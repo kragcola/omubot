@@ -1,8 +1,6 @@
-"""Qwen VL vision client for sticker/image recognition.
+"""VisionPlugin: 视觉客户端（Qwen VL）。
 
-Uses OpenAI-compatible API (DashScope / SiliconFlow) to describe images
-so that the text-only DeepSeek LLM can "see" stickers and decide whether
-to save or send them.
+创建 VisionClient 用于图片描述，供 StickerPlugin 的 DescribeImageTool 使用。
 """
 
 from __future__ import annotations
@@ -13,6 +11,10 @@ from typing import Any
 
 import aiohttp
 from loguru import logger
+
+from kernel.types import AmadeusPlugin, PluginContext
+
+_L = logger.bind(channel="system")
 
 _STICKER_DESCRIBE_PROMPT = (
     "请用一句简短的中文描述这张图片/表情包：它展示了什么内容、传达了什么样的情绪或态度、"
@@ -95,3 +97,29 @@ class VisionClient:
         except (KeyError, IndexError, TypeError) as e:
             logger.warning("Qwen VL unexpected response format: {}", e)
             return None
+
+
+class VisionPlugin(AmadeusPlugin):
+    name = "vision"
+    description = "视觉客户端：Qwen VL 图片描述"
+    version = "1.0.0"
+    priority = 8  # Before StickerPlugin (40) which uses it
+
+    async def on_startup(self, ctx: PluginContext) -> None:
+        config = ctx.config
+        if not config.vision.qwen.enabled or not config.vision.qwen.api_key:
+            _L.info("Qwen VL vision disabled, skipping")
+            ctx.vision_client = None
+            return
+
+        ctx.vision_client = VisionClient(
+            base_url=config.vision.qwen.base_url,
+            api_key=config.vision.qwen.api_key,
+            model=config.vision.qwen.model,
+            timeout_s=30.0,
+        )
+        _L.info(
+            "Qwen VL vision client initialized | model={} base_url={}",
+            config.vision.qwen.model,
+            config.vision.qwen.base_url,
+        )

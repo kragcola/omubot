@@ -147,6 +147,7 @@ class PluginContext:
 
     # 存储路径
     storage_dir: Path = field(default_factory=Path)
+    plugin_data_dir: Path = field(default_factory=Path)  # storage/plugins/，插件私有数据
 
     # 消息存储 —— MessageLog / GroupTimeline / ShortTermMemory
     msg_log: Any = None
@@ -262,11 +263,23 @@ class ThinkerContext:
 
 
 @dataclass
+class CommandContext:
+    """命令执行上下文，传给 Command.handler。"""
+
+    bot: Any  # nonebot Bot 实例
+    event: Any  # 原始 OneBot event
+    args: str  # 命令名之后的文本（去除首尾空白）
+    is_private: bool
+    user_id: str
+    group_id: str | None
+
+
+@dataclass
 class Command:
     """插件注册的文本命令。"""
 
     name: str  # 命令名，如 "memo"
-    handler: Any  # async callable，签名为 (bot, event, *args) -> None
+    handler: Any  # async callable，签名为 (CommandContext) -> bool
     description: str = ""
     usage: str = ""  # 用法示例，如 "/memo list"
     pattern: str = ""  # 匹配模式，空字符串表示用 name 自动生成
@@ -303,6 +316,7 @@ class AmadeusPlugin:
     priority: int = 100
     enabled: bool = True
     dependencies: dict[str, str] = {}  # noqa: RUF012 — overridden per-plugin, never mutated
+    author: str = ""  # 开发者签名，显示在 /plugins 列表中
 
     # ---- 生命周期 ----
 

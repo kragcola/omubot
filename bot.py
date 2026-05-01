@@ -173,19 +173,25 @@ from kernel.bus import PluginBus  # noqa: E402
 from kernel.router import setup_routers  # noqa: E402
 from kernel.types import PluginContext  # noqa: E402
 from plugins.affection.plugin import AffectionPlugin  # noqa: E402
-from plugins.chat.plugin import ChatPlugin  # noqa: E402
-from plugins.dream.plugin import DreamPlugin  # noqa: E402
-from plugins.echo.plugin import EchoPlugin  # noqa: E402
-from plugins.element_detector.plugin import ElementDetectorPlugin  # noqa: E402
-from plugins.history_loader.plugin import HistoryLoaderPlugin  # noqa: E402
-from plugins.memo.plugin import MemoPlugin  # noqa: E402
+from plugins.chat import ChatPlugin  # noqa: E402
+from plugins.dream import DreamPlugin  # noqa: E402
+from plugins.echo import EchoPlugin  # noqa: E402
+from plugins.element_detector import ElementDetectorPlugin  # noqa: E402
+from plugins.history_loader import HistoryLoaderPlugin  # noqa: E402
+from plugins.memo import MemoPlugin  # noqa: E402
 from plugins.schedule.plugin import SchedulePlugin  # noqa: E402
-from plugins.sticker.plugin import StickerPlugin  # noqa: E402
-from plugins.vision.plugin import VisionPlugin  # noqa: E402
+from plugins.sticker import StickerPlugin  # noqa: E402
+from plugins.vision import VisionPlugin  # noqa: E402
+from services.command import CommandDispatcher  # noqa: E402
+
+_storage_dir = _Path(_bot_config.memo.dir).parent
+_plugin_data_dir = _storage_dir / "plugins"
+_plugin_data_dir.mkdir(parents=True, exist_ok=True)
 
 _plugin_ctx = PluginContext(
     config=_bot_config,
-    storage_dir=_Path(_bot_config.memo.dir).parent,
+    storage_dir=_storage_dir,
+    plugin_data_dir=_plugin_data_dir,
 )
 
 # Set bot start time early — used by admin dashboard and ChatPlugin
@@ -215,6 +221,7 @@ _bus.register(VisionPlugin())
 _bus.discover_plugins("plugins")
 
 _plugin_ctx.bus = _bus
+_plugin_ctx.command_dispatcher = CommandDispatcher(_bus)
 
 setup_routers(_bus, _plugin_ctx)
 _logger = logger.bind(channel="system")

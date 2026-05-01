@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from plugins.dream.agent import DreamAgent, dream_pre_check
+from plugins.dream import DreamAgent, dream_pre_check
 from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
 

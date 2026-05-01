@@ -14,7 +14,9 @@ storage/logs/
 storage/*.db
 storage/image_cache/
 storage/stickers/
+storage/plugins/
 !storage/.gitkeep
+!storage/plugins/.gitkeep
 !storage/memories/.example.qmd
 napcat/data/
 napcat/config/napcat_*.json

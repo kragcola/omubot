@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from plugins.history_loader.loader import _extract_content
+from plugins.history_loader import _extract_content
 from services.media.image_cache import ImageCache
 from services.media.sticker_store import StickerStore
 from services.memory.types import ImageRefBlock

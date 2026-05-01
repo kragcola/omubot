@@ -3,6 +3,7 @@
 基于 NoneBot2 的三层可扩展 QQ 机器人框架。
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Ruff](https://img.shields.io/badge/lint-ruff-orange.svg)](https://github.com/astral-sh/ruff)
 
@@ -11,13 +12,13 @@
 ```
 QQ ←→ NapCat (WS) ←→ NoneBot2
                         └── Omubot 三层框架
-                             ├── Kernel     PluginBus · 类型契约 · 插件发现
-                             ├── Services   LLM · 记忆 · 时间线 · 工具 · 调度
+                             ├── Kernel     PluginBus · 类型契约 · 插件发现 · 指令调度
+                             ├── Services   LLM · 记忆 · 时间线 · 版本 · 调度
                              └── Plugins    14 个可开关、可插拔的功能插件
 ```
 
 - **内核层** — 零 I/O，零外部依赖。定义调度规则和类型契约，不改 API
-- **系统服务层** — LLM 客户端、记忆卡片、群聊时间线、图片缓存、表情库、工具注册表
+- **系统服务层** — LLM 客户端、记忆卡片、群聊时间线、图片缓存、指令分发、版本管理
 - **插件层** — 好感度、日程、记忆、表情包、梦境、视觉、复读等，通过钩子接入
 
 ## 快速开始
@@ -31,7 +32,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2
 ### 1. 安装
 
 ```bash
-git clone https://github.com/your-username/omubot.git
+git clone https://github.com/kragcola/omubot.git
 cd omubot
 uv sync
 ```
@@ -39,19 +40,18 @@ uv sync
 ### 2. 配置
 
 ```bash
-cp .env.example config/.env              # 编辑：QQ 号、API Key
-cp config.example.toml config/config.toml # 编辑：LLM 模型、群聊开关
-cp soul/identity.example.md config/soul/identity.md       # 编辑：Bot 人设
-cp soul/instruction.example.md config/soul/instruction.md # 编辑：行为指令
+cp config.example.toml config/config.toml    # 编辑：LLM 模型、群聊开关
+# 创建 config/.env，填写 SUPERUSERS 和 LLM_API_KEY
+# 创建 config/soul/identity.md 和 config/soul/instruction.md
 ```
+
+配置模板见 [config.example.toml](config.example.toml)，完整文档见 [wiki/](wiki/)。
 
 ### 3. 启动
 
 ```bash
 # Docker（推荐）
-docker compose up napcat -d           # 启动 NapCat
-# 浏览器打开 http://localhost:6099 → 扫码登录
-docker compose up bot -d --build      # 启动 Bot
+docker compose up -d --build
 
 # 或本地运行
 docker compose up napcat -d
@@ -60,28 +60,41 @@ uv run python bot.py
 
 ### 4. 验证
 
+- 浏览器打开 `http://localhost:6099` → 扫码登录 QQ
 - 在群里 @bot 发消息
 - 访问 Admin 面板：`http://localhost:8081/admin/`
+- 私聊发送 `/version` 检查版本
 
 ## 插件
 
 | 插件 | 优先级 | 功能 |
 |------|--------|------|
-| ChatPlugin | 0 | 核心聊天：消息路由、LLM 调用、tool loop |
+| ChatPlugin | 0 | 核心聊天：消息路由、LLM 调用、tool loop、/debug |
 | DateTimePlugin | 1 | 时间日期查询 |
 | WebSearchPlugin | 1 | DuckDuckGo 网页搜索 |
 | WebFetchPlugin | 1 | 网页内容抓取 |
 | HttpApiPlugin | 1 | NapCat HTTP API 调用 |
 | GroupAdminPlugin | 1 | 群管理（禁言、头衔、发消息） |
-| VisionPlugin | 5 | 多模态图像理解 |
+| VisionPlugin | 8 | 多模态图像理解 (Qwen VL) |
 | StickerPlugin | 10 | 表情包库：收藏、检索、发送 |
 | MemoPlugin | 20 | 记忆卡片：7 类 3 作用域，检索门控 |
 | AffectionPlugin | 30 | 好感度系统：分数、昵称、态度调节 |
 | SchedulePlugin | 35 | 模拟日程：每日 LLM 生成，结合真实日期 |
-| HistoryLoaderPlugin | 40 | 启动时加载群历史消息 |
-| DreamPlugin | 100 | 梦境整合：定期整理记忆、清理表情包 |
-| EchoPlugin | 200 | 复读检测 |
-| ElementDetectorPlugin | 200 | 特殊消息元素检测 |
+| HistoryLoaderPlugin | 5 | 启动时加载群历史消息 |
+| DreamPlugin | 150 | 梦境整合：定期整理记忆、清理表情包 |
+| EchoPlugin | 200 | 复读检测：5 分钟内同消息 3 次触发 |
+| ElementDetectorPlugin | 210 | 特殊消息元素检测 |
+| DebugCommandPlugin | 300 | /plugins 查看插件列表、/version 版本检查 |
+
+## 斜杠指令
+
+| 指令 | 权限 | 说明 |
+| --- | --- | --- |
+| `/debug [问题]` | 管理员 | 进入调试模式，注入系统状态后单轮 LLM 回答 |
+| `/plugins` | 管理员 | 列出所有已加载插件（名称、版本、开发者、简介） |
+| `/version` | 公开 | 查看本地版本并检查 GitHub 是否有更新 |
+
+插件可通过 `register_commands()` 注册更多指令。
 
 ## 写一个插件
 
@@ -145,16 +158,20 @@ uv run pyright       # 类型检查
 ## 项目结构
 
 ```
-kernel/         # 内核层（PluginBus、类型、配置）
-services/       # 系统服务层（LLM、记忆、媒体、工具）
+kernel/         # 内核层（PluginBus、类型、配置、路由）
+services/       # 系统服务层（LLM、记忆、媒体、工具、指令、版本）
 plugins/        # 插件层（14 个可开关插件）
-admin/          # 管理面板
+admin/          # 管理面板（用量、配置、Soul 编辑、日志）
 docs/           # 项目文档
 wiki/           # 框架开发文档
-soul/           # 人设模板（identity.example.md + instruction.example.md）
+config/         # 运行时配置（gitignored，Docker volume 挂载）
 storage/        # 运行时数据（volume 挂载，不进入版本控制）
 tests/          # 测试
 ```
+
+## 变更日志
+
+详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可
 

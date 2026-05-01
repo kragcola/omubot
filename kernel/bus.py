@@ -305,8 +305,14 @@ class PluginBus:
                 _L.debug("plugin already registered, skipping | name={}", plugin_name)
                 continue
 
+            # Check for sidecar .json manifest
+            sidecar_json = entry.with_suffix(".json")
+
             try:
-                instance = self._load_plugin_module(plugin_name, entry)
+                instance = self._load_plugin_module(
+                    plugin_name, entry,
+                    manifest_path=sidecar_json if sidecar_json.is_file() else None,
+                )
                 if instance is not None:
                     self.register(instance)
                     count += 1
@@ -325,10 +331,12 @@ class PluginBus:
         plugin_file: Path,
         *,
         plugin_dir: Path | None = None,
+        manifest_path: Path | None = None,
     ) -> AmadeusPlugin | None:
         """导入单个插件模块并实例化 AmadeusPlugin 子类。
 
-        若 plugin_dir 非空且包含 plugin.json，解析后用字段覆盖实例属性。
+        若 plugin_dir 非空且包含 plugin.json，或 manifest_path 指向有效文件，
+        解析后用字段覆盖实例属性。
         """
         import importlib.util
         import json
@@ -353,23 +361,30 @@ class PluginBus:
             ):
                 instance = attr()
 
-                # Apply plugin.json overrides if present
-                if plugin_dir is not None:
-                    manifest_path = plugin_dir / "plugin.json"
-                    if manifest_path.is_file():
-                        try:
-                            manifest_data = json.loads(
-                                manifest_path.read_text(encoding="utf-8")
-                            )
-                            self._apply_manifest(instance, manifest_data)
-                            _L.debug(
-                                "plugin.json applied | name={}", instance.name
-                            )
-                        except (json.JSONDecodeError, OSError) as e:
-                            _L.warning(
-                                "plugin.json parse failed | name={} error={}",
-                                plugin_name, e,
-                            )
+                # Apply plugin.json / sidecar .json overrides if present
+                resolved_manifest = (
+                    manifest_path
+                    if (manifest_path is not None and manifest_path.is_file())
+                    else (
+                        (plugin_dir / "plugin.json")
+                        if (plugin_dir is not None and (plugin_dir / "plugin.json").is_file())
+                        else None
+                    )
+                )
+                if resolved_manifest is not None:
+                    try:
+                        manifest_data = json.loads(
+                            resolved_manifest.read_text(encoding="utf-8")
+                        )
+                        self._apply_manifest(instance, manifest_data)
+                        _L.debug(
+                            "plugin.json applied | name={}", instance.name
+                        )
+                    except (json.JSONDecodeError, OSError) as e:
+                        _L.warning(
+                            "plugin.json parse failed | name={} error={}",
+                            plugin_name, e,
+                        )
 
                 _L.debug("plugin loaded | name={} version={}", instance.name, instance.version)
                 return instance
@@ -380,7 +395,7 @@ class PluginBus:
     @staticmethod
     def _apply_manifest(instance: AmadeusPlugin, data: dict[str, Any]) -> None:
         """用 plugin.json 数据覆盖插件实例属性。"""
-        for key in ("name", "version", "description", "priority", "enabled"):
+        for key in ("name", "version", "description", "priority", "enabled", "author"):
             if key in data:
                 setattr(instance, key, data[key])
         if "dependencies" in data and isinstance(data["dependencies"], dict):

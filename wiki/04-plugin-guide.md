@@ -2,8 +2,10 @@
 
 ## 最小插件
 
+单文件插件（推荐）：
+
 ```python
-# plugins/my_plugin/plugin.py
+# plugins/my_plugin.py
 from kernel.types import AmadeusPlugin, PluginContext
 
 class MyPlugin(AmadeusPlugin):
@@ -19,11 +21,29 @@ class MyPlugin(AmadeusPlugin):
         ctx.add_block("当前天气：晴", label="weather", position="dynamic")
 ```
 
-目录结构：
+可选侧车清单文件 `plugins/my_plugin.json`：
+
+```json
+{
+  "name": "my_plugin",
+  "version": "0.1.0",
+  "priority": 50,
+  "dependencies": {
+    "vision": ">=1.0.0"
+  }
+}
+```
+
+目录插件（多文件或需要子模块时）：
+
 ```
 plugins/my_plugin/
-└── plugin.py          # 必须有此文件 + AmadeusPlugin 子类
+├── plugin.py          # 必须有此文件 + AmadeusPlugin 子类
+├── plugin.json        # 可选：覆盖元数据、声明依赖
+└── helper.py          # 额外的子模块
 ```
+
+两种形态完全等价，PluginBus 在发现时统一处理。
 
 ## 选择优先级
 
@@ -119,24 +139,31 @@ class HealthCheck(AmadeusPlugin):
 5. **用 position 控制缓存** — static/stable/dynamic 选对，避免不必要的缓存失效
 6. **handle errors gracefully** — 框架已做异常隔离，但你仍可在内部处理预期错误
 7. **插件间不直接引用** — 通过共享服务或 Context 通信
+8. **插件数据放 `plugin_data_dir`** — 通过 `ctx.plugin_data_dir / "your_plugin"` 创建专属子目录存放日志、缓存等，该目录在 `storage/plugins/` 下且已被 gitignore
 
 ## 插件发现
 
-`PluginBus.discover_plugins("plugins")` 自动扫描所有子目录：
+`PluginBus.discover_plugins("plugins")` 自动扫描，支持两种形态：
 
 ```
 plugins/
-├── chat/plugin.py       → 注册 ChatPlugin
-├── affection/plugin.py  → 注册 AffectionPlugin
-├── echo/plugin.py       → 注册 EchoPlugin
+├── chat.py              → 单文件插件，注册 ChatPlugin
+├── chat.json            → 侧车清单（可选）
+├── echo.py              → 单文件插件，注册 EchoPlugin
+├── affection/           → 目录插件（多文件）
+│   ├── plugin.py        → 注册 AffectionPlugin
+│   ├── plugin.json      → 可选：覆盖元数据、声明依赖
+│   └── engine.py        → 子模块
 ├── utils/               → 跳过（无 plugin.py）
-└── old_module.py        → 跳过（是文件不是目录）
+└── old_module.py        → 跳过（无 AmadeusPlugin 子类）
 ```
 
-要求：
-1. 子目录中存在 `plugin.py`
-2. `plugin.py` 中有 `AmadeusPlugin` 的具体子类
-3. 该类名不与已注册插件重名
+发现规则：
+1. 子目录包含 `plugin.py` → 目录插件（优先于同名 .py 文件）
+2. 独立 `.py` 文件 → 单文件插件，检查是否有 `AmadeusPlugin` 子类
+3. `.py` 文件的侧车 `.json` → 自动拾取并覆盖实例属性
+4. 子目录的 `plugin.json` → 自动拾取并覆盖实例属性
+5. `__init__.py` 跳过
 
 ## 测试插件
 

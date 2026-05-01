@@ -41,7 +41,6 @@ _log_debug = _base_logger.bind(channel="debug")
 
 _REPLY_PREVIEW_MAX = 50
 _REPLY_PREVIEW_MAX_SELF = 200
-_DEBUG_PREFIX = "/debug"
 
 
 # ============================================================================
@@ -53,29 +52,6 @@ def _session_id(event: MessageEvent) -> str:
     if isinstance(event, GroupMessageEvent):
         return f"group_{event.group_id}"
     return f"private_{event.user_id}"
-
-
-def _check_debug_prefix(content: Content) -> tuple[Content, bool]:
-    if isinstance(content, str):
-        idx = content.find(_DEBUG_PREFIX)
-        if idx >= 0:
-            remainder = content[idx + len(_DEBUG_PREFIX):].lstrip()
-            if remainder:
-                return remainder, True
-        return content, False
-    if isinstance(content, list) and content:
-        first = content[0]
-        if isinstance(first, dict) and first.get("type") == "text":
-            text = first.get("text", "")
-            if isinstance(text, str):
-                idx = text.find(_DEBUG_PREFIX)
-                if idx >= 0:
-                    stripped = text[idx + len(_DEBUG_PREFIX):].lstrip()
-                    if stripped:
-                        new_first = {**first, "text": stripped}
-                        return [new_first, *content[1:]], True
-        return content, False
-    return content, False
 
 
 async def _render_forward_msg(forward_id: str, bot: Bot) -> str:
@@ -437,7 +413,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
     @group_listener.handle()
     async def _collect_group_context(bot: Bot, event: GroupMessageEvent) -> None:
-        from plugins.echo.plugin import build_echo_key
+        from plugins.echo import build_echo_key
 
         if ctx.allowed_groups and event.group_id not in ctx.allowed_groups:
             return
@@ -482,6 +458,20 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         )
         if await bus.fire_on_message(msg_ctx):
             return  # consumed by an interceptor plugin
+
+        # Check slash commands before timeline/scheduler
+        if (
+            plain_text
+            and hasattr(ctx, "command_dispatcher")
+            and ctx.command_dispatcher is not None
+            and await ctx.command_dispatcher.dispatch(
+                bot, event, plain_text.strip(),
+                is_private=False,
+                user_id=str(event.user_id),
+                group_id=group_id,
+            )
+        ):
+            return
 
         content = await _render_message(
             msg,
@@ -575,14 +565,20 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         if not user_content:
             return
 
-        user_content, force_reply = _check_debug_prefix(user_content)
-        if force_reply:
-            user_id_str = str(event.user_id)
-            if user_id_str not in ctx.admins:
-                logger.warning("debug denied (not admin) | user={}", user_id_str)
-                force_reply = False
-            else:
-                logger.info("debug mode | user={} session=private_{}", user_id_str, user_id_str)
+        # Check slash commands before LLM processing
+        raw_text = event.get_plaintext().strip()
+        if (
+            raw_text
+            and hasattr(ctx, "command_dispatcher")
+            and ctx.command_dispatcher is not None
+            and await ctx.command_dispatcher.dispatch(
+                bot, event, raw_text,
+                is_private=True,
+                user_id=str(event.user_id),
+                group_id=None,
+            )
+        ):
+            return
 
         sid = _session_id(event)
         identity = ctx.identity_mgr.resolve()
@@ -602,7 +598,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     group_id=None,
                     ctx=tool_ctx,
                     on_segment=send_segment,
-                    force_reply=force_reply,
+                    force_reply=False,
                 )
                 break
             except RateLimitError:

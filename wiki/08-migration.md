@@ -12,7 +12,10 @@
 | Phase 4 | ChatPlugin 拆分 | ✅ 完成 |
 | Phase 5 | 全部 14 个插件切出 | ✅ 完成 |
 | Phase 6 | src/ 耦合清理 + 垫片删除 | ✅ 完成 (2026-05-01) |
-| Phase 7 | 单文件插件 + plugin.json + 依赖解析 + .omu 打包 | 🔄 进行中 |
+| Phase 6a | 人格硬编码解耦（凤笑梦 → identity.name） | ✅ 完成 (2026-05-01) |
+| Phase 6b | config/ 目录隔离 + 开源准备 | ✅ 完成 (2026-05-01) |
+| Phase 7 | 单文件插件 + plugin.json + 依赖解析 | ✅ 完成 (2026-05-01) |
+| Phase 7b | .omu 打包 | 远期 |
 | Phase 8 | 热重载 + 第三方生态 | 远期 |
 
 ## 通用迁移模式

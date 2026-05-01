@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import timedelta
+from typing import Any
 
 import nonebot
 from loguru import logger
@@ -23,7 +24,80 @@ class ChatPlugin(AmadeusPlugin):
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._ctx: PluginContext | None = None
+
+    def register_commands(self) -> list:
+        from kernel.types import Command
+        return [
+            Command(
+                name="debug",
+                handler=self._handle_debug,
+                description="进入调试模式：跳过 thinker，注入实时状态数据，用纯文本回答",
+                usage="/debug [可选问题]",
+            ),
+        ]
+
+    async def _handle_debug(self, cmd_ctx: Any) -> None:
+        """Handle /debug command: admin-only debug mode with live state."""
+        from nonebot.adapters.onebot.v11 import Message
+
+        ctx = self._ctx
+        if ctx is None:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("系统未就绪"))
+            return
+
+        if cmd_ctx.user_id not in ctx.admins:
+            logger.warning("debug denied (not admin) | user={}", cmd_ctx.user_id)
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("无权限"))
+            return
+
+        logger.info(
+            "debug mode | user={} {}",
+            cmd_ctx.user_id,
+            "private" if cmd_ctx.is_private else f"group={cmd_ctx.group_id}",
+        )
+
+        from services.llm.client import _build_debug_block
+
+        sid = f"private_{cmd_ctx.user_id}" if cmd_ctx.is_private else f"group_{cmd_ctx.group_id}"
+
+        # Build the debug system block
+        debug_text = await _build_debug_block(
+            user_id=cmd_ctx.user_id,
+            session_id=sid,
+            mood_engine=ctx.mood_engine,
+            affection_engine=ctx.affection_engine,
+            schedule_store=ctx.schedule_store,
+            card_store=ctx.card_store,
+            short_term=ctx.short_term,
+            message_log=ctx.msg_log,
+        )
+        user_content = cmd_ctx.args if cmd_ctx.args else "请显示当前系统状态摘要"
+
+        # Single-turn LLM call: no thinker, no tool loop
+        system_blocks = [
+            {"type": "text", "text": debug_text},
+            {"type": "text", "text": (
+                "你是调试助手，不是聊天机器人。基于上面的实时状态数据如实回答用户的问题。\n"
+                "格式约束：QQ 不支持 Markdown。禁止 ``` 代码块、** 加粗、` 行内代码、- 列表。使用纯文本。"
+            )},
+        ]
+        messages = [{"role": "user", "content": user_content}]
+
+        try:
+            result = await ctx.llm_client._call(system_blocks, messages, max_tokens=2048)
+            reply_text = (result.get("text") or "").strip()
+            if reply_text:
+                await ctx.humanizer.delay(reply_text)
+                await cmd_ctx.bot.send(cmd_ctx.event, Message(reply_text))
+        except Exception:
+            logger.exception("debug command LLM call failed")
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("调试查询失败，请稍后重试"))
+
     async def on_startup(self, ctx: PluginContext) -> None:
+        self._ctx = ctx
         config: BotConfig = ctx.config
 
         # ---- config-derived globals ----
@@ -220,7 +294,7 @@ class ChatPlugin(AmadeusPlugin):
         )
 
         # ---- memo extractor ----
-        from plugins.memo.extractor import MemoExtractor
+        from plugins.memo import MemoExtractor
         memo_extractor = MemoExtractor(
             card_store=card_store,
             api_call=llm._call,

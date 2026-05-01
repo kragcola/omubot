@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from plugins.echo.plugin import EchoTracker, build_echo_key
+from plugins.echo import EchoTracker, build_echo_key
 
 
 @dataclass

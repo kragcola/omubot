@@ -1,4 +1,10 @@
-"""Dream agent: periodic background memory card consolidation with LLM tool loop."""
+"""DreamPlugin: 梦境整合代理。
+
+周期性运行 LLM 工具循环，整理记忆卡片和表情包库。
+在 bot 连接后启动后台循环，bot 关闭时停止。
+"""
+
+from __future__ import annotations
 
 import asyncio
 import contextlib
@@ -10,6 +16,7 @@ from typing import Any
 
 from loguru import logger
 
+from kernel.types import AmadeusPlugin, PluginContext
 from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
 
@@ -32,6 +39,7 @@ def setup_dream_logger(log_dir: str) -> None:
         level="DEBUG",
         filter=lambda record: record["extra"].get("dream", False),
     )
+
 
 _LIST_CARDS_TOOL: dict[str, Any] = {
     "name": "list_cards",
@@ -387,7 +395,7 @@ class DreamAgent:
                 return "scope 必须是 user 或 group"
             ids = await self._store.list_entities(scope)
             if not ids:
-                return f"（无{ '用户' if scope == 'user' else '群组' }）"
+                return f"（无{'用户' if scope == 'user' else '群组'}）"
             return "\n".join(ids)
 
         if name == "update_card":
@@ -447,3 +455,45 @@ class DreamAgent:
             return f"未找到: {sticker_id}"
 
         return f"未知工具: {name}"
+
+
+class DreamPlugin(AmadeusPlugin):
+    name = "dream"
+    description = "梦境整合：定期整理记忆卡片、清理表情包库"
+    version = "1.0.0"
+    priority = 150  # Background task, after business plugins
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._dream_agent = None
+        self._started = False
+
+    async def on_startup(self, ctx: PluginContext) -> None:
+        config = ctx.config
+        if not config.dream.enabled:
+            _L = logger.bind(channel="dream")
+            _L.info("dream disabled in config, skipping")
+            return
+
+        setup_dream_logger(config.log.dir)
+        self._dream_agent = DreamAgent(
+            store=ctx.card_store,
+            interval_hours=config.dream.interval_hours,
+            max_rounds=config.dream.max_rounds,
+            sticker_store=ctx.sticker_store,
+            on_memo_change=lambda: ctx.prompt_builder.invalidate(),
+        )
+
+    async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:
+        if self._dream_agent is None or self._started:
+            return
+        self._dream_agent.start(ctx.llm_client._call)
+        self._started = True
+        _L = logger.bind(channel="dream")
+        _L.info("dream agent started")
+
+    async def on_shutdown(self, ctx: PluginContext) -> None:
+        if self._dream_agent is not None:
+            await self._dream_agent.stop()
+            _L = logger.bind(channel="dream")
+            _L.info("dream agent stopped")

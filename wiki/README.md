@@ -27,16 +27,19 @@ kernel/          # 内核层 —— 零 I/O，零外部依赖
 ├── router.py    #   NoneBot 消息路由
 └── manifest.py  #   插件清单 + SemVer 解析
 services/        # 系统服务层 —— LLM、记忆、媒体、工具
-plugins/         # 插件层 —— 14 个可开关插件
+plugins/         # 插件层 —— 单文件 .py + 侧车 .json，或目录（多文件）
 admin/           # 管理面板（系统服务）
+config.example.toml  # 配置模板
+soul/            # 人设模板（identity.example.md + instruction.example.md）
 docs/            # 项目文档
 wiki/            # 框架开发文档（本文档）
 tests/           # 测试
+config/          # 运行时配置（gitignored —— 从模板复制）
 ```
 
 ## 版本
 
-当前版本：**Phase 5 完成**（全部 14 插件），Phase 6 完成（src/ 清理），Phase 7 待实施。
+当前版本：**Phase 6b 完成**（src/ 清理 + 人格解耦 + config/ 隔离 + 开源推送），Phase 7 待实施。
 
 ## 贡献
 

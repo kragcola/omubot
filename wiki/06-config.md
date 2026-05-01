@@ -154,7 +154,7 @@ def load_config(
 
 合并顺序：
 1. Pydantic 默认值
-2. TOML 文件（`config.toml` 或 `BOT_CONFIG_PATH` 环境变量指定）
+2. TOML 文件（默认 `config/config.toml`，或通过 `BOT_CONFIG_PATH` 环境变量指定）
 3. 环境变量（`_ENV_MAP`）
 4. `_CLI_*` 环境变量（bot.py argparse 写入）
 5. `cli_overrides` 参数

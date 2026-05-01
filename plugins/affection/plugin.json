@@ -1,0 +1,6 @@
+{
+  "name": "affection",
+  "description": "好感度系统：分数、昵称、态度调节",
+  "version": "1.0.0",
+  "priority": 30
+}

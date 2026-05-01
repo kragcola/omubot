@@ -1,0 +1,6 @@
+{
+  "name": "element_detector",
+  "description": "要素察觉：识别特定句式并回复（预设模板或LLM生成）",
+  "version": "1.0.0",
+  "priority": 210
+}

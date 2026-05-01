@@ -1,0 +1,9 @@
+{
+  "name": "sticker",
+  "description": "表情包库：收藏、检索、发送",
+  "version": "1.0.0",
+  "priority": 10,
+  "dependencies": {
+    "vision": ">=1.0.0"
+  }
+}

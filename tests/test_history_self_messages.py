@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from nonebot.adapters.onebot.v11.bot import Bot
 
-from plugins.history_loader.loader import load_group_history
+from plugins.history_loader import load_group_history
 from services.memory.timeline import GroupTimeline
 
 
