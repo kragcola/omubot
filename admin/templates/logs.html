@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}日志查看{% endblock %}
+{% block content %}
+
+<h2 style="margin-bottom:1rem">日志查看</h2>
+
+<div style="display:grid; grid-template-columns: 250px 1fr; gap:1rem;">
+    <div>
+        <div class="card">
+            <h3>日志文件</h3>
+            {% if log_files %}
+            <div style="display:flex;flex-direction:column;gap:0.25rem;">
+            {% for f in log_files %}
+            <a href="/admin/logs/view?file={{ f.name }}&lines={{ lines }}"
+               style="font-size:0.85rem;padding:0.3rem 0.5rem;border-radius:4px;text-decoration:none;color:var(--text);{{ 'background:rgba(108,92,231,0.1);font-weight:600;' if selected_file == f.name else '' }}"
+               hx-boost="true">
+                {{ f.name }}
+                <span style="color:var(--muted);font-size:0.75rem;display:block;">{{ "%.1f"|format(f.size / 1024) }} KB</span>
+            </a>
+            {% endfor %}
+            </div>
+            {% else %}
+            <p style="color:var(--muted);font-size:0.85rem">暂无日志文件</p>
+            {% endif %}
+        </div>
+        <div class="card mt-1">
+            <form hx-boost="true" method="get" action="/admin/logs/view">
+                <label>显示行数</label>
+                <select name="lines" style="width:100%" onchange="this.form.submit()">
+                    {% for n in [50, 100, 200, 500, 1000] %}
+                    <option value="{{ n }}" {{ 'selected' if lines == n }}>最后 {{ n }} 行</option>
+                    {% endfor %}
+                </select>
+                {% if selected_file %}
+                <input type="hidden" name="file" value="{{ selected_file }}">
+                {% endif %}
+            </form>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="flex items-center justify-between mb-1">
+            <h2>{{ selected_file or '选择日志文件' }}</h2>
+            {% if selected_file %}
+            <a href="/admin/logs/view?file={{ selected_file }}&lines={{ lines }}" class="btn btn-sm btn-outline" hx-boost="true">刷新</a>
+            {% endif %}
+        </div>
+        {% if log_content %}
+        <div class="log-viewer">{{ log_content }}</div>
+        {% else %}
+        <p style="color:var(--muted)">选择左侧日志文件以查看内容。</p>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}

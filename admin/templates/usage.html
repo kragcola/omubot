@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block title %}用量统计{% endblock %}
+{% block head %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    let chart = null;
+    let modelChart = null;
+
+    async function loadData(period, date) {
+        let url = '/admin/usage/data?period=' + period;
+        if (date) url += '&date=' + date;
+        const resp = await fetch(url);
+        const data = await resp.json();
+        if (data.error) { console.error(data.error); return; }
+        renderCharts(data, period);
+        renderSummary(data.summary);
+        renderTopTables(data.top_users, data.top_groups);
+    }
+
+    function renderCharts(data, period) {
+        const ts = data.timeseries || [];
+        const labels = ts.map(r => r.bucket);
+        const inputData = ts.map(r => r.input_tokens + (r.cache_read_tokens || 0) + (r.cache_create_tokens || 0));
+        const outputData = ts.map(r => r.output_tokens || 0);
+        const callsData = ts.map(r => r.calls || 0);
+
+        const ctx = document.getElementById('tokenChart').getContext('2d');
+        if (chart) chart.destroy();
+        chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    { label: 'Input Tokens', data: inputData, borderColor: '#6c5ce7', backgroundColor: 'rgba(108,92,231,0.1)', fill: true, tension: 0.3 },
+                    { label: 'Output Tokens', data: outputData, borderColor: '#00b894', backgroundColor: 'rgba(0,184,148,0.1)', fill: true, tension: 0.3 },
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { position: 'bottom' } },
+                scales: {
+                    y: { beginAtZero: true, ticks: { callback: v => v >= 1000 ? (v/1000).toFixed(0)+'k' : v } }
+                }
+            }
+        });
+
+        // Model distribution pie chart
+        const byModel = data.by_model || [];
+        const mCtx = document.getElementById('modelChart').getContext('2d');
+        if (modelChart) modelChart.destroy();
+        modelChart = new Chart(mCtx, {
+            type: 'doughnut',
+            data: {
+                labels: byModel.map(r => r.model),
+                datasets: [{
+                    data: byModel.map(r => r.input_tokens + r.output_tokens),
+                    backgroundColor: ['#6c5ce7','#00b894','#fdcb6e','#e17055','#74b9ff','#a29bfe'],
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { position: 'bottom' } }
+            }
+        });
+    }
+
+    function renderSummary(s) {
+        if (!s) return;
+        document.getElementById('sum-requests').textContent = s.total_calls || 0;
+        document.getElementById('sum-input').textContent = formatNum(s.total_input_tokens || 0);
+        document.getElementById('sum-output').textContent = formatNum(s.total_output_tokens || 0);
+        document.getElementById('sum-total').textContent = formatNum((s.total_input_tokens || 0) + (s.total_output_tokens || 0));
+        const totalIn = s.total_input_tokens || 0;
+        const hit = totalIn > 0 ? ((s.cache_read_tokens || 0) / totalIn * 100).toFixed(0) : '-';
+        document.getElementById('sum-cache').textContent = hit !== '-' ? hit + '%' : '-';
+        document.getElementById('sum-errors').textContent = s.error_count || 0;
+        document.getElementById('sum-avg-latency').textContent = s.avg_elapsed_s ? s.avg_elapsed_s.toFixed(1) + 's' : '-';
+    }
+
+    function renderTopTables(users, groups) {
+        const uTbody = document.getElementById('top-users-body');
+        uTbody.innerHTML = (users || []).map((r, i) =>
+            `<tr><td>${i+1}</td><td>${r.user_id || '-'}</td><td>${r.calls}</td><td>${formatNum(r.total_input)}</td><td>${formatNum(r.total_output)}</td></tr>`
+        ).join('');
+        const gTbody = document.getElementById('top-groups-body');
+        gTbody.innerHTML = (groups || []).map((r, i) =>
+            `<tr><td>${i+1}</td><td>${r.group_id || '-'}</td><td>${r.calls}</td><td>${formatNum(r.total_input)}</td><td>${formatNum(r.total_output)}</td></tr>`
+        ).join('');
+    }
+
+    function formatNum(n) {
+        if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+        if (n >= 1000) return (n/1000).toFixed(1) + 'k';
+        return String(n);
+    }
+
+    document.getElementById('period-select').addEventListener('change', function() {
+        loadData(this.value, document.getElementById('date-input').value || null);
+    });
+    document.getElementById('date-input').addEventListener('change', function() {
+        loadData(document.getElementById('period-select').value, this.value || null);
+    });
+
+    loadData('day', null);
+});
+</script>
+{% endblock %}
+{% block content %}
+
+<h2 style="margin-bottom:1rem">用量统计</h2>
+
+<div class="flex items-center gap-2 mb-2">
+    <select id="period-select" style="width:auto">
+        <option value="day">今天</option>
+        <option value="week">本周</option>
+        <option value="month">本月</option>
+    </select>
+    <input type="date" id="date-input" style="width:auto" placeholder="选择日期">
+</div>
+
+<div class="stat-grid mb-2" id="summary-cards">
+    <div class="stat-card"><div class="value" id="sum-requests">-</div><div class="label">请求数</div></div>
+    <div class="stat-card"><div class="value" id="sum-input">-</div><div class="label">Input Tokens</div></div>
+    <div class="stat-card"><div class="value" id="sum-output">-</div><div class="label">Output Tokens</div></div>
+    <div class="stat-card"><div class="value" id="sum-total">-</div><div class="label">Total Tokens</div></div>
+    <div class="stat-card"><div class="value" id="sum-cache">-</div><div class="label">Cache 命中率</div></div>
+    <div class="stat-card"><div class="value" id="sum-errors">-</div><div class="label">错误数</div></div>
+    <div class="stat-card"><div class="value" id="sum-avg-latency">-</div><div class="label">平均延迟</div></div>
+</div>
+
+<div style="display:grid; grid-template-columns: 2fr 1fr; gap:1rem;">
+    <div class="card"><h2>Token 消耗趋势</h2><canvas id="tokenChart"></canvas></div>
+    <div class="card"><h2>模型分布</h2><canvas id="modelChart"></canvas></div>
+</div>
+
+<div style="display:grid; grid-template-columns: 1fr 1fr; gap:1rem;">
+    <div class="card">
+        <h2>用户排行 (近7天)</h2>
+        <table><thead><tr><th>#</th><th>用户</th><th>请求数</th><th>Input</th><th>Output</th></tr></thead>
+        <tbody id="top-users-body"></tbody></table>
+    </div>
+    <div class="card">
+        <h2>群排行 (近7天)</h2>
+        <table><thead><tr><th>#</th><th>群</th><th>请求数</th><th>Input</th><th>Output</th></tr></thead>
+        <tbody id="top-groups-body"></tbody></table>
+    </div>
+</div>
+
+{% endblock %}

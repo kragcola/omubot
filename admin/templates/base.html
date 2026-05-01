@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}凤笑梦 Bot{% endblock %} — 管理面板</title>
+<link rel="stylesheet" href="/admin/static/admin.css">
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+{% block head %}{% endblock %}
+</head>
+<body hx-ext="head-support">
+<nav>
+    <a href="/admin/" class="brand">凤笑梦 Panel</a>
+    <a href="/admin/" hx-boost="true" class="{{ 'active' if active_page == 'dashboard' }}">总览</a>
+    <a href="/admin/usage" hx-boost="true" class="{{ 'active' if active_page == 'usage' }}">用量</a>
+    <a href="/admin/groups" hx-boost="true" class="{{ 'active' if active_page == 'groups' }}">群聊</a>
+    <a href="/admin/config" hx-boost="true" class="{{ 'active' if active_page == 'config' }}">配置</a>
+    <a href="/admin/soul" hx-boost="true" class="{{ 'active' if active_page == 'soul' }}">Soul</a>
+    <a href="/admin/logs" hx-boost="true" class="{{ 'active' if active_page == 'logs' }}">日志</a>
+    <span class="spacer"></span>
+    <a href="/admin/logout" class="logout-btn">退出</a>
+</nav>
+
+{% if messages %}
+<div class="container" style="padding-bottom:0">
+{% for msg in messages %}
+<div class="alert alert-{{ msg.type }}">{{ msg.text }}</div>
+{% endfor %}
+</div>
+{% endif %}
+
+<div class="container">
+{% block content %}{% endblock %}
+</div>
+</body>
+</html>

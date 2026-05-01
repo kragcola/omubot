@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}群聊管理{% endblock %}
+{% block content %}
+
+<h2 style="margin-bottom:1rem">群聊管理</h2>
+
+<div class="card mb-2">
+    <h2>全局默认配置</h2>
+    <table>
+        <tr><td>at_only</td><td><span class="badge badge-{{ 'warn' if global_at_only else 'success' }}">{{ global_at_only }}</span></td></tr>
+        <tr><td>debounce_seconds</td><td>{{ global_debounce }}s</td></tr>
+        <tr><td>batch_size</td><td>{{ global_batch_size }} 条</td></tr>
+        <tr><td>allowed_groups</td><td>{{ allowed_groups | join(', ') if allowed_groups else '无限制（所有群）' }}</td></tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>单群覆盖 (Overrides)</h2>
+    {% if overrides %}
+    <table>
+        <thead>
+            <tr><th>群号</th><th>at_only</th><th>debounce</th><th>batch_size</th><th>blocked_users</th></tr>
+        </thead>
+        <tbody>
+        {% for gid, cfg in overrides.items() %}
+        <tr>
+            <td><code>{{ gid }}</code></td>
+            <td>
+                {% if cfg.at_only is none %}<span class="badge badge-muted">全局</span>
+                {% elif cfg.at_only %}<span class="badge badge-warn">是</span>
+                {% else %}<span class="badge badge-success">否</span>
+                {% endif %}
+            </td>
+            <td>{{ cfg.debounce_seconds }}s</td>
+            <td>{{ cfg.batch_size }}</td>
+            <td>{{ cfg.blocked_users | join(', ') if cfg.blocked_users else '-' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:var(--muted)">暂无单群覆盖配置。在 config.toml → [group.overrides] 中添加。</p>
+    {% endif %}
+</div>
+
+{% endblock %}

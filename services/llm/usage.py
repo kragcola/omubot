@@ -1,0 +1,384 @@
+"""LLM usage tracking: record API calls to SQLite, query summaries."""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any
+
+import aiosqlite
+from loguru import logger
+
+_L = logger.bind(channel="usage")
+
+_CREATE_TABLE = """
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT    NOT NULL,
+    call_type       TEXT    NOT NULL,
+    user_id         TEXT,
+    group_id        TEXT,
+    model           TEXT    NOT NULL,
+    input_tokens    INTEGER NOT NULL,
+    cache_read_tokens  INTEGER NOT NULL,
+    cache_create_tokens INTEGER NOT NULL,
+    output_tokens   INTEGER NOT NULL,
+    tool_rounds     INTEGER NOT NULL,
+    elapsed_s       REAL    NOT NULL,
+    error           TEXT
+)
+"""
+
+_CREATE_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_llm_calls_ts ON llm_calls (ts)",
+    "CREATE INDEX IF NOT EXISTS idx_llm_calls_user ON llm_calls (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_llm_calls_group ON llm_calls (group_id)",
+    "CREATE INDEX IF NOT EXISTS idx_llm_calls_type ON llm_calls (call_type)",
+]
+
+_INSERT = """
+INSERT INTO llm_calls
+    (ts, call_type, user_id, group_id, model,
+     input_tokens, cache_read_tokens, cache_create_tokens, output_tokens,
+     tool_rounds, elapsed_s, error)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+class UsageTracker:
+    def __init__(self, db_path: str = "storage/usage.db") -> None:
+        self._db_path = db_path
+        self._db: aiosqlite.Connection | None = None
+        self._alert_fn: Callable[[str], Awaitable[None]] | None = None
+        self._cache_hit_warn: float = 90.0
+        self._slow_threshold_s: float = 60.0
+        self._cold_start: bool = True
+        # Cache alert: time-window average + cooldown
+        self._cache_alert_window_s: float = 30.0 * 60  # 30 min default
+        self._cache_alert_cooldown_s: float = 10.0 * 60  # 10 min default
+        self._cache_samples: list[tuple[float, float]] = []  # (monotonic_ts, hit_rate)
+        self._last_cache_alert_ts: float = 0.0
+
+    async def init(self) -> None:
+        self._db = await aiosqlite.connect(self._db_path)
+        self._db.row_factory = aiosqlite.Row
+        await self._db.execute(_CREATE_TABLE)
+        for idx in _CREATE_INDEXES:
+            await self._db.execute(idx)
+        await self._db.commit()
+
+    async def close(self) -> None:
+        if self._db:
+            await self._db.close()
+            self._db = None
+
+    def set_alert(
+        self,
+        *,
+        alert_fn: Callable[[str], Awaitable[None]],
+        cache_hit_warn: float = 90.0,
+        slow_threshold_s: float = 60.0,
+        cache_alert_window_m: float = 30.0,
+        cache_alert_cooldown_m: float = 10.0,
+    ) -> None:
+        self._alert_fn = alert_fn
+        self._cache_hit_warn = cache_hit_warn
+        self._slow_threshold_s = slow_threshold_s
+        self._cache_alert_window_s = cache_alert_window_m * 60
+        self._cache_alert_cooldown_s = cache_alert_cooldown_m * 60
+
+    async def _check_alerts(
+        self,
+        *,
+        call_type: str,
+        elapsed_s: float,
+        error: str | None,
+        input_tokens: int,
+        cache_read_tokens: int,
+        cache_create_tokens: int,
+        tool_rounds: int = 0,
+    ) -> None:
+        if not self._alert_fn:
+            return
+
+        if error:
+            msg = f"⚠ LLM call error: {error}"
+            _L.warning("usage_alert | {}", msg)
+            await self._alert_fn(msg)
+            return  # error alert takes priority, skip others
+
+        if elapsed_s > self._slow_threshold_s:
+            msg = f"⚠ LLM slow call: {elapsed_s:.1f}s (threshold: {self._slow_threshold_s:.0f}s)"
+            _L.warning("usage_alert | {}", msg)
+            await self._alert_fn(msg)
+            return  # slow alert takes priority, skip cache check
+
+        # Cache hit check — only for chat/proactive (compact/dream don't use prompt cache)
+        if call_type in ("chat", "proactive"):
+            # Skip the first call after restart — cold start always cache-misses.
+            if self._cold_start:
+                self._cold_start = False
+                return
+            # Skip 0-round calls — direct replies naturally have low cache hit rate
+            # (~19%) because only static system blocks are cached; including them
+            # drags the average down and causes false alarms.
+            if tool_rounds == 0:
+                return
+            total = input_tokens + cache_read_tokens + cache_create_tokens
+            if total > 0:
+                now = time.monotonic()
+                hit_rate = cache_read_tokens / total * 100
+                # Collect sample and prune stale entries outside the window
+                self._cache_samples.append((now, hit_rate))
+                cutoff = now - self._cache_alert_window_s
+                self._cache_samples = [
+                    s for s in self._cache_samples if s[0] >= cutoff
+                ]
+                # Need at least 3 samples to judge
+                if len(self._cache_samples) < 3:
+                    return
+                avg_hit = sum(r for _, r in self._cache_samples) / len(self._cache_samples)
+                if avg_hit >= self._cache_hit_warn:
+                    return
+                # Cooldown: suppress repeated alerts
+                if now - self._last_cache_alert_ts < self._cache_alert_cooldown_s:
+                    _L.warning(
+                        "usage_alert | cache avg {:.0f}% (suppressed, cooldown)",
+                        avg_hit,
+                    )
+                    return
+                self._last_cache_alert_ts = now
+                window_min = (now - self._cache_samples[0][0]) / 60
+                detail = " | ".join(f"{r:.0f}%" for _, r in self._cache_samples)
+                msg = (
+                    f"⚠ Cache hit rate low: avg {avg_hit:.0f}% "
+                    f"over {len(self._cache_samples)} calls / {window_min:.0f}min "
+                    f"(threshold: {self._cache_hit_warn:.0f}%)\n"
+                    f"detail: {detail}"
+                )
+                _L.warning("usage_alert | {}", msg)
+                await self._alert_fn(msg)
+
+    async def record(
+        self,
+        *,
+        call_type: str,
+        user_id: str | None,
+        group_id: str | None,
+        model: str,
+        input_tokens: int,
+        cache_read_tokens: int,
+        cache_create_tokens: int,
+        output_tokens: int,
+        tool_rounds: int,
+        elapsed_s: float,
+        error: str | None = None,
+    ) -> None:
+        if not self._db:
+            _L.warning("usage tracker not initialized, skipping record")
+            return
+        ts = datetime.now(UTC).isoformat()
+        try:
+            await self._db.execute(
+                _INSERT,
+                (ts, call_type, user_id, group_id, model,
+                 input_tokens, cache_read_tokens, cache_create_tokens, output_tokens,
+                 tool_rounds, elapsed_s, error),
+            )
+            await self._db.commit()
+            total_in = input_tokens + cache_read_tokens + cache_create_tokens
+            hit_pct = f"{cache_read_tokens / total_in * 100:.0f}%" if total_in > 0 else "n/a"
+            _L.info(
+                "usage | type={} user={} group={} in={} out={} cache_r={} cache_w={} hit={} rounds={} {:.1f}s{}",
+                call_type, user_id, group_id,
+                input_tokens, output_tokens, cache_read_tokens, cache_create_tokens,
+                hit_pct, tool_rounds, elapsed_s,
+                f" error={error}" if error else "",
+            )
+            await self._check_alerts(
+                call_type=call_type, elapsed_s=elapsed_s, error=error,
+                input_tokens=input_tokens, cache_read_tokens=cache_read_tokens,
+                cache_create_tokens=cache_create_tokens,
+                tool_rounds=tool_rounds,
+            )
+        except Exception:
+            _L.exception("usage record failed")
+
+    async def query_raw(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        """Run arbitrary SQL and return rows as dicts. For internal use and CLI."""
+        if not self._db:
+            return []
+        cursor = await self._db.execute(sql, params)
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def summary_today(self) -> dict[str, Any]:
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        return await self._summary_for_period(f"{today}%")
+
+    async def summary_month(self, month: str | None = None) -> dict[str, Any]:
+        if month is None:
+            month = datetime.now(UTC).strftime("%Y-%m")
+        return await self._summary_for_period(f"{month}%")
+
+    async def _summary_for_period(self, ts_like: str) -> dict[str, Any]:
+        rows = await self.query_raw(
+            """
+            SELECT
+                COUNT(*)        AS total_calls,
+                COALESCE(SUM(input_tokens), 0)        AS input_tokens,
+                COALESCE(SUM(cache_read_tokens), 0)    AS cache_read_tokens,
+                COALESCE(SUM(cache_create_tokens), 0)  AS cache_create_tokens,
+                COALESCE(SUM(input_tokens + cache_read_tokens + cache_create_tokens), 0) AS total_input_tokens,
+                COALESCE(SUM(output_tokens), 0)        AS total_output_tokens,
+                COALESCE(SUM(CASE WHEN call_type='chat' THEN 1 ELSE 0 END), 0)      AS chat_calls,
+                COALESCE(SUM(CASE WHEN call_type='proactive' THEN 1 ELSE 0 END), 0) AS proactive_calls,
+                COALESCE(SUM(CASE WHEN call_type='compact' THEN 1 ELSE 0 END), 0)   AS compact_calls,
+                COALESCE(SUM(CASE WHEN call_type='dream' THEN 1 ELSE 0 END), 0)     AS dream_calls,
+                COALESCE(SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END), 0)     AS error_count,
+                COALESCE(SUM(tool_rounds), 0) AS total_tool_rounds,
+                COALESCE(AVG(elapsed_s), 0)   AS avg_elapsed_s
+            FROM llm_calls WHERE ts LIKE ?
+            """,
+            (ts_like,),
+        )
+        return rows[0] if rows else {}
+
+    async def top_users(self, days: int = 7, limit: int = 10) -> list[dict[str, Any]]:
+        return await self.query_raw(
+            """
+            SELECT user_id,
+                   COUNT(*) AS calls,
+                   SUM(input_tokens + cache_read_tokens + cache_create_tokens) AS total_input,
+                   SUM(output_tokens) AS total_output
+            FROM llm_calls
+            WHERE user_id IS NOT NULL
+              AND ts >= datetime('now', ?)
+            GROUP BY user_id
+            ORDER BY total_input + total_output DESC
+            LIMIT ?
+            """,
+            (f"-{days} days", limit),
+        )
+
+    async def top_groups(self, days: int = 7, limit: int = 10) -> list[dict[str, Any]]:
+        return await self.query_raw(
+            """
+            SELECT group_id,
+                   COUNT(*) AS calls,
+                   SUM(input_tokens + cache_read_tokens + cache_create_tokens) AS total_input,
+                   SUM(output_tokens) AS total_output
+            FROM llm_calls
+            WHERE group_id IS NOT NULL
+              AND ts >= datetime('now', ?)
+            GROUP BY group_id
+            ORDER BY total_input + total_output DESC
+            LIMIT ?
+            """,
+            (f"-{days} days", limit),
+        )
+
+    @staticmethod
+    def _period_filter(
+        period: str, date: str | None, tz_modifier: str,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Build WHERE clause for a time period.
+
+        When *date* is None the filter uses a rolling window
+        (24 h / 30 d); when a date string is given it matches
+        the exact calendar day / month.
+        """
+        if period == "day":
+            if date is None:
+                return "ts >= datetime('now', '-24 hours')", ()
+            return f"date(ts, '{tz_modifier}') = ?", (date,)
+        if period == "month":
+            if date is None:
+                now_date = datetime.now(UTC).strftime("%Y-%m-%d")
+                return (
+                    f"date(ts, '{tz_modifier}') > date(?, '-30 days') "
+                    f"AND date(ts, '{tz_modifier}') <= ?",
+                    (now_date, now_date),
+                )
+            return f"strftime('%Y-%m', ts, '{tz_modifier}') = ?", (date,)
+        if period == "week":
+            if date is None:
+                date = datetime.now(UTC).strftime("%Y-%m-%d")
+            return (
+                f"date(ts, '{tz_modifier}') > date(?, '-7 days') "
+                f"AND date(ts, '{tz_modifier}') <= ?",
+                (date, date),
+            )
+        msg = f"unknown period: {period!r}"
+        raise ValueError(msg)
+
+    async def usage_by_model(
+        self,
+        *,
+        period: str,
+        date: str | None = None,
+        tz_offset_hours: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Return per-model token sums for a time period."""
+        tz_modifier = f"{tz_offset_hours:+.1f} hours"
+        where_clause, params = self._period_filter(period, date, tz_modifier)
+
+        sql = f"""
+            SELECT model,
+                   COUNT(*)                                 AS calls,
+                   COALESCE(SUM(input_tokens), 0)           AS input_tokens,
+                   COALESCE(SUM(cache_read_tokens), 0)      AS cache_read_tokens,
+                   COALESCE(SUM(cache_create_tokens), 0)    AS cache_create_tokens,
+                   COALESCE(SUM(output_tokens), 0)          AS output_tokens
+            FROM llm_calls
+            WHERE {where_clause}
+            GROUP BY model
+            ORDER BY SUM(input_tokens + cache_read_tokens
+                         + cache_create_tokens + output_tokens) DESC
+        """
+        return await self.query_raw(sql, params)
+
+    async def timeseries(
+        self,
+        *,
+        period: str,
+        date: str | None = None,
+        tz_offset_hours: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Return token usage bucketed by time.
+
+        When *date* is omitted the query uses a rolling window
+        (day → 24 h, week → 7 d, month → 30 d).
+        When *date* is given it matches the exact calendar period.
+        """
+        tz_modifier = f"{tz_offset_hours:+.1f} hours"
+        where_clause, params = self._period_filter(period, date, tz_modifier)
+
+        if period == "day":
+            bucket_expr = f"strftime('%H', ts, '{tz_modifier}')"
+        elif period == "month":
+            # Rolling 30 d uses MM-DD; calendar month uses DD
+            bucket_expr = (
+                f"strftime('%m-%d', ts, '{tz_modifier}')" if date is None
+                else f"strftime('%d', ts, '{tz_modifier}')"
+            )
+        elif period == "week":
+            bucket_expr = f"strftime('%m-%d', ts, '{tz_modifier}')"
+        else:
+            msg = f"unknown period: {period!r}"
+            raise ValueError(msg)
+
+        sql = f"""
+            SELECT {bucket_expr} AS bucket,
+                   COUNT(*)                                 AS calls,
+                   COALESCE(SUM(input_tokens), 0)           AS input_tokens,
+                   COALESCE(SUM(cache_read_tokens), 0)      AS cache_read_tokens,
+                   COALESCE(SUM(cache_create_tokens), 0)    AS cache_create_tokens,
+                   COALESCE(SUM(output_tokens), 0)          AS output_tokens
+            FROM llm_calls
+            WHERE {where_clause}
+            GROUP BY bucket
+            ORDER BY bucket
+        """
+        return await self.query_raw(sql, params)

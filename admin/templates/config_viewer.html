@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}配置查看{% endblock %}
+{% block content %}
+
+<h2 style="margin-bottom:1rem">配置查看 <span class="badge badge-muted">只读</span></h2>
+
+<div class="card">
+    <h2>config.toml</h2>
+    <div class="config-block">{{ config_content }}</div>
+</div>
+
+<p style="color:var(--muted);font-size:0.85rem;margin-top:0.5rem">
+    修改配置请直接编辑 config.toml 文件，然后执行 <code>docker compose restart bot</code> 生效。
+</p>
+
+{% endblock %}

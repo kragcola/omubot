@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录 — 凤笑梦 Bot 管理面板</title>
+<link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+<div class="login-container">
+    <div class="login-box">
+        <h1>凤笑梦 Bot</h1>
+        <p>请输入管理 Token 以访问控制面板</p>
+        <form method="post" action="/admin/login">
+            <div class="mb-2">
+                <input type="password" name="token" placeholder="Admin Token" autofocus>
+            </div>
+            <button type="submit" class="btn btn-primary" style="width:100%">登录</button>
+        </form>
+        {% if messages %}
+        {% for msg in messages %}
+        <div class="alert alert-{{ msg.type }} mt-2">{{ msg.text }}</div>
+        {% endfor %}
+        {% endif %}
+    </div>
+</div>
+</body>
+</html>

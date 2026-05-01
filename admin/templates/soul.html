@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Soul 编辑{% endblock %}
+{% block content %}
+
+<h2 style="margin-bottom:1rem">Soul 人设文件编辑</h2>
+
+<div class="card mb-2">
+    <h2>identity.md</h2>
+    <form hx-post="/admin/soul/save" hx-target="body">
+        <input type="hidden" name="file" value="identity.md">
+        <textarea name="content" style="min-height:300px;font-family:monospace;font-size:0.85rem;">{{ identity }}</textarea>
+        <div class="flex items-center justify-between mt-1">
+            <span style="color:var(--muted);font-size:0.8rem">{{ identity.split('\n')|length }} 行</span>
+            <button type="submit" class="btn btn-primary">保存 identity.md</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2>instruction.md</h2>
+    <form hx-post="/admin/soul/save" hx-target="body">
+        <input type="hidden" name="file" value="instruction.md">
+        <textarea name="content" style="min-height:300px;font-family:monospace;font-size:0.85rem;">{{ instruction }}</textarea>
+        <div class="flex items-center justify-between mt-1">
+            <span style="color:var(--muted);font-size:0.8rem">{{ instruction.split('\n')|length }} 行</span>
+            <button type="submit" class="btn btn-primary">保存 instruction.md</button>
+        </div>
+    </form>
+</div>
+
+<p style="color:var(--muted);font-size:0.85rem;margin-top:0.5rem">
+    保存后执行 <code>docker compose restart bot</code> 使改动生效。
+</p>
+
+{% endblock %}
