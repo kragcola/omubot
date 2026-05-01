@@ -540,11 +540,13 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
     @private_chat.handle()
     async def _handle_private_chat(bot: Bot, event: MessageEvent) -> None:
-        from services.llm.client import _RATE_LIMIT_BASE_DELAY, _RATE_LIMIT_MAX_RETRIES, RateLimitError
-        from services.tools.context import ToolContext
-
+        # Early return for group messages — before any heavy imports.
         if isinstance(event, GroupMessageEvent):
             return
+
+        from services.llm.client import RATE_LIMIT_BASE_DELAY, RATE_LIMIT_MAX_RETRIES, RateLimitError
+        from services.tools.context import ToolContext
+
         if ctx.allowed_private_users and event.user_id not in ctx.allowed_private_users:
             return
 
@@ -588,7 +590,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             await bot.send(event, Message(text))
 
         reply: str | None = None
-        for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+        for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
             try:
                 reply = await ctx.llm_client.chat(
                     session_id=sid,
@@ -602,14 +604,14 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 )
                 break
             except RateLimitError:
-                if attempt >= _RATE_LIMIT_MAX_RETRIES:
-                    logger.error("private chat rate limit exhausted after {} retries", _RATE_LIMIT_MAX_RETRIES)
+                if attempt >= RATE_LIMIT_MAX_RETRIES:
+                    logger.error("private chat rate limit exhausted after {} retries", RATE_LIMIT_MAX_RETRIES)
                     reply = "当前请求太多，请稍后再试"
                     break
-                delay = _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+                delay = RATE_LIMIT_BASE_DELAY * (2 ** attempt)
                 logger.warning(
                     "private chat rate limited, retry {}/{} in {:.0f}s",
-                    attempt + 1, _RATE_LIMIT_MAX_RETRIES, delay,
+                    attempt + 1, RATE_LIMIT_MAX_RETRIES, delay,
                 )
                 await asyncio.sleep(delay)
             except Exception:

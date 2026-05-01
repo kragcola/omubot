@@ -27,6 +27,10 @@ class CommandDispatcher:
             if cmd.name in self._commands:
                 _log.warning("duplicate command name, overwriting | name={}", cmd.name)
             self._commands[cmd.name] = cmd
+            for alias in cmd.aliases:
+                if alias in self._commands:
+                    _log.warning("duplicate command alias, overwriting | alias={}", alias)
+                self._commands[alias] = cmd
         _log.info("commands loaded | count={}", len(self._commands))
 
     @property

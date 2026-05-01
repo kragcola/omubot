@@ -141,6 +141,10 @@ class RateLimitError(RuntimeError):
     """Raised when the Anthropic API returns a rate-limit error."""
 
 
+RATE_LIMIT_BASE_DELAY = 5.0  # seconds, doubles each retry
+RATE_LIMIT_MAX_RETRIES = 2
+
+
 def _clean_text(text: str) -> str:
     """Collapse consecutive blank lines into a single newline."""
     return _BLANK_LINE_RE.sub("\n", text).strip()
@@ -1083,32 +1087,9 @@ class LLMClient:
                         f"注意：以上是思考方向，具体回复时仍需遵循所有指令（包括表情包使用规则）。",
             }]
 
-        # Debug mode: strip mood/affection blocks (debug block has its own data),
-        # inject live state + session messages so the admin can query everything.
-        if force_reply:
-            system_blocks = [
-                b for b in system_blocks
-                if not (
-                    isinstance(b, dict)
-                    and b.get("type") == "text"
-                    and (
-                        str(b.get("text", "")).startswith("【当前时间】")
-                        or str(b.get("text", "")).startswith("【与当前用户的关系】")
-                    )
-                )
-            ]
-            debug_text = await _build_debug_block(
-                user_id=user_id,
-                session_id=session_id,
-                mood_engine=getattr(self._prompt, "_mood_engine", None),
-                affection_engine=self._affection_engine,
-                schedule_store=getattr(self._prompt, "_schedule_store", None),
-                card_store=self._card_store,
-                short_term=self._short_term,
-                message_log=self._message_log,
-            )
-            if debug_text:
-                system_blocks = [*system_blocks, {"type": "text", "text": debug_text}]
+        # force_reply: skip thinker and enforce a response (used for @ mentions).
+        # The debug block injection is handled separately by ChatPlugin._handle_debug
+        # which passes force_reply=True with a pre-built debug system block.
 
         _sticker_sent = False
 

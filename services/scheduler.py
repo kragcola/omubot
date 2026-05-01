@@ -90,7 +90,10 @@ class GroupChatScheduler:
         if group_id in self._muted_groups:
             return
         identity = self._identity_mgr.resolve()
-        if identity.proactive is None:
+        if identity.proactive is None and not is_at:
+            # Skip non-@ messages when there are no proactive interjection rules.
+            # @ mentions always get a response regardless of proactive settings.
+            _L.debug("scheduler | group={} proactive=None, skip (non-@)", group_id)
             return
 
         resolved = self._group_config.resolve(int(group_id))

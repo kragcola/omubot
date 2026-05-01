@@ -283,6 +283,7 @@ class Command:
     description: str = ""
     usage: str = ""  # 用法示例，如 "/memo list"
     pattern: str = ""  # 匹配模式，空字符串表示用 name 自动生成
+    aliases: list[str] = field(default_factory=list)  # 别名，如 ["p", "plg"]
 
 
 @dataclass
@@ -316,7 +317,7 @@ class AmadeusPlugin:
     priority: int = 100
     enabled: bool = True
     dependencies: dict[str, str] = {}  # noqa: RUF012 — overridden per-plugin, never mutated
-    author: str = ""  # 开发者签名，显示在 /plugins 列表中
+    author: str = "kragcola"  # 开发者签名，显示在 /plugins 列表中
 
     # ---- 生命周期 ----
 

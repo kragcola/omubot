@@ -5,6 +5,24 @@ All notable changes to Omubot are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-05-02
+
+### Added
+
+- Command alias system: `Command.aliases` field, `CommandDispatcher` indexes by alias
+- `/plugins` now accessible via `/p`, `/plg`, `/插件` (Chinese alias)
+- All plugins signed with author "kragcola" (default in `AmadeusPlugin` base class)
+
+### Fixed
+
+- Scheduler: `proactive is None` no longer blocks @-mention responses — @ mentions always trigger a reply
+- `force_reply` no longer strips mood/affection blocks for @ mentions (was conflating debug mode with mention-reply)
+- Thinker now correctly fires for non-@ group messages (was blocked by scheduler proactive guard)
+
+### Changed
+
+- DebugCommands plugin upgraded to v1.1.0
+
 ## [1.0.0] — 2026-05-01
 
 ### Added
