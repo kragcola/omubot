@@ -459,7 +459,9 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         if await bus.fire_on_message(msg_ctx):
             return  # consumed by an interceptor plugin
 
-        # Check slash commands before timeline/scheduler
+        # Check slash commands before timeline/scheduler.
+        # Cancel any pending debounce so a previous message's thinker doesn't
+        # fire while the user is interactively debugging.
         if (
             plain_text
             and hasattr(ctx, "command_dispatcher")
@@ -471,6 +473,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 group_id=group_id,
             )
         ):
+            ctx.scheduler.cancel_debounce(group_id)
             return
 
         content = await _render_message(

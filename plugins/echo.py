@@ -112,6 +112,11 @@ class EchoPlugin(AmadeusPlugin):
         if ctx.is_private:
             return False
 
+        # Skip command messages (e.g. /debug, /memo) — they're instructions, not chat
+        plain_text = str(ctx.raw_message.get("plain_text", ""))
+        if plain_text.startswith("/"):
+            return False
+
         echo_key = ctx.raw_message.get("echo_key", "")
         if not echo_key:
             return False

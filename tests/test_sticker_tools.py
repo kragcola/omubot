@@ -438,18 +438,21 @@ async def test_send_sticker_group_success(
     ctx = ToolContext(bot=mock_bot, user_id="123456", group_id="987654")
 
     fake_seg = MagicMock()
-    with patch("nonebot.adapters.onebot.v11.MessageSegment.image", return_value=fake_seg) as mock_image:
+    with patch(
+        "nonebot.adapters.onebot.v11.MessageSegment.image",
+        return_value=fake_seg,
+    ) as mock_ctor:
         result = await tool.execute(ctx, sticker_id=stk_id)
 
     assert f"已发送 {stk_id}" in result
     mock_bot.send_group_msg.assert_awaited_once()
     mock_bot.send_private_msg.assert_not_awaited()
 
-    # Verify the file path was passed to MessageSegment.image
-    call_args = mock_image.call_args
-    assert call_args is not None
+    # Verify MessageSegment.image called with base64 file
+    mock_ctor.assert_called_once()
+    assert mock_ctor.call_args[1]["file"].startswith("base64://")
 
-    # Verify sub_type=1 and summary were set for sticker rendering
+    # Verify sub_type=1 and summary set for QQ sticker rendering
     fake_seg.data.__setitem__.assert_any_call("sub_type", 1)
     fake_seg.data.__setitem__.assert_any_call("summary", "[动画表情]")
 

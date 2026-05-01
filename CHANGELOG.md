@@ -5,7 +5,44 @@ All notable changes to Omubot are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.1] — 2026-05-02
+## [1.0.4] — 2026-05-02
+
+### Fixed
+
+- **表情包发送全线修复（critical）**：`SendStickerTool` 中 `subType`（驼峰）→ `sub_type`（蛇形），OneBot v11 协议要求蛇形命名，NapCat 静默忽略驼峰 key 导致所有表情包以普通图片发送
+- **Docker 容器文件隔离**：bot 与 napcat 在不同容器，改为 base64 编码内联传输图片
+- **`/debug` 指令触发 thinker**：命令匹配后调用 `scheduler.cancel_debounce()` 取消待处理的 thinker 触发
+- **指令被复读插件检测**：`EchoPlugin` 跳过以 `/` 开头的消息
+
+### Changed
+
+- **`/debug` 直接调度**：新增 `_debug_direct_dispatch()` 绕过 LLM 直接执行已知命令（发表情等），避免 DeepSeek V4 幻觉不调用工具
+- **表情包发送**：新增 `summary=[动画表情]` 字段使 QQ 正确渲染贴图样式
+- ChatPlugin 1.0.2 → 1.0.3
+
+## [1.0.3] — 2026-05-02
+
+### Added
+
+- **`/debug` 工具循环**：从单轮 `_call()` 改为完整 5 轮工具循环，LLM 可调用所有已注册工具
+- **好感度插件 INFO 日志**：on_pre_prompt 记录好感度层级和分数，on_post_reply 记录互动后变化
+
+### Fixed
+
+- **分段逻辑根本修复**：`force_reply=True` 不再绕过 `_split_naturally()`，所有回复统一分段
+- **消息分段增强**：硬字符上限强制切分、`---cut---` 逐行精确匹配、尾段合并仅对纯标点生效
+- **日志频道默认值**：`LogChannelConfig.system` 默认改为 `True`
+- **记忆卡片提取日志**：从 DEBUG 提升到 INFO
+
+### Changed
+
+- ChatPlugin 1.0.1 → 1.0.2
+- AffectionPlugin 1.0.0 → 1.0.1
+- MemoPlugin 1.0.0 → 1.0.1
+- SchedulePlugin 1.0.0 → 1.0.1
+- StickerPlugin 1.0.0 → 1.0.1
+
+## [1.0.2] — 2026-05-02
 
 ### Added
 

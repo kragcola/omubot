@@ -126,7 +126,7 @@ class MemoExtractor:
                 _L.warning("memo extractor add_card failed | user={} category={}", user_id, category)
 
         if written:
-            _L.debug(
+            _L.info(
                 "cards extracted | user={} count={}",
                 user_id, written,
             )
@@ -135,7 +135,7 @@ class MemoExtractor:
 class MemoPlugin(AmadeusPlugin):
     name = "memo"
     description = "记忆系统：卡片索引、实体记忆注入、对话后提取"
-    version = "1.0.0"
+    version = "1.0.1"
     priority = 30
 
     def __init__(self) -> None:

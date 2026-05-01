@@ -75,7 +75,7 @@ class LogChannelConfig(BaseModel):
     scheduler: bool = False
     usage: bool = False
     compact: bool = False
-    system: bool = False
+    system: bool = True
     debug: bool = False
     dream: bool = False
 

@@ -5,6 +5,8 @@ Owns all system service lifecycle. Other plugins access services via PluginConte
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import time
 from datetime import timedelta
@@ -21,6 +23,7 @@ _L = logger.bind(channel="system")
 
 class ChatPlugin(AmadeusPlugin):
     name = "chat"
+    version = "1.0.3"
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 
@@ -40,8 +43,16 @@ class ChatPlugin(AmadeusPlugin):
         ]
 
     async def _handle_debug(self, cmd_ctx: Any) -> None:
-        """Handle /debug command: admin-only debug mode with live state."""
+        """Handle /debug command: admin-only debug mode with live state and tool execution."""
         from nonebot.adapters.onebot.v11 import Message
+
+        from services.llm.client import (
+            _PASS_TURN_TOOL,
+            _build_debug_block,
+            _strip_markdown,
+            _to_anthropic_tools,
+        )
+        from services.tools.context import ToolContext
 
         ctx = self._ctx
         if ctx is None:
@@ -59,42 +70,224 @@ class ChatPlugin(AmadeusPlugin):
             "private" if cmd_ctx.is_private else f"group={cmd_ctx.group_id}",
         )
 
-        from services.llm.client import _build_debug_block
-
         sid = f"private_{cmd_ctx.user_id}" if cmd_ctx.is_private else f"group_{cmd_ctx.group_id}"
-
-        # Build the debug system block
-        debug_text = await _build_debug_block(
-            user_id=cmd_ctx.user_id,
-            session_id=sid,
-            mood_engine=ctx.mood_engine,
-            affection_engine=ctx.affection_engine,
-            schedule_store=ctx.schedule_store,
-            card_store=ctx.card_store,
-            short_term=ctx.short_term,
-            message_log=ctx.msg_log,
-        )
         user_content = cmd_ctx.args if cmd_ctx.args else "请显示当前系统状态摘要"
+        has_command = bool(cmd_ctx.args)
 
-        # Single-turn LLM call: no thinker, no tool loop
-        system_blocks = [
-            {"type": "text", "text": debug_text},
-            {"type": "text", "text": (
-                "你是调试助手，不是聊天机器人。基于上面的实时状态数据如实回答用户的问题。\n"
-                "格式约束：QQ 不支持 Markdown。禁止 ``` 代码块、** 加粗、` 行内代码、- 列表。使用纯文本。"
-            )},
-        ]
-        messages = [{"role": "user", "content": user_content}]
+        # Build tool context once — used by both direct dispatch and LLM path
+        tool_ctx_obj = ToolContext(
+            bot=cmd_ctx.bot,
+            user_id=str(cmd_ctx.user_id),
+            group_id=str(cmd_ctx.group_id) if not cmd_ctx.is_private else None,
+        )
+
+        # ---- Direct dispatch for known commands (bypass LLM) ----
+        if has_command:
+            direct_result = await self._debug_direct_dispatch(
+                cmd_ctx, cmd_ctx.args.strip(), tool_ctx_obj,
+            )
+            if direct_result is not None:
+                return  # handled directly
+
+        # ---- LLM path ----
+        if has_command:
+            # Include sticker library so the LLM can pick sticker IDs
+            sticker_view = ""
+            if ctx.sticker_store is not None:
+                sticker_view = ctx.sticker_store.format_prompt_view()
+            system_blocks = [
+                {"type": "text", "text": (
+                    "你是工具执行器。用户指令=工具调用。\n"
+                    "规则：绝不输出文字。你的每次回复必须是 tool_use，不能是 text。\n"
+                    "发送表情→send_sticker(sticker_id)  查卡→lookup_cards\n"
+                    "设置昵称→set_nickname  更新记忆→update_card  管理表情→manage_sticker\n"
+                    "如果用户的指令无法匹配任何工具，调用 pass_turn(reason='原因')。"
+                )},
+            ]
+            if sticker_view:
+                system_blocks.append({"type": "text", "text": sticker_view})
+        else:
+            # No command: full state dump for inspection
+            _L.info("debug building state dump | user={}", cmd_ctx.user_id)
+            debug_text = await asyncio.wait_for(
+                _build_debug_block(
+                    user_id=cmd_ctx.user_id,
+                    session_id=sid,
+                    mood_engine=ctx.mood_engine,
+                    affection_engine=ctx.affection_engine,
+                    schedule_store=ctx.schedule_store,
+                    card_store=ctx.card_store,
+                    short_term=ctx.short_term,
+                    message_log=ctx.msg_log,
+                ),
+                timeout=15.0,
+            )
+            _L.info("debug state dump ready | chars={}", len(debug_text))
+            system_blocks = [
+                {"type": "text", "text": debug_text},
+                {"type": "text", "text": (
+                    "你是调试助手。基于上面的实时状态数据如实回答用户的问题。\n"
+                    "格式约束：QQ 不支持 Markdown。禁止代码块、加粗、行内代码。使用纯文本。"
+                )},
+            ]
+        messages: list[Any] = [{"role": "user", "content": user_content}]
+
+        # Build tool definitions — all registered tools available
+        tool_defs: list[dict[str, Any]] | None = None
+        if not ctx.tool_registry.empty:
+            tool_defs = _to_anthropic_tools(ctx.tool_registry.to_openai_tools())
+        tool_defs = [*(tool_defs or []), _PASS_TURN_TOOL]
+        _L.info(
+            "debug tool_defs | count={} names={}",
+            len(tool_defs), [t["name"] for t in tool_defs],
+        )
+
+        MAX_TOOL_ROUNDS = 5
 
         try:
-            result = await ctx.llm_client._call(system_blocks, messages, max_tokens=2048)
-            reply_text = (result.get("text") or "").strip()
-            if reply_text:
+            for _round_i in range(MAX_TOOL_ROUNDS):
+                _L.info("debug API call round={}", _round_i)
+                try:
+                    result = await asyncio.wait_for(
+                        ctx.llm_client._call(system_blocks, messages, tools=tool_defs),
+                        timeout=60.0,
+                    )
+                except TimeoutError:
+                    _L.error("debug API call timed out | round={}", _round_i)
+                    await cmd_ctx.bot.send(cmd_ctx.event, Message("调试: API 调用超时 (60s)"))
+                    return
+                text: str = result.get("text", "")
+                tool_uses: list[Any] = result.get("tool_uses", [])
+                _L.info(
+                    "debug API response | round={} text_len={} tool_count={} names={}",
+                    _round_i, len(text), len(tool_uses),
+                    [tu.name for tu in tool_uses],
+                )
+
+                # pass_turn: skip action, just reply with text (if any)
+                if any(tu.name == "pass_turn" for tu in tool_uses):
+                    used_tools = [tu for tu in tool_uses if tu.name != "pass_turn"]
+                    if not used_tools:
+                        reason = ""
+                        for tu in tool_uses:
+                            if tu.name == "pass_turn":
+                                reason = tu.input.get("reason", "")
+                        reply_text = text.strip() or reason or "pass_turn (no reason)"
+                        _L.info("debug pass_turn | reason={!r}", reason)
+                        await ctx.humanizer.delay(reply_text)
+                        await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[pass_turn] {reply_text}"))
+                        return
+
+                if not tool_uses:
+                    reply_text = _strip_markdown(text or "...")
+                    if reply_text.strip():
+                        await ctx.humanizer.delay(reply_text)
+                        await cmd_ctx.bot.send(cmd_ctx.event, Message(reply_text))
+                    return
+
+                # Build assistant content with tool_use blocks
+                assistant_content: list[dict[str, Any]] = []
+                for tb in result.get("thinking_blocks", []):
+                    assistant_content.append(tb)
+                if text:
+                    assistant_content.append({"type": "text", "text": text})
+                for tu in tool_uses:
+                    assistant_content.append({
+                        "type": "tool_use", "id": tu.id, "name": tu.name, "input": tu.input,
+                    })
+                messages.append({"role": "assistant", "content": assistant_content})
+
+                # Execute tools
+                _L.info("debug executing tools | count={} names={}", len(tool_uses), [tu.name for tu in tool_uses])
+                call_results = await asyncio.gather(
+                    *[ctx.tool_registry.call(tu.name, json.dumps(tu.input), ctx=tool_ctx_obj)
+                      for tu in tool_uses],
+                    return_exceptions=True,
+                )
+                call_results = [
+                    r if isinstance(r, str) else f"Tool error: {r}" for r in call_results
+                ]
+                _L.info(
+                    "debug tool results | names={} results={}",
+                    [tu.name for tu in tool_uses],
+                    [r[:200] for r in call_results],
+                )
+                tool_results: list[dict[str, Any]] = []
+                for tu, rtext in zip(tool_uses, call_results, strict=True):
+                    tool_results.append({
+                        "type": "tool_result", "tool_use_id": tu.id, "content": rtext,
+                    })
+                messages.append({"role": "user", "content": tool_results})
+
+            # Tool loop exhausted — final reply
+            _L.debug("debug tool loop exhausted, calling final API")
+            result = await asyncio.wait_for(
+                ctx.llm_client._call(system_blocks, messages),
+                timeout=60.0,
+            )
+            reply_text = _strip_markdown(result.get("text") or "...")
+            if reply_text.strip():
                 await ctx.humanizer.delay(reply_text)
                 await cmd_ctx.bot.send(cmd_ctx.event, Message(reply_text))
+        except TimeoutError:
+            _L.error("debug API call timed out (final)")
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("调试: API 调用超时 (60s)"))
         except Exception:
             logger.exception("debug command LLM call failed")
             await cmd_ctx.bot.send(cmd_ctx.event, Message("调试查询失败，请稍后重试"))
+
+    async def _debug_direct_dispatch(
+        self, cmd_ctx: Any, args: str, tool_ctx: Any,
+    ) -> str | None:
+        """Direct tool dispatch for /debug — bypasses LLM for known commands.
+
+        Returns the result text if handled, or None to fall through to LLM.
+        Uses tool instances directly (not via registry) to avoid registration-order issues.
+        """
+        import random as _random
+        import re as _re
+
+        from nonebot.adapters.onebot.v11 import Message
+
+        from services.tools.sticker_tools import SendStickerTool
+
+        ctx = self._ctx
+        store = ctx.sticker_store
+
+        # ---- send_sticker: any phrase about sending stickers ----
+        SEND_KW = (
+            "发送表情", "发个表情", "发张表情", "发表情包", "发表情",
+            "发个表情包", "发张表情包", "发个贴图", "发张贴图",
+            "发个", "发张", "来个", "来张",
+            "发贴图", "发贴纸", "发gif", "发动图", "发动态",
+            "表情", "贴图", "动图", "gif",
+        )
+        if any(kw in args for kw in SEND_KW) or any(args == kw for kw in ("发",)):
+            if store is None or not store.list_all():
+                await cmd_ctx.bot.send(cmd_ctx.event, Message("表情包库为空，无法发送"))
+                return "OK"
+            match = _re.search(r"stk_[a-f0-9]{8}", args)
+            stk_id = match.group(0) if match else _random.choice(list(store.list_all().keys()))
+            tool = SendStickerTool(store)
+            result = await tool.execute(tool_ctx, sticker_id=stk_id)
+            logger.info("debug direct send_sticker | id={} result={}", stk_id, result)
+            await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[send_sticker] {result}"))
+            return "OK"
+
+        # ---- send specific sticker by id: "发 stk_xxxx" ----
+        match = _re.search(r"stk_[a-f0-9]{8}", args)
+        if match:
+            stk_id = match.group(0)
+            if store is None:
+                await cmd_ctx.bot.send(cmd_ctx.event, Message("表情包库未启用"))
+                return "OK"
+            tool = SendStickerTool(store)
+            result = await tool.execute(tool_ctx, sticker_id=stk_id)
+            logger.info("debug direct send_sticker (by id) | id={} result={}", stk_id, result)
+            await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[send_sticker] {result}"))
+            return "OK"
+
+        return None  # not handled — fall through to LLM
 
     async def on_startup(self, ctx: PluginContext) -> None:
         self._ctx = ctx

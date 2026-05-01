@@ -181,7 +181,7 @@ _MAX_CHUNK = 45
 
 
 def _split_on_sentence_end(text: str) -> list[str]:
-    """Split a long line on 。！？ boundaries."""
+    """Split a long line on 。！？ boundaries, with hard cap at _MAX_CHUNK."""
     parts = _SENTENCE_END.split(text)
     chunks: list[str] = []
     buf = ""
@@ -199,7 +199,15 @@ def _split_on_sentence_end(text: str) -> list[str]:
     if len(chunks) >= 2 and len(chunks[-1]) == 1 and chunks[-1] in "。！？\n":
         chunks[-2] += chunks[-1]
         chunks.pop()
-    return chunks or [text]
+    # Hard split: force-break any remaining chunk > _MAX_CHUNK
+    result: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= _MAX_CHUNK:
+            result.append(chunk)
+        else:
+            for i in range(0, len(chunk), _MAX_CHUNK):
+                result.append(chunk[i:i + _MAX_CHUNK])
+    return result or [text]
 
 
 def _split_long_on_comma(text: str) -> list[str]:
@@ -227,7 +235,7 @@ def _split_naturally(text: str) -> list[str]:
     long single lines are split on 。！？ then comma.
     Honors explicit ---cut--- markers.
     """
-    if _SEGMENT_SEP.strip() in text:
+    if any(line.strip() == _SEGMENT_SEP for line in text.split("\n")):
         return _split_segments(text)
 
     # Step 1: paragraphs (double newline = topic shift, always split)
@@ -262,10 +270,9 @@ def _split_naturally(text: str) -> list[str]:
                     else:
                         chunks.append(s)
 
-    # Merge last chunk if too short (fragment)
-    if len(chunks) >= 2 and len(chunks[-1]) < _MIN_CHUNK:
-        sep = "" if chunks[-1].strip() in "。！？\n，,；;：:、" else "\n"
-        chunks[-2] += sep + chunks[-1]
+    # Merge trailing punctuation-only fragment (not hard-split content)
+    if len(chunks) >= 2 and len(chunks[-1]) < _MIN_CHUNK and chunks[-1].strip() in "。！？，,；;：:、":
+        chunks[-2] += chunks[-1]
         chunks.pop()
 
     return chunks or [text]
@@ -1087,9 +1094,10 @@ class LLMClient:
                         f"注意：以上是思考方向，具体回复时仍需遵循所有指令（包括表情包使用规则）。",
             }]
 
-        # force_reply: skip thinker and enforce a response (used for @ mentions).
+        # force_reply: skip thinker and ensure a response (used for @ mentions / debug).
         # The debug block injection is handled separately by ChatPlugin._handle_debug
         # which passes force_reply=True with a pre-built debug system block.
+        # Note: force_reply no longer bypasses _split_naturally — all replies are segmented.
 
         _sticker_sent = False
 
@@ -1143,21 +1151,21 @@ class LLMClient:
                         "sticker enforcement | kaomoji detected, forcing round | session={}",
                         session_id,
                     )
+                    _sticker_sent = True  # Prevent repeated enforcement loops
                     continue
 
-                if force_reply:
-                    # Debug mode: single message, caller sends via finish()
-                    full_reply = reply
-                    segments = [reply]
-                    last_seg = reply
-                else:
-                    segments = _split_naturally(reply)
-                    if on_segment and len(segments) > 1:
-                        for seg in segments[:-1]:
-                            await on_segment(seg)
-                            await asyncio.sleep(_SEGMENT_DELAY)
+                segments = _split_naturally(reply)
+                if on_segment and len(segments) > 1:
+                    for seg in segments[:-1]:
+                        await on_segment(seg)
+                        await asyncio.sleep(_SEGMENT_DELAY)
                     last_seg = segments[-1] if segments else reply
-                    full_reply = "\n".join(segments)
+                elif not on_segment and len(segments) > 1:
+                    # No callback to send segments — rejoin so caller gets full text
+                    last_seg = "\n".join(segments)
+                else:
+                    last_seg = segments[-1] if segments else reply
+                full_reply = "\n".join(segments)
                 elapsed = time.monotonic() - t0
                 preview = full_reply[:120] + "…" if len(full_reply) > 120 else full_reply
                 _log_msg_out.info(
@@ -1245,19 +1253,17 @@ class LLMClient:
         acc_cache_read += result.get("cache_read", 0)
         acc_cache_create += result.get("cache_create", 0)
         reply = _strip_markdown(result["text"] or "...")
-        if force_reply:
-            # Debug mode: single message, caller sends via finish()
-            full_reply = reply
-            segments = [reply]
-            last_seg = reply
-        else:
-            segments = _split_naturally(reply)
-            if on_segment and len(segments) > 1:
-                for seg in segments[:-1]:
-                    await on_segment(seg)
-                    await asyncio.sleep(_SEGMENT_DELAY)
+        segments = _split_naturally(reply)
+        if on_segment and len(segments) > 1:
+            for seg in segments[:-1]:
+                await on_segment(seg)
+                await asyncio.sleep(_SEGMENT_DELAY)
             last_seg = segments[-1] if segments else reply
-            full_reply = "\n".join(segments)
+        elif not on_segment and len(segments) > 1:
+            last_seg = "\n".join(segments)
+        else:
+            last_seg = segments[-1] if segments else reply
+        full_reply = "\n".join(segments)
         if is_group and group_id is not None and self._timeline is not None:
             self._timeline.add(group_id, role="assistant", content=full_reply)
             self._timeline.set_input_tokens(group_id, result["input_tokens"])

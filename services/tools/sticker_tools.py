@@ -197,6 +197,8 @@ class SendStickerTool(Tool):
         }
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
+        import base64 as _b64
+
         sticker_id: str = kwargs["sticker_id"]
 
         if not ctx.bot:
@@ -208,8 +210,20 @@ class SendStickerTool(Tool):
 
         from nonebot.adapters.onebot.v11 import MessageSegment
 
-        img_seg = MessageSegment.image(file_path)
-        img_seg.data["subType"] = 1
+        # Read file as base64 — napcat container can't access bot's filesystem.
+        # Must use base64 because bot and napcat are in separate Docker containers.
+        try:
+            with open(file_path, "rb") as f:
+                raw = f.read()
+            b64_data = _b64.b64encode(raw).decode()
+        except OSError as e:
+            logger.error("send_sticker read failed for {}: {}", sticker_id, e)
+            return f"读取表情包失败: {sticker_id}"
+
+        # sub_type=1 → QQ sticker display. Must use snake_case per OneBot v11 spec.
+        img_seg = MessageSegment.image(file=f"base64://{b64_data}")
+        img_seg.data["sub_type"] = 1
+        img_seg.data["summary"] = "[动画表情]"
 
         try:
             if ctx.group_id:
@@ -217,7 +231,7 @@ class SendStickerTool(Tool):
             else:
                 await ctx.bot.send_private_msg(user_id=int(ctx.user_id), message=img_seg)
         except Exception as e:
-            logger.error("send_sticker failed for {}: {}", sticker_id, e)
+            logger.error("send_sticker send failed for {}: {}", sticker_id, e)
             return f"发送失败: {sticker_id}"
 
         self._store.record_send(sticker_id)

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from loguru import logger
+
 from kernel.types import (
     AmadeusPlugin,
     PluginContext,
@@ -14,11 +16,13 @@ from kernel.types import (
 )
 from services.tools.base import Tool
 
+_L = logger.bind(channel="affection")
+
 
 class AffectionPlugin(AmadeusPlugin):
     name = "affection"
     description = "好感度系统：关系提示、互动记录、昵称设置"
-    version = "1.0.0"
+    version = "1.0.1"
     priority = 10
 
     def __init__(self) -> None:
@@ -40,9 +44,16 @@ class AffectionPlugin(AmadeusPlugin):
         in_group = ctx.group_id is not None and ctx.privacy_mask
         text = self._engine.build_affection_block(ctx.user_id, in_group=in_group)
         if text:
+            profile = self._engine._store.get(ctx.user_id)
+            tier = profile.tier
+            _L.info("user={} tier={} score={:.0f} in_group={}", ctx.user_id, tier, profile.score, in_group)
             ctx.add_block(text=text, label="与当前用户的关系", position="dynamic")
 
     async def on_post_reply(self, ctx: ReplyContext) -> None:
         if self._engine is None or not ctx.user_id or ctx.user_id == "0":
             return
-        await self._engine.record_interaction(ctx.user_id)
+        profile = await self._engine.record_interaction(ctx.user_id)
+        _L.info(
+            "user={} score={:.1f} tier={} total={}",
+            ctx.user_id, profile.score, profile.tier, profile.total_interactions,
+        )
