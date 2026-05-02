@@ -317,7 +317,7 @@ class AmadeusPlugin:
     priority: int = 100
     enabled: bool = True
     dependencies: dict[str, str] = {}  # noqa: RUF012 — overridden per-plugin, never mutated
-    author: str = "kragcola"  # 开发者签名，显示在 /plugins 列表中
+    author: str = "Omubot"  # 开发者签名，显示在 /plugins 列表中
 
     # ---- 生命周期 ----
 

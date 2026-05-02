@@ -17,9 +17,8 @@ _log = logger.bind(channel="command")
 class DebugCommandPlugin(AmadeusPlugin):
     name = "debug_commands"
     description = "调试指令增强：/plugins 查看已加载插件列表，/version 版本检查"
-    version = "1.1.0"
+    version = "1.2.0"
     priority = 300  # After all business plugins, before third-party
-    author = "kragcola"
 
     def __init__(self) -> None:
         super().__init__()
@@ -63,21 +62,20 @@ class DebugCommandPlugin(AmadeusPlugin):
             await cmd_ctx.bot.send(cmd_ctx.event, Message("PluginBus 不可用"))
             return
 
-        plugins = bus.plugins
+        plugins = sorted(bus.plugins, key=lambda p: (not p.enabled, p.priority))
         if not plugins:
             await cmd_ctx.bot.send(cmd_ctx.event, Message("（无已加载插件）"))
             return
 
-        lines: list[str] = [f"已加载 {len(plugins)} 个插件：", ""]
+        enabled_count = sum(1 for p in plugins if p.enabled)
+        disabled_count = len(plugins) - enabled_count
+        lines: list[str] = [f"插件列表（启用 {enabled_count} / 禁用 {disabled_count}）：", ""]
         for p in plugins:
             status = "启用" if p.enabled else "禁用"
             author = p.author if p.author else "—"
             desc = p.description if p.description else "—"
-            lines.append(
-                f"[{status}] {p.name} v{p.version}"
-            )
-            lines.append(f"  开发者: {author}")
-            lines.append(f"  简介: {desc}")
+            lines.append(f"[{status}] [{p.name} v{p.version}] 开发者：{author}")
+            lines.append(f"  简介：{desc}")
 
         reply = "\n".join(lines)
         if len(reply) > 2000:
