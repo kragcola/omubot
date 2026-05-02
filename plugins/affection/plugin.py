@@ -22,7 +22,7 @@ _L = logger.bind(channel="affection")
 class AffectionPlugin(AmadeusPlugin):
     name = "affection"
     description = "好感度系统：关系提示、互动记录、昵称设置"
-    version = "1.0.1"
+    version = "1.0.2"
     priority = 10
 
     def __init__(self) -> None:

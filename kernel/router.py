@@ -501,7 +501,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     content="@我",
                     message_id=event.message_id,
                 )
-                ctx.scheduler.notify(group_id, is_at=is_addressed)
+                ctx.scheduler.notify(group_id, is_at=is_addressed, user_id=str(event.user_id))
             return
 
         preview = content if isinstance(content, str) else "".join(
@@ -519,7 +519,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             content=content,
             message_id=event.message_id,
         )
-        ctx.scheduler.notify(group_id, is_at=is_addressed)
+        ctx.scheduler.notify(group_id, is_at=is_addressed, user_id=str(event.user_id))
 
     # ---- group ban notice ----
 

@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-05-02 — 好感度群聊归因修复：调度器传入 user_id
+
+- **类型**：bugfix
+- **操作人**：Claude Code (assisted)
+- **问题与根因**：群聊中好感度始终为 0。`GroupChatScheduler._do_chat()` 硬编码 `user_id=""`，导致好感度引擎无法将互动归因到任何用户。
+- **修复**：
+  - `services/scheduler.py`：`_GroupSlot` 新增 `last_user_id` 字段，`notify()` 接收并存储 `user_id`，`_do_chat()` 使用存储的 user_id 而非空字符串
+  - `kernel/router.py`：两处 `scheduler.notify()` 调用传入 `user_id=str(event.user_id)`
+- **影响范围**：`services/scheduler.py`、`kernel/router.py`、`plugins/affection/plugin.py`（1.0.1→1.0.2）
+- **验证**：ruff check 通过，pytest 通过（预存失败与本次无关）
+- **回滚**：git revert 即可
+
+---
+
 ## 2026-05-02 — 调试保存表情包三项修复：mface 识别、Qwen VL 限流、历史加载干扰
 
 - **类型**：bugfix

@@ -22,7 +22,7 @@ _L = logger.bind(channel="scheduler")
 
 
 class _GroupSlot:
-    __slots__ = ("debounce_task", "force_reply", "msg_count", "pending_at", "running_task")
+    __slots__ = ("debounce_task", "force_reply", "last_user_id", "msg_count", "pending_at", "running_task")
 
     def __init__(self) -> None:
         self.debounce_task: asyncio.Task[None] | None = None
@@ -30,6 +30,7 @@ class _GroupSlot:
         self.msg_count: int = 0
         self.pending_at: bool = False
         self.force_reply: bool = False
+        self.last_user_id: str = ""
 
 
 class GroupChatScheduler:
@@ -85,7 +86,7 @@ class GroupChatScheduler:
     # Public API
     # ------------------------------------------------------------------
 
-    def notify(self, group_id: str, *, is_at: bool = False) -> None:
+    def notify(self, group_id: str, *, is_at: bool = False, user_id: str = "") -> None:
         """Called on every group message. Manages debounce/batch."""
         if group_id in self._muted_groups:
             return
@@ -100,6 +101,8 @@ class GroupChatScheduler:
 
         slot = self._slots.setdefault(group_id, _GroupSlot())
         slot.msg_count += 1
+        if user_id:
+            slot.last_user_id = user_id
 
         if is_at:
             if slot.running_task and not slot.running_task.done():
@@ -225,7 +228,8 @@ class GroupChatScheduler:
                 try:
                     identity = self._identity_mgr.resolve()
                     session_id = f"group_{group_id}"
-                    ctx = ToolContext(bot=self._bot, user_id="", group_id=group_id)
+                    uid = slot.last_user_id if slot else ""
+                    ctx = ToolContext(bot=self._bot, user_id=uid, group_id=group_id)
 
                     async def on_segment(text: str) -> None:
                         await self._send_to_group(group_id, text)
@@ -233,7 +237,7 @@ class GroupChatScheduler:
                     resolved = self._group_config.resolve(int(group_id))
                     reply = await self._llm.chat(
                         session_id=session_id,
-                        user_id="",
+                        user_id=uid,
                         user_content="",
                         identity=identity,
                         group_id=group_id,
