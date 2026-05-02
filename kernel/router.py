@@ -562,7 +562,13 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             desc_cache=ctx.desc_cache,
         )
         if not user_content:
-            return
+            # NoneBot's _check_nickname strips the nickname from the message.
+            # If the user ONLY said the bot's name (e.g. "姆"), user_content
+            # becomes empty — treat it as a greeting.
+            if event.is_tome():
+                user_content = "你好"
+            else:
+                return
 
         # Check slash commands before LLM processing
         raw_text = event.get_plaintext().strip()
