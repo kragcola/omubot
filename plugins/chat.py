@@ -536,12 +536,17 @@ class ChatPlugin(AmadeusPlugin):
         # ---- config-derived globals ----
         ctx.bot_start_time = time.time()
 
-        import json as _json
-        raw = os.environ.get("BOT_NICKNAMES", "[]")
-        try:
-            ctx.bot_nicknames = _json.loads(raw)
-        except _json.JSONDecodeError:
-            ctx.bot_nicknames = []
+        # Prefer NoneBot's nickname config (NICKNAME env var), fall back to BOT_NICKNAMES.
+        nb_nicknames = nonebot.get_driver().config.nickname
+        if nb_nicknames:
+            ctx.bot_nicknames = list(nb_nicknames)
+        else:
+            import json as _json
+            raw = os.environ.get("BOT_NICKNAMES", "[]")
+            try:
+                ctx.bot_nicknames = _json.loads(raw)
+            except _json.JSONDecodeError:
+                ctx.bot_nicknames = []
 
         ctx.allowed_groups = set(config.group.allowed_groups)
         ctx.allowed_private_users = set(config.allowed_private_users)

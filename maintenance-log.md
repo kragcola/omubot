@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-05-02 — 补全 NoneBot NICKNAME 配置，修复适配器层昵称检测
+
+- **类型**：bugfix (配置缺陷)
+- **操作人**：Claude Code (assisted)
+- **问题与根因**：`config/.env` 缺少 `NICKNAME`（NoneBot 标准配置键），导致适配器层 `_check_nickname()` 永远不触发。虽然 `router.py` 中有自定义 `BOT_NICKNAMES` 匹配（任意位置皆可检测），但 NoneBot 层的昵称剥离和 `to_me` 标记完全缺失。
+- **修复**：
+  - `config/.env`：新增 `NICKNAME` 行，值与 `BOT_NICKNAMES` 保持一致
+  - `plugins/chat.py`：优先从 `nonebot.get_driver().config.nickname` 读取昵称列表，`BOT_NICKNAMES` 仅作 fallback
+- **影响范围**：`config/.env`、`plugins/chat.py`
+- **测试**：ruff check 通过，pytest 通过
+- **回滚**：git revert 即可
+
+---
+
 ## 2026-05-02 — 移除重启后自动触发群聊回复
 
 - **类型**：bugfix
