@@ -23,7 +23,7 @@ _L = logger.bind(channel="system")
 
 class ChatPlugin(AmadeusPlugin):
     name = "chat"
-    version = "1.0.4"
+    version = "1.0.5"
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 
