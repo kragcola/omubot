@@ -64,8 +64,8 @@ logger.info(
     _c.admins or "无", _c.allowed_private_users or "无限制",
 )
 logger.info(
-    "[Dirs] soul={} memo={} log={}",
-    _c.soul.dir, _c.memo.dir, _c.log.dir,
+    "[Dirs] soul={} log={}",
+    _c.soul.dir, _c.log.dir,
 )
 logger.info("[NapCat] api_url={}", _c.napcat.api_url)
 logger.info("==================================")
@@ -184,7 +184,7 @@ from plugins.sticker import StickerPlugin  # noqa: E402
 from services.command import CommandDispatcher  # noqa: E402
 from services.media.vision import VisionClient  # noqa: E402
 
-_storage_dir = _Path(_bot_config.memo.dir).parent
+_storage_dir = _Path("storage")
 _plugin_data_dir = _storage_dir / "plugins"
 _plugin_data_dir.mkdir(parents=True, exist_ok=True)
 

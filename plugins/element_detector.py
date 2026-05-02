@@ -10,9 +10,25 @@ import re
 from dataclasses import dataclass
 
 from loguru import logger
+from pydantic import BaseModel
 
-from kernel.config import ElementRule
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext
+
+
+class ElementRule(BaseModel):
+    """单条要素察觉规则：正则匹配 → 预设回复（或 LLM 生成）。"""
+
+    pattern: str
+    reply: str
+    description: str = ""
+    use_llm: bool = False
+
+
+class ElementDetectionConfig(BaseModel):
+    """要素察觉配置。"""
+
+    enabled: bool = True
+    rules: list[ElementRule] = []
 
 _log = logger.bind(channel="message_out")
 
@@ -62,21 +78,23 @@ class ElementDetector:
 class ElementDetectorPlugin(AmadeusPlugin):
     name = "element_detector"
     description = "要素察觉：识别特定句式并回复（预设模板或LLM生成）"
-    version = "1.0.0"
+    version = "1.1.1"
     priority = 210
 
     async def on_startup(self, ctx: PluginContext) -> None:
-        config = ctx.config
-        if config.element_detection.enabled and config.element_detection.rules:
-            self._detector = ElementDetector(config.element_detection.rules)
-            logger.info("element detection enabled | rules={}", len(config.element_detection.rules))
+        from kernel.config import load_plugin_config
+
+        cfg = load_plugin_config("plugins/element_detector.toml", ElementDetectionConfig)
+        if cfg.enabled and cfg.rules:
+            self._detector = ElementDetector(cfg.rules)
+            logger.info("element detection enabled | rules={}", len(cfg.rules))
         else:
             self._detector = None
         self._humanizer = ctx.humanizer
         self._scheduler = ctx.scheduler
         self._timeline = ctx.timeline
         self._llm_client = ctx.llm_client
-        self._identity_mgr = ctx.identity_mgr
+        self._identity = ctx.identity
 
     async def on_message(self, ctx: MessageContext) -> bool:
         if ctx.is_private or self._detector is None:
@@ -103,7 +121,7 @@ class ElementDetectorPlugin(AmadeusPlugin):
         )
 
         if match.use_llm:
-            identity = self._identity_mgr.resolve()
+            identity = self._identity
             directive = "直接输出回复内容，禁止括号、禁止内心独白、禁止解释。"
             system_text = f"你是{identity.name}。{directive}\n\n{match.reply_template}"
             system = [{"type": "text", "text": system_text}]

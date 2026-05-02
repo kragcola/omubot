@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from loguru import logger
+from pydantic import BaseModel
 
 from kernel.types import (
     AmadeusPlugin,
@@ -16,13 +17,22 @@ from kernel.types import (
 )
 from services.tools.base import Tool
 
+
+class AffectionConfig(BaseModel):
+    """好感度与称呼系统配置。"""
+
+    enabled: bool = True
+    storage_dir: str = "storage/affection"
+    score_increment: float = 0.8
+    daily_cap: float = 10.0
+
 _L = logger.bind(channel="affection")
 
 
 class AffectionPlugin(AmadeusPlugin):
     name = "affection"
     description = "好感度系统：关系提示、互动记录、昵称设置"
-    version = "1.0.2"
+    version = "1.1.1"
     priority = 10
 
     def __init__(self) -> None:

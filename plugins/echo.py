@@ -99,7 +99,7 @@ class EchoTracker:
 class EchoPlugin(AmadeusPlugin):
     name = "echo"
     description = "群聊复读检测：5分钟内同消息3次触发复读，5%概率打断"
-    version = "1.0.0"
+    version = "1.1.0"
     priority = 200
 
     async def on_startup(self, ctx: PluginContext) -> None:

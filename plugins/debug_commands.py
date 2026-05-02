@@ -17,7 +17,7 @@ _log = logger.bind(channel="command")
 class DebugCommandPlugin(AmadeusPlugin):
     name = "debug_commands"
     description = "调试指令增强：/plugins 查看已加载插件列表，/version 版本检查"
-    version = "1.2.0"
+    version = "1.3.0"
     priority = 300  # After all business plugins, before third-party
 
     def __init__(self) -> None:

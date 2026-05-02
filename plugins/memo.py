@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from loguru import logger
+from pydantic import BaseModel
 
 from kernel.types import (
     AmadeusPlugin,
@@ -20,6 +21,16 @@ from kernel.types import (
 )
 from services.memory.card_store import CardStore, NewCard
 from services.tools.base import Tool
+
+
+class MemoConfig(BaseModel):
+    """备忘录系统配置。"""
+
+    dir: str = "storage/memories"
+    user_max_chars: int = 300
+    group_max_chars: int = 500
+    index_max_lines: int = 200
+    history_enabled: bool = True
 
 _L = logger.bind(channel="system")
 
@@ -135,7 +146,7 @@ class MemoExtractor:
 class MemoPlugin(AmadeusPlugin):
     name = "memo"
     description = "记忆系统：卡片索引、实体记忆注入、对话后提取"
-    version = "1.0.1"
+    version = "1.1.1"
     priority = 30
 
     def __init__(self) -> None:

@@ -1,0 +1,5 @@
+enabled = true
+storage_dir = "storage/schedule"
+generate_at_hour = 2
+mood_anomaly_chance = 0.05
+mood_refresh_minutes = 30

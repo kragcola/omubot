@@ -1,6 +1,6 @@
 {
   "name": "memo",
   "description": "记忆系统：卡片索引、实体记忆注入、对话后提取",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "priority": 30
 }

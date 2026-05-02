@@ -234,24 +234,13 @@ cache_max_age_hours = 12
 
 
 def test_memo_config_defaults() -> None:
-    from kernel.config import CompactConfig, DreamConfig, MemoConfig
+    from plugins.memo import MemoConfig
     m = MemoConfig()
     assert m.dir == "storage/memories"
     assert m.user_max_chars == 300
     assert m.group_max_chars == 500
     assert m.index_max_lines == 200
     assert m.history_enabled is True
-
-    c = CompactConfig()
-    assert c.ratio == 0.7
-    assert c.compress_ratio == 0.5
-    assert c.max_failures == 3
-    assert c.cache_hit_warn == 90.0
-
-    d = DreamConfig()
-    assert d.enabled is False
-    assert d.interval_hours == 24
-    assert d.max_rounds == 15
 
 
 def test_compact_config_defaults():

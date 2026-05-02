@@ -15,7 +15,7 @@ from typing import Any
 import nonebot
 from loguru import logger
 
-from kernel.config import BotConfig
+from kernel.config import BotConfig, load_plugin_config
 from kernel.types import AmadeusPlugin, PluginContext
 
 _L = logger.bind(channel="system")
@@ -23,7 +23,7 @@ _L = logger.bind(channel="system")
 
 class ChatPlugin(AmadeusPlugin):
     name = "chat"
-    version = "1.0.5"
+    version = "1.1.2"
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 
@@ -39,6 +39,22 @@ class ChatPlugin(AmadeusPlugin):
                 handler=self._handle_debug,
                 description="进入调试模式：跳过 thinker，注入实时状态数据，用纯文本回答",
                 usage="/debug [可选问题]",
+                sub_commands=[
+                    Command(
+                        name="save",
+                        handler=self._handle_debug_save,
+                        description="保存最近图片到表情包库",
+                        usage="/debug save [描述]",
+                        aliases=["保存", "收录", "添加表情"],
+                    ),
+                    Command(
+                        name="send",
+                        handler=self._handle_debug_send,
+                        description="发送表情包（指定ID或随机）",
+                        usage="/debug send [stk_id|gif]",
+                        aliases=["发", "发送"],
+                    ),
+                ],
             ),
         ]
 
@@ -74,20 +90,12 @@ class ChatPlugin(AmadeusPlugin):
         user_content = cmd_ctx.args if cmd_ctx.args else "请显示当前系统状态摘要"
         has_command = bool(cmd_ctx.args)
 
-        # Build tool context once — used by both direct dispatch and LLM path
+        # Build tool context once
         tool_ctx_obj = ToolContext(
             bot=cmd_ctx.bot,
             user_id=str(cmd_ctx.user_id),
             group_id=str(cmd_ctx.group_id) if not cmd_ctx.is_private else None,
         )
-
-        # ---- Direct dispatch for known commands (bypass LLM) ----
-        if has_command:
-            direct_result = await self._debug_direct_dispatch(
-                cmd_ctx, cmd_ctx.args.strip(), tool_ctx_obj,
-            )
-            if direct_result is not None:
-                return  # handled directly
 
         # ---- LLM path ----
         if has_command:
@@ -179,8 +187,9 @@ class ChatPlugin(AmadeusPlugin):
                         return
 
                 if not tool_uses:
-                    reply_text = _strip_markdown(text or "...")
+                    reply_text = _strip_markdown(text or "")
                     if reply_text.strip():
+                        _L.info("debug reply | len={} text={!r}", len(reply_text), reply_text[:120])
                         await ctx.humanizer.delay(reply_text)
                         await cmd_ctx.bot.send(cmd_ctx.event, Message(reply_text))
                     return
@@ -225,8 +234,9 @@ class ChatPlugin(AmadeusPlugin):
                 ctx.llm_client._call(system_blocks, messages),
                 timeout=60.0,
             )
-            reply_text = _strip_markdown(result.get("text") or "...")
+            reply_text = _strip_markdown(result.get("text") or "")
             if reply_text.strip():
+                _L.info("debug reply (final) | len={} text={!r}", len(reply_text), reply_text[:120])
                 await ctx.humanizer.delay(reply_text)
                 await cmd_ctx.bot.send(cmd_ctx.event, Message(reply_text))
         except TimeoutError:
@@ -236,115 +246,55 @@ class ChatPlugin(AmadeusPlugin):
             logger.exception("debug command LLM call failed")
             await cmd_ctx.bot.send(cmd_ctx.event, Message("调试查询失败，请稍后重试"))
 
-    async def _debug_direct_dispatch(
-        self, cmd_ctx: Any, args: str, tool_ctx: Any,
-    ) -> str | None:
-        """Direct tool dispatch for /debug — bypasses LLM for known commands.
-
-        Returns the result text if handled, or None to fall through to LLM.
-        Uses tool instances directly (not via registry) to avoid registration-order issues.
-        """
-        import random as _random
-        import re as _re
+    async def _handle_debug_save(self, cmd_ctx: Any) -> None:
+        """Handle /debug save — save recent image as sticker (no LLM)."""
+        import re as _re_cq
+        from pathlib import Path as _Path
 
         from nonebot.adapters.onebot.v11 import Message
 
-        from services.tools.sticker_tools import SendStickerTool
+        from services.tools.context import ToolContext
+        from services.tools.sticker_tools import SaveStickerTool
 
         ctx = self._ctx
+        if ctx is None:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("系统未就绪"))
+            return
+        if cmd_ctx.user_id not in ctx.admins:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("无权限"))
+            return
+
         store = ctx.sticker_store
+        if store is None:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("表情包库未启用"))
+            return
 
-        # ---- save_sticker: find recent image, save directly (no LLM needed) ----
-        SAVE_KW = ("保存", "收录", "save", "添加表情")
-        if any(kw in args for kw in SAVE_KW):
-            if store is None:
-                await cmd_ctx.bot.send(cmd_ctx.event, Message("表情包库未启用"))
-                return "OK"
+        superusers: set[str] = (
+            set(getattr(ctx.config, "admins", {}).keys())
+            | nonebot.get_driver().config.superusers
+        )
 
-            from pathlib import Path as _Path
-
-            from services.tools.sticker_tools import SaveStickerTool
-
-            superusers: set[str] = (
-                set(getattr(ctx.config, "admins", {}).keys())
-                | nonebot.get_driver().config.superusers
-            )
-
-            # Collect image paths to save
-            image_paths: list[str] = []
-
-            # 1. Extract images from the current message event first
-            raw_msg = cmd_ctx.event.get_message()
-            _seg_types: list[str] = []
-            import re as _re_cq
-            for seg in raw_msg:
-                _seg_types.append(seg.type)
-                if seg.type == "image":
-                    url = seg.data.get("url", "")
-                    file_uniq = seg.data.get("file", "")
-                    if url and ctx.image_cache:
-                        try:
-                            ref = await ctx.image_cache.save(
-                                ctx.llm_client._session, url=url, file_id=file_uniq,
-                            )
-                            if ref is not None:
-                                image_paths.append(ref["path"])
-                        except Exception as e:
-                            logger.warning(
-                                "debug save: image download failed | url={} err={}",
-                                url[:80], e,
-                            )
-                elif seg.type == "mface" or seg.type == "market_face":
-                    # QQ market/favorite sticker — no direct URL, download via NapCat API
-                    key = seg.data.get("key") or seg.data.get("file_unique") or seg.data.get("id", "")
-                    summary = seg.data.get("summary", "")
-                    if key and ctx.sticker_store:
-                        try:
-                            resp = await cmd_ctx.bot.call_api("get_image", file=key)
-                            file_data = resp.get("file", "")
-                            if file_data.startswith("base64://"):
-                                import base64 as _b64
-                                raw = _b64.b64decode(file_data[len("base64://"):])
-                            elif file_data.startswith("file://"):
-                                p = _Path(file_data[len("file://"):])
-                                raw = p.read_bytes() if p.exists() else b""
-                            else:
-                                p = _Path(file_data)
-                                raw = p.read_bytes() if p.exists() else b""
-                            if raw:
-                                tmp_path = ctx.sticker_store.storage_dir / f"_tmp_mface_{key}.tmp"
-                                tmp_path.write_bytes(raw)
-                                image_paths.append(str(tmp_path))
-                                logger.info(
-                                    "debug save: mface downloaded | key={} summary={!r} size={}",
-                                    key, summary, len(raw),
-                                )
-                            else:
-                                logger.warning(
-                                    "debug save: mface empty data | key={} summary={!r}",
-                                    key, summary,
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                "debug save: mface download failed | key={} summary={!r} err={}",
-                                key, summary, e,
-                            )
-                    else:
-                        logger.info(
-                            "debug save: mface found but no key | data={}",
-                            seg.data,
+        # 1. Extract images from the current message event
+        image_paths: list[str] = []
+        raw_msg = cmd_ctx.event.get_message()
+        _seg_types: list[str] = []
+        for seg in raw_msg:
+            _seg_types.append(seg.type)
+            if seg.type == "image":
+                url = seg.data.get("url", "")
+                file_uniq = seg.data.get("file", "")
+                if url and ctx.image_cache:
+                    try:
+                        ref = await ctx.image_cache.save(
+                            ctx.llm_client._session, url=url, file_id=file_uniq,
                         )
-            # Also scan raw_message string for CQ-encoded mface/market_face segments
-            # that NoneBot may have converted to text (e.g. NapCat mface → text [星星眼])
-            raw_str = getattr(cmd_ctx.event, "raw_message", "")
-            for m in _re_cq.finditer(
-                r"\[(?:mface|market_face):([^\]]+)\]", raw_str
-            ):
-                params = dict(
-                    p.split("=", 1) for p in m.group(1).split(",") if "=" in p
-                )
-                key = params.get("key") or params.get("file_unique") or params.get("id", "")
-                summary = params.get("summary", "")
+                        if ref is not None:
+                            image_paths.append(ref["path"])
+                    except Exception as e:
+                        logger.warning("debug save: image download failed | url={} err={}", url[:80], e)
+            elif seg.type in ("mface", "market_face"):
+                key = seg.data.get("key") or seg.data.get("file_unique") or seg.data.get("id", "")
+                summary = seg.data.get("summary", "")
                 if key and ctx.sticker_store:
                     try:
                         resp = await cmd_ctx.bot.call_api("get_image", file=key)
@@ -363,25 +313,66 @@ class ChatPlugin(AmadeusPlugin):
                             tmp_path.write_bytes(raw)
                             image_paths.append(str(tmp_path))
                             logger.info(
-                                "debug save: mface from raw_message | key={} summary={!r} size={}",
+                                "debug save: mface downloaded | key={} summary={!r} size={}",
                                 key, summary, len(raw),
                             )
                     except Exception as e:
                         logger.warning(
-                            "debug save: mface raw_message download failed | key={} err={}",
-                            key, e,
+                            "debug save: mface download failed | key={} summary={!r} err={}",
+                            key, summary, e,
                         )
-            logger.info(
-                "debug save: segment scan | types={} image_count={}",
-                _seg_types, len(image_paths),
-            )
 
-            # 2. Fall back to timeline if no images in current message
-            if not image_paths:
-                group_id = str(cmd_ctx.group_id) if not cmd_ctx.is_private else None
-                if group_id and ctx.timeline:
-                    for msg in reversed(ctx.timeline.get_pending(group_id)):
-                        content = msg.get("content", "")
+        raw_str = getattr(cmd_ctx.event, "raw_message", "")
+        for m in _re_cq.finditer(r"\[(?:mface|market_face):([^\]]+)\]", raw_str):
+            params = dict(p.split("=", 1) for p in m.group(1).split(",") if "=" in p)
+            key = params.get("key") or params.get("file_unique") or params.get("id", "")
+            summary = params.get("summary", "")
+            if key and ctx.sticker_store:
+                try:
+                    resp = await cmd_ctx.bot.call_api("get_image", file=key)
+                    file_data = resp.get("file", "")
+                    if file_data.startswith("base64://"):
+                        import base64 as _b64
+                        raw = _b64.b64decode(file_data[len("base64://"):])
+                    elif file_data.startswith("file://"):
+                        p = _Path(file_data[len("file://"):])
+                        raw = p.read_bytes() if p.exists() else b""
+                    else:
+                        p = _Path(file_data)
+                        raw = p.read_bytes() if p.exists() else b""
+                    if raw:
+                        tmp_path = ctx.sticker_store.storage_dir / f"_tmp_mface_{key}.tmp"
+                        tmp_path.write_bytes(raw)
+                        image_paths.append(str(tmp_path))
+                        logger.info(
+                            "debug save: mface from raw_message | key={} summary={!r} size={}",
+                            key, summary, len(raw),
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "debug save: mface raw_message download failed | key={} err={}",
+                        key, e,
+                    )
+        logger.info("debug save: segment scan | types={} image_count={}", _seg_types, len(image_paths))
+
+        # 2. Fall back to timeline if no images in current message
+        if not image_paths:
+            group_id = str(cmd_ctx.group_id) if cmd_ctx.group_id else None
+            if group_id and ctx.timeline:
+                for msg in reversed(ctx.timeline.get_pending(group_id)):
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "image_ref":
+                                p = block.get("path")
+                                if p:
+                                    image_paths.append(p)
+                                    break
+                    if image_paths:
+                        break
+                if not image_paths:
+                    for turn in reversed(ctx.timeline.get_turns(group_id)):
+                        content = turn.get("content", "")
                         if isinstance(content, list):
                             for block in content:
                                 if isinstance(block, dict) and block.get("type") == "image_ref":
@@ -391,143 +382,120 @@ class ChatPlugin(AmadeusPlugin):
                                         break
                         if image_paths:
                             break
-                    if not image_paths:
-                        for turn in reversed(ctx.timeline.get_turns(group_id)):
-                            content = turn.get("content", "")
-                            if isinstance(content, list):
-                                for block in content:
-                                    if isinstance(block, dict) and block.get("type") == "image_ref":
-                                        p = block.get("path")
-                                        if p:
-                                            image_paths.append(p)
-                                            break
-                            if image_paths:
-                                break
 
-            if not image_paths:
-                await cmd_ctx.bot.send(
-                    cmd_ctx.event,
-                    Message("未找到图片（请先发送图片再使用此命令，或将图片与命令放在同一条消息中）"),
-                )
-                return "OK"
-
-            # User-supplied description from command args
-            user_desc = args
-            for kw in SAVE_KW:
-                idx = user_desc.find(kw)
-                if idx >= 0:
-                    user_desc = user_desc[idx + len(kw):].strip()
-                    break
-
-            # Save each image
-            results: list[str] = []
-            for idx, image_path in enumerate(image_paths):
-                tool_ctx.extra["image_tags"] = {f"img:{idx + 1}": image_path}
-                image_data = _Path(image_path).read_bytes()
-
-                description: str | None = None
-                usage_hint = "通用聊天表情"
-
-                vision_client = ctx.vision_client
-                if vision_client is not None:
-                    # Stagger rapid consecutive calls to avoid rate limiting
-                    if idx > 0:
-                        await asyncio.sleep(1.5)
-                    try:
-                        desc = await vision_client.describe_image(image_data)
-                        if desc:
-                            description = desc
-                            usage_hint = desc
-                            logger.info(
-                                "debug save_sticker vision desc | path={} desc={!r}",
-                                image_path, desc,
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "debug save_sticker vision failed | path={} err={}",
-                            image_path, e,
-                        )
-
-                if description is None:
-                    description = "通用聊天表情"
-
-                if user_desc:
-                    description = f"{user_desc}。{description}"
-                    usage_hint = user_desc
-
-                tool = SaveStickerTool(store, superusers)
-                result = await tool.execute(
-                    tool_ctx,
-                    image_tag=f"img:{idx + 1}",
-                    description=description,
-                    usage_hint=usage_hint,
-                    requested_by=str(cmd_ctx.user_id),
-                )
-                results.append(result)
-                logger.info(
-                    "debug direct save_sticker | path={} result={}",
-                    image_path, result,
-                )
-
-            summary = f"已处理 {len(image_paths)} 张图片：\n" + "\n".join(
-                f"  {r}" for r in results
+        if not image_paths:
+            await cmd_ctx.bot.send(
+                cmd_ctx.event,
+                Message("未找到图片（请先发送图片再使用此命令，或将图片与命令放在同一条消息中）"),
             )
-            await cmd_ctx.bot.send(cmd_ctx.event, Message(summary))
-            return "OK"
+            return
 
-        # ---- send_sticker: any phrase about sending stickers ----
-        SEND_KW = (
-            "发送表情", "发个表情", "发张表情", "发表情包", "发表情",
-            "发个表情包", "发张表情包", "发个贴图", "发张贴图",
-            "发个", "发张", "来个", "来张",
-            "发贴图", "发贴纸", "发gif", "发动图", "发动态",
-            "表情", "贴图", "动图", "gif",
+        user_desc = cmd_ctx.args.strip()
+
+        tool_ctx_obj = ToolContext(
+            bot=cmd_ctx.bot,
+            user_id=str(cmd_ctx.user_id),
+            group_id=str(cmd_ctx.group_id) if cmd_ctx.group_id else None,
         )
-        if any(kw in args for kw in SEND_KW) or any(args == kw for kw in ("发",)):
-            if store is None or not store.list_all():
-                await cmd_ctx.bot.send(cmd_ctx.event, Message("表情包库为空，无法发送"))
-                return "OK"
+        results: list[str] = []
+        for idx, image_path in enumerate(image_paths):
+            tool_ctx_obj.extra["image_tags"] = {f"img:{idx + 1}": image_path}
+            image_data = _Path(image_path).read_bytes()
 
-            # Filter by format if the user specified a type
-            want_gif = any(kw in args for kw in ("gif", "GIF", "动图", "动态"))
-            all_stickers = store.list_all()
+            description: str | None = None
+            usage_hint = "通用聊天表情"
 
-            if want_gif:
-                candidates = {
-                    sid: e for sid, e in all_stickers.items()
-                    if e.get("file", "").endswith(".gif")
-                }
-                if not candidates:
-                    await cmd_ctx.bot.send(
-                        cmd_ctx.event,
-                        Message("库中没有动图表情包（当前全部为静态 JPG/PNG），请先通过对话收录 GIF 动图。"),
-                    )
-                    return "OK"
-            else:
-                candidates = all_stickers
+            vision_client = ctx.vision_client
+            if vision_client is not None:
+                if idx > 0:
+                    await asyncio.sleep(1.5)
+                try:
+                    desc = await vision_client.describe_image(image_data)
+                    if desc:
+                        description = desc
+                        usage_hint = desc
+                        logger.info("debug save_sticker vision desc | path={} desc={!r}", image_path, desc)
+                except Exception as e:
+                    logger.warning("debug save_sticker vision failed | path={} err={}", image_path, e)
 
-            match = _re.search(r"stk_[a-f0-9]{8}", args)
-            stk_id = match.group(0) if match else _random.choice(list(candidates.keys()))
-            tool = SendStickerTool(store)
-            result = await tool.execute(tool_ctx, sticker_id=stk_id)
-            logger.info("debug direct send_sticker | id={} result={}", stk_id, result)
-            await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[send_sticker] {result}"))
-            return "OK"
+            if description is None:
+                description = "通用聊天表情"
 
-        # ---- send specific sticker by id: "发 stk_xxxx" ----
+            if user_desc:
+                description = f"{user_desc}。{description}"
+                usage_hint = user_desc
+
+            tool = SaveStickerTool(store, superusers)
+            result = await tool.execute(
+                tool_ctx_obj,
+                image_tag=f"img:{idx + 1}",
+                description=description,
+                usage_hint=usage_hint,
+                requested_by=str(cmd_ctx.user_id),
+            )
+            results.append(result)
+            logger.info("debug direct save_sticker | path={} result={}", image_path, result)
+
+        summary = f"已处理 {len(image_paths)} 张图片：\n" + "\n".join(f"  {r}" for r in results)
+        await cmd_ctx.bot.send(cmd_ctx.event, Message(summary))
+
+    async def _handle_debug_send(self, cmd_ctx: Any) -> None:
+        """Handle /debug send — send a sticker by ID or at random."""
+        import random as _random
+        import re as _re
+
+        from nonebot.adapters.onebot.v11 import Message
+
+        from services.tools.context import ToolContext
+        from services.tools.sticker_tools import SendStickerTool
+
+        ctx = self._ctx
+        if ctx is None:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("系统未就绪"))
+            return
+        if cmd_ctx.user_id not in ctx.admins:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("无权限"))
+            return
+
+        store = ctx.sticker_store
+        if store is None or not store.list_all():
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("表情包库为空，无法发送"))
+            return
+
+        args = cmd_ctx.args.strip()
+        tool_ctx_obj = ToolContext(
+            bot=cmd_ctx.bot,
+            user_id=str(cmd_ctx.user_id),
+            group_id=str(cmd_ctx.group_id) if cmd_ctx.group_id else None,
+        )
+
+        # stk_id in args → send specific
         match = _re.search(r"stk_[a-f0-9]{8}", args)
         if match:
             stk_id = match.group(0)
-            if store is None:
-                await cmd_ctx.bot.send(cmd_ctx.event, Message("表情包库未启用"))
-                return "OK"
             tool = SendStickerTool(store)
-            result = await tool.execute(tool_ctx, sticker_id=stk_id)
+            result = await tool.execute(tool_ctx_obj, sticker_id=stk_id)
             logger.info("debug direct send_sticker (by id) | id={} result={}", stk_id, result)
             await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[send_sticker] {result}"))
-            return "OK"
+            return
 
-        return None  # not handled — fall through to LLM
+        # Filter by format
+        want_gif = any(kw in args for kw in ("gif", "GIF", "动图", "动态"))
+        all_stickers = store.list_all()
+
+        if want_gif:
+            candidates = {sid: e for sid, e in all_stickers.items() if e.get("file", "").endswith(".gif")}
+            if not candidates:
+                await cmd_ctx.bot.send(cmd_ctx.event, Message("库中没有动图表情包"))
+                return
+        else:
+            candidates = all_stickers
+
+        stk_id = _random.choice(list(candidates.keys()))
+        tool = SendStickerTool(store)
+        result = await tool.execute(tool_ctx_obj, sticker_id=stk_id)
+        logger.info("debug direct send_sticker | id={} result={}", stk_id, result)
+        await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[send_sticker] {result}"))
 
     async def on_startup(self, ctx: PluginContext) -> None:
         self._ctx = ctx
@@ -577,20 +545,25 @@ class ChatPlugin(AmadeusPlugin):
         ctx.max_images_per_message = config.vision.max_images_per_message
 
         # ---- sticker store ----
-        if config.sticker.enabled:
+        from plugins.sticker import StickerConfig
+
+        sticker_cfg = load_plugin_config("plugins/sticker.toml", StickerConfig)
+        if sticker_cfg.enabled:
             from services.media.sticker_store import StickerStore
             ctx.sticker_store = StickerStore(
-                storage_dir=config.sticker.storage_dir,
-                max_count=config.sticker.max_count,
+                storage_dir=sticker_cfg.storage_dir,
+                max_count=sticker_cfg.max_count,
             )
         else:
             ctx.sticker_store = None
 
         # ---- card store ----
+        from plugins.memo import MemoConfig
         from services.memory.card_store import CardStore
 
+        memo_cfg = load_plugin_config("plugins/memo.toml", MemoConfig)
         card_store = CardStore(db_path="storage/memory_cards.db")
-        await card_store.init(migrate_from_md=config.memo.dir)
+        await card_store.init(migrate_from_md=memo_cfg.dir)
         ctx.card_store = card_store
 
         # ---- short term memory ----
@@ -608,45 +581,51 @@ class ChatPlugin(AmadeusPlugin):
         ctx.identity = identity_mgr.resolve()
 
         # ---- schedule system ----
-        if config.schedule.enabled:
+        from plugins.schedule.plugin import ScheduleConfig
+
+        schedule_cfg = load_plugin_config("plugins/schedule/plugin.toml", ScheduleConfig)
+        if schedule_cfg.enabled:
             from plugins.schedule import MoodEngine, ScheduleGenerator, ScheduleStore
 
-            ctx.schedule_store = ScheduleStore(storage_dir=config.schedule.storage_dir)
+            ctx.schedule_store = ScheduleStore(storage_dir=schedule_cfg.storage_dir)
             await ctx.schedule_store.startup()
             ctx.mood_engine = MoodEngine(
-                anomaly_chance=config.schedule.mood_anomaly_chance,
-                refresh_minutes=config.schedule.mood_refresh_minutes,
+                anomaly_chance=schedule_cfg.mood_anomaly_chance,
+                refresh_minutes=schedule_cfg.mood_refresh_minutes,
             )
             ctx.schedule_gen = ScheduleGenerator(
                 store=ctx.schedule_store,
-                generate_at_hour=config.schedule.generate_at_hour,
+                generate_at_hour=schedule_cfg.generate_at_hour,
                 identity_name=ctx.identity.name,
             )
             from plugins.schedule.calendar import set_self_name
             set_self_name(ctx.identity.name)
-            _L.info("schedule system initialized | dir={}", config.schedule.storage_dir)
+            _L.info("schedule system initialized | dir={}", schedule_cfg.storage_dir)
         else:
             ctx.schedule_store = None
             ctx.mood_engine = None
             ctx.schedule_gen = None
-        ctx.schedule_enabled = config.schedule.enabled
+        ctx.schedule_enabled = schedule_cfg.enabled
 
         # ---- affection system ----
-        if config.affection.enabled:
+        from plugins.affection.plugin import AffectionConfig
+
+        affection_cfg = load_plugin_config("plugins/affection/plugin.toml", AffectionConfig)
+        if affection_cfg.enabled:
             from plugins.affection import AffectionEngine, AffectionStore
 
-            ctx.affection_store = AffectionStore(storage_dir=config.affection.storage_dir)
+            ctx.affection_store = AffectionStore(storage_dir=affection_cfg.storage_dir)
             await ctx.affection_store.startup()
             ctx.affection_engine = AffectionEngine(
                 store=ctx.affection_store,
-                score_increment=config.affection.score_increment,
-                daily_cap=config.affection.daily_cap,
+                score_increment=affection_cfg.score_increment,
+                daily_cap=affection_cfg.daily_cap,
             )
-            _L.info("affection system initialized | dir={}", config.affection.storage_dir)
+            _L.info("affection system initialized | dir={}", affection_cfg.storage_dir)
         else:
             ctx.affection_store = None
             ctx.affection_engine = None
-        ctx.affection_enabled = config.affection.enabled
+        ctx.affection_enabled = affection_cfg.enabled
 
         # ---- message log ----
         from services.memory.message_log import MessageLog
@@ -688,8 +667,11 @@ class ChatPlugin(AmadeusPlugin):
         ctx.prompt_builder = prompt_builder
 
         # ---- dream agent (created by DreamPlugin) ----
+        from plugins.dream import DreamConfig
+
+        dream_cfg = load_plugin_config("plugins/dream.toml", DreamConfig)
         ctx.dream = None
-        ctx.dream_enabled = config.dream.enabled
+        ctx.dream_enabled = dream_cfg.enabled
 
         # ---- usage tracker ----
         from services.llm.usage import UsageTracker

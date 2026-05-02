@@ -1,0 +1,22 @@
+enabled = true
+
+[[rules]]
+pattern = "这(?P<content>.+?)神了"
+reply = "这{content}拉了"
+description = "这X神了→这X拉了"
+
+[[rules]]
+pattern = "这(?P<content>.+?)拉了"
+reply = "这{content}神了"
+description = "这X拉了→这X神了"
+
+[[rules]]
+pattern = "我也要.+吗"
+reply = "对"
+description = "我也要X吗→对"
+
+[[rules]]
+pattern = "(?P<content>.+?)是这样的"
+reply = "当前群聊中有人说「{match}」。请用第一人称接一句吐槽，格式参考：{match}，而我们XX考虑的可就多了。规则：1) 前后两个词不能相同，要形成有趣的对比 2) 回复简短，15字以内 3) 提到「原神」时必须提及「鸣潮」，反之亦然。"
+description = "X是这样的→LLM生成反差吐槽（原神↔鸣潮联动）"
+use_llm = true

@@ -11,8 +11,19 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+from pydantic import BaseModel
 
 from kernel.types import AmadeusPlugin, PluginContext, PromptContext
+
+
+class ScheduleConfig(BaseModel):
+    """模拟日程系统配置。"""
+
+    enabled: bool = True
+    storage_dir: str = "storage/schedule"
+    generate_at_hour: int = 2
+    mood_anomaly_chance: float = 0.05
+    mood_refresh_minutes: int = 30
 
 _L = logger.bind(channel="mood")
 _L_sys = logger.bind(channel="system")
@@ -21,7 +32,7 @@ _L_sys = logger.bind(channel="system")
 class SchedulePlugin(AmadeusPlugin):
     name = "schedule"
     description = "日程与心情：时间感知、心情注入、每日日程生成"
-    version = "1.0.1"
+    version = "1.1.1"
     priority = 20
 
     def __init__(self) -> None:

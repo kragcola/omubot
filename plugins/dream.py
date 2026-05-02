@@ -15,10 +15,19 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from pydantic import BaseModel
 
 from kernel.types import AmadeusPlugin, PluginContext
 from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
+
+
+class DreamConfig(BaseModel):
+    """Dream 整理配置。"""
+
+    enabled: bool = False
+    interval_hours: int = 24
+    max_rounds: int = 15
 
 # Type alias for the LLM API caller (matches LLMClient._call signature)
 ApiCaller = Callable[..., Awaitable[dict[str, Any]]]
@@ -460,7 +469,7 @@ class DreamAgent:
 class DreamPlugin(AmadeusPlugin):
     name = "dream"
     description = "梦境整合：定期整理记忆卡片、清理表情包库"
-    version = "1.0.0"
+    version = "1.1.1"
     priority = 150  # Background task, after business plugins
 
     def __init__(self) -> None:
@@ -469,17 +478,19 @@ class DreamPlugin(AmadeusPlugin):
         self._started = False
 
     async def on_startup(self, ctx: PluginContext) -> None:
-        config = ctx.config
-        if not config.dream.enabled:
+        from kernel.config import load_plugin_config
+
+        dream_cfg = load_plugin_config("plugins/dream.toml", DreamConfig)
+        if not dream_cfg.enabled:
             _L = logger.bind(channel="dream")
             _L.info("dream disabled in config, skipping")
             return
 
-        setup_dream_logger(config.log.dir)
+        setup_dream_logger(ctx.config.log.dir)
         self._dream_agent = DreamAgent(
             store=ctx.card_store,
-            interval_hours=config.dream.interval_hours,
-            max_rounds=config.dream.max_rounds,
+            interval_hours=dream_cfg.interval_hours,
+            max_rounds=dream_cfg.max_rounds,
             sticker_store=ctx.sticker_store,
             on_memo_change=lambda: ctx.prompt_builder.invalidate(),
         )

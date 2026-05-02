@@ -1,0 +1,3 @@
+enabled = true
+interval_hours = 24
+max_rounds = 15

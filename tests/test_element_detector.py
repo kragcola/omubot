@@ -1,6 +1,5 @@
 
-from kernel.config import ElementRule
-from plugins.element_detector import ElementDetector
+from plugins.element_detector import ElementDetector, ElementRule
 
 
 def test_detect_simple_match() -> None:

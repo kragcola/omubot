@@ -10,7 +10,7 @@ from services.tools.datetime_tool import DateTimeTool
 class DateTimePlugin(AmadeusPlugin):
     name = "datetime"
     description = "时间查询工具：获取当前日期、时间、节假日、日程信息"
-    version = "1.0.0"
+    version = "1.1.0"
     priority = 1
 
     async def on_startup(self, ctx: PluginContext) -> None:

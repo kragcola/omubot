@@ -3,7 +3,7 @@
 基于 NoneBot2 的三层可扩展 QQ 机器人框架。
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.0.6-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Ruff](https://img.shields.io/badge/lint-ruff-orange.svg)](https://github.com/astral-sh/ruff)
 
@@ -69,7 +69,7 @@ uv run python bot.py
 
 | 插件 | 优先级 | 功能 |
 |------|--------|------|
-| ChatPlugin | 0 | 核心聊天：消息路由、LLM 调用、tool loop、/debug |
+| ChatPlugin | 0 | 核心聊天：消息路由、LLM 调用、tool loop、/debug 及其子命令 save/send |
 | DateTimePlugin | 1 | 时间日期查询 |
 | WebSearchPlugin | 1 | DuckDuckGo 网页搜索 |
 | WebFetchPlugin | 1 | 网页内容抓取 |
@@ -90,6 +90,8 @@ uv run python bot.py
 | 指令 | 权限 | 说明 |
 | --- | --- | --- |
 | `/debug [问题]` | 管理员 | 进入调试模式，注入系统状态后单轮 LLM 回答 |
+| `/debug save [描述]` | 管理员 | 保存最近图片到表情包库（别名: 保存/收录/添加表情） |
+| `/debug send [stk_id\|gif]` | 管理员 | 发送表情包：指定ID或随机（别名: 发/发送） |
 | `/plugins` | 管理员 | 列出所有已加载插件（名称、版本、开发者、简介） |
 | `/version` | 公开 | 查看本地版本并检查 GitHub 是否有更新 |
 

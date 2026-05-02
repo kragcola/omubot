@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from kernel.config import BotConfig, StickerConfig
+from plugins.sticker import StickerConfig
 from services.media.sticker_store import StickerStore
 
 # ---------------------------------------------------------------------------
@@ -51,23 +51,6 @@ def test_sticker_config_custom() -> None:
     assert cfg.storage_dir == "/tmp/stickers"
     assert cfg.max_count == 50
 
-
-def test_bot_config_has_sticker_field() -> None:
-    bot = BotConfig()
-    assert hasattr(bot, "sticker")
-    assert isinstance(bot.sticker, StickerConfig)
-
-
-def test_bot_config_sticker_defaults() -> None:
-    bot = BotConfig()
-    assert bot.sticker.enabled is True
-    assert bot.sticker.storage_dir == "storage/stickers"
-    assert bot.sticker.max_count == 200
-
-
-def test_bot_config_sticker_override() -> None:
-    bot = BotConfig(sticker=StickerConfig(max_count=100))
-    assert bot.sticker.max_count == 100
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,4 @@
+enabled = true
+storage_dir = "storage/stickers"
+max_count = 200
+frequency = "frequently"

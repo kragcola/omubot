@@ -12,7 +12,7 @@ from services.tools.group_admin import MuteUserTool, SendGroupMsgTool, SetTitleT
 class GroupAdminPlugin(AmadeusPlugin):
     name = "group_admin"
     description = "群管理工具：禁言用户、设置头衔、发送群消息（需 SUPERUSER 权限）"
-    version = "1.0.0"
+    version = "1.1.0"
     priority = 1
 
     async def on_startup(self, ctx: PluginContext) -> None:

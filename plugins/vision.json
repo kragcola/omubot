@@ -1,6 +1,6 @@
 {
   "name": "vision",
   "description": "视觉客户端：Qwen VL 图片描述",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "priority": 8
 }

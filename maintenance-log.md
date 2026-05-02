@@ -4,6 +4,49 @@
 
 ---
 
+## 2026-05-03 — 多级命令支持 (sub-commands)
+
+- **类型**：feature
+- **操作人**：Claude Code (assisted)
+- **变更内容**：
+  - 框架层：`Command` 数据类新增 `sub_commands: list[Command]` 字段，`CommandDispatcher.dispatch()` 支持递归子命令匹配，未命中子命令时回退到父 handler
+  - `/debug` 注册 `save`（别名: 保存/收录/添加表情）和 `send`（别名: 发/发送）两个子命令，替代原有 ad-hoc 关键词匹配
+  - 修复 debug 模式空文本回退 "…" 问题，增加 debug 回复日志
+- **版本**：bot 1.0.7→1.1.0，chat 插件 1.1.1→1.1.2
+- **影响范围**：`kernel/types.py`、`services/command.py`、`plugins/chat.py`
+- **回滚**：`git revert` 即可
+
+---
+
+## 2026-05-02 — 插件配置迁移至插件目录
+
+- **类型**：重构
+- **操作人**：Claude Code (assisted)
+- **变更内容**：将 6 个插件的配置从中央 `config.toml` 迁移至各插件目录下的同名 `.toml` 文件（`plugins/<name>.toml`）。Config Pydantic 模型同时从 `kernel/config.py` 搬至插件 `.py` 文件，新增 `load_plugin_config()` 工具函数统一加载。ChatPlugin 现在从插件 TOML 读取配置创建服务对象。
+- **迁移清单**：sticker、memo、schedule、affection、dream、element_detection
+- **影响范围**：
+  - 新增 6 个 `plugins/*.toml`
+  - 修改：`kernel/config.py`、`kernel/__init__.py`、`plugins/chat.py`、`bot.py`、`config.example.toml`、`config/config.toml`
+  - 修改 6 个插件 `.py` 文件（新增 Config 模型 + 更新 on_startup）
+- **回滚**：`git revert` 即可，注意恢复后需同步 `config.toml` 中对应段落
+
+---
+
+## 2026-05-02 — 启用要素察觉 + 修复 identity 引用
+
+- **类型**：bugfix + feature enablement
+- **操作人**：Claude Code (assisted)
+- **问题与根因**：`ElementDetectorPlugin` 从未触发，因为 `config.toml` 和 `config.example.toml` 均无 `[element_detection]` 段落，`rules` 为空导致 `on_startup` 中 `self._detector = None`。此外 `element_detector.py:79` 引用了不存在的 `ctx.identity_mgr`（应为 `ctx.identity`）。
+- **修复**：
+  - `config.example.toml`：新增 `[element_detection]` 段落，含 2 条示例规则（感叹词检测 + 番剧询问检测）
+  - `config/config.toml`：同上
+  - `plugins/element_detector.py`：`ctx.identity_mgr` → `ctx.identity`，移除不必要的 `.resolve()` 调用
+- **影响范围**：`config.example.toml`、`config/config.toml`、`plugins/element_detector.py`
+- **测试**：ruff check 通过，9 个 element_detector 测试全过，启动日志确认 `element detection enabled | rules=2`
+- **回滚**：git revert 即可
+
+---
+
 ## 2026-05-02 — 补全 NoneBot NICKNAME 配置，修复适配器层昵称检测
 
 - **类型**：bugfix (配置缺陷)

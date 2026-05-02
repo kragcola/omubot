@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import os
 import tomllib
-from typing import Any, Self
+from pathlib import Path
+from typing import Any, Self, TypeVar
 
 from pydantic import BaseModel, model_validator
+
+T = TypeVar("T")
 
 # ============================================================================
 # 内核配置
@@ -175,15 +178,6 @@ class NapcatConfig(BaseModel):
 # ============================================================================
 
 
-class MemoConfig(BaseModel):
-    """备忘录系统配置。"""
-
-    dir: str = "storage/memories"
-    user_max_chars: int = 300
-    group_max_chars: int = 500
-    index_max_lines: int = 200
-    history_enabled: bool = True
-
 
 class CompactConfig(BaseModel):
     """上下文压缩配置。"""
@@ -203,13 +197,6 @@ class CompactConfig(BaseModel):
             raise ValueError("compress_ratio must be between 0 and 1")
         return self
 
-
-class DreamConfig(BaseModel):
-    """Dream 整理配置。"""
-
-    enabled: bool = False
-    interval_hours: int = 24
-    max_rounds: int = 15
 
 
 # ============================================================================
@@ -236,37 +223,12 @@ class VisionConfig(BaseModel):
     qwen: QwenVLConfig = QwenVLConfig()
 
 
-class StickerConfig(BaseModel):
-    """表情包系统配置。"""
-
-    enabled: bool = True
-    storage_dir: str = "storage/stickers"
-    max_count: int = 200
-    frequency: str = "normal"
-
 
 # ============================================================================
 # 日程 / 好感度 / Thinker 配置
 # ============================================================================
 
 
-class ScheduleConfig(BaseModel):
-    """模拟日程系统配置。"""
-
-    enabled: bool = True
-    storage_dir: str = "storage/schedule"
-    generate_at_hour: int = 2
-    mood_anomaly_chance: float = 0.2
-    mood_refresh_minutes: int = 15
-
-
-class AffectionConfig(BaseModel):
-    """好感度与称呼系统配置。"""
-
-    enabled: bool = True
-    storage_dir: str = "storage/affection"
-    score_increment: float = 0.8
-    daily_cap: float = 10.0
 
 
 class ThinkerConfig(BaseModel):
@@ -280,21 +242,6 @@ class ThinkerConfig(BaseModel):
 # 要素察觉 / 防检测配置
 # ============================================================================
 
-
-class ElementRule(BaseModel):
-    """单条要素察觉规则：正则匹配 → 预设回复（或 LLM 生成）。"""
-
-    pattern: str
-    reply: str
-    description: str = ""
-    use_llm: bool = False
-
-
-class ElementDetectionConfig(BaseModel):
-    """要素察觉配置。"""
-
-    enabled: bool = True
-    rules: list[ElementRule] = []
 
 
 class AntiDetectConfig(BaseModel):
@@ -321,18 +268,12 @@ class BotConfig(BaseModel):
     anti_detect: AntiDetectConfig = AntiDetectConfig()
     llm: LLMConfig = LLMConfig()
     log: LogConfig = LogConfig()
-    memo: MemoConfig = MemoConfig()
     compact: CompactConfig = CompactConfig()
-    dream: DreamConfig = DreamConfig()
     soul: SoulConfig = SoulConfig()
     group: GroupConfig = GroupConfig()
     napcat: NapcatConfig = NapcatConfig()
     vision: VisionConfig = VisionConfig()
-    sticker: StickerConfig = StickerConfig()
-    schedule: ScheduleConfig = ScheduleConfig()
-    affection: AffectionConfig = AffectionConfig()
     thinker: ThinkerConfig = ThinkerConfig()
-    element_detection: ElementDetectionConfig = ElementDetectionConfig()
 
     # 管理员 & 白名单
     admins: dict[str, str] = {}
@@ -424,3 +365,13 @@ def load_config(
             _deep_set(data, dotted_key, value)
 
     return BotConfig.model_validate(data)
+
+
+def load_plugin_config[T](toml_path: str | Path, model_cls: type[T]) -> T:
+    """加载插件 TOML 配置文件，不存在时返回模型默认值。"""
+    path = Path(toml_path)
+    if not path.exists():
+        return model_cls()
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    return model_cls.model_validate(data)

@@ -203,7 +203,7 @@ async def _extract_content(
 class HistoryLoaderPlugin(AmadeusPlugin):
     name = "history_loader"
     description = "群聊历史加载：bot 连接后回填近期消息"
-    version = "1.0.2"
+    version = "1.1.0"
     priority = 5  # Run early, after ChatPlugin but before other business plugins
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:

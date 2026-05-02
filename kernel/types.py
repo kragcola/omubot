@@ -284,6 +284,7 @@ class Command:
     usage: str = ""  # 用法示例，如 "/memo list"
     pattern: str = ""  # 匹配模式，空字符串表示用 name 自动生成
     aliases: list[str] = field(default_factory=list)  # 别名，如 ["p", "plg"]
+    sub_commands: list[Command] = field(default_factory=list)  # 子命令，如 restart/shutdown
 
 
 @dataclass

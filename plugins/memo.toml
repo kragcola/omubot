@@ -1,0 +1,5 @@
+dir = "storage/memories"
+user_max_chars = 300
+group_max_chars = 500
+index_max_lines = 200
+history_enabled = true

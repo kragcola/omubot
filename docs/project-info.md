@@ -78,7 +78,8 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | 文件 | 用途 | 谁读取 |
 | --- | --- | --- |
 | `config/.env` | NoneBot 框架层（SUPERUSERS, ONEBOT_WS_URLS） + LLM 环境变量 | `nonebot.init()` |
-| `config/config.toml` | Bot 业务层（LLM、群聊、vision、dream、compact 等） | `kernel/config.py` |
+| `config/config.toml` | Bot 业务层（LLM、群聊、vision、compact 等），不含插件配置 | `kernel/config.py` |
+| `plugins/<name>.toml` | 插件配置（sticker、memo、schedule、affection、dream、element_detector） | 插件 `on_startup` 中通过 `load_plugin_config()` |
 
 优先级：TOML < 环境变量 < CLI 参数
 
@@ -127,13 +128,14 @@ storage/
 | Debounce 等待 | `[group].debounce_seconds` | `5.0` 秒 |
 | Batch 触发 | `[group].batch_size` | `10` 条 |
 | 多模态视觉 | `[vision.qwen]` → `api_key` 填写即启用 | 已启用（硅基流动 Qwen3-VL-30B） |
-| 表情包系统 | `[sticker].enabled` | `true` |
-| 表情包发送频率 | `[sticker].frequency` | `"frequently"` |
-| Dream Agent | `[dream].enabled` | `true`（每 24h） |
+| 表情包系统 | `plugins/sticker.toml` → `enabled` | `true` |
+| 表情包发送频率 | `plugins/sticker.toml` → `frequency` | `"frequently"` |
+| Dream Agent | `plugins/dream.toml` → `enabled` | `true`（每 24h） |
 | 用量追踪 | `[llm.usage].enabled` | `true` |
 | 上下文压缩 | `[compact].ratio` | `0.7` |
-| 模拟日程 | `[schedule].enabled` | `true`（每日凌晨 2:00 生成） |
-| 好感度系统 | `[affection].enabled` | `true`（每次互动 +0.8，日上限 10.0） |
+| 模拟日程 | `plugins/schedule/plugin.toml` → `enabled` | `true`（每日凌晨 2:00 生成） |
+| 好感度系统 | `plugins/affection/plugin.toml` → `enabled` | `true`（每次互动 +0.8，日上限 10.0） |
+| 要素察觉 | `plugins/element_detector.toml` → `enabled` | `true`（2 条规则） |
 | 群聊隐私遮掩 | `[group].privacy_mask` | `true` |
 | 预回复思考 | thinker（内置） | `true`（轻量 LLM 判断 reply/wait/search） |
 | 日志频道 | `[log.channels]` | 6 个默认开启，其余关闭 |

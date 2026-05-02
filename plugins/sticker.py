@@ -5,8 +5,19 @@
 
 from __future__ import annotations
 
+from pydantic import BaseModel
+
 from kernel.types import AmadeusPlugin, PluginContext, PromptContext
 from services.tools.base import Tool
+
+
+class StickerConfig(BaseModel):
+    """表情包系统配置。"""
+
+    enabled: bool = True
+    storage_dir: str = "storage/stickers"
+    max_count: int = 200
+    frequency: str = "frequently"
 
 _STICKER_FREQUENCY_PROMPTS: dict[str, str] = {
     "rarely": (
@@ -55,7 +66,7 @@ _STICKER_FREQUENCY_PROMPTS: dict[str, str] = {
 class StickerPlugin(AmadeusPlugin):
     name = "sticker"
     description = "表情包工具：保存、发送、管理表情包及图片描述"
-    version = "1.0.2"
+    version = "1.1.1"
     priority = 40
 
     def __init__(self) -> None:
@@ -69,11 +80,14 @@ class StickerPlugin(AmadeusPlugin):
     async def on_startup(self, ctx: PluginContext) -> None:
         import nonebot
 
+        from kernel.config import load_plugin_config
+
+        sticker_cfg = load_plugin_config("plugins/sticker.toml", StickerConfig)
         self._sticker_store = ctx.sticker_store
         self._vision_client = ctx.vision_client
         self._image_cache = ctx.image_cache
         self._superusers = set(ctx.config.admins.keys()) | nonebot.get_driver().config.superusers
-        self._sticker_frequency = ctx.config.sticker.frequency
+        self._sticker_frequency = sticker_cfg.frequency
 
     def register_tools(self) -> list[Tool]:
         if self._sticker_store is None:
