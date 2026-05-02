@@ -266,8 +266,27 @@ class ChatPlugin(AmadeusPlugin):
             if store is None or not store.list_all():
                 await cmd_ctx.bot.send(cmd_ctx.event, Message("表情包库为空，无法发送"))
                 return "OK"
+
+            # Filter by format if the user specified a type
+            want_gif = any(kw in args for kw in ("gif", "GIF", "动图", "动态"))
+            all_stickers = store.list_all()
+
+            if want_gif:
+                candidates = {
+                    sid: e for sid, e in all_stickers.items()
+                    if e.get("file", "").endswith(".gif")
+                }
+                if not candidates:
+                    await cmd_ctx.bot.send(
+                        cmd_ctx.event,
+                        Message("库中没有动图表情包（当前全部为静态 JPG/PNG），请先通过对话收录 GIF 动图。"),
+                    )
+                    return "OK"
+            else:
+                candidates = all_stickers
+
             match = _re.search(r"stk_[a-f0-9]{8}", args)
-            stk_id = match.group(0) if match else _random.choice(list(store.list_all().keys()))
+            stk_id = match.group(0) if match else _random.choice(list(candidates.keys()))
             tool = SendStickerTool(store)
             result = await tool.execute(tool_ctx, sticker_id=stk_id)
             logger.info("debug direct send_sticker | id={} result={}", stk_id, result)
