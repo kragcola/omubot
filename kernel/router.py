@@ -401,12 +401,6 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
         logger.info("Bot 就绪，开始接收消息 ✓")
 
-        # Evaluate history for each group — catch up on missed messages (first connect only)
-        if is_first_connect:
-            for gid in group_ids:
-                if ctx.timeline.get_turns(gid) or ctx.timeline.get_pending(gid):
-                    ctx.scheduler.trigger(gid)
-
     # ---- group listener ----
 
     group_listener = on_message(priority=1, block=False)

@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-05-02 — 移除重启后自动触发群聊回复
+
+- **类型**：bugfix
+- **操作人**：Claude Code (assisted)
+- **问题与根因**：每次 bot 容器重启后，历史加载器回填近期消息到 timeline，随后 `router.py` 调用 `scheduler.trigger()` 强制触发一次回复。由于每次加载的近期历史相同，LLM 收到相同上下文后产生同话题重复发言。多次重载 → 多次重复。
+- **修复**：移除 `kernel/router.py` 中 `is_first_connect` 后的 `scheduler.trigger()` 调用。Bot 重启后静默加载历史作为上下文，等待新的群消息（@/debounce/batch）自然触发回复。
+- **影响范围**：`kernel/router.py`（移除 5 行）
+- **测试**：ruff check 通过，pytest 通过（20 个 scheduler 测试全过，预存失败与本次无关）
+- **回滚**：git revert 即可
+
+---
+
 ## 2026-05-02 — 好感度群聊归因修复：调度器传入 user_id
 
 - **类型**：bugfix
