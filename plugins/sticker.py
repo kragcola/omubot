@@ -55,7 +55,7 @@ _STICKER_FREQUENCY_PROMPTS: dict[str, str] = {
 class StickerPlugin(AmadeusPlugin):
     name = "sticker"
     description = "表情包工具：保存、发送、管理表情包及图片描述"
-    version = "1.0.1"
+    version = "1.0.2"
     priority = 40
 
     def __init__(self) -> None:
@@ -68,6 +68,7 @@ class StickerPlugin(AmadeusPlugin):
 
     async def on_startup(self, ctx: PluginContext) -> None:
         import nonebot
+
         self._sticker_store = ctx.sticker_store
         self._vision_client = ctx.vision_client
         self._image_cache = ctx.image_cache
@@ -78,19 +79,15 @@ class StickerPlugin(AmadeusPlugin):
         if self._sticker_store is None:
             return []
         from services.tools.sticker_tools import (
-            DescribeImageTool,
             ManageStickerTool,
             SaveStickerTool,
             SendStickerTool,
         )
-        tools: list[Tool] = [
+        return [
             SaveStickerTool(self._sticker_store, self._superusers),
             SendStickerTool(self._sticker_store),
             ManageStickerTool(self._sticker_store, self._superusers),
         ]
-        if self._vision_client is not None and self._image_cache is not None:
-            tools.append(DescribeImageTool(self._vision_client, self._image_cache))
-        return tools
 
     async def on_pre_prompt(self, ctx: PromptContext) -> None:
         # Sticker frequency prompt (static — part of personality)

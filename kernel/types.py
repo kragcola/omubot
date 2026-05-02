@@ -9,20 +9,20 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, TypedDict
 
 # ============================================================================
 # 多模态消息类型（从旧 memory/types.py 提升至内核）
 # ============================================================================
 
 
-class TextBlock(Protocol):
+class TextBlock(TypedDict):
     """文本块。"""
     type: Literal["text"]
     text: str
 
 
-class ImageRefBlock(Protocol):
+class ImageRefBlock(TypedDict):
     """图片引用块——存磁盘路径而非 base64。"""
     type: Literal["image_ref"]
     path: str

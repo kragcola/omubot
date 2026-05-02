@@ -23,7 +23,7 @@ _L = logger.bind(channel="system")
 
 class ChatPlugin(AmadeusPlugin):
     name = "chat"
-    version = "1.0.3"
+    version = "1.0.4"
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 
@@ -253,6 +253,227 @@ class ChatPlugin(AmadeusPlugin):
 
         ctx = self._ctx
         store = ctx.sticker_store
+
+        # ---- save_sticker: find recent image, save directly (no LLM needed) ----
+        SAVE_KW = ("保存", "收录", "save", "添加表情")
+        if any(kw in args for kw in SAVE_KW):
+            if store is None:
+                await cmd_ctx.bot.send(cmd_ctx.event, Message("表情包库未启用"))
+                return "OK"
+
+            from pathlib import Path as _Path
+
+            from services.tools.sticker_tools import SaveStickerTool
+
+            superusers: set[str] = (
+                set(getattr(ctx.config, "admins", {}).keys())
+                | nonebot.get_driver().config.superusers
+            )
+
+            # Collect image paths to save
+            image_paths: list[str] = []
+
+            # 1. Extract images from the current message event first
+            raw_msg = cmd_ctx.event.get_message()
+            _seg_types: list[str] = []
+            import re as _re_cq
+            for seg in raw_msg:
+                _seg_types.append(seg.type)
+                if seg.type == "image":
+                    url = seg.data.get("url", "")
+                    file_uniq = seg.data.get("file", "")
+                    if url and ctx.image_cache:
+                        try:
+                            ref = await ctx.image_cache.save(
+                                ctx.llm_client._session, url=url, file_id=file_uniq,
+                            )
+                            if ref is not None:
+                                image_paths.append(ref["path"])
+                        except Exception as e:
+                            logger.warning(
+                                "debug save: image download failed | url={} err={}",
+                                url[:80], e,
+                            )
+                elif seg.type == "mface" or seg.type == "market_face":
+                    # QQ market/favorite sticker — no direct URL, download via NapCat API
+                    key = seg.data.get("key") or seg.data.get("file_unique") or seg.data.get("id", "")
+                    summary = seg.data.get("summary", "")
+                    if key and ctx.sticker_store:
+                        try:
+                            resp = await cmd_ctx.bot.call_api("get_image", file=key)
+                            file_data = resp.get("file", "")
+                            if file_data.startswith("base64://"):
+                                import base64 as _b64
+                                raw = _b64.b64decode(file_data[len("base64://"):])
+                            elif file_data.startswith("file://"):
+                                p = _Path(file_data[len("file://"):])
+                                raw = p.read_bytes() if p.exists() else b""
+                            else:
+                                p = _Path(file_data)
+                                raw = p.read_bytes() if p.exists() else b""
+                            if raw:
+                                tmp_path = ctx.sticker_store.storage_dir / f"_tmp_mface_{key}.tmp"
+                                tmp_path.write_bytes(raw)
+                                image_paths.append(str(tmp_path))
+                                logger.info(
+                                    "debug save: mface downloaded | key={} summary={!r} size={}",
+                                    key, summary, len(raw),
+                                )
+                            else:
+                                logger.warning(
+                                    "debug save: mface empty data | key={} summary={!r}",
+                                    key, summary,
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "debug save: mface download failed | key={} summary={!r} err={}",
+                                key, summary, e,
+                            )
+                    else:
+                        logger.info(
+                            "debug save: mface found but no key | data={}",
+                            seg.data,
+                        )
+            # Also scan raw_message string for CQ-encoded mface/market_face segments
+            # that NoneBot may have converted to text (e.g. NapCat mface → text [星星眼])
+            raw_str = getattr(cmd_ctx.event, "raw_message", "")
+            for m in _re_cq.finditer(
+                r"\[(?:mface|market_face):([^\]]+)\]", raw_str
+            ):
+                params = dict(
+                    p.split("=", 1) for p in m.group(1).split(",") if "=" in p
+                )
+                key = params.get("key") or params.get("file_unique") or params.get("id", "")
+                summary = params.get("summary", "")
+                if key and ctx.sticker_store:
+                    try:
+                        resp = await cmd_ctx.bot.call_api("get_image", file=key)
+                        file_data = resp.get("file", "")
+                        if file_data.startswith("base64://"):
+                            import base64 as _b64
+                            raw = _b64.b64decode(file_data[len("base64://"):])
+                        elif file_data.startswith("file://"):
+                            p = _Path(file_data[len("file://"):])
+                            raw = p.read_bytes() if p.exists() else b""
+                        else:
+                            p = _Path(file_data)
+                            raw = p.read_bytes() if p.exists() else b""
+                        if raw:
+                            tmp_path = ctx.sticker_store.storage_dir / f"_tmp_mface_{key}.tmp"
+                            tmp_path.write_bytes(raw)
+                            image_paths.append(str(tmp_path))
+                            logger.info(
+                                "debug save: mface from raw_message | key={} summary={!r} size={}",
+                                key, summary, len(raw),
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "debug save: mface raw_message download failed | key={} err={}",
+                            key, e,
+                        )
+            logger.info(
+                "debug save: segment scan | types={} image_count={}",
+                _seg_types, len(image_paths),
+            )
+
+            # 2. Fall back to timeline if no images in current message
+            if not image_paths:
+                group_id = str(cmd_ctx.group_id) if not cmd_ctx.is_private else None
+                if group_id and ctx.timeline:
+                    for msg in reversed(ctx.timeline.get_pending(group_id)):
+                        content = msg.get("content", "")
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, dict) and block.get("type") == "image_ref":
+                                    p = block.get("path")
+                                    if p:
+                                        image_paths.append(p)
+                                        break
+                        if image_paths:
+                            break
+                    if not image_paths:
+                        for turn in reversed(ctx.timeline.get_turns(group_id)):
+                            content = turn.get("content", "")
+                            if isinstance(content, list):
+                                for block in content:
+                                    if isinstance(block, dict) and block.get("type") == "image_ref":
+                                        p = block.get("path")
+                                        if p:
+                                            image_paths.append(p)
+                                            break
+                            if image_paths:
+                                break
+
+            if not image_paths:
+                await cmd_ctx.bot.send(
+                    cmd_ctx.event,
+                    Message("未找到图片（请先发送图片再使用此命令，或将图片与命令放在同一条消息中）"),
+                )
+                return "OK"
+
+            # User-supplied description from command args
+            user_desc = args
+            for kw in SAVE_KW:
+                idx = user_desc.find(kw)
+                if idx >= 0:
+                    user_desc = user_desc[idx + len(kw):].strip()
+                    break
+
+            # Save each image
+            results: list[str] = []
+            for idx, image_path in enumerate(image_paths):
+                tool_ctx.extra["image_tags"] = {f"img:{idx + 1}": image_path}
+                image_data = _Path(image_path).read_bytes()
+
+                description: str | None = None
+                usage_hint = "通用聊天表情"
+
+                vision_client = ctx.vision_client
+                if vision_client is not None:
+                    # Stagger rapid consecutive calls to avoid rate limiting
+                    if idx > 0:
+                        await asyncio.sleep(1.5)
+                    try:
+                        desc = await vision_client.describe_image(image_data)
+                        if desc:
+                            description = desc
+                            usage_hint = desc
+                            logger.info(
+                                "debug save_sticker vision desc | path={} desc={!r}",
+                                image_path, desc,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "debug save_sticker vision failed | path={} err={}",
+                            image_path, e,
+                        )
+
+                if description is None:
+                    description = "通用聊天表情"
+
+                if user_desc:
+                    description = f"{user_desc}。{description}"
+                    usage_hint = user_desc
+
+                tool = SaveStickerTool(store, superusers)
+                result = await tool.execute(
+                    tool_ctx,
+                    image_tag=f"img:{idx + 1}",
+                    description=description,
+                    usage_hint=usage_hint,
+                    requested_by=str(cmd_ctx.user_id),
+                )
+                results.append(result)
+                logger.info(
+                    "debug direct save_sticker | path={} result={}",
+                    image_path, result,
+                )
+
+            summary = f"已处理 {len(image_paths)} 张图片：\n" + "\n".join(
+                f"  {r}" for r in results
+            )
+            await cmd_ctx.bot.send(cmd_ctx.event, Message(summary))
+            return "OK"
 
         # ---- send_sticker: any phrase about sending stickers ----
         SEND_KW = (

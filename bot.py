@@ -181,8 +181,8 @@ from plugins.history_loader import HistoryLoaderPlugin  # noqa: E402
 from plugins.memo import MemoPlugin  # noqa: E402
 from plugins.schedule.plugin import SchedulePlugin  # noqa: E402
 from plugins.sticker import StickerPlugin  # noqa: E402
-from plugins.vision import VisionPlugin  # noqa: E402
 from services.command import CommandDispatcher  # noqa: E402
+from services.media.vision import VisionClient  # noqa: E402
 
 _storage_dir = _Path(_bot_config.memo.dir).parent
 _plugin_data_dir = _storage_dir / "plugins"
@@ -215,7 +215,22 @@ _bus.register(HistoryLoaderPlugin())
 _bus.register(MemoPlugin())
 _bus.register(SchedulePlugin())
 _bus.register(StickerPlugin())
-_bus.register(VisionPlugin())
+# VisionClient (system service, not a plugin)
+if _bot_config.vision.qwen.api_key:
+    _plugin_ctx.vision_client = VisionClient(
+        base_url=_bot_config.vision.qwen.base_url,
+        api_key=_bot_config.vision.qwen.api_key,
+        model=_bot_config.vision.qwen.model,
+        timeout_s=15.0,
+    )
+    logger.info(
+        "Qwen VL vision enabled | model={} base_url={}",
+        _bot_config.vision.qwen.model,
+        _bot_config.vision.qwen.base_url,
+    )
+else:
+    _plugin_ctx.vision_client = None
+    logger.info("Qwen VL vision disabled (no api_key)")
 
 # Single-file plugins + any directory plugins with plugin.json are auto-discovered
 _bus.discover_plugins("plugins")

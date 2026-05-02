@@ -24,6 +24,15 @@ from services.memory.types import Content, ContentBlock, ImageRefBlock, TextBloc
 _L = logger.bind(channel="system")
 
 
+def _contains_debug_command(segments: list[dict[str, Any]]) -> bool:
+    """Return True if any segment contains a /debug command that should not be replayed."""
+    for seg in segments:
+        text = seg.get("data", {}).get("text", "")
+        if "/debug" in text:
+            return True
+    return False
+
+
 async def load_group_history(
     bot: Bot,
     group_ids: list[str],
@@ -81,7 +90,13 @@ async def _load_one_group(
         user_id = str(sender.get("user_id", ""))
         nickname = sender.get("nickname", "") or sender.get("card", "") or user_id
 
-        content = await _extract_content(msg.get("message", []), session, image_cache, sticker_store)
+        # Skip messages containing /debug commands — they are interactive admin
+        # operations and should not re-trigger thinker/chat flows on restart.
+        raw_segs = msg.get("message", [])
+        if _contains_debug_command(raw_segs):
+            continue
+
+        content = await _extract_content(raw_segs, session, image_cache, sticker_store)
         if not content:
             continue
 
@@ -188,7 +203,7 @@ async def _extract_content(
 class HistoryLoaderPlugin(AmadeusPlugin):
     name = "history_loader"
     description = "群聊历史加载：bot 连接后回填近期消息"
-    version = "1.0.0"
+    version = "1.0.1"
     priority = 5  # Run early, after ChatPlugin but before other business plugins
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:

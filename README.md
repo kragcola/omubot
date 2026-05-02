@@ -3,7 +3,7 @@
 基于 NoneBot2 的三层可扩展 QQ 机器人框架。
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.6-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Ruff](https://img.shields.io/badge/lint-ruff-orange.svg)](https://github.com/astral-sh/ruff)
 
@@ -14,7 +14,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2
                         └── Omubot 三层框架
                              ├── Kernel     PluginBus · 类型契约 · 插件发现 · 指令调度
                              ├── Services   LLM · 记忆 · 时间线 · 版本 · 调度
-                             └── Plugins    14 个可开关、可插拔的功能插件
+                             └── Plugins    15 个可开关、可插拔的功能插件
 ```
 
 - **内核层** — 零 I/O，零外部依赖。定义调度规则和类型契约，不改 API
@@ -75,8 +75,7 @@ uv run python bot.py
 | WebFetchPlugin | 1 | 网页内容抓取 |
 | HttpApiPlugin | 1 | NapCat HTTP API 调用 |
 | GroupAdminPlugin | 1 | 群管理（禁言、头衔、发消息） |
-| VisionPlugin | 8 | 多模态图像理解 (Qwen VL) |
-| StickerPlugin | 10 | 表情包库：收藏、检索、发送 |
+| StickerPlugin | 10 | 表情包库：收藏、检索、发送（依赖系统层 vision） |
 | MemoPlugin | 20 | 记忆卡片：7 类 3 作用域，检索门控 |
 | AffectionPlugin | 30 | 好感度系统：分数、昵称、态度调节 |
 | SchedulePlugin | 35 | 模拟日程：每日 LLM 生成，结合真实日期 |
@@ -160,7 +159,7 @@ uv run pyright       # 类型检查
 ```
 kernel/         # 内核层（PluginBus、类型、配置、路由）
 services/       # 系统服务层（LLM、记忆、媒体、工具、指令、版本）
-plugins/        # 插件层（14 个可开关插件）
+plugins/        # 插件层（15 个可开关插件）
 admin/          # 管理面板（用量、配置、Soul 编辑、日志）
 docs/           # 项目文档
 wiki/           # 框架开发文档

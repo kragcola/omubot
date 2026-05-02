@@ -52,10 +52,12 @@ class CommandDispatcher:
         Returns True if a command matched and was executed (caller should stop).
         Returns False if no command matched (caller should continue to LLM).
         """
-        if not text.startswith("/"):
+        # Find first "/" — command may be preceded by noise (e.g. emoji, stickers)
+        slash_idx = text.find("/")
+        if slash_idx == -1:
             return False
 
-        stripped = text[1:]
+        stripped = text[slash_idx + 1:]
         if not stripped:
             return False
 

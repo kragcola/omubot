@@ -1169,8 +1169,9 @@ class LLMClient:
                 elapsed = time.monotonic() - t0
                 preview = full_reply[:120] + "…" if len(full_reply) > 120 else full_reply
                 _log_msg_out.info(
-                    "{!r} | len={} segments={} elapsed={:.1f}s",
-                    preview, len(full_reply), len(segments), elapsed,
+                    "{!r} | sticker={} len={} segments={} elapsed={:.1f}s",
+                    preview, "sent" if _sticker_sent else "none",
+                    len(full_reply), len(segments), elapsed,
                 )
                 if is_group and group_id is not None and self._timeline is not None:
                     self._timeline.add(group_id, role="assistant", content=full_reply)

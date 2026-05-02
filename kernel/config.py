@@ -218,9 +218,8 @@ class DreamConfig(BaseModel):
 
 
 class QwenVLConfig(BaseModel):
-    """Qwen VL 小模型配置。"""
+    """Qwen VL 小模型配置。api_key 非空即启用，无需额外 enabled 开关。"""
 
-    enabled: bool = False
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key: str = ""
     model: str = "qwen2.5-vl-7b-instruct"

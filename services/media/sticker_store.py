@@ -215,7 +215,7 @@ class StickerStore:
     def format_prompt_view(self) -> str:
         """Return a compact view of the sticker library for system prompt injection.
 
-        Only includes id, description, and usage_hint — volatile fields
+        Only includes id, format, description, and usage_hint — volatile fields
         (send_count, last_sent, created_at) are excluded for prompt cache stability.
         """
         if not self._index:
@@ -225,6 +225,11 @@ class StickerStore:
         for sticker_id, entry in self._index.items():
             description = entry.get("description", "")
             usage_hint = entry.get("usage_hint", "")
-            lines.append(f"«表情包:{sticker_id}» {description} | {usage_hint}")
+            file_name = entry.get("file", "")
+            fmt = file_name.rsplit(".", 1)[-1].upper() if "." in file_name else "?"
+            fmt_tag = "动图" if fmt == "GIF" else "静态"
+            lines.append(
+                f"«表情包:{sticker_id}» [{fmt_tag}] {description} | {usage_hint}"
+            )
 
         return "\n".join(lines)

@@ -177,6 +177,13 @@ cache_dir = "storage/image_cache"
 # 缓存过期时间（小时）
 cache_max_age_hours = 24
 
+[vision.qwen]
+# 填写 api_key 即启用图像描述（通过 Qwen VL 模型），留空则关闭
+# 环境变量: QWEN_VL_API_KEY, QWEN_VL_BASE_URL, QWEN_VL_MODEL
+api_key = ""
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "qwen2.5-vl-7b-instruct"
+
 # ---------------------------------------------------------------------------
 # 表情包系统
 # ---------------------------------------------------------------------------

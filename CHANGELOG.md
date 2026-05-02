@@ -5,6 +5,42 @@ All notable changes to Omubot are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] — 2026-05-02
+
+### Fixed
+
+- **mface（QQ 商城表情）检测**：`/debug 保存表情` 无法识别第四张 QQ 商城表情（如 `[星星眼]`）。新增 `market_face` 类型检测 + 从 `event.raw_message` 解析 `[mface:...]` CQ 码兜底，NoneBot 将其转为纯文本时仍可捕获
+- **Qwen VL 连续调用限流**：多图保存时连续 vision API 调用触发硅基流动限流。图片间增加 1.5s 延迟，timeout 10s → 15s
+- **历史加载触发正常回复**：Bot 重启后历史加载回填 `/debug` 消息进入 timeline，重新触发 thinker/chat 流程。`HistoryLoaderPlugin` 现跳过含 `/debug` 的消息
+
+### Changed
+
+- ChatPlugin 1.0.3 → 1.0.4
+- HistoryLoaderPlugin 1.0.0 → 1.0.1
+- VisionClient 错误日志增加异常类型
+
+## [1.0.5] — 2026-05-02
+
+### Changed
+
+- **图像描述提升至系统层**：`VisionPlugin` 删除，`VisionClient` 移至 `services/media/vision.py`。由 `bot.py` 根据 `api_key` 是否填写自动启用，无需额外 `enabled` 开关
+- **接入硅基流动 VLM**：配置 `Qwen/Qwen3-VL-30B-A3B-Instruct` 通过 SiliconFlow API 提供多模态描述，DeepSeek V4 不支持多模态
+- **`/debug 保存表情` 图像描述**：保存时调用 Qwen VL 生成中文描述，替代硬编码占位符。支持用户自定义描述前缀
+- **表情包评估日志**：回复日志新增 `sticker=sent`/`sticker=none` 字段
+- **指令调度兼容前置文本**：`CommandDispatcher` 匹配 `/` 命令不再要求以斜杠开头，支持 `[表情] /debug` 等前置内容
+
+### Added
+
+- `config.example.toml` 新增 `[vision.qwen]` 示例段落
+
+### Removed
+
+- `QwenVLConfig.enabled` 字段：api_key 非空即启用，留空即关闭
+
+### Changed (plugins)
+
+- StickerPlugin 1.0.1 → 1.0.2
+
 ## [1.0.4] — 2026-05-02
 
 ### Fixed
