@@ -5,6 +5,66 @@ All notable changes to Omubot are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] — 2026-05-03
+
+### Fixed
+
+- **文本分段算法重写**：替换三层函数叠加（`_split_on_sentence_end` + `_split_long_on_comma` + hard slice）为单一 `_smart_chunk` 回溯式标点优先级切分。扫描窗口从右向左找最佳断点：句末标点（。！？～…）→ 从句标点（，；：、）→ 字符边界（保护英文单词完整性）→ 硬切。解决 "AI修复" 被撕成 "AI"+"修复" 的孤儿碎片问题
+- **段首标点修复**：`_smart_chunk` 将标点留在前段末尾（`t[:best]`），不再推到下一段开头
+- **句尾从句标点剥离**：独立 QQ 消息末尾无意义连接符（"虽然我主要玩烤和邦邦，"）剥离从句标点，句末标点保留
+- **`～` 升级为句末标点**：从仅用于 `\n` 合并判断升级为一级切分点，与 `。！？` 同级
+- **`/debug split` 误输入保护**：纯 ASCII 小写首词检测，非已知子命令时提示可用命令而非送 LLM
+
+### Added
+
+- **`/debug split <文本>`** 子命令：实时测试 `_split_naturally()` 分段效果，别名 `/debug 分段`/`/debug 分割`
+- 新增 5 个测试：段首无标点、英文完整性、尾段合并、精确回归、用户 case v2（共 13 个 split 测试）
+
+### Changed
+
+- `_MIN_CHUNK` 3 → 6，避免短片段逃脱合并逻辑
+- `_MAX_CHUNK` 45 → 20（配合新算法更精确的断点选择）
+- Bot 版本 1.2.0 → 1.2.1
+- ChatPlugin 1.1.3 → 1.1.4
+
+## [1.2.0] — 2026-05-03
+
+### Fixed
+
+- **句中断行合并**：`\n` 从硬分段边界降级为软提示。仅当上一行末尾有句末标点（。！？～…）」』））时才切分，句内换行直接合并
+- **超长句语义切分**：硬字符切分替换为逗号层级语义切分，避免合并后完整句子被重新撕碎
+- **指令更新**：分段指导从"换行即分段"改为"一个完整想法写完后再换行"
+
+### Added
+
+- `_SENTENCE_ENDING` 字符集用于 `\n` 合并判断
+- `TestSplitNaturally` 测试类：9 个测试覆盖句中断行合并、句末切分、`---cut---`、长句语义切分、`_MIN_CHUNK` 合并
+
+### Changed
+
+- Bot 版本 1.1.1 → 1.2.0
+
+## [1.1.0] — 2026-05-03
+
+### Added
+
+- **多级命令支持**：`Command.sub_commands` 字段，`CommandDispatcher` 递归匹配子命令，未命中回退父 handler
+- **`/debug` 子命令**：`save`（别名: 保存/收录/添加表情）、`send`（别名: 发/发送）
+- **B站视频链接识别插件**：识别 BV号/av号/b23.tv/番剧链接，注入视频摘要（含 Qwen VL 封面描述），本地缓存去重
+- **B站回复模式**：4 种模式（mood/always/dedicated/autonomous），兴趣评估函数根据视频标题匹配 bot 人设关键词计算 0-1 兴趣分
+- **心情系统 × 概率调度联动**：心情三维度（valence/energy/openness）计算 talk_value 乘数 [0.25, 2.0]
+- **群聊延迟优化**：概率调度替代固定 debounce、移除独立 Thinker（~55 行）、合并 Sticker 强制执行（~23 行），延迟从 17-22s 降至 ~3-5s
+- **调度器日志可见性**：5 处 skip 决策日志从 DEBUG 提升至 INFO
+- **心情缓存修复**：`mood_getter` lambda 改为主动调用 `mood_engine.evaluate()`，修复重启后首次聊天心情乘数始终 1.0 的 bug
+- **要素察觉启用**：`[element_detection]` 配置补全，修复 `identity_mgr`→`identity` 引用错误
+- **NoneBot NICKNAME 配置**：补全 `config/.env` 的 `NICKNAME`，修复适配器层昵称剥离和 `to_me` 标记
+
+### Changed
+
+- **插件配置迁移**：6 个插件配置从中央 `config.toml` 迁移至 `plugins/<name>.toml`，Config 模型从 kernel/config.py 搬至各插件 .py 文件
+- Bot 版本 1.0.7 → 1.1.0
+- ChatPlugin 1.1.1 → 1.1.2
+
 ## [1.0.6] — 2026-05-02
 
 ### Fixed
