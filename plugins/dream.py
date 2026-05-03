@@ -249,8 +249,9 @@ class DreamAgent:
             dream_logger.info("dream loop stopped")
 
     async def _loop(self, api_call: ApiCaller) -> None:
-        """Sleep → run → repeat. First run waits a full interval."""
+        """Run immediately on start, then sleep → run → repeat."""
         interval_s = self._interval_hours * 3600
+        await self._run(api_call)
         while True:
             await asyncio.sleep(interval_s)
             await self._run(api_call)
@@ -328,8 +329,10 @@ class DreamAgent:
                     )
                     break
 
-                # Build assistant message with text + tool_use blocks
+                # Build assistant message — preserve thinking blocks for DeepSeek
                 assistant_content: list[dict[str, Any]] = []
+                for tb in result.get("thinking_blocks", []):
+                    assistant_content.append(tb)
                 if text:
                     assistant_content.append({"type": "text", "text": text})
                 for tu in tool_uses:
@@ -469,7 +472,7 @@ class DreamAgent:
 class DreamPlugin(AmadeusPlugin):
     name = "dream"
     description = "梦境整合：定期整理记忆卡片、清理表情包库"
-    version = "1.1.1"
+    version = "1.1.2"
     priority = 150  # Background task, after business plugins
 
     def __init__(self) -> None:

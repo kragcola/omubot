@@ -78,6 +78,65 @@ def _strip_markdown(text: str) -> str:
     text = _MD_STRIKE_RE.sub(r"\1", text)
     return text
 
+
+# Patterns for stripping parenthetical stage directions from LLM output.
+# Stage directions use full-width Chinese parentheses （）with action text,
+# or half-width () with Chinese action words (not kaomoji).
+#
+# Action/state characters: body parts, physical actions, emotional states that
+# DeepSeek commonly puts in parens as stage direction.
+_STAGE_ACTION_CHARS = (
+    "困累饿躺趴揉打眨伸爬走跑跳坐站睡抱推拉哭笑叹捂挥"
+    "滚晃闹踢踹蹲跪抓捏掐按摸拍击砍劈砍撕扯倒掉跌落飘"
+    "昏倦乏疲酸疼痛痒颤抖嗦转翻扭摆摇发送补"
+)
+_STAGE_DIR_FULL_RE = re.compile(r"（[^）]*?[" + _STAGE_ACTION_CHARS + r"][^）]*?）")
+# Standalone parenthetical that occupies the whole line (short, likely action)
+_STAGE_DIR_SOLO_RE = re.compile(r"^[（(][^)）]{1,20}[）)]\s*$", re.MULTILINE)
+# Half-width parenthetical: short with Chinese text, NOT kaomoji
+_STAGE_DIR_HALF_RE = re.compile(r"\([^)≡≧≦▽◕‿✧☆♪・ω･]{1,20}\)")
+
+
+# Patterns for stripping sticker-narration phrases the LLM may emit after
+# calling send_sticker: "（已发送表情包）"、"表情包补上啦"、"表情包来啦" etc.
+_STICKER_NARRATION_RE = re.compile(
+    r"(?:（[^）]*?(?:已发送|表情包[已补发来去]|补上)[^）]*?）"
+    r"|表情包(?:已发送|补上啦|来啦|送到|到啦)"
+    r"|[已补]发送了?表情包[啦喔呢~！]*"
+    r")"
+)
+
+def _strip_stage_direction(text: str) -> str:
+    """Strip parenthetical stage directions that DeepSeek sometimes outputs.
+
+    Removes （揉眼睛）（好困）（已发送表情包）etc., but preserves kaomoji like (≧▽≦).
+    """
+    text = _STAGE_DIR_FULL_RE.sub("", text)
+    text = _STAGE_DIR_HALF_RE.sub("", text)
+    # Remove lingering standalone lines that are just parentheses
+    text = _STAGE_DIR_SOLO_RE.sub("", text)
+    # Strip sticker-narration phrases
+    text = _STICKER_NARRATION_RE.sub("", text)
+    # Collapse multiple blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _clean_reply(text: str) -> str:
+    """Full reply cleaning pipeline: markdown + narration + stage direction strip."""
+    text = _strip_stage_direction(_strip_markdown(text or "..."))
+    # Final safety: if the reply is now just narration/metacommentary, drop it
+    if text.strip() in ("", "...", "☆", "~"):
+        return text
+    # Drop lines that are purely sticker narration
+    lines = text.split("\n")
+    kept = [
+        line for line in lines
+        if not _STICKER_NARRATION_RE.search(line)
+        and line.strip() not in ("...",)
+    ]
+    return "\n".join(kept).strip() or "..."
+
 # Kaomoji / action-description detection for sticker enforcement.
 #
 # Pattern A — special-character kaomoji: (≧▽≦)/  (｡･ω･｡)  (◕‿◕)✧  etc.
@@ -771,6 +830,7 @@ class LLMClient:
         affection_engine: object | None = None,
         thinker_enabled: bool = True,
         thinker_max_tokens: int = 256,
+        mood_getter: Callable[[], Any] | None = None,
         bus: object | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
@@ -803,6 +863,7 @@ class LLMClient:
         self._affection_engine = affection_engine
         self._thinker_enabled = thinker_enabled
         self._thinker_max_tokens = thinker_max_tokens
+        self._mood_getter = mood_getter
         self._bus = bus
 
     async def close(self) -> None:
@@ -923,6 +984,50 @@ class LLMClient:
         return messages
 
     # ------------------------------------------------------------------
+    # Thinker helpers
+    # ------------------------------------------------------------------
+
+    def _build_thinker_mood_text(self) -> str:
+        """Build a one-line mood summary for the pre-reply thinker."""
+        if self._mood_getter is None:
+            return ""
+        try:
+            profile = self._mood_getter()
+            if profile is None:
+                return ""
+            mood_line = (
+                f"【当前心情】{profile.label} "
+                f"(energy={profile.energy:.2f} valence={profile.valence:+.2f} "
+                f"openness={profile.openness:.2f} tension={profile.tension:.2f})"
+            )
+            if getattr(profile, "anomaly_reason", ""):
+                mood_line += f"\n（心情说明：{profile.anomaly_reason}）"
+            return mood_line
+        except Exception:
+            return ""
+
+    def _build_thinker_affection_text(self, user_id: str) -> str:
+        """Build a one-line relationship summary for the pre-reply thinker."""
+        if self._affection_engine is None:
+            return ""
+        try:
+            engine = self._affection_engine
+            store = getattr(engine, "_store", None)
+            if store is None:
+                return ""
+            profile = store.get(user_id)
+            if profile is None or profile.total_interactions == 0:
+                return ""
+            nickname = profile.custom_nickname or profile.group_nickname or ""
+            tag = f"（称呼：{nickname}）" if nickname else ""
+            return (
+                f"【与当前用户的关系】tier={profile.tier} "
+                f"score={profile.score:.0f} interactions={profile.total_interactions} {tag}".strip()
+            )
+        except Exception:
+            return ""
+
+    # ------------------------------------------------------------------
     # Main chat entry point
     # ------------------------------------------------------------------
 
@@ -990,6 +1095,59 @@ class LLMClient:
         else:
             conversation_text = content_text(user_content) if user_content else ""
 
+        # ------------------------------------------------------------------
+        # Pre-reply thinker: decide whether to speak before building full prompt
+        # ------------------------------------------------------------------
+        thinker_decision: object | None = None
+        if self._thinker_enabled:
+            from services.llm.thinker import think
+
+            # Filter to text-only: image_ref blocks are not valid for the API
+            # and the thinker doesn't need images for its text-based decision.
+            def _text_only(msg: dict[str, Any]) -> dict[str, Any]:
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    filtered = [b for b in content if b.get("type") == "text"]
+                    if filtered:
+                        return {**msg, "content": filtered}
+                return msg
+
+            recent_raw = messages[-8:] if len(messages) > 8 else messages
+            recent_for_thinker = [_text_only(m) for m in recent_raw]
+            recent_for_thinker = [m for m in recent_for_thinker if m.get("content")]
+            mood_text = self._build_thinker_mood_text()
+            affection_text = self._build_thinker_affection_text(user_id)
+            thinker_decision = await think(
+                api_call=self._call,
+                recent_messages=recent_for_thinker,
+                max_tokens=self._thinker_max_tokens,
+                mood_text=mood_text,
+                affection_text=affection_text,
+                identity_name=identity.name,
+            )
+            # Persist decision in prompt context so plugins can see it
+            thinker_action = thinker_decision.action
+            thinker_thought = thinker_decision.thought
+
+            if thinker_action == "wait":
+                elapsed = time.monotonic() - t0
+                _log_msg_out.info(
+                    "thinker_wait | session={} thought={!r} elapsed={:.1f}s",
+                    session_id, thinker_thought, elapsed,
+                )
+                self._record_usage(
+                    call_type="proactive",
+                    user_id=user_id, group_id=group_id,
+                    input_tokens=thinker_decision.usage.get("input_tokens", 0),
+                    cache_read_tokens=thinker_decision.usage.get("cache_read", 0),
+                    cache_create_tokens=thinker_decision.usage.get("cache_create", 0),
+                    output_tokens=thinker_decision.usage.get("output_tokens", 0),
+                    tool_rounds=0, elapsed_s=elapsed,
+                )
+                return None
+        else:
+            thinker_thought = ""
+
         if self._card_store:
             try:
                 # Collect plugin blocks via bus.on_pre_prompt
@@ -1040,6 +1198,25 @@ class LLMClient:
         else:
             system_blocks = [self._prompt.static_block]
 
+        # Inject thinker decision as final system block so the main LLM
+        # knows what direction to take — placed last for highest attention.
+        if thinker_decision is not None and thinker_thought:
+            hints = [f"你决定说话：{thinker_thought}"]
+            d = thinker_decision
+            if d.sticker:
+                hints.append(
+                    "sticker: yes — 请在本轮同时调用 send_sticker 发送匹配的表情包，"
+                    "发送后直接接文字内容，不要提及已发送表情包"
+                )
+            else:
+                hints.append("sticker: no")
+            hints.append(f"tone: {d.tone}")
+            thinker_block: dict[str, Any] = {
+                "type": "text",
+                "text": "【" + "】【".join(hints) + "】",
+            }
+            system_blocks = [*system_blocks, thinker_block]
+
         messages, image_tag_map = await resolve_image_refs(messages, self._image_cache)
 
         tool_defs: list[dict[str, Any]] | None = None
@@ -1086,7 +1263,34 @@ class LLMClient:
                 return None
 
             if not tool_uses:
-                reply = _strip_markdown(text or "...")
+                reply = _clean_reply(text or "...")
+
+                # Kaomoji enforcement: if the reply contains a kaomoji / action
+                # description but the LLM forgot to call send_sticker, inject a
+                # forced sticker-selection round (once only, and only if we have
+                # at least one round left).
+                if (
+                    _text_has_kaomoji(reply)
+                    and not _sticker_sent
+                    and round_i < MAX_TOOL_ROUNDS - 1
+                ):
+                    _sticker_sent = True  # prevent re-entry
+                    assistant_content = []
+                    for tb in result.get("thinking_blocks", []):
+                        assistant_content.append(tb)
+                    if text:
+                        assistant_content.append({"type": "text", "text": text})
+                    messages.append({"role": "assistant", "content": assistant_content})
+                    messages.append({
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "请现在发送一个表情包来配合你刚才的颜文字"
+                                    "（只调用 send_sticker，不要重复文字内容）",
+                        }],
+                    })
+                    _log_thinking.info("kaomoji_enforce | forcing sticker round after kaomoji detected")
+                    continue
 
                 segments = _split_naturally(reply)
                 if on_segment and len(segments) > 1:
@@ -1132,8 +1336,11 @@ class LLMClient:
                         session_id=session_id,
                         group_id=group_id,
                         user_id=user_id,
+                        user_msg=content_text(user_content),
                         reply_content=full_reply,
                         elapsed_ms=elapsed * 1000,
+                        thinker_action=thinker_decision.action if thinker_decision else "",
+                        thinker_thought=thinker_decision.thought if thinker_decision else "",
                     )
                     await self._bus.fire_on_post_reply(reply_ctx)
 
@@ -1187,7 +1394,7 @@ class LLMClient:
         acc_output += result.get("output_tokens", 0)
         acc_cache_read += result.get("cache_read", 0)
         acc_cache_create += result.get("cache_create", 0)
-        reply = _strip_markdown(result["text"] or "...")
+        reply = _clean_reply(result["text"] or "...")
         segments = _split_naturally(reply)
         if on_segment and len(segments) > 1:
             for seg in segments[:-1]:
@@ -1224,8 +1431,11 @@ class LLMClient:
                 session_id=session_id,
                 group_id=group_id,
                 user_id=user_id,
+                user_msg=content_text(user_content),
                 reply_content=full_reply,
                 elapsed_ms=elapsed * 1000,
+                thinker_action=thinker_decision.action if thinker_decision else "",
+                thinker_thought=thinker_decision.thought if thinker_decision else "",
             )
             await self._bus.fire_on_post_reply(reply_ctx)
         return last_seg
@@ -1277,8 +1487,10 @@ class LLMClient:
                 )
                 return text, memo_writes
 
-            # Build assistant message with text + tool_use blocks
+            # Build assistant message — preserve thinking blocks for DeepSeek
             assistant_content: list[dict[str, Any]] = []
+            for tb in result.get("thinking_blocks", []):
+                assistant_content.append(tb)
             if text:
                 assistant_content.append({"type": "text", "text": text})
             for tu in tool_uses:

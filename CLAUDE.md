@@ -15,7 +15,7 @@ uv run pyright                 # Type check
 | Run locally | `docker compose up napcat -d && uv run python bot.py` |
 | Run all in Docker | `docker compose up -d` |
 | Restart bot (config changes) | `docker compose restart bot` |
-| Rebuild bot (code/deps) | `docker compose up bot -d --build` |
+| Rebuild bot (code/deps) | `dot_clean . && docker compose up bot -d --build` |
 | Usage TUI | `uv run python -m services.llm.usage_cli tui day\|week\|month [date]` |
 | Usage API | `GET /api/usage/today`, `/api/usage/month`, `/api/usage/top-users`, `/api/usage/top-groups` |
 | Admin Dashboard | `http://localhost:8081/admin/` — token auth via `ADMIN_TOKEN` env var |

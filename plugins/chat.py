@@ -23,7 +23,7 @@ _L = logger.bind(channel="system")
 
 class ChatPlugin(AmadeusPlugin):
     name = "chat"
-    version = "1.1.4"
+    version = "1.1.6"
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 
@@ -755,6 +755,13 @@ class ChatPlugin(AmadeusPlugin):
             affection_engine=ctx.affection_engine,
             thinker_enabled=config.thinker.enabled,
             thinker_max_tokens=config.thinker.max_tokens,
+            mood_getter=(
+                lambda: ctx.mood_engine.evaluate(
+                    ctx.schedule_store.current if ctx.schedule_store else None,
+                )
+                if ctx.mood_engine
+                else None
+            ),
             bus=ctx.bus,
         )
 

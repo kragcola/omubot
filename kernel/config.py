@@ -306,6 +306,7 @@ _ENV_MAP: dict[str, str] = {
     "QWEN_VL_API_KEY": "vision.qwen.api_key",
     "QWEN_VL_BASE_URL": "vision.qwen.base_url",
     "QWEN_VL_MODEL": "vision.qwen.model",
+    "SEARCH_API_KEY": "search.api_key",
 }
 
 # CLI 参数名 → dotted key

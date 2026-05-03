@@ -1,9 +1,11 @@
 # Omubot
 
+> **状态：Demo 阶段** — 本项目仍在早期开发中，架构和 API 可能发生较大变更。欢迎试用和反馈，但不建议用于正式生产环境。
+
 基于 NoneBot2 的三层可扩展 QQ 机器人框架。
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.4-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Ruff](https://img.shields.io/badge/lint-ruff-orange.svg)](https://github.com/astral-sh/ruff)
 

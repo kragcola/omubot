@@ -39,6 +39,19 @@ def build_echo_key(segments: Iterable[object]) -> str:
             parts.append(f"[face:{d.get('id', '')}]")
         elif t == "at":
             parts.append(f"[at:{d.get('qq', '')}]")
+        elif t == "json":
+            # Differentiate JSON cards by their prompt / desc so that
+            # multiple B站 mini-program forwards are not lumped together.
+            raw = d.get("data", "")
+            prompt = ""
+            if isinstance(raw, str) and raw:
+                try:
+                    import json as _json
+                    obj = _json.loads(raw)
+                    prompt = obj.get("prompt", "") or obj.get("desc", "")
+                except (_json.JSONDecodeError, ValueError):
+                    pass
+            parts.append(f"[json:{prompt}]")
         else:
             parts.append(f"[{t}]")
     return "".join(parts).strip()
@@ -99,7 +112,7 @@ class EchoTracker:
 class EchoPlugin(AmadeusPlugin):
     name = "echo"
     description = "群聊复读检测：5分钟内同消息3次触发复读，5%概率打断"
-    version = "1.1.0"
+    version = "1.1.1"
     priority = 200
 
     async def on_startup(self, ctx: PluginContext) -> None:

@@ -66,7 +66,7 @@ _STICKER_FREQUENCY_PROMPTS: dict[str, str] = {
 class StickerPlugin(AmadeusPlugin):
     name = "sticker"
     description = "表情包工具：保存、发送、管理表情包及图片描述"
-    version = "1.1.1"
+    version = "1.1.3"
     priority = 40
 
     def __init__(self) -> None:

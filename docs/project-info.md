@@ -136,6 +136,8 @@ storage/
 | B站视频识别 | `plugins/bilibili.toml` → `enabled` | `true` |
 | B站回复模式 | `plugins/bilibili.toml` → `reply_mode` | `autonomous` |
 | B站回复概率 | `plugins/bilibili.toml` → `bilibili_talk_value` | `0.8` |
+| B站兴趣关键词 | `plugins/bilibili.toml` → `high/medium/low_interest_keywords` | 高69/中29/低19 个 |
+| B站兴趣 LLM 回退 | `plugins/bilibili.toml` → `interest_llm_fallback` | `0.6` |
 | 上下文压缩 | `[compact].ratio` | `0.7` |
 | 模拟日程 | `plugins/schedule/plugin.toml` → `enabled` | `true`（每日凌晨 2:00 生成） |
 | 好感度系统 | `plugins/affection/plugin.toml` → `enabled` | `true`（每次互动 +0.8，日上限 10.0） |

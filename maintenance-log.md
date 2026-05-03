@@ -4,6 +4,288 @@
 
 ---
 
+## 2026-05-04 B站 JSON 卡片多 URL 遍历 + 无 scheme URL 修复
+
+**变更类型**：bugfix
+
+**内容**：
+- **JSON 卡片多 URL 遍历**（`plugins/bilibili.py`）：
+  - `_extract_bilibili_json_info()` 改为收集全部候选 URL（`_all_urls`），不止取第一个
+  - `on_message()` 遍历全部 URL 逐个尝试解析，任一成功即停止
+  - 根因：QQ 小程序卡片 `detail_1` 同时包含 `url`（QQ 小程序页）和 `share_url`（b23.tv 短链），旧代码只取第一个 → 拿到无用的 QQ 页面 URL → 解析失败 → 回退搜索 → 搜索也失败
+  - 效果："萍儿的低皮质醇" → `m.q.qq.com/a/s/...`（无用）跳过，`b23.tv/qmz0jXy?...`（b23.tv）成功解析 → `BV1jGRgB4EZr`
+- **无 scheme URL 归一化**（`plugins/bilibili.py`）：
+  - `_resolve_urls_to_vid()` 对不含 `://` 的 URL（如 `m.q.qq.com/a/s/...`）自动补 `https://` 前缀
+  - 根因：QQ 小程序卡片 URL 不含协议头，`url.startswith("http")` 为 False → HTTP 重定向跟踪永不触发
+- **调试日志增强**：
+  - 列出全部候选 URL（`urls=N` + 逐个 `url[i]=...`）
+  - 无 URL 时打印 `detail_1`/`meta`/`data` 的 keys 以诊断数据格式
+  - JSON 原始数据截断从 500 字符扩展到 2000 字符
+
+**影响范围**：`plugins/bilibili.py`（bilibili 1.1.1 → 1.1.2）
+
+**回滚方案**：`git revert` 即可
+
+---
+
+---
+
+## 2026-05-03 B站搜索匹配修复：前置标识词惩罚 + qqdocurl 跳转
+
+**变更类型**：bugfix
+
+**内容**：
+- **前置标识词不匹配惩罚**（`plugins/bilibili.py`）：
+  - 新增 `_extract_first_word()` — 提取关键词首个有意义的词（2-3 字，跳过括号/标点）作为身份标识
+  - `_title_match_score()` 字符集模糊匹配分支：若前置标识词不在候选标题中，得分 × 0.3
+  - 根因：字符集匹配给"的低皮质醇"（通用描述）和"萍儿/豹"（关键标识）同等权重 → "萍儿的低皮质醇"误匹配到"豹的低皮质醇~"
+  - 效果：误匹配 "萍儿→豹" 从 0.21 降至 0.064，正确匹配不受影响
+- **qqdocurl 通用跳转跟随**（`plugins/bilibili.py`）：
+  - `_resolve_urls_to_vid()` 新增通用 HTTP 重定向跟随：`http(s)` 开头的未知短链自动跟随跳转，从最终 URL 提取 BV 号
+  - 根因：QQ 小程序卡片通过 `qqdocurl` 跳转到 B站，旧代码只处理 b23.tv 一种短链，不认识 qqdocurl → URL 解析失败 → 回退到搜索
+  - 效果：有 `qqdocurl` 的卡片可通过 HTTP 重定向解出 BV 号，根本不需要搜索（100% 准确）
+
+**影响范围**：`plugins/bilibili.py`
+
+**验证**：659 passed, 8 预存失败，零回归
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 Thinker 启用 + B站关键词配置化 + image_ref 修复
+
+**变更类型**：bugfix + enhancement
+
+**内容**：
+- **Thinker 启用**：`config.toml` 新增 `[thinker]` 段（`enabled = true`）。多阶段流水线代码（Phase 1-4）虽已实现但 ThinkerConfig.enabled 默认为 false，导致预回复思考从未在生产中运行。启用后每次回复前 Thinker 预判 action/thought/sticker/tone，主 LLM 收到 `【你决定说话：...】【sticker: yes/no】【tone: ...】` 指令后再生成回复。
+- **image_ref 过滤修复**（`services/llm/client.py`）：Thinker 调用前过滤图片块，只保留 text 类型。根因：Thinker 调用在 `resolve_image_refs()` 之前，消息中的 `image_ref` 内部类型直接发给 Anthropic API → 400 unknown variant。
+- **B站兴趣关键词配置化**（`plugins/bilibili.py` + `plugins/bilibili.toml`）：`_HIGH_INTEREST`/`_MEDIUM_INTEREST`/`_LOW_INTEREST` 关键词列表和 `_INTEREST_LLM_FALLBACK` 阈值从模块级常量迁移至 TOML 配置文件。`BilibiliConfig` 新增 4 个字段，`evaluate_interest()` 支持参数传入关键词，`on_startup` 从配置读取。修改关键词或阈值只需 `restart`，无需 rebuild。
+
+**影响范围**：`config/config.toml`、`services/llm/client.py`、`plugins/bilibili.py`、`plugins/bilibili.toml`
+
+**验证**：rebuild 后启动正常，Thinker 过滤逻辑生效
+
+**回滚方案**：`[thinker].enabled = false` 关闭 Thinker；git revert 恢复关键词硬编码
+
+---
+
+## 2026-05-03 多阶段流水线架构 — Phase 1-4 实施
+
+**变更类型**：enhancement
+
+**内容**：
+- **Phase 1 — 接线 Thinker**：
+  - `services/llm/client.py`: `chat()` 中主 LLM 调用前先调 `think()` (wait → return None; reply → 注入 thought 到 system prompt)
+  - 新增 `_build_thinker_mood_text()` / `_build_thinker_affection_text()` 辅助方法
+  - `__init__` 新增 `mood_getter` 参数
+  - `ReplyContext` 填充 `thinker_action` / `thinker_thought`
+  - `plugins/chat.py`: 传递 `mood_getter` lambda 给 LLMClient
+- **Phase 2 — sticker 决策移入 Thinker**：
+  - `services/llm/thinker.py`: `ThinkDecision` 新增 `sticker: bool` 和 `tone: str` 字段
+  - thinker prompt 新增表情包决策和语气决策指令
+  - `parse_think_output()` 解析新字段
+  - `client.py`: thinker block 注入 `sticker: yes/no` 和 `tone: 元气/日常/安慰/认真` 指令
+- **Phase 3 — instruction.md 重排序**：
+  - 新增「底线规则速查」放在文件最前（长度控制、禁止括号、sticker 后规则、禁用 Markdown）
+  - 表情包章节前移（原在末尾）
+  - 记忆系统、工具使用移至末尾（有工具定义辅助）
+- **Phase 4 — `_clean_reply()` 增强**：
+  - 新增 `_STICKER_NARRATION_RE` 匹配"已发送表情包""表情包补上啦""表情包来啦"等
+  - `_STAGE_ACTION_CHARS` 扩展 "发送补"
+  - `_clean_reply()` 增加空行/纯叙述行过滤
+
+**影响范围**：回复生成全流程
+
+**回滚方案**：git revert
+
+---
+
+## 2026-05-03 DeepSeek thinking blocks 400 修复（回归）
+
+**变更类型**：bugfix
+
+**内容**：
+- `plugins/dream.py`: Dream Agent 工具循环中未保留 thinking_blocks → API 400
+- `services/llm/client.py`: Compaction 工具循环中未保留 thinking_blocks → API 400
+- 修复方式：两处 assistant_content 构建前追加 `result.get("thinking_blocks", [])`
+- 主聊天流程（`client.py:1217-1225`）已正确保留，本次补全其余两个 API 调用路径
+- 根因：DeepSeek thinking mode 要求 thinking blocks（含 signature）必须在后续请求中原样回传
+
+**影响范围**：Dream Agent 第二轮起、compaction 有工具调用时 → 400 错误中断
+
+**回滚方案**：git revert
+
+---
+
+## 2026-05-03 B站兴趣评分强化 + 调度器阈值联动修复
+
+**变更类型**：bugfix
+
+**内容**：
+- **兴趣关键词扩展**（`plugins/bilibili.py`）：
+  - `_HIGH_INTEREST` 新增 Project Sekai 全组/角色：25时、nightcord、ニーゴ、25ji、vivid bad squad、vbs、ビビバス、more more jump、mmj、モモジャン、leo/need、レオニ、各角色名（宵崎、朝比奈、東雲、花里、白石 等）、rin/len/luka/リン/レン/ルカ、缤纷舞台、プロジェクトセカイ、mmd、3d、blender
+  - `_MEDIUM_INTEREST` 新增：手书、手描き、描いてみた
+- **LLM 评估门槛与合并策略修正**：`_INTEREST_LLM_FALLBACK` 0.2→0.6；LLM 评分与关键词评分取 max（`interest = max(interest, llm_score)`）而非替换
+  - 根因：添加更多关键词后关键词评分反而可能低于纯 LLM 评估（0.85），旧代码用 LLM 分直接覆盖关键词分导致退步
+- **调度器兴趣公式改为混合下限**（`services/scheduler.py`）：`threshold *= interest_score` → `threshold = base_talk_value * (0.3 + 0.7 * interest_score)`
+  - 效果：0.05→0.335、0.55→0.685、0.85→0.895、1.0→1.0，高兴趣分不再被乘法过度放大
+- **高兴趣视频免时段抑制**：interest ≥0.6 时 `time_mult = 1.0`，bot 对其真正关心的内容无论时段都回复
+
+**影响范围**：`plugins/bilibili.py`、`services/scheduler.py`
+
+**验证**：659 passed, 8 预存失败，零回归
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 B站小程序卡片复读误触发修复
+
+**变更类型**：bugfix
+
+**内容**：
+- `plugins/echo.py`：`build_echo_key()` 新增 `json` 类型 segment 处理，从 JSON data 中提取 `prompt`/`desc` 字段生成差异化 key
+  - 根因：多个不同 B站 mini-program 转发卡片的 segment type 均为 `json`，旧代码只生成 `[json]` 固定 key → 即使内容不同的视频也被识别为"同一条消息"→ 第三个转发即触发复读
+  - 修复后：`[json:视频标题/prompt 文本]`，不同视频的卡片各自独立
+- JSON 解析异常保护：空字符串、无效 JSON 均静默回退
+
+**影响范围**：`plugins/echo.py`
+
+**验证**：659 passed, 8 预存失败，零回归
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 多阶段流水线架构方案（调研文档）
+
+**变更类型**：docs
+
+**内容**：
+- 新建 `docs/superpowers/plans/2026-05-03-multi-stage-pipeline.md`
+- 归档四阶段实施建议：接线 Thinker → sticker 决策移入 Thinker → instruction.md 重排序 → 后处理增强
+- 未改代码，仅调研结论与方案
+
+---
+
+## 2026-05-03 回复质量修复：禁止括号动作描述 + 禁止提及表情包发送
+
+**变更类型**：bugfix
+
+**内容**：
+- **指令强化**（`config/soul/instruction.md`）：
+  - send_sticker 规则扩展：明确列出禁止的表述（"（已发送表情包）""表情包补上啦"等），规定发送后若无话可说就 pass_turn
+  - 新增"括号动作描述"禁令："（揉眼睛）""（好困）""（笑瘫.jpg）""（身体好沉）"等括号舞台提示一律禁止；状态通过语气传达，不通过括号里的字面描述
+- **代码安全网**（`services/llm/client.py`）：
+  - 新增 `_strip_stage_direction()` 函数：用正则匹配并移除中文括号（）+半角括号()中的动作/状态描述
+  - 新增 `_clean_reply()` 统一清洗管线：markdown strip + stage direction strip
+  - 所有回复路径（`if not tool_uses` 和 `tool loop exhausted`）均改用 `_clean_reply`
+  - 正则区分动作括号与颜文字（(≧▽≦)、(◕‿◕)、(｡･ω･｡) 保留不删）；区分动作括号与自然语中括号（"我姐姐（就是上次那个）" 保留不删）
+  - 动作关键词覆盖：困累饿躺趴揉打眨伸爬走跑跳坐站睡抱推拉哭笑叹捂挥滚晃闹踢踹蹲跪等
+
+**影响范围**：`config/soul/instruction.md`、`services/llm/client.py`
+
+**验证**：16 条测试用例全部通过（动作括号正确移除、颜文字保留、自然语括号保留）；659 passed, 8 预存失败
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 B站搜索误匹配修复
+
+**变更类型**：bugfix
+
+**内容**：
+- **搜索不再盲取第一项**（`plugins/bilibili.py`）：`_search_video()` 改取前10条结果，用 `_title_match_score()` 逐条评分后选最高分
+  - 根因：QQ 小程序卡片分享 B站视频时只有标题没有 BV ID，bot 通过搜索匹配。对含常见词的短标题（如"遮阳伞汽水"），B站搜索把练习室镜面排在第1、原曲排在第2，盲取 `items[0]` 导致错误匹配
+- **评分函数 `_title_match_score()`**：关键词子串匹配基础分 + 练习/教程信号惩罚（自用、镜面、扒舞、喊拍等 -0.15）+ 原曲信号奖励（pjsk、mmj、live、MV 等 +0.05）
+- **JSON 卡片额外提取 URL**：`_extract_bilibili_json_info()` 新增提取 `url`/`qqdocurl` 字段，可直接解析 BV ID 跳过搜索
+- **新增 `_resolve_urls_to_vid()`**：从 URL 解析 b23.tv 短链或完整 bilibili 链接
+
+**影响范围**：`plugins/bilibili.py`
+
+**验证**：遮阳伞汽水搜索 5 条结果中 MMJ 原曲 0.876 > 练习室镜面 0.436；659 passed, 8 预存失败
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 网页搜索修复：DuckDuckGo 更换包 + 新增 Bing API
+
+**变更类型**：bugfix
+
+**内容**：
+- **更换搜索后端**（`services/tools/web_search.py`）：重写为双后端架构
+  - 主后端：Bing Web Search API（设置 `SEARCH_API_KEY` 环境变量时启用，返回 JSON，稳定可靠）
+  - 回退：DuckDuckGo（`ddgs` 包 v9.14.1，已在 Docker 容器验证可用）
+  - 根因：`duckduckgo-search` v8.1.1 对数据中心 IP 返回空结果（DDG 反爬拦截），且该包已更名为 `ddgs`
+- **依赖更新**（`pyproject.toml`）：`duckduckgo-search>=8.1.1` → `ddgs>=9.0.0`
+- **配置**（`kernel/config.py`）：`_ENV_MAP` 新增 `SEARCH_API_KEY`
+
+**影响范围**：`services/tools/web_search.py`、`pyproject.toml`、`kernel/config.py`
+
+**验证**：Docker 内中英文查询均返回正确结果；659 passed, 8 预存失败
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 Memo 组件修复：user_msg 传递 + 缓存失效 + Dream 首轮
+
+**变更类型**：bugfix
+
+**内容**：
+- **`user_msg` 传递**（`kernel/types.py`）：`ReplyContext` 新增 `user_msg: str = ""` 字段；`client.py` 两处 `fire_on_post_reply` 构造点传入 `content_text(user_content)`；`memo.py` 使用 `ctx.user_msg` 替代硬编码 `""`
+  - 根因：MemoExtractor 只能看到 bot 回复，看不到用户说了什么（"用户: \n助手: ..."），提取质量严重受损
+- **提取后缓存失效**（`plugins/memo.py`）：`on_post_reply` 的 done callback 中清空 `_index_cache` + 调用 `_retrieval.invalidate_entity(scope, scope_id)`
+  - 根因：新卡片写入后 RetrievalGate 返回陈旧内容，最多 5 分钟 TTL 到期才恢复
+- **删除死代码**（`plugins/memo.py`）：移除 `_content_text()`（~11行，从未被调用）
+- **DreamAgent 首轮立即执行**（`plugins/dream.py`）：`_loop()` 在 `while True` sleep 前先 `await self._run()`
+  - 根因：默认 interval_hours=24 时需要等 24 小时才首次整理，改为启动即运行
+
+**影响范围**：`kernel/types.py`、`services/llm/client.py`、`plugins/memo.py`、`plugins/dream.py`
+
+**验证**：659 passed, 8 预存失败，零回归
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 颜文字强制表情包功能修复
+
+**变更类型**：bugfix
+
+**内容**：
+- `services/llm/client.py`：恢复 kaomoji→sticker 强制执行逻辑（~20行），在 `if not tool_uses:` 块中检测颜文字后注入强制 sticker 轮次
+  - 根因：2026-05-03"移除独立 Thinker + 合并 Sticker 强制执行"重构中删除了 ~23 行 enforcement 代码，`_text_has_kaomoji()` 定义但从未调用
+- 版本：bot 1.2.1 → 1.2.2，chat 插件 1.1.4 → 1.1.5，sticker 插件 1.1.1 → 1.1.2
+
+**影响范围**：`services/llm/client.py`、`plugins/chat.py`、`plugins/sticker.py`、`pyproject.toml`
+
+**验证**：659 passed, 8 预存失败，零回归
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 Dockerfile 构建源修改 + Apple Double 防护
+
+**变更类型**：infra
+
+**内容**：
+- **Dockerfile**：`COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv` → `RUN pip install uv`
+  - 根因：ghcr.io 在国内网络不可达（`i/o timeout`），改用 PyPI 安装 uv
+- **Apple Double 防护**：
+  - `~/.zshrc`：新增 `export COPYFILE_DISABLE=1`，阻止 macOS 在非 APFS 卷上生成 `._*` 资源分支文件
+  - `CLAUDE.md`：rebuild 命令改为 `dot_clean . && docker compose up bot -d --build`
+
+**影响范围**：`Dockerfile`、`~/.zshrc`、`CLAUDE.md`
+
+**回滚方案**：恢复 Dockerfile 原 `COPY --from` 行；取消 `COPYFILE_DISABLE` 环境变量
+
+---
+
 ## 2026-05-03 句尾从句标点剥离修复
 
 **变更类型**：bugfix

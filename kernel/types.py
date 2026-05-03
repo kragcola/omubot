@@ -239,6 +239,7 @@ class ReplyContext:
     group_id: str | None
     user_id: str
     reply_content: str  # 实际发送的回复文本
+    user_msg: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)  # 本轮 LLM 工具调用记录
     elapsed_ms: float = 0.0  # 本轮 LLM 调用耗时
     thinker_action: str = ""  # thinker 决策: "reply" / "wait" / "search"

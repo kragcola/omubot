@@ -31,12 +31,92 @@ _VIDEO_INFO_PROMPT = (
 )
 
 # Threshold below which keyword-based interest triggers LLM fallback.
-_INTEREST_LLM_FALLBACK = 0.2
+_INTEREST_LLM_FALLBACK = 0.6
 
 _INTEREST_LLM_PROMPT = (
     "你是鳳笑梦（Emu Otori），一个乐园偶像。"
     "你对这个视频有多感兴趣？先只输出一个0到100的整数（不要任何其他文字），然后换行再解释。"
 )
+
+# Keywords that suggest a search result is a practice/cover/dance video rather
+# than the original. Penalised during title match scoring.
+_PRACTICE_SIGNALS: list[str] = [
+    "自用", "镜面", "鏡面", "扒舞", "教程", "练习", "練習",
+    "翻跳", "喊拍", "文字教程", "侵权删",
+]
+
+# Keywords that suggest a search result is the original/official video.
+_ORIGINAL_SIGNALS: list[str] = [
+    "世界计划", "pjsk", "mmj", "wxs", "vbs", "ln", "25時",
+    "プロセカ", "colorful", "live", "公式", "mv", "original",
+    "original song", "中日字幕", "官方",
+]
+
+
+def _title_match_score(keyword: str, title_html: str) -> float:
+    """Score how well a search result title matches the intended video.
+
+    Returns 0.0-1.0. Higher = more likely to be the correct video.
+    """
+    title = _strip_html(title_html).lower()
+    kw = keyword.strip().lower()
+
+    # Exact match
+    if kw == title:
+        return 1.0
+
+    score: float
+
+    if kw in title:
+        # Keyword is a substring. Score based on how dominant it is in the title.
+        ratio = len(kw) / max(len(title), 1)
+        score = 0.6 + 0.3 * ratio
+    else:
+        # Character-level overlap for fuzzy matching
+        kw_chars = set(kw)
+        title_chars = set(title)
+        if not kw_chars:
+            return 0.0
+        score = 0.3 * (len(kw_chars & title_chars) / len(kw_chars))
+
+        # Prefix-word mismatch penalty: the first meaningful word of the
+        # keyword (the key identifier — person name, character, work title)
+        # MUST appear in the title. Otherwise this is almost certainly a
+        # different video (e.g. "萍儿的低皮质醇" mismatched to "豹的低皮质醇~").
+        prefix_word = _extract_first_word(kw)
+        if prefix_word and prefix_word not in title:
+            score *= 0.3
+
+    # Penalize practice/mirror/dance-cover signals
+    for sig in _PRACTICE_SIGNALS:
+        if sig in title:
+            score -= 0.15
+
+    # Reward original/official content signals
+    for sig in _ORIGINAL_SIGNALS:
+        if sig.lower() in title:
+            score += 0.05
+
+    return max(0.0, min(1.0, score))
+
+
+def _extract_first_word(text: str) -> str:
+    """Extract the first meaningful word from text for identity matching.
+
+    Strips leading bracket wrappers and punctuation, then returns the first
+    2-4 characters as the likely identifier (name, work title, etc.).
+    """
+    import re
+
+    # Strip leading 【...】 [...] （...） bracket wrappers
+    text = re.sub(r"^【[^】]*】", "", text)
+    text = re.sub(r"^\[[^\]]*\]", "", text)
+    text = re.sub(r"^（[^）]*）", "", text)
+    # Strip remaining punctuation / whitespace / symbols
+    text = re.sub(r"[^\w一-鿿]", "", text)
+    if len(text) >= 2:
+        return text[:3].lower()
+    return text.lower()
 
 
 class BilibiliConfig(BaseModel):
@@ -45,6 +125,10 @@ class BilibiliConfig(BaseModel):
     cover_timeout: float = 10.0
     reply_mode: str = "mood"  # "mood" | "always" | "dedicated" | "autonomous"
     bilibili_talk_value: float = 0.8  # base probability for dedicated/autonomous modes
+    interest_llm_fallback: float = 0.6  # trigger LLM eval when keyword score < this
+    high_interest_keywords: list[str] = []
+    medium_interest_keywords: list[str] = []
+    low_interest_keywords: list[str] = []
 
 
 @dataclass
@@ -128,6 +212,18 @@ _HIGH_INTEREST: list[str] = [
     "舞台", "演出", "show", "live",
     "笑容", "笑顔", "smile",
     "vocaloid", "初音未来", "miku", "镜音", "巡音", "kaito", "meiko",
+    # Project Sekai groups & characters
+    "25时", "nightcord", "ニーゴ", "25ji",
+    "vivid", "bad squad", "vbs", "ビビバス",
+    "more more jump", "mmj", "モモジャン",
+    "leo/need", "レオニ",
+    "宵崎", "朝比奈", "東雲", "东云", "暁山", "晓山",
+    "花里", "白石", "小豆沢", "青柳", "桃井",
+    "日野森", "星乃", "天馬咲希", "望月",
+    "rin", "len", "luka", "リン", "レン", "ルカ",
+    # Related content
+    "缤纷舞台", "プロジェクトセカイ",
+    "mmd", "3d", "blender",
 ]
 _MEDIUM_INTEREST: list[str] = [
     "音游", "音乐游戏", "rhythm game", "节奏游戏",
@@ -139,6 +235,8 @@ _MEDIUM_INTEREST: list[str] = [
     "杂技", "acrobatics",
     "动画", "动漫", "anime",
     "日本", "japan",
+    # Fan works & adjacent content
+    "手书", "手描き", "描いてみた",
 ]
 _LOW_INTEREST: list[str] = [
     "游戏", "game", "ゲーム",
@@ -152,17 +250,26 @@ _LOW_INTEREST: list[str] = [
 ]
 
 
-def evaluate_interest(title: str) -> float:
-    """Compute a 0.0-1.0 interest score for a video title against the bot's persona."""
+def evaluate_interest(
+    title: str,
+    high_keywords: list[str] | None = None,
+    med_keywords: list[str] | None = None,
+    low_keywords: list[str] | None = None,
+) -> float:
+    """Compute a 0.0-1.0 interest score for a video title against the bot's persona.
+
+    Keywords default to the module-level constants for backward compatibility
+    (tests, callers that don't have a BilibiliPlugin instance).
+    """
     title_lower = title.lower()
     score = 0.05  # floor — even unrecognized videos have a tiny baseline
-    for kw in _HIGH_INTEREST:
+    for kw in (high_keywords if high_keywords is not None else _HIGH_INTEREST):
         if kw in title_lower:
             score += 0.25
-    for kw in _MEDIUM_INTEREST:
+    for kw in (med_keywords if med_keywords is not None else _MEDIUM_INTEREST):
         if kw in title_lower:
             score += 0.12
-    for kw in _LOW_INTEREST:
+    for kw in (low_keywords if low_keywords is not None else _LOW_INTEREST):
         if kw in title_lower:
             score += 0.05
     return min(score, 1.0)
@@ -211,7 +318,7 @@ def format_video_summary(info: dict, cover_desc: str | None = None) -> str:
 class BilibiliPlugin(AmadeusPlugin):
     name = "bilibili"
     description = "B站视频链接识别：拉取标题/封面/简介/标签，注入消息上下文"
-    version = "1.1.0"
+    version = "1.1.2"
     priority = 190
 
     async def on_startup(self, ctx: PluginContext) -> None:
@@ -223,13 +330,22 @@ class BilibiliPlugin(AmadeusPlugin):
         self._cover_timeout = cfg.cover_timeout
         self._reply_mode = cfg.reply_mode
         self._bilibili_talk_value = cfg.bilibili_talk_value
+        self._interest_llm_fallback = cfg.interest_llm_fallback
+        self._high_keywords = cfg.high_interest_keywords
+        self._med_keywords = cfg.medium_interest_keywords
+        self._low_keywords = cfg.low_interest_keywords
         self._vision_client = getattr(ctx, "vision_client", None)
         self._llm_client = getattr(ctx, "llm_client", None)
         self._cache: dict[str, _VideoCacheEntry] = {}
 
         if self._enabled:
-            _log.info("bilibili plugin enabled | cache_ttl={}s cover_timeout={}s reply_mode={}",
-                      self._cache_ttl, self._cover_timeout, self._reply_mode)
+            _log.info(
+                "bilibili plugin enabled | cache_ttl={}s cover_timeout={}s reply_mode={} "
+                "keywords high={} med={} low={} llm_fallback={:.2f}",
+                self._cache_ttl, self._cover_timeout, self._reply_mode,
+                len(self._high_keywords), len(self._med_keywords), len(self._low_keywords),
+                self._interest_llm_fallback,
+            )
         else:
             _log.info("bilibili plugin disabled")
 
@@ -252,12 +368,25 @@ class BilibiliPlugin(AmadeusPlugin):
         if vid is None:
             json_info = self._extract_bilibili_json_info(ctx)
             if json_info:
-                info = await self._search_video(json_info["title"])
-                if info:
-                    _log.info(
-                        "bilibili | json card resolved | title={!r} -> bvid={}",
-                        json_info["title"], info.get("bvid", "?"),
-                    )
+                # Try all URLs found in the card — QQ embeds multiple URL
+                # formats (qqdocurl, share_url, url) in different locations.
+                for card_url in json_info.get("_all_urls", []):
+                    resolved = await self._resolve_urls_to_vid(card_url)
+                    if resolved:
+                        vid = resolved
+                        _log.info(
+                            "bilibili | json card url resolved | url={!r} -> vid={}",
+                            card_url[:80], vid.key,
+                        )
+                        break
+
+                if vid is None:
+                    info = await self._search_video(json_info["title"])
+                    if info:
+                        _log.info(
+                            "bilibili | json card resolved | title={!r} -> bvid={}",
+                            json_info["title"], info.get("bvid", "?"),
+                        )
 
         if vid is None and info is None:
             return False
@@ -310,15 +439,20 @@ class BilibiliPlugin(AmadeusPlugin):
                 "video_title": title,
             }
             if self._reply_mode == "autonomous":
-                interest = evaluate_interest(title)
-                if interest < _INTEREST_LLM_FALLBACK and self._llm_client:
+                interest = evaluate_interest(
+                    title,
+                    high_keywords=getattr(self, "_high_keywords", None),
+                    med_keywords=getattr(self, "_med_keywords", None),
+                    low_keywords=getattr(self, "_low_keywords", None),
+                )
+                if interest < getattr(self, "_interest_llm_fallback", _INTEREST_LLM_FALLBACK) and self._llm_client:
                     llm_score = await self._evaluate_interest_llm(title)
                     if llm_score is not None:
                         _log.info(
                             "bilibili | vid={} keyword={:.2f} llm={:.2f} title={!r}",
                             vid_key, interest, llm_score, title[:60],
                         )
-                        interest = llm_score
+                        interest = max(interest, llm_score)
                     else:
                         _log.info("bilibili | vid={} interest={:.2f} (keyword only, LLM failed) title={!r}",
                                   vid_key, interest, title[:60])
@@ -351,7 +485,7 @@ class BilibiliPlugin(AmadeusPlugin):
             if seg_type == "json" and isinstance(seg_data, dict):
                 raw = seg_data.get("data", "")
                 if isinstance(raw, str):
-                    _log.debug("bilibili | json seg data={}", raw[:500])
+                    _log.debug("bilibili | json seg data={}", raw[:2000])
                     parts.append(raw)
             elif seg_type == "forward" and isinstance(seg_data, dict):
                 raw = seg_data.get("id", "")
@@ -364,9 +498,9 @@ class BilibiliPlugin(AmadeusPlugin):
     def _extract_bilibili_json_info(ctx: MessageContext) -> dict | None:
         """Extract B站 video metadata from a QQ mini-program JSON card.
 
-        QQ mini-program cards for B站 contain metadata (title, cover preview)
-        but NOT the video URL. Returns a dict with title/search query info,
-        or None if this isn't a B站 mini-program card.
+        QQ mini-program cards for B站 contain metadata (title, cover preview).
+        Some cards also include a URL that can be resolved to a direct BV ID.
+        Returns a dict with title/search query info, or None if this isn't a B站 card.
         """
         import json
 
@@ -395,9 +529,45 @@ class BilibiliPlugin(AmadeusPlugin):
                 continue
 
             title = detail.get("desc", "") or detail.get("title", "")
-            if isinstance(title, str) and title:
-                _log.debug("bilibili | json card bilibili appid={} title={!r}", appid, title)
-                return {"title": title, "preview": detail.get("preview", "")}
+            if not isinstance(title, str) or not title:
+                continue
+
+            result: dict = {"title": title, "preview": detail.get("preview", "")}
+
+            # Extract URL from multiple possible locations:
+            # - detail_1.url / detail_1.qqdocurl (QQ doc redirect)
+            # - detail_1.share_url (some card formats)
+            # - meta.url / meta.qqdocurl (top-level meta)
+            # - data.url / data.qqdocurl (top-level data, rare)
+            candidate_urls: list[str] = []
+            for source in (detail, meta, data):
+                if not isinstance(source, dict):
+                    continue
+                for key in ("url", "qqdocurl", "share_url"):
+                    val = source.get(key, "")
+                    if isinstance(val, str) and val.strip():
+                        candidate_urls.append(val.strip())
+
+            if candidate_urls:
+                result["url"] = candidate_urls[0]
+                result["_all_urls"] = candidate_urls
+                _log.info(
+                    "bilibili | json card urls={} | title={!r} first_url={!r}",
+                    len(candidate_urls), title, candidate_urls[0][:120],
+                )
+                for i, u in enumerate(candidate_urls[1:], start=2):
+                    _log.info("bilibili | json card url[{}]={!r}", i, u[:120])
+            else:
+                _log.info(
+                    "bilibili | json card NO url | title={!r} detail_keys={}",
+                    title, list(detail.keys()) if isinstance(detail, dict) else "n/a",
+                )
+                # Dump all field names across detail_1, meta, data for diagnosis
+                for label, src in [("detail_1", detail), ("meta", meta), ("data", data)]:
+                    if isinstance(src, dict):
+                        _log.info("bilibili | json card {} keys={}", label, list(src.keys())[:20])
+
+            return result
 
         return None
 
@@ -419,6 +589,48 @@ class BilibiliPlugin(AmadeusPlugin):
                 except Exception:
                     _log.debug("bilibili | b23.tv resolve failed: {}", short_url)
         return result
+
+    @staticmethod
+    async def _resolve_urls_to_vid(url: str) -> _VideoId | None:
+        """Try to extract a video ID from a URL string.
+
+        Handles direct bilibili URLs, b23.tv short links, and QQ document
+        redirect URLs (qqdocurl) by following HTTP redirects.
+        """
+        # Already a full bilibili URL with BV/av
+        vid = extract_video_id(url)
+        if vid:
+            return vid
+
+        # Try to resolve b23.tv short links
+        if _B23_PATTERN.search(url):
+            async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+                for m in _B23_PATTERN.finditer(url):
+                    try:
+                        resp = await client.get(f"https://b23.tv/{m.group(1)}")
+                        vid = extract_video_id(str(resp.url))
+                        if vid:
+                            return vid
+                    except Exception:
+                        pass
+
+        # Generic redirect follow for other URL shorteners / QQ doc redirects.
+        # QQ mini-program cards often give scheme-less URLs like
+        # "m.q.qq.com/a/s/..." — normalise to https first.
+        normalized = url if "://" in url else f"https://{url}"
+        if normalized.startswith("http") and not extract_video_id(normalized):
+            try:
+                async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+                    resp = await client.get(normalized)
+                    final = str(resp.url)
+                    vid = extract_video_id(final)
+                    if vid:
+                        _log.info("bilibili | url redirect resolved | {} -> {}", url[:80], final[:80])
+                        return vid
+            except Exception:
+                _log.debug("bilibili | url redirect failed | url={!r}", url[:80])
+
+        return None
 
     async def _get_video_info(self, vid: _VideoId) -> dict | None:
         """Fetch video info from bilibili API, with local cache."""
@@ -444,7 +656,11 @@ class BilibiliPlugin(AmadeusPlugin):
         return info
 
     async def _search_video(self, keyword: str) -> dict | None:
-        """Search B站 for a video by title keyword. Returns the first result, cached."""
+        """Search B站 for a video by title keyword.
+
+        Fetches top results and picks the best match by title similarity,
+        not blindly the first result.
+        """
         cache_key = f"__search__{keyword}"
         now = time.monotonic()
         entry = self._cache.get(cache_key)
@@ -469,7 +685,29 @@ class BilibiliPlugin(AmadeusPlugin):
             _log.warning("bilibili | search no results keyword={!r}", keyword)
             return None
 
-        best = items[0]
+        # Score results by title similarity and pick the best match
+        scored = [(item, _title_match_score(keyword, item.get("title", ""))) for item in items[:10]]
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        best, best_score = scored[0]
+        _log.info(
+            "bilibili | search keyword={!r} results={} best_score={:.2f} best_title={!r}",
+            keyword, len(items), best_score, _strip_html(best.get("title", ""))[:60],
+        )
+
+        # Reject when confidence is too low — a bad match is worse than no match.
+        if best_score < 0.3:
+            _log.warning(
+                "bilibili | search rejected low confidence keyword={!r} best_score={:.2f}",
+                keyword, best_score,
+            )
+            return None
+            runner_up, ru_score = scored[1]
+            _log.debug(
+                "bilibili | search runner_up score={:.2f} title={!r}",
+                ru_score, _strip_html(runner_up.get("title", ""))[:60],
+            )
+
         info = {
             "bvid": best.get("bvid", ""),
             "title": _strip_html(best.get("title", "")),

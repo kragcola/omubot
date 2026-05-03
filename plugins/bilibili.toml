@@ -7,3 +7,49 @@ cover_timeout = 10.0
 reply_mode = "autonomous"
 # 独立视频回复基础概率 (0.0-1.0)，用于 dedicated / autonomous 模式
 bilibili_talk_value = 0.8
+# 关键词兴趣分低于此阈值时，触发 LLM 二次评估
+interest_llm_fallback = 0.6
+# 高兴趣关键词（每个 +0.25，累加上限 1.0）- 标题匹配这些词说明 bot 非常关心
+high_interest_keywords = [
+    "project sekai", "プロセカ", "pjsk", "世界计划",
+    "wonderlands", "wxs",
+    "天马司", "草薙宁宁", "神代类", "凤笑梦", "emu", "otori",
+    "凤凰", "乐园", "游乐园", "奇幻乐园",
+    "舞台", "演出", "show", "live",
+    "笑容", "笑顔", "smile",
+    "vocaloid", "初音未来", "miku", "镜音", "巡音", "kaito", "meiko",
+    "25时", "nightcord", "ニーゴ", "25ji",
+    "vivid", "bad squad", "vbs", "ビビバス",
+    "more more jump", "mmj", "モモジャン",
+    "leo/need", "レオニ",
+    "宵崎", "朝比奈", "東雲", "东云", "暁山", "晓山",
+    "花里", "白石", "小豆沢", "青柳", "桃井",
+    "日野森", "星乃", "天馬咲希", "望月",
+    "rin", "len", "luka", "リン", "レン", "ルカ",
+    "缤纷舞台", "プロジェクトセカイ",
+    "mmd", "3d", "blender",
+]
+# 中等兴趣关键词（每个 +0.12）
+medium_interest_keywords = [
+    "音游", "音乐游戏", "rhythm game", "节奏游戏",
+    "翻唱", "唱见", "cover", "歌ってみた",
+    "偶像", "idol",
+    "可爱", "kawaii", "萌",
+    "鲷鱼烧", "甜食", "甜品", "甜点",
+    "元气", "活力",
+    "杂技", "acrobatics",
+    "动画", "动漫", "anime",
+    "日本", "japan",
+    "手书", "手描き", "描いてみた",
+]
+# 低兴趣关键词（每个 +0.05）
+low_interest_keywords = [
+    "游戏", "game", "ゲーム",
+    "二次元",
+    "冒险", "探险",
+    "快乐", "开心", "happy",
+    "音乐", "music", "歌",
+    "有趣", "好玩",
+    "新作", "新曲", "新歌",
+    "派对", "party",
+]

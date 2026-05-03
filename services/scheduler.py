@@ -169,16 +169,26 @@ class GroupChatScheduler:
         elif slot.consecutive_skip >= 3:
             threshold = min(1.0, base_talk_value * 2)
 
-        # Autonomous mode: apply interest score multiplier.
+        # Autonomous mode: apply interest score as a floor booster.
+        # High-interest videos (e.g. pjsk, 25时) should fire reliably even
+        # during low-activity time slots — the bot cares about the content.
         # Skip when consecutive_skip >= 5 so the forced-reply guarantee holds.
         if video_hint is not None and video_hint.get("mode") == "autonomous" and slot.consecutive_skip < 5:
             interest_score = float(video_hint.get("interest_score", 0.3))  # type: ignore[arg-type]
-            threshold *= interest_score
+            # Blend so interest acts as a floor: 0.3 + 0.7×interest maps
+            # 0.05→0.335, 0.55→0.685, 0.85→0.895, 1.0→1.0
+            threshold = base_talk_value * (0.3 + 0.7 * interest_score)
 
         # Mood-adjusted probability — good mood boosts, bad mood suppresses.
         mood_mult = self._get_mood_multiplier()
         # Time-slot multiplier — configurable per time range.
+        # High-interest videos (score >= 0.6) skip time suppression so the
+        # bot can reply to content it genuinely cares about regardless of hour.
         time_mult = self._talk_schedule.get_time_multiplier() if self._talk_schedule else 1.0
+        if video_hint is not None and video_hint.get("mode") == "autonomous":
+            interest_score = float(video_hint.get("interest_score", 0.3))  # type: ignore[arg-type]
+            if interest_score >= 0.6:
+                time_mult = 1.0
         threshold = min(1.0, threshold * mood_mult * time_mult)
 
         mode_label = video_hint.get("mode", "none") if video_hint else "none"

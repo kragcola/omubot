@@ -5,7 +5,50 @@ All notable changes to Omubot are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.1] — 2026-05-03
+## [1.2.4] — 2026-05-04
+
+### Fixed
+
+- **B站 JSON 卡片多 URL 遍历**：QQ 小程序卡片同时包含 `url`（QQ 页面）和 `share_url`（b23.tv），旧代码只取第一个导致 BV 号解析失败。改为收集全部候选 URL 并逐个尝试解析
+- **无 scheme URL 归一化**：`_resolve_urls_to_vid()` 对不含 `://` 的 URL 自动补 `https://` 前缀，确保 HTTP 重定向跟踪能够触发
+- **JSON 原始数据日志截断**：从 500 字符扩展到 2000 字符，捕获完整字段
+
+### Changed
+
+- BilibiliPlugin 1.1.1 → 1.1.2
+
+## [1.2.3] — 2026-05-03
+
+### Fixed
+
+- **B站搜索匹配**：`_title_match_score()` 新增前缀词身份匹配——关键词第一个有意义词不在候选标题中时得分 × 0.3，解决"萍儿→豹"误匹配
+- **qqdocurl 跳转跟随**：`_resolve_urls_to_vid()` 新增通用 HTTP 重定向跟随，支持 qqdocurl 等非 b23.tv 的短链跳转
+- **B站搜索置信度阈值**：搜索结果得分 < 0.3 时拒绝匹配，避免低质量结果
+
+### Changed
+
+- BilibiliPlugin 1.1.0 → 1.1.1
+
+## [1.2.2] — 2026-05-03
+
+### Added
+
+- **Thinker 预回复思考**：`config.toml` 新增 `[thinker]` 段，回复前 Thinker LLM 预判 action/thought/sticker/tone，主 LLM 收到指令后生成回复
+- **B站回复模式**：4 种 `reply_mode`（mood/always/dedicated/autonomous）接入调度器，支持视频兴趣评估驱动自主回复
+- **B站兴趣关键词配置化**：`plugins/bilibili.toml` 支持三级关键词（high/medium/low）和 LLM 回退阈值，修改无需 rebuild
+- **`/debug split` 子命令**：实时测试文本分段效果
+
+### Fixed
+
+- **Thinker image_ref 过滤**：Thinker 调用前剥离非 text 内容块，避免 `image_ref` 内部类型发往 Anthropic API 导致 400 错误
+- **句中断行合并**：`\n` 从硬分段边界降级为软提示，仅句末标点后切分
+- **文本分段重写**：替换三层函数叠加为单一 `_smart_chunk` 回溯式标点优先级切分，解决孤儿碎片问题
+
+### Changed
+
+- Bot 版本 1.2.1 → 1.2.2
+- ChatPlugin 1.1.4 → 1.1.5
+- BilibiliPlugin 1.0.0 → 1.1.0
 
 ### Fixed
 
