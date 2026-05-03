@@ -943,6 +943,10 @@ class LLMClient:
                 )
                 await self._compact_group(group_id, identity)
             messages = self._build_group_messages(group_id)
+            # Append user_content as a transient user message so directives
+            # like "respond to this video" reach the LLM in group context.
+            if user_content:
+                messages.append({"role": "user", "content": user_content})
         else:
             # Private: use ShortTermMemory
             self._short_term.add(session_id, "user", user_content)

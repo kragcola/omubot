@@ -554,22 +554,27 @@ class TestVideoHint:
         assert len(llm.calls) == 1
         await scheduler.close()
 
-    async def test_autonomous_low_interest_rarely_fires(self) -> None:
-        """Low interest score makes firing much less likely."""
-        llm = _FakeLLM(reply=None)
+    async def test_autonomous_low_interest_guaranteed_after_5_skips(self) -> None:
+        """Even with interest=0.05, consecutive_skip>=5 guarantees reply."""
+        llm = _FakeLLM(reply=None, delay=0.001)
         scheduler = GroupChatScheduler(
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
-        for _ in range(30):
+        # First 5 calls may or may not fire (low interest), but 6th is guaranteed
+        for i in range(5):
             scheduler.notify("111", video_hint={
                 "mode": "autonomous", "bilibili_talk_value": 0.5,
                 "interest_score": 0.05, "video_title": "test",
             })
             await asyncio.sleep(0.01)
-        # With threshold = 0.5 * 0.05 = 0.025, 30 shots → expected ~0.75 fires
-        # Should fire very few times
-        assert len(llm.calls) < 5
+        # After 5 skips, consecutive_skip=5 → threshold=1.0, interest skipped
+        scheduler.notify("111", video_hint={
+            "mode": "autonomous", "bilibili_talk_value": 0.5,
+            "interest_score": 0.05, "video_title": "test",
+        })
+        await asyncio.sleep(0.2)
+        assert len(llm.calls) >= 1  # guaranteed fire by the 6th attempt
         await scheduler.close()
 
     async def test_mood_mode_no_hint_is_backward_compatible(self) -> None:

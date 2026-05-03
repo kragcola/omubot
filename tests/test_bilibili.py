@@ -157,6 +157,7 @@ class TestBilibiliPlugin:
         p._reply_mode = "mood"
         p._bilibili_talk_value = 0.8
         p._vision_client = None
+        p._llm_client = None
         p._cache = {}
         return p
 
@@ -465,6 +466,7 @@ class TestBilibiliReplyHint:
         p._reply_mode = "always"
         p._bilibili_talk_value = 0.8
         p._vision_client = None
+        p._llm_client = None
         p._cache = {}
         return p
 
@@ -562,3 +564,50 @@ class TestBilibiliReplyHint:
         assert hint is not None
         assert hint["mode"] == "dedicated"
         assert "interest_score" not in hint
+
+    @pytest.mark.asyncio
+    async def test_llm_fallback_used_when_keyword_low(self, plugin: BilibiliPlugin) -> None:
+        """When keyword score < 0.2 and LLM client is available, LLM score overrides."""
+        plugin._reply_mode = "autonomous"
+        plugin._llm_client = MagicMock()
+        plugin._llm_client._call = AsyncMock(return_value={"text": " 75 "})
+
+        ctx = self._make_msg_ctx("BV1xx1234567")
+        fake_info = {
+            "title": "今日新闻联播", "duration": 60, "pic": "",
+            "stat": {"view": 100}, "desc": "", "tname": "", "owner": {},
+        }
+        with (
+            patch.object(plugin, "_get_video_info", new_callable=AsyncMock) as mock_get,
+            patch.object(plugin, "_resolve_b23_links", new_callable=AsyncMock) as mock_resolve,
+        ):
+            mock_resolve.return_value = ctx.raw_message["plain_text"]
+            mock_get.return_value = fake_info
+            await plugin.on_message(ctx)
+        hint = ctx.raw_message.get("_bilibili_reply")
+        assert hint is not None
+        assert hint["interest_score"] == 0.75  # LLM score overrides keyword floor
+        assert plugin._llm_client._call.called
+
+    @pytest.mark.asyncio
+    async def test_llm_fallback_cache_used(self, plugin: BilibiliPlugin) -> None:
+        """LLM interest evaluation result is cached."""
+        plugin._reply_mode = "autonomous"
+        plugin._llm_client = MagicMock()
+        plugin._llm_client._call = AsyncMock(return_value={"text": " 60 "})
+
+        ctx = self._make_msg_ctx("BV1xx1234567")
+        fake_info = {
+            "title": "新闻", "duration": 60, "pic": "",
+            "stat": {"view": 100}, "desc": "", "tname": "", "owner": {},
+        }
+        with (
+            patch.object(plugin, "_get_video_info", new_callable=AsyncMock) as mock_get,
+            patch.object(plugin, "_resolve_b23_links", new_callable=AsyncMock) as mock_resolve,
+        ):
+            mock_resolve.return_value = ctx.raw_message["plain_text"]
+            mock_get.return_value = fake_info
+            await plugin.on_message(ctx)
+            await plugin.on_message(ctx)
+        # LLM called only once (cached on second call)
+        assert plugin._llm_client._call.call_count == 1

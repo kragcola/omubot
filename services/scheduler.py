@@ -27,7 +27,7 @@ _L = logger.bind(channel="scheduler")
 class _GroupSlot:
     __slots__ = (
         "consecutive_skip", "debounce_task", "force_reply", "last_fire_time",
-        "last_user_id", "msg_count", "pending_at", "running_task",
+        "last_user_id", "msg_count", "pending_at", "running_task", "video_hint",
     )
 
     def __init__(self) -> None:
@@ -39,6 +39,7 @@ class _GroupSlot:
         self.force_reply: bool = False
         self.last_fire_time: float = 0.0
         self.last_user_id: str = ""
+        self.video_hint: dict[str, object] | None = None
 
 
 class GroupChatScheduler:
@@ -116,6 +117,8 @@ class GroupChatScheduler:
         slot.msg_count += 1
         if user_id:
             slot.last_user_id = user_id
+        if video_hint is not None:
+            slot.video_hint = video_hint  # always update so latest video takes priority
 
         if is_at:
             if slot.running_task and not slot.running_task.done():
@@ -166,8 +169,9 @@ class GroupChatScheduler:
         elif slot.consecutive_skip >= 3:
             threshold = min(1.0, base_talk_value * 2)
 
-        # Autonomous mode: apply interest score multiplier
-        if video_hint is not None and video_hint.get("mode") == "autonomous":
+        # Autonomous mode: apply interest score multiplier.
+        # Skip when consecutive_skip >= 5 so the forced-reply guarantee holds.
+        if video_hint is not None and video_hint.get("mode") == "autonomous" and slot.consecutive_skip < 5:
             interest_score = float(video_hint.get("interest_score", 0.3))  # type: ignore[arg-type]
             threshold *= interest_score
 
@@ -286,6 +290,10 @@ class GroupChatScheduler:
 
     async def _do_chat(self, group_id: str, *, force_reply: bool = False) -> None:
         slot = self._slots.get(group_id)
+        # Snapshot and clear video_hint so it's used exactly once.
+        video_hint = slot.video_hint if slot else None
+        if slot:
+            slot.video_hint = None
         try:
             for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
                 try:
@@ -297,11 +305,23 @@ class GroupChatScheduler:
                     async def on_segment(text: str) -> None:
                         await self._send_to_group(group_id, text)
 
+                    # Build user_content: include video title so the LLM knows
+                    # which video triggered the reply when multiple videos are in
+                    # the timeline.
+                    user_content = ""
+                    if video_hint is not None:
+                        mode = video_hint.get("mode", "")
+                        video_title = video_hint.get("video_title", "")
+                        if mode == "always":
+                            user_content = f"（看到你分享了视频《{video_title}》，回应一下）"
+                        elif mode in ("dedicated", "autonomous"):
+                            user_content = f"（看到你分享了视频《{video_title}》，聊聊你的看法）"
+
                     resolved = self._group_config.resolve(int(group_id))
                     reply = await self._llm.chat(
                         session_id=session_id,
                         user_id=uid,
-                        user_content="",
+                        user_content=user_content,
                         identity=identity,
                         group_id=group_id,
                         ctx=ctx,

@@ -30,6 +30,14 @@ _VIDEO_INFO_PROMPT = (
     "要像真人随手发的截图说明，20字以内。"
 )
 
+# Threshold below which keyword-based interest triggers LLM fallback.
+_INTEREST_LLM_FALLBACK = 0.2
+
+_INTEREST_LLM_PROMPT = (
+    "你是鳳笑梦（Emu Otori），一个乐园偶像。"
+    "你对这个视频有多感兴趣？先只输出一个0到100的整数（不要任何其他文字），然后换行再解释。"
+)
+
 
 class BilibiliConfig(BaseModel):
     enabled: bool = True
@@ -203,7 +211,7 @@ def format_video_summary(info: dict, cover_desc: str | None = None) -> str:
 class BilibiliPlugin(AmadeusPlugin):
     name = "bilibili"
     description = "B站视频链接识别：拉取标题/封面/简介/标签，注入消息上下文"
-    version = "1.0.0"
+    version = "1.1.0"
     priority = 190
 
     async def on_startup(self, ctx: PluginContext) -> None:
@@ -216,6 +224,7 @@ class BilibiliPlugin(AmadeusPlugin):
         self._reply_mode = cfg.reply_mode
         self._bilibili_talk_value = cfg.bilibili_talk_value
         self._vision_client = getattr(ctx, "vision_client", None)
+        self._llm_client = getattr(ctx, "llm_client", None)
         self._cache: dict[str, _VideoCacheEntry] = {}
 
         if self._enabled:
@@ -302,8 +311,20 @@ class BilibiliPlugin(AmadeusPlugin):
             }
             if self._reply_mode == "autonomous":
                 interest = evaluate_interest(title)
+                if interest < _INTEREST_LLM_FALLBACK and self._llm_client:
+                    llm_score = await self._evaluate_interest_llm(title)
+                    if llm_score is not None:
+                        _log.info(
+                            "bilibili | vid={} keyword={:.2f} llm={:.2f} title={!r}",
+                            vid_key, interest, llm_score, title[:60],
+                        )
+                        interest = llm_score
+                    else:
+                        _log.info("bilibili | vid={} interest={:.2f} (keyword only, LLM failed) title={!r}",
+                                  vid_key, interest, title[:60])
+                else:
+                    _log.info("bilibili | vid={} interest={:.2f} title={!r}", vid_key, interest, title[:60])
                 hint["interest_score"] = interest
-                _log.info("bilibili | vid={} interest={:.2f} title={!r}", vid_key, interest, title[:60])
             ctx.raw_message["_bilibili_reply"] = hint
 
         return False
@@ -482,6 +503,44 @@ class BilibiliPlugin(AmadeusPlugin):
             media_type=media_type,
             prompt=_VIDEO_INFO_PROMPT,
         )
+
+    async def _evaluate_interest_llm(self, title: str) -> float | None:
+        """Evaluate interest via LLM. Returns 0.0-1.0 score or None on failure.
+
+        Cached by title with the same TTL as video info.
+        """
+        cache_key = f"__interest__{title}"
+        now = time.monotonic()
+        entry = self._cache.get(cache_key)
+        if entry and (now - entry.stored_at) < self._cache_ttl:
+            _log.debug("bilibili | interest LLM cache HIT title={!r}", title)
+            return entry.info
+
+        system = [{"type": "text", "text": _INTEREST_LLM_PROMPT}]
+        messages = [{"role": "user", "content": f"视频标题：{title}\n兴趣分（0-100）："}]
+
+        try:
+            result = await self._llm_client._call(system, messages, tools=None, max_tokens=512)
+            raw = (result.get("text") or "").strip()
+            if not raw:
+                # deepseek-v4-flash may consume all tokens in thinking blocks
+                thinking_blocks = result.get("thinking_blocks") or []
+                for tb in thinking_blocks:
+                    raw += tb.get("thinking", "")
+                raw = raw.strip()
+                _log.debug("bilibili | interest LLM text empty, falling back to thinking blocks len={}", len(raw))
+            # Extract the first number (prompt asks to output number first)
+            _log.info("bilibili | interest LLM raw={!r} title={!r}", raw[:300], title[:60])
+            score = int(re.search(r"\d+", raw).group()) if re.search(r"\d+", raw) else None
+        except Exception:
+            _log.warning("bilibili | interest LLM call failed title={!r}", title)
+            return None
+
+        if score is None:
+            return None
+        clamped = max(0.0, min(1.0, score / 100.0))
+        self._cache[cache_key] = _VideoCacheEntry(info=clamped, stored_at=now)
+        return clamped
 
     def _inject_summary(self, ctx: MessageContext, summary: str) -> None:
         """Append video summary to message segments so _render_message picks it up."""
