@@ -1,0 +1,9 @@
+enabled = true
+# 本地缓存视频信息，避免重复请求（秒）
+cache_ttl = 3600
+# 封面描述超时（秒）
+cover_timeout = 10.0
+# 视频回复模式: "mood" (跟随心情) | "always" (必回复) | "dedicated" (专门频率) | "autonomous" (自主兴趣)
+reply_mode = "autonomous"
+# 独立视频回复基础概率 (0.0-1.0)，用于 dedicated / autonomous 模式
+bilibili_talk_value = 0.8

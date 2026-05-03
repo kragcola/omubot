@@ -4,6 +4,100 @@
 
 ---
 
+## 2026-05-03 B站插件回复模式 + HTML 标签修复 + 兴趣评估
+
+**变更类型**：feature + bugfix
+
+**内容**：
+- 新增 4 种视频回复模式（`plugins/bilibili.toml` → `reply_mode`）：
+  - `mood`（默认）：跟随主 bot 心情/时段概率，不改 scheduler 行为
+  - `always`：检测到视频即强制回复，绕过 proactive/at_only/概率/interval 全部限制
+  - `dedicated`：使用独立概率 `bilibili_talk_value`（默认 0.8），心情/时段乘数照常
+  - `autonomous`：在 dedicated 基础上 × 兴趣分（关键词匹配 bot 人设，高分视频回复率更高）
+- 新增 `evaluate_interest()` 函数：三级关键词表（高/中/低权重），匹配视频标题计算 0-1 兴趣分
+- 数据流：bilibili.on_message() → raw_message["_bilibili_reply"] hint → router 提取 → scheduler.notify(video_hint=...)
+- Scheduler 适配：notify() 新增可选 video_hint 参数，"always" 模式类似 @ 直接 fire
+- 修复 B 站搜索 API 返回 HTML 标签（`<em class="keyword">`）导致 loguru 格式解析崩溃
+- 修复 plain_text 被覆盖导致用户原文丢失
+- 新增 15 个测试（7 兴趣评估 + 4 reply hint + 9 scheduler 集成），总计 88 passed
+
+**影响范围**：`plugins/bilibili.py`、`plugins/bilibili.toml`、`services/scheduler.py`、`kernel/router.py`、`tests/test_bilibili.py`、`tests/test_scheduler.py`
+
+**回滚方案**：`reply_mode = "mood"` 即恢复原行为
+
+---
+
+## 2026-05-03 B站视频链接识别插件
+
+**变更类型**：新插件
+
+**内容**：
+- 新增 `plugins/bilibili.py`：BilibiliPlugin（priority=190），在消息管线中拦截B站视频链接并注入视频摘要
+- 识别格式：BV号、av号、b23.tv短链接、bilibili.com/video/ 完整链接、番剧ep/ss链接
+- b23.tv短链接自动跟随HTTP重定向解析真实URL
+- 通过 bilibili-api-python 获取视频信息（标题、时长、播放量、UP主、简介、分区）
+- 封面图下载后通过 Qwen VL (VisionClient) 描述画面内容
+- 摘要注入到消息segments中，`_render_message` 自然包含视频上下文
+- 本地缓存视频信息（默认3600秒），避免重复API请求
+- 新增配置 `plugins/bilibili.toml`：enabled / cache_ttl / cover_timeout
+- 新增依赖 `bilibili-api-python>=17.0.0`
+- 新增33个单元测试（URL匹配、摘要格式、插件集成、缓存、降级处理）
+
+**影响范围**：
+- 群聊中发送B站视频链接时，bot能理解视频内容再回复
+- API故障或封面下载失败时静默降级，不阻断消息流
+- 返回 False 不消费消息，正常流继续走 scheduler
+
+**回滚方案**：将 `plugins/bilibili.toml` 中 `enabled = false` 即可禁用插件
+
+## 2026-05-03 — 调度器日志可见性修复 + 心情缓存修复
+
+- **类型**：bugfix
+- **操作人**：Claude Code (assisted)
+- **问题**：
+  1. scheduler 频道的 skip 决策日志（prob skip / interval too short / at_only 等）使用 `logger.debug()`，被 NoneBot 的 `default_filter`（默认只放行 INFO+）拦截，开启 `scheduler = true` 后仍不可见
+  2. `mood_getter` lambda 只读 `mood_engine._cache`，重启后首次聊天触发前缓存为空 → 心情乘数始终 1.0，心情系统未实际介入概率调度
+- **修复**：
+  - `services/scheduler.py`：5 处调度决策日志从 `_L.debug()` 提升为 `_L.info()`
+  - `plugins/chat.py`：`mood_getter` lambda 改为主动调用 `mood_engine.evaluate(schedule)`，确保首次访问即计算心情（evaluate 自带 15 分钟缓存）
+- **影响范围**：`services/scheduler.py`、`plugins/chat.py`
+- **测试**：ruff 通过，26/26 scheduler 测试通过
+- **回滚**：`git revert` 即可
+
+---
+
+## 2026-05-03 — 群聊延迟优化：概率调度 + 移除独立 Thinker + 合并 Sticker 强制执行
+
+- **类型**：performance + refactor
+- **操作人**：Claude Code (assisted)
+- **背景**：群聊回复链路耗时 17-22s，根因三步串行 LLM 调用（Thinker ~3s + 主回复 ~3-5s + Sticker 强制执行 ~5s）+ 固定 debounce 5s。参考 MaiBot 的概率调度设计。
+- **变更内容**：
+  - **概率调度替代 debounce**（`services/scheduler.py`）：非@消息不再每条触发，改为 `talk_value` 概率（默认 0.3=30%）+ `planner_smooth` 最小间隔（默认 3s）。连续跳过 3 次后阈值翻倍，5 次后强制回复。删除 `_debounce()` 方法。
+  - **移除独立 Thinker**（`services/llm/client.py`）：删除 ~55 行 think() 调用块。原 Thinker 的 reply/wait/search 决策由 LLM 工具调用（`pass_turn`）自然接管。`ThinkerConfig.enabled` 默认值改为 `False`。`services/llm/thinker.py` 文件保留（向后兼容）。
+  - **合并 Sticker 强制执行**（`services/llm/client.py`）：删除 ~23 行 kaomoji 检测 + 强制 sticker 轮次。LLM 可在主回复轮次中自然调用 `send_sticker`。
+  - **配置层**（`kernel/config.py`）：`GroupConfig`/`GroupOverride`/`ResolvedGroupConfig` 新增 `talk_value`、`planner_smooth` 字段。`config.example.toml` 同步更新。
+- **版本**：bot 1.1.0→1.1.1，chat 插件 1.1.2→1.1.3
+- **效果**：延迟从 17-22s 降至 ~3-5s；非@消息回复频率大幅降低，减少无效插话。
+- **测试**：21 个 scheduler 测试重写适配新调度逻辑，ruff 通过，pyright 无新增错误
+- **回滚**：`git revert` 即可
+
+---
+
+## 2026-05-03 — 心情系统 × 概率调度联动
+
+- **类型**：feature
+- **操作人**：Claude Code (assisted)
+- **变更内容**：
+  - `services/scheduler.py`：新增 `mood_getter` 回调参数（可选），新增 `_get_mood_multiplier()` 方法，用心情三维度（valence 正负面、energy 精力、openness 开放度）计算 talk_value 乘数（范围 [0.25, 2.0]）。好心情更爱插话，坏心情更沉默。@ 消息和管理员命令不受影响。
+  - `plugins/chat.py`：创建 scheduler 时注入 mood_getter lambda，从 `ctx.mood_engine._cache` 读取当前心情。
+  - 心情乘数公式：`mood_factor = 0.4×openness + 0.3×energy + 0.3×(valence+1)/2`，`mult = 0.25 + 1.75×mood_factor`
+- **版本**：bot 1.1.0→1.1.1，chat 插件 1.1.2→1.1.3
+- **影响范围**：`services/scheduler.py`、`plugins/chat.py`、`tests/test_scheduler.py`（+5 个心情测试，共 26 个）
+- **测试**：ruff check 通过，26/26 scheduler 测试通过，582/590 全量（8 个预存失败与本次无关）
+- **回滚**：`git revert` 即可
+
+---
+
 ## 2026-05-03 — 多级命令支持 (sub-commands)
 
 - **类型**：feature

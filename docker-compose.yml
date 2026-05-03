@@ -32,6 +32,7 @@ services:
       - ./storage:/app/storage
       - ./config/config.toml:/app/config/config.toml:ro
       - ./config/.env:/app/config/.env:ro
+      - ./config/talk_schedule.json:/app/config/talk_schedule.json:ro
       - ./config/soul:/app/config/soul:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

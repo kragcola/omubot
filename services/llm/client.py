@@ -17,7 +17,6 @@ from loguru import logger as _base_logger
 
 from services.identity import Identity
 from services.llm.prompt_builder import PromptBuilder
-from services.llm.thinker import think
 from services.llm.usage import UsageTracker
 from services.media.image_cache import ImageCache
 from services.memory.card_store import CardStore, NewCard
@@ -42,7 +41,7 @@ _log_compact = _base_logger.bind(channel="compact")
 _log_debug = _base_logger.bind(channel="debug")
 
 _SEGMENT_SEP = "---cut---"
-_SEGMENT_DELAY = 1.2  # seconds between segment sends (human-like pacing)
+_SEGMENT_DELAY = 0.8  # seconds between segment sends (human-like pacing)
 _BLANK_LINE_RE = re.compile(r"\n{2,}")
 _CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
 _CQ_KV_FIX_RE = re.compile(r",(\w+):")
@@ -176,8 +175,8 @@ def _split_segments(text: str) -> list[str]:
 
 _SENTENCE_END = re.compile(r"([。！？\n])")
 _CLAUSE_SEP = re.compile(r"([,，;；:：、])")
-_MIN_CHUNK = 4
-_MAX_CHUNK = 45
+_MIN_CHUNK = 3
+_MAX_CHUNK = 20
 
 
 def _split_on_sentence_end(text: str) -> list[str]:
@@ -1037,68 +1036,6 @@ class LLMClient:
         acc_cache_read = 0
         acc_cache_create = 0
 
-        # Pre-reply thinking phase: decide reply / wait / search before the tool loop
-        if self._thinker_enabled and not force_reply:
-            # Extract mood and affection context from system blocks so the
-            # thinker can make mood-aware decisions (energy/valence/tension).
-            mood_text = ""
-            affection_text = ""
-            state_board_text = ""
-            for block in system_blocks:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    t = block.get("text", "")
-                    if t.startswith("【当前时间】"):
-                        mood_text = t
-                    elif t.startswith("【与当前用户的关系】"):
-                        affection_text = t
-                    elif t.startswith("【当前群聊状态】"):
-                        state_board_text = t
-            if state_board_text:
-                mood_text = state_board_text + "\n\n" + mood_text
-            decision = await think(
-                self._call, messages,
-                max_tokens=self._thinker_max_tokens,
-                mood_text=mood_text,
-                affection_text=affection_text,
-                identity_name=identity.name,
-            )
-            thinker_usage = decision.usage or {}
-            thinker_elapsed = time.monotonic() - t0
-            # Record thinker call as a separate row for cache/usage visibility
-            self._record_usage(
-                call_type="thinker",
-                user_id=user_id, group_id=group_id,
-                input_tokens=thinker_usage.get("input_tokens", 0),
-                cache_read_tokens=thinker_usage.get("cache_read", 0),
-                cache_create_tokens=thinker_usage.get("cache_create", 0),
-                output_tokens=thinker_usage.get("output_tokens", 0),
-                tool_rounds=0, elapsed_s=thinker_elapsed,
-            )
-            if decision.action == "wait":
-                _log_msg_out.info(
-                    "thinker wait | session={} thought={!r} elapsed={:.1f}s",
-                    session_id, decision.thought, thinker_elapsed,
-                )
-                if is_group and group_id is not None and self._timeline is not None:
-                    self._timeline.set_input_tokens(group_id, 0)
-                self._prompt.rewind_retrieval_turn(session_id)
-                return None
-            # Append thought as a system hint so sticker rules still apply
-            _log_thinking.info(
-                "thinker | action={} thought={!r} session={}",
-                decision.action, decision.thought, session_id,
-            )
-            system_blocks = [*system_blocks, {
-                "type": "text",
-                "text": f"[思考指引] {decision.thought}\n"
-                        f"注意：以上是思考方向，具体回复时仍需遵循所有指令（包括表情包使用规则）。",
-            }]
-
-        # force_reply: skip thinker and ensure a response (used for @ mentions / debug).
-        # The debug block injection is handled separately by ChatPlugin._handle_debug
-        # which passes force_reply=True with a pre-built debug system block.
-        # Note: force_reply no longer bypasses _split_naturally — all replies are segmented.
-
         _sticker_sent = False
 
         for round_i in range(MAX_TOOL_ROUNDS):
@@ -1129,30 +1066,6 @@ class LLMClient:
 
             if not tool_uses:
                 reply = _strip_markdown(text or "...")
-
-                # Kaomoji→sticker enforcement: if the LLM used emoticons but
-                # didn't send a sticker, force one more tool round.
-                if not force_reply and not _sticker_sent and _text_has_kaomoji(reply) and round_i + 1 < MAX_TOOL_ROUNDS:
-                    assistant_content = []
-                    for tb in result.get("thinking_blocks", []):
-                        assistant_content.append(tb)
-                    if text:
-                        assistant_content.append({"type": "text", "text": text})
-                    messages.append({"role": "assistant", "content": assistant_content})
-                    system_blocks = [*system_blocks, {
-                        "type": "text",
-                        "text": (
-                            "[系统指令] 你的上一条消息使用了颜文字（如(≧▽≦)/等），"
-                            "必须立即调用 send_sticker 发送一个表情包来配合你的语气。"
-                            "选择与当前情绪最匹配的表情包，只调用 send_sticker，不要再输出文字。"
-                        ),
-                    }]
-                    _log_thinking.info(
-                        "sticker enforcement | kaomoji detected, forcing round | session={}",
-                        session_id,
-                    )
-                    _sticker_sent = True  # Prevent repeated enforcement loops
-                    continue
 
                 segments = _split_naturally(reply)
                 if on_segment and len(segments) > 1:

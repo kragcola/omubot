@@ -81,6 +81,7 @@ class LogChannelConfig(BaseModel):
     system: bool = True
     debug: bool = False
     dream: bool = False
+    bilibili: bool = True
 
 
 class LogConfig(BaseModel):
@@ -111,6 +112,8 @@ class ResolvedGroupConfig(BaseModel):
 
     blocked_users: set[int] = set()
     at_only: bool = False
+    talk_value: float = 0.3
+    planner_smooth: float = 3.0
     debounce_seconds: float = 5.0
     batch_size: int = 10
     history_load_count: int = 30
@@ -122,6 +125,8 @@ class GroupOverride(BaseModel):
 
     blocked_users: list[int] = []
     at_only: bool | None = None
+    talk_value: float | None = None
+    planner_smooth: float | None = None
     debounce_seconds: float | None = None
     batch_size: int | None = None
     history_load_count: int | None = None
@@ -132,6 +137,8 @@ class GroupConfig(BaseModel):
 
     history_load_count: int = 30
     allowed_groups: list[int] = []
+    talk_value: float = 0.3
+    planner_smooth: float = 3.0
     debounce_seconds: float = 5.0
     batch_size: int = 10
     at_only: bool = False
@@ -146,6 +153,8 @@ class GroupConfig(BaseModel):
             return ResolvedGroupConfig(
                 blocked_users=base_blocked,
                 at_only=self.at_only,
+                talk_value=self.talk_value,
+                planner_smooth=self.planner_smooth,
                 debounce_seconds=self.debounce_seconds,
                 batch_size=self.batch_size,
                 history_load_count=self.history_load_count,
@@ -155,6 +164,8 @@ class GroupConfig(BaseModel):
         return ResolvedGroupConfig(
             blocked_users=base_blocked | set(o.blocked_users),
             at_only=o.at_only if o.at_only is not None else self.at_only,
+            talk_value=o.talk_value if o.talk_value is not None else self.talk_value,
+            planner_smooth=o.planner_smooth if o.planner_smooth is not None else self.planner_smooth,
             debounce_seconds=o.debounce_seconds if o.debounce_seconds is not None else self.debounce_seconds,
             batch_size=o.batch_size if o.batch_size is not None else self.batch_size,
             history_load_count=o.history_load_count if o.history_load_count is not None else self.history_load_count,
@@ -234,7 +245,7 @@ class VisionConfig(BaseModel):
 class ThinkerConfig(BaseModel):
     """Pre-reply thinking phase configuration."""
 
-    enabled: bool = True
+    enabled: bool = False
     max_tokens: int = 256
 
 

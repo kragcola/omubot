@@ -453,6 +453,9 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         if await bus.fire_on_message(msg_ctx):
             return  # consumed by an interceptor plugin
 
+        # Extract bilibili reply hint (set by BilibiliPlugin on raw_message)
+        video_hint = msg_ctx.raw_message.get("_bilibili_reply")
+
         # Check slash commands before timeline/scheduler.
         # Cancel any pending debounce so a previous message's thinker doesn't
         # fire while the user is interactively debugging.
@@ -495,7 +498,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     content="@我",
                     message_id=event.message_id,
                 )
-                ctx.scheduler.notify(group_id, is_at=is_addressed, user_id=str(event.user_id))
+                ctx.scheduler.notify(group_id, is_at=is_addressed, user_id=str(event.user_id), video_hint=video_hint)
             return
 
         preview = content if isinstance(content, str) else "".join(
@@ -513,7 +516,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             content=content,
             message_id=event.message_id,
         )
-        ctx.scheduler.notify(group_id, is_at=is_addressed, user_id=str(event.user_id))
+        ctx.scheduler.notify(group_id, is_at=is_addressed, user_id=str(event.user_id), video_hint=video_hint)
 
     # ---- group ban notice ----
 

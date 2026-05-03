@@ -23,7 +23,7 @@ _L = logger.bind(channel="system")
 
 class ChatPlugin(AmadeusPlugin):
     name = "chat"
-    version = "1.1.2"
+    version = "1.1.3"
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 
@@ -736,6 +736,9 @@ class ChatPlugin(AmadeusPlugin):
 
         # ---- scheduler ----
         from services.scheduler import GroupChatScheduler
+        from services.talk_schedule import TalkSchedule
+
+        talk_schedule = TalkSchedule("config/talk_schedule.json")
 
         ctx.scheduler = GroupChatScheduler(
             llm=llm,
@@ -743,6 +746,14 @@ class ChatPlugin(AmadeusPlugin):
             identity_mgr=identity_mgr,
             group_config=config.group,
             humanizer=humanizer,
+            talk_schedule=talk_schedule,
+            mood_getter=(
+                lambda: ctx.mood_engine.evaluate(
+                    ctx.schedule_store.current if ctx.schedule_store else None,
+                )
+                if ctx.mood_engine
+                else None
+            ),
         )
 
         _L.info("ChatPlugin startup complete")

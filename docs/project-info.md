@@ -35,7 +35,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
                       └── Omubot 三层框架
                            ├── 内核层: PluginBus · 类型契约 · 插件发现
                            ├── 服务层: LLMClient · Timeline · CardStore · Scheduler
-                           └── 插件层: 14 个可开关插件
+                           └── 插件层: 15 个可开关插件
 ```
 
 - **LLM 后端**：DeepSeek API（`api.deepseek.com/anthropic`），Anthropic Messages 兼容端点
@@ -52,7 +52,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | 系统服务 | `services/` | LLM 调用、记忆、时间线、调度器 | 可互相 import，不 import 插件 |
 | 插件 | `plugins/` | 好感度、日程、表情包、梦境等 | 只 import 内核类型 + 系统服务 |
 
-### 14 个插件一览
+### 15 个插件一览
 
 | 插件 | 优先级 | 形态 | 功能 |
 |------|--------|------|------|
@@ -70,6 +70,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | DreamPlugin | 150 | 单文件 | 梦境整合：定期整理记忆、清理表情包 |
 | EchoPlugin | 200 | 单文件 | 复读检测：5 分钟内同消息 3 次触发 |
 | ElementDetectorPlugin | 210 | 单文件 | 特殊消息元素检测 |
+| BilibiliPlugin | 190 | 单文件 | B站视频链接识别：标题/封面/简介注入 |
 
 ## 配置要点
 
@@ -79,7 +80,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | --- | --- | --- |
 | `config/.env` | NoneBot 框架层（SUPERUSERS, ONEBOT_WS_URLS） + LLM 环境变量 | `nonebot.init()` |
 | `config/config.toml` | Bot 业务层（LLM、群聊、vision、compact 等），不含插件配置 | `kernel/config.py` |
-| `plugins/<name>.toml` | 插件配置（sticker、memo、schedule、affection、dream、element_detector） | 插件 `on_startup` 中通过 `load_plugin_config()` |
+| `plugins/<name>.toml` | 插件配置（sticker、memo、schedule、affection、dream、element_detector、bilibili） | 插件 `on_startup` 中通过 `load_plugin_config()` |
 
 优先级：TOML < 环境变量 < CLI 参数
 
@@ -132,6 +133,9 @@ storage/
 | 表情包发送频率 | `plugins/sticker.toml` → `frequency` | `"frequently"` |
 | Dream Agent | `plugins/dream.toml` → `enabled` | `true`（每 24h） |
 | 用量追踪 | `[llm.usage].enabled` | `true` |
+| B站视频识别 | `plugins/bilibili.toml` → `enabled` | `true` |
+| B站回复模式 | `plugins/bilibili.toml` → `reply_mode` | `autonomous` |
+| B站回复概率 | `plugins/bilibili.toml` → `bilibili_talk_value` | `0.8` |
 | 上下文压缩 | `[compact].ratio` | `0.7` |
 | 模拟日程 | `plugins/schedule/plugin.toml` → `enabled` | `true`（每日凌晨 2:00 生成） |
 | 好感度系统 | `plugins/affection/plugin.toml` → `enabled` | `true`（每次互动 +0.8，日上限 10.0） |

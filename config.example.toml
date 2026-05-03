@@ -101,6 +101,12 @@ history_load_count = 30
 # allowed_groups = [100001, 100002]
 allowed_groups = []
 
+# 非@消息的回复概率 (0-1)。@消息始终回复。0 = 完全沉默，1 = 每条都回
+talk_value = 0.3
+
+# 两次聊天之间的最小间隔（秒），防止刷屏
+planner_smooth = 3.0
+
 # 非@消息的 debounce 等待时间（秒），等消息间隙后触发模型调用
 debounce_seconds = 5.0
 
@@ -123,6 +129,8 @@ privacy_mask = true
 # [group.overrides.100001]
 # blocked_users = [123456, 789012]
 # at_only = true
+# talk_value = 0.5
+# planner_smooth = 5.0
 # debounce_seconds = 10.0
 # batch_size = 20
 # history_load_count = 50
