@@ -173,57 +173,70 @@ def _split_segments(text: str) -> list[str]:
     return segments or [_clean_text(text)]
 
 
-_SENTENCE_END = re.compile(r"([。！？\n])")
-_CLAUSE_SEP = re.compile(r"([,，;；:：、])")
-_MIN_CHUNK = 3
+_SENTENCE_ENDING = set("。！？～…」』）\"!?~)")  # chars that terminate a thought
+_SENTENCE_BREAK = set("。！？～…!?~")  # priority 1: sentence-ending breaks
+_CLAUSE_BREAK = set("，；：、,;:")     # priority 2: clause-level breaks
+_MIN_CHUNK = 6
 _MAX_CHUNK = 20
 
 
-def _split_on_sentence_end(text: str) -> list[str]:
-    """Split a long line on 。！？ boundaries, with hard cap at _MAX_CHUNK."""
-    parts = _SENTENCE_END.split(text)
-    chunks: list[str] = []
-    buf = ""
-    for part in parts:
-        combined = buf + part
-        if len(combined) <= _MAX_CHUNK:
-            buf = combined
-        else:
-            if buf.strip():
-                chunks.append(buf.strip())
-            buf = part
-    if buf.strip():
-        chunks.append(buf.strip())
-    # Don't leave a lone delimiter as the last chunk
-    if len(chunks) >= 2 and len(chunks[-1]) == 1 and chunks[-1] in "。！？\n":
-        chunks[-2] += chunks[-1]
-        chunks.pop()
-    # Hard split: force-break any remaining chunk > _MAX_CHUNK
-    result: list[str] = []
-    for chunk in chunks:
-        if len(chunk) <= _MAX_CHUNK:
-            result.append(chunk)
-        else:
-            for i in range(0, len(chunk), _MAX_CHUNK):
-                result.append(chunk[i:i + _MAX_CHUNK])
-    return result or [text]
+def _smart_chunk(text: str, max_len: int = _MAX_CHUNK) -> list[str]:
+    """Split text into segments ≤ max_len, preferring natural punctuation breaks.
 
+    Scans backward from max_len to find the best split point:
+    1. After sentence-ending punctuation (。！？～…) — delimiter stays with preceding text
+    2. After clause punctuation (，；：、)
+    3. At a character boundary that doesn't break an English word
+    4. Hard split at max_len (last resort, should rarely fire)
 
-def _split_long_on_comma(text: str) -> list[str]:
-    """Last resort: split an overly long sentence at comma/clause boundaries."""
-    parts = _CLAUSE_SEP.split(text)
-    chunks: list[str] = []
-    buf = ""
-    for part in parts:
-        if len(buf) + len(part) <= _MAX_CHUNK:
-            buf += part
-        else:
-            if buf.strip():
-                chunks.append(buf.strip())
-            buf = part
-    if buf.strip():
-        chunks.append(buf.strip())
-    return chunks or [text]
+    A trailing segment shorter than _MIN_CHUNK is merged into the previous one.
+    """
+    segments: list[str] = []
+    t = text
+    while t:
+        if len(t) <= max_len:
+            segments.append(t)
+            break
+
+        best = 0
+        half = max_len // 2
+
+        # Priority 1: sentence-ending break
+        for i in range(max_len - 1, half - 1, -1):
+            if t[i] in _SENTENCE_BREAK:
+                best = i + 1
+                break
+
+        # Priority 2: clause break
+        if best == 0:
+            for i in range(max_len - 1, half - 1, -1):
+                if t[i] in _CLAUSE_BREAK:
+                    best = i + 1
+                    break
+
+        # Priority 3: character boundary (don't break English words)
+        if best == 0:
+            for i in range(max_len, half - 1, -1):
+                if i >= len(t):
+                    continue
+                if i > 0 and t[i - 1].isalpha() and (i < len(t) and t[i].isalpha()):
+                    continue
+                best = i
+                break
+
+        # Priority 4: hard split
+        if best == 0:
+            best = max_len
+
+        segments.append(t[:best])
+        t = t[best:].lstrip()
+
+    # Post-process: merge trailing short segment
+    if len(segments) >= 2 and len(segments[-1]) < _MIN_CHUNK:
+        segments[-2] += segments[-1]
+        segments.pop()
+
+    return segments or [text]
 
 
 def _split_naturally(text: str) -> list[str]:
@@ -244,35 +257,39 @@ def _split_naturally(text: str) -> list[str]:
 
     chunks: list[str] = []
     for para in paragraphs:
-        # Step 2: each \n is a split boundary by default
+        # Step 2: split on \n but only as a real boundary when the previous
+        # line ends with sentence-ending punctuation.  Otherwise the \n is
+        # likely a mid-sentence line-wrap from the LLM — merge the two lines.
         lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
         if not lines:
             continue
 
-        # Merge consecutive short lines to avoid single-word messages
         merged: list[str] = []
         for line in lines:
-            if merged and len(line) < _MIN_CHUNK:
-                merged[-1] += "\n" + line
-            else:
+            if not merged:
                 merged.append(line)
+            elif merged[-1] and merged[-1][-1] in _SENTENCE_ENDING:
+                # Previous line ended a thought → \n is intentional
+                merged.append(line)
+            elif len(line) < _MIN_CHUNK:
+                # Short line → fragment, always merge
+                merged[-1] += line
+            else:
+                # Previous line didn't end with sentence-ending punctuation
+                # and this line isn't trivially short — \n is mid-sentence.
+                # Merge without adding \n to preserve natural reading.
+                merged[-1] += line
 
         # Step 3: split any merged line that's still too long
         for line in merged:
             if len(line) <= _MAX_CHUNK:
                 chunks.append(line)
             else:
-                sub = _split_on_sentence_end(line)
-                for s in sub:
-                    if len(s) > _MAX_CHUNK:
-                        chunks.extend(_split_long_on_comma(s))
-                    else:
-                        chunks.append(s)
+                chunks.extend(_smart_chunk(line))
 
-    # Merge trailing punctuation-only fragment (not hard-split content)
-    if len(chunks) >= 2 and len(chunks[-1]) < _MIN_CHUNK and chunks[-1].strip() in "。！？，,；;：:、":
-        chunks[-2] += chunks[-1]
-        chunks.pop()
+    # Strip trailing clause punctuation — meaningless at end of a standalone message
+    _TRAILING_CLAUSE = "，；：、,;:"
+    chunks = [c.rstrip(_TRAILING_CLAUSE) for c in chunks]
 
     return chunks or [text]
 

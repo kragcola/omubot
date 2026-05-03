@@ -23,7 +23,7 @@ _L = logger.bind(channel="system")
 
 class ChatPlugin(AmadeusPlugin):
     name = "chat"
-    version = "1.1.3"
+    version = "1.1.4"
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 
@@ -53,6 +53,13 @@ class ChatPlugin(AmadeusPlugin):
                         description="发送表情包（指定ID或随机）",
                         usage="/debug send [stk_id|gif]",
                         aliases=["发", "发送"],
+                    ),
+                    Command(
+                        name="split",
+                        handler=self._handle_debug_split,
+                        description="测试文本分段效果",
+                        usage="/debug split <文本>",
+                        aliases=["分段", "分割"],
                     ),
                 ],
             ),
@@ -89,6 +96,22 @@ class ChatPlugin(AmadeusPlugin):
         sid = f"private_{cmd_ctx.user_id}" if cmd_ctx.is_private else f"group_{cmd_ctx.group_id}"
         user_content = cmd_ctx.args if cmd_ctx.args else "请显示当前系统状态摘要"
         has_command = bool(cmd_ctx.args)
+
+        # If the first token is a lowercase ASCII word, it's likely a mistyped
+        # subcommand — show available subcommands rather than sending to LLM.
+        if has_command:
+            first_token = cmd_ctx.args.split()[0]
+            _known_subs = {"save", "send", "split", "保存", "收录", "添加表情", "发", "发送", "分段", "分割"}
+            if first_token.isascii() and first_token.islower() and first_token not in _known_subs:
+                await cmd_ctx.bot.send(
+                    cmd_ctx.event,
+                    Message(
+                        f"未知子命令: /debug {first_token}\n"
+                        "可用: /debug save, /debug send, /debug split\n"
+                        "或输入中文问题进入 LLM 调试模式"
+                    ),
+                )
+                return
 
         # Build tool context once
         tool_ctx_obj = ToolContext(
@@ -496,6 +519,28 @@ class ChatPlugin(AmadeusPlugin):
         result = await tool.execute(tool_ctx_obj, sticker_id=stk_id)
         logger.info("debug direct send_sticker | id={} result={}", stk_id, result)
         await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[send_sticker] {result}"))
+
+    async def _handle_debug_split(self, cmd_ctx: Any) -> None:
+        """Handle /debug split — test _split_naturally on arbitrary text."""
+        from nonebot.adapters.onebot.v11 import Message
+
+        from services.llm.client import _split_naturally
+
+        text = cmd_ctx.args.strip()
+        if not text:
+            await cmd_ctx.bot.send(
+                cmd_ctx.event,
+                Message("用法: /debug split <文本>\n示例: /debug split 感觉像在看超高清的童话舞台剧！"),
+            )
+            return
+
+        segments = _split_naturally(text)
+        output = f"输入: {text}\n分段数: {len(segments)}\n---\n"
+        for i, seg in enumerate(segments, 1):
+            output += f"[{i}] {seg}\n"
+
+        logger.info("debug split | input_len={} segments={}", len(text), len(segments))
+        await cmd_ctx.bot.send(cmd_ctx.event, Message(output.strip()))
 
     async def on_startup(self, ctx: PluginContext) -> None:
         self._ctx = ctx

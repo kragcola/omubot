@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-05-03 句尾从句标点剥离修复
+
+**变更类型**：bugfix
+
+**内容**：
+- `_split_naturally()` 在 `_smart_chunk` 切分后新增从句标点剥离：`c.rstrip(_TRAILING_CLAUSE)` — 移除段尾的 `，；：、,;:`
+- 根因：`_smart_chunk` 在从句标点处切分时，标点留在前一段末尾（如"虽然我主要玩烤和邦邦，"），导致这条独立 QQ 消息末尾挂着无意义的连接符
+- 句末标点（`。！？～`）保留——它们承载语气信息；从句标点（`，；：、`）仅在连续文本中有连接作用，独立成段时剥离
+- 测试更新：`test_mid_sentence_merge` 断言 `result[0] == "恋爱捉迷藏配上AI修复"`（移除末尾逗号）
+
+**影响范围**：`services/llm/client.py`（新增 `_TRAILING_CLAUSE` 常量 + 一行 rstrip）、`tests/test_client.py`（调整 1 个断言）
+
+**验证**：659 passed, 8 预存失败（libvips + sticker），零回归
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 文本分段算法重写：回溯式标点优先级切分
+
+**变更类型**：refactor + bugfix
+
+**内容**：
+- **算法重写**（`services/llm/client.py`）：删除 `_split_on_sentence_end` + `_split_long_on_comma`（~50行），替换为 `_smart_chunk`（~55行）——回溯式标点优先级切分
+  - 优先级1：在 `。！？～…` 句末标点后切分
+  - 优先级2：在 `，；：、` 从句边界后切分
+  - 优先级3：中文字符边界（保护英文单词完整性，不撕开 "AI" 等）
+  - 优先级4：硬切（最后手段，基本不触发）
+  - 标点留在段尾而非推到段首
+  - 内置尾段合并（< `_MIN_CHUNK` = 6 的尾段合并到前一段）
+- **`～` 升级为句末标点**：从仅用于 `\n` 合并判断升级为一级切分点，与 `。！？` 同级
+- **`/debug split` 误输入保护**（`plugins/chat.py`）：`_handle_debug` 现在检测纯 ASCII 小写首词是否为已知子命令，否则提示可用子命令而非送 LLM
+- **测试**：`tests/test_client.py` 新增 4 个测试（段首无标点、英文完整性、尾段合并、精确回归），共 13 个 split 测试
+- **版本**：bot 1.2.0 → 1.2.1，chat 插件 1.1.3 → 1.1.4
+
+**影响范围**：`services/llm/client.py`、`plugins/chat.py`、`tests/test_client.py`、`pyproject.toml`
+
+**验证**：659 passed, 8 预存失败（libvips + sticker），零回归
+
+**回滚方案**：`git revert` 即可
+
+---
+
+## 2026-05-03 文本分段修复：句中断行合并 + /debug split 子命令
+
+**变更类型**：bugfix + feature
+
+**内容**：
+- **句中断行合并**（`services/llm/client.py`）：新增 `_SENTENCE_ENDING` 字符集（`。！？～…」』）\"!?~)`），`\n` 从硬分段边界降级为软提示——仅当上一行末尾有句末标点时才切分，句内换行直接合并。修复「感觉像在看超高清\n的童话舞台剧！」被切成孤儿碎片的问题
+- **`_MIN_CHUNK` 提升**：3 → 6，避免 4-5 字短片段逃脱合并逻辑
+- **超长句语义切分**：`_split_on_sentence_end` 的硬字符切分（`chunk[i:i+MAX]`）替换为 `_split_long_on_comma`（逗号层级语义切分），避免把合并后的完整句子重新撕成碎片
+- **指令更新**（`config/soul/instruction.md`）：分段指导从「换行即分段」改为「一个完整想法写完后再换行，不要在句子中途强行换行」
+- **`/debug split` 子命令**（`plugins/chat.py`）：新增 `_handle_debug_split` handler，实时测试 `_split_naturally()` 分段效果，别名 `/debug 分段`/`/debug 分割`
+- **测试**：`tests/test_client.py` 新增 `TestSplitNaturally`（9 个测试），覆盖句中断行合并、句末标点切分、`---cut---` 分隔符、长句语义切分、`_MIN_CHUNK` 合并等场景
+- **版本**：bot 1.1.1 → 1.2.0
+
+**影响范围**：`services/llm/client.py`、`config/soul/instruction.md`、`plugins/chat.py`、`tests/test_client.py`、`pyproject.toml`
+
+**回滚方案**：`git revert` 即可
+
+---
+
 ## 2026-05-03 B站插件回复模式 + HTML 标签修复 + 兴趣评估
 
 **变更类型**：feature + bugfix
