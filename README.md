@@ -3,7 +3,7 @@
 基于 NoneBot2 的三层可扩展 QQ 机器人框架。
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Ruff](https://img.shields.io/badge/lint-ruff-orange.svg)](https://github.com/astral-sh/ruff)
 
@@ -14,7 +14,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2
                         └── Omubot 三层框架
                              ├── Kernel     PluginBus · 类型契约 · 插件发现 · 指令调度
                              ├── Services   LLM · 记忆 · 时间线 · 版本 · 调度
-                             └── Plugins    15 个可开关、可插拔的功能插件
+                             └── Plugins    16 个可开关、可插拔的功能插件
 ```
 
 - **内核层** — 零 I/O，零外部依赖。定义调度规则和类型契约，不改 API
@@ -82,7 +82,8 @@ uv run python bot.py
 | HistoryLoaderPlugin | 5 | 启动时加载群历史消息 |
 | DreamPlugin | 150 | 梦境整合：定期整理记忆、清理表情包 |
 | EchoPlugin | 200 | 复读检测：5 分钟内同消息 3 次触发 |
-| ElementDetectorPlugin | 210 | 特殊消息元素检测 |
+| ElementDetectorPlugin | 210 | 特殊消息元素检测（含 LLM 模式） |
+| BilibiliPlugin | 190 | B站视频链接识别：摘要注入、兴趣评估、回复模式 |
 | DebugCommandPlugin | 300 | /plugins 查看插件列表、/version 版本检查 |
 
 ## 斜杠指令
@@ -92,6 +93,7 @@ uv run python bot.py
 | `/debug [问题]` | 管理员 | 进入调试模式，注入系统状态后单轮 LLM 回答 |
 | `/debug save [描述]` | 管理员 | 保存最近图片到表情包库（别名: 保存/收录/添加表情） |
 | `/debug send [stk_id\|gif]` | 管理员 | 发送表情包：指定ID或随机（别名: 发/发送） |
+| `/debug split <文本>` | 管理员 | 测试文本分段效果（别名: 分段/分割） |
 | `/plugins` | 管理员 | 列出所有已加载插件（名称、版本、开发者、简介） |
 | `/version` | 公开 | 查看本地版本并检查 GitHub 是否有更新 |
 
@@ -161,7 +163,7 @@ uv run pyright       # 类型检查
 ```
 kernel/         # 内核层（PluginBus、类型、配置、路由）
 services/       # 系统服务层（LLM、记忆、媒体、工具、指令、版本）
-plugins/        # 插件层（15 个可开关插件）
+plugins/        # 插件层（16 个可开关插件）
 admin/          # 管理面板（用量、配置、Soul 编辑、日志）
 docs/           # 项目文档
 wiki/           # 框架开发文档
