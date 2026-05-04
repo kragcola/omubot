@@ -320,6 +320,119 @@ async def test_migration_missing_dir(store: CardStore) -> None:
 
 
 # ------------------------------------------------------------------
+# find_similar
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_similar_match(store: CardStore) -> None:
+    await store.add_card(NewCard(category="preference", scope="user", scope_id="123", content="偏好被称呼为帆"))
+    found = await store.find_similar("user", "123", "用户偏好被称呼为帆")
+    assert found is not None
+    assert found.content == "偏好被称呼为帆"
+
+
+@pytest.mark.asyncio
+async def test_find_similar_no_match(store: CardStore) -> None:
+    await store.add_card(NewCard(category="preference", scope="user", scope_id="123", content="偏好被称呼为帆"))
+    found = await store.find_similar("user", "123", "喜欢打音游和玩啤酒烧烤")
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_find_similar_different_scope(store: CardStore) -> None:
+    await store.add_card(NewCard(category="preference", scope="user", scope_id="123", content="偏好被称呼为帆"))
+    found = await store.find_similar("user", "456", "偏好被称呼为帆")
+    assert found is None  # different user
+
+
+@pytest.mark.asyncio
+async def test_find_similar_short_content(store: CardStore) -> None:
+    await store.add_card(NewCard(category="fact", scope="user", scope_id="1", content="ab"))
+    found = await store.find_similar("user", "1", "xy")
+    assert found is None  # content too short, skipped
+
+
+@pytest.mark.asyncio
+async def test_find_similar_excludes_inactive(store: CardStore) -> None:
+    cid = await store.add_card(NewCard(category="fact", scope="user", scope_id="1", content="喜欢音游"))
+    await store.expire_card(cid)
+    found = await store.find_similar("user", "1", "喜欢音游")
+    assert found is None  # expired cards excluded
+
+
+# ------------------------------------------------------------------
+# reinforce
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reinforce_bumps_confidence(store: CardStore) -> None:
+    cid = await store.add_card(NewCard(category="fact", scope="user", scope_id="1", content="x", confidence=0.6))
+    ok = await store.reinforce(cid)
+    assert ok
+    card = await store.get_card(cid)
+    assert card.confidence == 0.65
+    assert card.last_seen_at is not None
+
+
+@pytest.mark.asyncio
+async def test_reinforce_caps_at_one(store: CardStore) -> None:
+    cid = await store.add_card(NewCard(category="fact", scope="user", scope_id="1", content="x", confidence=0.98))
+    await store.reinforce(cid, bump=0.05)
+    card = await store.get_card(cid)
+    assert card.confidence == 1.0
+
+
+@pytest.mark.asyncio
+async def test_reinforce_nonexistent(store: CardStore) -> None:
+    ok = await store.reinforce("nonexistent")
+    assert not ok
+
+
+# ------------------------------------------------------------------
+# decay_confidence
+# ------------------------------------------------------------------
+
+
+class _FakeTTLConfig:
+    def __init__(self, floor: float = 0.25, decay: float = 0.02) -> None:
+        self.confidence_floor = floor
+        self.decay_per_day = decay
+
+
+@pytest.mark.asyncio
+async def test_decay_reduces_confidence(store: CardStore) -> None:
+    cid = await store.add_card(NewCard(category="fact", scope="user", scope_id="1", content="x", confidence=0.80))
+    await store.decay_confidence(_FakeTTLConfig(floor=0.10, decay=0.10))
+    card = await store.get_card(cid)
+    assert card.confidence == pytest.approx(0.72)  # 0.80 * 0.90
+
+
+@pytest.mark.asyncio
+async def test_decay_expires_below_floor(store: CardStore) -> None:
+    cid = await store.add_card(NewCard(category="fact", scope="user", scope_id="1", content="x", confidence=0.20))
+    n = await store.decay_confidence(_FakeTTLConfig(floor=0.25, decay=0.02))
+    assert n == 1  # 0.20 < 0.25, expired immediately
+    card = await store.get_card(cid)
+    assert card.status == "expired"
+
+
+@pytest.mark.asyncio
+async def test_decay_none_config(store: CardStore) -> None:
+    n = await store.decay_confidence(None)
+    assert n == 0
+
+
+@pytest.mark.asyncio
+async def test_decay_zero_factor(store: CardStore) -> None:
+    cid = await store.add_card(NewCard(category="fact", scope="user", scope_id="1", content="x", confidence=0.80))
+    await store.decay_confidence(_FakeTTLConfig(floor=0.10, decay=0.0))
+    card = await store.get_card(cid)
+    assert card.confidence == 0.80  # unchanged
+
+
+# ------------------------------------------------------------------
 # Concurrent adds
 # ------------------------------------------------------------------
 

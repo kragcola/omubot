@@ -4,11 +4,233 @@
 
 ---
 
+## 2026-05-04 FoodPlugin 隐私隔离 + 搜索驱动 + 依赖系统
+
+**变更类型**：enhancement + fix
+
+**内容**：
+
+- **反馈窗口**：推荐后 120s 内同一用户的消息被 `on_message` 拦截，拒绝关键词（不/换/不想…）触发自动重推，无需再次 `/吃什么`
+- **搜索驱动**：推荐不再由 LLM 凭空生成，改为 DDG/Bing 搜索 → LLM 从结果中挑选，解决"永不推荐麦当劳"问题。复用 `ctx.tool_registry.get("web_search")`，不重复建造搜索
+- **隐私隔离**：
+  - `on_pre_prompt`：只在私聊注入食物偏好（之前群聊中 likes 泄露）
+  - `_read_user_prefs`：只匹配 `source="user_config"` + 精确前缀 `"喜欢吃"/"不喜欢吃"`（之前 `startswith("喜欢")` 太宽，把其他插件的偏好卡当食物偏好）
+  - `_do_recommend`：群聊中不传 likes/dislikes/location 给 LLM，只传 taste_hint + 时间 + 搜索结果；搜索词也只含时段不含位置
+  - System prompt 加 "绝对不要提及用户的偏好、地区、位置等个人信息"
+- **插件依赖系统**：
+  - FoodPlugin 声明 `dependencies = {"web_search": ">=0.1.0"}`
+  - `PluginBus._resolve_dependencies` 改为依赖缺失/禁用/版本不匹配时 **禁用** 依赖方插件（ERROR 日志），级联禁用
+  - `fire_on_message`、`fire_on_pre_prompt`、`fire_on_post_reply`、`fire_on_thinker_decision`、`fire_on_tick` 补上 `enabled` 检查（之前禁用的插件仍在跑）
+- **版本**：bot 1.2.4 → 1.2.5，FoodPlugin 0.1.0 → 0.1.1
+
+**影响范围**：`plugins/food.py`、`plugins/food.toml`、`kernel/bus.py`、`pyproject.toml`。`plugins=18` 不变。
+
+**回滚方案**：git revert 或 `plugins/food.toml` 中 `enabled = false`
+
+---
+
+## 2026-05-04 FoodPlugin: /吃什么 食物推荐插件
+
+**变更类型**：feature
+
+**内容**：
+
+- 新增 `plugins/food.py` — FoodPlugin（priority=25），命令驱动的食物推荐系统
+  - `/吃什么`（别名 `/吃`、`/c`）：根据用户偏好、地区、当前时间、可选口味倾向推荐食物
+  - `/food like/dislike/location/info/help`：管理食物偏好配置（私聊或群聊均可）
+  - 首次使用无偏好卡片时引导用户前往私聊配置，不盲目推荐
+  - 短期去重记忆（30min TTL，最多 5 条）：同一次"点餐会话"内避开已推荐食物，不会永久拉黑
+  - 推荐由 LLM 生成（內置食物知识），结合时段适配、地区、偏好、口味倾向
+- 新增 `plugins/food.toml`：插件配置（`enabled`、`recent_max=5`、`recent_ttl=1800`）
+- 偏好数据通过 CardStore（`user` scope）持久化：`preference`（喜欢/不喜欢）、`fact`（地区）、`event`（推荐历史）
+- `on_pre_prompt` 注入食物偏好块（stable 位置），群聊中隐藏忌口和地区（隐私保护）
+
+**影响范围**：`plugins/food.py`、`plugins/food.toml`。无其他文件改动（`discover_plugins` 自动发现）。`commands loaded: 6→10`。
+
+**回滚方案**：将 `plugins/food.toml` 中 `enabled = false` 即可禁用
+
+---
+
+## 2026-05-04 Bot 版本号统一
+
+**变更类型**：chore
+
+**内容**：
+
+- 将 bot 版本号从两处硬编码（`services/version.py` `VERSION = "1.1.1"`、`pyproject.toml` `version = "1.3.0"`）统一到 `pyproject.toml` 一处
+- `services/version.py` 改为运行时动态读取：优先 `importlib.metadata.version("qq-bot")`，回退解析 `pyproject.toml`，最后回退 `"0.0.0"`
+- `pyproject.toml` 版本修正为 `1.2.4`（匹配最新 git tag `v1.2.4`）
+
+**影响范围**：`/version` 命令显示、`version_summary()` 调用。此后修改版本号只需改 `pyproject.toml` 的 `[project] version`。
+
+**回滚方案**：直接恢复 git 历史
+
+---
+
+## 2026-05-04 日程触发日志 + 情感维度啰嗦度控制
+
+**变更类型**：enhancement
+
+**内容**：
+
+- 心情日志追加当前日程阶段：每次触发回复时，`on_pre_prompt` 日志从 `label=专注 energy=0.80...` 扩展为附带 `| 15:30 太阳有点晒，收拾东西走到树荫下的长椅... [专注]`
+- tone 驱动啰嗦度控制：thinker block 追加 verbosity 提示
+
+  - 元气/日常 → `回复：简短，1-2句`（娱乐化内容不废话）
+  - 认真 → `回复：可以展开，但要清晰有条理`
+  - 安慰 → `回复：可以充分表达，温暖陪伴`（情感倾诉可展开）
+- thinker block 角色代入化：`"你决定说话"` → `"（{identity.name} 此刻的内心想法）"`，sticker/tone 标签中文化
+
+**影响范围**：日程日志不再空洞；娱乐内容回复显著缩短，情感内容保留展开空间
+
+**回滚方案**：删除 verbosity hints 恢复原行为
+
+---
+
+## 2026-05-04 Phase 4: 文件知识库
+
+**变更类型**：feature
+
+**内容**：
+
+- 新增 `services/knowledge/` — 倒排关键词索引知识库，扫描 docs/*.md 按 ## 标题分块，支持中文 bigram + CJK 单字 + 英文词检索
+- `KnowledgePlugin`（priority=8）通过 `on_pre_prompt` 注入匹配的知识库块
+- `KnowledgeConfig`: `enabled`（默认 false）/ `dir` / `max_chunks`（默认 3）
+- `bot.py` 启动时初始化 `KnowledgeBase` 注入 `PluginContext`
+
+**影响范围**：知识库默认关闭需显式启用；启用后对话相关的 docs/ 内容自动注入 system prompt
+
+**回滚方案**：`[knowledge].enabled = false`
+
+---
+
+## 2026-05-04 Phase 2: 记忆去重 + 置信度衰减 + TTL 过期
+
+**变更类型**：feature
+
+**内容**：
+
+- `CardStore.find_similar()` — 基于字符 bigram 的 Jaccard 相似度去重（language-agnostic，支持中文）
+- `CardStore.reinforce()` — 匹配到旧卡时强化置信度（+0.05，上限 1.0）+ 更新 last_seen_at
+- `CardStore.decay_confidence()` — 每日对所有活跃卡片执行 `confidence *= (1 - decay_factor)`，低于 `confidence_floor` 自动过期
+- `CardStore.expire_ttl_cards()` — 按类别和 TTL 天数清理过期卡片
+- `MemoPlugin.extract_after_turn()` — 提取前调用 `find_similar`，命中 → reinforce，未命中 → add_card；status 类别设 `ttl_turns=10`
+- `DreamAgent._run()` — LLM 整合前先执行 TTL 过期 + 置信度衰减
+
+**影响范围**：备忘卡片不再出现重复；长期未确认的推测自动淘汰
+
+**回滚方案**：`CardTTLConfig.decay_per_day` 设为 0 即关闭衰减
+
+---
+
+## 2026-05-04 Phase 1: 多 LLM 后端 Provider 抽象
+
+**变更类型**：refactor
+
+**内容**：
+
+- 新增 `services/llm/provider.py` — `LLMProvider` 抽象基类 + `extract_text()` / `build_assistant_message()` / `create_provider()` 工厂
+- 新增 `services/llm/providers/anthropic.py` — Anthropic Messages API provider
+- 新增 `services/llm/providers/openai.py` — OpenAI Chat Completions API provider（含 tool 格式转换、reasoning_content 处理）
+- `LLMClient` 按 `api_format` 选择 provider，`_call()` 委托 provider 构建请求/解析 SSE
+- 删除 `services/llm/client.py` 中独立 `call_api()` 函数（~125 行）和 4 处 inline `thinking_blocks` 处理
+- `LLMConfig` 新增 `api_format: str = "anthropic"`，环境变量 `LLM_API_FORMAT` 可切换
+
+**影响范围**：LLM 调用路径全部重构；thinking_blocks 回显逻辑集中在 provider；支付 OpenAI 兼容端点接入能力
+
+**回滚方案**：`api_format` 保持 `"anthropic"` 即与原行为一致
+
+---
+
+## 2026-05-04 Phase 3+4: 高危工具审批 + 文件知识库
+
+**变更类型**：feature
+
+**内容**：
+
+- Phase 3: Tool 基类新增 `is_dangerous` 标记，ToolContext 新增 `admin_approved` 字段
+
+  - ToolRegistry.call() 执行前检查：危险工具 + 未审批 → 返回"需管理员审批"
+  - MuteUserTool / SetTitleTool / SendGroupMsgTool 标记为 `is_dangerous = True`
+- Phase 4: 新增 `services/knowledge` — 倒排关键词索引知识库
+
+  - 扫描 docs/*.md，按 ## 标题分块，支持中文 bigram + CJK 单字 + 英文词检索
+  - KnowledgePlugin（priority=8）通过 on_pre_prompt 注入匹配的知识库块
+  - KnowledgeConfig: `enabled`（默认 false）/ `dir` / `max_chunks`
+
+**影响范围**：所有危险工具调用需 admin_approved 上下文；知识库默认关闭，需显式启用
+
+**回滚方案**：回退至 272bfb7 即可（Phase 3/4 无破坏性变更）
+
+---
+
+## 2026-05-04 群聊记忆/昵称隔离 + JSON 配置 + Web 管理 + 卡片 TTL
+
+**变更类型**：feature
+
+**内容**：
+
+- **昵称 per-group 隔离**（affection 1.1.2→1.1.3）：
+  - `group_nickname` 单值改为 `group_nicknames: dict[str, str]`（key=group_id）
+  - 兼容旧数据：`_load_from_disk` 自动迁移旧 `group_nickname` → `group_nicknames["*"]`
+  - `resolve_nickname` 按 group_id 查找，fallback 到 `"*"`
+  - 涉及：`models.py`、`store.py`、`engine.py`、`plugin.py`、`affection_tools.py`、`client.py`
+- **记忆 Pool 系统**（memo 1.1.3→1.1.4）：
+  - `GroupMemoryConfig`（`config/group-memory.json`）支持 `global`/`per_group`/`pool` 三种模式
+  - `CardStore.build_entity_prompt()` 接受 `pool_group_ids`，pool 模式下合并多群卡片
+  - `MemoPlugin.on_pre_prompt()` 从 config 解析 pool 配置传入
+- **JSON 配置热加载**（`kernel/config.py`）：
+  - 新增 `GroupMemoryConfig`、`MemoryPoolConfig`、`NicknameConfig`、`CardTTLConfig` Pydantic 模型
+  - 支持 `load()`/`save()`，修改无需重启
+  - `PluginContext`/`PromptContext` 新增 `group_memory_config` 字段
+- **Web Admin 记忆管理页**：
+  - `admin/routes/group_memory.py` — 配置编辑 / 卡片浏览 / 卡片过期
+  - `admin/templates/group_memory.html` — Jinja2 页面
+  - 导航栏新增"记忆"入口
+- **卡片 TTL 自动过期**（dream 1.1.2→1.1.3）：
+  - `CardStore.expire_ttl_cards(ttl_config)` — 按 default + per_category TTL 过期卡片
+  - `DreamAgent._run()` 开头调用 TTL 清理，过期卡片更新 stage
+
+**影响范围**：`kernel/config.py`、`kernel/types.py`、`services/memory/card_store.py`、`services/llm/client.py`、`plugins/memo.py`、`plugins/affection/`、`plugins/dream.py`、`services/tools/`、`admin/`、`bot.py`、`plugins/chat.py`
+
+**新增文件**：`config/group-memory.json`、`admin/routes/group_memory.py`、`admin/templates/group_memory.html`
+
+**版本**：bot 1.2.5 → 1.3.0
+
+**回滚方案**：`git revert` 即可。旧数据已自动迁移（nickname），不影响历史卡片。
+
+---
+
+## 2026-05-04 私聊/群聊称呼隔离：3 处修复
+
+**变更类型**：bugfix
+
+**内容**：
+
+- **`lookup_cards` 关键词搜索隔离**（`services/tools/memo_tools.py`）：
+  - 根因：`CardLookupTool` 在 query 模式下调用 `search_cards` 不带 scope 过滤，LLM 在群聊中搜索"称呼"能拿到私聊的 `user/*` 偏好卡片，从而在群里用私聊昵称称呼用户
+  - 修复：根据 `ctx.group_id` 判断上下文，群聊只返回 `group`（当前群）+ `global` 卡片，私聊只返回 `user`（当前用户）+ `global` 卡片；输出标注 `[私]`/`[群]`/`[全局]` 标签
+- **AffectionStore `group_nickname` 持久化修复**（`plugins/affection/store.py`）：
+  - 根因：`save()` 和 `_load_from_disk()` 均遗漏 `group_nickname` 字段，群聊昵称写入后下次加载丢失
+  - 修复：序列化/反序列化均补上 `group_nickname`
+- **Thinker 称呼上下文区分**（`services/llm/client.py`）：
+  - 根因：`_build_thinker_affection_text()` 固定用 `custom_nickname or group_nickname`，群聊中也优先拿私聊昵称
+  - 修复：新增 `in_group` 参数，群聊优先 `group_nickname`，调用处传 `is_group`
+
+**影响范围**：`services/tools/memo_tools.py`、`plugins/affection/store.py`、`services/llm/client.py`（memo 1.1.2→1.1.3、affection 1.1.1→1.1.2、chat 1.1.6→1.1.7）
+
+**版本**：bot 1.2.4 → 1.2.5
+
+**回滚方案**：`git revert` 即可
+
+---
+
 ## 2026-05-04 B站 JSON 卡片多 URL 遍历 + 无 scheme URL 修复
 
 **变更类型**：bugfix
 
 **内容**：
+
 - **JSON 卡片多 URL 遍历**（`plugins/bilibili.py`）：
   - `_extract_bilibili_json_info()` 改为收集全部候选 URL（`_all_urls`），不止取第一个
   - `on_message()` 遍历全部 URL 逐个尝试解析，任一成功即停止
@@ -35,6 +257,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - **前置标识词不匹配惩罚**（`plugins/bilibili.py`）：
   - 新增 `_extract_first_word()` — 提取关键词首个有意义的词（2-3 字，跳过括号/标点）作为身份标识
   - `_title_match_score()` 字符集模糊匹配分支：若前置标识词不在候选标题中，得分 × 0.3
@@ -58,6 +281,7 @@
 **变更类型**：bugfix + enhancement
 
 **内容**：
+
 - **Thinker 启用**：`config.toml` 新增 `[thinker]` 段（`enabled = true`）。多阶段流水线代码（Phase 1-4）虽已实现但 ThinkerConfig.enabled 默认为 false，导致预回复思考从未在生产中运行。启用后每次回复前 Thinker 预判 action/thought/sticker/tone，主 LLM 收到 `【你决定说话：...】【sticker: yes/no】【tone: ...】` 指令后再生成回复。
 - **image_ref 过滤修复**（`services/llm/client.py`）：Thinker 调用前过滤图片块，只保留 text 类型。根因：Thinker 调用在 `resolve_image_refs()` 之前，消息中的 `image_ref` 内部类型直接发给 Anthropic API → 400 unknown variant。
 - **B站兴趣关键词配置化**（`plugins/bilibili.py` + `plugins/bilibili.toml`）：`_HIGH_INTEREST`/`_MEDIUM_INTEREST`/`_LOW_INTEREST` 关键词列表和 `_INTEREST_LLM_FALLBACK` 阈值从模块级常量迁移至 TOML 配置文件。`BilibiliConfig` 新增 4 个字段，`evaluate_interest()` 支持参数传入关键词，`on_startup` 从配置读取。修改关键词或阈值只需 `restart`，无需 rebuild。
@@ -75,6 +299,7 @@
 **变更类型**：enhancement
 
 **内容**：
+
 - **Phase 1 — 接线 Thinker**：
   - `services/llm/client.py`: `chat()` 中主 LLM 调用前先调 `think()` (wait → return None; reply → 注入 thought 到 system prompt)
   - 新增 `_build_thinker_mood_text()` / `_build_thinker_affection_text()` 辅助方法
@@ -106,6 +331,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - `plugins/dream.py`: Dream Agent 工具循环中未保留 thinking_blocks → API 400
 - `services/llm/client.py`: Compaction 工具循环中未保留 thinking_blocks → API 400
 - 修复方式：两处 assistant_content 构建前追加 `result.get("thinking_blocks", [])`
@@ -123,6 +349,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - **兴趣关键词扩展**（`plugins/bilibili.py`）：
   - `_HIGH_INTEREST` 新增 Project Sekai 全组/角色：25时、nightcord、ニーゴ、25ji、vivid bad squad、vbs、ビビバス、more more jump、mmj、モモジャン、leo/need、レオニ、各角色名（宵崎、朝比奈、東雲、花里、白石 等）、rin/len/luka/リン/レン/ルカ、缤纷舞台、プロジェクトセカイ、mmd、3d、blender
   - `_MEDIUM_INTEREST` 新增：手书、手描き、描いてみた
@@ -145,6 +372,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - `plugins/echo.py`：`build_echo_key()` 新增 `json` 类型 segment 处理，从 JSON data 中提取 `prompt`/`desc` 字段生成差异化 key
   - 根因：多个不同 B站 mini-program 转发卡片的 segment type 均为 `json`，旧代码只生成 `[json]` 固定 key → 即使内容不同的视频也被识别为"同一条消息"→ 第三个转发即触发复读
   - 修复后：`[json:视频标题/prompt 文本]`，不同视频的卡片各自独立
@@ -163,6 +391,7 @@
 **变更类型**：docs
 
 **内容**：
+
 - 新建 `docs/superpowers/plans/2026-05-03-multi-stage-pipeline.md`
 - 归档四阶段实施建议：接线 Thinker → sticker 决策移入 Thinker → instruction.md 重排序 → 后处理增强
 - 未改代码，仅调研结论与方案
@@ -174,6 +403,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - **指令强化**（`config/soul/instruction.md`）：
   - send_sticker 规则扩展：明确列出禁止的表述（"（已发送表情包）""表情包补上啦"等），规定发送后若无话可说就 pass_turn
   - 新增"括号动作描述"禁令："（揉眼睛）""（好困）""（笑瘫.jpg）""（身体好沉）"等括号舞台提示一律禁止；状态通过语气传达，不通过括号里的字面描述
@@ -197,6 +427,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - **搜索不再盲取第一项**（`plugins/bilibili.py`）：`_search_video()` 改取前10条结果，用 `_title_match_score()` 逐条评分后选最高分
   - 根因：QQ 小程序卡片分享 B站视频时只有标题没有 BV ID，bot 通过搜索匹配。对含常见词的短标题（如"遮阳伞汽水"），B站搜索把练习室镜面排在第1、原曲排在第2，盲取 `items[0]` 导致错误匹配
 - **评分函数 `_title_match_score()`**：关键词子串匹配基础分 + 练习/教程信号惩罚（自用、镜面、扒舞、喊拍等 -0.15）+ 原曲信号奖励（pjsk、mmj、live、MV 等 +0.05）
@@ -216,6 +447,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - **更换搜索后端**（`services/tools/web_search.py`）：重写为双后端架构
   - 主后端：Bing Web Search API（设置 `SEARCH_API_KEY` 环境变量时启用，返回 JSON，稳定可靠）
   - 回退：DuckDuckGo（`ddgs` 包 v9.14.1，已在 Docker 容器验证可用）
@@ -236,6 +468,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - **`user_msg` 传递**（`kernel/types.py`）：`ReplyContext` 新增 `user_msg: str = ""` 字段；`client.py` 两处 `fire_on_post_reply` 构造点传入 `content_text(user_content)`；`memo.py` 使用 `ctx.user_msg` 替代硬编码 `""`
   - 根因：MemoExtractor 只能看到 bot 回复，看不到用户说了什么（"用户: \n助手: ..."），提取质量严重受损
 - **提取后缓存失效**（`plugins/memo.py`）：`on_post_reply` 的 done callback 中清空 `_index_cache` + 调用 `_retrieval.invalidate_entity(scope, scope_id)`
@@ -257,6 +490,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - `services/llm/client.py`：恢复 kaomoji→sticker 强制执行逻辑（~20行），在 `if not tool_uses:` 块中检测颜文字后注入强制 sticker 轮次
   - 根因：2026-05-03"移除独立 Thinker + 合并 Sticker 强制执行"重构中删除了 ~23 行 enforcement 代码，`_text_has_kaomoji()` 定义但从未调用
 - 版本：bot 1.2.1 → 1.2.2，chat 插件 1.1.4 → 1.1.5，sticker 插件 1.1.1 → 1.1.2
@@ -274,6 +508,7 @@
 **变更类型**：infra
 
 **内容**：
+
 - **Dockerfile**：`COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv` → `RUN pip install uv`
   - 根因：ghcr.io 在国内网络不可达（`i/o timeout`），改用 PyPI 安装 uv
 - **Apple Double 防护**：
@@ -291,6 +526,7 @@
 **变更类型**：bugfix
 
 **内容**：
+
 - `_split_naturally()` 在 `_smart_chunk` 切分后新增从句标点剥离：`c.rstrip(_TRAILING_CLAUSE)` — 移除段尾的 `，；：、,;:`
 - 根因：`_smart_chunk` 在从句标点处切分时，标点留在前一段末尾（如"虽然我主要玩烤和邦邦，"），导致这条独立 QQ 消息末尾挂着无意义的连接符
 - 句末标点（`。！？～`）保留——它们承载语气信息；从句标点（`，；：、`）仅在连续文本中有连接作用，独立成段时剥离
@@ -309,6 +545,7 @@
 **变更类型**：refactor + bugfix
 
 **内容**：
+
 - **算法重写**（`services/llm/client.py`）：删除 `_split_on_sentence_end` + `_split_long_on_comma`（~50行），替换为 `_smart_chunk`（~55行）——回溯式标点优先级切分
   - 优先级1：在 `。！？～…` 句末标点后切分
   - 优先级2：在 `，；：、` 从句边界后切分
@@ -334,6 +571,7 @@
 **变更类型**：bugfix + feature
 
 **内容**：
+
 - **句中断行合并**（`services/llm/client.py`）：新增 `_SENTENCE_ENDING` 字符集（`。！？～…」』）\"!?~)`），`\n` 从硬分段边界降级为软提示——仅当上一行末尾有句末标点时才切分，句内换行直接合并。修复「感觉像在看超高清\n的童话舞台剧！」被切成孤儿碎片的问题
 - **`_MIN_CHUNK` 提升**：3 → 6，避免 4-5 字短片段逃脱合并逻辑
 - **超长句语义切分**：`_split_on_sentence_end` 的硬字符切分（`chunk[i:i+MAX]`）替换为 `_split_long_on_comma`（逗号层级语义切分），避免把合并后的完整句子重新撕成碎片
@@ -353,6 +591,7 @@
 **变更类型**：feature + bugfix
 
 **内容**：
+
 - 新增 4 种视频回复模式（`plugins/bilibili.toml` → `reply_mode`）：
   - `mood`（默认）：跟随主 bot 心情/时段概率，不改 scheduler 行为
   - `always`：检测到视频即强制回复，绕过 proactive/at_only/概率/interval 全部限制
@@ -376,6 +615,7 @@
 **变更类型**：新插件
 
 **内容**：
+
 - 新增 `plugins/bilibili.py`：BilibiliPlugin（priority=190），在消息管线中拦截B站视频链接并注入视频摘要
 - 识别格式：BV号、av号、b23.tv短链接、bilibili.com/video/ 完整链接、番剧ep/ss链接
 - b23.tv短链接自动跟随HTTP重定向解析真实URL
@@ -1366,6 +1606,9 @@
 - **影响范围**：重启后生效。stderr 输出大幅减少，默认只看到收/发消息、工具调用、心情、好感度、日程和所有 ERROR。文件日志 `storage/logs/bot_*.log` 不受影响（始终全部 DEBUG）。无需重建镜像（restart 即可）。
 
 ---
+
+## 2026-04-29 — 节假日/真实日期感知
+
 - **类型**：功能新增
 - **操作人**：Claude Code (assisted)
 - **变更内容**：
@@ -1379,6 +1622,7 @@
 - **背景**：日程生成完全不感知真实日期（周一至周五全在上学、节假日也在上课、角色生日无人提及）。用户要求结合真实日期但保留虚拟感。
 - **影响范围**：rebuild 后生效。心情系统自动感知节假日/生日并调整情绪；日程生成 prompt 包含日期类型指引；`get_datetime` 工具返回特殊日期信息；mood_block 约增加 0~150 chars（仅特殊日期时）。无需新增配置项——日历数据硬编码，每年更新一次即可。
 - **回滚方案**：`git revert` 相关提交。
+
 ---
 ## 2026-04-29 — 称呼与好感度系统
 

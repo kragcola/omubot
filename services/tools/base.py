@@ -9,6 +9,9 @@ from services.tools.context import ToolContext
 class Tool(ABC):
     """所有工具的基类。子类实现 name / description / parameters / execute。"""
 
+    is_dangerous: bool = False
+    """危险工具标记。为 True 时需 admin_approved 上下文才能执行。"""
+
     @property
     @abstractmethod
     def name(self) -> str: ...

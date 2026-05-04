@@ -2,26 +2,28 @@
 
 from __future__ import annotations
 
-from plugins.schedule.generator import _extract_text, _parse_schedule
+from plugins.schedule.generator import _parse_schedule
+from services.llm.provider import extract_text
 
 
 class TestExtractText:
     def test_extracts_text_field(self):
         """_call_api returns {"text": "...", ...} — flat text field."""
         result = {"text": "hello world", "tool_uses": [], "thinking_blocks": []}
-        assert _extract_text(result) == "hello world"
+        assert extract_text(result) == "hello world"
 
-    def test_empty_text_falls_back_to_thinking(self):
+    def test_empty_text_returns_empty_even_with_thinking(self):
+        """Thinking blocks must never leak into user-visible text."""
         result = {
             "text": "",
             "thinking_blocks": [
                 {"type": "thinking", "thinking": "thought content"},
             ],
         }
-        assert _extract_text(result) == "thought content"
+        assert extract_text(result) == ""
 
     def test_empty_returns_empty(self):
-        assert _extract_text({"text": ""}) == ""
+        assert extract_text({"text": ""}) == ""
 
 
 class TestParseSchedule:

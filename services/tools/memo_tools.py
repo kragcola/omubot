@@ -18,6 +18,12 @@ _CATEGORY_HELP = (
     "event（事件）| promise（承诺）| fact（事实）| status（状态）"
 )
 
+_SCOPE_LABELS: dict[str, str] = {"user": "私", "group": "群", "global": "全局"}
+
+
+def _scope_label(scope: str) -> str:
+    return _SCOPE_LABELS.get(scope, scope)
+
 
 class CardLookupTool(Tool):
     """Query memory cards by entity or keyword search."""
@@ -69,12 +75,30 @@ class CardLookupTool(Tool):
         category: str | None = kwargs.get("category")
 
         if query is not None:
-            cards = await self._store.search_cards(query, limit=10)
+            # Keyword search. Restrict to in-context scopes: private chat
+            # sees only user-scope cards for the current user + global;
+            # group chat sees only group-scope cards for the current
+            # group + global. This prevents private nickname preferences
+            # from leaking into group conversations.
+            in_group = bool(ctx.group_id)
+            cards = await self._store.search_cards(query, limit=20)
             if not cards:
                 return f"未找到匹配 '{query}' 的卡片。"
-            lines = [f"搜索 '{query}' 结果 ({len(cards)} 条):"]
+            # Post-filter: keep only cards scoped to the current context
+            filtered: list[Any] = []
             for c in cards:
-                lines.append(f"  [{c.category}] {c.content} (confidence={c.confidence:.0%})")
+                if (
+                    c.scope == "global"
+                    or (in_group and c.scope == "group" and c.scope_id == ctx.group_id)
+                    or (not in_group and c.scope == "user" and c.scope_id == ctx.user_id)
+                ):
+                    filtered.append(c)
+            if not filtered:
+                return f"未找到匹配 '{query}' 的卡片（当前上下文范围内）。"
+            lines = [f"搜索 '{query}' 结果 ({len(filtered)} 条):"]
+            for c in filtered:
+                scope_label = _scope_label(c.scope)
+                lines.append(f"  [{scope_label}][{c.category}] {c.content} (confidence={c.confidence:.0%})")
             return "\n".join(lines)
 
         if scope is not None and scope_id is not None:

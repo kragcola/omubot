@@ -60,10 +60,18 @@ class AffectionEngine:
         self._store.save(profile)
         return profile
 
-    def set_group_nickname(self, user_id: str, nickname: str) -> AffectionProfile:
-        """Set a custom nickname for a user (group chat, separate from private)."""
+    def set_group_nickname(self, user_id: str, nickname: str, *, group_id: str = "") -> AffectionProfile:
+        """Set per-group nickname for a user.
+
+        With group_id: stores a group-specific nickname.
+        Without group_id: stores under "*" as a fallback for all groups.
+        """
         profile = self._store.get(user_id)
-        profile.group_nickname = nickname
+        key = group_id or "*"
+        if nickname:
+            profile.group_nicknames[key] = nickname
+        elif key in profile.group_nicknames:
+            del profile.group_nicknames[key]
         self._store.save(profile)
         return profile
 
@@ -85,15 +93,19 @@ class AffectionEngine:
         qq_nickname: str = "",
         *,
         in_group: bool = False,
+        group_id: str = "",
     ) -> str:
         """Resolve the best nickname for a user.
 
         Private: custom_nickname > QQ nickname > QQ号
-        Group:   group_nickname > group card > QQ nickname > QQ号
+        Group:   per-group nickname > legacy "*" fallback > group card > QQ nickname > QQ号
         """
         profile = self._store.get(user_id)
-        if in_group and profile.group_nickname:
-            return profile.group_nickname
+        if in_group and profile.group_nicknames:
+            if group_id and group_id in profile.group_nicknames:
+                return profile.group_nicknames[group_id]
+            if "*" in profile.group_nicknames:
+                return profile.group_nicknames["*"]
         if not in_group and profile.custom_nickname:
             return profile.custom_nickname
         if group_card:
@@ -113,21 +125,22 @@ class AffectionEngine:
     # Prompt block
     # ------------------------------------------------------------------
 
-    def build_affection_block(self, user_id: str, *, in_group: bool = False) -> str:
+    def build_affection_block(self, user_id: str, *, in_group: bool = False, group_id: str = "") -> str:
         """Build the affection_block text for system prompt injection.
 
         When *in_group* is True, relationship detail is masked to simulate
         the difference between public and private interactions.
         """
         profile = self._store.get(user_id)
+        group_nick = profile.group_nicknames.get(group_id, "") if group_id else profile.group_nicknames.get("*", "")
 
         if profile.total_interactions == 0:
             lines = [
                 "【与当前用户的关系】",
                 f"你和 QQ号{user_id} 的用户是初次对话。保持正常的友好态度。",
             ]
-            if in_group and profile.group_nickname:
-                lines.append(f"在群聊中他希望你称呼他为「{profile.group_nickname}」。")
+            if in_group and group_nick:
+                lines.append(f"在群聊中他希望你称呼他为「{group_nick}」。")
             elif not in_group and profile.custom_nickname:
                 lines.append(f"他希望你称呼他为「{profile.custom_nickname}」。")
             else:
@@ -152,8 +165,8 @@ class AffectionEngine:
                 "用「好像记得」「似乎」「印象中」等模糊语气来提及对他的了解。",
                 "但如果他主动提起私下聊过的话题或询问你，可以自然地接话——不装傻，只是不主动。",
             ]
-            if profile.group_nickname:
-                lines.append(f"在群聊中，他希望你称呼他为「{profile.group_nickname}」。这是他在群里的公开称呼，可以大方使用。")
+            if group_nick:
+                lines.append(f"在群聊中，他希望你称呼他为「{group_nick}」。这是他在群里的公开称呼，可以大方使用。")
         else:
             tier_descriptions = {
                 "陌生人": "你们还不太熟悉，保持礼貌友好的距离。",

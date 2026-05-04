@@ -2,7 +2,35 @@
 
 from __future__ import annotations
 
-VERSION = "1.1.1"
+import tomllib
+from pathlib import Path
+
+
+def _read_version() -> str:
+    """Read bot version from pyproject.toml, the single source of truth."""
+    # Try installed package metadata first (most reliable when pip-installed)
+    try:
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("qq-bot")
+    except Exception:
+        pass
+    # Fallback: parse pyproject.toml from repo root
+    try:
+        candidates = [
+            Path(__file__).parent.parent / "pyproject.toml",
+            Path.cwd() / "pyproject.toml",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                data = tomllib.loads(candidate.read_text())
+                v: str = data["project"]["version"]
+                return v
+    except Exception:
+        pass
+    return "0.0.0"
+
+
+VERSION = _read_version()
 GITHUB_REPO = "kragcola/omubot"
 
 

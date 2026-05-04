@@ -237,6 +237,7 @@ class TestBilibiliPlugin:
     @pytest.mark.asyncio
     async def test_injection_with_cover(self, plugin: BilibiliPlugin) -> None:
         ctx = self._make_msg_ctx("BV1xx1234567")
+        plugin._reply_mode = "autonomous"  # enable video_hint creation
         fake_info = {
             "title": "测试视频",
             "duration": 100,
@@ -257,8 +258,12 @@ class TestBilibiliPlugin:
             mock_cover.return_value = "一个可爱的动漫女孩"
             result = await plugin.on_message(ctx)
         assert result is False
+        # Short marker in segments (not full summary — that goes to video_hint)
         segments = ctx.raw_message["segments"]
-        assert "封面: 一个可爱的动漫女孩" in segments[0].data["text"]
+        assert "[B站视频] 《测试视频》" in segments[0].data["text"]
+        # Full context (with cover) is in _bilibili_reply for the scheduler
+        hint = ctx.raw_message.get("_bilibili_reply", {})
+        assert "封面: 一个可爱的动漫女孩" in hint.get("video_summary", "")
 
     @pytest.mark.asyncio
     async def test_cover_failure_not_fatal(self, plugin: BilibiliPlugin) -> None:

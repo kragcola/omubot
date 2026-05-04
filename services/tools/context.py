@@ -12,4 +12,5 @@ class ToolContext:
     user_id: str = ""
     group_id: str | None = None
     session_id: str = ""
+    admin_approved: bool = False
     extra: dict[str, Any] = field(default_factory=dict)

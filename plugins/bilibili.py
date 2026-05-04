@@ -15,6 +15,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext
+from services.llm.provider import extract_text
 
 _log = logger.bind(channel="bilibili")
 
@@ -318,7 +319,7 @@ def format_video_summary(info: dict, cover_desc: str | None = None) -> str:
 class BilibiliPlugin(AmadeusPlugin):
     name = "bilibili"
     description = "B站视频链接识别：拉取标题/封面/简介/标签，注入消息上下文"
-    version = "1.1.2"
+    version = "1.1.3"
     priority = 190
 
     async def on_startup(self, ctx: PluginContext) -> None:
@@ -417,17 +418,19 @@ class BilibiliPlugin(AmadeusPlugin):
             except Exception:
                 _log.debug("bilibili | vid={} cover description failed", vid_key)
 
-        # Build summary and inject into message segments
+        # Build summary and inject into message segments.
+        # Use a short marker for timeline injection — full context goes into
+        # video_hint so the scheduler can present it only for the current video.
         summary = format_video_summary(info, cover_desc)
-        self._inject_summary(ctx, summary)
+        short_marker = f"[B站视频] 《{title}》"
+        self._inject_summary(ctx, short_marker)
 
-        # Also update plain_text so the rest of the pipeline sees non-empty content.
-        # Preserve original text so user's words alongside a video card aren't lost.
+        # Keep plain_text consistent with the injected segment marker.
         original_text = ctx.raw_message.get("plain_text", "")
         if original_text:
-            ctx.raw_message["plain_text"] = f"{original_text}\n{summary}"
+            ctx.raw_message["plain_text"] = f"{original_text}\n{short_marker}"
         else:
-            ctx.raw_message["plain_text"] = summary
+            ctx.raw_message["plain_text"] = short_marker
 
         _log.info("bilibili | vid={} summary injected ({} chars)", vid_key, len(summary))
 
@@ -437,6 +440,7 @@ class BilibiliPlugin(AmadeusPlugin):
                 "mode": self._reply_mode,
                 "bilibili_talk_value": self._bilibili_talk_value,
                 "video_title": title,
+                "video_summary": summary,  # full context for scheduler's user_content
             }
             if self._reply_mode == "autonomous":
                 interest = evaluate_interest(
@@ -759,14 +763,7 @@ class BilibiliPlugin(AmadeusPlugin):
 
         try:
             result = await self._llm_client._call(system, messages, tools=None, max_tokens=512)
-            raw = (result.get("text") or "").strip()
-            if not raw:
-                # deepseek-v4-flash may consume all tokens in thinking blocks
-                thinking_blocks = result.get("thinking_blocks") or []
-                for tb in thinking_blocks:
-                    raw += tb.get("thinking", "")
-                raw = raw.strip()
-                _log.debug("bilibili | interest LLM text empty, falling back to thinking blocks len={}", len(raw))
+            raw = extract_text(result).strip()
             # Extract the first number (prompt asks to output number first)
             _log.info("bilibili | interest LLM raw={!r} title={!r}", raw[:300], title[:60])
             score = int(re.search(r"\d+", raw).group()) if re.search(r"\d+", raw) else None

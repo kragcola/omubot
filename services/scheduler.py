@@ -315,17 +315,33 @@ class GroupChatScheduler:
                     async def on_segment(text: str) -> None:
                         await self._send_to_group(group_id, text)
 
-                    # Build user_content: include video title so the LLM knows
-                    # which video triggered the reply when multiple videos are in
+                    # Build user_content: include full video context so the LLM
+                    # responds to the CURRENT video only, not previous ones in
                     # the timeline.
                     user_content = ""
                     if video_hint is not None:
                         mode = video_hint.get("mode", "")
                         video_title = video_hint.get("video_title", "")
+                        video_summary = video_hint.get("video_summary", "")
                         if mode == "always":
-                            user_content = f"（看到你分享了视频《{video_title}》，回应一下）"
+                            if video_summary:
+                                intro = (
+                                    f"（看到你分享了视频，回应一下：\n{video_summary}\n）"
+                                )
+                            else:
+                                intro = f"（看到你分享了视频《{video_title}》，回应一下）"
+                            user_content = intro
                         elif mode in ("dedicated", "autonomous"):
-                            user_content = f"（看到你分享了视频《{video_title}》，聊聊你的看法）"
+                            if video_summary:
+                                user_content = (
+                                    f"【只看此视频】刚才分享了：\n{video_summary}\n\n"
+                                    f"请只针对上面这个视频发表看法，不要讨论聊天记录中其他视频。"
+                                )
+                            else:
+                                user_content = (
+                                    f"（看到你分享了视频《{video_title}》，聊聊你的看法。"
+                                    f"注意：只聊这个视频，不要提之前分享的其他视频）"
+                                )
 
                     resolved = self._group_config.resolve(int(group_id))
                     reply = await self._llm.chat(

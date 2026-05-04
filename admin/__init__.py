@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from admin.auth import create_login_router
 from admin.routes.config_viewer import create_config_router
 from admin.routes.dashboard import create_dashboard_router
+from admin.routes.group_memory import create_group_memory_router
 from admin.routes.groups import create_groups_router
 from admin.routes.logs import create_logs_router
 from admin.routes.soul import create_soul_router
@@ -42,6 +43,8 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
     soul_dir: str = soul_cfg.dir if soul_cfg else "config/soul"
     log_cfg = getattr(config, "log", None) if config else None
     log_dir: str = log_cfg.dir if log_cfg else "storage/logs"
+    card_store = getattr(ctx, "card_store", None)
+    group_memory_config = getattr(ctx, "group_memory_config", None)
 
     if not config_path:
         config_path = os.environ.get("BOT_CONFIG_PATH", "config/config.toml")
@@ -76,5 +79,12 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
     router.include_router(create_config_router(config_path))
     router.include_router(create_soul_router(soul_dir))
     router.include_router(create_logs_router(log_dir))
+    router.include_router(
+        create_group_memory_router(
+            card_store=card_store,
+            group_memory_config=group_memory_config,
+            config_path="config/group-memory.json",
+        )
+    )
 
     return router

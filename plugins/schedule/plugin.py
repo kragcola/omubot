@@ -77,9 +77,19 @@ class SchedulePlugin(AmadeusPlugin):
             profile = self._mood_engine._cache
             if profile is not None:
                 p, _ = profile
+                slot_info = ""
+                sched = self._schedule_store.current
+                if sched is not None:
+                    from datetime import datetime
+                    from zoneinfo import ZoneInfo
+                    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+                    slot = sched.current_slot(now)
+                    if slot is not None:
+                        slot_info = f" | {slot.time} {slot.activity} [{slot.mood_hint}]"
                 _L.info(
-                    "label={} energy={:.2f} valence={:+.2f} openness={:.2f} tension={:.2f}{}",
+                    "label={} energy={:.2f} valence={:+.2f} openness={:.2f} tension={:.2f}{}{}",
                     p.label, p.energy, p.valence, p.openness, p.tension,
                     f" anomaly={p.anomaly_reason!r}" if p.anomaly_reason else "",
+                    slot_info,
                 )
             ctx.add_block(text=text, label="当前时间", position="dynamic")

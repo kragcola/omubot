@@ -68,6 +68,42 @@ async def test_registry_empty() -> None:
     assert not registry.empty
 
 
+# ── 危险工具审批 ──
+
+
+async def test_dangerous_tool_rejected_without_approval() -> None:
+    """Registry rejects dangerous tools when admin_approved is False."""
+    registry = ToolRegistry()
+    registry.register(MuteUserTool(superusers={"admin1"}))
+    ctx = ToolContext(bot=object(), user_id="admin1", group_id="123")
+    result = await registry.call("mute_user", '{"user_id":"target","duration":60}', ctx)
+    assert "需管理员审批" in result
+
+
+async def test_dangerous_tool_allowed_with_approval() -> None:
+    """Dangerous tools pass the registry check when admin_approved is True."""
+    registry = ToolRegistry()
+    registry.register(MuteUserTool(superusers={"admin1"}))
+    ctx = ToolContext(bot=object(), user_id="admin1", group_id="123", admin_approved=True)
+    result = await registry.call("mute_user", '{"user_id":"target","duration":60}', ctx)
+    # Passes registry check, reaches execute → auth fails (no real bot)
+    assert "需管理员审批" not in result
+
+
+async def test_non_dangerous_tool_unaffected() -> None:
+    """Non-dangerous tools work regardless of admin_approved flag."""
+    registry = ToolRegistry()
+    registry.register(DateTimeTool())
+    ctx = ToolContext(user_id="123", admin_approved=False)
+    result = await registry.call("get_datetime", "{}", ctx)
+    assert "20" in result
+
+
+async def test_is_dangerous_default_false() -> None:
+    """New tools default to is_dangerous=False."""
+    assert DateTimeTool().is_dangerous is False
+
+
 # ── 群管理鉴权 ──
 
 

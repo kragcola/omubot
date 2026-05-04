@@ -38,7 +38,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
                            └── 插件层: 15 个可开关插件
 ```
 
-- **LLM 后端**：DeepSeek API（`api.deepseek.com/anthropic`），Anthropic Messages 兼容端点
+- **LLM 后端**：DeepSeek API（`api.deepseek.com/anthropic`），支持 Anthropic Messages + OpenAI Chat Completions 双格式
 - **模型**：`deepseek-v4-flash`（上下文窗口 1M tokens）
 - **QQ 协议**：NapCat (NTQQ) via Docker
 - **部署**：Docker Compose（napcat + bot 双容器）
@@ -52,7 +52,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | 系统服务 | `services/` | LLM 调用、记忆、时间线、调度器 | 可互相 import，不 import 插件 |
 | 插件 | `plugins/` | 好感度、日程、表情包、梦境等 | 只 import 内核类型 + 系统服务 |
 
-### 15 个插件一览
+### 17 个插件一览
 
 | 插件 | 优先级 | 形态 | 功能 |
 |------|--------|------|------|
@@ -61,7 +61,9 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | WebSearchPlugin | 1 | 单文件 | DuckDuckGo 网页搜索 |
 | WebFetchPlugin | 1 | 单文件 | 网页内容抓取 |
 | HttpApiPlugin | 1 | 单文件 | NapCat HTTP API 调用 |
-| GroupAdminPlugin | 1 | 单文件 | 群管理（禁言、头衔、发消息） |
+| GroupAdminPlugin | 1 | 单文件 | 群管理（禁言、头衔、发消息），危险工具需审批 |
+| KnowledgePlugin | 8 | 单文件 | 知识库：扫描 docs/ 倒排索引，关键词匹配注入 prompt |
+| FoodPlugin | 25 | 单文件 | 食物推荐：/吃什么 搜索驱动推荐，支持偏好管理 |
 | StickerPlugin | 10 | 单文件 | 表情包库：收藏、检索、发送（依赖系统层 vision） |
 | MemoPlugin | 20 | 单文件 | 记忆卡片：7 类 3 作用域，检索门控 |
 | AffectionPlugin | 30 | 目录 | 好感度系统：分数、昵称、态度调节 |
@@ -80,6 +82,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | --- | --- | --- |
 | `config/.env` | NoneBot 框架层（SUPERUSERS, ONEBOT_WS_URLS） + LLM 环境变量 | `nonebot.init()` |
 | `config/config.toml` | Bot 业务层（LLM、群聊、vision、compact 等），不含插件配置 | `kernel/config.py` |
+| `config/group-memory.json` | 群聊记忆/昵称隔离配置（pool 分组、昵称映射、卡片 TTL），Web 可编辑 | `kernel/config.py` → `GroupMemoryConfig` |
 | `plugins/<name>.toml` | 插件配置（sticker、memo、schedule、affection、dream、element_detector、bilibili） | 插件 `on_startup` 中通过 `load_plugin_config()` |
 
 优先级：TOML < 环境变量 < CLI 参数
@@ -139,10 +142,15 @@ storage/
 | B站兴趣关键词 | `plugins/bilibili.toml` → `high/medium/low_interest_keywords` | 高69/中29/低19 个 |
 | B站兴趣 LLM 回退 | `plugins/bilibili.toml` → `interest_llm_fallback` | `0.6` |
 | 上下文压缩 | `[compact].ratio` | `0.7` |
+| 食物推荐 | `plugins/food.toml` → `enabled` | `true`（/吃什么 命令驱动） |
 | 模拟日程 | `plugins/schedule/plugin.toml` → `enabled` | `true`（每日凌晨 2:00 生成） |
 | 好感度系统 | `plugins/affection/plugin.toml` → `enabled` | `true`（每次互动 +0.8，日上限 10.0） |
 | 要素察觉 | `plugins/element_detector.toml` → `enabled` | `true`（2 条规则） |
 | 群聊隐私遮掩 | `[group].privacy_mask` | `true` |
+| 群聊记忆隔离 | `config/group-memory.json` → `memory.mode` | `per_group`（可选 `global`/`pool`） |
+| 群聊昵称隔离 | `config/group-memory.json` → `nickname.mode` | `per_group`（可选 `global`） |
+| 卡片 TTL 自动过期 | `config/group-memory.json` → `card_ttl_days` | `default: 0`（0=永不过期） |
+| 知识库 | `[knowledge]` → `enabled` | `false`（需显式启用） |
 | 预回复思考 | thinker（内置） | `true`（轻量 LLM 判断 reply/wait/search） |
 | 日志频道 | `[log.channels]` | 6 个默认开启，其余关闭 |
 | 插件发现 | 自动 | `bot.py` 调用 `bus.discover_plugins()` |
@@ -183,6 +191,7 @@ privacy_mask = false     # 关闭群聊隐私遮掩
 | `/admin/config` | 配置查看（config/config.toml 只读） |
 | `/admin/soul` | Soul 编辑（在线编辑 identity.md / instruction.md） |
 | `/admin/logs` | 日志查看（tail 最近 N 行） |
+| `/admin/group-memory` | 记忆管理（编辑 JSON 配置、浏览/清理卡片） |
 
 访问 `http://localhost:8081/admin/`，使用 `ADMIN_TOKEN` 环境变量登录。
 

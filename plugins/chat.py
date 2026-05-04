@@ -23,7 +23,7 @@ _L = logger.bind(channel="system")
 
 class ChatPlugin(AmadeusPlugin):
     name = "chat"
-    version = "1.1.6"
+    version = "1.1.7"
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 
@@ -740,6 +740,7 @@ class ChatPlugin(AmadeusPlugin):
             base_url=config.llm.base_url,
             api_key=config.llm.api_key,
             model=config.llm.model,
+            api_format=config.llm.api_format,
             prompt_builder=prompt_builder,
             short_term=ctx.short_term,
             tools=tools,
@@ -763,6 +764,7 @@ class ChatPlugin(AmadeusPlugin):
                 else None
             ),
             bus=ctx.bus,
+            group_memory_config=ctx.group_memory_config,
         )
 
         # ---- memo extractor ----

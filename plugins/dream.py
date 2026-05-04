@@ -18,6 +18,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from kernel.types import AmadeusPlugin, PluginContext
+from services.llm.provider import build_assistant_message
 from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
 
@@ -222,12 +223,14 @@ class DreamAgent:
         max_rounds: int = 15,
         sticker_store: StickerStore | None = None,
         on_memo_change: Callable[[], None] | None = None,
+        group_memory_config: Any = None,
     ) -> None:
         self._store = store
         self._interval_hours = interval_hours
         self._max_rounds = max_rounds
         self._sticker_store = sticker_store
         self._on_memo_change = on_memo_change
+        self._group_memory_cfg = group_memory_config
         self._running: bool = False
         self._loop_task: asyncio.Task[None] | None = None
 
@@ -267,6 +270,21 @@ class DreamAgent:
         self._running = True
         t0 = time.time()
         try:
+            # TTL expiry & confidence decay — programmatic cleanup before LLM-driven consolidation
+            if self._group_memory_cfg is not None:
+                ttl_cfg = getattr(self._group_memory_cfg, "card_ttl_days", None)
+                if ttl_cfg is not None:
+                    n_ttl = await self._store.expire_ttl_cards(ttl_cfg)
+                    if n_ttl:
+                        dream_logger.info("ttl expired {} cards", n_ttl)
+                        if self._on_memo_change:
+                            self._on_memo_change()
+                    n_decay = await self._store.decay_confidence(ttl_cfg)
+                    if n_decay:
+                        dream_logger.info("decay expired {} cards", n_decay)
+                        if self._on_memo_change:
+                            self._on_memo_change()
+
             dream_logger.info("dream starting")
             index_text = await self._store.build_global_index()
 
@@ -319,7 +337,6 @@ class DreamAgent:
             for round_i in range(self._max_rounds):
                 result = await api_call(system, messages, tools, 2048)
 
-                text: str = result["text"].strip()
                 tool_uses: list[Any] = result["tool_uses"]
 
                 if not tool_uses:
@@ -330,17 +347,7 @@ class DreamAgent:
                     break
 
                 # Build assistant message — preserve thinking blocks for DeepSeek
-                assistant_content: list[dict[str, Any]] = []
-                for tb in result.get("thinking_blocks", []):
-                    assistant_content.append(tb)
-                if text:
-                    assistant_content.append({"type": "text", "text": text})
-                for tu in tool_uses:
-                    assistant_content.append({
-                        "type": "tool_use", "id": tu.id,
-                        "name": tu.name, "input": tu.input,
-                    })
-                messages.append({"role": "assistant", "content": assistant_content})
+                messages.append({"role": "assistant", "content": build_assistant_message(result)})
 
                 # Execute tools and collect results
                 tool_results: list[dict[str, Any]] = []
@@ -472,7 +479,7 @@ class DreamAgent:
 class DreamPlugin(AmadeusPlugin):
     name = "dream"
     description = "梦境整合：定期整理记忆卡片、清理表情包库"
-    version = "1.1.2"
+    version = "1.1.3"
     priority = 150  # Background task, after business plugins
 
     def __init__(self) -> None:
@@ -496,6 +503,7 @@ class DreamPlugin(AmadeusPlugin):
             max_rounds=dream_cfg.max_rounds,
             sticker_store=ctx.sticker_store,
             on_memo_change=lambda: ctx.prompt_builder.invalidate(),
+            group_memory_config=ctx.group_memory_config,
         )
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:

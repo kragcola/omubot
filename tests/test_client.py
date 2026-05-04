@@ -9,7 +9,6 @@ import pytest
 from services.identity import Identity
 from services.llm.client import (
     LLMClient,
-    ToolUse,
     _split_naturally,
     content_text,
     fix_cq_codes,
@@ -17,6 +16,7 @@ from services.llm.client import (
     to_anthropic_message,
 )
 from services.llm.prompt_builder import PromptBuilder
+from services.llm.provider import ToolUse
 from services.llm.usage import UsageTracker
 from services.memory.card_store import CardStore
 from services.memory.short_term import ChatMessage, ShortTermMemory
@@ -129,7 +129,7 @@ async def test_group_compact_triggers_at_ratio(prompt, short_term, tools, timeli
             "output_tokens": 100, "cache_read": 0, "cache_create": 0,
         }
 
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=[mock_compact, mock_chat]):
+        with patch.object(client, "_call", new_callable=AsyncMock, side_effect=[mock_compact, mock_chat]):
             result = await client.chat(
                 session_id="group_12345", user_id="111",
                 user_content="hello", identity=_IDENTITY, group_id=gid,
@@ -153,7 +153,7 @@ async def test_group_no_compact_below_ratio(prompt, short_term, tools, timeline,
             "text": "reply", "tool_uses": [], "input_tokens": 5000,
             "output_tokens": 100, "cache_read": 0, "cache_create": 0,
         }
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=mock_chat):
+        with patch.object(client, "_call", new_callable=AsyncMock, return_value=mock_chat):
             await client.chat(
                 session_id="group_12345", user_id="111",
                 user_content="hello", identity=_IDENTITY, group_id=gid,
@@ -174,7 +174,7 @@ async def test_private_circuit_breaker_activates(prompt, short_term, tools) -> N
         client._private_compact_failures = 2
         _fill_messages(short_term, "private_100")
 
-        with patch("services.llm.client.call_api", new_callable=AsyncMock) as mock_api:
+        with patch.object(client, "_call", new_callable=AsyncMock) as mock_api:
             await client._compact("private_100")
             mock_api.assert_not_called()
 
@@ -184,7 +184,7 @@ async def test_private_compact_resets_on_success(prompt, short_term, tools) -> N
         client._private_compact_failures = 1
         _fill_messages(short_term, "private_100")
 
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=MOCK_RESULT):
+        with patch.object(client, "_call", new_callable=AsyncMock, return_value=MOCK_RESULT):
             await client._compact("private_100")
         assert client._private_compact_failures == 0
 
@@ -193,7 +193,7 @@ async def test_private_compact_increments_on_failure(prompt, short_term, tools) 
     async for client in _client(prompt, short_term, tools):
         _fill_messages(short_term, "private_100")
 
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=RuntimeError("fail")):
+        with patch.object(client, "_call", new_callable=AsyncMock, side_effect=RuntimeError("fail")):
             await client._compact("private_100")
         assert client._private_compact_failures == 1
 
@@ -211,7 +211,7 @@ async def test_group_compact_independent_counter(prompt, short_term, tools, time
 
         _fill_messages(short_term, "private_100")
 
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=MOCK_RESULT):
+        with patch.object(client, "_call", new_callable=AsyncMock, return_value=MOCK_RESULT):
             await client._compact("private_100")
         assert client._private_compact_failures == 0
 
@@ -237,7 +237,7 @@ async def test_private_compact_adds_card(prompt, short_term, tools, card_store) 
         # Second call: LLM returns the summary text
         mock_summary = {"text": "test summary", "tool_uses": [], "input_tokens": 50}
 
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=[mock_tool_call, mock_summary]):
+        with patch.object(client, "_call", new_callable=AsyncMock, side_effect=[mock_tool_call, mock_summary]):
             await client._compact("private_12345")
 
         cards = await card_store.get_entity_cards("user", "12345")
@@ -252,7 +252,7 @@ async def test_private_compact_no_card_store(prompt, short_term, tools) -> None:
         _fill_messages(short_term, "private_100")
 
         mock_result = {"text": "plain text summary", "tool_uses": [], "input_tokens": 100}
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=mock_result):
+        with patch.object(client, "_call", new_callable=AsyncMock, return_value=mock_result):
             await client._compact("private_100")
         assert short_term.get_summary("private_100") == "plain text summary"
 
@@ -289,7 +289,7 @@ async def test_group_compact_adds_cards(prompt, short_term, tools, timeline, car
         # Second call: LLM returns the summary
         mock_summary = {"text": "group summary", "tool_uses": [], "input_tokens": 50}
 
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=[mock_tool_call, mock_summary]):
+        with patch.object(client, "_call", new_callable=AsyncMock, side_effect=[mock_tool_call, mock_summary]):
             await client._compact_group(gid, _IDENTITY)
 
         cards_111 = await card_store.get_entity_cards("user", "111")
@@ -324,7 +324,7 @@ async def test_group_compact_invalid_category(prompt, short_term, tools, timelin
         }
         mock_summary = {"text": "summary", "tool_uses": [], "input_tokens": 50}
 
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=[mock_tool_call, mock_summary]):
+        with patch.object(client, "_call", new_callable=AsyncMock, side_effect=[mock_tool_call, mock_summary]):
             await client._compact_group(gid, _IDENTITY)
 
         # Valid card was written
@@ -345,7 +345,7 @@ async def test_compact_calls_on_compact(prompt, short_term, tools) -> None:
         client._on_compact = callback
         _fill_messages(short_term, "private_100")
 
-        with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=MOCK_RESULT):
+        with patch.object(client, "_call", new_callable=AsyncMock, return_value=MOCK_RESULT):
             await client._compact("private_100")
         callback.assert_called_once()
 
@@ -370,7 +370,7 @@ class TestPassTurn:
                 "cache_read": 0,
                 "cache_create": 0,
             }
-            with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=mock_result):
+            with patch.object(client, "_call", new_callable=AsyncMock, return_value=mock_result):
                 result = await client.chat(
                     session_id="group_12345",
                     user_id="111",
@@ -393,7 +393,7 @@ async def test_chat_records_usage(prompt, short_term, tools, tmp_path) -> None:
     try:
         async for client in _client(prompt, short_term, tools):
             client._usage_tracker = tracker
-            with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=MOCK_RESULT_FULL):
+            with patch.object(client, "_call", new_callable=AsyncMock, return_value=MOCK_RESULT_FULL):
                 await client.chat(
                     session_id="private_100", user_id="100",
                     user_content="hello", identity=_IDENTITY,
@@ -419,7 +419,7 @@ async def test_compact_records_usage(prompt, short_term, tools, tmp_path) -> Non
         async for client in _client(prompt, short_term, tools):
             client._usage_tracker = tracker
             _fill_messages(short_term, "private_100")
-            with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=mock_result):
+            with patch.object(client, "_call", new_callable=AsyncMock, return_value=mock_result):
                 await client._compact("private_100")
             await asyncio.sleep(0)
         rows = await tracker.query_raw("SELECT * FROM llm_calls WHERE call_type='compact'")

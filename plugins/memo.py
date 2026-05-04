@@ -112,15 +112,27 @@ class MemoExtractor:
             if not content or content == "无":
                 continue
             try:
-                await self._store.add_card(NewCard(
-                    category=category,
-                    scope="user",
-                    scope_id=user_id,
-                    content=content,
-                    confidence=0.6,
-                    source="extractor",
-                ))
-                written += 1
+                # Dedup: reinforce existing card instead of creating duplicate
+                existing = await self._store.find_similar("user", user_id, content)
+                if existing:
+                    await self._store.reinforce(existing.card_id)
+                    written += 1
+                    _L.debug("memo reinforced | user={} card={}", user_id, existing.card_id)
+                else:
+                    # New card — status cards get short TTL
+                    ttl_turns = None
+                    if category == "status":
+                        ttl_turns = 10
+                    await self._store.add_card(NewCard(
+                        category=category,
+                        scope="user",
+                        scope_id=user_id,
+                        content=content,
+                        confidence=0.6,
+                        source="extractor",
+                        ttl_turns=ttl_turns,
+                    ))
+                    written += 1
             except (ValueError, Exception):
                 _L.warning("memo extractor add_card failed | user={} category={}", user_id, category)
 
@@ -134,7 +146,7 @@ class MemoExtractor:
 class MemoPlugin(AmadeusPlugin):
     name = "memo"
     description = "记忆系统：卡片索引、实体记忆注入、对话后提取"
-    version = "1.1.2"
+    version = "1.1.4"
     priority = 30
 
     def __init__(self) -> None:
@@ -180,8 +192,18 @@ class MemoPlugin(AmadeusPlugin):
                 conversation_text=ctx.conversation_text,
             )
         elif self._card_store is not None:
+            # Resolve pool group IDs if pool mode is active
+            pool_ids: list[str] | None = None
+            gmc = ctx.group_memory_config
+            if gmc is not None and ctx.group_id:
+                pool = gmc.resolve_pool(int(ctx.group_id))
+                if pool is not None:
+                    pool_ids = [str(g) for g in pool.groups]
+
             if ctx.group_id:
-                body = await self._card_store.build_entity_prompt("group", ctx.group_id)
+                body = await self._card_store.build_entity_prompt(
+                    "group", ctx.group_id, pool_group_ids=pool_ids,
+                )
                 memo_text = f"【当前在群 #{ctx.group_id} 中对话】\n{body}"
             else:
                 body = await self._card_store.build_entity_prompt("user", ctx.user_id)

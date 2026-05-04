@@ -102,9 +102,6 @@ class PluginBus:
         self._started = True
         order = self._resolve_dependencies()
         for p in order:
-            if not p.enabled:
-                _L.info("plugin startup skipped (disabled) | name={}", p.name)
-                continue
             _L.info("plugin startup | name={} priority={}", p.name, p.priority)
             await self._safe_call(p, p.on_startup(ctx), "on_startup")
         _L.info("all plugins started | count={}", len(order))
@@ -131,6 +128,8 @@ class PluginBus:
         返回 True 表示消息已被某插件消费，调用方应停止后续处理。
         """
         for p in self._plugins:
+            if not p.enabled:
+                continue
             consumed = await self._safe_call(p, p.on_message(ctx), "on_message")
             if consumed is True:
                 _L.debug("message consumed | plugin={} session={}", p.name, ctx.session_id)
@@ -140,6 +139,8 @@ class PluginBus:
     async def fire_on_thinker_decision(self, ctx: ThinkerContext) -> None:
         """通知所有插件 thinker 决策结果。"""
         for p in self._plugins:
+            if not p.enabled:
+                continue
             await self._safe_call(p, p.on_thinker_decision(ctx), "on_thinker_decision")
 
     async def fire_on_pre_prompt(self, ctx: PromptContext) -> None:
@@ -148,11 +149,15 @@ class PluginBus:
         各插件通过 ctx.add_block() 追加内容，调用方读取 ctx.blocks 使用。
         """
         for p in self._plugins:
+            if not p.enabled:
+                continue
             await self._safe_call(p, p.on_pre_prompt(ctx), "on_pre_prompt")
 
     async def fire_on_post_reply(self, ctx: ReplyContext) -> None:
         """按优先级调用 on_post_reply。各插件独立执行副作用。"""
         for p in self._plugins:
+            if not p.enabled:
+                continue
             await self._safe_call(p, p.on_post_reply(ctx), "on_post_reply")
 
     # ---- 工具收集 ----
@@ -207,6 +212,8 @@ class PluginBus:
     async def fire_on_tick(self, ctx: PluginContext) -> None:
         """按优先级调用 on_tick。"""
         for p in self._plugins:
+            if not p.enabled:
+                continue
             await self._safe_call(p, p.on_tick(ctx), "on_tick")
 
     def start_tick_loop(self, ctx: PluginContext, interval: float = 60.0) -> None:
@@ -404,52 +411,77 @@ class PluginBus:
     # ---- 内部 ----
 
     def _resolve_dependencies(self) -> list[AmadeusPlugin]:
-        """用 Kahn 算法拓扑排序插件依赖图。
+        """Topologically sort plugins by dependency graph (Kahn's algorithm).
 
-        若某插件声明的依赖不存在或版本不兼容，降级为 warning 并跳过该依赖边。
-        若存在循环依赖，降级为 warning 并回退到 priority 排序。
+        Dependency enforcement:
+        - If a declared dependency does not exist → ERROR + disable plugin.
+        - If a declared dependency is disabled → ERROR + disable plugin.
+        - If version constraint is not satisfied → ERROR + disable plugin.
+        - Cascading: disabling a plugin may disable its dependents in turn.
 
-        返回拓扑排序后的插件列表。
+        Returns topologically sorted list of enabled plugins.
         """
         from kernel.manifest import check_version
 
         name_to_plugin: dict[str, AmadeusPlugin] = {p.name: p for p in self._plugins}
 
-        # 构建邻接表和入度，同时校验依赖
-        edges: dict[str, list[str]] = {p.name: [] for p in self._plugins}
-        in_degree: dict[str, int] = {p.name: 0 for p in self._plugins}
+        # ---- Phase 1: disable plugins with unmet dependencies ----
 
-        for p in self._plugins:
-            for dep_name, version_constraint in p.dependencies.items():
+        changed = True
+        while changed:
+            changed = False
+            for p in self._plugins:
+                if not p.enabled:
+                    continue
+                for dep_name, version_constraint in p.dependencies.items():
+                    dep = name_to_plugin.get(dep_name)
+                    if dep is None:
+                        p.enabled = False
+                        _L.error(
+                            "dependency not found — plugin disabled | "
+                            "plugin={} dependency={}",
+                            p.name, dep_name,
+                        )
+                        changed = True
+                        break
+                    if not dep.enabled:
+                        p.enabled = False
+                        _L.error(
+                            "dependency disabled — plugin disabled | "
+                            "plugin={} dependency={}",
+                            p.name, dep_name,
+                        )
+                        changed = True
+                        break
+                    if not check_version(dep.version, version_constraint):
+                        p.enabled = False
+                        _L.error(
+                            "dependency version mismatch — plugin disabled | "
+                            "plugin={} dependency={} required={} actual={}",
+                            p.name, dep_name, version_constraint, dep.version,
+                        )
+                        changed = True
+                        break
+
+        enabled = [p for p in self._plugins if p.enabled]
+
+        # ---- Phase 2: Kahn topological sort on enabled plugins ----
+
+        edges: dict[str, list[str]] = {p.name: [] for p in enabled}
+        in_degree: dict[str, int] = {p.name: 0 for p in enabled}
+
+        for p in enabled:
+            for dep_name in p.dependencies:
                 dep = name_to_plugin.get(dep_name)
-                if dep is None:
-                    _L.warning(
-                        "dependency not found | plugin={} dependency={}",
-                        p.name, dep_name,
-                    )
-                    continue
-                if not dep.enabled:
-                    _L.warning(
-                        "dependency disabled | plugin={} dependency={}",
-                        p.name, dep_name,
-                    )
-                    continue
-                if not check_version(dep.version, version_constraint):
-                    _L.warning(
-                        "dependency version mismatch | plugin={} dependency={} "
-                        "required={} actual={}",
-                        p.name, dep_name, version_constraint, dep.version,
-                    )
-                    continue
+                if dep is None or not dep.enabled:
+                    continue  # already handled in phase 1, shouldn't happen
                 edges[dep_name].append(p.name)
                 in_degree[p.name] += 1
 
-        # Kahn 拓扑排序
         queue: list[str] = [name for name, deg in in_degree.items() if deg == 0]
         sorted_names: list[str] = []
 
         while queue:
-            # 按 priority 排序保证同层稳定性
             queue.sort(key=lambda n: name_to_plugin[n].priority)
             node = queue.pop(0)
             sorted_names.append(node)
@@ -458,14 +490,14 @@ class PluginBus:
                 if in_degree[dependent] == 0:
                     queue.append(dependent)
 
-        if len(sorted_names) != len(self._plugins):
-            cycle_plugins = set(p.name for p in self._plugins) - set(sorted_names)
+        if len(sorted_names) != len(enabled):
+            cycle_plugins = set(p.name for p in enabled) - set(sorted_names)
             _L.warning(
                 "circular dependency detected, falling back to priority order | "
                 "in_cycle={}",
                 list(cycle_plugins),
             )
-            return sorted(self._plugins, key=lambda p: p.priority)
+            return sorted(enabled, key=lambda p: p.priority)
 
         return [name_to_plugin[n] for n in sorted_names]
 

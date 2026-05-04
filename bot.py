@@ -236,6 +236,35 @@ else:
 # Single-file plugins + any directory plugins with plugin.json are auto-discovered
 _bus.discover_plugins("plugins")
 
+# Group memory/nickname JSON config — hot-reloadable, no restart needed
+from kernel.config import GroupMemoryConfig  # noqa: E402
+
+_group_memory_path = _Path("config/group-memory.json")
+_group_memory_cfg = GroupMemoryConfig.load(str(_group_memory_path))
+_plugin_ctx.group_memory_config = _group_memory_cfg
+logger.info(
+    "Group memory config loaded | mode={} pools={} nickname_mode={}",
+    _group_memory_cfg.memory.mode,
+    len(_group_memory_cfg.memory.pools),
+    _group_memory_cfg.nickname.mode,
+)
+
+# Knowledge base — inverted index over docs/
+if _bot_config.knowledge.enabled:
+    from services.knowledge import KnowledgeBase
+
+    _kb = KnowledgeBase(docs_dir=_bot_config.knowledge.dir)
+    _kb.reload()
+    _plugin_ctx.knowledge_base = _kb
+    logger.info(
+        "Knowledge base loaded | dir={} chunks={}",
+        _bot_config.knowledge.dir,
+        _kb.chunk_count,
+    )
+else:
+    _plugin_ctx.knowledge_base = None
+    logger.info("Knowledge base disabled")
+
 _plugin_ctx.bus = _bus
 _plugin_ctx.command_dispatcher = CommandDispatcher(_bus)
 

@@ -21,6 +21,7 @@ class CommandDispatcher:
     def __init__(self, bus: Any) -> None:
         self._commands: dict[str, Command] = {}
         self._load(bus)
+        self._register_system_commands()
 
     def _load(self, bus: Any) -> None:
         for cmd in bus.collect_commands():
@@ -32,6 +33,45 @@ class CommandDispatcher:
                     _log.warning("duplicate command alias, overwriting | alias={}", alias)
                 self._commands[alias] = cmd
         _log.info("commands loaded | count={}", len(self._commands))
+
+    def _register_system_commands(self) -> None:
+        """Register system-layer commands (not from plugins)."""
+        help_cmd = Command(
+            name="help",
+            handler=self._handle_help,
+            description="显示所有已注册指令",
+            usage="/help",
+            aliases=["h", "指令", "命令"],
+        )
+        self._commands[help_cmd.name] = help_cmd
+        for alias in help_cmd.aliases:
+            self._commands[alias] = help_cmd
+
+    async def _handle_help(self, cmd_ctx: CommandContext) -> None:
+        from nonebot.adapters.onebot.v11 import Message
+
+        # Collect unique commands (dedup by name, skip aliases)
+        seen: set[str] = set()
+        unique: list[Command] = []
+        for cmd in self._commands.values():
+            if cmd.name not in seen:
+                seen.add(cmd.name)
+                unique.append(cmd)
+        unique.sort(key=lambda c: c.name)
+
+        lines: list[str] = [f"已注册指令（{len(unique)} 个）：", ""]
+        for cmd in unique:
+            aliases_str = f" ({', '.join(cmd.aliases)})" if cmd.aliases else ""
+            lines.append(f"/{cmd.name}{aliases_str}")
+            if cmd.description:
+                lines.append(f"  {cmd.description}")
+            if cmd.usage and cmd.usage != f"/{cmd.name}":
+                lines.append(f"  用法：{cmd.usage}")
+
+        reply = "\n".join(lines)
+        if len(reply) > 2000:
+            reply = reply[:2000] + "\n…(截断)"
+        await cmd_ctx.bot.send(cmd_ctx.event, Message(reply))
 
     @property
     def commands(self) -> dict[str, Command]:

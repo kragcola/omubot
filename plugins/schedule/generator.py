@@ -14,6 +14,7 @@ from loguru import logger
 from plugins.schedule.calendar import get_day_context
 from plugins.schedule.store import ScheduleStore
 from plugins.schedule.types import Schedule, TimeSlot
+from services.llm.provider import extract_text
 
 _L = logger.bind(channel="schedule")
 
@@ -156,7 +157,7 @@ class ScheduleGenerator:
         _L.info("generating schedule for {} ...", today_str)
         result = await api_call(system, messages, tools=None, max_tokens=4096)
 
-        text = _extract_text(result)
+        text = extract_text(result)
         schedule = _parse_schedule(text, today_str)
         if schedule is None:
             _L.error("failed to parse schedule JSON | raw={}", text[:500])
@@ -175,24 +176,6 @@ class ScheduleGenerator:
 
 
 import contextlib  # noqa: E402
-
-
-def _extract_text(result: dict[str, Any]) -> str:
-    """Extract text from _call_api return value.
-
-    Falls back to thinking blocks when the model outputs JSON inside
-    thinking (DeepSeek V4 thinking mode may do this).
-    """
-    text: str = result.get("text", "")
-    if text.strip():
-        return text
-    # Fallback: DeepSeek thinking mode may put the real output in thinking blocks
-    for tb in result.get("thinking_blocks", []):
-        if tb.get("type") == "thinking":
-            t = tb.get("thinking", "").strip()
-            if t:
-                return t
-    return ""
 
 
 def _parse_schedule(text: str, date_str: str) -> Schedule | None:

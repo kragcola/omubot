@@ -26,6 +26,8 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if not tool:
             return f"未知工具: {name}"
+        if tool.is_dangerous and not ctx.admin_approved:
+            return "此操作需管理员审批，请通过 Web Admin 面板授权"
         try:
             kwargs: dict[str, Any] = json.loads(arguments) if arguments else {}
             return await tool.execute(ctx, **kwargs)

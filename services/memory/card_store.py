@@ -234,6 +234,152 @@ class CardStore:
         return await self.update_card(card_id, status="expired")
 
     # ------------------------------------------------------------------
+    # Dedup / Reinforce / Decay
+    # ------------------------------------------------------------------
+
+    async def find_similar(
+        self,
+        scope: str,
+        scope_id: str,
+        content: str,
+        threshold: float = 0.5,
+    ) -> Card | None:
+        """Find an active card with Jaccard similarity >= threshold over character bigrams."""
+        if len(content) < 3:
+            return None
+        content_bigrams = _bigrams(content)
+        if not content_bigrams:
+            return None
+        cards = await self.get_entity_cards(scope, scope_id)
+        best: Card | None = None
+        best_score = threshold
+        for card in cards:
+            card_bigrams = _bigrams(card.content)
+            score = _jaccard(content_bigrams, card_bigrams)
+            if score > best_score:
+                best_score = score
+                best = card
+        return best
+
+    async def reinforce(self, card_id: str, bump: float = 0.05) -> bool:
+        """Bump confidence (cap 1.0) and touch last_seen_at. Returns True if updated."""
+        card = await self.get_card(card_id)
+        if card is None:
+            return False
+        new_conf = min(1.0, card.confidence + bump)
+        return await self.update_card(
+            card_id, confidence=new_conf, last_seen_at=_now_iso(),
+        )
+
+    async def decay_confidence(self, config: Any) -> int:
+        """Decay confidence of all active cards, expire those below confidence_floor.
+
+        Returns count of expired cards.
+        """
+        if config is None:
+            return 0
+        floor: float = getattr(config, "confidence_floor", 0.25)
+        if floor is None:
+            floor = 0.25
+        factor: float = getattr(config, "decay_per_day", 0.02)
+        if factor is None:
+            factor = 0.02
+        if factor <= 0:
+            return 0
+
+        cursor = await self._db.execute(
+            "UPDATE memory_cards SET confidence = confidence * ?, updated_at = ? "
+            "WHERE status = 'active'",
+            (1.0 - factor, _now_iso()),
+        )
+        await self._db.commit()
+        decayed = cursor.rowcount
+
+        cursor = await self._db.execute(
+            "SELECT card_id FROM memory_cards WHERE status = 'active' AND confidence < ?",
+            (floor,),
+        )
+        rows = await cursor.fetchall()
+        expired = 0
+        for row in rows:
+            await self.expire_card(row["card_id"])
+            expired += 1
+        if expired:
+            await self._db.commit()
+
+        if decayed or expired:
+            logger.info(
+                "card_store decay | decayed={} expired={} factor={} floor={}",
+                decayed, expired, factor, floor,
+            )
+        return expired
+
+    async def expire_ttl_cards(self, ttl_config: Any) -> int:
+        """Expire active cards past their TTL. Returns count of expired cards."""
+        if ttl_config is None:
+            return 0
+        default_ttl: int = getattr(ttl_config, "default", 0) or 0
+        per_category: dict[str, int] = getattr(ttl_config, "per_category", {}) or {}
+        if default_ttl <= 0 and not per_category:
+            return 0
+
+        expired_count = 0
+        now = datetime.now(tz=TZ_SHANGHAI)
+
+        for category, ttl_days in per_category.items():
+            if ttl_days <= 0:
+                continue
+            cutoff = now.replace(
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+            from datetime import timedelta
+            cutoff = cutoff - timedelta(days=ttl_days)
+            cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
+            cursor = await self._db.execute(
+                "SELECT card_id FROM memory_cards "
+                "WHERE category = ? AND status = 'active' AND updated_at < ?",
+                (category, cutoff_str),
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                await self.expire_card(row["card_id"])
+                expired_count += 1
+
+        if default_ttl > 0:
+            from datetime import timedelta
+            cutoff = now.replace(
+                hour=0, minute=0, second=0, microsecond=0,
+            ) - timedelta(days=default_ttl)
+            cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
+            # Exclude categories that have their own TTL
+            exclude_cats = [c for c, d in per_category.items() if d > 0]
+            if exclude_cats:
+                placeholders = ",".join("?" for _ in exclude_cats)
+                cursor = await self._db.execute(
+                    f"SELECT card_id FROM memory_cards "
+                    f"WHERE status = 'active' AND updated_at < ? AND category NOT IN ({placeholders})",
+                    (cutoff_str, *exclude_cats),
+                )
+            else:
+                cursor = await self._db.execute(
+                    "SELECT card_id FROM memory_cards WHERE status = 'active' AND updated_at < ?",
+                    (cutoff_str,),
+                )
+            rows = await cursor.fetchall()
+            for row in rows:
+                await self.expire_card(row["card_id"])
+                expired_count += 1
+
+        if expired_count:
+            await self._db.commit()
+            logger.info(
+                "card_store expired {} cards | default_ttl={}d per_category={}",
+                expired_count, default_ttl, per_category,
+            )
+
+        return expired_count
+
+    # ------------------------------------------------------------------
     # Query helpers
     # ------------------------------------------------------------------
 
@@ -288,8 +434,27 @@ class CardStore:
             return ""
         return "\n".join(parts)
 
-    async def build_entity_prompt(self, scope: str, scope_id: str) -> str:
-        cards = await self.get_entity_cards(scope, scope_id)
+    async def build_entity_prompt(
+        self, scope: str, scope_id: str, *, pool_group_ids: list[str] | None = None,
+    ) -> str:
+        """Build a prompt block for an entity, optionally merging pool groups.
+
+        When *pool_group_ids* is provided, cards from those groups are also
+        included alongside the entity's own cards — enabling multi-group
+        memory pools.
+        """
+        cards = list(await self.get_entity_cards(scope, scope_id))
+
+        pool_cards_by_group: dict[str, list[Card]] = {}
+        if pool_group_ids:
+            for gid in pool_group_ids:
+                if gid == scope_id:
+                    continue
+                g_cards = await self.get_entity_cards("group", gid)
+                if g_cards:
+                    pool_cards_by_group[gid] = list(g_cards)
+                    cards.extend(g_cards)
+
         if not cards:
             label = "用户" if scope == "user" else "群" if scope == "group" else "全局"
             return f"【{label}记忆 / {scope_id}】\n暂无记录"
@@ -302,7 +467,11 @@ class CardStore:
         lines = [header]
         for c in cards:
             cat_label = CATEGORY_LABELS.get(c.category, c.category)
-            lines.append(f"[{cat_label}] {c.content}")
+            # Annotate cards from other groups in the pool
+            if c.scope == "group" and c.scope_id and c.scope_id != scope_id:
+                lines.append(f"[{cat_label}｜群{c.scope_id}] {c.content}")
+            else:
+                lines.append(f"[{cat_label}] {c.content}")
         return "\n".join(lines)
 
 
@@ -316,6 +485,20 @@ def _generate_card_id() -> str:
 
 def _now_iso() -> str:
     return datetime.now(tz=TZ_SHANGHAI).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _bigrams(text: str) -> set[str]:
+    """Return set of character bigrams from text."""
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    """Jaccard similarity coefficient."""
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
 
 
 def _format_counts(counts: dict[str, int]) -> str:

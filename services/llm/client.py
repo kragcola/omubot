@@ -17,6 +17,12 @@ from loguru import logger as _base_logger
 
 from services.identity import Identity
 from services.llm.prompt_builder import PromptBuilder
+from services.llm.provider import (
+    LLMProvider,
+    ToolUse,
+    build_assistant_message,
+    create_provider,
+)
 from services.llm.usage import UsageTracker
 from services.media.image_cache import ImageCache
 from services.memory.card_store import CardStore, NewCard
@@ -353,15 +359,6 @@ def _split_naturally(text: str) -> list[str]:
     return chunks or [text]
 
 
-class ToolUse:
-    __slots__ = ("id", "input", "name")
-
-    def __init__(self, id: str, name: str, input: dict[str, Any]) -> None:
-        self.id = id
-        self.name = name
-        self.input = input
-
-
 def _cached_text(text: str) -> dict[str, Any]:
     return {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
 
@@ -522,131 +519,6 @@ _ADD_CARD_TOOL: dict[str, Any] = {
         "required": ["scope", "scope_id", "category", "content"],
     },
 }
-
-
-async def call_api(
-    session: aiohttp.ClientSession,
-    base_url: str,
-    api_key: str,
-    model: str,
-    system_blocks: list[dict[str, Any]],
-    messages: list[Any],
-    max_tokens: int = 1024,
-    tools: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Call Anthropic API, parse SSE stream."""
-    body: dict[str, Any] = {
-        "model": model,
-        "system": system_blocks,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "stream": True,
-    }
-    if tools:
-        # Cache-control on last tool def so the whole tool set is cached together
-        cached_tools = [*tools]
-        cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
-        body["tools"] = cached_tools
-
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": api_key,
-        "anthropic-version": "2024-10-22",
-    }
-
-    text_parts: list[str] = []
-    tool_uses: list[ToolUse] = []
-    thinking_blocks: list[dict[str, Any]] = []
-    current_tool: dict[str, str] = {}
-    current_thinking: str = ""
-    current_thinking_sig: str = ""
-    current_block_type: str = ""
-    usage: dict[str, int] = {}
-
-    t_ser = time.perf_counter()
-    payload_bytes = json.dumps(body).encode()
-    payload = io.BytesIO(payload_bytes)
-    _log_debug.trace(
-        "api payload serialized | size={}KB elapsed={:.1f}ms",
-        len(payload_bytes) // 1024,
-        (time.perf_counter() - t_ser) * 1000,
-    )
-    async with session.post(f"{base_url}/v1/messages", data=payload, headers=headers) as resp:
-        if resp.status == 429:
-            body_text = await resp.text()
-            raise RateLimitError(f"HTTP 429: {body_text}")
-        if resp.status >= 400:
-            body_text = await resp.text()
-            logger.error("API {} | body={}", resp.status, body_text[:500])
-            resp.raise_for_status()
-        async for raw_line in resp.content:
-            line = raw_line.decode().strip()
-            if not line.startswith("data: "):
-                continue
-            data: dict[str, Any] = json.loads(line[6:])
-            event_type = data.get("type", "")
-
-            if event_type == "message_start":
-                msg_usage: dict[str, Any] = data.get("message", {}).get("usage", {})
-                usage = {k: v for k, v in msg_usage.items() if isinstance(v, int)}
-            elif event_type == "content_block_start":
-                block: dict[str, Any] = data.get("content_block", {})
-                current_block_type = block.get("type", "")
-                if current_block_type == "tool_use":
-                    current_tool = {"id": block["id"], "name": block["name"], "input_json": ""}
-                elif current_block_type == "thinking":
-                    current_thinking = ""
-                    current_thinking_sig = block.get("signature", "")
-            elif event_type == "content_block_delta":
-                delta: dict[str, Any] = data.get("delta", {})
-                if delta.get("type") == "text_delta" and current_block_type != "thinking":
-                    text_parts.append(delta["text"])
-                elif delta.get("type") == "thinking_delta":
-                    current_thinking += delta.get("thinking", "")
-                elif delta.get("type") == "input_json_delta":
-                    current_tool["input_json"] += delta.get("partial_json", "")
-            elif event_type == "content_block_stop":
-                if current_tool:
-                    input_data: dict[str, Any] = (
-                        json.loads(current_tool["input_json"]) if current_tool["input_json"] else {}
-                    )
-                    tool_uses.append(ToolUse(id=current_tool["id"], name=current_tool["name"], input=input_data))
-                    current_tool = {}
-                elif current_block_type == "thinking":
-                    tb: dict[str, Any] = {"type": "thinking", "thinking": current_thinking}
-                    if current_thinking_sig:
-                        tb["signature"] = current_thinking_sig
-                    thinking_blocks.append(tb)
-                    current_thinking = ""
-                    current_thinking_sig = ""
-            elif event_type == "message_delta":
-                delta_usage: dict[str, Any] = data.get("usage", {})
-                for k, v in delta_usage.items():
-                    if isinstance(v, int):
-                        usage[k] = v
-            elif event_type == "error":
-                error_data = data.get("error", {})
-                error_msg = error_data.get("message", str(data))
-                if "rate limit" in error_msg.lower():
-                    raise RateLimitError(f"Anthropic API stream error: {error_msg}")
-                raise RuntimeError(f"Anthropic API stream error: {error_msg}")
-
-    # Token stats
-    cache_read = usage.get("cache_read_input_tokens", 0)
-    cache_create = usage.get("cache_creation_input_tokens", 0)
-    input_tokens = usage.get("input_tokens", 0)
-    total_input = input_tokens + cache_read + cache_create
-    output_tokens = usage.get("output_tokens", 0)
-
-    return {
-        "text": "".join(text_parts),
-        "tool_uses": tool_uses,
-        "thinking_blocks": thinking_blocks,
-        "input_tokens": total_input,
-        "output_tokens": output_tokens,
-        "cache_read": cache_read,
-        "cache_create": cache_create,
-    }
 
 
 async def _build_debug_block(
@@ -832,6 +704,8 @@ class LLMClient:
         thinker_max_tokens: int = 256,
         mood_getter: Callable[[], Any] | None = None,
         bus: object | None = None,
+        group_memory_config: object | None = None,
+        api_format: str = "anthropic",
     ) -> None:
         connector = aiohttp.TCPConnector(
             enable_cleanup_closed=True,
@@ -844,6 +718,8 @@ class LLMClient:
         self._base_url = base_url
         self._api_key = api_key
         self._model = model
+        self._api_format = api_format
+        self._provider: LLMProvider = create_provider(api_format, base_url, api_key)
         self._prompt = prompt_builder
         self._short_term = short_term
         self._tools = tools
@@ -865,6 +741,7 @@ class LLMClient:
         self._thinker_max_tokens = thinker_max_tokens
         self._mood_getter = mood_getter
         self._bus = bus
+        self._group_memory_cfg = group_memory_config
 
     async def close(self) -> None:
         await self._session.close()
@@ -872,11 +749,36 @@ class LLMClient:
     async def _call(
         self, system_blocks: list[dict[str, Any]], messages: list[Any], tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 1024,
+        thinking: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await call_api(
-            self._session, self._base_url, self._api_key, self._model,
-            system_blocks, messages, max_tokens=max_tokens, tools=tools,
+        body, headers = self._provider.build_request(
+            system_blocks, messages, tools, max_tokens, self._model, thinking=thinking,
         )
+        url = (
+            f"{self._base_url}/v1/chat/completions"
+            if self._api_format == "openai"
+            else f"{self._base_url}/v1/messages"
+        )
+        t_ser = time.perf_counter()
+        payload_bytes = json.dumps(body).encode()
+        payload = io.BytesIO(payload_bytes)
+        _log_debug.trace(
+            "api payload serialized | size={}KB elapsed={:.1f}ms",
+            len(payload_bytes) // 1024,
+            (time.perf_counter() - t_ser) * 1000,
+        )
+        raw_lines: list[str] = []
+        async with self._session.post(url, data=payload, headers=headers) as resp:
+            if resp.status == 429:
+                body_text = await resp.text()
+                raise RateLimitError(f"HTTP 429: {body_text}")
+            if resp.status >= 400:
+                body_text = await resp.text()
+                logger.error("API {} | body={}", resp.status, body_text[:500])
+                resp.raise_for_status()
+            async for raw_line in resp.content:
+                raw_lines.append(raw_line.decode())
+        return self._provider.parse_sse_stream(raw_lines)
 
     def _record_usage(
         self,
@@ -1006,7 +908,7 @@ class LLMClient:
         except Exception:
             return ""
 
-    def _build_thinker_affection_text(self, user_id: str) -> str:
+    def _build_thinker_affection_text(self, user_id: str, *, in_group: bool = False, group_id: str = "") -> str:
         """Build a one-line relationship summary for the pre-reply thinker."""
         if self._affection_engine is None:
             return ""
@@ -1018,7 +920,12 @@ class LLMClient:
             profile = store.get(user_id)
             if profile is None or profile.total_interactions == 0:
                 return ""
-            nickname = profile.custom_nickname or profile.group_nickname or ""
+            if in_group and profile.group_nicknames:
+                nickname = profile.group_nicknames.get(group_id, "") or profile.group_nicknames.get("*", "")
+            elif in_group:
+                nickname = ""
+            else:
+                nickname = profile.custom_nickname
             tag = f"（称呼：{nickname}）" if nickname else ""
             return (
                 f"【与当前用户的关系】tier={profile.tier} "
@@ -1116,7 +1023,7 @@ class LLMClient:
             recent_for_thinker = [_text_only(m) for m in recent_raw]
             recent_for_thinker = [m for m in recent_for_thinker if m.get("content")]
             mood_text = self._build_thinker_mood_text()
-            affection_text = self._build_thinker_affection_text(user_id)
+            affection_text = self._build_thinker_affection_text(user_id, in_group=is_group, group_id=group_id or "")
             thinker_decision = await think(
                 api_call=self._call,
                 recent_messages=recent_for_thinker,
@@ -1164,6 +1071,7 @@ class LLMClient:
                         conversation_text=conversation_text,
                         force_reply=force_reply,
                         privacy_mask=privacy_mask,
+                        group_memory_config=self._group_memory_cfg,
                     )
                     await self._bus.fire_on_pre_prompt(prompt_ctx)
                     for pb in prompt_ctx.blocks:
@@ -1201,16 +1109,19 @@ class LLMClient:
         # Inject thinker decision as final system block so the main LLM
         # knows what direction to take — placed last for highest attention.
         if thinker_decision is not None and thinker_thought:
-            hints = [f"你决定说话：{thinker_thought}"]
+            hints = [f"（{identity.name} 此刻的内心想法）{thinker_thought}"]
             d = thinker_decision
             if d.sticker:
-                hints.append(
-                    "sticker: yes — 请在本轮同时调用 send_sticker 发送匹配的表情包，"
-                    "发送后直接接文字内容，不要提及已发送表情包"
-                )
+                hints.append("发图：适合配表情包")
             else:
-                hints.append("sticker: no")
-            hints.append(f"tone: {d.tone}")
+                hints.append("发图：不配表情包")
+            hints.append(f"语气：{d.tone}")
+            if d.tone in ("元气", "日常"):
+                hints.append("回复：简短，1-2句")
+            elif d.tone == "认真":
+                hints.append("回复：可以展开，但要清晰有条理")
+            elif d.tone == "安慰":
+                hints.append("回复：可以充分表达，温暖陪伴")
             thinker_block: dict[str, Any] = {
                 "type": "text",
                 "text": "【" + "】【".join(hints) + "】",
@@ -1275,12 +1186,7 @@ class LLMClient:
                     and round_i < MAX_TOOL_ROUNDS - 1
                 ):
                     _sticker_sent = True  # prevent re-entry
-                    assistant_content = []
-                    for tb in result.get("thinking_blocks", []):
-                        assistant_content.append(tb)
-                    if text:
-                        assistant_content.append({"type": "text", "text": text})
-                    messages.append({"role": "assistant", "content": assistant_content})
+                    messages.append({"role": "assistant", "content": build_assistant_message(result)})
                     messages.append({
                         "role": "user",
                         "content": [{
@@ -1357,14 +1263,7 @@ class LLMClient:
                     _sticker_sent = True
 
             # Assistant message content — preserve thinking blocks for DeepSeek
-            assistant_content: list[dict[str, Any]] = []
-            for tb in result.get("thinking_blocks", []):
-                assistant_content.append(tb)
-            if text:
-                assistant_content.append({"type": "text", "text": text})
-            for tu in tool_uses:
-                assistant_content.append({"type": "tool_use", "id": tu.id, "name": tu.name, "input": tu.input})
-            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append({"role": "assistant", "content": build_assistant_message(result)})
 
             # Execute tools in parallel
             tool_ctx = ctx or ToolContext(user_id=user_id, group_id=group_id)
@@ -1466,10 +1365,7 @@ class LLMClient:
         memo_writes = 0
 
         for round_i in range(_MAX_COMPACT_TOOL_ROUNDS):
-            result = await call_api(
-                self._session, self._base_url, self._api_key, self._model,
-                system, messages, max_tokens=1024, tools=tools,
-            )
+            result = await self._call(system, messages, max_tokens=1024, tools=tools)
             acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
             acc_output += result.get("output_tokens", 0)
             acc_cache_read += result.get("cache_read", 0)
@@ -1488,14 +1384,7 @@ class LLMClient:
                 return text, memo_writes
 
             # Build assistant message — preserve thinking blocks for DeepSeek
-            assistant_content: list[dict[str, Any]] = []
-            for tb in result.get("thinking_blocks", []):
-                assistant_content.append(tb)
-            if text:
-                assistant_content.append({"type": "text", "text": text})
-            for tu in tool_uses:
-                assistant_content.append({"type": "tool_use", "id": tu.id, "name": tu.name, "input": tu.input})
-            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append({"role": "assistant", "content": build_assistant_message(result)})
 
             # Execute add_card tool calls
             tool_results: list[dict[str, Any]] = []
@@ -1533,10 +1422,7 @@ class LLMClient:
             messages.append({"role": "user", "content": tool_results})
 
         # Exhausted rounds — do a final call without tools to get summary
-        result = await call_api(
-            self._session, self._base_url, self._api_key, self._model,
-            system, messages, max_tokens=1024,
-        )
+        result = await self._call(system, messages, max_tokens=1024)
         acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
         acc_output += result.get("output_tokens", 0)
         acc_cache_read += result.get("cache_read", 0)

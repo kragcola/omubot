@@ -57,6 +57,7 @@ class LLMConfig(BaseModel):
     api_key: str = "sk-placeholder"
     model: str = "claude-sonnet-4-6"
     max_tokens: int = 1024
+    api_format: str = "anthropic"  # "anthropic" | "openai"
     context: ContextConfig = ContextConfig()
     usage: UsageConfig = UsageConfig()
 
@@ -185,6 +186,19 @@ class NapcatConfig(BaseModel):
 
 
 # ============================================================================
+# 知识库配置
+# ============================================================================
+
+
+class KnowledgeConfig(BaseModel):
+    """文件知识库配置。"""
+
+    enabled: bool = False
+    dir: str = "docs"
+    max_chunks: int = 3
+
+
+# ============================================================================
 # 记忆 / 压缩 / Dream 配置
 # ============================================================================
 
@@ -265,6 +279,107 @@ class AntiDetectConfig(BaseModel):
 
 
 # ============================================================================
+# 群聊记忆与昵称 JSON 配置（Web 可编辑，热加载）
+# ============================================================================
+
+
+class MemoryPoolConfig(BaseModel):
+    """单个记忆池配置。"""
+
+    name: str = ""
+    groups: list[int] = []
+    shared_categories: list[str] = []  # 空=全部类别共享
+    description: str = ""
+
+
+class MemoryConfig(BaseModel):
+    """记忆共享配置。"""
+
+    mode: str = "per_group"  # "global" | "per_group" | "pool"
+    pools: dict[str, MemoryPoolConfig] = {}
+
+
+class NicknameConfig(BaseModel):
+    """群聊昵称配置。"""
+
+    mode: str = "global"  # "global" | "per_group"
+    per_group: dict[str, dict[str, str]] = {}  # {user_id: {group_id: nickname}}
+
+
+class CardTTLConfig(BaseModel):
+    """卡片自动过期配置。"""
+
+    default: int = 0  # 0 = 永不过期
+    per_category: dict[str, int] = {}  # {"fact": 90, "status": 7, ...}
+    confidence_floor: float = 0.25  # 低于此值自动过期
+    decay_per_day: float = 0.02  # 日衰减因子
+    per_category_ttl_turns: dict[str, int] = {}  # {"status": 10}
+
+
+class GroupMemoryConfig(BaseModel):
+    """群聊记忆与昵称 JSON 配置根模型。
+
+    从 config/group-memory.json 加载，修改后无需重启。
+    """
+
+    version: int = 1
+    memory: MemoryConfig = MemoryConfig()
+    nickname: NicknameConfig = NicknameConfig()
+    card_ttl_days: CardTTLConfig = CardTTLConfig()
+
+    def resolve_pool(self, group_id: int) -> MemoryPoolConfig | None:
+        """返回 group_id 所属的 pool，无则返回 None。"""
+        for pool in self.memory.pools.values():
+            if group_id in pool.groups:
+                return pool
+        return None
+
+    def resolve_nickname(self, user_id: str, group_id: str) -> str:
+        """按模式解析用户在指定群的昵称。"""
+        if self.nickname.mode == "per_group":
+            user_nicks = self.nickname.per_group.get(user_id, {})
+            return user_nicks.get(group_id, "")
+        return ""  # global 模式下不从此处取昵称，走旧逻辑
+
+    def set_nickname(self, user_id: str, group_id: str, nickname: str) -> None:
+        """Web/工具设置群聊昵称。"""
+        if self.nickname.mode != "per_group":
+            self.nickname.mode = "per_group"
+        if user_id not in self.nickname.per_group:
+            self.nickname.per_group[user_id] = {}
+        self.nickname.per_group[user_id][group_id] = nickname
+
+    @staticmethod
+    def load(path: str) -> GroupMemoryConfig:
+        """从 JSON 文件加载配置。文件不存在时返回默认值。"""
+        import json
+        from pathlib import Path
+
+        p = Path(path)
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                return GroupMemoryConfig.model_validate(data)
+            except (json.JSONDecodeError, ValueError):
+                from loguru import logger
+                logger.warning("group-memory config corrupted, using defaults | path={}", path)
+        return GroupMemoryConfig()
+
+    def save(self, path: str) -> None:
+        """原子保存到 JSON 文件。"""
+        import json
+        from pathlib import Path
+
+        p = Path(path)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(self.model_dump(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp.replace(p)
+
+
+# ============================================================================
 # 根配置
 # ============================================================================
 
@@ -285,6 +400,7 @@ class BotConfig(BaseModel):
     napcat: NapcatConfig = NapcatConfig()
     vision: VisionConfig = VisionConfig()
     thinker: ThinkerConfig = ThinkerConfig()
+    knowledge: KnowledgeConfig = KnowledgeConfig()
 
     # 管理员 & 白名单
     admins: dict[str, str] = {}
@@ -300,6 +416,7 @@ class BotConfig(BaseModel):
 _ENV_MAP: dict[str, str] = {
     "LLM_BASE_URL": "llm.base_url",
     "LLM_API_KEY": "llm.api_key",
+    "LLM_API_FORMAT": "llm.api_format",
     "LLM_MODEL": "llm.model",
     "NAPCAT_API_URL": "napcat.api_url",
     "ADMIN_TOKEN": "admin_token",

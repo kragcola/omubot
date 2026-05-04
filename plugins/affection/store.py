@@ -50,6 +50,7 @@ class AffectionStore:
             "user_id": profile.user_id,
             "score": profile.score,
             "custom_nickname": profile.custom_nickname,
+            "group_nicknames": profile.group_nicknames,
             "last_interaction": profile.last_interaction,
             "total_interactions": profile.total_interactions,
             "first_interaction": profile.first_interaction,
@@ -68,10 +69,15 @@ class AffectionStore:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            # Backward compat: old "group_nickname" string → migrate to dict
+            nicknames: dict[str, str] = data.get("group_nicknames", {})
+            if not nicknames and isinstance(data.get("group_nickname"), str) and data["group_nickname"]:
+                nicknames["*"] = data["group_nickname"]  # legacy global key
             return AffectionProfile(
                 user_id=data["user_id"],
                 score=float(data.get("score", 0.0)),
                 custom_nickname=data.get("custom_nickname", ""),
+                group_nicknames=nicknames,
                 last_interaction=data.get("last_interaction", ""),
                 total_interactions=int(data.get("total_interactions", 0)),
                 first_interaction=data.get("first_interaction", ""),

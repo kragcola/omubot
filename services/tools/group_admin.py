@@ -16,6 +16,8 @@ def _check_auth(ctx: ToolContext, superusers: set[str]) -> str | None:
 
 
 class MuteUserTool(Tool):
+    is_dangerous = True
+
     def __init__(self, superusers: set[str]) -> None:
         self._superusers = superusers
 
@@ -51,6 +53,8 @@ class MuteUserTool(Tool):
 
 
 class SetTitleTool(Tool):
+    is_dangerous = True
+
     def __init__(self, superusers: set[str]) -> None:
         self._superusers = superusers
 
@@ -86,6 +90,8 @@ class SetTitleTool(Tool):
 
 
 class SendGroupMsgTool(Tool):
+    is_dangerous = True
+
     def __init__(self, superusers: set[str]) -> None:
         self._superusers = superusers
 

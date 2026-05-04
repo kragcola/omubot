@@ -562,7 +562,7 @@ class TestVideoHint:
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
         # First 5 calls may or may not fire (low interest), but 6th is guaranteed
-        for i in range(5):
+        for _i in range(5):
             scheduler.notify("111", video_hint={
                 "mode": "autonomous", "bilibili_talk_value": 0.5,
                 "interest_score": 0.05, "video_title": "test",

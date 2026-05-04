@@ -173,10 +173,14 @@ class PluginContext:
     tool_registry: Any = None
     scheduler: Any = None
 
-    # 其他 —— UsageTracker / Humanizer / Identity
+    # 其他 —— UsageTracker / Humanizer / Identity / KnowledgeBase
     usage_tracker: Any = None
     humanizer: Any = None
     identity: Any = None  # Identity 实例
+    knowledge_base: Any = None  # KnowledgeBase 实例
+
+    # 群聊记忆/昵称 JSON 配置（Web 可编辑，热加载）
+    group_memory_config: Any = None  # GroupMemoryConfig
 
     # PluginBus 引用（供 LLMClient 等需要触发钩子的服务使用）
     bus: Any = None
@@ -216,6 +220,7 @@ class PromptContext:
     conversation_text: str = ""  # 最近对话文本（供关键词检索等使用）
     force_reply: bool = False
     privacy_mask: bool = True
+    group_memory_config: Any = None  # GroupMemoryConfig，群聊记忆/昵称配置
 
     # 插件追加的 blocks（可变列表）
     blocks: list[PromptBlock] = field(default_factory=list)

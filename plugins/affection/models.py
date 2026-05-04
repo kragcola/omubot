@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -12,7 +12,7 @@ class AffectionProfile:
     user_id: str  # QQ号 as string
     score: float = 0.0  # 0.0 ~ 100.0
     custom_nickname: str = ""  # user-requested nickname (private chat), e.g. "司君"
-    group_nickname: str = ""  # user-requested nickname (group chat), separate from private
+    group_nicknames: dict[str, str] = field(default_factory=dict)  # {group_id: nickname}
     last_interaction: str = ""  # ISO timestamp
     total_interactions: int = 0
     first_interaction: str = ""  # ISO timestamp
