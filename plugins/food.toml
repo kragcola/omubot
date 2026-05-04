@@ -1,0 +1,4 @@
+# FoodPlugin — food recommendation via /吃什么 command
+enabled = true
+recent_max = 5        # Max recent foods to avoid repeating
+recent_ttl = 1800      # TTL for short-term rejection memory (seconds)

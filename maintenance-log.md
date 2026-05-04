@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-05-05 FoodPlugin thinking 参数透传修复 (v0.1.4)
+
+**变更类型**：bugfix
+
+**内容**：
+- 第一次尝试：移除 `thinking={"type": "disabled"}` → TypeError 解决，但 deepseek-v4-flash 默认开启 thinking，64 tokens 被 thinking 吃光 → `extract_text` 返回空 → "脑袋空空了"
+- 最终方案：将 `thinking` 参数从 `LLMClient._call` → `call_api` 完整透传：
+  - `call_api()` 新增 `thinking: dict | None = None`，非空时写入 `body["thinking"]`
+  - `LLMClient._call()` 新增 `thinking` 参数并转发给 `call_api`
+  - `plugins/food.py` 两处恢复 `thinking={"type": "disabled"}`，同时 `max_tokens` 从 64 提升到 128 作为安全余量
+- 根因：`call_api` 是直接构建 Anthropic 请求的独立函数，不经过 Provider 抽象层；Provider 的 `build_request` 虽支持 `thinking`，但 food plugin 走 `_call → call_api` 路径
+
+**影响范围**：`plugins/food.py`、`services/llm/client.py`
+
+**验证**：ruff check 零新增；bot 已重建部署
+
+**回滚方案**：移除 `thinking` 参数，改为增大 `max_tokens` 到 512 以上以容纳默认 thinking 消耗
+
+---
+
+## 2026-05-05 FoodPlugin 食物库上线 + Web 搜索开关
+
+**变更类型**：feature
+
+**内容**：
+- **食物库**（`plugins/food_library.json`）：1094 条食物条目，覆盖 16 个品类、56 个品牌
+  - 10 个标签字段：name / taste / region / available_time / category / staple / meat_veg / cooking_method / temperature / brand
+  - staple 从 8 种扩展为 12 种：汉堡/披萨/三明治/糕点/面点 独立分类（汉堡不再归类为"面包"）
+  - available_time 从 36 条扩展至 189 条精确标注：早餐(97) / 下午茶(39) / 夜宵(53)
+  - 品牌覆盖：麦当劳、肯德基、海底捞、太二、费大厨、西贝等 56 个连锁品牌
+- **食物库筛选逻辑**（`plugins/food.py`）：
+  - `_filter_food_library()`：按时段→排除品牌→口味偏好→最近排除→用户偏好 五层过滤，最多返回 40 条给 LLM
+  - `_parse_exclusions()`：从"不要麦当劳""不吃面"等自然语言提取结构化排除条件（brand/staple/taste/category）
+  - `_format_library_items()`：格式化为 `食物名 [品牌 | 口味 | 分类 | 主食 | 烹饪 | 温度]`
+- **Web 搜索开关**（默认关闭）：
+  - `_search_enabled = False`：/吃什么 跳过搜索，直接从食物库筛选后由 LLM 选择
+  - `/food search on|off` 运行时切换，`/food info` 显示当前状态
+  - 开启后恢复 Web 搜索 → 食物库 fallback 的双路径
+- **版本**：FoodPlugin 0.1.2 → 0.1.3
+
+**影响范围**：`plugins/food.py`、`plugins/food_library.json`（新增）
+
+**验证**：ruff check 零新增；pytest 690 passed（9 预存失败与食物插件无关）
+
+**回滚方案**：`git revert` 即可；或 `/food search on` 恢复旧的 Web 搜索路径
+
+---
+
 ## 2026-05-04 B站 JSON 卡片多 URL 遍历 + 无 scheme URL 修复
 
 **变更类型**：bugfix

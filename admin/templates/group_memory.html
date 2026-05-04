@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}群聊记忆 & 昵称{% endblock %}
+{% block content %}
+
+<h2 style="margin-bottom:1rem">群聊记忆 & 昵称配置</h2>
+
+<div class="card mb-2">
+    <h2>配置文件 (config/group-memory.json) <span style="font-size:0.8rem;font-weight:normal;color:var(--muted)">— 修改后自动热加载，无需重启</span></h2>
+    <form hx-post="/admin/group-memory/save" hx-target="body">
+        <textarea name="config_json" style="min-height:420px;font-family:monospace;font-size:0.82rem;"
+         >{{ config_json }}</textarea>
+        <div class="flex items-center justify-between mt-1">
+            <span style="font-size:0.8rem;{% if config_valid %}color:var(--muted){% else %}color:var(--danger,#e74c3c){% endif %}">
+            {% if config_valid %}JSON 格式正确{% else %}JSON 格式错误{% endif %}
+            </span>
+            <button type="submit" class="btn btn-primary">保存配置</button>
+        </div>
+    </form>
+</div>
+
+<div class="card mb-2">
+    <h2>记忆卡片浏览</h2>
+    <form hx-get="/admin/group-memory" hx-target="body" style="margin-bottom:1rem">
+        <div class="flex items-center" style="gap:0.5rem">
+            <select name="card_scope" style="max-width:140px">
+                <option value="user" {% if card_scope == 'user' %}selected{% endif %}>私聊</option>
+                <option value="group" {% if card_scope == 'group' %}selected{% endif %}>群聊</option>
+                <option value="global" {% if card_scope == 'global' %}selected{% endif %}>全局</option>
+            </select>
+            {% if entities %}
+            <select name="card_scope_id" style="max-width:200px">
+                <option value="">— 选择实体 —</option>
+                {% for eid in entities %}
+                <option value="{{ eid }}" {% if card_scope_id == eid %}selected{% endif %}>{{ eid }}</option>
+                {% endfor %}
+            </select>
+            {% else %}
+            <input name="card_scope_id" value="{{ card_scope_id }}" placeholder="输入 ID，如 984198159" style="max-width:200px">
+            {% endif %}
+            <button type="submit" class="btn btn-sm">查询</button>
+        </div>
+    </form>
+
+    {% if cards %}
+    <table style="width:100%;font-size:0.85rem">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>类别</th>
+                <th>范围</th>
+                <th>内容</th>
+                <th>置信度</th>
+                <th>状态</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for c in cards %}
+            <tr>
+                <td style="font-family:monospace;font-size:0.75rem">{{ c.card_id[5:] }}</td>
+                <td><span class="badge">{{ c.category_label }}</span></td>
+                <td>{{ c.scope_label }}/{{ c.scope_id }}</td>
+                <td style="max-width:300px">{{ c.content }}</td>
+                <td>{{ "%.0f%%" % (c.confidence * 100) }}</td>
+                <td><span class="badge {% if c.status == 'active' %}badge-ok{% else %}badge-warn{% endif %}">{{ c.status }}</span></td>
+                <td>
+                    <form hx-post="/admin/group-memory/cards/delete" hx-target="body" style="display:inline">
+                        <input type="hidden" name="card_id" value="{{ c.card_id }}">
+                        <button type="submit" class="btn btn-sm btn-danger" style="font-size:0.75rem"
+                         onclick="return confirm('确定过期卡片 {{ c.card_id[5:] }} ?')">过期</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% elif card_scope_id %}
+    <p style="color:var(--muted)">该实体暂无记忆卡片。</p>
+    {% else %}
+    <p style="color:var(--muted)">选择一个范围并输入实体 ID 查看卡片。</p>
+    {% endif %}
+</div>
+
+<div class="card mb-2">
+    <h2>配置字段说明</h2>
+    <table style="font-size:0.85rem">
+        <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td><code>memory.mode</code></td><td>string</td><td><code>"global"</code> 所有群共享 / <code>"per_group"</code> 每群独立 / <code>"pool"</code> 分组共享</td></tr>
+            <tr><td><code>memory.pools.&lt;id&gt;.name</code></td><td>string</td><td>池显示名称</td></tr>
+            <tr><td><code>memory.pools.&lt;id&gt;.groups</code></td><td>list[int]</td><td>该池包含的群号列表</td></tr>
+            <tr><td><code>memory.pools.&lt;id&gt;.shared_categories</code></td><td>list[str]</td><td>共享的卡片类别，空=全部共享</td></tr>
+            <tr><td><code>nickname.mode</code></td><td>string</td><td><code>"global"</code> 全局昵称 / <code>"per_group"</code> 按群独立</td></tr>
+            <tr><td><code>nickname.per_group.&lt;user_id&gt;.&lt;group_id&gt;</code></td><td>string</td><td>指定用户在指定群的昵称</td></tr>
+            <tr><td><code>card_ttl_days.default</code></td><td>int</td><td>卡片默认过期天数，0=永不过期</td></tr>
+            <tr><td><code>card_ttl_days.per_category.&lt;category&gt;</code></td><td>int</td><td>按类别指定过期天数，如 <code>"status": 7</code> (7天过期)</td></tr>
+        </tbody>
+    </table>
+</div>
+
+{% endblock %}

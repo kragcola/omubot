@@ -5,6 +5,23 @@ All notable changes to Omubot are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.5] — 2026-05-05
+
+### Added
+
+- **FoodPlugin**：`/吃什么` 食物推荐命令，含 1094 条本地食物库（16 品类 × 56 品牌），支持时段匹配、品牌/口味排除、"不要麦当劳"等自然语言过滤。Web 搜索默认关闭，可通过 `/food search on|off` 切换。`/food like|dislike|location` 偏好管理
+- **LLM Provider 抽象层**（`services/llm/provider.py`）：解耦 Anthropic / OpenAI Chat Completions API 格式差异，支持 build_request + parse_sse_stream 双方法。AnthropicProvider + OpenAIProvider 实现
+- **Knowledge 检索服务**（`services/knowledge/`）：倒排索引全文检索，按 `##` 标题分块，支持中文二元组 + 英文词 tokenization
+- **KnowledgePlugin**：加载 `docs/` 下 markdown 文档到倒排索引，`/knowledge <查询>` 命令检索
+- **群记忆管理页**（`admin/routes/group_memory.py`）：Admin Dashboard 中浏览和编辑记忆卡片、群昵称配置
+- **`thinking` 参数透传**：`call_api()` 和 `LLMClient._call()` 支持 `thinking` 参数，可禁用 DeepSeek 等模型的默认推理行为
+
+### Changed
+
+- Bot 版本 1.2.4 → 1.2.5
+- FoodPlugin 0.1.0 → 0.1.4
+- 插件数量 16 → 18
+
 ## [1.2.4] — 2026-05-04
 
 ### Fixed

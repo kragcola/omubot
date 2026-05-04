@@ -533,6 +533,7 @@ async def call_api(
     messages: list[Any],
     max_tokens: int = 1024,
     tools: list[dict[str, Any]] | None = None,
+    thinking: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Call Anthropic API, parse SSE stream."""
     body: dict[str, Any] = {
@@ -542,6 +543,8 @@ async def call_api(
         "max_tokens": max_tokens,
         "stream": True,
     }
+    if thinking is not None:
+        body["thinking"] = thinking
     if tools:
         # Cache-control on last tool def so the whole tool set is cached together
         cached_tools = [*tools]
@@ -872,10 +875,12 @@ class LLMClient:
     async def _call(
         self, system_blocks: list[dict[str, Any]], messages: list[Any], tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 1024,
+        thinking: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await call_api(
             self._session, self._base_url, self._api_key, self._model,
             system_blocks, messages, max_tokens=max_tokens, tools=tools,
+            thinking=thinking,
         )
 
     def _record_usage(
