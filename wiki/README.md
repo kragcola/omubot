@@ -27,7 +27,7 @@ kernel/          # 内核层 —— 零 I/O，零外部依赖
 ├── router.py    #   NoneBot 消息路由
 └── manifest.py  #   插件清单 + SemVer 解析
 services/        # 系统服务层 —— LLM、记忆、媒体、工具
-plugins/         # 插件层 —— 单文件 .py + 侧车 .json，或目录（多文件）
+plugins/         # 插件层 —— 统一目录插件（plugin.py + plugin.json + JSON 配置）
 admin/           # 管理面板（系统服务）
 config.example.toml  # 配置模板
 soul/            # 人设模板（identity.example.md + instruction.example.md）

@@ -47,12 +47,16 @@ def _get_admin_token() -> str:
     return os.environ.get("ADMIN_TOKEN", "admin")
 
 
-# Paths that don't need auth
-_SKIP_PATHS = {"/admin/login", "/admin/logout", "/admin/static"}
+# API paths that don't need auth
+_API_SKIP_PATHS = {"/api/admin/login", "/api/admin/logout"}
 
 
 class AdminAuthMiddleware(BaseHTTPMiddleware):
-    """Middleware that redirects unauthenticated /admin/* requests to /admin/login."""
+    """Middleware that protects /api/admin/* endpoints with HMAC-signed cookies.
+
+    Page routes under /admin/* pass through to the SPA, which handles its own
+    auth UI.  API routes return 401 JSON when unauthenticated.
+    """
 
     def __init__(self, app, admin_token: str = "") -> None:
         super().__init__(app)
@@ -62,9 +66,12 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
-        if not path.startswith("/admin/") or any(
-            path == p or path.startswith(p) for p in _SKIP_PATHS
-        ):
+
+        # Only protect JSON API routes — let the SPA handle page auth
+        if not path.startswith("/api/admin/"):
+            return await call_next(request)
+
+        if path in _API_SKIP_PATHS:
             return await call_next(request)
 
         session = request.cookies.get("admin_session", "")
@@ -74,7 +81,8 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
             ok = value == self._admin_token
 
         if not ok:
-            return RedirectResponse(url="/admin/login", status_code=303)
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
         request.state.admin_authenticated = True
         return await call_next(request)

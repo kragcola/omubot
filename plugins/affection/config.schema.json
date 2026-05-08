@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用好感度"
+    },
+    "storage_dir": {
+      "type": "string",
+      "title": "好感度目录"
+    },
+    "score_increment": {
+      "type": "number",
+      "title": "单次互动增量",
+      "minimum": 0
+    },
+    "daily_cap": {
+      "type": "number",
+      "title": "每日增量上限",
+      "minimum": 0
+    }
+  }
+}

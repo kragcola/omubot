@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "food",
+  "display_name": {
+    "zh": "吃什么",
+    "en": "Food"
+  },
+  "description": "食物推荐：/吃什么 根据偏好、地区、时间推荐食物",
+  "version": "0.1.6",
+  "priority": 25,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "tool",
+  "permissions": [
+    "message",
+    "command",
+    "storage",
+    "network"
+  ],
+  "capabilities": [
+    "food_recommendation"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "recent_max",
+      "recent_ttl",
+      "feedback_window",
+      "search_enabled",
+      "food_library_max_items"
+    ]
+  },
+  "store": {
+    "visibility": "marketplace_ready",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from plugins.affection.models import AffectionProfile
 from plugins.affection.store import AffectionStore
+
+if TYPE_CHECKING:
+    from kernel.config import GroupMemoryConfig
 
 CST = ZoneInfo("Asia/Shanghai")
 
@@ -23,6 +27,11 @@ class AffectionEngine:
         self._store = store
         self._score_increment = score_increment
         self._daily_cap = daily_cap
+        self._group_memory_config: GroupMemoryConfig | None = None
+
+    def set_group_memory_config(self, config: GroupMemoryConfig) -> None:
+        """Inject group memory config for pool-aware nickname resolution."""
+        self._group_memory_config = config
 
     # ------------------------------------------------------------------
     # Score management
@@ -60,10 +69,32 @@ class AffectionEngine:
         self._store.save(profile)
         return profile
 
-    def set_group_nickname(self, user_id: str, nickname: str) -> AffectionProfile:
-        """Set a custom nickname for a user (group chat, separate from private)."""
+    def _resolve_pool_ids(self, group_id: str | None) -> list[str] | None:
+        """Resolve pool IDs from group_id using the injected config."""
+        if group_id and self._group_memory_config is not None:
+            return self._group_memory_config.resolve_group_pools(group_id)
+        return None
+
+    def set_group_nickname(
+        self,
+        user_id: str,
+        nickname: str,
+        *,
+        pool_ids: list[str] | None = None,
+        group_id: str | None = None,
+    ) -> AffectionProfile:
+        """Set a custom nickname for a user (group chat, separate from private).
+
+        pool_ids: explicit scope IDs (takes priority).
+        group_id: used to resolve pool_ids via GroupMemoryConfig when pool_ids is None.
+                  When neither is provided, stores under "__default__" (legacy fallback).
+        """
+        if pool_ids is None:
+            pool_ids = self._resolve_pool_ids(group_id)
         profile = self._store.get(user_id)
-        profile.group_nickname = nickname
+        targets = pool_ids if pool_ids else ["__default__"]
+        for sid in targets:
+            profile.group_nicknames[sid] = nickname
         self._store.save(profile)
         return profile
 
@@ -85,15 +116,19 @@ class AffectionEngine:
         qq_nickname: str = "",
         *,
         in_group: bool = False,
+        pool_ids: list[str] | None = None,
     ) -> str:
         """Resolve the best nickname for a user.
 
         Private: custom_nickname > QQ nickname > QQ号
-        Group:   group_nickname > group card > QQ nickname > QQ号
+        Group:   group_nickname (pool-aware) > group card > QQ nickname > QQ号
         """
         profile = self._store.get(user_id)
-        if in_group and profile.group_nickname:
-            return profile.group_nickname
+        if in_group:
+            # Pool-aware: look up across all pool scope_ids
+            gn = self._lookup_group_nickname(profile, pool_ids)
+            if gn:
+                return gn
         if not in_group and profile.custom_nickname:
             return profile.custom_nickname
         if group_card:
@@ -101,6 +136,19 @@ class AffectionEngine:
         if qq_nickname:
             return qq_nickname
         return user_id
+
+    def _lookup_group_nickname(
+        self, profile: AffectionProfile, pool_ids: list[str] | None
+    ) -> str:
+        """Look up group nickname across pool scope_ids."""
+        if not profile.group_nicknames:
+            return ""
+        if pool_ids:
+            for pid in pool_ids:
+                if pid in profile.group_nicknames:
+                    return profile.group_nicknames[pid]
+        # Fallback: check __default__ or __legacy__
+        return profile.group_nicknames.get("__default__") or profile.group_nicknames.get("__legacy__", "")
 
     def resolve_suffix(self, user_id: str) -> str:
         """Get the address suffix to use for a user."""
@@ -113,7 +161,13 @@ class AffectionEngine:
     # Prompt block
     # ------------------------------------------------------------------
 
-    def build_affection_block(self, user_id: str, *, in_group: bool = False) -> str:
+    def build_affection_block(
+        self,
+        user_id: str,
+        *,
+        in_group: bool = False,
+        pool_ids: list[str] | None = None,
+    ) -> str:
         """Build the affection_block text for system prompt injection.
 
         When *in_group* is True, relationship detail is masked to simulate
@@ -126,8 +180,10 @@ class AffectionEngine:
                 "【与当前用户的关系】",
                 f"你和 QQ号{user_id} 的用户是初次对话。保持正常的友好态度。",
             ]
-            if in_group and profile.group_nickname:
-                lines.append(f"在群聊中他希望你称呼他为「{profile.group_nickname}」。")
+            if in_group:
+                gn = self._lookup_group_nickname(profile, pool_ids)
+                if gn:
+                    lines.append(f"在群聊中他希望你称呼他为「{gn}」。")
             elif not in_group and profile.custom_nickname:
                 lines.append(f"他希望你称呼他为「{profile.custom_nickname}」。")
             else:
@@ -152,8 +208,9 @@ class AffectionEngine:
                 "用「好像记得」「似乎」「印象中」等模糊语气来提及对他的了解。",
                 "但如果他主动提起私下聊过的话题或询问你，可以自然地接话——不装傻，只是不主动。",
             ]
-            if profile.group_nickname:
-                lines.append(f"在群聊中，他希望你称呼他为「{profile.group_nickname}」。这是他在群里的公开称呼，可以大方使用。")
+            gn = self._lookup_group_nickname(profile, pool_ids)
+            if gn:
+                lines.append(f"在群聊中，他希望你称呼他为「{gn}」。这是他在群里的公开称呼，可以大方使用。")
         else:
             tier_descriptions = {
                 "陌生人": "你们还不太熟悉，保持礼貌友好的距离。",

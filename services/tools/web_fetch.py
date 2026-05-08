@@ -16,7 +16,7 @@ _SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.I
 MAX_LENGTH = 4000
 
 
-def _is_safe_url(url: str) -> bool:
+def _is_safe_url(url: str, *, allow_proxy_dns_net: bool = True) -> bool:
     """拒绝内网/本机地址，防止 SSRF。"""
     import socket
     try:
@@ -31,7 +31,7 @@ def _is_safe_url(url: str) -> bool:
             addrinfos = socket.getaddrinfo(hostname, None)
             for _, _, _, _, sockaddr in addrinfos:
                 addr = ipaddress.ip_address(sockaddr[0])
-                if not _is_allowed_addr(addr):
+                if not _is_allowed_addr(addr, allow_proxy_dns_net=allow_proxy_dns_net):
                     return False
             return bool(addrinfos)
         except socket.gaierror:
@@ -44,14 +44,33 @@ def _is_safe_url(url: str) -> bool:
 _PROXY_DNS_NET = ipaddress.ip_network("198.18.0.0/15")
 
 
-def _is_allowed_addr(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+def _is_allowed_addr(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    *,
+    allow_proxy_dns_net: bool = True,
+) -> bool:
     """判断地址是否允许访问：全局地址或代理 DNS 段。"""
     if addr.is_global:
         return True
-    return isinstance(addr, ipaddress.IPv4Address) and addr in _PROXY_DNS_NET
+    return bool(allow_proxy_dns_net and isinstance(addr, ipaddress.IPv4Address) and addr in _PROXY_DNS_NET)
 
 
 class WebFetchTool(Tool):
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 15,
+        max_length: int = MAX_LENGTH,
+        follow_redirects: bool = True,
+        user_agent: str = "Mozilla/5.0 QQBot/1.0",
+        allow_proxy_dns_net: bool = True,
+    ) -> None:
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
+        self._max_length = max(100, int(max_length))
+        self._follow_redirects = bool(follow_redirects)
+        self._user_agent = user_agent or "Mozilla/5.0 QQBot/1.0"
+        self._allow_proxy_dns_net = bool(allow_proxy_dns_net)
+
     @property
     def name(self) -> str:
         return "web_fetch"
@@ -72,14 +91,14 @@ class WebFetchTool(Tool):
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         url: str = kwargs["url"]
-        if not _is_safe_url(url):
+        if not _is_safe_url(url, allow_proxy_dns_net=self._allow_proxy_dns_net):
             return "拒绝访问: 不允许访问内网地址"
 
         try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 QQBot/1.0"})
+            async with httpx.AsyncClient(timeout=self._timeout_seconds, follow_redirects=self._follow_redirects) as client:
+                resp = await client.get(url, headers={"User-Agent": self._user_agent})
         except httpx.TimeoutException:
-            return f"请求超时: 网页在 15 秒内未响应 ({url})"
+            return f"请求超时: 网页在 {self._timeout_seconds:g} 秒内未响应 ({url})"
         except httpx.ConnectError:
             return f"连接失败: 无法连接到服务器 ({url})"
         except httpx.HTTPError as e:
@@ -92,6 +111,6 @@ class WebFetchTool(Tool):
         text = _TAG_RE.sub(" ", text)
         text = _SPACE_RE.sub(" ", text).strip()
 
-        if len(text) > MAX_LENGTH:
-            text = text[:MAX_LENGTH] + "...(已截断)"
+        if len(text) > self._max_length:
+            text = text[:self._max_length] + "...(已截断)"
         return text

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用知识库注入"
+    },
+    "dir": {
+      "type": "string",
+      "title": "文档目录",
+      "description": "生产聊天知识推荐使用 docs/knowledge，避免把审计、计划、研发记录全部注入日常对话。"
+    },
+    "index_db_path": {
+      "type": "string",
+      "title": "持久索引数据库",
+      "description": "SQLite chunk/source 索引路径。重启后会优先从这里恢复索引，再按文件 hash 增量重建。"
+    },
+    "max_chunks": {
+      "type": "integer",
+      "title": "最多注入片段",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "recursive": {
+      "type": "boolean",
+      "title": "递归扫描子目录"
+    },
+    "include": {
+      "type": "array",
+      "title": "包含规则",
+      "items": {
+        "type": "string"
+      }
+    },
+    "exclude": {
+      "type": "array",
+      "title": "排除规则",
+      "description": "相对文档目录的 glob。建议保留 drafts/**、**/*.draft.md、_archive/**、._*.md、**/._*.md。",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

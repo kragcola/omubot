@@ -1,4 +1,0 @@
-enabled = true
-storage_dir = "storage/affection"
-score_increment = 0.8
-daily_cap = 10.0

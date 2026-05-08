@@ -32,15 +32,17 @@ _L = logger.bind(channel="affection")
 class AffectionPlugin(AmadeusPlugin):
     name = "affection"
     description = "好感度系统：关系提示、互动记录、昵称设置"
-    version = "1.1.1"
+    version = "1.1.2"
     priority = 10
 
     def __init__(self) -> None:
         super().__init__()
         self._engine = None
+        self._group_memory_config = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
         self._engine = ctx.affection_engine
+        self._group_memory_config = ctx.group_memory_config
 
     def register_tools(self) -> list[Tool]:
         if self._engine is None:
@@ -52,7 +54,10 @@ class AffectionPlugin(AmadeusPlugin):
         if self._engine is None:
             return
         in_group = ctx.group_id is not None and ctx.privacy_mask
-        text = self._engine.build_affection_block(ctx.user_id, in_group=in_group)
+        pool_ids: list[str] | None = None
+        if in_group and ctx.group_id and self._group_memory_config is not None:
+            pool_ids = self._group_memory_config.resolve_group_pools(ctx.group_id)
+        text = self._engine.build_affection_block(ctx.user_id, in_group=in_group, pool_ids=pool_ids)
         if text:
             profile = self._engine._store.get(ctx.user_id)
             tier = profile.tier

@@ -73,7 +73,7 @@ def test_save_sticker_schema(store: StickerStore, superusers: set[str]) -> None:
     assert "image_tag" in props
     assert "description" in props
     assert "usage_hint" in props
-    assert set(schema["required"]) == {"image_tag", "description", "usage_hint"}
+    assert set(schema["required"]) == {"image_tag", "description", "usage_hint", "requested_by"}
 
 
 def test_save_sticker_name_and_description(store: StickerStore, superusers: set[str]) -> None:
@@ -234,7 +234,7 @@ async def test_save_sticker_bot_steal(
     ctx = _ctx_with_tag("regular_user", "img:1", str(jpeg_file))
 
     result = await tool.execute(
-        ctx, image_tag="img:1", description="可爱表情", usage_hint="开心时发",
+        ctx, image_tag="img:1", description="可爱表情", usage_hint="开心时发", requested_by="admin1",
     )
 
     assert "已收录" in result

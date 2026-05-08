@@ -20,6 +20,21 @@ BING_API = "https://api.bing.microsoft.com/v7.0/search"
 
 
 class WebSearchTool(Tool):
+    def __init__(
+        self,
+        *,
+        default_results: int = MAX_RESULTS,
+        max_results: int = 10,
+        mode: str = "auto",
+        bing_market: str = "zh-CN",
+        timeout_seconds: float = 15,
+    ) -> None:
+        self._default_results = max(1, int(default_results))
+        self._max_results = max(1, int(max_results))
+        self._mode = mode if mode in {"auto", "bing", "ddg"} else "auto"
+        self._bing_market = bing_market or "zh-CN"
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
+
     @property
     def name(self) -> str:
         return "web_search"
@@ -40,7 +55,7 @@ class WebSearchTool(Tool):
                 "query": {"type": "string", "description": "搜索关键词"},
                 "max_results": {
                     "type": "integer",
-                    "description": "返回结果数量，默认 5，最多 10",
+                    "description": f"返回结果数量，默认 {self._default_results}，最多 {self._max_results}",
                 },
             },
             "required": ["query"],
@@ -48,22 +63,46 @@ class WebSearchTool(Tool):
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         query: str = kwargs["query"]
-        max_results = min(int(kwargs.get("max_results", MAX_RESULTS)), 10)
+        max_results = min(int(kwargs.get("max_results", self._default_results)), self._max_results)
         api_key = os.environ.get("SEARCH_API_KEY", "")
 
-        if api_key:
-            return await _bing_search(query, max_results, api_key)
-        else:
+        if self._mode == "bing":
+            if not api_key:
+                return "Bing 搜索未配置 SEARCH_API_KEY。"
+            return await _bing_search(
+                query,
+                max_results,
+                api_key,
+                market=self._bing_market,
+                timeout_seconds=self._timeout_seconds,
+            )
+        if self._mode == "ddg":
             return await _ddg_search(query, max_results)
+        if api_key:
+            return await _bing_search(
+                query,
+                max_results,
+                api_key,
+                market=self._bing_market,
+                timeout_seconds=self._timeout_seconds,
+            )
+        return await _ddg_search(query, max_results)
 
 
-async def _bing_search(query: str, max_results: int, api_key: str) -> str:
+async def _bing_search(
+    query: str,
+    max_results: int,
+    api_key: str,
+    *,
+    market: str = "zh-CN",
+    timeout_seconds: float = 15,
+) -> str:
     """Search via Bing Web Search API."""
-    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
         try:
             resp = await client.get(
                 BING_API,
-                params={"q": query, "count": max_results, "mkt": "zh-CN"},
+                params={"q": query, "count": max_results, "mkt": market},
                 headers={"Ocp-Apim-Subscription-Key": api_key},
             )
             resp.raise_for_status()

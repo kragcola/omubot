@@ -27,7 +27,12 @@ _L = logger.bind(channel="system")
 
 
 def load_instruction(soul_dir: str) -> str:
-    """Load instruction.md from the soul directory. Returns empty string if missing."""
+    """Load behavioral instructions from the soul directory.
+
+    The runtime uses the legacy two-file soul layout:
+    identity.md for persona, instruction.md for behavior rules.
+    Returns empty string if instruction.md does not exist.
+    """
     path = Path(soul_dir) / "instruction.md"
     if not path.exists():
         return ""
@@ -116,6 +121,7 @@ class PromptBuilder:
         plugin_static: list[dict[str, Any]] | None = None,
         plugin_stable: list[dict[str, Any]] | None = None,
         plugin_dynamic: list[dict[str, Any]] | None = None,
+        include_state_board: bool = True,
     ) -> list[dict[str, Any]]:
         """Build system prompt blocks for a conversation turn.
 
@@ -124,8 +130,8 @@ class PromptBuilder:
         Most blocks are now contributed by plugins via bus.fire_on_pre_prompt().
         PromptBuilder only owns the static identity block and state_board.
         """
-        state_board_block = await self._build_state_board(group_id)
-        if state_board_block["text"]:
+        state_board_block = await self.build_state_board_block(group_id)
+        if include_state_board and state_board_block["text"]:
             st_len = len(state_board_block["text"])
             st_preview = state_board_block["text"][:80]
             logger.info("state board | chars={} preview={!r}", st_len, st_preview)
@@ -133,7 +139,8 @@ class PromptBuilder:
         blocks: list[dict[str, Any]] = [self._static_block]
         if plugin_static:
             blocks.extend(plugin_static)
-        blocks.append(state_board_block)
+        if include_state_board:
+            blocks.append(state_board_block)
         if plugin_stable:
             blocks.extend(plugin_stable)
         if plugin_dynamic:
@@ -141,7 +148,7 @@ class PromptBuilder:
 
         return blocks
 
-    async def _build_state_board(self, group_id: str | None) -> dict[str, Any]:
+    async def build_state_board_block(self, group_id: str | None) -> dict[str, Any]:
         """Build a fresh state_board block for group conversations.
 
         Returns an empty block for private chats or when state_board is not configured.

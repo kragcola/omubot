@@ -21,6 +21,8 @@ class TimelineMessage(TypedDict):
     speaker: str | None  # user → "昵称(QQ号)", assistant → None
     content: Content
     message_id: NotRequired[int | None]  # QQ message_id for reply references
+    trigger_reason: NotRequired[str]  # 触发原因标记（如 "有人@了你"），合并时包裹为 «触发原因: ...»
+    trigger_target: NotRequired[str]  # 触发者 QQ 号，合并时渲染为 «来自 QQ=xxx»
 
 
 # ------------------------------------------------------------------
@@ -40,30 +42,53 @@ def merge_user_contents(batch: list[TimelineMessage]) -> Content:
         lines: list[str] = []
         for m in batch:
             assert isinstance(m["content"], str)
+            trigger = m.get("trigger_reason")
             mid = m.get("message_id")
-            tag = f"«msg:{mid}» " if mid is not None else ""
-            if m["speaker"] is not None:
-                lines.append(f"{tag}{m['speaker']}: {m['content']}")
+            if trigger:
+                # Trigger marker: metadata only, no «msg:mid» tag
+                parts = [f"触发原因: {trigger}"]
+                target = m.get("trigger_target", "")
+                if target:
+                    parts.append(f"来自 QQ={target}")
+                if mid is not None:
+                    parts.append(f"消息ID={mid}")
+                lines.append(f"«{' | '.join(parts)}»")
             else:
-                lines.append(f"{tag}{m['content']}" if tag else m["content"])
+                # Regular message
+                tag = f"«msg:{mid}» " if mid is not None else ""
+                if m["speaker"] is not None:
+                    lines.append(f"{tag}{m['speaker']}: {m['content']}")
+                else:
+                    lines.append(f"{tag}{m['content']}" if tag else m["content"])
         return "\n".join(lines)
 
     merged: list[ContentBlock] = []
     for m in batch:
+        trigger = m.get("trigger_reason")
         mid = m.get("message_id")
-        tag = f"«msg:{mid}» " if mid is not None else ""
-        prefix = f"{tag}{m['speaker']}: " if m["speaker"] is not None else tag
-        if isinstance(m["content"], str):
-            merged.append(TextBlock(type="text", text=f"{prefix}{m['content']}"))
+        if trigger:
+            # Trigger marker: metadata only, no «msg:mid» tag
+            parts = [f"触发原因: {trigger}"]
+            target = m.get("trigger_target", "")
+            if target:
+                parts.append(f"来自 QQ={target}")
+            if mid is not None:
+                parts.append(f"消息ID={mid}")
+            merged.append(TextBlock(type="text", text=f"«{' | '.join(parts)}»"))
         else:
-            # Insert speaker prefix: prepend to first text block, or add as own block
-            if prefix and (not m["content"] or m["content"][0]["type"] != "text"):
-                merged.append(TextBlock(type="text", text=prefix.rstrip()))
-            for j, block in enumerate(m["content"]):
-                if j == 0 and block["type"] == "text" and prefix:
-                    merged.append(TextBlock(type="text", text=f"{prefix}{block['text']}"))
-                else:
-                    merged.append(block)
+            # Regular message
+            tag = f"«msg:{mid}» " if mid is not None else ""
+            prefix = f"{tag}{m['speaker']}: " if m["speaker"] is not None else tag
+            if isinstance(m["content"], str):
+                merged.append(TextBlock(type="text", text=f"{prefix}{m['content']}"))
+            else:
+                if prefix and (not m["content"] or m["content"][0]["type"] != "text"):
+                    merged.append(TextBlock(type="text", text=prefix.rstrip()))
+                for j, block in enumerate(m["content"]):
+                    if j == 0 and block["type"] == "text" and prefix:
+                        merged.append(TextBlock(type="text", text=f"{prefix}{block['text']}"))
+                    else:
+                        merged.append(block)
     return merged
 
 
@@ -227,6 +252,30 @@ class GroupTimeline:
                 content_json=self._content_to_json(content),
                 message_id=message_id,
             ))
+
+    def add_pending_trigger(
+        self, group_id: str, *, reason: str,
+        message_id: int | None = None,
+        target_user_id: str = "",
+    ) -> None:
+        """Append a trigger-reason marker to the pending buffer.
+
+        This marker is merged into the user turn when the assistant replies,
+        making the trigger reason visible to the LLM and persistent across
+        compactions.  «触发原因: ...»  tags distinguish it from user text.
+        """
+        state = self._get_or_create(group_id)
+        msg: TimelineMessage = {
+            "role": "user",
+            "speaker": None,
+            "content": "",
+            "trigger_reason": reason,
+        }
+        if message_id is not None:
+            msg["message_id"] = message_id
+        if target_user_id:
+            msg["trigger_target"] = target_user_id
+        state.pending.insert(0, msg)
 
     # ------------------------------------------------------------------
     # Read accessors

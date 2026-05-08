@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "plugin": "knowledge",
+  "values": {
+    "enabled": false,
+    "dir": "docs/knowledge",
+    "index_db_path": "storage/knowledge_index.db",
+    "max_chunks": 3,
+    "recursive": true,
+    "include": [
+      "*.md",
+      "**/*.md"
+    ],
+    "exclude": [
+      "drafts/**",
+      "**/*.draft.md",
+      "_archive/**",
+      "._*.md",
+      "**/._*.md"
+    ]
+  }
+}

@@ -198,6 +198,36 @@ class ToolProvidingPlugin(AmadeusPlugin):
         return list(self._tools)
 
 
+class PermissionedPlugin(TrackingPlugin):
+    name = "permissioned"
+    permissions = ["message"]  # noqa: RUF012 - test fixture metadata
+
+
+class SlowHookPlugin(TrackingPlugin):
+    name = "slow_hook"
+    hook_budget_ms = 1
+
+    async def on_tick(self, ctx: PluginContext) -> None:
+        await asyncio.sleep(0.01)
+        await super().on_tick(ctx)
+
+
+class RecoveringMessagePlugin(AmadeusPlugin):
+    name = "recovering_message"
+    priority = 80
+
+    def __init__(self, fail_times: int = 1):
+        super().__init__()
+        self.fail_times = fail_times
+        self.calls = 0
+
+    async def on_message(self, ctx: MessageContext) -> bool:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise RuntimeError("temporary failure")
+        return False
+
+
 class FailingToolPlugin(AmadeusPlugin):
     """Raises during register_tools() for error isolation."""
     name = "failing_tool"
@@ -460,6 +490,22 @@ class TestThinkerDispatch:
         assert len(tracker.thinker_calls) == 1
         assert tracker.thinker_calls[0].action == "reply"
 
+    def test_fire_on_thinker_decision_wait_action(self) -> None:
+        bus = PluginBus()
+        tracker = TrackingPlugin()
+        bus.register(tracker)
+
+        ctx = ThinkerContext(
+            session_id="s1",
+            group_id="g1",
+            user_id="u1",
+            action="wait",
+            thought="先不说",
+        )
+        asyncio.run(bus.fire_on_thinker_decision(ctx))
+        assert len(tracker.thinker_calls) == 1
+        assert tracker.thinker_calls[0].action == "wait"
+
 
 # ============================================================================
 # Tool collection tests
@@ -575,6 +621,149 @@ class TestErrorIsolation:
 
         asyncio.run(bus.fire_on_post_reply(_reply_ctx()))
         assert len(tracker.post_reply_calls) == 1
+
+    def test_plugin_health_records_errors_and_elapsed(self) -> None:
+        bus = PluginBus()
+        bus.register(CrashingPlugin(crash_on="on_message"))
+
+        consumed = asyncio.run(bus.fire_on_message(_msg_ctx()))
+
+        assert consumed is False
+        [health] = bus.plugin_health()
+        assert health["name"] == "crasher"
+        assert health["state"] == "degraded"
+        assert health["calls"] == 1
+        assert health["errors"] == 1
+        assert health["last_hook"] == "on_message"
+        assert "crash in on_message" in health["last_error"]
+
+    def test_set_plugin_enabled_gates_hooks(self) -> None:
+        bus = PluginBus()
+        tracker = TrackingPlugin()
+        bus.register(tracker)
+
+        assert bus.set_plugin_enabled("tracker", False) is True
+        asyncio.run(bus.fire_on_tick(_plugin_ctx()))
+
+        assert tracker.tick_calls == 0
+        [health] = bus.plugin_health()
+        assert health["state"] == "disabled"
+        assert health["enabled"] is False
+
+    def test_system_plugin_cannot_be_disabled(self) -> None:
+        bus = PluginBus()
+        plugin = TrackingPlugin()
+        plugin.name = "chat"
+        bus.register(plugin)
+
+        assert bus.set_plugin_enabled("chat", False) is False
+
+        [health] = bus.plugin_health()
+        assert health["enabled"] is True
+        assert plugin.enabled is True
+        assert plugin.tier == "system"
+        assert plugin.toggle_policy == "locked"
+
+    def test_manifest_permissions_gate_hook_and_tool_collection(self) -> None:
+        bus = PluginBus()
+        plugin = PermissionedPlugin()
+        bus.register(plugin)
+
+        consumed = asyncio.run(bus.fire_on_message(_msg_ctx()))
+        asyncio.run(bus.fire_on_tick(_plugin_ctx()))
+
+        assert consumed is False
+        assert plugin.tick_calls == 0
+        assert bus.collect_tools() == []
+        [health] = bus.plugin_health()
+        assert health["permission_denials"] >= 2
+        assert health["state"] == "permission_limited"
+        assert health["display_label"] == "按权限运行"
+        assert health["display_type"] == "info"
+        assert health["last_permission_denied"] == "tool"
+
+    def test_hook_budget_records_slow_calls(self) -> None:
+        bus = PluginBus()
+        plugin = SlowHookPlugin()
+        bus.register(plugin)
+
+        asyncio.run(bus.fire_on_tick(_plugin_ctx()))
+
+        [health] = bus.plugin_health()
+        assert health["state"] == "degraded"
+        assert health["slow_calls"] == 1
+        assert health["last_slow_hook"] == "on_tick"
+        assert health["hooks"]["on_tick"]["slow_calls"] == 1
+
+    def test_error_burst_enters_soft_isolation_and_suppresses_future_hooks(self) -> None:
+        bus = PluginBus()
+        bus._ERROR_BURST_LIMIT = 3
+        bus._SOFT_ISOLATION_COOLDOWN_SECONDS = 60.0
+        bus.register(CrashingPlugin(crash_on="on_message"))
+        consumer = EchoConsumerPlugin(prefix="!")
+        bus.register(consumer)
+
+        for _ in range(3):
+            consumed = asyncio.run(bus.fire_on_message(_msg_ctx(content="!ping")))
+            assert consumed is True
+
+        [crasher, _consumer_health] = bus.plugin_health()
+        assert crasher["calls"] == 3
+        assert crasher["state"] == "throttled"
+        assert crasher["cooldown_reason"] == "error_burst"
+        assert crasher["cooldown_remaining_seconds"] > 0
+
+        consumed = asyncio.run(bus.fire_on_message(_msg_ctx(content="!ping")))
+        assert consumed is True
+
+        [crasher, _consumer_health] = bus.plugin_health()
+        assert crasher["calls"] == 3
+        assert crasher["suppressed_calls"] == 1
+        assert crasher["last_suppressed_hook"] == "on_message"
+        assert consumer.on_message_calls == ["!ping", "!ping", "!ping", "!ping"]
+
+    def test_soft_isolation_expires_and_plugin_can_run_again(self) -> None:
+        bus = PluginBus()
+        bus._ERROR_BURST_LIMIT = 1
+        bus._SOFT_ISOLATION_COOLDOWN_SECONDS = 0.01
+        plugin = RecoveringMessagePlugin(fail_times=1)
+        bus.register(plugin)
+
+        consumed = asyncio.run(bus.fire_on_message(_msg_ctx()))
+        assert consumed is False
+
+        [health] = bus.plugin_health()
+        assert health["state"] == "throttled"
+
+        asyncio.run(asyncio.sleep(0.02))
+        consumed = asyncio.run(bus.fire_on_message(_msg_ctx()))
+        assert consumed is False
+
+        [health] = bus.plugin_health()
+        assert plugin.calls == 2
+        assert health["cooldown_remaining_seconds"] == 0
+        assert health["state"] == "degraded"
+
+    def test_slow_burst_enters_soft_isolation(self) -> None:
+        bus = PluginBus()
+        bus._SLOW_BURST_LIMIT = 1
+        bus._SOFT_ISOLATION_COOLDOWN_SECONDS = 60.0
+        plugin = SlowHookPlugin()
+        bus.register(plugin)
+
+        asyncio.run(bus.fire_on_tick(_plugin_ctx()))
+
+        [health] = bus.plugin_health()
+        assert health["state"] == "throttled"
+        assert health["cooldown_reason"] == "slow_burst"
+        assert health["slow_burst_count"] == 1
+
+        asyncio.run(bus.fire_on_tick(_plugin_ctx()))
+
+        [health] = bus.plugin_health()
+        assert plugin.tick_calls == 1
+        assert health["suppressed_calls"] == 1
+        assert health["hooks"]["on_tick"]["suppressed_calls"] == 1
 
 
 # ============================================================================

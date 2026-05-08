@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "element_detector",
+  "display_name": {
+    "zh": "要素察觉",
+    "en": "Element Detector"
+  },
+  "description": "要素察觉：识别特定句式并回复预设模板或 LLM 生成内容",
+  "version": "1.1.2",
+  "priority": 210,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "pipeline",
+  "permissions": [
+    "message",
+    "network"
+  ],
+  "capabilities": [
+    "pattern_reply"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "rules"
+    ]
+  },
+  "store": {
+    "visibility": "marketplace_ready",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

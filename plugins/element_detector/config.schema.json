@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用要素察觉"
+    },
+    "rules": {
+      "type": "array",
+      "title": "匹配规则",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "title": "匹配正则",
+            "description": "用于检测消息的正则表达式。"
+          },
+          "reply": {
+            "type": "string",
+            "title": "回复模板",
+            "description": "可使用 {match} 或命名捕获组占位。"
+          },
+          "description": {
+            "type": "string",
+            "title": "说明",
+            "description": "规则用途说明，方便在 Web 中识别。"
+          },
+          "use_llm": {
+            "type": "boolean",
+            "title": "使用 LLM 生成",
+            "description": "开启后 reply 会作为 LLM 指令使用。"
+          }
+        },
+        "required": [
+          "pattern",
+          "reply"
+        ]
+      },
+      "description": "正则规则列表，高级项建议谨慎编辑。"
+    }
+  }
+}

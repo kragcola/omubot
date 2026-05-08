@@ -2,10 +2,10 @@
 
 ## 最小插件
 
-单文件插件（推荐）：
+目录插件：
 
 ```python
-# plugins/my_plugin.py
+# plugins/my_plugin/plugin.py
 from kernel.types import AmadeusPlugin, PluginContext
 
 class MyPlugin(AmadeusPlugin):
@@ -21,7 +21,7 @@ class MyPlugin(AmadeusPlugin):
         ctx.add_block("当前天气：晴", label="weather", position="dynamic")
 ```
 
-可选侧车清单文件 `plugins/my_plugin.json`：
+清单文件 `plugins/my_plugin/plugin.json`：
 
 ```json
 {
@@ -143,27 +143,27 @@ class HealthCheck(AmadeusPlugin):
 
 ## 插件发现
 
-`PluginBus.discover_plugins("plugins")` 自动扫描，支持两种形态：
+`PluginBus.discover_plugins("plugins")` 自动扫描统一目录插件：
 
 ```
 plugins/
-├── chat.py              → 单文件插件，注册 ChatPlugin
-├── chat.json            → 侧车清单（可选）
-├── echo.py              → 单文件插件，注册 EchoPlugin
+├── chat/                → 目录插件，注册 ChatPlugin
+│   ├── plugin.py
+│   ├── plugin.json
+│   ├── config.default.json
+│   └── config.schema.json
 ├── affection/           → 目录插件（多文件）
 │   ├── plugin.py        → 注册 AffectionPlugin
-│   ├── plugin.json      → 可选：覆盖元数据、声明依赖
+│   ├── plugin.json      → manifest v3：覆盖元数据、声明依赖
 │   └── engine.py        → 子模块
 ├── utils/               → 跳过（无 plugin.py）
-└── old_module.py        → 跳过（无 AmadeusPlugin 子类）
+└── old_module.py        → 旧根目录单文件，标为 legacy_single_file_unsupported
 ```
 
 发现规则：
-1. 子目录包含 `plugin.py` → 目录插件（优先于同名 .py 文件）
-2. 独立 `.py` 文件 → 单文件插件，检查是否有 `AmadeusPlugin` 子类
-3. `.py` 文件的侧车 `.json` → 自动拾取并覆盖实例属性
-4. 子目录的 `plugin.json` → 自动拾取并覆盖实例属性
-5. `__init__.py` 跳过
+1. 子目录包含 `plugin.py` → 导入并实例化 `AmadeusPlugin` 子类
+2. 子目录的 `plugin.json` → 自动拾取并覆盖实例属性
+3. 根目录 `.py` / `.json` 不再运行时加载，只进入本地索引治理队列
 
 ## 测试插件
 

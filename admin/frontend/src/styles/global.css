@@ -1,0 +1,221 @@
+/* Width transition for sidebar */
+.transition-width-300 {
+  transition: width 0.3s ease;
+}
+
+/* Theme tokens */
+:root {
+  --primary-color: 49, 108, 114;
+  --om-bg: #eef2f4;
+  --om-bg-soft: #f7fafb;
+  --om-surface: rgba(255, 255, 255, 0.88);
+  --om-surface-solid: #ffffff;
+  --om-surface-2: #f2f7f8;
+  --om-surface-3: #e6eff1;
+  --om-border: rgba(111, 137, 146, 0.22);
+  --om-border-strong: rgba(74, 109, 119, 0.35);
+  --om-text-1: #1f2a30;
+  --om-text-2: #607078;
+  --om-text-3: #8a979d;
+  --om-shadow-sm: 0 8px 24px rgba(23, 42, 48, 0.06);
+  --om-shadow-md: 0 16px 40px rgba(23, 42, 48, 0.12);
+  --om-shadow-lg: 0 24px 70px rgba(23, 42, 48, 0.18);
+  --om-page-gradient: radial-gradient(circle at top left, rgba(49, 108, 114, 0.12), transparent 28%), linear-gradient(180deg, var(--om-bg) 0%, var(--om-bg-soft) 100%);
+  --om-hero-gradient: linear-gradient(135deg, rgba(49, 108, 114, 0.12), rgba(49, 108, 114, 0.02) 45%, rgba(255, 255, 255, 0.64));
+  --om-success: #2e8f6b;
+  --om-warning: #c58a2b;
+  --om-danger: #b84c5c;
+  --om-info: #4d7892;
+}
+
+.dark {
+  --primary-color: 99, 178, 186;
+  --om-bg: #10171a;
+  --om-bg-soft: #132027;
+  --om-surface: rgba(26, 38, 44, 0.86);
+  --om-surface-solid: #1a262c;
+  --om-surface-2: #22323a;
+  --om-surface-3: #2a3d45;
+  --om-border: rgba(123, 149, 157, 0.22);
+  --om-border-strong: rgba(140, 175, 185, 0.38);
+  --om-text-1: #e7f0f2;
+  --om-text-2: #9cb0b8;
+  --om-text-3: #768b92;
+  --om-shadow-sm: 0 12px 30px rgba(0, 0, 0, 0.26);
+  --om-shadow-md: 0 18px 44px rgba(0, 0, 0, 0.34);
+  --om-shadow-lg: 0 32px 70px rgba(0, 0, 0, 0.42);
+  --om-page-gradient: radial-gradient(circle at top left, rgba(99, 178, 186, 0.15), transparent 30%), linear-gradient(180deg, var(--om-bg) 0%, var(--om-bg-soft) 100%);
+  --om-hero-gradient: linear-gradient(135deg, rgba(99, 178, 186, 0.18), rgba(99, 178, 186, 0.04) 42%, rgba(24, 37, 43, 0.76));
+  color-scheme: dark;
+}
+
+html {
+  background: var(--om-bg);
+}
+
+body {
+  background: var(--om-bg);
+  color: var(--om-text-1);
+  transition: background-color 0.22s ease, color 0.22s ease;
+}
+
+::selection {
+  background: rgba(var(--primary-color), 0.18);
+}
+
+/* Shared utility classes */
+.card-shadow {
+  box-shadow: var(--om-shadow-md);
+}
+
+.soft-text {
+  color: var(--om-text-2);
+}
+
+.muted-text {
+  color: var(--om-text-3);
+}
+
+.om-fill-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.om-fill-page__body {
+  flex: 1;
+  min-height: 0;
+}
+
+.om-fill-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.om-fill-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Custom scrollbar */
+.cus-scroll {
+  overflow: auto;
+}
+
+.cus-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.cus-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--om-text-3) 34%, transparent);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.cus-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--om-text-2) 48%, transparent);
+  background-clip: padding-box;
+}
+
+.cus-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Ensure Naive UI default buttons are visible in dark mode */
+.dark .n-button:not(.n-button--primary-type):not(.n-button--info-type):not(.n-button--success-type):not(.n-button--warning-type):not(.n-button--error-type) {
+  --n-color: rgba(255, 255, 255, 0.06) !important;
+  --n-color-hover: rgba(255, 255, 255, 0.1) !important;
+  --n-color-pressed: rgba(255, 255, 255, 0.04) !important;
+  --n-color-focus: rgba(255, 255, 255, 0.06) !important;
+  --n-text-color: var(--om-text-1) !important;
+  --n-text-color-hover: rgba(255, 255, 255, 0.95) !important;
+  --n-text-color-pressed: rgba(255, 255, 255, 0.72) !important;
+  --n-text-color-focus: var(--om-text-1) !important;
+  --n-border: 1px solid var(--om-border) !important;
+  --n-border-hover: 1px solid var(--om-border-strong) !important;
+  --n-border-pressed: 1px solid var(--om-border) !important;
+  --n-border-focus: 1px solid var(--om-border-strong) !important;
+}
+
+/* Ensure Naive UI menu items are visible in dark mode */
+.dark .n-menu {
+  --n-item-text-color: var(--om-text-1) !important;
+  --n-item-text-color-hover: rgba(255, 255, 255, 0.95) !important;
+  --n-item-text-color-active: rgb(var(--primary-color)) !important;
+  --n-item-text-color-child-active: rgb(var(--primary-color)) !important;
+  --n-item-icon-color: var(--om-text-2) !important;
+  --n-item-icon-color-hover: var(--om-text-1) !important;
+  --n-item-icon-color-active: rgb(var(--primary-color)) !important;
+  --n-item-icon-color-child-active: rgb(var(--primary-color)) !important;
+  --n-item-color-hover: rgba(255, 255, 255, 0.05) !important;
+  --n-item-color-active: rgba(99, 178, 186, 0.12) !important;
+  --n-arrow-color: var(--om-text-2) !important;
+  --n-arrow-color-hover: var(--om-text-1) !important;
+  --n-arrow-color-active: rgb(var(--primary-color)) !important;
+  --n-group-text-color: var(--om-text-3) !important;
+}
+
+.dark .n-menu .n-menu-item-content {
+  color: var(--om-text-1) !important;
+}
+
+.dark .n-menu .n-menu-item-content:hover {
+  color: rgba(255, 255, 255, 0.95) !important;
+}
+
+.dark .n-menu .n-menu-item-content.n-menu-item-content--selected {
+  color: rgb(var(--primary-color)) !important;
+}
+
+.dark .n-menu .n-menu-item-content .n-menu-item-content__icon {
+  color: var(--om-text-2) !important;
+}
+
+.dark .n-menu .n-menu-item-content.n-menu-item-content--selected .n-menu-item-content__icon {
+  color: rgb(var(--primary-color)) !important;
+}
+
+/* Dark mode overrides for other Naive UI components */
+.dark .n-card {
+  --n-color: var(--om-surface-solid) !important;
+  --n-text-color: var(--om-text-1) !important;
+  --n-border-color: var(--om-border) !important;
+}
+
+.dark .n-input {
+  --n-color: rgba(255, 255, 255, 0.05) !important;
+  --n-text-color: var(--om-text-1) !important;
+  --n-border-color: var(--om-border) !important;
+  --n-placeholder-color: var(--om-text-3) !important;
+}
+
+.dark .n-select {
+  --n-color: rgba(255, 255, 255, 0.05) !important;
+  --n-text-color: var(--om-text-1) !important;
+  --n-border-color: var(--om-border) !important;
+}
+
+.dark .n-tag {
+  --n-color: rgba(255, 255, 255, 0.08) !important;
+  --n-text-color: var(--om-text-1) !important;
+  --n-border-color: var(--om-border) !important;
+}
+
+.dark .n-drawer {
+  --n-color: var(--om-surface-solid) !important;
+}
+
+.dark .n-modal {
+  --n-color: var(--om-surface-solid) !important;
+}
+
+.dark .n-data-table {
+  --n-th-color: rgba(255, 255, 255, 0.05) !important;
+  --n-td-color: transparent !important;
+  --n-th-text-color: var(--om-text-1) !important;
+  --n-td-text-color: var(--om-text-1) !important;
+  --n-border-color: var(--om-border) !important;
+}

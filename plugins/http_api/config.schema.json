@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "timeout_seconds": {
+      "type": "number",
+      "title": "超时秒数",
+      "minimum": 1,
+      "maximum": 120
+    },
+    "max_response_chars": {
+      "type": "integer",
+      "title": "最大响应字符",
+      "minimum": 500,
+      "maximum": 50000
+    },
+    "follow_redirects": {
+      "type": "boolean",
+      "title": "跟随跳转"
+    },
+    "allowed_methods": {
+      "type": "array",
+      "title": "允许 HTTP 方法",
+      "items": {
+        "type": "string",
+        "enum": [
+          "GET",
+          "POST"
+        ]
+      }
+    }
+  }
+}

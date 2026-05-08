@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "plugin": "food",
+  "values": {
+    "enabled": true,
+    "recent_max": 5,
+    "recent_ttl": 1800,
+    "feedback_window": 120,
+    "search_enabled": false,
+    "food_library_max_items": 40
+  }
+}

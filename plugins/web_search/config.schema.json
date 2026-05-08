@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "default_results": {
+      "type": "integer",
+      "title": "默认结果数",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "max_results": {
+      "type": "integer",
+      "title": "最大结果上限",
+      "minimum": 1,
+      "maximum": 20
+    },
+    "mode": {
+      "type": "string",
+      "title": "搜索模式",
+      "enum": [
+        "auto",
+        "bing",
+        "ddg"
+      ],
+      "enumNames": [
+        "自动",
+        "Bing",
+        "DuckDuckGo"
+      ]
+    },
+    "bing_market": {
+      "type": "string",
+      "title": "Bing 市场区域"
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "title": "超时秒数",
+      "minimum": 1,
+      "maximum": 120
+    }
+  }
+}

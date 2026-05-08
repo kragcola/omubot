@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用表情包"
+    },
+    "storage_dir": {
+      "type": "string",
+      "title": "表情包目录"
+    },
+    "max_count": {
+      "type": "integer",
+      "title": "最大收藏数量",
+      "minimum": 1
+    },
+    "frequency": {
+      "type": "string",
+      "title": "默认发送频率",
+      "enum": [
+        "rarely",
+        "normal",
+        "frequently"
+      ],
+      "enumNames": [
+        "较少",
+        "正常",
+        "频繁"
+      ]
+    }
+  }
+}

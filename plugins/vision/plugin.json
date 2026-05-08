@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "vision",
+  "display_name": {
+    "zh": "视觉能力",
+    "en": "Vision"
+  },
+  "description": "视觉客户端：Qwen VL 图片描述能力，作为系统服务展示",
+  "version": "1.1.1",
+  "priority": 8,
+  "tier": "system",
+  "toggle_policy": "locked",
+  "category": "core",
+  "permissions": [
+    "network"
+  ],
+  "capabilities": [
+    "image_description"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "read_only",
+    "restart_required_fields": []
+  },
+  "store": {
+    "visibility": "internal",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

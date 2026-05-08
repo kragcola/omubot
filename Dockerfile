@@ -8,6 +8,10 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY . .
+RUN .venv/bin/python scripts/check_plugin_layout.py --strict
+
+# Pre-built frontend (run `npm run build` in admin/frontend/ locally before docker build)
+COPY admin/static ./admin/static/
 
 FROM python:3.12-slim AS runtime
 

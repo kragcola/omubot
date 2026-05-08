@@ -1,6 +1,41 @@
 {
+  "manifest_version": 3,
   "name": "affection",
-  "description": "好感度系统：分数、昵称、态度调节",
-  "version": "1.1.1",
-  "priority": 30
+  "display_name": {
+    "zh": "关系画像",
+    "en": "Affection"
+  },
+  "description": "好感度系统：关系提示、互动记录、昵称设置",
+  "version": "1.1.2",
+  "priority": 10,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "memory",
+  "permissions": [
+    "prompt",
+    "reply",
+    "tool",
+    "storage"
+  ],
+  "capabilities": [
+    "affection",
+    "nickname"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "storage_dir",
+      "score_increment",
+      "daily_cap"
+    ]
+  },
+  "store": {
+    "visibility": "marketplace_ready",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
 }

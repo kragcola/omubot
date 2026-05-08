@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "mute_enabled": {
+      "type": "boolean",
+      "title": "启用禁言工具"
+    },
+    "set_title_enabled": {
+      "type": "boolean",
+      "title": "启用头衔工具"
+    },
+    "send_group_msg_enabled": {
+      "type": "boolean",
+      "title": "启用主动发群消息工具"
+    },
+    "default_mute_seconds": {
+      "type": "integer",
+      "title": "默认禁言秒数",
+      "minimum": 0
+    },
+    "max_mute_seconds": {
+      "type": "integer",
+      "title": "最大禁言秒数",
+      "minimum": 0
+    }
+  }
+}

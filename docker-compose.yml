@@ -30,9 +30,7 @@ services:
       - napcat
     volumes:
       - ./storage:/app/storage
-      - ./config/config.toml:/app/config/config.toml:ro
-      - ./config/.env:/app/config/.env:ro
-      - ./config/talk_schedule.json:/app/config/talk_schedule.json:ro
-      - ./config/soul:/app/config/soul:ro
+      - ./config:/app/config:rw
+      - ./admin/static:/app/admin/static:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

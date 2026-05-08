@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "plugins_command_enabled": {
+      "type": "boolean",
+      "title": "/plugins 指令",
+      "description": "允许管理员在聊天中查看插件列表。"
+    },
+    "version_command_enabled": {
+      "type": "boolean",
+      "title": "/version 指令",
+      "description": "允许查看 Omubot 当前版本。"
+    },
+    "max_reply_chars": {
+      "type": "integer",
+      "title": "最大回复字符数",
+      "minimum": 200,
+      "maximum": 10000
+    },
+    "check_github_updates": {
+      "type": "boolean",
+      "title": "检查 GitHub 更新",
+      "description": "关闭后 /version 只显示本地版本，不联网检查 release。"
+    }
+  }
+}

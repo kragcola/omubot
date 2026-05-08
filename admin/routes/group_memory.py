@@ -13,6 +13,7 @@ from admin.templates import render
 def create_group_memory_router(
     card_store: Any,
     group_memory_config: Any,
+    retrieval_gate: Any = None,
     config_path: str = "config/group-memory.json",
 ) -> APIRouter:
     router = APIRouter()
@@ -39,6 +40,9 @@ def create_group_memory_router(
                 # Copy fields into the existing instance (reference is shared via PluginContext)
                 for field_name in ("version", "memory", "nickname", "card_ttl_days"):
                     setattr(group_memory_config, field_name, getattr(new_cfg, field_name))
+                # Notify retrieval gate of config change
+                if retrieval_gate is not None:
+                    retrieval_gate.set_group_memory_config(group_memory_config)
             except Exception:
                 pass  # keep old config on parse failure
 

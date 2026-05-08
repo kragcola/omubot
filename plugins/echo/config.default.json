@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "plugin": "echo",
+  "values": {
+    "enabled": true,
+    "window_seconds": 300,
+    "threshold": 3,
+    "break_text": "打断复读！",
+    "break_chance": 0.05,
+    "ignore_command_messages": true
+  }
+}

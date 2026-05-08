@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "sticker",
+  "display_name": {
+    "zh": "表情包",
+    "en": "Sticker"
+  },
+  "description": "表情包工具：保存、发送、管理表情包及图片描述",
+  "version": "1.1.4",
+  "priority": 40,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "expression",
+  "permissions": [
+    "prompt",
+    "tool",
+    "storage"
+  ],
+  "capabilities": [
+    "sticker_store",
+    "send_sticker"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "storage_dir",
+      "max_count",
+      "frequency"
+    ]
+  },
+  "store": {
+    "visibility": "marketplace_ready",
+    "marketplace_id": ""
+  },
+  "author": "Omubot",
+  "dependencies": {
+    "vision": ">=1.0.0"
+  }
+}

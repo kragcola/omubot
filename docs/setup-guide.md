@@ -49,7 +49,7 @@ ADMIN_TOKEN=your-secret-token
 cp config.example.toml config/config.toml
 ```
 
-编辑 `config/config.toml`，关键项：
+编辑 `config/config.toml`（legacy 兼容格式，首次在 `/admin/config` 保存后会生成 `config/config.json`），关键项：
 
 ```toml
 [llm]
@@ -127,7 +127,8 @@ amadeus-in-shell/
 ├── Dockerfile              # 多阶段构建
 ├── docker-compose.yml
 ├── config/                 # 运行时配置（gitignore，从模板复制）
-│   ├── config.toml         #   业务配置
+│   ├── config.json         #   主配置（JSON，管理端保存目标）
+│   ├── config.toml         #   legacy 兼容配置（可选保留）
 │   ├── .env                #   环境变量
 │   └── soul/               #   人设文件
 │       ├── identity.md     #     角色定义
@@ -171,10 +172,10 @@ uv run pyright                   # 类型检查
 
 ### 添加新插件
 
-**单文件插件**（纯工具，无状态）：
+**目录插件**：
 
 ```python
-# plugins/my_tool.py
+# plugins/my_tool/plugin.py
 from kernel.types import AmadeusPlugin
 from services.tools.base import Tool
 
@@ -193,9 +194,9 @@ class MyToolPlugin(AmadeusPlugin):
         return [MyTool()]
 ```
 
-放到 `plugins/` 目录下，Bot 重启时 `discover_plugins()` 自动发现。
+放到 `plugins/<name>/plugin.py`，并补齐 `plugin.json / config.default.json / config.schema.json` 后，Bot 重启时 `discover_plugins()` 自动发现。
 
-**目录插件**（复杂功能，多文件）：
+创建目录骨架：
 
 ```bash
 mkdir -p plugins/my_plugin
@@ -259,7 +260,7 @@ tar czf backup-$(date +%Y%m%d).tar.gz \
 ### Q: 怎么迁移到另一台机器？
 
 1. 新机器上 clone 代码
-2. 复制 `napcat/data/`、`storage/`、`config.toml`、`.env`、`soul/`
+2. 复制 `napcat/data/`、`storage/`、`config/`（含 `config.json/.env/soul`）
 3. `docker compose up -d`
 4. 如果 NapCat 要求重新扫码，在新机器上扫码即可（指指纹变了）
 

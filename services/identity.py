@@ -1,12 +1,8 @@
 """Identity model and manager — persona configuration.
 
-Markdown format:
-    # Persona Name
-
-    Description text...
-
-    ## 插话方式
-    (optional) Proactive interjection rules, supports multiple lines.
+Runtime identity is loaded from identity.md. The parser accepts plain Markdown
+and tolerates optional YAML frontmatter for imported content, but SKILL.md is
+not a runtime source.
 """
 
 from __future__ import annotations
@@ -15,10 +11,12 @@ import re
 from pathlib import Path
 
 import aiofiles
+import yaml
 from pydantic import BaseModel, Field
 
 _TITLE_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _PROACTIVE_RE = re.compile(r"^##\s+插话方式\s*$", re.MULTILINE)
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)", re.DOTALL)
 
 
 class Identity(BaseModel):
@@ -26,6 +24,7 @@ class Identity(BaseModel):
 
     id: str = Field(default="default", description="identifier")
     name: str = Field(description="Name of the persona")
+    description: str = Field(default="", description="Short description from optional frontmatter")
     personality: str = Field(description="Core personality, written into System Prompt")
     proactive: str | None = Field(
         default=None,
@@ -33,26 +32,51 @@ class Identity(BaseModel):
     )
 
 
-def parse_identity(text: str) -> Identity | None:
-    """Parse a single-persona Markdown file."""
-    m = _TITLE_RE.search(text)
+def _strip_frontmatter(text: str) -> tuple[dict, str]:
+    """Split Markdown into (frontmatter_dict, body_text).
+
+    Returns ({}, text) if no frontmatter is found.
+    """
+    m = _FRONTMATTER_RE.match(text)
     if not m:
+        return {}, text
+    try:
+        fm = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError:
+        fm = {}
+    return fm, m.group(2)
+
+
+def parse_identity(text: str) -> Identity | None:
+    """Parse a persona Markdown file with optional YAML frontmatter."""
+    fm, body = _strip_frontmatter(text)
+
+    # Resolve name: frontmatter name > H1 title > fail
+    fm_name = fm.get("name", "") if isinstance(fm, dict) else ""
+    description = fm.get("description", "") if isinstance(fm, dict) else ""
+
+    title_m = _TITLE_RE.search(body)
+    if title_m:
+        name = fm_name or title_m.group(1).strip()
+        body_content = body[title_m.end():].strip()
+    elif fm_name:
+        name = fm_name
+        body_content = body.strip()
+    else:
         return None
 
-    name = m.group(1).strip()
-    body = text[m.end():].strip()
-
     proactive: str | None = None
-    split = _PROACTIVE_RE.search(body)
+    split = _PROACTIVE_RE.search(body_content)
     if split:
-        personality = body[: split.start()].strip()
-        proactive = body[split.end():].strip() or None
+        personality = body_content[: split.start()].strip()
+        proactive = body_content[split.end():].strip() or None
     else:
-        personality = body
+        personality = body_content
 
     return Identity(
         id="default",
         name=name,
+        description=description,
         personality=personality,
         proactive=proactive,
     )

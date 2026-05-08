@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用统一上下文注入",
+      "description": "关闭时沿用 MemoPlugin 与 KnowledgePlugin 的旧注入路径。"
+    },
+    "takeover_dynamic_prompt": {
+      "type": "boolean",
+      "title": "接管动态上下文",
+      "description": "启用后 MemoPlugin 不再直接注入实体记忆，KnowledgePlugin 不再直接注入文档片段。"
+    },
+    "max_hits": {
+      "type": "integer",
+      "title": "最多上下文命中",
+      "minimum": 1,
+      "maximum": 30
+    },
+    "max_doc_hits": {
+      "type": "integer",
+      "title": "最多文档知识命中",
+      "description": "限制文档知识库片段占用，避免一次聊天注入过多资料。",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "max_chars": {
+      "type": "integer",
+      "title": "最大注入字符数",
+      "minimum": 300,
+      "maximum": 12000
+    },
+    "graph_auto_extract": {
+      "type": "boolean",
+      "title": "自动抽取图谱候选",
+      "description": "从本轮命中的记忆卡片和文档片段中抽取关系事实。抽取结果先走图谱治理阈值，不会直接改写本轮 Prompt。"
+    }
+  }
+}

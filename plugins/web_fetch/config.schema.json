@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "timeout_seconds": {
+      "type": "number",
+      "title": "超时秒数",
+      "minimum": 1,
+      "maximum": 120
+    },
+    "max_length": {
+      "type": "integer",
+      "title": "最大返回字符",
+      "minimum": 500,
+      "maximum": 50000
+    },
+    "follow_redirects": {
+      "type": "boolean",
+      "title": "跟随跳转"
+    },
+    "user_agent": {
+      "type": "string",
+      "title": "User-Agent"
+    },
+    "allow_proxy_dns_net": {
+      "type": "boolean",
+      "title": "允许代理 DNS 段",
+      "description": "允许访问 198.18.0.0/15 代理 DNS 映射地址。"
+    }
+  }
+}

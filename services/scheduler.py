@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from kernel.config import GroupConfig
+from kernel.types import TriggerContext
 from services.llm.client import RATE_LIMIT_BASE_DELAY, RATE_LIMIT_MAX_RETRIES, RateLimitError
 from services.memory.timeline import GroupTimeline
 from services.tools.context import ToolContext
@@ -26,8 +27,8 @@ _L = logger.bind(channel="scheduler")
 
 class _GroupSlot:
     __slots__ = (
-        "consecutive_skip", "debounce_task", "force_reply", "last_fire_time",
-        "last_user_id", "msg_count", "pending_at", "running_task", "video_hint",
+        "consecutive_skip", "debounce_task", "last_fire_time",
+        "last_user_id", "msg_count", "pending_at", "running_task", "trigger",
     )
 
     def __init__(self) -> None:
@@ -36,10 +37,9 @@ class _GroupSlot:
         self.running_task: asyncio.Task[None] | None = None
         self.msg_count: int = 0
         self.pending_at: bool = False
-        self.force_reply: bool = False
         self.last_fire_time: float = 0.0
         self.last_user_id: str = ""
-        self.video_hint: dict[str, object] | None = None
+        self.trigger: TriggerContext | None = None
 
 
 class GroupChatScheduler:
@@ -93,19 +93,35 @@ class GroupChatScheduler:
     def is_muted(self, group_id: str) -> bool:
         return group_id in self._muted_groups
 
+    def get_all_slots(self) -> dict[str, dict[str, object]]:
+        """Return public state for all group slots (admin API)."""
+        result: dict[str, dict[str, object]] = {}
+        for gid, slot in self._slots.items():
+            result[gid] = {
+                "consecutive_skip": slot.consecutive_skip,
+                "msg_count": slot.msg_count,
+                "pending_at": slot.pending_at,
+                "last_fire_time": slot.last_fire_time,
+                "last_user_id": slot.last_user_id,
+                "has_trigger": slot.trigger is not None,
+                "is_muted": gid in self._muted_groups,
+                "has_running_task": slot.running_task is not None and not slot.running_task.done(),
+            }
+        return result
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def notify(self, group_id: str, *, is_at: bool = False, user_id: str = "",
-               video_hint: dict[str, object] | None = None) -> None:
-        """Called on every group message. Manages debounce/batch."""
+    def notify(self, group_id: str, *, trigger: TriggerContext | None = None,
+               user_id: str = "") -> None:
+        """Called on every group message. Manages probability-based dispatch."""
         if group_id in self._muted_groups:
             return
         identity = self._identity_mgr.resolve()
-        if identity.proactive is None and not is_at and not (
-            video_hint is not None and video_hint.get("mode") == "always"
-        ):
+        is_at = trigger is not None and trigger.mode == "at_mention"
+        is_video_always = trigger is not None and trigger.mode == "video_always"
+        if identity.proactive is None and not is_at and not is_video_always:
             # Skip non-@ messages when there are no proactive interjection rules.
             # @ mentions and video always-reply bypass this check.
             _L.info("scheduler | group={} proactive=None, skip (non-@)", group_id)
@@ -117,26 +133,24 @@ class GroupChatScheduler:
         slot.msg_count += 1
         if user_id:
             slot.last_user_id = user_id
-        if video_hint is not None:
-            slot.video_hint = video_hint  # always update so latest video takes priority
+        if trigger is not None:
+            slot.trigger = trigger  # always update so latest trigger takes priority
 
         if is_at:
             if slot.running_task and not slot.running_task.done():
                 slot.pending_at = True
                 _L.debug("scheduler | group={} @ queued (task running)", group_id)
                 return
-            slot.force_reply = True
             _L.info("scheduler | group={} @ -> fire", group_id)
             self._fire(group_id)
             return
 
         # Video always-reply: force fire for B站 video shares
-        if video_hint is not None and video_hint.get("mode") == "always":
+        if is_video_always:
             if slot.running_task and not slot.running_task.done():
                 slot.pending_at = True
                 _L.debug("scheduler | group={} bilibili always queued (task running)", group_id)
                 return
-            slot.force_reply = True
             _L.info("scheduler | group={} bilibili always -> fire", group_id)
             self._fire(group_id)
             return
@@ -144,6 +158,7 @@ class GroupChatScheduler:
         # at_only mode: only respond to @ messages
         if resolved.at_only:
             _L.info("scheduler | group={} at_only, skip (msgs={})", group_id, slot.msg_count)
+            slot.trigger = None  # clear trigger on skip — prevent leak
             return
 
         if slot.running_task and not slot.running_task.done():
@@ -154,12 +169,14 @@ class GroupChatScheduler:
         now = time.monotonic()
         if now - slot.last_fire_time < resolved.planner_smooth:
             _L.info("scheduler | group={} interval too short, skip (msgs={})", group_id, slot.msg_count)
+            slot.trigger = None  # clear trigger on skip — prevent leak
             return
 
         # Dynamic threshold: become more responsive after prolonged silence.
-        # Use bilibili-specific talk_value when a video hint is present.
-        if video_hint is not None and video_hint.get("mode") in ("dedicated", "autonomous"):
-            base_talk_value = float(video_hint.get("bilibili_talk_value", resolved.talk_value))  # type: ignore[arg-type]
+        # Use bilibili-specific talk_value when a video trigger is present.
+        is_video_prob = trigger is not None and trigger.mode in ("video_dedicated", "video_autonomous")
+        if is_video_prob:
+            base_talk_value = float(trigger.extra.get("bilibili_talk_value", resolved.talk_value))
         else:
             base_talk_value = resolved.talk_value
 
@@ -173,25 +190,26 @@ class GroupChatScheduler:
         # High-interest videos (e.g. pjsk, 25时) should fire reliably even
         # during low-activity time slots — the bot cares about the content.
         # Skip when consecutive_skip >= 5 so the forced-reply guarantee holds.
-        if video_hint is not None and video_hint.get("mode") == "autonomous" and slot.consecutive_skip < 5:
-            interest_score = float(video_hint.get("interest_score", 0.3))  # type: ignore[arg-type]
-            # Blend so interest acts as a floor: 0.3 + 0.7×interest maps
-            # 0.05→0.335, 0.55→0.685, 0.85→0.895, 1.0→1.0
-            threshold = base_talk_value * (0.3 + 0.7 * interest_score)
+        is_autonomous = trigger is not None and trigger.mode == "video_autonomous"
+        if is_autonomous and slot.consecutive_skip < 5:
+            interest_score = float(trigger.extra.get("interest_score", 0.3))
+            # Blend so interest acts as a floor: 0.1 + 0.9×interest maps
+            # 0.05→0.145, 0.55→0.595, 0.85→0.865, 1.0→1.0
+            threshold = base_talk_value * (0.1 + 0.9 * interest_score)
 
         # Mood-adjusted probability — good mood boosts, bad mood suppresses.
         mood_mult = self._get_mood_multiplier()
-        # Time-slot multiplier — configurable per time range.
-        # High-interest videos (score >= 0.6) skip time suppression so the
-        # bot can reply to content it genuinely cares about regardless of hour.
+        # Time-slot multiplier — capped at 0.7 globally.
+        # High-interest videos (score >= 0.6) get a floor of 0.7 so the
+        # bot can still reply during off hours, but never exceed the cap.
         time_mult = self._talk_schedule.get_time_multiplier() if self._talk_schedule else 1.0
-        if video_hint is not None and video_hint.get("mode") == "autonomous":
-            interest_score = float(video_hint.get("interest_score", 0.3))  # type: ignore[arg-type]
+        if is_autonomous:
+            interest_score = float(trigger.extra.get("interest_score", 0.3))
             if interest_score >= 0.6:
-                time_mult = 1.0
+                time_mult = max(time_mult, 0.7)
         threshold = min(1.0, threshold * mood_mult * time_mult)
 
-        mode_label = video_hint.get("mode", "none") if video_hint else "none"
+        mode_label = trigger.mode if trigger else "none"
 
         if random.random() < threshold:
             _L.info(
@@ -207,6 +225,7 @@ class GroupChatScheduler:
                 "scheduler | group={} prob skip (threshold={:.2f} mood={:.2f} time={:.2f} msgs={} skips={} mode={})",
                 group_id, threshold, mood_mult, time_mult, slot.msg_count, slot.consecutive_skip, mode_label,
             )
+            slot.trigger = None  # clear trigger on skip — prevent leak
 
     def cancel_debounce(self, group_id: str) -> None:
         """Reset message counter. Called after echo handles the batch. (no-op after prob dispatch)"""
@@ -214,6 +233,23 @@ class GroupChatScheduler:
         if slot is None:
             return
         slot.msg_count = 0
+
+    def clear_pending(self, group_id: str, *, cancel_running: bool = False) -> None:
+        """Clear queued scheduler state for interactive command flows."""
+        slot = self._slots.get(group_id)
+        if slot is None:
+            return
+        slot.msg_count = 0
+        slot.trigger = None
+        slot.pending_at = False
+        if cancel_running and slot.running_task and not slot.running_task.done():
+            slot.running_task.cancel()
+            slot.running_task = None
+        _L.info(
+            "scheduler | group={} pending cleared cancel_running={}",
+            group_id,
+            cancel_running,
+        )
 
     def trigger(self, group_id: str) -> None:
         """Immediately fire a chat for this group (no debounce). Used at startup."""
@@ -266,30 +302,50 @@ class GroupChatScheduler:
         slot = self._slots.get(group_id)
         if not slot:
             return
-        force = slot.force_reply
+        # Snapshot and clear trigger so it's consumed exactly once.
+        trigger = slot.trigger
+        slot.trigger = None
         slot.msg_count = 0
-        slot.force_reply = False
-        slot.running_task = asyncio.create_task(self._do_chat(group_id, force_reply=force))
+        slot.running_task = asyncio.create_task(self._do_chat(group_id, trigger=trigger))
         slot.running_task.add_done_callback(lambda _: None)
 
-    async def _send_to_group(self, group_id: str, text: str) -> None:
+    async def _send_to_group(self, group_id: str, text: str, *, humanize: str = "normal") -> float:
         """Send a text message to a group with retry on failure."""
         if not self._bot:
-            return
+            return 0.0
         from nonebot.adapters.onebot.v11 import Message
         from nonebot.adapters.onebot.v11.exception import ActionFailed
+
+        # Detect [CQ:reply,id=X] prefix for quote-reply targeting.
+        # OneBot v11 Message handles CQ codes natively — we just log it.
+        if text.startswith("[CQ:reply,id="):
+            import re
+            if m := re.match(r"\[CQ:reply,id=(-?\d+)\]", text):
+                _L.info("scheduler | group={} reply targets msg_id={}", group_id, m.group(1))
 
         delay = 2.0
         max_delay = 60.0
         while True:
             if group_id in self._muted_groups:
                 _L.warning("scheduler | group={} muted, dropping message", group_id)
-                return
+                return 0.0
             try:
-                if self._humanizer is not None:
+                t_send = time.monotonic()
+                if self._humanizer is not None and humanize != "skip":
                     await self._humanizer.delay(text)
                 await self._bot.send_group_msg(group_id=int(group_id), message=Message(text))
-                return
+                elapsed = time.monotonic() - t_send
+                if elapsed >= 8.0:
+                    _L.warning(
+                        "scheduler send slow | group={} humanize={} len={} elapsed={:.1f}s",
+                        group_id, humanize, len(text), elapsed,
+                    )
+                else:
+                    _L.debug(
+                        "scheduler send ok | group={} humanize={} len={} elapsed={:.1f}s",
+                        group_id, humanize, len(text), elapsed,
+                    )
+                return elapsed
             except ActionFailed as e:
                 _L.warning(
                     "scheduler | group={} send failed: {} | retry in {}s",
@@ -298,12 +354,8 @@ class GroupChatScheduler:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, max_delay)
 
-    async def _do_chat(self, group_id: str, *, force_reply: bool = False) -> None:
+    async def _do_chat(self, group_id: str, *, trigger: TriggerContext | None = None) -> None:
         slot = self._slots.get(group_id)
-        # Snapshot and clear video_hint so it's used exactly once.
-        video_hint = slot.video_hint if slot else None
-        if slot:
-            slot.video_hint = None
         try:
             for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
                 try:
@@ -312,26 +364,46 @@ class GroupChatScheduler:
                     uid = slot.last_user_id if slot else ""
                     ctx = ToolContext(bot=self._bot, user_id=uid, group_id=group_id)
 
-                    async def on_segment(text: str) -> None:
-                        await self._send_to_group(group_id, text)
+                    # Write trigger reason into the timeline so the LLM sees it
+                    # in the pending buffer, not as transient user_content.
+                    if trigger is not None:
+                        self._timeline.add_pending_trigger(
+                            group_id, reason=trigger.reason,
+                            message_id=trigger.target_message_id,
+                            target_user_id=trigger.target_user_id,
+                        )
 
-                    # Build user_content: include video title so the LLM knows
-                    # which video triggered the reply when multiple videos are in
-                    # the timeline.
-                    user_content = ""
-                    if video_hint is not None:
-                        mode = video_hint.get("mode", "")
-                        video_title = video_hint.get("video_title", "")
-                        if mode == "always":
-                            user_content = f"（看到你分享了视频《{video_title}》，回应一下）"
-                        elif mode in ("dedicated", "autonomous"):
-                            user_content = f"（看到你分享了视频《{video_title}》，聊聊你的看法）"
+                    force_reply = trigger is not None and trigger.mode in ("at_mention", "video_always")
+
+                    # @mention: prepend [CQ:reply] to the first streamed segment only.
+                    # Quote-reply already identifies the target — no need for [CQ:at].
+                    first_segment = True
+                    sent_segments = 0
+                    send_total_elapsed = 0.0
+                    reply_prefix = ""
+                    if trigger is not None and trigger.mode == "at_mention" and trigger.target_message_id is not None:
+                        reply_prefix = f"[CQ:reply,id={trigger.target_message_id}]"
+                        _L.info("scheduler | group={} @mention prefix={}", group_id, reply_prefix)
+
+                    async def on_segment(text: str, _prefix: str = reply_prefix) -> None:
+                        nonlocal first_segment, sent_segments, send_total_elapsed
+                        is_first = first_segment
+                        if first_segment:
+                            if _prefix:
+                                text = _prefix + text
+                            first_segment = False
+                        send_total_elapsed += await self._send_to_group(
+                            group_id,
+                            text,
+                            humanize="skip" if is_first else "normal",
+                        )
+                        sent_segments += 1
 
                     resolved = self._group_config.resolve(int(group_id))
                     reply = await self._llm.chat(
                         session_id=session_id,
                         user_id=uid,
-                        user_content=user_content,
+                        user_content="",
                         identity=identity,
                         group_id=group_id,
                         ctx=ctx,
@@ -341,7 +413,21 @@ class GroupChatScheduler:
                     )
 
                     if reply:
-                        await self._send_to_group(group_id, reply)
+                        # Non-streaming fallback: prepend [CQ:reply] if on_segment was never called
+                        is_first = first_segment
+                        if first_segment and reply_prefix:
+                            reply = reply_prefix + reply
+                            first_segment = False
+                        send_total_elapsed += await self._send_to_group(
+                            group_id,
+                            reply,
+                            humanize="skip" if is_first else "normal",
+                        )
+                        sent_segments += 1
+                        _L.info(
+                            "scheduler reply send complete | group={} segments={} send_total={:.1f}s",
+                            group_id, sent_segments, send_total_elapsed,
+                        )
                     return
 
                 except RateLimitError:

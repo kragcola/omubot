@@ -366,3 +366,40 @@ async def test_private_chat_context(store: CardStore, gate: RetrievalGate) -> No
     result = await gate.build_memo_block("s1", "999", None)
     assert "【当前私聊 @999】" in result
     assert "私聊偏好" in result
+
+
+# ------------------------------------------------------------------
+# Semantic fallback retrieval
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_semantic_match_finds_nearby_memory_when_keyword_search_misses(store: CardStore) -> None:
+    gate = RetrievalGate(card_store=store, refresh_interval=5, semantic_enabled=True, semantic_backend="ngram")
+    await store.add_card(NewCard(category="fact", scope="user", scope_id="123", content="对猫毛过敏"))
+
+    await gate.build_memo_block("s1", "123", None)
+
+    result = await gate.build_memo_block("s1", "123", None, conversation_text="对猫会过敏")
+    assert "对猫毛过敏" in result
+    assert "轻量语义匹配" in result
+
+    semantic = gate.semantic_status()
+    assert semantic["enabled"] is True
+    assert semantic["hits"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_embedding_backend_falls_back_to_ngram_safely(store: CardStore) -> None:
+    gate = RetrievalGate(card_store=store, refresh_interval=5, semantic_enabled=True, semantic_backend="embedding")
+    await store.add_card(NewCard(category="fact", scope="user", scope_id="123", content="对猫毛过敏"))
+
+    await gate.build_memo_block("s1", "123", None)
+    result = await gate.build_memo_block("s1", "123", None, conversation_text="对猫会过敏")
+
+    assert "对猫毛过敏" in result
+    semantic = gate.semantic_status()
+    assert semantic["requested_backend"] == "embedding"
+    assert semantic["active_backend"] == "ngram"
+    assert semantic["fallbacks"] >= 1
+    assert semantic["errors"] >= 1

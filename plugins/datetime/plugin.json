@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "datetime",
+  "display_name": {
+    "zh": "时间日期",
+    "en": "Date Time"
+  },
+  "description": "时间查询工具：获取当前日期、时间、节假日、日程信息",
+  "version": "1.1.1",
+  "priority": 1,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "tool",
+  "permissions": [
+    "tool"
+  ],
+  "capabilities": [
+    "datetime_tool"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "timezone",
+      "include_calendar_context",
+      "include_schedule"
+    ]
+  },
+  "store": {
+    "visibility": "local",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用梦境整理"
+    },
+    "interval_hours": {
+      "type": "integer",
+      "title": "整理间隔小时",
+      "minimum": 1
+    },
+    "max_rounds": {
+      "type": "integer",
+      "title": "最大工具轮数",
+      "minimum": 1,
+      "maximum": 50
+    }
+  }
+}

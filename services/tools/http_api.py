@@ -13,6 +13,20 @@ MAX_RESPONSE_LENGTH = 4000
 
 
 class HttpApiTool(Tool):
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 15,
+        max_response_chars: int = MAX_RESPONSE_LENGTH,
+        follow_redirects: bool = True,
+        allowed_methods: list[str] | None = None,
+    ) -> None:
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
+        self._max_response_chars = max(100, int(max_response_chars))
+        self._follow_redirects = bool(follow_redirects)
+        normalized = [str(item).upper() for item in (allowed_methods or ["GET", "POST"])]
+        self._allowed_methods = [item for item in normalized if item in {"GET", "POST"}] or ["GET"]
+
     @property
     def name(self) -> str:
         return "http_api"
@@ -26,7 +40,12 @@ class HttpApiTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "method": {"type": "string", "enum": ["GET", "POST"], "description": "HTTP 方法", "default": "GET"},
+                "method": {
+                    "type": "string",
+                    "enum": self._allowed_methods,
+                    "description": "HTTP 方法",
+                    "default": self._allowed_methods[0],
+                },
                 "url": {"type": "string", "description": "API URL"},
                 "headers": {"type": "object", "description": "请求头", "additionalProperties": {"type": "string"}},
                 "body": {"type": "object", "description": "POST 请求体（JSON）"},
@@ -39,13 +58,13 @@ class HttpApiTool(Tool):
         if not _is_safe_url(url):
             return "拒绝访问: 不允许访问内网地址"
 
-        method: str = kwargs.get("method", "GET")
-        if method not in ("GET", "POST"):
+        method: str = str(kwargs.get("method", self._allowed_methods[0])).upper()
+        if method not in self._allowed_methods:
             return f"不支持的 HTTP 方法: {method}"
         headers: dict[str, str] = kwargs.get("headers", {})
         body: dict[str, Any] | None = kwargs.get("body")
 
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=self._timeout_seconds, follow_redirects=self._follow_redirects) as client:
             if method == "POST":
                 resp = await client.post(url, headers=headers, json=body)
             else:
@@ -58,6 +77,6 @@ class HttpApiTool(Tool):
         except (json.JSONDecodeError, ValueError):
             text = resp.text
 
-        if len(text) > MAX_RESPONSE_LENGTH:
-            text = text[:MAX_RESPONSE_LENGTH] + "...(已截断)"
+        if len(text) > self._max_response_chars:
+            text = text[:self._max_response_chars] + "...(已截断)"
         return text

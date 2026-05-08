@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "echo",
+  "display_name": {
+    "zh": "复读检测",
+    "en": "Echo"
+  },
+  "description": "群聊复读检测：5 分钟内同消息多次触发复读",
+  "version": "1.1.2",
+  "priority": 200,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "expression",
+  "permissions": [
+    "message"
+  ],
+  "capabilities": [
+    "echo_detection"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "window_seconds",
+      "threshold",
+      "break_text",
+      "break_chance",
+      "ignore_command_messages"
+    ]
+  },
+  "store": {
+    "visibility": "local",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

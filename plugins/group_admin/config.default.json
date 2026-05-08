@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "plugin": "group_admin",
+  "values": {
+    "mute_enabled": true,
+    "set_title_enabled": true,
+    "send_group_msg_enabled": true,
+    "default_mute_seconds": 60,
+    "max_mute_seconds": 2592000
+  }
+}

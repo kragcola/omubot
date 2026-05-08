@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "plugin": "sticker",
+  "values": {
+    "enabled": true,
+    "storage_dir": "storage/stickers",
+    "max_count": 200,
+    "frequency": "frequently"
+  }
+}

@@ -7,7 +7,7 @@ from typing import Any
 
 from loguru import logger
 
-from services.llm.provider import LLMProvider, ToolUse
+from services.llm.provider import LLMProvider, ThinkingMode, ToolUse, normalize_thinking_mode, provider_mode
 
 _log = logger.bind(channel="api")
 
@@ -23,6 +23,12 @@ class AnthropicProvider(LLMProvider):
         self._base_url = base_url
         self._api_key = api_key
 
+    def request_url(self) -> str:
+        base = self._base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/messages"
+        return f"{base}/v1/messages"
+
     # ------------------------------------------------------------------
     # build_request
     # ------------------------------------------------------------------
@@ -34,8 +40,9 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict[str, Any]] | None,
         max_tokens: int,
         model: str,
-        thinking: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], dict[str, str]]:
+        thinking: ThinkingMode = None,
+        request_options: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
         body: dict[str, Any] = {
             "model": model,
             "system": system_blocks,
@@ -43,7 +50,9 @@ class AnthropicProvider(LLMProvider):
             "max_tokens": max_tokens,
             "stream": True,
         }
-        if thinking is not None:
+        if normalize_thinking_mode(thinking) == "disabled":
+            body["thinking"] = {"type": "disabled"}
+        elif isinstance(thinking, dict):
             body["thinking"] = thinking
         if tools:
             cached_tools = [*tools]
@@ -55,7 +64,12 @@ class AnthropicProvider(LLMProvider):
             "x-api-key": self._api_key,
             "anthropic-version": "2024-10-22",
         }
-        return body, headers
+        return body, headers, {
+            "provider_kind": "anthropic",
+            "provider_mode": provider_mode("anthropic", self._base_url),
+            "payload_sanitized": False,
+            "reasoning_replay_tokens": 0,
+        }
 
     # ------------------------------------------------------------------
     # parse_sse_stream
@@ -137,4 +151,8 @@ class AnthropicProvider(LLMProvider):
             "output_tokens": output_tokens,
             "cache_read": cache_read,
             "cache_create": cache_create,
+            "usage": usage,
+            "prompt_cache_hit_tokens": cache_read,
+            "prompt_cache_miss_tokens": max(0, total_input - cache_read),
+            "reasoning_tokens": 0,
         }

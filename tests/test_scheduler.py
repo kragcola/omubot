@@ -3,6 +3,7 @@
 import asyncio
 
 from kernel.config import GroupConfig, GroupOverride
+from kernel.types import TriggerContext
 from services.identity import Identity
 from services.memory.timeline import GroupTimeline
 from services.scheduler import GroupChatScheduler
@@ -116,7 +117,7 @@ class TestAtHandling:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0),  # would never fire normally
         )
-        scheduler.notify("111", is_at=True)
+        scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         await scheduler.close()
@@ -128,7 +129,7 @@ class TestAtHandling:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(planner_smooth=999.0),
         )
-        scheduler.notify("111", is_at=True)
+        scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         await scheduler.close()
@@ -143,7 +144,7 @@ class TestAtHandling:
         scheduler.notify("111")
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
-        scheduler.notify("111", is_at=True)  # should queue
+        scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))  # should queue
         assert scheduler._slots["111"].pending_at is True
         await scheduler.close()
 
@@ -157,10 +158,56 @@ class TestAtHandling:
         scheduler.notify("111")
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
-        scheduler.notify("111", is_at=True)  # queued as pending_at
+        scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))  # queued as pending_at
         await asyncio.sleep(0.5)  # first call finishes, pending fires
         assert len(llm.calls) == 2
         assert scheduler._slots["111"].pending_at is False
+        await scheduler.close()
+
+
+class TestPendingReset:
+    async def test_clear_pending_resets_trigger_and_queue(self) -> None:
+        llm = _FakeLLM(reply=None, delay=0.5)
+        scheduler = GroupChatScheduler(
+            llm=llm,
+            timeline=GroupTimeline(),
+            identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        scheduler.notify("111", user_id="42")
+        await asyncio.sleep(0.1)
+        scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"), user_id="42")
+
+        slot = scheduler._slots["111"]
+        assert slot.pending_at is True
+        assert slot.trigger is not None
+
+        scheduler.clear_pending("111")
+
+        assert slot.pending_at is False
+        assert slot.trigger is None
+        assert slot.msg_count == 0
+        await scheduler.close()
+
+    async def test_clear_pending_can_cancel_running_task(self) -> None:
+        llm = _FakeLLM(reply=None, delay=1.0)
+        scheduler = GroupChatScheduler(
+            llm=llm,
+            timeline=GroupTimeline(),
+            identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        scheduler.notify("111", user_id="42")
+        await asyncio.sleep(0.1)
+
+        slot = scheduler._slots["111"]
+        assert slot.running_task is not None
+        assert not slot.running_task.done()
+
+        scheduler.clear_pending("111", cancel_running=True)
+        await asyncio.sleep(0)
+
+        assert slot.running_task is None or slot.running_task.cancelled() or slot.running_task.done()
         await scheduler.close()
 
 
@@ -208,7 +255,7 @@ class TestAtOnly:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=group_config,
         )
-        scheduler.notify("123", is_at=True)
+        scheduler.notify("123", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         await scheduler.close()
@@ -283,7 +330,7 @@ class TestMute:
         )
         scheduler.mute("111")
         scheduler.notify("111")
-        scheduler.notify("111", is_at=True)
+        scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))
         await asyncio.sleep(0.15)
         assert len(llm.calls) == 0
         await scheduler.close()
@@ -463,7 +510,7 @@ class TestVideoHint:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
-        scheduler.notify("111", video_hint={"mode": "always", "bilibili_talk_value": 0.8, "video_title": "test"})
+        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         await scheduler.close()
@@ -476,7 +523,7 @@ class TestVideoHint:
             group_config=_make_config(),
         )
         scheduler.mute("111")
-        scheduler.notify("111", video_hint={"mode": "always", "bilibili_talk_value": 0.8, "video_title": "test"})
+        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 0
         await scheduler.close()
@@ -489,7 +536,7 @@ class TestVideoHint:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(identity),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
-        scheduler.notify("111", video_hint={"mode": "always", "bilibili_talk_value": 0.8, "video_title": "test"})
+        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         await scheduler.close()
@@ -501,11 +548,11 @@ class TestVideoHint:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(planner_smooth=999.0),
         )
-        scheduler.notify("111", video_hint={"mode": "always", "bilibili_talk_value": 0.8, "video_title": "test"})
+        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         # Second call also fires (planner_smooth ignored for always mode)
-        scheduler.notify("111", video_hint={"mode": "always", "bilibili_talk_value": 0.8, "video_title": "test"})
+        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 2
         await scheduler.close()
@@ -517,9 +564,10 @@ class TestVideoHint:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
-        scheduler.notify("111", video_hint={
-            "mode": "dedicated", "bilibili_talk_value": 1.0, "video_title": "test",
-        })
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_dedicated",
+            extra={"bilibili_talk_value": 1.0, "video_title": "test"},
+        ))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         await scheduler.close()
@@ -531,9 +579,10 @@ class TestVideoHint:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=1.0, planner_smooth=0),
         )
-        scheduler.notify("111", video_hint={
-            "mode": "dedicated", "bilibili_talk_value": 0.0, "video_title": "test",
-        })
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_dedicated",
+            extra={"bilibili_talk_value": 0.0, "video_title": "test"},
+        ))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 0
         await scheduler.close()
@@ -546,10 +595,10 @@ class TestVideoHint:
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
         # talk_value=1.0 * interest=1.0 = 1.0 threshold → guaranteed fire
-        scheduler.notify("111", video_hint={
-            "mode": "autonomous", "bilibili_talk_value": 1.0,
-            "interest_score": 1.0, "video_title": "test",
-        })
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_autonomous",
+            extra={"bilibili_talk_value": 1.0, "interest_score": 1.0, "video_title": "test"},
+        ))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         await scheduler.close()
@@ -563,16 +612,16 @@ class TestVideoHint:
         )
         # First 5 calls may or may not fire (low interest), but 6th is guaranteed
         for i in range(5):
-            scheduler.notify("111", video_hint={
-                "mode": "autonomous", "bilibili_talk_value": 0.5,
-                "interest_score": 0.05, "video_title": "test",
-            })
+            scheduler.notify("111", trigger=TriggerContext(
+                reason="视频分享:《test》", mode="video_autonomous",
+                extra={"bilibili_talk_value": 0.5, "interest_score": 0.05, "video_title": "test"},
+            ))
             await asyncio.sleep(0.01)
         # After 5 skips, consecutive_skip=5 → threshold=1.0, interest skipped
-        scheduler.notify("111", video_hint={
-            "mode": "autonomous", "bilibili_talk_value": 0.5,
-            "interest_score": 0.05, "video_title": "test",
-        })
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_autonomous",
+            extra={"bilibili_talk_value": 0.5, "interest_score": 0.05, "video_title": "test"},
+        ))
         await asyncio.sleep(0.2)
         assert len(llm.calls) >= 1  # guaranteed fire by the 6th attempt
         await scheduler.close()

@@ -16,8 +16,16 @@ def _check_auth(ctx: ToolContext, superusers: set[str]) -> str | None:
 
 
 class MuteUserTool(Tool):
-    def __init__(self, superusers: set[str]) -> None:
+    def __init__(
+        self,
+        superusers: set[str],
+        *,
+        default_duration: int = 60,
+        max_duration: int = 2592000,
+    ) -> None:
         self._superusers = superusers
+        self._default_duration = max(0, int(default_duration))
+        self._max_duration = max(0, int(max_duration))
 
     @property
     def name(self) -> str:
@@ -33,7 +41,13 @@ class MuteUserTool(Tool):
             "type": "object",
             "properties": {
                 "user_id": {"type": "string", "description": "要禁言的用户 QQ 号"},
-                "duration": {"type": "integer", "description": "禁言时长（秒），0=解除禁言，默认60", "default": 60},
+                "duration": {
+                    "type": "integer",
+                    "description": f"禁言时长（秒），0=解除禁言，默认{self._default_duration}",
+                    "default": self._default_duration,
+                    "minimum": 0,
+                    "maximum": self._max_duration,
+                },
             },
             "required": ["user_id"],
         }
@@ -43,7 +57,9 @@ class MuteUserTool(Tool):
             return err
         assert ctx.group_id is not None
         user_id: str = kwargs["user_id"]
-        duration: int = kwargs.get("duration", 60)
+        duration: int = int(kwargs.get("duration", self._default_duration))
+        if self._max_duration and duration > self._max_duration:
+            duration = self._max_duration
         await ctx.bot.set_group_ban(group_id=int(ctx.group_id), user_id=int(user_id), duration=duration)
         if duration == 0:
             return f"已解除 {user_id} 的禁言"

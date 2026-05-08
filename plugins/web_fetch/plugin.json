@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "web_fetch",
+  "display_name": {
+    "zh": "网页抓取",
+    "en": "Web Fetch"
+  },
+  "description": "网页抓取工具：抓取指定 URL 内容并返回纯文本",
+  "version": "1.1.1",
+  "priority": 1,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "tool",
+  "permissions": [
+    "tool",
+    "network"
+  ],
+  "capabilities": [
+    "web_fetch"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "timeout_seconds",
+      "max_length",
+      "follow_redirects",
+      "user_agent",
+      "allow_proxy_dns_net"
+    ]
+  },
+  "store": {
+    "visibility": "local",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

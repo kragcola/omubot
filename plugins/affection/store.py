@@ -35,6 +35,10 @@ class AffectionStore:
                 self._profiles[user_id] = profile
         _L.info("AffectionStore loaded {} profiles", len(self._profiles))
 
+    def list_all(self) -> list[AffectionProfile]:
+        """Return all loaded profiles (for admin API)."""
+        return list(self._profiles.values())
+
     def get(self, user_id: str) -> AffectionProfile:
         """Get profile for a user. Returns a fresh default if not tracked yet."""
         if user_id in self._profiles:
@@ -50,6 +54,7 @@ class AffectionStore:
             "user_id": profile.user_id,
             "score": profile.score,
             "custom_nickname": profile.custom_nickname,
+            "group_nicknames": profile.group_nicknames,
             "last_interaction": profile.last_interaction,
             "total_interactions": profile.total_interactions,
             "first_interaction": profile.first_interaction,
@@ -68,10 +73,16 @@ class AffectionStore:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            # Backward compat: migrate old group_nickname (str) → group_nicknames (dict)
+            group_nicknames: dict[str, str] = data.get("group_nicknames") or {}
+            legacy_nick = data.get("group_nickname", "")
+            if legacy_nick and not group_nicknames:
+                group_nicknames["__legacy__"] = legacy_nick
             return AffectionProfile(
                 user_id=data["user_id"],
                 score=float(data.get("score", 0.0)),
                 custom_nickname=data.get("custom_nickname", ""),
+                group_nicknames=group_nicknames,
                 last_interaction=data.get("last_interaction", ""),
                 total_interactions=int(data.get("total_interactions", 0)),
                 first_interaction=data.get("first_interaction", ""),

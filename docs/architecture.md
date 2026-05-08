@@ -52,22 +52,22 @@ omubot/
 │   ├── scheduler.py        #   GroupChatScheduler
 │   ├── identity.py         #   IdentityManager
 │   └── humanizer.py        #   消息人性化处理
-├── plugins/                # 插件层（14 个）
+├── plugins/                # 插件层（统一目录插件 + 系统能力包）
 │   ├── chat/               #   核心聊天（不可卸载）
 │   ├── affection/          #   好感度系统
-│   ├── datetime.py         #   时间查询（单文件插件）
+│   ├── datetime/           #   时间查询
 │   ├── dream/              #   梦境整合
 │   ├── echo/               #   复读检测
 │   ├── element_detector/   #   消息元素检测（特殊消息类型识别）
-│   ├── group_admin.py      #   群管理（单文件插件）
+│   ├── group_admin/        #   群管理
 │   ├── history_loader/     #   历史消息加载
-│   ├── http_api.py         #   HTTP API 工具（单文件插件）
+│   ├── http_api/           #   HTTP API 工具
 │   ├── memo/               #   记忆卡片
 │   ├── schedule/           #   模拟日程
 │   ├── sticker/            #   表情包
-│   ├── vision/             #   多模态视觉
-│   ├── web_fetch.py        #   网页抓取（单文件插件）
-│   └── web_search.py       #   网页搜索（单文件插件）
+│   ├── vision/             #   多模态视觉系统能力包
+│   ├── web_fetch/          #   网页抓取
+│   └── web_search/         #   网页搜索
 └── admin/                  # 管理面板（系统服务）
     ├── auth.py             #   HMAC-signed cookie 认证
     ├── templates.py        #   Jinja2 模板渲染
@@ -77,24 +77,21 @@ omubot/
 
 ### 插件形态
 
-**形态 A：目录插件**（功能复杂、多文件）
+Omubot 运行时只加载统一目录插件：
 
 ```
 plugins/memo/
 ├── plugin.py              # 入口（必须）
-├── plugin.json            # (可选) 元数据清单，覆盖类属性
+├── plugin.json            # manifest v3 元数据清单，覆盖类属性
+├── config.default.json    # 默认配置
+├── config.schema.json     # Web 配置 schema
+├── plugin.sig             # (可选) 本地 detached attestation / SHA256 声明
 └── ...
 ```
 
-**形态 B：单文件插件**（纯工具插件，一文件搞定）
-
-```
-plugins/datetime.py       # 单文件，内含 AmadeusPlugin 子类
-```
-
-- 目录名（或单文件名去掉 `.py`）= `plugin.name`
-- 单文件中只放一个 `AmadeusPlugin` 子类
-- 同名时目录优先（单文件被忽略）
+- 目录名 = `plugin.name`
+- `plugins/<name>/plugin.py` 中放 `AmadeusPlugin` 子类
+- 旧根目录单文件插件不会被加载，只会在本地插件索引里标记为 blocked
 
 ### plugin.json 清单
 
@@ -114,6 +111,33 @@ plugins/datetime.py       # 单文件，内含 AmadeusPlugin 子类
 ```
 
 加载优先级：`plugin.json` > 类属性默认值。`PluginBus` 在 `discover_plugins()` 时解析。
+
+### plugin.sig 预留
+
+可选的 `plugin.sig` 仅用于本地插件包审计，不参与运行时加载，也不提供远程安装能力。当前支持轻量 JSON 结构：
+
+```json
+{
+    "scheme": "sha256",
+    "signer": "local-ci",
+    "key_id": "dev-key",
+    "signed_at": "2026-05-07T10:00:00+08:00",
+    "entry_sha256": "…",
+    "manifest_sha256": "…",
+    "source": {
+        "origin": "trusted",
+        "entry_path": "plugins/memo/plugin.py"
+    }
+}
+```
+
+Admin 插件页会读取它，并校验：
+
+- 入口文件 SHA256
+- `plugin.json` SHA256
+- 声明来源类型与入口路径
+
+这一步是 Phase 7 的“签名/来源校验预留”，目的是为将来更强的签名格式留位，同时保持当前默认栈轻量。
 
 ## PluginBus 核心机制
 
@@ -195,20 +219,25 @@ bus.discover_plugins("plugins")
 | 插件 | 优先级 | 形态 | 主要钩子 |
 |------|--------|------|----------|
 | ChatPlugin | 0 | 目录 | `on_startup`, `on_shutdown`, `on_bot_connect`, `register_tools` |
-| DateTimePlugin | 1 | 单文件 | `register_tools` |
-| WebSearchPlugin | 1 | 单文件 | `register_tools` |
-| WebFetchPlugin | 1 | 单文件 | `register_tools` |
-| HttpApiPlugin | 1 | 单文件 | `register_tools` |
-| GroupAdminPlugin | 1 | 单文件 | `register_tools` |
-| VisionPlugin | 5 | 目录 | `on_startup`, `on_pre_prompt` |
-| StickerPlugin | 10 | 目录 | `register_tools` |
-| MemoPlugin | 20 | 目录 | `on_startup`, `register_tools` |
-| AffectionPlugin | 30 | 目录 | `on_startup`, `on_pre_prompt`, `on_post_reply` |
-| SchedulePlugin | 35 | 目录 | `on_bot_connect`, `on_shutdown`, `on_pre_prompt` |
-| HistoryLoaderPlugin | 40 | 目录 | `on_bot_connect` |
-| DreamPlugin | 100 | 目录 | `on_startup`, `on_bot_connect`, `on_shutdown`, `on_tick` |
+| DateTimePlugin | 1 | 目录 | `register_tools` |
+| WebSearchPlugin | 1 | 目录 | `register_tools` |
+| WebFetchPlugin | 1 | 目录 | `register_tools` |
+| HttpApiPlugin | 1 | 目录 | `register_tools` |
+| GroupAdminPlugin | 1 | 目录 | `register_tools` |
+| HistoryLoaderPlugin | 5 | 目录 / 系统级 | `on_bot_connect` |
+| KnowledgePlugin | 8 | 目录 | `on_pre_prompt` |
+| AffectionPlugin | 10 | 目录 | `on_startup`, `on_pre_prompt`, `on_post_reply` |
+| SchedulePlugin | 20 | 目录 | `on_bot_connect`, `on_shutdown`, `on_pre_prompt` |
+| FoodPlugin | 25 | 目录 | `register_commands` |
+| MemoPlugin | 30 | 目录 | `on_startup`, `register_tools`, `on_pre_prompt`, `on_post_reply` |
+| StickerPlugin | 40 | 目录 | `register_tools`, `on_pre_prompt` |
+| SlangPlugin | 42 | 目录 | `on_message`, `on_pre_prompt`, `on_tick`, `register_tools` |
+| DreamPlugin | 150 | 目录 | `on_startup`, `on_shutdown`, `on_tick` |
+| BilibiliPlugin | 190 | 目录 | `on_message` |
 | EchoPlugin | 200 | 目录 | `on_message` |
-| ElementDetectorPlugin | 200 | 目录 | `on_message` |
+| ElementDetectorPlugin | 210 | 目录 | `on_message` |
+| DebugCommandPlugin | 300 | 目录 | `register_commands` |
+| Vision | - | 系统能力包 | 由 `services.media.vision` 提供，插件中心只读展示 |
 
 ## Key Design Decisions
 

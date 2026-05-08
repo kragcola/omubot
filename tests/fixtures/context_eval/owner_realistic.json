@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "description": "更贴近日常主人使用的脱敏评测集：用短自然问法覆盖记忆、文档、图谱和无关问题。",
+  "cases": [
+    {
+      "id": "owner-private-routine",
+      "query": "蒸汽眼罩",
+      "user_id": "u_owner",
+      "group_id": null,
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 500,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "睡前使用蒸汽眼罩"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "本群采购蒸汽眼罩"
+        },
+        {
+          "contains": "其他群也在聊蒸汽眼罩"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0
+    },
+    {
+      "id": "owner-group-tabletop",
+      "query": "跑团地下城",
+      "user_id": "u_owner",
+      "group_id": "g_table",
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 500,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "本群正在跑团地下城"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "个人跑团地下城剧透"
+        },
+        {
+          "contains": "其他群跑团地下城安排"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0
+    },
+    {
+      "id": "ops-napcat-doc",
+      "query": "NapCat",
+      "user_id": "u_owner",
+      "group_id": "g_table",
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 650,
+      "required_hits": [
+        {
+          "type": "doc_chunk",
+          "contains": "NapCat 连接失败"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "个人跑团地下城剧透"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0
+    },
+    {
+      "id": "stable-prefix-doc",
+      "query": "稳定前缀",
+      "user_id": "u_owner",
+      "group_id": "g_table",
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 650,
+      "required_hits": [
+        {
+          "type": "doc_chunk",
+          "contains": "动态上下文必须进入 tail metadata"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "其他群跑团地下城安排"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0
+    },
+    {
+      "id": "admin-style-graph",
+      "query": "雾青控制台",
+      "user_id": "u_owner",
+      "group_id": "g_table",
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 500,
+      "required_hits": [
+        {
+          "type": "graph_fact",
+          "contains": "雾青控制台"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "其他群跑团地下城安排"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0
+    },
+    {
+      "id": "unrelated-no-fill",
+      "query": "随机天气预报",
+      "user_id": "u_owner",
+      "group_id": "g_table",
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 0,
+      "required_hits": [],
+      "forbidden_hits": [
+        {
+          "contains": "蒸汽眼罩"
+        },
+        {
+          "contains": "跑团地下城"
+        },
+        {
+          "contains": "稳定前缀"
+        },
+        {
+          "contains": "雾青控制台"
+        },
+        {
+          "contains": "NapCat"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0
+    }
+  ]
+}

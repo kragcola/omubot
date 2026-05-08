@@ -1,25 +1,153 @@
 # 插件
 
-## 已加载插件（14+2 个）
+## 插件规范化 Phase 0
+
+当前插件体系已经进入 manifest v3 + JSON 配置契约：
+
+```text
+plugins/<name>/
+  __init__.py
+  plugin.py
+  plugin.json
+  config.default.json
+  config.schema.json
+```
+
+根目录单文件插件已取消支持。运行时发现只加载 `plugins/<name>/plugin.py` 目录插件；若本地索引发现旧 `plugins/<name>.py` 或根目录 `<name>.json`，会标记为 `blocked: legacy_single_file_unsupported`，不会作为可加载插件。
+
+运行时配置固定从 JSON 合并：
+
+```text
+plugins/<name>/config.default.json
+storage/plugins/config/<name>.json
+```
+
+合并顺序为 `config.default.json` → Admin 保存的 runtime override → 环境/启动禁用项。旧 `plugins/*.toml` 与 `plugins/*/plugin.toml` 已不再作为主配置路径。
+
+标准配置文件格式：
+
+```json
+{
+  "schema_version": 1,
+  "plugin": "sticker",
+  "values": {}
+}
+```
+
+`config.schema.json` 只描述 `values` 内字段，Admin Web 会根据后端返回的 `effective_values` 渲染配置表单。
+
+## Manifest v3
+
+所有插件清单统一使用 `plugin.json`：
+
+```json
+{
+  "manifest_version": 3,
+  "name": "slang",
+  "display_name": { "zh": "群内黑话", "en": "Slang" },
+  "description": "群内黑话：学习候选、审核后注入当前群语境",
+  "version": "0.1.0",
+  "tier": "system|user",
+  "toggle_policy": "locked|runtime|restart_required",
+  "category": "core|memory|expression|tool|pipeline|ops",
+  "permissions": [],
+  "capabilities": [],
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "hot|restart_required|read_only",
+    "restart_required_fields": []
+  },
+  "store": {
+    "visibility": "internal|local|marketplace_ready",
+    "marketplace_id": ""
+  }
+}
+```
+
+系统级插件会被运行时锁定，Web 端和 API 都不能关闭。首批系统级为 `chat`、`history_loader`，`vision` 作为系统能力卡展示但不进入普通插件启停流。插件中心默认隐藏系统级能力，需要通过“显示系统插件”高级入口查看。
+
+## 已加载插件（19 个）
 
 | 插件 | 版本 | 优先级 | 形态 | 功能 |
 |------|------|--------|------|------|
-| ChatPlugin | 1.0.3 | 0 | 单文件 | 核心聊天：消息路由、LLM 调用、tool loop |
-| DateTimePlugin | 1.0.0 | 1 | 单文件 | 时间日期查询工具 |
-| WebSearchPlugin | 1.0.0 | 1 | 单文件 | DuckDuckGo 网页搜索 |
-| WebFetchPlugin | 1.0.0 | 1 | 单文件 | 网页内容抓取 |
-| HttpApiPlugin | 1.0.0 | 1 | 单文件 | NapCat HTTP API 调用 |
-| GroupAdminPlugin | 1.0.0 | 1 | 单文件 | 群管理（禁言、头衔、发消息） |
-| VisionPlugin | 1.0.0 | 8 | 单文件 | 多模态图像理解 (Qwen VL) |
-| StickerPlugin | 1.0.1 | 10 | 单文件 | 表情包：保存、发送、管理 |
-| MemoPlugin | 1.0.1 | 20 | 单文件 | 记忆卡片：7 类 3 作用域，检索门控 |
-| AffectionPlugin | 1.0.1 | 30 | 目录 | 好感度系统：分数、昵称、态度调节 |
-| SchedulePlugin | 1.0.1 | 35 | 目录 | 模拟日程：每日 LLM 生成 |
-| HistoryLoaderPlugin | 1.0.0 | 5 | 单文件 | 启动时加载群历史消息 |
-| DreamPlugin | 1.0.0 | 150 | 单文件 | 梦境整合：定期整理记忆、清理表情包 |
-| EchoPlugin | 1.0.0 | 200 | 单文件 | 复读检测：5 分钟内同消息 3 次触发 |
-| ElementDetectorPlugin | 1.0.0 | 210 | 单文件 | 特殊消息元素检测 |
-| DebugCommandPlugin | 1.1.0 | 300 | 单文件 | 调试指令：/plugins、/version |
+| ChatPlugin | 1.1.6 | 0 | 目录 / 系统级 | 核心聊天：消息路由、LLM 调用、tool loop |
+| DateTimePlugin | 1.1.0 | 1 | 目录 | 时间日期查询工具 |
+| WebSearchPlugin | 1.1.0 | 1 | 目录 | DuckDuckGo / Bing 网页搜索 |
+| WebFetchPlugin | 1.1.0 | 1 | 目录 | 网页内容抓取 |
+| HttpApiPlugin | 1.1.0 | 1 | 目录 | 通用 HTTP API 调用 |
+| GroupAdminPlugin | 1.1.0 | 1 | 目录 | 群管理（禁言、头衔、发消息） |
+| HistoryLoaderPlugin | 1.1.0 | 5 | 目录 / 系统级 | 启动时加载群历史消息 |
+| KnowledgePlugin | 0.1.0 | 8 | 目录 | 知识库能力；可按配置关闭 |
+| StickerPlugin | 1.1.3 | 40 | 目录 | 表情包：保存、发送、管理 |
+| MemoPlugin | 1.1.2 | 30 | 目录 | 记忆卡片：7 类 3 作用域，检索门控 |
+| FoodPlugin | 0.1.5 | 25 | 目录 | 饮食/点餐相关指令 |
+| AffectionPlugin | 1.1.1 | 10 | 目录 | 好感度系统：分数、昵称、态度调节 |
+| SchedulePlugin | 1.1.1 | 20 | 目录 | 模拟日程：每日 LLM 生成 |
+| SlangPlugin | 0.1.0 | 42 | 目录 | 群内黑话：学习、审核、AI 复核、漂移治理、Prompt 注入 |
+| DreamPlugin | 1.1.2 | 150 | 目录 | 梦境整合：定期整理记忆、清理表情包 |
+| BilibiliPlugin | 1.1.2 | 190 | 目录 | B 站链接解析与封面摘要 |
+| EchoPlugin | 1.1.1 | 200 | 目录 | 复读检测：5 分钟内同消息 3 次触发 |
+| ElementDetectorPlugin | 1.1.1 | 210 | 目录 | 特殊消息元素检测 |
+| DebugCommandPlugin | 1.3.0 | 300 | 目录 | 调试指令：/plugins、/version |
+
+所有运行时插件都已目录化，并补齐 `plugin.json`、`config.default.json`、`config.schema.json`。`vision` 不是运行时插件，而是 `plugins/vision/plugin.json` 系统能力包。
+
+## 本地插件索引与治理
+
+Admin 插件页现在不只看“已加载插件”，还会额外扫描本地 `plugins/` 目录，生成一份仅本地可见的插件包索引，用来排查：
+
+- 本地目录里有插件包，但没有被加载进运行时
+- `plugin.json` 缺失或损坏
+- 插件最低版本要求与当前 Omubot 版本不兼容
+- 插件入口来自符号链接或仓库外路径，需要人工确认来源
+
+索引接口：
+
+- `GET /api/admin/plugins/index`
+- `GET /api/admin/plugins/store`
+
+返回内容包含：
+
+- `summary`：本地包总数、已加载数、未加载数、阻塞数、待确认数、可接入数
+- `entries[]`：每个本地包的入口路径、清单路径、`plugin.sig` 路径、SHA256 指纹、来源状态、签名状态、版本兼容状态、治理状态和行动建议
+- `install_policy`：明确当前策略是 `local_only`
+
+可选的 `plugin.sig` 是本地 detached attestation 预留，不是远程安装机制。当前先支持：
+
+- `scheme: "sha256"`
+- `entry_sha256`
+- `manifest_sha256`
+- `signer` / `key_id` / `signed_at`
+- `source.origin`
+- `source.entry_path`
+
+当前索引会校验：
+
+- `plugin.py` 目录入口的 SHA256 是否与 `plugin.sig` 声明一致
+- `plugin.json` 的 SHA256 是否一致
+- `source.origin` 与 `source.entry_path` 是否和当前实际来源、路径一致
+
+治理状态固定为：
+
+- `healthy`：已加载且没有额外治理告警
+- `attention`：已加载，但仍需要补清单、确认来源或处理版本告警
+- `ready`：本地包可读，尚未接入运行时
+- `review`：本地包来源需要人工确认
+- `blocked`：入口缺失、清单损坏或版本不兼容，当前不应接入运行时
+
+当前策略明确为“只识别本地插件包，不允许 Web 端远程下载安装并执行未知代码”。这也是 Omubot Phase 7 插件生态的安全边界。
+
+## Admin 插件中心
+
+`/admin/plugins` 是插件中心主入口：
+
+- `用户插件`：默认入口，只展示可日常管理的用户插件，支持中文名、英文名和插件 ID 搜索。
+- `显示系统插件`：弱化高级入口，展示系统级锁定能力，固定标明“系统级 / 锁定 / 不可关闭”，不渲染启停开关。
+- `插件商店`：只读展示本地包、来源、manifest、兼容状态和未来市场字段。
+- `治理队列`：集中展示缺清单、来源待确认、版本不兼容、签名异常等问题。
+
+插件详情页为 `/admin/plugins/<name>?tab=overview|settings|commands|health|source`，左上角有“返回插件中心”。若插件声明 `config.schema.json`，Web 会渲染结构化配置表单，并把覆盖写入 `storage/plugins/config/<name>.json`；对象数组类配置会按字段渲染，不再退回裸 JSON 文本框。
 
 ## 钩子生命周期
 
@@ -47,15 +175,104 @@ class MyPlugin(AmadeusPlugin):
         return [MyTool(), AnotherTool()]
 ```
 
+当前常见工具包括：
+
+| 工具 | 来源插件 | 用途 |
+|------|----------|------|
+| `web_search` | WebSearchPlugin | 搜索互联网，用于实时信息和黑话每日 AI 复核 |
+| `web_fetch` | WebFetchPlugin | 抓取网页内容 |
+| `send_sticker` | StickerPlugin | 按场景发送表情包 |
+| `lookup_cards` / `append_memo` | MemoPlugin | 查询和写入长期记忆卡片 |
+| `slang_lookup` | SlangPlugin | 按需查询当前群与全局已批准黑话 |
+
+`slang_lookup` 只返回当前群和 global 作用域的 `approved` 词条；无群上下文时只返回 global。
+
 ## 命令注册
 
-插件通过 `register_commands()` 注册斜杠指令：
+插件通过 `register_commands()` 声明式注册命令。`CommandDispatcher` 自动处理权限门禁、参数校验、未知子命令检测和帮助文本生成。
+
+### 基础示例
 
 ```python
+from kernel.types import Command
+
 def register_commands(self) -> list:
-    from kernel.types import Command
     return [
-        Command(name="mycmd", handler=self._handle, description="...",
-                usage="/mycmd [args]", aliases=["mc"]),
+        Command(
+            name="mycmd",
+            handler=self._handle_mycmd,
+            description="我的命令",
+            usage="/mycmd <参数>",
+            aliases=["mc"],
+            require_args=True,   # 无参数时自动回复 usage
+        ),
     ]
 ```
+
+### 带子命令
+
+```python
+Command(
+    name="mgr",
+    handler=self._handle_mgr,      # /mgr（无参数）→ 显示帮助
+    description="管理工具",
+    hidden=True,                    # 父命令不显示在自身 help 中
+    sub_commands=[
+        Command(
+            name="list",
+            handler=self._handle_list,
+            description="列出所有项目",
+        ),
+        Command(
+            name="delete",
+            handler=self._handle_delete,
+            description="删除项目",
+            usage="/mgr delete <id>",
+            require_args=True,
+            admin_only=True,         # 管理员专属
+        ),
+    ],
+)
+```
+
+### 门禁字段
+
+所有门禁由 `CommandDispatcher` 在调用 handler 前统一检查，handler 不需要写任何权限代码：
+
+| 字段 | 效果 |
+|------|------|
+| `admin_only=True` | 非管理员自动回复"无权限" |
+| `private_only=True` | 群聊自动回复"请在私聊中使用此指令" |
+| `require_args=True` | 无参数时自动回复 `usage` |
+| `hidden=True` | 在 `format_help()` 中隐藏 |
+| `passthrough_unknown=True` | 未知子命令不报错，透传给父 handler |
+
+门禁从父命令继承：父命令设 `admin_only=True`，所有子命令自动受保护。
+
+### Handler 签名
+
+Handler 接收 `RichCommandContext`，包含消息信息 + 全部系统服务：
+
+```python
+async def _handle_mycmd(self, ctx: RichCommandContext) -> None:
+    # ctx.bot, ctx.event, ctx.args, ctx.user_id, ctx.group_id, ctx.is_private
+    # ctx.plugin_ctx.card_store, ctx.plugin_ctx.llm_client, ...
+    # ctx.command (当前匹配的 Command), ctx.root_command (顶层父命令)
+    await ctx.bot.send(ctx.event, Message(f"参数: {ctx.args}"))
+```
+
+### 自动帮助
+
+`format_help()` 从命令元数据递归生成帮助文本，自动标注门禁：
+
+```python
+help_text = parent_cmd.format_help()
+# 输出：
+# 管理工具：
+# /mgr list — 列出所有项目
+# /mgr delete <参数> — 删除项目（仅管理员）
+```
+
+### 完整示例参见
+
+[FoodPlugin](../../plugins/food/plugin.py) — 带门禁字段、子命令、自动帮助的生产级示例

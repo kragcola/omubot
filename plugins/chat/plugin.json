@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "chat",
+  "display_name": {
+    "zh": "核心聊天",
+    "en": "Core Chat"
+  },
+  "description": "核心聊天：消息路由、LLM 调用、工具循环与上下文调度",
+  "version": "1.1.7",
+  "priority": 0,
+  "tier": "system",
+  "toggle_policy": "locked",
+  "category": "core",
+  "permissions": [
+    "message",
+    "prompt",
+    "reply",
+    "tool",
+    "command",
+    "storage",
+    "network"
+  ],
+  "capabilities": [
+    "llm",
+    "tool_loop",
+    "prompt_building"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "read_only",
+    "restart_required_fields": []
+  },
+  "store": {
+    "visibility": "internal",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

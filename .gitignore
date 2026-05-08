@@ -12,6 +12,8 @@ config/
 storage/memories/
 storage/logs/
 storage/*.db
+storage/*.db-shm
+storage/*.db-wal
 storage/image_cache/
 storage/stickers/
 storage/plugins/
@@ -26,8 +28,17 @@ napcat/config/webui.json
 napcat/config/plugins/
 .pytest_cache/
 .worktrees/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/omubot-admin-console/
+!.claude/skills/omubot-admin-console/SKILL.md
+!.claude/skills/omubot-admin-console/agents/
+!.claude/skills/omubot-admin-console/agents/openai.yaml
 .vscode/
+node_modules/
+admin/frontend/node_modules/
+codex-skills/
 maintenance-log.md
 rewrite-plan.md
 docs/project-info.md

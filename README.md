@@ -42,7 +42,7 @@ uv sync
 ### 2. 配置
 
 ```bash
-cp config.example.toml config/config.toml    # 编辑：LLM 模型、群聊开关
+cp config.example.toml config/config.toml    # 兼容 legacy TOML，首次在 /admin/config 保存后会迁移为 config/config.json
 # 创建 config/.env，填写 SUPERUSERS 和 LLM_API_KEY
 # 创建 config/soul/identity.md 和 config/soul/instruction.md
 ```
@@ -108,10 +108,10 @@ uv run python bot.py
 
 ## 写一个插件
 
-**单文件插件**（纯工具，零依赖）：
+**目录插件**：
 
 ```python
-# plugins/my_tool.py
+# plugins/my_tool/plugin.py
 from kernel.types import AmadeusPlugin
 from services.tools.base import Tool
 
@@ -145,7 +145,7 @@ class MyToolPlugin(AmadeusPlugin):
 
 ## 配置
 
-三层优先级：`config.toml` < 环境变量 < CLI 参数
+三层优先级：`config/config.json`（兼容 legacy TOML）< 环境变量 < CLI 参数
 
 | 环境变量 | 覆盖字段 |
 |----------|---------|

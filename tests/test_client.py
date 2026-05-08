@@ -2,13 +2,16 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from kernel.config import GroupConfig, GroupOverride
 from services.identity import Identity
 from services.llm.client import (
     LLMClient,
+    RateLimitError,
     ToolUse,
     _split_naturally,
     content_text,
@@ -64,6 +67,7 @@ async def _client(
     timeline: GroupTimeline | None = None,
     card_store: CardStore | None = None,
     max_compact_failures: int = 3,
+    group_config: GroupConfig | None = None,
 ) -> AsyncIterator[LLMClient]:
     c = LLMClient(
         base_url="http://fake",
@@ -79,6 +83,7 @@ async def _client(
         group_timeline=timeline,
         card_store=card_store,
         thinker_enabled=False,
+        group_config=group_config,
     )
     try:
         yield c
@@ -104,6 +109,100 @@ MOCK_RESULT_FULL = {
     "cache_read": 50,
     "cache_create": 10,
 }
+
+
+class _StaticTool:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"{self._name} description"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {"type": "object", "properties": {}}
+
+    def to_openai_tool(self) -> dict[str, object]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+        }
+
+    async def execute(self, ctx, **kwargs):
+        return "ok"
+
+
+class _Bus:
+    def __init__(self) -> None:
+        self.post_reply_calls: list[object] = []
+        self.thinker_calls: list[object] = []
+
+    async def fire_on_pre_prompt(self, prompt_ctx) -> None:
+        return None
+
+    async def fire_on_post_reply(self, reply_ctx) -> None:
+        self.post_reply_calls.append(reply_ctx)
+
+    async def fire_on_thinker_decision(self, thinker_ctx) -> None:
+        self.thinker_calls.append(thinker_ctx)
+
+
+# ---------------------------------------------------------------------------
+# Provider profile rate limit state
+# ---------------------------------------------------------------------------
+
+
+async def test_profile_rate_limit_cooldown_is_per_profile(prompt, short_term, tools) -> None:
+    async for client in _client(prompt, short_term, tools):
+        client._task_profiles = {
+            "main": SimpleNamespace(
+                base_url="http://main",
+                api_key="sk-main",
+                model="main-model",
+                api_format="anthropic",
+            ),
+            "slang": SimpleNamespace(
+                base_url="http://slang",
+                api_key="sk-slang",
+                model="slang-model",
+                api_format="openai",
+            ),
+        }
+        client.set_task_profile_names({"main": "main", "slang": "slang"})
+
+        with patch("services.llm.client.call_api", new_callable=AsyncMock) as mock_api:
+            mock_api.side_effect = RateLimitError("HTTP 429")
+            with pytest.raises(RateLimitError):
+                await client._call_slang([], [])
+            assert mock_api.await_count == 1
+
+            # The limited slang profile fails fast during cooldown and does not
+            # make another HTTP call.
+            with pytest.raises(RateLimitError):
+                await client._call_slang([], [])
+            assert mock_api.await_count == 1
+
+            # Main profile remains callable because cooldown is keyed by profile.
+            mock_api.side_effect = None
+            mock_api.return_value = MOCK_RESULT_FULL
+            result = await client._call([], [])
+            assert result["text"] == "reply text"
+            assert mock_api.await_count == 2
+
+        payload = client.provider_rate_limit_payload()
+        assert payload["profiles"]["slang"]["status"] == "cooldown"
+        assert payload["profiles"]["slang"]["rate_limited"] == 1
+        assert payload["profiles"]["slang"]["blocked_calls"] == 1
+        assert payload["profiles"]["main"]["successes"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +261,138 @@ async def test_group_no_compact_below_ratio(prompt, short_term, tools, timeline,
         # group messages are added by the listener, not by chat())
         turns = timeline.get_turns(gid)
         assert len(turns) == 9  # 8 existing + 1 assistant reply
+
+
+async def test_group_profile_injects_prompt_and_filters_tools(prompt, short_term, timeline, card_store) -> None:
+    tools = ToolRegistry()
+    tools.register(_StaticTool("send_sticker"))
+    tools.register(_StaticTool("slang_lookup"))
+    tools.register(_StaticTool("lookup_cards"))
+    group_config = GroupConfig(
+        overrides={
+            12345: GroupOverride(
+                reply_style="gentle",
+                custom_prompt="少说教，优先接住群内气氛。",
+                allowed_tools=["lookup_cards", "send_sticker"],
+                blocked_tools=["lookup_cards"],
+                sticker_mode="off",
+                slang_enabled=False,
+            ),
+        },
+    )
+
+    async for client in _client(
+        prompt,
+        short_term,
+        tools,
+        timeline=timeline,
+        card_store=card_store,
+        group_config=group_config,
+    ):
+        captured: dict[str, object] = {}
+
+        async def _fake_call_api(*args, **kwargs):
+            captured["system_blocks"] = args[4]
+            captured["tools"] = kwargs.get("tools")
+            return MOCK_RESULT_FULL
+
+        with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=_fake_call_api):
+            result = await client.chat(
+                session_id="group_12345",
+                user_id="111",
+                user_content="hello",
+                identity=_IDENTITY,
+                group_id="12345",
+            )
+
+        assert result == "reply text"
+        system_text = "\n".join(
+            str(block.get("text", ""))
+            for block in captured["system_blocks"]  # type: ignore[index]
+            if isinstance(block, dict)
+        )
+        assert "群聊回复偏好" in system_text
+        assert "少说教，优先接住群内气氛。" in system_text
+
+        tool_names = {
+            str(tool.get("name", ""))
+            for tool in (captured["tools"] or [])  # type: ignore[operator]
+            if isinstance(tool, dict)
+        }
+        assert "lookup_cards" not in tool_names
+        assert "send_sticker" not in tool_names
+        assert "slang_lookup" not in tool_names
+        assert "pass_turn" in tool_names
+
+
+async def test_deepseek_main_moves_dynamic_prompt_blocks_to_tail_metadata(
+    prompt,
+    short_term,
+    timeline,
+    card_store,
+) -> None:
+    tools = ToolRegistry()
+
+    class _Bus:
+        async def fire_on_pre_prompt(self, prompt_ctx) -> None:
+            prompt_ctx.add_block("稳定规则", label="稳定块", position="stable")
+            prompt_ctx.add_block("本轮动态信息", label="动态块", position="dynamic")
+
+        async def fire_on_post_reply(self, reply_ctx) -> None:
+            return None
+
+    async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
+        client._bus = _Bus()
+        client._task_profiles = {
+            "main": SimpleNamespace(
+                base_url="https://api.deepseek.com",
+                api_key="sk-deepseek-main",
+                model="deepseek-v4-flash",
+                api_format="deepseek",
+            ),
+        }
+        client.set_task_profile_names({"main": "main"})
+
+        captured: dict[str, object] = {}
+
+        async def _fake_call_api(*args, **kwargs):
+            captured["system_blocks"] = args[4]
+            captured["messages"] = args[5]
+            captured["request_options"] = kwargs.get("request_options")
+            return MOCK_RESULT_FULL | {
+                "provider_kind": "deepseek",
+                "provider_mode": "native",
+                "prompt_cache_hit_tokens": 50,
+                "prompt_cache_miss_tokens": 100,
+                "reasoning_replay_tokens": 0,
+                "payload_sanitized": False,
+            }
+
+        with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=_fake_call_api):
+            await client.chat(
+                session_id="group_12345",
+                user_id="111",
+                user_content="hello",
+                identity=_IDENTITY,
+                group_id="12345",
+            )
+
+        system_text = "\n".join(
+            str(block.get("text", ""))
+            for block in captured["system_blocks"]  # type: ignore[index]
+            if isinstance(block, dict)
+        )
+        assert "稳定块" in system_text
+        assert "动态块" not in system_text
+
+        messages = captured["messages"]  # type: ignore[assignment]
+        last_user = next(msg for msg in reversed(messages) if msg["role"] == "user")
+        assert "<turn_meta>" in str(last_user["content"])
+        assert "动态块" in str(last_user["content"])
+
+        request_options = captured["request_options"]  # type: ignore[assignment]
+        assert isinstance(request_options, dict)
+        assert str(request_options.get("user_id", "")).startswith("grp_")
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +611,132 @@ class TestPassTurn:
                     ctx=None,
                 )
             assert result is None
+
+    async def test_textual_pass_turn_is_suppressed_in_group(self, prompt, short_term, tools, timeline, card_store) -> None:
+        async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
+            bus = _Bus()
+            client._bus = bus
+
+            with patch(
+                "services.llm.client.call_api",
+                new_callable=AsyncMock,
+                return_value={
+                    "text": "[pass_turn] 不相关",
+                    "tool_uses": [],
+                    "input_tokens": 100,
+                    "output_tokens": 1,
+                    "cache_read": 0,
+                    "cache_create": 0,
+                },
+            ):
+                result = await client.chat(
+                    session_id="group_12345",
+                    user_id="111",
+                    user_content="hello",
+                    identity=_IDENTITY,
+                    group_id="12345",
+                    ctx=None,
+                )
+
+            assert result is None
+            assert len(bus.post_reply_calls) == 0
+            assert len(timeline.get_turns("12345")) == 0
+
+    async def test_empty_reply_falls_back_in_private_chat(self, prompt, short_term, tools) -> None:
+        async for client in _client(prompt, short_term, tools):
+            bus = _Bus()
+            client._bus = bus
+
+            with patch(
+                "services.llm.client.call_api",
+                new_callable=AsyncMock,
+                return_value={
+                    "text": "pass_turn",
+                    "tool_uses": [],
+                    "input_tokens": 100,
+                    "output_tokens": 1,
+                    "cache_read": 0,
+                    "cache_create": 0,
+                },
+            ):
+                result = await client.chat(
+                    session_id="private_100",
+                    user_id="100",
+                    user_content="hello",
+                    identity=_IDENTITY,
+                )
+
+            assert result == "我先缓一下，马上接你。"
+            assert len(bus.post_reply_calls) == 1
+            assert bus.post_reply_calls[0].reply_content == "我先缓一下，马上接你。"
+
+    async def test_tool_calls_are_exposed_to_post_reply(self, prompt, short_term, tools) -> None:
+        async for client in _client(prompt, short_term, tools):
+            bus = _Bus()
+            client._bus = bus
+            tools.register(_StaticTool("lookup_cards"))
+
+            with patch(
+                "services.llm.client.call_api",
+                new_callable=AsyncMock,
+                side_effect=[
+                    {
+                        "text": "",
+                        "tool_uses": [ToolUse(id="tu_1", name="lookup_cards", input={"query": "猫"})],
+                        "input_tokens": 100,
+                        "output_tokens": 5,
+                        "cache_read": 0,
+                        "cache_create": 0,
+                    },
+                    {
+                        "text": "找到啦",
+                        "tool_uses": [],
+                        "input_tokens": 80,
+                        "output_tokens": 20,
+                        "cache_read": 0,
+                        "cache_create": 0,
+                    },
+                ],
+            ):
+                result = await client.chat(
+                    session_id="private_100",
+                    user_id="100",
+                    user_content="查一下",
+                    identity=_IDENTITY,
+                )
+
+            assert result == "找到啦"
+            assert len(bus.post_reply_calls) == 1
+            assert bus.post_reply_calls[0].tool_calls
+            assert bus.post_reply_calls[0].tool_calls[0]["name"] == "lookup_cards"
+
+    async def test_thinker_search_is_coerced_and_hooked(self, prompt, short_term, tools) -> None:
+        async for client in _client(prompt, short_term, tools):
+            client._thinker_enabled = True
+            bus = _Bus()
+            client._bus = bus
+
+            with (
+                patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+                patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=MOCK_RESULT_FULL),
+            ):
+                mock_think.return_value = SimpleNamespace(
+                    action="search",
+                    thought="查一下",
+                    sticker=False,
+                    tone="认真",
+                    usage={"input_tokens": 10, "cache_read": 0, "cache_create": 0, "output_tokens": 2},
+                )
+                result = await client.chat(
+                    session_id="private_100",
+                    user_id="100",
+                    user_content="今天几号",
+                    identity=_IDENTITY,
+                )
+
+            assert result == "reply text"
+            assert len(bus.thinker_calls) == 1
+            assert bus.thinker_calls[0].action == "reply"
 
 
 # ---------------------------------------------------------------------------
@@ -672,4 +1029,3 @@ class TestSplitNaturally:
         for seg in result:
             # Every segment should feel complete
             assert len(seg) >= 6
-

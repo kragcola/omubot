@@ -34,7 +34,7 @@ storage/stickers/
 
 ## 表情包频率
 
-`config/config.toml` → `[sticker].frequency`：
+`config/config.json` → `sticker.frequency`。已有 `config/config.toml` 的 `[sticker].frequency` 仍兼容读取：
 
 | 频率 | 规则 |
 |------|------|

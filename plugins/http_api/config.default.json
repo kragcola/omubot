@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "plugin": "http_api",
+  "values": {
+    "timeout_seconds": 15,
+    "max_response_chars": 4000,
+    "follow_redirects": true,
+    "allowed_methods": [
+      "GET",
+      "POST"
+    ]
+  }
+}

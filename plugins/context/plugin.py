@@ -1,0 +1,160 @@
+"""ContextPlugin: unified dynamic context prompt injection."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from collections import Counter
+
+from loguru import logger
+from pydantic import BaseModel
+
+from kernel.config import load_plugin_config
+from kernel.types import AmadeusPlugin, PluginContext, PromptContext
+
+_L = logger.bind(channel="system")
+
+
+class ContextConfig(BaseModel):
+    enabled: bool = True
+    takeover_dynamic_prompt: bool = True
+    max_hits: int = 5
+    max_doc_hits: int = 3
+    max_chars: int = 2400
+    graph_auto_extract: bool = True
+
+
+class ContextPlugin(AmadeusPlugin):
+    name = "context"
+    description = "统一上下文：聚合记忆卡片、文档知识和图谱事实"
+    version = "0.1.0"
+    priority = 7
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._enabled = False
+        self._takeover = True
+        self._max_hits = 5
+        self._max_doc_hits = 3
+        self._max_chars = 2400
+        self._graph_auto_extract = True
+        self._service = None
+        self._graph = None
+        self._pending_graph_tasks: set[asyncio.Task[dict[str, int]]] = set()
+
+    async def on_startup(self, ctx: PluginContext) -> None:
+        cfg = load_plugin_config("plugins/context/config.default.json", ContextConfig)
+        self._enabled = cfg.enabled
+        self._takeover = cfg.takeover_dynamic_prompt
+        self._max_hits = cfg.max_hits
+        self._max_doc_hits = cfg.max_doc_hits
+        self._max_chars = cfg.max_chars
+        self._graph_auto_extract = cfg.graph_auto_extract
+
+        if not self._enabled:
+            _L.info("context plugin disabled; legacy memo/knowledge prompt injection remains active")
+            return
+
+        from services.context import ContextService
+
+        self._service = getattr(ctx, "context_service", None) or ContextService.from_runtime(ctx, bus=ctx.bus)
+        self._graph = getattr(ctx, "knowledge_graph", None)
+        ctx.context_service = self._service
+        if self._takeover:
+            ctx.context_prompt_owner = "context"
+        _L.info(
+            "context plugin enabled | takeover={} max_hits={} max_doc_hits={} max_chars={}",
+            self._takeover,
+            self._max_hits,
+            self._max_doc_hits,
+            self._max_chars,
+        )
+
+    async def on_pre_prompt(self, ctx: PromptContext) -> None:
+        if not self._enabled or self._service is None:
+            return
+        query = ctx.conversation_text.strip()
+        if not query:
+            return
+        t0 = asyncio.get_running_loop().time()
+        pack = await self._service.build_prompt_context(
+            query,
+            session_id=ctx.session_id,
+            user_id=ctx.user_id,
+            group_id=ctx.group_id,
+            top_k=self._max_hits,
+            max_chars=self._max_chars,
+            type_caps={"doc_chunk": self._max_doc_hits},
+        )
+        elapsed_ms = (asyncio.get_running_loop().time() - t0) * 1000
+        _L.debug(
+            "context prompt pack | query={!r} hits={} types={} doc_chunks={} pack_chars={} omitted={} elapsed={:.1f}ms sources={}",
+            _safe_query(query),
+            len(pack.hits),
+            dict(Counter(str(getattr(hit, "type", "")) for hit in pack.hits)),
+            sum(1 for hit in pack.hits if getattr(hit, "type", "") == "doc_chunk"),
+            len(pack.text),
+            pack.omitted_count,
+            elapsed_ms,
+            _hit_sources(pack.hits),
+        )
+        if pack.text:
+            ctx.add_block(
+                text=pack.text,
+                label="上下文资料",
+                position="dynamic",
+            )
+        if self._graph_auto_extract and self._graph is not None and pack.hits:
+            self._schedule_graph_extract(pack.hits)
+
+    async def on_shutdown(self, ctx: PluginContext) -> None:
+        del ctx
+        if not self._pending_graph_tasks:
+            return
+        for task in list(self._pending_graph_tasks):
+            task.cancel()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(*self._pending_graph_tasks, return_exceptions=True)
+        self._pending_graph_tasks.clear()
+
+    def _schedule_graph_extract(self, hits: list[object]) -> None:
+        task = asyncio.create_task(self._graph.extract_from_context_hits(list(hits)))
+        self._pending_graph_tasks.add(task)
+
+        def _on_done(done: asyncio.Task[dict[str, int]]) -> None:
+            self._pending_graph_tasks.discard(done)
+            if done.cancelled():
+                return
+            try:
+                summary = done.result()
+            except Exception as exc:
+                _L.warning("context graph auto extract failed | error={}", type(exc).__name__)
+                return
+            if summary.get("extracted"):
+                _L.debug("context graph auto extract completed | summary={}", summary)
+
+        task.add_done_callback(_on_done)
+
+
+def _safe_query(query: str, limit: int = 80) -> str:
+    text = " ".join((query or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _hit_sources(hits: list[object], limit: int = 4) -> list[str]:
+    sources: list[str] = []
+    for hit in hits:
+        if len(sources) >= limit:
+            break
+        hit_type = str(getattr(hit, "type", "") or "")
+        source = str(getattr(hit, "source", "") or "")
+        title = str(getattr(hit, "title", "") or "")
+        if not source and not title:
+            continue
+        label = f"{hit_type}:{source}"
+        if title:
+            label += f"::{title}"
+        sources.append(_safe_query(label, limit=120))
+    return sources

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "dir": {
+      "type": "string",
+      "title": "旧 Markdown 迁移目录"
+    },
+    "user_max_chars": {
+      "type": "integer",
+      "title": "用户记忆最大字符",
+      "minimum": 50
+    },
+    "group_max_chars": {
+      "type": "integer",
+      "title": "群记忆最大字符",
+      "minimum": 50
+    },
+    "index_max_lines": {
+      "type": "integer",
+      "title": "全局索引最大行数",
+      "minimum": 20
+    },
+    "history_enabled": {
+      "type": "boolean",
+      "title": "启用历史记忆"
+    }
+  }
+}

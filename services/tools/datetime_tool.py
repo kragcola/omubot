@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from plugins.schedule.calendar import get_day_context
 from services.tools.base import Tool
@@ -14,8 +14,18 @@ _WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日
 
 
 class DateTimeTool(Tool):
-    def __init__(self, schedule_store: object | None = None) -> None:
+    def __init__(
+        self,
+        schedule_store: object | None = None,
+        *,
+        timezone: str = "Asia/Shanghai",
+        include_calendar_context: bool = True,
+        include_schedule: bool = True,
+    ) -> None:
         self._schedule_store = schedule_store
+        self._timezone = timezone or "Asia/Shanghai"
+        self._include_calendar_context = include_calendar_context
+        self._include_schedule = include_schedule
 
     @property
     def name(self) -> str:
@@ -30,22 +40,27 @@ class DateTimeTool(Tool):
         return {"type": "object", "properties": {}}
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
-        now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+        try:
+            tz = ZoneInfo(self._timezone)
+        except ZoneInfoNotFoundError:
+            tz = ZoneInfo("Asia/Shanghai")
+        now = datetime.now(tz=tz)
         weekday = _WEEKDAYS[now.weekday()]
         result = f"{now.strftime('%Y-%m-%d %H:%M:%S')} {weekday}"
 
         # Calendar context — holidays, special days, birthdays
-        day_ctx = get_day_context(now)
-        if day_ctx.holiday_name:
-            result += f"\n今天正在放{day_ctx.holiday_name}假。"
-        elif day_ctx.is_makeup_day:
-            result += "\n今天是调休日，虽然是周末但要上课。"
-        if day_ctx.special_day:
-            result += f"\n今天是{day_ctx.special_day}。"
-        for b in day_ctx.birthdays:
-            result += f"\n今天是{b.name_cn}（{b.group}）的生日！"
+        if self._include_calendar_context:
+            day_ctx = get_day_context(now)
+            if day_ctx.holiday_name:
+                result += f"\n今天正在放{day_ctx.holiday_name}假。"
+            elif day_ctx.is_makeup_day:
+                result += "\n今天是调休日，虽然是周末但要上课。"
+            if day_ctx.special_day:
+                result += f"\n今天是{day_ctx.special_day}。"
+            for b in day_ctx.birthdays:
+                result += f"\n今天是{b.name_cn}（{b.group}）的生日！"
 
-        if self._schedule_store is not None:
+        if self._include_schedule and self._schedule_store is not None:
             schedule = getattr(self._schedule_store, "current", None)
             if schedule is not None:
                 slot = schedule.current_slot(now)

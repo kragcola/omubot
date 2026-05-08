@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用食物推荐"
+    },
+    "recent_max": {
+      "type": "integer",
+      "title": "短期避重数量",
+      "minimum": 1,
+      "maximum": 20
+    },
+    "recent_ttl": {
+      "type": "integer",
+      "title": "短期避重秒数",
+      "minimum": 60
+    },
+    "feedback_window": {
+      "type": "integer",
+      "title": "反馈追问窗口秒数",
+      "minimum": 10,
+      "maximum": 600
+    },
+    "search_enabled": {
+      "type": "boolean",
+      "title": "启用联网补充搜索"
+    },
+    "food_library_max_items": {
+      "type": "integer",
+      "title": "发送给模型的候选数量",
+      "minimum": 5,
+      "maximum": 100
+    }
+  }
+}

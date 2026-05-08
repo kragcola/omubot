@@ -54,6 +54,10 @@ class TestExtractVideoId:
         assert _VideoId(bvid="BV1xx1234567").key == "BV1xx1234567"
         assert _VideoId(aid=123456).key == "av123456"
 
+    def test_av_does_not_match_inside_noise(self) -> None:
+        assert extract_video_id("preview=...qc3av4l12...") is None
+        assert extract_video_id("save4me") is None
+
 
 class TestHasBilibiliLink:
     def test_bv_link(self) -> None:
@@ -80,6 +84,9 @@ class TestHasBilibiliLink:
 
     def test_empty_text(self) -> None:
         assert not has_bilibili_link("")
+
+    def test_noise_with_av_substring_is_not_link(self) -> None:
+        assert not has_bilibili_link("preview=...qc3av4l12...")
 
 
 class TestFormatVideoSummary:
@@ -329,8 +336,8 @@ class TestBilibiliPlugin:
         ctx = MagicMock()
         ctx.raw_message = {"plain_text": "", "segments": msg}
         result = plugin._collect_segment_text(ctx)
-        assert "BV1xx1234567" in result
         assert "测试视频" in result
+        assert "https://" not in result
 
     def test_collect_segment_text_plain_only(self, plugin: BilibiliPlugin) -> None:
         ctx = MagicMock()
@@ -344,7 +351,8 @@ class TestBilibiliPlugin:
         from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
         json_data = (
-            '{"prompt":"[QQ小程序]测试","meta":{"url":"https://b23.tv/abc123"}}'
+            '{"prompt":"[QQ小程序]测试","meta":{"detail_1":{"appid":"1109937557","desc":"测试视频标题",'
+            '"qqdocurl":"https://b23.tv/abc123","preview":"https://qq.ugcimg.cn/v1/xxqc3av4l12"}}}'
         )
         seg = MessageSegment.json(json_data)
         msg = Message([seg])
@@ -354,18 +362,101 @@ class TestBilibiliPlugin:
         ctx.user_id = "789"
 
         with (
-            patch.object(plugin, "_resolve_b23_links", new_callable=AsyncMock) as mock_resolve,
+            patch.object(plugin, "_resolve_urls_to_vid", new_callable=AsyncMock) as mock_resolve,
             patch.object(plugin, "_get_video_info", new_callable=AsyncMock) as mock_get,
         ):
-            mock_resolve.return_value = "https://www.bilibili.com/video/BV1xx9999999"
+            mock_resolve.return_value = _VideoId(bvid="BV1xx9999999")
             mock_get.return_value = {
                 "title": "JSON卡片视频", "duration": 60, "pic": "",
                 "stat": {"view": 100}, "desc": "", "tname": "", "owner": {},
             }
             result = await plugin.on_message(ctx)
         assert result is False
+        mock_resolve.assert_awaited()
         # plain_text should be updated
         assert "JSON卡片视频" in ctx.raw_message["plain_text"]
+
+    @pytest.mark.asyncio
+    async def test_json_card_preview_noise_does_not_create_fake_av(self, plugin: BilibiliPlugin) -> None:
+        from nonebot.adapters.onebot.v11 import Message, MessageSegment
+
+        json_data = (
+            '{"ver":"1.0.0.19","prompt":"[QQ小程序]ファッションビート \\/ 冬杏",'
+            '"meta":{"detail_1":{"appid":"1109937557","desc":"ファッションビート \\/ 冬杏",'
+            '"preview":"https://qq.ugcimg.cn/v1/xxqc3av4l12","qqdocurl":"https://b23.tv/rmMu2aK"}}}'
+        )
+        seg = MessageSegment.json(json_data)
+        msg = Message([seg])
+        ctx = MagicMock()
+        ctx.raw_message = {"plain_text": "", "segments": msg}
+        ctx.group_id = "123456"
+        ctx.user_id = "789"
+
+        with (
+            patch.object(plugin, "_resolve_urls_to_vid", new_callable=AsyncMock) as mock_resolve,
+            patch.object(plugin, "_get_video_info", new_callable=AsyncMock) as mock_get,
+        ):
+            mock_resolve.return_value = _VideoId(bvid="BV1xy411c7mD")
+            mock_get.return_value = {
+                "title": "ファッションビート / 冬杏", "duration": 60, "pic": "",
+                "stat": {"view": 100}, "desc": "", "tname": "", "owner": {},
+            }
+            result = await plugin.on_message(ctx)
+
+        assert result is False
+        called_vid = mock_get.await_args.args[0]
+        assert called_vid.bvid == "BV1xy411c7mD"
+        assert called_vid.aid is None
+
+    @pytest.mark.asyncio
+    async def test_json_card_falls_back_to_search_when_url_resolution_fails(self, plugin: BilibiliPlugin) -> None:
+        from nonebot.adapters.onebot.v11 import Message, MessageSegment
+
+        json_data = (
+            '{"prompt":"[QQ小程序]测试","meta":{"detail_1":{"appid":"1109937557","desc":"测试视频标题",'
+            '"qqdocurl":"https://b23.tv/abc123","preview":"https://qq.ugcimg.cn/v1/xxqc3av4l12"}}}'
+        )
+        seg = MessageSegment.json(json_data)
+        msg = Message([seg])
+        ctx = MagicMock()
+        ctx.raw_message = {"plain_text": "", "segments": msg}
+        ctx.group_id = "123456"
+        ctx.user_id = "789"
+
+        with (
+            patch.object(plugin, "_resolve_urls_to_vid", new_callable=AsyncMock) as mock_resolve,
+            patch.object(plugin, "_search_video", new_callable=AsyncMock) as mock_search,
+        ):
+            mock_resolve.return_value = None
+            mock_search.return_value = {
+                "bvid": "BV1xx9999999",
+                "title": "搜索命中视频",
+                "duration": 60,
+                "pic": "",
+                "stat": {"view": 100},
+                "desc": "",
+                "tname": "",
+                "owner": {},
+            }
+            result = await plugin.on_message(ctx)
+
+        assert result is False
+        mock_search.assert_awaited_once_with("测试视频标题")
+        assert "搜索命中视频" in ctx.raw_message["plain_text"]
+
+    def test_extract_json_info_non_bilibili_preview_with_av_noise(self, plugin: BilibiliPlugin) -> None:
+        from nonebot.adapters.onebot.v11 import Message, MessageSegment
+
+        json_data = (
+            '{"prompt":"[QQ小程序]其他","meta":{"detail_1":{"appid":"999999","desc":"非B站",'
+            '"preview":"https://qq.ugcimg.cn/v1/xxqc3av4l12"}}}'
+        )
+        seg = MessageSegment.json(json_data)
+        msg = Message([seg])
+        ctx = MagicMock()
+        ctx.raw_message = {"plain_text": "", "segments": msg}
+
+        assert plugin._extract_bilibili_json_info(ctx) is None
 
     def test_extract_json_info_bilibili_card(self, plugin: BilibiliPlugin) -> None:
         """Extract B站 metadata from a QQ mini-program JSON card."""

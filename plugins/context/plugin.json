@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "context",
+  "display_name": {
+    "zh": "上下文系统",
+    "en": "Context"
+  },
+  "description": "统一聚合记忆卡片、文档知识和未来图谱事实的系统级上下文插件",
+  "version": "0.1.0",
+  "priority": 7,
+  "tier": "system",
+  "toggle_policy": "locked",
+  "category": "core",
+  "permissions": [
+    "prompt",
+    "storage"
+  ],
+  "capabilities": [
+    "context_retrieval",
+    "prompt_injection"
+  ],
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "takeover_dynamic_prompt",
+      "max_hits",
+      "max_chars",
+      "graph_auto_extract"
+    ]
+  },
+  "store": {
+    "visibility": "internal",
+    "marketplace_id": ""
+  }
+}

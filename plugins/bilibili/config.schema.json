@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用 B 站识别"
+    },
+    "cache_ttl": {
+      "type": "number",
+      "title": "视频缓存秒数",
+      "minimum": 0
+    },
+    "cover_timeout": {
+      "type": "number",
+      "title": "封面描述超时",
+      "minimum": 1
+    },
+    "reply_mode": {
+      "type": "string",
+      "title": "回复模式",
+      "enum": [
+        "mood",
+        "always",
+        "dedicated",
+        "autonomous"
+      ],
+      "enumNames": [
+        "跟随心情",
+        "必回复",
+        "独立频率",
+        "自主兴趣"
+      ]
+    },
+    "bilibili_talk_value": {
+      "type": "number",
+      "title": "独立回复概率",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "interest_llm_fallback": {
+      "type": "number",
+      "title": "LLM兴趣评估阈值",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "high_interest_keywords": {
+      "type": "array",
+      "title": "高兴趣关键词",
+      "items": {
+        "type": "string"
+      }
+    },
+    "medium_interest_keywords": {
+      "type": "array",
+      "title": "中兴趣关键词",
+      "items": {
+        "type": "string"
+      }
+    },
+    "low_interest_keywords": {
+      "type": "array",
+      "title": "低兴趣关键词",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,4 +1,4 @@
-"""Config viewer — read-only display of config.toml."""
+"""Config viewer — read-only display of config file."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from fastapi import APIRouter, Request
 from admin.templates import render
 
 
-def create_config_router(config_path: str = "config/config.toml") -> APIRouter:
+def create_config_router(config_path: str = "config/config.json") -> APIRouter:
     router = APIRouter()
 
     def _read_config() -> str:
         p = Path(config_path)
         if not p.is_file():
-            return "# config.toml not found"
+            return "# config file not found"
         return p.read_text(encoding="utf-8")
 
     @router.get("/admin/config")

@@ -154,11 +154,15 @@ class PluginContext:
     timeline: Any = None
     short_term: Any = None
 
-    # 记忆 —— CardStore / RetrievalGate / StateBoard / MemoExtractor
+    # 记忆 —— CardStore / RetrievalGate / StateBoard / MemoExtractor / GroupMemoryConfig
     card_store: Any = None
     retrieval: Any = None
+    context_service: Any = None
+    knowledge_base: Any = None
+    knowledge_graph: Any = None
     memo_extractor: Any = None
     state_board: Any = None
+    group_memory_config: Any = None  # GroupMemoryConfig (kernel.config)
 
     # 媒体 —— ImageCache / StickerStore
     image_cache: Any = None
@@ -180,6 +184,28 @@ class PluginContext:
 
     # PluginBus 引用（供 LLMClient 等需要触发钩子的服务使用）
     bus: Any = None
+    plugin_state_store: Any = None
+    plugin_config_store: Any = None
+    protocol_trace: Any = None
+    protocol_connections: Any = None
+    runtime_errors: Any = None
+
+
+@dataclass
+class TriggerContext:
+    """描述调度器为何决定触发回复。
+
+    替代 ad-hoc 的 video_hint dict + force_reply bool，成为所有触发类型的统一表示。
+    mode 决定调度器的行为（强制触发 vs 概率触发）；extra 携带插件提供的数据。
+    """
+
+    reason: str = ""  # 人类可读的触发原因，如 "有人@了你" / "视频分享:《xxx》"
+    # "at_mention" | "video_always" | "video_dedicated" | "video_autonomous"
+    # | "probability" | "manual"
+    mode: str = "probability"
+    target_message_id: int | None = None  # 触发消息的 QQ message_id
+    target_user_id: str = ""  # 触发消息的发送者
+    extra: dict[str, Any] = field(default_factory=dict)  # 插件数据（bilibili_talk_value, interest_score 等）
 
 
 @dataclass
@@ -196,6 +222,7 @@ class MessageContext:
     message_id: int | None = None
     bot: Any = None  # nonebot Bot 实例（供拦截器发送消息）
     nickname: str = ""  # 发送者昵称
+    trigger: TriggerContext | None = None  # 由拦截器（如 BilibiliPlugin）设置的触发上下文
 
     @property
     def is_group(self) -> bool:
@@ -263,9 +290,25 @@ class ThinkerContext:
 # ============================================================================
 
 
+PluginPermission = Literal[
+    "message",
+    "prompt",
+    "reply",
+    "tick",
+    "tool",
+    "command",
+    "admin",
+    "storage",
+    "network",
+]
+
+PluginTier = Literal["system", "user"]
+PluginTogglePolicy = Literal["locked", "runtime", "restart_required"]
+
+
 @dataclass
 class CommandContext:
-    """命令执行上下文，传给 Command.handler。"""
+    """命令执行上下文，传给 Command.handler（旧接口，保留向后兼容）。"""
 
     bot: Any  # nonebot Bot 实例
     event: Any  # 原始 OneBot event
@@ -276,16 +319,71 @@ class CommandContext:
 
 
 @dataclass
+class RichCommandContext:
+    """命令执行上下文（新版）。Handler 入参，包含消息信息 + 全部系统服务。
+
+    Handler 不再需要通过 self._ctx 间接访问服务，直接从 ctx 取用。
+    """
+
+    bot: Any
+    event: Any
+    args: str
+    is_private: bool
+    user_id: str
+    group_id: str | None
+    # 匹配到的 Command 和根 Command（用于生成帮助文本）
+    command: Any  # Command
+    root_command: Any  # Command（顶层父命令）
+    # 系统服务
+    plugin_ctx: Any  # PluginContext
+
+
+@dataclass
 class Command:
     """插件注册的文本命令。"""
 
     name: str  # 命令名，如 "memo"
-    handler: Any  # async callable，签名为 (CommandContext) -> bool
+    handler: Any  # async callable，签名为 (RichCommandContext) -> None
     description: str = ""
     usage: str = ""  # 用法示例，如 "/memo list"
     pattern: str = ""  # 匹配模式，空字符串表示用 name 自动生成
     aliases: list[str] = field(default_factory=list)  # 别名，如 ["p", "plg"]
     sub_commands: list[Command] = field(default_factory=list)  # 子命令，如 restart/shutdown
+    # Guard fields — Dispatcher 在执行 handler 前统一检查
+    admin_only: bool = False  # 仅管理员可用
+    private_only: bool = False  # 仅私聊可用
+    require_args: bool = False  # 需要参数，无参数时自动回复 usage
+    hidden: bool = False  # 在 format_help() 中隐藏（占位父命令等）
+    passthrough_unknown: bool = False  # 未知子命令不报错，传给父 handler
+
+    def format_help(self, prefix: str = "/") -> str:
+        """从 Command 元数据自动生成帮助文本。
+
+        递归包含子命令：名称、参数占位符、描述、门禁标注。
+        """
+        if not self.sub_commands:
+            line = f"{prefix}{self.name} — {self.description}"
+            if self.private_only:
+                line += "（仅私聊）"
+            if self.admin_only:
+                line += "（仅管理员）"
+            return line
+
+        lines: list[str] = []
+        if self.description:
+            lines.append(f"{self.description}：")
+        visible = [s for s in self.sub_commands if not s.hidden]
+        for sub in visible:
+            line = f"{prefix}{self.name} {sub.name}"
+            if sub.require_args:
+                line += " <参数>"
+            line += f" — {sub.description}"
+            if sub.private_only:
+                line += "（仅私聊）"
+            if sub.admin_only:
+                line += "（仅管理员）"
+            lines.append(line)
+        return "\n".join(lines)
 
 
 @dataclass
@@ -320,6 +418,17 @@ class AmadeusPlugin:
     enabled: bool = True
     dependencies: dict[str, str] = {}  # noqa: RUF012 — overridden per-plugin, never mutated
     author: str = "Omubot"  # 开发者签名，显示在 /plugins 列表中
+    category: str = "general"
+    permissions: list[PluginPermission] = []  # noqa: RUF012 — manifest v2 metadata
+    capabilities: list[str] = []  # noqa: RUF012 — human-readable feature flags
+    settings_schema: dict[str, Any] = {}  # noqa: RUF012 — future Admin schema hook
+    min_omubot_version: str = ""
+    hook_budget_ms: int = 5000
+    display_name: dict[str, str] = {}  # noqa: RUF012 — {"zh": "...", "en": "..."}
+    tier: PluginTier = "user"
+    toggle_policy: PluginTogglePolicy = "runtime"
+    config_spec: dict[str, Any] = {}  # noqa: RUF012 — manifest v3 config contract
+    store: dict[str, Any] = {}  # noqa: RUF012 — local/marketplace metadata
 
     # ---- 生命周期 ----
 

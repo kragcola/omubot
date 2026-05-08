@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "http_api",
+  "display_name": {
+    "zh": "HTTP API",
+    "en": "HTTP API"
+  },
+  "description": "HTTP API 调用工具：支持 GET/POST 通用 REST 接口调用",
+  "version": "1.1.1",
+  "priority": 1,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "tool",
+  "permissions": [
+    "tool",
+    "network"
+  ],
+  "capabilities": [
+    "http_request"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "timeout_seconds",
+      "max_response_chars",
+      "follow_redirects",
+      "allowed_methods"
+    ]
+  },
+  "store": {
+    "visibility": "local",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

@@ -11,11 +11,28 @@ multi-message bursts and gives the bot more natural conversational pacing.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from loguru import logger
 
 _L = logger.bind(channel="thinking")
+
+_ALLOWED_ACTIONS = {"reply", "wait", "search"}
+_ALLOWED_TONES = {"元气", "日常", "安慰", "认真"}
+_TRUTHY_STRINGS = {"1", "true", "yes", "y", "on", "ok"}
+_FALSY_STRINGS = {"0", "false", "no", "n", "off", ""}
+_WAIT_HINTS = (
+    "先不回",
+    "不用回",
+    "保持沉默",
+    "先别回",
+    "等一下",
+    "稍后再说",
+    "暂时别说",
+    "先等等",
+    "wait",
+)
 
 THINKER_SYSTEM_PROMPT = """你是{name}的思考中枢。你需要在回复之前快速判断：现在要不要说话？说什么方向？要不要配表情包？
 
@@ -84,30 +101,147 @@ class ThinkDecision:
         )
 
 
+def _strip_fences(text: str) -> str:
+    text = text.strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _coerce_sticker(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUTHY_STRINGS:
+            return True
+        if normalized in _FALSY_STRINGS:
+            return False
+    return False
+
+
+def _normalize_thought(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:30]
+
+
+def _decision_from_data(data: Any) -> ThinkDecision | None:
+    if not isinstance(data, dict):
+        return None
+    action = str(data.get("action", "reply")).strip().lower()
+    if action not in _ALLOWED_ACTIONS:
+        action = "reply"
+    tone = str(data.get("tone", "日常")).strip()
+    if tone not in _ALLOWED_TONES:
+        tone = "日常"
+    thought = _normalize_thought(data.get("thought", ""))
+    sticker = _coerce_sticker(data.get("sticker", False))
+    return ThinkDecision(action=action, thought=thought, sticker=sticker, tone=tone)
+
+
+def _extract_fenced_json(text: str) -> str | None:
+    for match in re.finditer(r"```(?:json|JSON)?\s*(.*?)```", text, flags=re.DOTALL):
+        candidate = match.group(1).strip()
+        if candidate:
+            return candidate
+    return None
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    start = -1
+    depth = 0
+    in_string = False
+    escape = False
+    for idx, char in enumerate(text):
+        if start < 0:
+            if char == "{":
+                start = idx
+                depth = 1
+                in_string = False
+                escape = False
+            continue
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1]
+    return None
+
+
+def _heuristic_decision(text: str) -> ThinkDecision | None:
+    cleaned = re.sub(r"\s+", " ", text).strip(" \n\r\t`")
+    cleaned = cleaned.strip("\"'[]（）()")
+    if not cleaned:
+        return None
+    action = "wait" if any(hint in cleaned.lower() for hint in _WAIT_HINTS) else "reply"
+    sentence = re.split(r"[。！？!?；;\n]", cleaned, maxsplit=1)[0].strip()
+    thought = _normalize_thought(sentence or cleaned)
+    return ThinkDecision(action=action, thought=thought, sticker=False, tone="日常")
+
+
+def _parse_think_output_details(text: str) -> tuple[ThinkDecision | None, str]:
+    stripped = text.strip()
+    if not stripped:
+        return None, "failed"
+
+    direct_candidate = _strip_fences(stripped)
+    try:
+        direct = _decision_from_data(json.loads(direct_candidate))
+    except (json.JSONDecodeError, TypeError):
+        direct = None
+    if direct is not None:
+        mode = "fenced" if direct_candidate != stripped else "direct"
+        return direct, mode
+
+    fenced = _extract_fenced_json(stripped)
+    if fenced:
+        try:
+            decision = _decision_from_data(json.loads(fenced))
+        except (json.JSONDecodeError, TypeError):
+            decision = None
+        if decision is not None:
+            return decision, "fenced"
+
+    embedded = _extract_first_json_object(stripped)
+    if embedded:
+        try:
+            decision = _decision_from_data(json.loads(embedded))
+        except (json.JSONDecodeError, TypeError):
+            decision = None
+        if decision is not None:
+            return decision, "embedded"
+
+    heuristic = _heuristic_decision(stripped)
+    if heuristic is not None:
+        return heuristic, "heuristic"
+    return None, "failed"
+
+
 def parse_think_output(text: str) -> ThinkDecision | None:
     """Parse the thinker's JSON output. Returns None on failure."""
-    text = text.strip()
-    # Strip markdown fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-    try:
-        data = json.loads(text)
-        action = data.get("action", "reply")
-        thought = data.get("thought", "")
-        if action not in ("reply", "wait", "search"):
-            action = "reply"
-        sticker = bool(data.get("sticker", False))
-        tone = data.get("tone", "日常")
-        if tone not in ("元气", "日常", "安慰", "认真"):
-            tone = "日常"
-        return ThinkDecision(action=action, thought=thought, sticker=sticker, tone=tone)
-    except (json.JSONDecodeError, TypeError, KeyError):
-        return None
+    decision, _mode = _parse_think_output_details(text)
+    return decision
 
 
 async def think(
@@ -153,14 +287,18 @@ async def think(
         }
     except Exception:
         _L.warning("thinker call failed, defaulting to reply")
-        return ThinkDecision(action="reply", thought="(thinker error, fallback to reply)", usage=usage)
+        return ThinkDecision(action="reply", thought="", usage=usage)
 
     text: str = result.get("text", "")
-    decision = parse_think_output(text)
+    decision, mode = _parse_think_output_details(text)
     if decision is None:
         _L.warning("thinker parse failed, defaulting to reply | raw={}", text[:200])
-        return ThinkDecision(action="reply", thought="(parse error, fallback to reply)", usage=usage)
+        return ThinkDecision(action="reply", thought="", usage=usage)
 
     decision.usage = usage
+    if mode in {"fenced", "embedded"}:
+        _L.info("thinker_parse_recovered | mode={} action={} thought={!r}", mode, decision.action, decision.thought)
+    elif mode == "heuristic":
+        _L.info("thinker_parse_heuristic | action={} thought={!r}", decision.action, decision.thought)
     _L.info("thinker | action={} thought={!r}", decision.action, decision.thought)
     return decision

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -34,7 +35,7 @@ class ImageCache:
         self._sem = asyncio.Semaphore(_MAX_CONCURRENT_DOWNLOADS)
 
     def _path_for(self, file_id: str) -> Path:
-        """Return the expected JPEG path for a given file_id (legacy default)."""
+        """Return the expected cache path for a given file_id (legacy default)."""
         bucket = file_id[:2]
         return self._dir / bucket / f"{file_id}.jpg"
 
@@ -68,7 +69,7 @@ class ImageCache:
         cached = self._find_cached(file_id)
         if cached is not None:
             _L.debug("image cache hit | file_id={}", file_id)
-            media_type = "image/gif" if cached.suffix == ".gif" else "image/jpeg"
+            media_type = self._media_type_for_suffix(cached.suffix)
             return ImageRefBlock(type="image_ref", path=str(cached), media_type=media_type)
 
         async with self._sem:
@@ -117,11 +118,20 @@ class ImageCache:
             scale = self._max_dim / max_side
             img = img.resize(scale)
 
-        # Save
-        path.parent.mkdir(parents=True, exist_ok=True)
-        img.jpegsave(str(path), Q=80, strip=True)
+        has_alpha = self._image_has_alpha(img)
+        suffix = ".png" if has_alpha else ".jpg"
+        save_path = path.with_suffix(suffix)
 
-        return ImageRefBlock(type="image_ref", path=str(path), media_type="image/jpeg")
+        # Save
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        if has_alpha:
+            img.pngsave(str(save_path), strip=True)
+            media_type = "image/png"
+        else:
+            img.jpegsave(str(save_path), Q=80, strip=True)
+            media_type = "image/jpeg"
+
+        return ImageRefBlock(type="image_ref", path=str(save_path), media_type=media_type)
 
     async def load_as_base64(self, ref: ImageRefBlock | dict[str, Any]) -> dict[str, Any] | None:
         """Read image from disk and return an Anthropic image content block.
@@ -135,6 +145,7 @@ class ImageCache:
         t0 = time.perf_counter()
         data, b64 = await asyncio.to_thread(self._read_and_encode, path)
         elapsed_ms = (time.perf_counter() - t0) * 1000
+        media_type = self._media_type_for_suffix(path.suffix.lower())
         _L.debug(
             "image load_base64 | file={} size={}KB elapsed={:.0f}ms",
             path.name, len(data) // 1024, elapsed_ms,
@@ -143,7 +154,7 @@ class ImageCache:
             "type": "image",
             "source": {
                 "type": "base64",
-                "media_type": ref["media_type"],
+                "media_type": media_type,
                 "data": b64,
             },
         }
@@ -152,6 +163,30 @@ class ImageCache:
     def _read_and_encode(path: Path) -> tuple[bytes, str]:
         data = path.read_bytes()
         return data, base64.b64encode(data).decode("ascii")
+
+    @staticmethod
+    def _media_type_for_suffix(suffix: str) -> str:
+        if suffix == ".gif":
+            return "image/gif"
+        if suffix == ".png":
+            return "image/png"
+        if suffix == ".webp":
+            return "image/webp"
+        return "image/jpeg"
+
+    @staticmethod
+    def _image_has_alpha(img: Any) -> bool:
+        if hasattr(img, "hasalpha"):
+            try:
+                return bool(img.hasalpha())
+            except Exception:
+                return False
+        try:
+            bands = int(getattr(img, "bands", 0) or 0)
+            interpretation = str(getattr(img, "interpretation", "") or "").lower()
+            return bands == 2 or bands == 4 or "alpha" in interpretation
+        except Exception:
+            return False
 
     async def cleanup(self, max_age: timedelta = timedelta(hours=24)) -> None:
         """Delete cached images older than max_age. Remove empty subdirectories."""

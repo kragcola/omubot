@@ -174,16 +174,18 @@ from kernel.bus import PluginBus  # noqa: E402
 from kernel.router import setup_routers  # noqa: E402
 from kernel.types import PluginContext  # noqa: E402
 from plugins.affection.plugin import AffectionPlugin  # noqa: E402
-from plugins.chat import ChatPlugin  # noqa: E402
-from plugins.dream import DreamPlugin  # noqa: E402
-from plugins.echo import EchoPlugin  # noqa: E402
-from plugins.element_detector import ElementDetectorPlugin  # noqa: E402
-from plugins.history_loader import HistoryLoaderPlugin  # noqa: E402
-from plugins.memo import MemoPlugin  # noqa: E402
+from plugins.chat.plugin import ChatPlugin  # noqa: E402
+from plugins.dream.plugin import DreamPlugin  # noqa: E402
+from plugins.echo.plugin import EchoPlugin  # noqa: E402
+from plugins.element_detector.plugin import ElementDetectorPlugin  # noqa: E402
+from plugins.history_loader.plugin import HistoryLoaderPlugin  # noqa: E402
+from plugins.memo.plugin import MemoPlugin  # noqa: E402
 from plugins.schedule.plugin import SchedulePlugin  # noqa: E402
-from plugins.sticker import StickerPlugin  # noqa: E402
+from plugins.sticker.plugin import StickerPlugin  # noqa: E402
 from services.command import CommandDispatcher  # noqa: E402
+from services.errors import RuntimeErrorStore  # noqa: E402
 from services.media.vision import VisionClient  # noqa: E402
+from services.protocol_trace import ProtocolConnectionHistory, ProtocolTraceStore  # noqa: E402
 
 _storage_dir = _Path("storage")
 _plugin_data_dir = _storage_dir / "plugins"
@@ -194,14 +196,17 @@ _plugin_ctx = PluginContext(
     storage_dir=_storage_dir,
     plugin_data_dir=_plugin_data_dir,
 )
+_plugin_ctx.protocol_trace = ProtocolTraceStore(max_items=120)
+_plugin_ctx.protocol_connections = ProtocolConnectionHistory(max_items=80)
+_plugin_ctx.runtime_errors = RuntimeErrorStore(max_events=300, max_groups=120)
 
 # Set bot start time early — used by admin dashboard and ChatPlugin
 _plugin_ctx.bot_start_time = time.time()
 
-# Mount admin dashboard (system service, not a plugin)
-from admin import create_admin_router  # noqa: E402
+# SSE log sink (install early so logs from startup are pushed)
+from admin.routes.api.events import install_loguru_sink  # noqa: E402
 
-_nb_app.include_router(create_admin_router(_plugin_ctx))
+install_loguru_sink(_plugin_ctx.runtime_errors)
 
 _bus = PluginBus()
 
@@ -235,11 +240,36 @@ else:
 
 # Single-file plugins + any directory plugins with plugin.json are auto-discovered
 _bus.discover_plugins("plugins")
+from services.plugin_config import PluginConfigStore  # noqa: E402
+from services.plugin_state import PluginStateStore  # noqa: E402
+
+_plugin_config_store = PluginConfigStore(_plugin_data_dir / "config")
+_plugin_state_store = PluginStateStore(_plugin_data_dir / "plugin-state.json")
+for _plugin_name, _enabled in _plugin_state_store.load().items():
+    _plugin = _bus.get_plugin(_plugin_name)
+    if _enabled is False and _bus.is_plugin_locked(_plugin):
+        logger.warning("ignored persisted disabled state for locked plugin | name={}", _plugin_name)
+        continue
+    _bus.set_plugin_enabled(_plugin_name, _enabled)
+for _disabled_name in _bot_config.kernel.disabled_plugins:
+    _plugin = _bus.get_plugin(_disabled_name)
+    if _bus.is_plugin_locked(_plugin):
+        logger.warning("ignored config disabled state for locked plugin | name={}", _disabled_name)
+        continue
+    _bus.set_plugin_enabled(_disabled_name, False)
+_plugin_ctx.plugin_state_store = _plugin_state_store
+_plugin_ctx.plugin_config_store = _plugin_config_store
 
 _plugin_ctx.bus = _bus
 _plugin_ctx.command_dispatcher = CommandDispatcher(_bus)
 
 setup_routers(_bus, _plugin_ctx)
+
+# Mount admin dashboard AFTER all services are wired (bus, scheduler, etc.)
+from admin import create_admin_router  # noqa: E402
+
+_nb_app.include_router(create_admin_router(_plugin_ctx))
+
 _logger = logger.bind(channel="system")
 _logger.info(
     "Omubot PluginBus initialized | plugins={}",

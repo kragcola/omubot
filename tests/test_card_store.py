@@ -5,6 +5,7 @@ import pytest
 from services.memory.card_store import (
     CardStore,
     NewCard,
+    NewCardSeries,
 )
 
 
@@ -62,6 +63,12 @@ async def test_add_card_invalid_category(store: CardStore) -> None:
 async def test_add_card_invalid_scope(store: CardStore) -> None:
     with pytest.raises(ValueError, match="Invalid scope"):
         NewCard(category="fact", scope="unknown", scope_id="1", content="x")
+
+
+@pytest.mark.asyncio
+async def test_add_card_empty_scope_id_for_user_rejected(store: CardStore) -> None:
+    with pytest.raises(ValueError, match="scope_id is required"):
+        NewCard(category="fact", scope="user", scope_id="   ", content="x")
 
 
 # ------------------------------------------------------------------
@@ -334,3 +341,287 @@ async def test_concurrent_adds(store: CardStore) -> None:
     assert len(set(ids)) == 10  # All unique
     cards = await store.get_entity_cards("user", "1")
     assert len(cards) == 10
+
+
+# ------------------------------------------------------------------
+# Series CRUD
+# ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_series_create_and_get(store: CardStore) -> None:
+    s = await store.create_series(NewCardSeries(
+        series_key="food_served:123", scope="user", scope_id="123",
+        label="食物推荐记录",
+    ))
+    assert s.series_id.startswith("ser_")
+    assert s.series_key == "food_served:123"
+    assert s.label == "食物推荐记录"
+
+    got = await store.get_series(s.series_id)
+    assert got is not None
+    assert got.series_key == "food_served:123"
+
+
+@pytest.mark.asyncio
+async def test_series_get_by_key(store: CardStore) -> None:
+    await store.create_series(NewCardSeries(
+        series_key="food_served:456", scope="user", scope_id="456",
+    ))
+    s = await store.get_series_by_key("food_served:456")
+    assert s is not None
+    assert s.scope_id == "456"
+
+
+@pytest.mark.asyncio
+async def test_series_get_or_create(store: CardStore) -> None:
+    s1 = await store.get_or_create_series("food_served:1", "user", "1", label="test")
+    s2 = await store.get_or_create_series("food_served:1", "user", "1", label="ignored")
+    assert s1.series_id == s2.series_id  # Same series returned
+
+
+@pytest.mark.asyncio
+async def test_series_cards(store: CardStore) -> None:
+    s = await store.create_series(NewCardSeries(
+        series_key="food_served:1", scope="user", scope_id="1",
+    ))
+    await store.add_card(NewCard(
+        category="event", scope="user", scope_id="1",
+        content="推荐了麦当劳", series_id=s.series_id,
+    ))
+    await store.add_card(NewCard(
+        category="event", scope="user", scope_id="1",
+        content="推荐了肯德基", series_id=s.series_id,
+    ))
+    cards = await store.get_series_cards(s.series_id)
+    assert len(cards) == 2
+    assert all(c.series_id == s.series_id for c in cards)
+
+
+@pytest.mark.asyncio
+async def test_list_entity_series(store: CardStore) -> None:
+    await store.create_series(NewCardSeries(
+        series_key="food_served:1", scope="user", scope_id="1",
+    ))
+    await store.create_series(NewCardSeries(
+        series_key="food_pref:1", scope="user", scope_id="1",
+    ))
+    series = await store.list_entity_series("user", "1")
+    assert len(series) == 2
+
+
+@pytest.mark.asyncio
+async def test_series_cards_excludes_expired(store: CardStore) -> None:
+    s = await store.create_series(NewCardSeries(
+        series_key="food_served:1", scope="user", scope_id="1",
+    ))
+    cid = await store.add_card(NewCard(
+        category="event", scope="user", scope_id="1",
+        content="推荐了麦当劳", series_id=s.series_id,
+    ))
+    await store.expire_card(cid)
+    cards = await store.get_series_cards(s.series_id)
+    assert len(cards) == 0
+    cards_all = await store.get_series_cards(s.series_id, status="expired")
+    assert len(cards_all) == 1
+
+
+# ------------------------------------------------------------------
+# find_similar / reinforce
+# ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_find_similar_match(store: CardStore) -> None:
+    await store.add_card(NewCard(
+        category="preference", scope="user", scope_id="1",
+        content="喜欢吃辣的", source="user_config",
+    ))
+    found = await store.find_similar("user", "1", "喜欢吃辣的，重口味")
+    assert found is not None
+    assert "喜欢吃辣的" in found.content
+
+
+@pytest.mark.asyncio
+async def test_find_similar_no_match(store: CardStore) -> None:
+    await store.add_card(NewCard(
+        category="preference", scope="user", scope_id="1",
+        content="喜欢吃辣的",
+    ))
+    found = await store.find_similar("user", "1", "不喜欢吃甜的")
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_find_similar_threshold(store: CardStore) -> None:
+    await store.add_card(NewCard(
+        category="preference", scope="user", scope_id="1",
+        content="喜欢吃辣的", confidence=0.3,
+    ))
+    found = await store.find_similar("user", "1", "喜欢吃辣的", threshold=0.6)
+    assert found is None  # confidence 0.3 < threshold 0.6
+
+
+@pytest.mark.asyncio
+async def test_find_similar_short_content(store: CardStore) -> None:
+    found = await store.find_similar("user", "1", "x")
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_reinforce(store: CardStore) -> None:
+    cid = await store.add_card(NewCard(
+        category="preference", scope="user", scope_id="1",
+        content="喜欢吃辣的", confidence=0.7,
+    ))
+    ok = await store.reinforce(cid)
+    assert ok
+    card = await store.get_card(cid)
+    assert card.confidence == pytest.approx(0.8)
+
+
+@pytest.mark.asyncio
+async def test_reinforce_cap(store: CardStore) -> None:
+    cid = await store.add_card(NewCard(
+        category="preference", scope="user", scope_id="1",
+        content="喜欢吃辣的", confidence=0.95,
+    ))
+    await store.reinforce(cid)
+    card = await store.get_card(cid)
+    assert card.confidence == 1.0
+
+
+@pytest.mark.asyncio
+async def test_reinforce_nonexistent(store: CardStore) -> None:
+    ok = await store.reinforce("card_nonexistent")
+    assert not ok
+
+
+# ------------------------------------------------------------------
+# Series + series_id on cards
+# ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_card_with_series_id(store: CardStore) -> None:
+    s = await store.create_series(NewCardSeries(
+        series_key="test:1", scope="user", scope_id="1",
+    ))
+    cid = await store.add_card(NewCard(
+        category="event", scope="user", scope_id="1",
+        content="test", series_id=s.series_id,
+    ))
+    card = await store.get_card(cid)
+    assert card.series_id == s.series_id
+
+
+@pytest.mark.asyncio
+async def test_card_without_series_id(store: CardStore) -> None:
+    cid = await store.add_card(NewCard(
+        category="fact", scope="user", scope_id="1", content="no series",
+    ))
+    card = await store.get_card(cid)
+    assert card.series_id is None
+
+
+@pytest.mark.asyncio
+async def test_update_card_series_id(store: CardStore) -> None:
+    s = await store.create_series(NewCardSeries(
+        series_key="test:1", scope="user", scope_id="1",
+    ))
+    cid = await store.add_card(NewCard(
+        category="event", scope="user", scope_id="1", content="test",
+    ))
+    ok = await store.update_card(cid, series_id=s.series_id)
+    assert ok
+    card = await store.get_card(cid)
+    assert card.series_id == s.series_id
+
+
+@pytest.mark.asyncio
+async def test_series_table_created(store: CardStore) -> None:
+    cursor = await store._db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='card_series'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+
+
+# ------------------------------------------------------------------
+# Backfill food series
+# ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_backfill_food_series(tmp_path) -> None:
+    """Old food cards (series_id=NULL) get assigned to series on init."""
+    db_path = str(tmp_path / "backfill.db")
+    s = CardStore(db_path=db_path)
+    await s.init()
+
+    # Food event cards (old _record_served)
+    for i in range(3):
+        await s._db.execute(
+            "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
+            "VALUES (?, 'event', 'user', '100', ?, 0.5, 'active', 5, 'food_plugin', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+            (f"old_event_{i}", f"推荐了食物{i}"),
+        )
+    # Food preference cards (old _add_preference with source=food_plugin)
+    await s._db.execute(
+        "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
+        "VALUES (?, 'preference', 'user', '100', '喜欢吃辣的', 0.7, 'active', 5, 'food_plugin', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+        ("old_pref_1",),
+    )
+    # Early served recommendation cards were accidentally stored as preferences.
+    await s._db.execute(
+        "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
+        "VALUES (?, 'preference', 'user', '100', '推荐了热汤面（05-04 22:27）', 0.5, 'active', 5, 'food_plugin', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+        ("old_served_pref_1",),
+    )
+    # Preference with source=user_config (content-matched)
+    await s._db.execute(
+        "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
+        "VALUES (?, 'preference', 'user', '100', '不喜欢吃甜的', 0.7, 'active', 5, 'user_config', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+        ("old_pref_2",),
+    )
+    # Non-food card — should be untouched
+    await s._db.execute(
+        "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
+        "VALUES (?, 'fact', 'user', '100', 'not food', 0.7, 'active', 5, 'manual', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
+        ("other_card",),
+    )
+    await s._db.commit()
+    await s.close()
+
+    # Re-init triggers backfill
+    s2 = CardStore(db_path=db_path)
+    await s2.init()
+
+    cards = await s2.get_entity_cards("user", "100")
+    event_cards = [c for c in cards if c.category == "event"]
+    pref_cards = [c for c in cards if c.category == "preference"]
+    other_cards = [c for c in cards if c.source == "manual"]
+
+    # Event cards → food_served series
+    assert len(event_cards) == 4
+    assert all(c.series_id is not None for c in event_cards)
+    served_series = await s2.get_series_by_key("food_served:100")
+    assert served_series is not None
+    assert served_series.label == "食物推荐记录"
+    assert all(c.series_id == served_series.series_id for c in event_cards)
+    assert any(c.card_id == "old_served_pref_1" for c in event_cards)
+
+    # Preference cards → food_pref series
+    assert len(pref_cards) == 2
+    assert all(c.series_id is not None for c in pref_cards)
+    pref_series = await s2.get_series_by_key("food_pref:100")
+    assert pref_series is not None
+    assert pref_series.label == "食物口味偏好"
+    assert all(c.series_id == pref_series.series_id for c in pref_cards)
+
+    # Non-food card untouched
+    assert len(other_cards) == 1
+    assert other_cards[0].series_id is None
+
+    # Idempotent: re-init again should not duplicate
+    await s2.close()
+    s3 = CardStore(db_path=db_path)
+    await s3.init()
+    series_list = await s3.list_entity_series("user", "100")
+    assert len(series_list) == 2  # food_served + food_pref

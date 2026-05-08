@@ -10,13 +10,16 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
 from loguru import logger as _base_logger
 
+from kernel.types import ReplyContext, ThinkerContext
 from services.identity import Identity
 from services.llm.prompt_builder import PromptBuilder
+from services.llm.provider import ToolUse, create_provider, is_deepseek_v4_model, provider_mode
 from services.llm.usage import UsageTracker
 from services.media.image_cache import ImageCache
 from services.memory.card_store import CardStore, NewCard
@@ -31,6 +34,8 @@ MAX_TOOL_ROUNDS = 5
 _MAX_COMPACT_TOOL_ROUNDS = 3
 RATE_LIMIT_MAX_RETRIES = 3
 RATE_LIMIT_BASE_DELAY = 5.0  # seconds
+_API_FIRST_BYTE_WARN_S = 20.0
+_API_TOTAL_WARN_S = 60.0
 
 # Channel-tagged loggers — each maps to a LogChannelConfig boolean
 logger = _base_logger  # keep bare logger for ERROR / EXCEPTION
@@ -42,9 +47,24 @@ _log_debug = _base_logger.bind(channel="debug")
 
 _SEGMENT_SEP = "---cut---"
 _SEGMENT_DELAY = 0.8  # seconds between segment sends (human-like pacing)
+_MAX_SEND_SEGMENTS = 4
 _BLANK_LINE_RE = re.compile(r"\n{2,}")
 _CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
 _CQ_KV_FIX_RE = re.compile(r",(\w+):")
+_GROUP_REPLY_STYLE_HINTS: dict[str, str] = {
+    "gentle": "回复风格偏柔和、耐心、安抚感更强，避免过硬或过冲的表达。",
+    "playful": "回复风格可以更轻松俏皮，允许一点点玩梗和抖机灵，但不要失控。",
+    "concise": "回复尽量短一些，优先直接结论，减少过长铺垫和重复解释。",
+    "energetic": "回复可以更有活力和在场感，语气积极，但不要变得吵闹失真。",
+    "steady": "回复保持平稳、克制、可靠，少用夸张语气和过度情绪化表达。",
+}
+_STICKER_TOOL_NAMES = {"send_sticker", "save_sticker", "manage_sticker"}
+_DEEPSEEK_V4_COMPACT_RATIO = 0.88
+_EMPTY_VISIBLE_REPLY_FALLBACK = "我先缓一下，马上接你。"
+_CONTROL_TOKEN_RE = re.compile(
+    r"(?is)\s*(?:\[\s*pass[_\s-]*turn\s*\]|pass[_\s-]*turn|passturn)\s*(?:[:：\-]\s*.*)?\s*"
+)
+_VISIBLE_TOOL_OUTPUT_NAMES = {"send_sticker", "send_group_msg"}
 
 # Markdown stripping — QQ does not render Markdown.
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
@@ -137,6 +157,24 @@ def _clean_reply(text: str) -> str:
     ]
     return "\n".join(kept).strip() or "..."
 
+
+def _strip_control_tokens(text: str) -> tuple[str, bool]:
+    """Strip leaked internal control tokens from visible assistant text."""
+    stripped = text or ""
+    changed = False
+    lines: list[str] = []
+    for line in stripped.split("\n"):
+        cleaned = _CONTROL_TOKEN_RE.sub("", line).strip()
+        if cleaned != line.strip():
+            changed = True
+        if cleaned:
+            lines.append(cleaned)
+    return "\n".join(lines).strip(), changed
+
+
+def _contains_control_token(text: str) -> bool:
+    return bool(_CONTROL_TOKEN_RE.search(text or ""))
+
 # Kaomoji / action-description detection for sticker enforcement.
 #
 # Pattern A — special-character kaomoji: (≧▽≦)/  (｡･ω･｡)  (◕‿◕)✧  etc.
@@ -201,6 +239,68 @@ class RateLimitError(RuntimeError):
 
 RATE_LIMIT_BASE_DELAY = 5.0  # seconds, doubles each retry
 RATE_LIMIT_MAX_RETRIES = 2
+PROFILE_RATE_LIMIT_MAX_COOLDOWN = 60.0
+
+
+@dataclass
+class ProfileRateLimitState:
+    """Runtime rate-limit state for a single resolved LLM profile."""
+
+    profile: str
+    total_calls: int = 0
+    successes: int = 0
+    failures: int = 0
+    rate_limited: int = 0
+    blocked_calls: int = 0
+    consecutive_rate_limits: int = 0
+    last_task: str = ""
+    last_error: str = ""
+    last_success_at: float = 0.0
+    last_limited_at: float = 0.0
+    cooldown_until: float = 0.0
+    cooldown_until_monotonic: float = 0.0
+    provider_kind: str = ""
+    provider_mode: str = ""
+    last_model: str = ""
+    last_api_format: str = ""
+    last_cache_hit_pct: float | None = None
+    last_prompt_cache_hit_tokens: int = 0
+    last_prompt_cache_miss_tokens: int = 0
+    last_reasoning_replay_tokens: int = 0
+    last_payload_sanitized: bool = False
+    last_usage: dict[str, Any] | None = None
+
+    def cooldown_remaining(self) -> float:
+        return max(0.0, self.cooldown_until_monotonic - time.monotonic())
+
+    def as_payload(self) -> dict[str, Any]:
+        remaining = self.cooldown_remaining()
+        return {
+            "profile": self.profile,
+            "status": "cooldown" if remaining > 0 else "ready",
+            "cooldown_remaining_seconds": round(remaining, 2),
+            "cooldown_until": self.cooldown_until if remaining > 0 else 0.0,
+            "total_calls": self.total_calls,
+            "successes": self.successes,
+            "failures": self.failures,
+            "rate_limited": self.rate_limited,
+            "blocked_calls": self.blocked_calls,
+            "consecutive_rate_limits": self.consecutive_rate_limits,
+            "last_task": self.last_task,
+            "last_error": self.last_error,
+            "last_success_at": self.last_success_at,
+            "last_limited_at": self.last_limited_at,
+            "provider_kind": self.provider_kind,
+            "provider_mode": self.provider_mode,
+            "last_model": self.last_model,
+            "last_api_format": self.last_api_format,
+            "last_cache_hit_pct": self.last_cache_hit_pct,
+            "last_prompt_cache_hit_tokens": self.last_prompt_cache_hit_tokens,
+            "last_prompt_cache_miss_tokens": self.last_prompt_cache_miss_tokens,
+            "last_reasoning_replay_tokens": self.last_reasoning_replay_tokens,
+            "last_payload_sanitized": self.last_payload_sanitized,
+            "last_usage": self.last_usage or {},
+        }
 
 
 def _clean_text(text: str) -> str:
@@ -353,13 +453,20 @@ def _split_naturally(text: str) -> list[str]:
     return chunks or [text]
 
 
-class ToolUse:
-    __slots__ = ("id", "input", "name")
+def _coalesce_segments(segments: list[str], max_segments: int = _MAX_SEND_SEGMENTS) -> list[str]:
+    """Cap visible send fragments by merging overflow into the last segment."""
+    if len(segments) <= max_segments:
+        return segments
+    if max_segments <= 1:
+        return ["\n".join(segments)]
+    head = segments[: max_segments - 1]
+    tail = "\n".join(segments[max_segments - 1:])
+    return [*head, tail]
 
-    def __init__(self, id: str, name: str, input: dict[str, Any]) -> None:
-        self.id = id
-        self.name = name
-        self.input = input
+
+def _reply_segments(reply: str) -> tuple[list[str], int]:
+    raw_segments = _split_naturally(reply)
+    return _coalesce_segments(raw_segments), len(raw_segments)
 
 
 def _cached_text(text: str) -> dict[str, Any]:
@@ -375,6 +482,77 @@ def content_text(content: Content) -> str:
     if isinstance(content, str):
         return content
     return " ".join(b["text"] for b in content if b["type"] == "text")
+
+
+def _pending_conversation_text(timeline: GroupTimeline | None, group_id: str | None) -> str:
+    """Return pending human text only, so direct @ retrieval does not drift."""
+    if timeline is None or group_id is None:
+        return ""
+    parts: list[str] = []
+    with contextlib.suppress(Exception):
+        for msg in timeline.get_pending(group_id):
+            if msg.get("trigger_reason"):
+                continue
+            text = content_text(msg.get("content", ""))
+            if text.strip():
+                parts.append(text.strip())
+    return " ".join(parts[-3:])
+
+
+def _hash_scope_id(scope: str, raw_id: str, salt: str) -> str:
+    digest = hashlib.sha256(f"{scope}:{salt}:{raw_id}".encode("utf-8")).hexdigest()[:16]
+    return f"{scope}_{digest}"
+
+
+def _render_tail_metadata(blocks: list[dict[str, Any]]) -> str:
+    parts = [
+        str(block.get("text", "") or "").strip()
+        for block in blocks
+        if isinstance(block, dict) and str(block.get("text", "") or "").strip()
+    ]
+    if not parts:
+        return ""
+    return "<turn_meta>\n" + "\n\n".join(parts) + "\n</turn_meta>"
+
+
+def _append_tail_metadata(
+    messages: list[dict[str, Any]],
+    blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    tail = _render_tail_metadata(blocks)
+    if not tail:
+        return messages
+
+    for msg in reversed(messages):
+        if not isinstance(msg, dict) or str(msg.get("role", "")) != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            msg["content"] = (content + "\n\n" + tail).strip()
+            return messages
+        if isinstance(content, list):
+            msg["content"] = [*content, {"type": "text", "text": tail}]
+            return messages
+
+    messages.append({"role": "user", "content": tail})
+    return messages
+
+
+def _usage_observability_fields(result: dict[str, Any]) -> tuple[int, int, int]:
+    cache_hit = int(result.get("prompt_cache_hit_tokens", result.get("cache_read", 0)) or 0)
+    cache_miss = int(
+        result.get(
+            "prompt_cache_miss_tokens",
+            max(
+                0,
+                int(result.get("input_tokens", 0) or 0)
+                - int(result.get("cache_read", 0) or 0)
+                - int(result.get("cache_create", 0) or 0),
+            ),
+        ) or 0
+    )
+    reasoning_replay = int(result.get("reasoning_replay_tokens", 0) or 0)
+    return cache_hit, cache_miss, reasoning_replay
 
 
 async def resolve_image_refs(
@@ -534,38 +712,20 @@ async def call_api(
     max_tokens: int = 1024,
     tools: list[dict[str, Any]] | None = None,
     thinking: dict[str, Any] | None = None,
+    api_format: str = "anthropic",
+    request_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Call Anthropic API, parse SSE stream."""
-    body: dict[str, Any] = {
-        "model": model,
-        "system": system_blocks,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "stream": True,
-    }
-    if thinking is not None:
-        body["thinking"] = thinking
-    if tools:
-        # Cache-control on last tool def so the whole tool set is cached together
-        cached_tools = [*tools]
-        cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
-        body["tools"] = cached_tools
-
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": api_key,
-        "anthropic-version": "2024-10-22",
-    }
-
-    text_parts: list[str] = []
-    tool_uses: list[ToolUse] = []
-    thinking_blocks: list[dict[str, Any]] = []
-    current_tool: dict[str, str] = {}
-    current_thinking: str = ""
-    current_thinking_sig: str = ""
-    current_block_type: str = ""
-    usage: dict[str, int] = {}
-
+    """Call the configured provider API and parse its SSE stream."""
+    provider = create_provider(api_format, base_url, api_key)
+    body, headers, request_meta = provider.build_request(
+        system_blocks=system_blocks,
+        messages=messages,
+        tools=tools,
+        max_tokens=max_tokens,
+        model=model,
+        thinking=thinking,
+        request_options=request_options,
+    )
     t_ser = time.perf_counter()
     payload_bytes = json.dumps(body).encode()
     payload = io.BytesIO(payload_bytes)
@@ -574,82 +734,67 @@ async def call_api(
         len(payload_bytes) // 1024,
         (time.perf_counter() - t_ser) * 1000,
     )
-    async with session.post(f"{base_url}/v1/messages", data=payload, headers=headers) as resp:
+
+    raw_lines: list[str] = []
+    t_api = time.perf_counter()
+    first_byte_ms: float | None = None
+    response_headers_ms = 0.0
+    async with session.post(provider.request_url(), data=payload, headers=headers) as resp:
+        response_headers_ms = (time.perf_counter() - t_api) * 1000
         if resp.status == 429:
             body_text = await resp.text()
             raise RateLimitError(f"HTTP 429: {body_text}")
         if resp.status >= 400:
             body_text = await resp.text()
+            if api_format == "deepseek" and resp.status >= 500:
+                logger.warning(
+                    "deepseek api unavailable | status={} headers_ms={:.0f} body={}",
+                    resp.status, response_headers_ms, body_text[:240],
+                )
             logger.error("API {} | body={}", resp.status, body_text[:500])
             resp.raise_for_status()
         async for raw_line in resp.content:
+            if first_byte_ms is None:
+                first_byte_ms = (time.perf_counter() - t_api) * 1000
             line = raw_line.decode().strip()
-            if not line.startswith("data: "):
-                continue
-            data: dict[str, Any] = json.loads(line[6:])
-            event_type = data.get("type", "")
+            if line:
+                raw_lines.append(line)
+    stream_ms = (time.perf_counter() - t_api) * 1000
 
-            if event_type == "message_start":
-                msg_usage: dict[str, Any] = data.get("message", {}).get("usage", {})
-                usage = {k: v for k, v in msg_usage.items() if isinstance(v, int)}
-            elif event_type == "content_block_start":
-                block: dict[str, Any] = data.get("content_block", {})
-                current_block_type = block.get("type", "")
-                if current_block_type == "tool_use":
-                    current_tool = {"id": block["id"], "name": block["name"], "input_json": ""}
-                elif current_block_type == "thinking":
-                    current_thinking = ""
-                    current_thinking_sig = block.get("signature", "")
-            elif event_type == "content_block_delta":
-                delta: dict[str, Any] = data.get("delta", {})
-                if delta.get("type") == "text_delta" and current_block_type != "thinking":
-                    text_parts.append(delta["text"])
-                elif delta.get("type") == "thinking_delta":
-                    current_thinking += delta.get("thinking", "")
-                elif delta.get("type") == "input_json_delta":
-                    current_tool["input_json"] += delta.get("partial_json", "")
-            elif event_type == "content_block_stop":
-                if current_tool:
-                    input_data: dict[str, Any] = (
-                        json.loads(current_tool["input_json"]) if current_tool["input_json"] else {}
-                    )
-                    tool_uses.append(ToolUse(id=current_tool["id"], name=current_tool["name"], input=input_data))
-                    current_tool = {}
-                elif current_block_type == "thinking":
-                    tb: dict[str, Any] = {"type": "thinking", "thinking": current_thinking}
-                    if current_thinking_sig:
-                        tb["signature"] = current_thinking_sig
-                    thinking_blocks.append(tb)
-                    current_thinking = ""
-                    current_thinking_sig = ""
-            elif event_type == "message_delta":
-                delta_usage: dict[str, Any] = data.get("usage", {})
-                for k, v in delta_usage.items():
-                    if isinstance(v, int):
-                        usage[k] = v
-            elif event_type == "error":
-                error_data = data.get("error", {})
-                error_msg = error_data.get("message", str(data))
-                if "rate limit" in error_msg.lower():
-                    raise RateLimitError(f"Anthropic API stream error: {error_msg}")
-                raise RuntimeError(f"Anthropic API stream error: {error_msg}")
-
-    # Token stats
-    cache_read = usage.get("cache_read_input_tokens", 0)
-    cache_create = usage.get("cache_creation_input_tokens", 0)
-    input_tokens = usage.get("input_tokens", 0)
-    total_input = input_tokens + cache_read + cache_create
-    output_tokens = usage.get("output_tokens", 0)
-
-    return {
-        "text": "".join(text_parts),
-        "tool_uses": tool_uses,
-        "thinking_blocks": thinking_blocks,
-        "input_tokens": total_input,
-        "output_tokens": output_tokens,
-        "cache_read": cache_read,
-        "cache_create": cache_create,
+    t_parse = time.perf_counter()
+    try:
+        result = provider.parse_sse_stream(raw_lines)
+    except Exception as exc:
+        if "rate limit" in str(exc).lower():
+            raise RateLimitError(str(exc)) from exc
+        raise
+    parse_ms = (time.perf_counter() - t_parse) * 1000
+    if isinstance(request_meta, dict):
+        for key, value in request_meta.items():
+            result.setdefault(key, value)
+    timing = {
+        "api_payload_kb": len(payload_bytes) / 1024,
+        "api_response_headers_ms": response_headers_ms,
+        "api_first_byte_ms": first_byte_ms if first_byte_ms is not None else response_headers_ms,
+        "api_stream_ms": stream_ms,
+        "api_parse_ms": parse_ms,
+        "api_total_ms": stream_ms + parse_ms,
+        "api_sse_lines": len(raw_lines),
     }
+    result["timing"] = timing
+    first_s = timing["api_first_byte_ms"] / 1000
+    total_s = timing["api_total_ms"] / 1000
+    if first_s >= _API_FIRST_BYTE_WARN_S or total_s >= _API_TOTAL_WARN_S:
+        logger.warning(
+            "llm api slow | provider={} model={} first_byte={:.1f}s stream={:.1f}s parse={:.0f}ms lines={}",
+            api_format, model, first_s, stream_ms / 1000, parse_ms, len(raw_lines),
+        )
+    else:
+        _log_debug.debug(
+            "llm api timing | provider={} model={} first_byte={:.1f}s stream={:.1f}s parse={:.0f}ms lines={}",
+            api_format, model, first_s, stream_ms / 1000, parse_ms, len(raw_lines),
+        )
+    return result
 
 
 async def _build_debug_block(
@@ -820,6 +965,7 @@ class LLMClient:
         prompt_builder: PromptBuilder,
         short_term: ShortTermMemory,
         tools: ToolRegistry,
+        api_format: str = "anthropic",
         max_context_tokens: int = 200_000,
         compact_ratio: float = 0.7,
         compress_ratio: float = 0.5,
@@ -835,6 +981,8 @@ class LLMClient:
         thinker_max_tokens: int = 256,
         mood_getter: Callable[[], Any] | None = None,
         bus: object | None = None,
+        task_profiles: dict[str, Any] | None = None,
+        group_config: Any | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
             enable_cleanup_closed=True,
@@ -847,6 +995,7 @@ class LLMClient:
         self._base_url = base_url
         self._api_key = api_key
         self._model = model
+        self._api_format = api_format
         self._prompt = prompt_builder
         self._short_term = short_term
         self._tools = tools
@@ -868,20 +1017,364 @@ class LLMClient:
         self._thinker_max_tokens = thinker_max_tokens
         self._mood_getter = mood_getter
         self._bus = bus
+        self._group_config = group_config
+        self._task_profiles = task_profiles or {}
+        self._task_profile_names = {
+            task: str(getattr(profile, "name", "") or task)
+            for task, profile in self._task_profiles.items()
+        }
+        self._profile_rate_limits: dict[str, ProfileRateLimitState] = {}
 
     async def close(self) -> None:
         await self._session.close()
+
+    def set_group_config(self, group_config: Any | None) -> None:
+        self._group_config = group_config
 
     async def _call(
         self, system_blocks: list[dict[str, Any]], messages: list[Any], tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 1024,
         thinking: dict[str, Any] | None = None,
+        task: str = "main",
+        user_id: str = "",
+        group_id: str | None = None,
     ) -> dict[str, Any]:
-        return await call_api(
-            self._session, self._base_url, self._api_key, self._model,
-            system_blocks, messages, max_tokens=max_tokens, tools=tools,
-            thinking=thinking,
+        profile_name, base_url, api_key, model, api_format = self._profile_for_task(task)
+        state = self._profile_rate_state(profile_name)
+        self._raise_if_profile_cooling_down(state, task=task)
+        state.total_calls += 1
+        state.last_task = task
+        provider_request_options = self._provider_request_options(
+            task=task,
+            api_format=api_format,
+            model=model,
+            user_id=user_id,
+            group_id=group_id,
         )
+        if api_format == "deepseek" and task in {"thinker", "compact", "slang"} and thinking is None:
+            thinking = {"type": "disabled"}
+        try:
+            t_call = time.monotonic()
+            result = await call_api(
+                self._session, base_url, api_key, model,
+                system_blocks, messages, max_tokens=max_tokens, tools=tools,
+                thinking=thinking, api_format=api_format,
+                request_options=provider_request_options,
+            )
+            result["call_elapsed_s"] = time.monotonic() - t_call
+        except RateLimitError as exc:
+            self._record_profile_rate_limited(state, task=task, error=str(exc))
+            raise
+        except Exception as exc:
+            state.failures += 1
+            state.last_error = str(exc)[:240]
+            raise
+        result.setdefault("provider_kind", "deepseek" if api_format == "deepseek" else api_format)
+        result.setdefault("provider_mode", provider_mode(api_format, base_url))
+        result["provider_model"] = model
+        result["provider_api_format"] = api_format
+        self._record_profile_success(
+            state,
+            task=task,
+            result=result,
+            model=model,
+            api_format=api_format,
+            base_url=base_url,
+        )
+        return result
+
+    async def _call_thinker(
+        self,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 1024,
+        thinking: dict[str, Any] | None = None,
+        user_id: str = "",
+        group_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._call(
+            system_blocks, messages, tools=tools,
+            max_tokens=max_tokens, thinking=thinking, task="thinker",
+            user_id=user_id, group_id=group_id,
+        )
+
+    async def _call_compact(
+        self,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 1024,
+        thinking: dict[str, Any] | None = None,
+        user_id: str = "",
+        group_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._call(
+            system_blocks, messages, tools=tools,
+            max_tokens=max_tokens, thinking=thinking, task="compact",
+            user_id=user_id, group_id=group_id,
+        )
+
+    async def _call_slang(
+        self,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 1024,
+        thinking: dict[str, Any] | None = None,
+        user_id: str = "",
+        group_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._call(
+            system_blocks, messages, tools=tools,
+            max_tokens=max_tokens, thinking=thinking, task="slang",
+            user_id=user_id, group_id=group_id,
+        )
+
+    def _profile_for_task(self, task: str) -> tuple[str, str, str, str, str]:
+        profile = self._task_profiles.get(task) or self._task_profiles.get("main")
+        if profile is None:
+            return "main", self._base_url, self._api_key, self._model, self._api_format
+        profile_name = self._task_profile_names.get(task) or ("main" if task == "main" else task)
+        return (
+            profile_name,
+            str(getattr(profile, "base_url", "") or self._base_url),
+            str(getattr(profile, "api_key", "") or self._api_key),
+            str(getattr(profile, "model", "") or self._model),
+            str(getattr(profile, "api_format", "") or self._api_format),
+        )
+
+    def set_task_profile_names(self, task_profile_names: dict[str, str]) -> None:
+        """Attach resolved task → profile names for diagnostics and rate limiting."""
+        self._task_profile_names = {
+            str(task or "main"): str(profile_name or "main")
+            for task, profile_name in task_profile_names.items()
+        }
+
+    def set_task_profiles(
+        self,
+        task_profiles: dict[str, Any],
+        task_profile_names: dict[str, str] | None = None,
+    ) -> None:
+        """Hot-swap resolved task profiles without rebuilding the client session."""
+        self._task_profiles = dict(task_profiles or {})
+        if task_profile_names is None:
+            self._task_profile_names = {
+                str(task or "main"): str(getattr(profile, "name", "") or task or "main")
+                for task, profile in self._task_profiles.items()
+            }
+        else:
+            self.set_task_profile_names(task_profile_names)
+
+        main_profile = self._task_profiles.get("main")
+        if main_profile is not None:
+            self._base_url = str(getattr(main_profile, "base_url", "") or self._base_url)
+            self._api_key = str(getattr(main_profile, "api_key", "") or self._api_key)
+            self._model = str(getattr(main_profile, "model", "") or self._model)
+            self._api_format = str(getattr(main_profile, "api_format", "") or self._api_format)
+
+    def _resolve_group_profile(self, group_id: str | None) -> Any | None:
+        if not group_id or self._group_config is None:
+            return None
+        with contextlib.suppress(Exception):
+            return self._group_config.resolve(int(group_id))
+        return None
+
+    def _build_group_profile_block(self, group_profile: Any | None) -> dict[str, Any] | None:
+        if group_profile is None:
+            return None
+
+        lines: list[str] = []
+        reply_style = str(getattr(group_profile, "reply_style", "default") or "default")
+        style_hint = _GROUP_REPLY_STYLE_HINTS.get(reply_style)
+        if style_hint:
+            lines.append(style_hint)
+
+        custom_prompt = str(getattr(group_profile, "custom_prompt", "") or "").strip()
+        if custom_prompt:
+            lines.append(f"【本群附加要求】\n{custom_prompt}")
+
+        if not lines:
+            return None
+        return {
+            "type": "text",
+            "text": "【群聊回复偏好】\n" + "\n".join(lines),
+            "cache_control": {"type": "ephemeral"},
+        }
+
+    def _deepseek_hash_salt(self) -> str:
+        return (
+            self._api_key
+            or self._bot_self_id
+            or "omubot-deepseek"
+        )
+
+    def _provider_request_options(
+        self,
+        *,
+        task: str,
+        api_format: str,
+        model: str,
+        user_id: str = "",
+        group_id: str | None = None,
+    ) -> dict[str, Any]:
+        options: dict[str, Any] = {}
+        if api_format != "deepseek":
+            return options
+
+        salt = self._deepseek_hash_salt()
+        if group_id:
+            options["user_id"] = _hash_scope_id("grp", group_id, salt)
+        elif user_id:
+            options["user_id"] = _hash_scope_id("dm", user_id, salt)
+        else:
+            options["user_id"] = f"sys_{task or 'main'}"
+
+        if is_deepseek_v4_model(model) and task == "main":
+            profile = self._task_profiles.get(task) or self._task_profiles.get("main")
+            configured_effort = str(getattr(profile, "reasoning_effort", "") or "").strip().lower()
+            if configured_effort in {"default", "auto", "none", "disabled"}:
+                configured_effort = ""
+            elif configured_effort and configured_effort not in {"low", "medium", "high"}:
+                _log_debug.warning(
+                    "invalid deepseek reasoning_effort={!r}; falling back to medium",
+                    configured_effort,
+                )
+                configured_effort = ""
+            options["reasoning_effort"] = configured_effort or "medium"
+        return options
+
+    def _compact_ratio_for_main(self) -> float:
+        _, _, _, model, api_format = self._profile_for_task("main")
+        if api_format == "deepseek" and is_deepseek_v4_model(model):
+            return _DEEPSEEK_V4_COMPACT_RATIO
+        return self._compact_ratio
+
+    def _build_tool_defs(self, group_profile: Any | None) -> list[dict[str, Any]]:
+        openai_tools = self._tools.to_openai_tools() if not self._tools.empty else []
+        if group_profile is not None:
+            if not bool(getattr(group_profile, "tools_enabled", True)):
+                openai_tools = []
+            else:
+                allowed = {
+                    str(name).strip()
+                    for name in (getattr(group_profile, "allowed_tools", []) or [])
+                    if str(name).strip()
+                }
+                if allowed:
+                    openai_tools = [
+                        tool for tool in openai_tools
+                        if str(tool.get("function", {}).get("name", "")) in allowed
+                    ]
+                blocked: set[str] = set()
+                blocked.update({
+                    str(name).strip()
+                    for name in (getattr(group_profile, "blocked_tools", []) or [])
+                    if str(name).strip()
+                })
+                if str(getattr(group_profile, "sticker_mode", "inherit") or "inherit") == "off":
+                    blocked.update(_STICKER_TOOL_NAMES)
+                if not bool(getattr(group_profile, "slang_enabled", True)):
+                    blocked.add("slang_lookup")
+                if blocked:
+                    openai_tools = [
+                        tool for tool in openai_tools
+                        if str(tool.get("function", {}).get("name", "")) not in blocked
+                    ]
+
+        tool_defs = _to_anthropic_tools(openai_tools) if openai_tools else []
+        return [*tool_defs, _PASS_TURN_TOOL]
+
+    def provider_rate_limit_payload(self) -> dict[str, Any]:
+        names = set(self._profile_rate_limits.keys()) | set(self._task_profile_names.values()) | {"main"}
+        profiles = {
+            name: self._profile_rate_state(name).as_payload()
+            for name in sorted(names)
+        }
+        return {
+            "profiles": profiles,
+            "tasks": {
+                task: self._profile_rate_state(profile_name).as_payload()
+                for task, profile_name in sorted(self._task_profile_names.items())
+            },
+        }
+
+    def _profile_rate_state(self, profile_name: str) -> ProfileRateLimitState:
+        key = str(profile_name or "main")
+        if key not in self._profile_rate_limits:
+            self._profile_rate_limits[key] = ProfileRateLimitState(profile=key)
+        return self._profile_rate_limits[key]
+
+    def _raise_if_profile_cooling_down(self, state: ProfileRateLimitState, *, task: str) -> None:
+        remaining = state.cooldown_remaining()
+        if remaining <= 0:
+            return
+        state.blocked_calls += 1
+        state.last_task = task
+        raise RateLimitError(
+            f"profile {state.profile} cooling down for {remaining:.1f}s after rate limit"
+        )
+
+    def _record_profile_rate_limited(
+        self,
+        state: ProfileRateLimitState,
+        *,
+        task: str,
+        error: str,
+    ) -> None:
+        now = time.time()
+        state.rate_limited += 1
+        state.failures += 1
+        state.consecutive_rate_limits += 1
+        state.last_task = task
+        state.last_error = str(error or "")[:240]
+        state.last_limited_at = now
+        delay = min(
+            PROFILE_RATE_LIMIT_MAX_COOLDOWN,
+            RATE_LIMIT_BASE_DELAY * (2 ** max(0, state.consecutive_rate_limits - 1)),
+        )
+        state.cooldown_until = now + delay
+        state.cooldown_until_monotonic = time.monotonic() + delay
+        _log_debug.warning(
+            "provider rate limited | profile={} task={} cooldown={:.0f}s count={}",
+            state.profile, task, delay, state.consecutive_rate_limits,
+        )
+
+    def _record_profile_success(
+        self,
+        state: ProfileRateLimitState,
+        *,
+        task: str,
+        result: dict[str, Any],
+        model: str,
+        api_format: str,
+        base_url: str,
+    ) -> None:
+        state.successes += 1
+        state.consecutive_rate_limits = 0
+        state.last_task = task
+        state.last_success_at = time.time()
+        state.provider_kind = str(result.get("provider_kind", "") or api_format)
+        state.provider_mode = str(result.get("provider_mode", "") or provider_mode(api_format, base_url))
+        state.last_model = model
+        state.last_api_format = api_format
+        hit_tokens = int(result.get("prompt_cache_hit_tokens", result.get("cache_read", 0)) or 0)
+        miss_tokens = int(result.get("prompt_cache_miss_tokens", 0) or 0)
+        if miss_tokens == 0:
+            total_input = int(result.get("input_tokens", 0) or 0)
+            cache_create = int(result.get("cache_create", 0) or 0)
+            miss_tokens = max(0, total_input - hit_tokens - cache_create)
+        total_prompt = hit_tokens + miss_tokens
+        state.last_cache_hit_pct = (hit_tokens / total_prompt * 100) if total_prompt > 0 else None
+        state.last_prompt_cache_hit_tokens = hit_tokens
+        state.last_prompt_cache_miss_tokens = miss_tokens
+        state.last_reasoning_replay_tokens = int(result.get("reasoning_replay_tokens", 0) or 0)
+        state.last_payload_sanitized = bool(result.get("payload_sanitized", False))
+        usage = result.get("usage")
+        state.last_usage = usage if isinstance(usage, dict) else {}
+        if state.cooldown_remaining() <= 0:
+            state.cooldown_until = 0.0
+            state.cooldown_until_monotonic = 0.0
 
     def _record_usage(
         self,
@@ -889,10 +1382,15 @@ class LLMClient:
         call_type: str,
         user_id: str,
         group_id: str | None,
+        model: str | None = None,
+        provider_kind: str = "",
         input_tokens: int,
         cache_read_tokens: int,
         cache_create_tokens: int,
         output_tokens: int,
+        prompt_cache_hit_tokens: int = 0,
+        prompt_cache_miss_tokens: int = 0,
+        reasoning_replay_tokens: int = 0,
         tool_rounds: int,
         elapsed_s: float,
         error: str | None = None,
@@ -904,15 +1402,109 @@ class LLMClient:
             call_type=call_type,
             user_id=user_id or None,
             group_id=group_id,
-            model=self._model,
+            model=model or self._model,
+            provider_kind=provider_kind,
             input_tokens=input_tokens,
             cache_read_tokens=cache_read_tokens,
             cache_create_tokens=cache_create_tokens,
             output_tokens=output_tokens,
+            prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+            reasoning_replay_tokens=reasoning_replay_tokens,
             tool_rounds=tool_rounds,
             elapsed_s=elapsed_s,
             error=error,
         ))
+
+    async def _fire_thinker_decision(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        action: str,
+        thought: str,
+        elapsed_ms: float,
+    ) -> None:
+        if self._bus is None:
+            return
+        await self._bus.fire_on_thinker_decision(
+            ThinkerContext(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                action=action,
+                thought=thought,
+                elapsed_ms=elapsed_ms,
+            )
+        )
+
+    async def _fire_post_reply(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        user_content: Content,
+        reply_content: str,
+        elapsed_ms: float,
+        thinker_action: str,
+        thinker_thought: str,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        if self._bus is None or not reply_content.strip():
+            return
+        await self._bus.fire_on_post_reply(
+            ReplyContext(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                user_msg=content_text(user_content),
+                reply_content=reply_content,
+                tool_calls=[dict(item) for item in tool_calls],
+                elapsed_ms=elapsed_ms,
+                thinker_action=thinker_action,
+                thinker_thought=thinker_thought,
+            )
+        )
+
+    def _finalize_visible_reply(
+        self,
+        *,
+        reply: str,
+        session_id: str,
+        force_reply: bool,
+        has_visible_tool_output: bool,
+        is_group: bool,
+    ) -> tuple[str, str]:
+        raw_reply = reply or ""
+        control_only_reply = _contains_control_token(raw_reply)
+        cleaned = _clean_reply(reply or "...")
+        cleaned, stripped = _strip_control_tokens(cleaned)
+        if stripped:
+            _log_msg_out.info("reply_control_token_stripped | session={}", session_id)
+            if control_only_reply:
+                cleaned = ""
+
+        normalized = cleaned.strip()
+        if normalized in ("", "...", "☆", "~"):
+            if has_visible_tool_output:
+                _log_msg_out.info("reply_suppressed_empty | session={} reason=tool_visible", session_id)
+                return "", "suppressed"
+            if force_reply or not is_group:
+                _log_msg_out.info("reply_fallback_emitted | session={}", session_id)
+                return _EMPTY_VISIBLE_REPLY_FALLBACK, "fallback"
+            _log_msg_out.info("reply_suppressed_empty | session={} reason=autonomous", session_id)
+            return "", "suppressed"
+        return normalized, "reply"
+
+    def _has_visible_tool_output(self, tool_calls: list[dict[str, Any]]) -> bool:
+        for call in tool_calls:
+            if call.get("is_error"):
+                continue
+            if str(call.get("name", "")) in _VISIBLE_TOOL_OUTPUT_NAMES:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Message building
@@ -1055,18 +1647,22 @@ class LLMClient:
             session_id, user_id, identity.id, content_preview,
         )
         t0 = time.monotonic()
+        prompt_start = time.perf_counter()
 
         is_group = group_id is not None and self._timeline is not None
+        _, _, _, main_model, main_api_format = self._profile_for_task("main")
+        deepseek_native_main = main_api_format == "deepseek" and is_deepseek_v4_model(main_model)
+        compact_ratio = self._compact_ratio_for_main()
 
         if is_group:
             assert group_id is not None
             assert self._timeline is not None
             # Group: messages already added to timeline by group_listener
-            if self._timeline.needs_compact(group_id, self._max_context_tokens, self._compact_ratio):
+            if self._timeline.needs_compact(group_id, self._max_context_tokens, compact_ratio):
                 _log_compact.info(
                     "compact triggering | group={} input_tokens={} threshold={}",
                     group_id, self._timeline.get_input_tokens(group_id),
-                    int(self._max_context_tokens * self._compact_ratio),
+                    int(self._max_context_tokens * compact_ratio),
                 )
                 await self._compact_group(group_id, identity)
             messages = self._build_group_messages(group_id)
@@ -1085,18 +1681,23 @@ class LLMClient:
                     else str(user_content)[:2000]
                 )
                 await self._message_log.record_session_msg(session_id, "user", text_preview)
-            if self._short_term.needs_compact(session_id, self._max_context_tokens, self._compact_ratio):
+            if self._short_term.needs_compact(session_id, self._max_context_tokens, compact_ratio):
                 _log_compact.info(
                     "compact triggering | session={} input_tokens={} threshold={}",
                     session_id, self._short_term.get_input_tokens(session_id),
-                    int(self._max_context_tokens * self._compact_ratio),
+                    int(self._max_context_tokens * compact_ratio),
                 )
                 await self._compact(session_id)
             messages = self._build_private_messages(session_id)
 
         # Extract conversation text for retrieval gating
         if is_group and self._timeline is not None:
-            conversation_text = self._timeline.get_recent_text(group_id, last_n=3)
+            pending_text = _pending_conversation_text(self._timeline, group_id)
+            recent_text = self._timeline.get_recent_text(group_id, last_n=3)
+            if force_reply and pending_text:
+                conversation_text = pending_text
+            else:
+                conversation_text = " ".join(part for part in (recent_text, pending_text) if part)
         else:
             conversation_text = content_text(user_content) if user_content else ""
 
@@ -1104,7 +1705,8 @@ class LLMClient:
         # Pre-reply thinker: decide whether to speak before building full prompt
         # ------------------------------------------------------------------
         thinker_decision: object | None = None
-        if self._thinker_enabled:
+        thinker_action = ""
+        if self._thinker_enabled and not force_reply:
             from services.llm.thinker import think
 
             # Filter to text-only: image_ref blocks are not valid for the API
@@ -1123,7 +1725,15 @@ class LLMClient:
             mood_text = self._build_thinker_mood_text()
             affection_text = self._build_thinker_affection_text(user_id)
             thinker_decision = await think(
-                api_call=self._call,
+                api_call=lambda system, thinker_messages, tools=None, max_tokens=1024, thinking=None: self._call_thinker(
+                    system,
+                    thinker_messages,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                    thinking=thinking,
+                    user_id=user_id,
+                    group_id=group_id,
+                ),
                 recent_messages=recent_for_thinker,
                 max_tokens=self._thinker_max_tokens,
                 mood_text=mood_text,
@@ -1134,6 +1744,20 @@ class LLMClient:
             thinker_action = thinker_decision.action
             thinker_thought = thinker_decision.thought
 
+            if thinker_action == "search":
+                _log_thinking.info("thinker_search_coerced | session={} thought={!r}", session_id, thinker_thought)
+                thinker_action = "reply"
+                thinker_decision.action = "reply"
+
+            await self._fire_thinker_decision(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                action=thinker_action,
+                thought=thinker_thought,
+                elapsed_ms=(time.monotonic() - t0) * 1000,
+            )
+
             if thinker_action == "wait":
                 elapsed = time.monotonic() - t0
                 _log_msg_out.info(
@@ -1143,6 +1767,8 @@ class LLMClient:
                 self._record_usage(
                     call_type="proactive",
                     user_id=user_id, group_id=group_id,
+                    model=self._profile_for_task("thinker")[3],
+                    provider_kind=self._profile_for_task("thinker")[4],
                     input_tokens=thinker_decision.usage.get("input_tokens", 0),
                     cache_read_tokens=thinker_decision.usage.get("cache_read", 0),
                     cache_create_tokens=thinker_decision.usage.get("cache_create", 0),
@@ -1153,12 +1779,18 @@ class LLMClient:
         else:
             thinker_thought = ""
 
+        group_profile = self._resolve_group_profile(group_id)
+        prompt_build_start = time.perf_counter()
         if self._card_store:
             try:
                 # Collect plugin blocks via bus.on_pre_prompt
                 plugin_static: list[dict[str, Any]] = []
                 plugin_stable: list[dict[str, Any]] = []
                 plugin_dynamic: list[dict[str, Any]] = []
+                tail_blocks: list[dict[str, Any]] = []
+                group_profile_block = self._build_group_profile_block(group_profile)
+                if group_profile_block is not None:
+                    plugin_stable.append(group_profile_block)
                 if self._bus is not None:
                     from kernel.types import PromptContext
                     prompt_ctx = PromptContext(
@@ -1186,6 +1818,12 @@ class LLMClient:
                         else:
                             plugin_dynamic.append(block_dict)
 
+                if deepseek_native_main:
+                    state_board_block = await self._prompt.build_state_board_block(group_id)
+                    if state_board_block.get("text"):
+                        tail_blocks.append(state_board_block)
+                    tail_blocks.extend(plugin_dynamic)
+
                 system_blocks = await self._prompt.build_blocks(
                     user_id=user_id,
                     group_id=group_id,
@@ -1195,8 +1833,11 @@ class LLMClient:
                     conversation_text=conversation_text,
                     plugin_static=plugin_static or None,
                     plugin_stable=plugin_stable or None,
-                    plugin_dynamic=plugin_dynamic or None,
+                    plugin_dynamic=None if deepseek_native_main else (plugin_dynamic or None),
+                    include_state_board=not deepseek_native_main,
                 )
+                if deepseek_native_main and tail_blocks:
+                    messages = _append_tail_metadata(messages, tail_blocks)
             except Exception:
                 logger.exception("build_blocks failed, falling back to static block")
                 system_blocks = [self._prompt.static_block]
@@ -1224,29 +1865,50 @@ class LLMClient:
 
         messages, image_tag_map = await resolve_image_refs(messages, self._image_cache)
 
-        tool_defs: list[dict[str, Any]] | None = None
-        if not self._tools.empty:
-            tool_defs = _to_anthropic_tools(self._tools.to_openai_tools())
-        # pass_turn is always available
-        tool_defs = [*(tool_defs or []), _PASS_TURN_TOOL]
+        tool_defs = self._build_tool_defs(group_profile)
 
         # Debug: hash system blocks and tools to diagnose cache misses
         _log_cache_debug(session_id, system_blocks, tool_defs, len(messages))
+        _log_debug.debug(
+            "chat prompt timing | session={} prepare={:.1f}ms build={:.1f}ms system_blocks={} messages={} tools={}",
+            session_id,
+            (time.perf_counter() - prompt_start) * 1000,
+            (time.perf_counter() - prompt_build_start) * 1000,
+            len(system_blocks),
+            len(messages),
+            len(tool_defs),
+        )
 
         # Token accumulators across tool rounds
         acc_input = 0
         acc_output = 0
         acc_cache_read = 0
         acc_cache_create = 0
+        acc_prompt_cache_hit = 0
+        acc_prompt_cache_miss = 0
+        acc_reasoning_replay = 0
+        acc_llm_elapsed = 0.0
 
         _sticker_sent = False
+        tool_call_records: list[dict[str, Any]] = []
 
         for round_i in range(MAX_TOOL_ROUNDS):
-            result = await self._call(system_blocks, messages, tools=tool_defs)
+            result = await self._call(
+                system_blocks,
+                messages,
+                tools=tool_defs,
+                user_id=user_id,
+                group_id=group_id,
+            )
+            acc_llm_elapsed += float(result.get("call_elapsed_s", 0.0) or 0.0)
             acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
             acc_output += result.get("output_tokens", 0)
             acc_cache_read += result.get("cache_read", 0)
             acc_cache_create += result.get("cache_create", 0)
+            round_cache_hit, round_cache_miss, round_reasoning_replay = _usage_observability_fields(result)
+            acc_prompt_cache_hit += round_cache_hit
+            acc_prompt_cache_miss += round_cache_miss
+            acc_reasoning_replay += round_reasoning_replay
             text: str = result["text"]
             tool_uses: list[ToolUse] = result["tool_uses"]
 
@@ -1254,21 +1916,54 @@ class LLMClient:
             pass_turn = next((tu for tu in tool_uses if tu.name == "pass_turn"), None)
             if pass_turn:
                 reason = pass_turn.input.get("reason", "")
-                elapsed = time.monotonic() - t0
-                _log_msg_out.info("pass_turn | session={} reason={!r} elapsed={:.1f}s", session_id, reason, elapsed)
+                total_elapsed = time.monotonic() - t0
+                _log_msg_out.info(
+                    "pass_turn | session={} reason={!r} llm={:.1f}s total={:.1f}s",
+                    session_id, reason, acc_llm_elapsed, total_elapsed,
+                )
                 if is_group and group_id is not None and self._timeline is not None:
                     self._timeline.set_input_tokens(group_id, result["input_tokens"])
                 self._record_usage(
                     call_type="proactive",
                     user_id=user_id, group_id=group_id,
+                    model=main_model,
+                    provider_kind=str(result.get("provider_kind", main_api_format)),
                     input_tokens=acc_input, cache_read_tokens=acc_cache_read,
                     cache_create_tokens=acc_cache_create, output_tokens=acc_output,
-                    tool_rounds=round_i, elapsed_s=elapsed,
+                    prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                    prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                    reasoning_replay_tokens=acc_reasoning_replay,
+                    tool_rounds=round_i, elapsed_s=acc_llm_elapsed,
                 )
                 return None
 
             if not tool_uses:
-                reply = _clean_reply(text or "...")
+                reply, reply_state = self._finalize_visible_reply(
+                    reply=text or "...",
+                    session_id=session_id,
+                    force_reply=force_reply,
+                    has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
+                    is_group=is_group,
+                )
+
+                if not reply:
+                    if is_group and group_id is not None and self._timeline is not None:
+                        self._timeline.set_input_tokens(group_id, result["input_tokens"])
+                    else:
+                        self._short_term.set_input_tokens(session_id, result["input_tokens"])
+                    self._record_usage(
+                        call_type="proactive" if is_group else "chat",
+                        user_id=user_id, group_id=group_id,
+                        model=main_model,
+                        provider_kind=str(result.get("provider_kind", main_api_format)),
+                        input_tokens=acc_input, cache_read_tokens=acc_cache_read,
+                        cache_create_tokens=acc_cache_create, output_tokens=acc_output,
+                        prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                        prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                        reasoning_replay_tokens=acc_reasoning_replay,
+                        tool_rounds=round_i, elapsed_s=acc_llm_elapsed,
+                    )
+                    return None
 
                 # Kaomoji enforcement: if the reply contains a kaomoji / action
                 # description but the LLM forgot to call send_sticker, inject a
@@ -1297,7 +1992,13 @@ class LLMClient:
                     _log_thinking.info("kaomoji_enforce | forcing sticker round after kaomoji detected")
                     continue
 
-                segments = _split_naturally(reply)
+                segments, raw_segment_count = _reply_segments(reply)
+                if raw_segment_count > len(segments):
+                    _log_msg_out.debug(
+                        "segments coalesced | session={} raw={} capped={}",
+                        session_id, raw_segment_count, len(segments),
+                    )
+                send_start = time.monotonic()
                 if on_segment and len(segments) > 1:
                     for seg in segments[:-1]:
                         await on_segment(seg)
@@ -1308,13 +2009,15 @@ class LLMClient:
                     last_seg = "\n".join(segments)
                 else:
                     last_seg = segments[-1] if segments else reply
+                send_elapsed = time.monotonic() - send_start
                 full_reply = "\n".join(segments)
-                elapsed = time.monotonic() - t0
+                total_elapsed = time.monotonic() - t0
                 preview = full_reply[:120] + "…" if len(full_reply) > 120 else full_reply
                 _log_msg_out.info(
-                    "{!r} | sticker={} len={} segments={} elapsed={:.1f}s",
+                    "{!r} | sticker={} len={} segments={} raw_segments={} llm={:.1f}s send_partial={:.1f}s total={:.1f}s",
                     preview, "sent" if _sticker_sent else "none",
-                    len(full_reply), len(segments), elapsed,
+                    len(full_reply), len(segments), raw_segment_count,
+                    acc_llm_elapsed, send_elapsed, total_elapsed,
                 )
                 if is_group and group_id is not None and self._timeline is not None:
                     self._timeline.add(group_id, role="assistant", content=full_reply)
@@ -1329,25 +2032,26 @@ class LLMClient:
                 self._record_usage(
                     call_type="proactive" if is_group else "chat",
                     user_id=user_id, group_id=group_id,
+                    model=main_model,
+                    provider_kind=str(result.get("provider_kind", main_api_format)),
                     input_tokens=acc_input, cache_read_tokens=acc_cache_read,
                     cache_create_tokens=acc_cache_create, output_tokens=acc_output,
-                    tool_rounds=round_i, elapsed_s=elapsed,
+                    prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                    prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                    reasoning_replay_tokens=acc_reasoning_replay,
+                    tool_rounds=round_i, elapsed_s=acc_llm_elapsed,
                 )
-
-                # Fire post_reply hook for plugins (affection, memo, etc.)
-                if self._bus is not None:
-                    from kernel.types import ReplyContext
-                    reply_ctx = ReplyContext(
-                        session_id=session_id,
-                        group_id=group_id,
-                        user_id=user_id,
-                        user_msg=content_text(user_content),
-                        reply_content=full_reply,
-                        elapsed_ms=elapsed * 1000,
-                        thinker_action=thinker_decision.action if thinker_decision else "",
-                        thinker_thought=thinker_decision.thought if thinker_decision else "",
-                    )
-                    await self._bus.fire_on_post_reply(reply_ctx)
+                await self._fire_post_reply(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    user_content=user_content,
+                    reply_content=full_reply,
+                    elapsed_ms=total_elapsed * 1000,
+                    thinker_action=thinker_action,
+                    thinker_thought=thinker_thought,
+                    tool_calls=tool_call_records,
+                )
 
                 return last_seg
 
@@ -1386,21 +2090,70 @@ class LLMClient:
             ]
             tool_results: list[dict[str, Any]] = []
             for tu, result_text in zip(tool_uses, call_results, strict=True):
+                is_error = result_text.startswith("Tool error:")
                 _log_thinking.debug(
                     "tool_result | name={} result={}",
                     tu.name, result_text[:200].replace("{", "{{").replace("}", "}}"),
+                )
+                tool_call_records.append(
+                    {
+                        "name": tu.name,
+                        "input": dict(tu.input),
+                        "result": result_text,
+                        "is_error": is_error,
+                    }
                 )
                 tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result_text})
             messages.append({"role": "user", "content": tool_results})
 
         _log_thinking.warning("tool loop exhausted | session={} rounds={}", session_id, MAX_TOOL_ROUNDS)
-        result = await self._call(system_blocks, messages)
+        result = await self._call(
+            system_blocks,
+            messages,
+            user_id=user_id,
+            group_id=group_id,
+        )
+        acc_llm_elapsed += float(result.get("call_elapsed_s", 0.0) or 0.0)
         acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
         acc_output += result.get("output_tokens", 0)
         acc_cache_read += result.get("cache_read", 0)
         acc_cache_create += result.get("cache_create", 0)
-        reply = _clean_reply(result["text"] or "...")
-        segments = _split_naturally(reply)
+        round_cache_hit, round_cache_miss, round_reasoning_replay = _usage_observability_fields(result)
+        acc_prompt_cache_hit += round_cache_hit
+        acc_prompt_cache_miss += round_cache_miss
+        acc_reasoning_replay += round_reasoning_replay
+        reply, reply_state = self._finalize_visible_reply(
+            reply=result["text"] or "...",
+            session_id=session_id,
+            force_reply=force_reply,
+            has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
+            is_group=is_group,
+        )
+        if not reply:
+            if is_group and group_id is not None and self._timeline is not None:
+                self._timeline.set_input_tokens(group_id, result["input_tokens"])
+            else:
+                self._short_term.set_input_tokens(session_id, result["input_tokens"])
+            self._record_usage(
+                call_type="proactive" if is_group else "chat",
+                user_id=user_id, group_id=group_id,
+                model=main_model,
+                provider_kind=str(result.get("provider_kind", main_api_format)),
+                input_tokens=acc_input, cache_read_tokens=acc_cache_read,
+                cache_create_tokens=acc_cache_create, output_tokens=acc_output,
+                prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                reasoning_replay_tokens=acc_reasoning_replay,
+                tool_rounds=MAX_TOOL_ROUNDS, elapsed_s=acc_llm_elapsed,
+            )
+            return None
+        segments, raw_segment_count = _reply_segments(reply)
+        if raw_segment_count > len(segments):
+            _log_msg_out.debug(
+                "segments coalesced | session={} raw={} capped={}",
+                session_id, raw_segment_count, len(segments),
+            )
+        send_start = time.monotonic()
         if on_segment and len(segments) > 1:
             for seg in segments[:-1]:
                 await on_segment(seg)
@@ -1410,6 +2163,7 @@ class LLMClient:
             last_seg = "\n".join(segments)
         else:
             last_seg = segments[-1] if segments else reply
+        send_elapsed = time.monotonic() - send_start
         full_reply = "\n".join(segments)
         if is_group and group_id is not None and self._timeline is not None:
             self._timeline.add(group_id, role="assistant", content=full_reply)
@@ -1422,27 +2176,33 @@ class LLMClient:
                     session_id, "assistant", full_reply[:2000]
                 )
         elapsed = time.monotonic() - t0
+        _log_msg_out.info(
+            "tool_exhausted_reply | session={} segments={} raw_segments={} llm={:.1f}s send_partial={:.1f}s total={:.1f}s",
+            session_id, len(segments), raw_segment_count, acc_llm_elapsed, send_elapsed, elapsed,
+        )
         self._record_usage(
             call_type="proactive" if is_group else "chat",
             user_id=user_id, group_id=group_id,
+            model=main_model,
+            provider_kind=str(result.get("provider_kind", main_api_format)),
             input_tokens=acc_input, cache_read_tokens=acc_cache_read,
             cache_create_tokens=acc_cache_create, output_tokens=acc_output,
-            tool_rounds=MAX_TOOL_ROUNDS, elapsed_s=elapsed,
+            prompt_cache_hit_tokens=acc_prompt_cache_hit,
+            prompt_cache_miss_tokens=acc_prompt_cache_miss,
+            reasoning_replay_tokens=acc_reasoning_replay,
+            tool_rounds=MAX_TOOL_ROUNDS, elapsed_s=acc_llm_elapsed,
         )
-        # Fire post_reply hook for plugins
-        if self._bus is not None:
-            from kernel.types import ReplyContext
-            reply_ctx = ReplyContext(
-                session_id=session_id,
-                group_id=group_id,
-                user_id=user_id,
-                user_msg=content_text(user_content),
-                reply_content=full_reply,
-                elapsed_ms=elapsed * 1000,
-                thinker_action=thinker_decision.action if thinker_decision else "",
-                thinker_thought=thinker_decision.thought if thinker_decision else "",
-            )
-            await self._bus.fire_on_post_reply(reply_ctx)
+        await self._fire_post_reply(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            user_content=user_content,
+            reply_content=full_reply,
+            elapsed_ms=elapsed * 1000,
+            thinker_action=thinker_action,
+            thinker_thought=thinker_thought,
+            tool_calls=tool_call_records,
+        )
         return last_seg
 
     # ------------------------------------------------------------------
@@ -1455,6 +2215,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         source: str,
         group_id: str | None,
+        user_id: str = "",
     ) -> tuple[str, int]:
         """Run a compact LLM call with an update_memo tool loop.
 
@@ -1468,17 +2229,28 @@ class LLMClient:
         acc_output = 0
         acc_cache_read = 0
         acc_cache_create = 0
+        acc_prompt_cache_hit = 0
+        acc_prompt_cache_miss = 0
+        acc_reasoning_replay = 0
         memo_writes = 0
 
         for round_i in range(_MAX_COMPACT_TOOL_ROUNDS):
-            result = await call_api(
-                self._session, self._base_url, self._api_key, self._model,
-                system, messages, max_tokens=1024, tools=tools,
+            result = await self._call_compact(
+                system,
+                messages,
+                max_tokens=1024,
+                tools=tools,
+                user_id=user_id,
+                group_id=group_id,
             )
             acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
             acc_output += result.get("output_tokens", 0)
             acc_cache_read += result.get("cache_read", 0)
             acc_cache_create += result.get("cache_create", 0)
+            round_cache_hit, round_cache_miss, round_reasoning_replay = _usage_observability_fields(result)
+            acc_prompt_cache_hit += round_cache_hit
+            acc_prompt_cache_miss += round_cache_miss
+            acc_reasoning_replay += round_reasoning_replay
 
             text: str = result["text"].strip()
             tool_uses: list[ToolUse] = result["tool_uses"]
@@ -1486,8 +2258,13 @@ class LLMClient:
             if not tool_uses:
                 self._record_usage(
                     call_type="compact", user_id="", group_id=group_id,
+                    model=self._profile_for_task("compact")[3],
+                    provider_kind=str(result.get("provider_kind", self._profile_for_task("compact")[4])),
                     input_tokens=acc_input, cache_read_tokens=acc_cache_read,
                     cache_create_tokens=acc_cache_create, output_tokens=acc_output,
+                    prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                    prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                    reasoning_replay_tokens=acc_reasoning_replay,
                     tool_rounds=round_i, elapsed_s=0.0,
                 )
                 return text, memo_writes
@@ -1538,18 +2315,30 @@ class LLMClient:
             messages.append({"role": "user", "content": tool_results})
 
         # Exhausted rounds — do a final call without tools to get summary
-        result = await call_api(
-            self._session, self._base_url, self._api_key, self._model,
-            system, messages, max_tokens=1024,
+        result = await self._call_compact(
+            system,
+            messages,
+            max_tokens=1024,
+            user_id=user_id,
+            group_id=group_id,
         )
         acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
         acc_output += result.get("output_tokens", 0)
         acc_cache_read += result.get("cache_read", 0)
         acc_cache_create += result.get("cache_create", 0)
+        round_cache_hit, round_cache_miss, round_reasoning_replay = _usage_observability_fields(result)
+        acc_prompt_cache_hit += round_cache_hit
+        acc_prompt_cache_miss += round_cache_miss
+        acc_reasoning_replay += round_reasoning_replay
         self._record_usage(
             call_type="compact", user_id="", group_id=group_id,
+            model=self._profile_for_task("compact")[3],
+            provider_kind=str(result.get("provider_kind", self._profile_for_task("compact")[4])),
             input_tokens=acc_input, cache_read_tokens=acc_cache_read,
             cache_create_tokens=acc_cache_create, output_tokens=acc_output,
+            prompt_cache_hit_tokens=acc_prompt_cache_hit,
+            prompt_cache_miss_tokens=acc_prompt_cache_miss,
+            reasoning_replay_tokens=acc_reasoning_replay,
             tool_rounds=_MAX_COMPACT_TOOL_ROUNDS, elapsed_s=0.0,
         )
         return result["text"].strip(), memo_writes
@@ -1610,7 +2399,7 @@ class LLMClient:
             source = f"compact:private:{session_id}"
             t_compact = time.monotonic()
             new_summary, memo_writes = await self._compact_with_tools(
-                system, compress_messages, source, group_id=None,
+                system, compress_messages, source, group_id=None, user_id=user_id,
             )
             compact_elapsed = time.monotonic() - t_compact
 
@@ -1750,5 +2539,3 @@ class LLMClient:
         except Exception:
             self._group_compact_failures += 1
             logger.exception("compact_group failed ({}/{})", self._group_compact_failures, self._max_compact_failures)
-
-

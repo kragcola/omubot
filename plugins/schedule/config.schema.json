@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用日程心情"
+    },
+    "storage_dir": {
+      "type": "string",
+      "title": "日程目录"
+    },
+    "generate_at_hour": {
+      "type": "integer",
+      "title": "每日生成小时",
+      "minimum": 0,
+      "maximum": 23
+    },
+    "mood_anomaly_chance": {
+      "type": "number",
+      "title": "心情异常概率",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "mood_refresh_minutes": {
+      "type": "integer",
+      "title": "心情刷新分钟",
+      "minimum": 5
+    }
+  }
+}

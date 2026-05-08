@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "knowledge",
+  "display_name": {
+    "zh": "知识库",
+    "en": "Knowledge"
+  },
+  "description": "知识库：扫描文档目录，关键词匹配注入对话上下文",
+  "version": "0.1.1",
+  "priority": 8,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "memory",
+  "permissions": [
+    "prompt",
+    "storage"
+  ],
+  "capabilities": [
+    "knowledge_retrieval"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "dir",
+      "max_chunks",
+      "recursive",
+      "include",
+      "exclude"
+    ]
+  },
+  "store": {
+    "visibility": "marketplace_ready",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

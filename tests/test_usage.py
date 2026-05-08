@@ -27,10 +27,14 @@ async def test_record_inserts_row(tracker: UsageTracker) -> None:
         user_id="12345",
         group_id=None,
         model="claude-sonnet-4-6",
+        provider_kind="deepseek",
         input_tokens=100,
         cache_read_tokens=50,
         cache_create_tokens=10,
         output_tokens=200,
+        prompt_cache_hit_tokens=50,
+        prompt_cache_miss_tokens=100,
+        reasoning_replay_tokens=12,
         tool_rounds=0,
         elapsed_s=1.5,
     )
@@ -40,10 +44,14 @@ async def test_record_inserts_row(tracker: UsageTracker) -> None:
     assert row["call_type"] == "chat"
     assert row["user_id"] == "12345"
     assert row["group_id"] is None
+    assert row["provider_kind"] == "deepseek"
     assert row["input_tokens"] == 100
     assert row["output_tokens"] == 200
     assert row["cache_read_tokens"] == 50
     assert row["cache_create_tokens"] == 10
+    assert row["prompt_cache_hit_tokens"] == 50
+    assert row["prompt_cache_miss_tokens"] == 100
+    assert row["reasoning_replay_tokens"] == 12
     assert row["tool_rounds"] == 0
     assert row["elapsed_s"] == pytest.approx(1.5)
     assert row["error"] is None
@@ -104,6 +112,8 @@ async def test_summary_today(tracker: UsageTracker) -> None:
     # total_input = sum(input + cache_read + cache_create) for each record
     assert summary["total_input_tokens"] == (100+50+10) + (150+80+20) + (200+100+30) + (50+30+5) + (80+0+0)
     assert summary["total_output_tokens"] == 200 + 300 + 400 + 100 + 50
+    assert summary["prompt_cache_hit_tokens"] == 0
+    assert summary["reasoning_replay_tokens"] == 0
 
 
 async def test_top_users(tracker: UsageTracker) -> None:

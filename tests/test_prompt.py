@@ -1,6 +1,7 @@
 import pytest
 
 from services.identity import Identity
+from services.llm.client import _append_tail_metadata
 from services.llm.prompt_builder import PromptBuilder, load_instruction
 from services.memory.card_store import CardStore, NewCard
 
@@ -30,6 +31,28 @@ def test_load_instruction_missing(tmp_path) -> None:
 def test_load_instruction_exists(tmp_path) -> None:
     (tmp_path / "instruction.md").write_text("Do things.")
     assert load_instruction(str(tmp_path)) == "Do things."
+
+
+def test_load_instruction_prefers_legacy_instruction_over_skill_md(tmp_path) -> None:
+    """Runtime instructions come only from instruction.md."""
+    (tmp_path / "SKILL.md").write_text("""\
+---
+name: Test
+description: desc
+---
+
+# 行为指令
+
+这是行为指令正文。
+""")
+    (tmp_path / "instruction.md").write_text("Use legacy instruction.")
+    assert load_instruction(str(tmp_path)) == "Use legacy instruction."
+
+
+def test_load_instruction_ignores_skill_md_without_instruction(tmp_path) -> None:
+    """SKILL.md alone is not a runtime instruction source."""
+    (tmp_path / "SKILL.md").write_text("# Plain markdown\n\nJust body text.")
+    assert load_instruction(str(tmp_path)) == ""
 
 
 def test_build_static_called_once(identity: Identity) -> None:
@@ -70,6 +93,45 @@ async def test_build_blocks_with_plugin_blocks(identity: Identity, store: CardSt
     assert blocks[1]["text"] == "static1"
     assert blocks[3]["text"] == "stable1"
     assert blocks[4]["text"] == "dynamic1"
+
+
+async def test_deepseek_native_dynamic_context_stays_out_of_stable_system_prefix(
+    identity: Identity,
+    store: CardStore,
+) -> None:
+    """DeepSeek native keeps dynamic context in tail metadata, not system prefix."""
+    pb = PromptBuilder(instruction="")
+    pb.build_static(identity, bot_self_id="999")
+    plugin_static = [{"type": "text", "text": "static plugin", "cache_control": {"type": "ephemeral"}}]
+    plugin_stable = [{"type": "text", "text": "stable plugin", "cache_control": {"type": "ephemeral"}}]
+
+    system_a = await pb.build_blocks(
+        user_id="100",
+        group_id="200",
+        card_store=store,
+        plugin_static=plugin_static,
+        plugin_stable=plugin_stable,
+        plugin_dynamic=None,
+        include_state_board=False,
+    )
+    system_b = await pb.build_blocks(
+        user_id="100",
+        group_id="200",
+        card_store=store,
+        plugin_static=plugin_static,
+        plugin_stable=plugin_stable,
+        plugin_dynamic=None,
+        include_state_board=False,
+    )
+    messages_a = [{"role": "user", "content": "这一轮问题"}]
+    messages_b = [{"role": "user", "content": "这一轮问题"}]
+    _append_tail_metadata(messages_a, [{"type": "text", "text": "【上下文资料】\n动态资料 A"}])
+    _append_tail_metadata(messages_b, [{"type": "text", "text": "【上下文资料】\n动态资料 B"}])
+
+    assert system_a == system_b
+    assert "动态资料 A" not in "\n".join(str(block.get("text", "")) for block in system_a)
+    assert "动态资料 B" not in "\n".join(str(block.get("text", "")) for block in system_b)
+    assert messages_a != messages_b
 
 
 async def test_static_block_shared_across_calls(identity: Identity, store: CardStore) -> None:

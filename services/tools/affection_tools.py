@@ -59,7 +59,7 @@ class SetNicknameTool(Tool):
         in_group = bool(ctx.group_id)
         try:
             if in_group:
-                self._engine.set_group_nickname(user_id, nickname)
+                self._engine.set_group_nickname(user_id, nickname, group_id=ctx.group_id)
             else:
                 self._engine.set_nickname(user_id, nickname)
             if suffix:

@@ -1,6 +1,42 @@
 {
+  "manifest_version": 3,
   "name": "schedule",
-  "description": "模拟日程：每日LLM生成，结合真实日期",
-  "version": "1.1.1",
-  "priority": 35
+  "display_name": {
+    "zh": "日程心情",
+    "en": "Schedule"
+  },
+  "description": "日程与心情：时间感知、心情注入、每日日程生成",
+  "version": "1.1.2",
+  "priority": 20,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "memory",
+  "permissions": [
+    "prompt",
+    "tick",
+    "storage",
+    "network"
+  ],
+  "capabilities": [
+    "mood",
+    "schedule"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "storage_dir",
+      "generate_at_hour",
+      "mood_anomaly_chance",
+      "mood_refresh_minutes"
+    ]
+  },
+  "store": {
+    "visibility": "marketplace_ready",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
 }

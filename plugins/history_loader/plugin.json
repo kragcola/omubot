@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "history_loader",
+  "display_name": {
+    "zh": "历史加载",
+    "en": "History Loader"
+  },
+  "description": "群聊历史加载：Bot 连接后回填近期消息",
+  "version": "1.1.1",
+  "priority": 5,
+  "tier": "system",
+  "toggle_policy": "locked",
+  "category": "core",
+  "permissions": [
+    "storage",
+    "network"
+  ],
+  "capabilities": [
+    "history_backfill"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "read_only",
+    "restart_required_fields": []
+  },
+  "store": {
+    "visibility": "internal",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

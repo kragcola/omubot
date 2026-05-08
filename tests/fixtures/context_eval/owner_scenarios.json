@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "description": "主人日常场景评测集：覆盖私聊/群聊作用域隔离、文档知识、图谱事实和无关问题。",
+  "cases": [
+    {
+      "id": "private-user-memory-scope",
+      "query": "蒸汽眼罩",
+      "user_id": "u_owner",
+      "group_id": null,
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 500,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "睡前使用蒸汽眼罩"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "本群采购蒸汽眼罩"
+        },
+        {
+          "contains": "其他群也在聊蒸汽眼罩"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0,
+      "notes": "私聊只应召回用户/全局记忆，不应串入群记忆。"
+    },
+    {
+      "id": "group-memory-scope-isolation",
+      "query": "跑团地下城",
+      "user_id": "u_owner",
+      "group_id": "g_table",
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 500,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "本群正在跑团地下城"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "个人跑团地下城剧透"
+        },
+        {
+          "contains": "其他群跑团地下城安排"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0,
+      "notes": "群聊应只召回当前群/全局记忆，不应串入同关键词的用户或其他群记忆。"
+    },
+    {
+      "id": "knowledge-doc-stable-prefix",
+      "query": "稳定前缀",
+      "user_id": "u_owner",
+      "group_id": "g_table",
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 600,
+      "required_hits": [
+        {
+          "type": "doc_chunk",
+          "contains": "DeepSeek V4 模式下，动态上下文必须进入 tail metadata"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "个人跑团地下城剧透"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0,
+      "notes": "知识库文档可独立召回，不应因为同轮群聊上下文带出无关私有记忆。"
+    },
+    {
+      "id": "graph-fact-admin-style",
+      "query": "雾青控制台",
+      "user_id": "u_owner",
+      "group_id": "g_table",
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 500,
+      "required_hits": [
+        {
+          "type": "graph_fact",
+          "contains": "雾青控制台"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "其他群跑团地下城安排"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0,
+      "notes": "图谱事实作为派生上下文召回，不能顺带污染 memory scope。"
+    },
+    {
+      "id": "unrelated-owner-query-no-fill",
+      "query": "随机天气预报",
+      "user_id": "u_owner",
+      "group_id": "g_table",
+      "top_k": 10,
+      "max_chars": 1400,
+      "max_pack_chars": 0,
+      "required_hits": [],
+      "forbidden_hits": [
+        {
+          "contains": "蒸汽眼罩"
+        },
+        {
+          "contains": "跑团地下城"
+        },
+        {
+          "contains": "稳定前缀"
+        },
+        {
+          "contains": "雾青控制台"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0,
+      "notes": "无关问题宁可不给上下文，也不要为了填满 Prompt 注入旧资料。"
+    }
+  ]
+}

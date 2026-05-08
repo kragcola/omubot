@@ -7,7 +7,7 @@ from typing import Any
 
 from loguru import logger
 
-from services.llm.provider import LLMProvider, ToolUse
+from services.llm.provider import LLMProvider, ThinkingMode, ToolUse, provider_mode
 
 _log = logger.bind(channel="api")
 
@@ -27,6 +27,12 @@ class OpenAIProvider(LLMProvider):
         self._base_url = base_url
         self._api_key = api_key
 
+    def request_url(self) -> str:
+        base = self._base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
     # ------------------------------------------------------------------
     # build_request
     # ------------------------------------------------------------------
@@ -38,14 +44,10 @@ class OpenAIProvider(LLMProvider):
         tools: list[dict[str, Any]] | None,
         max_tokens: int,
         model: str,
-        thinking: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        # Build OpenAI-format messages
-        oai_messages: list[dict[str, Any]] = []
-        for block in system_blocks:
-            if isinstance(block, dict) and block.get("type") == "text":
-                oai_messages.append({"role": "system", "content": block["text"]})
-        oai_messages.extend(messages)
+        thinking: ThinkingMode = None,
+        request_options: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
+        oai_messages = _to_openai_messages(system_blocks, messages)
 
         body: dict[str, Any] = {
             "model": model,
@@ -65,7 +67,12 @@ class OpenAIProvider(LLMProvider):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",
         }
-        return body, headers
+        return body, headers, {
+            "provider_kind": "openai",
+            "provider_mode": provider_mode("openai", self._base_url),
+            "payload_sanitized": False,
+            "reasoning_replay_tokens": 0,
+        }
 
     # ------------------------------------------------------------------
     # parse_sse_stream
@@ -91,6 +98,13 @@ class OpenAIProvider(LLMProvider):
                 data: dict[str, Any] = json.loads(payload)
             except json.JSONDecodeError:
                 continue
+
+            u = data.get("usage")
+            if isinstance(u, dict):
+                usage = {
+                    "input_tokens": u.get("prompt_tokens", 0),
+                    "output_tokens": u.get("completion_tokens", 0),
+                }
 
             choices: list[dict[str, Any]] = data.get("choices", [])
             if not choices:
@@ -132,14 +146,6 @@ class OpenAIProvider(LLMProvider):
                     if fn.get("arguments"):
                         buf["arguments"] += fn["arguments"]
 
-            # Usage (usually in final chunk)
-            u = data.get("usage")
-            if u:
-                usage = {
-                    "input_tokens": u.get("prompt_tokens", 0),
-                    "output_tokens": u.get("completion_tokens", 0),
-                }
-
         # Finalize tool calls
         for idx in sorted(tool_call_buf.keys()):
             buf = tool_call_buf[idx]
@@ -161,6 +167,10 @@ class OpenAIProvider(LLMProvider):
             "output_tokens": output_tokens,
             "cache_read": 0,
             "cache_create": 0,
+            "usage": usage,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": input_tokens,
+            "reasoning_tokens": 0,
         }
 
 
@@ -177,3 +187,80 @@ def _to_openai_tools(anthropic_tools: list[dict[str, Any]]) -> list[dict[str, An
             },
         })
     return oai_tools
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            parts.append(str(block.get("text", "")))
+        elif block_type in {"image", "image_ref"}:
+            parts.append("«图片»")
+    return "\n".join(part for part in parts if part)
+
+
+def _to_openai_messages(
+    system_blocks: list[dict[str, Any]],
+    messages: list[Any],
+) -> list[dict[str, Any]]:
+    """Convert Omubot's Anthropic-shaped history to OpenAI chat messages."""
+    oai_messages: list[dict[str, Any]] = []
+    for block in system_blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            oai_messages.append({"role": "system", "content": block["text"]})
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        if isinstance(content, list):
+            tool_calls: list[dict[str, Any]] = []
+            tool_results: list[dict[str, str]] = []
+            text_parts: list[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "text":
+                    text_parts.append(str(block.get("text", "")))
+                elif block_type == "tool_use":
+                    tool_calls.append({
+                        "id": str(block.get("id", "")),
+                        "type": "function",
+                        "function": {
+                            "name": str(block.get("name", "")),
+                            "arguments": json.dumps(block.get("input", {}) or {}, ensure_ascii=False),
+                        },
+                    })
+                elif block_type == "tool_result":
+                    tool_results.append({
+                        "role": "tool",
+                        "tool_call_id": str(block.get("tool_use_id", "")),
+                        "content": str(block.get("content", "")),
+                    })
+                elif block_type in {"image", "image_ref"}:
+                    text_parts.append("«图片»")
+
+            if tool_calls:
+                oai_messages.append({
+                    "role": "assistant",
+                    "content": "\n".join(part for part in text_parts if part) or None,
+                    "tool_calls": tool_calls,
+                })
+            elif text_parts:
+                oai_messages.append({"role": role, "content": "\n".join(part for part in text_parts if part)})
+            oai_messages.extend(tool_results)
+            continue
+
+        oai_messages.append({"role": role, "content": _content_text(content)})
+
+    return oai_messages

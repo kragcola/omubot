@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用复读检测"
+    },
+    "window_seconds": {
+      "type": "integer",
+      "title": "复读窗口秒数",
+      "minimum": 10,
+      "maximum": 3600
+    },
+    "threshold": {
+      "type": "integer",
+      "title": "触发次数",
+      "minimum": 2,
+      "maximum": 10
+    },
+    "break_text": {
+      "type": "string",
+      "title": "打断文本"
+    },
+    "break_chance": {
+      "type": "number",
+      "title": "打断概率",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "ignore_command_messages": {
+      "type": "boolean",
+      "title": "忽略命令消息",
+      "description": "开启后 / 开头的命令不会触发复读。"
+    }
+  }
+}

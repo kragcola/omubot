@@ -8,6 +8,8 @@ from typing import Any
 import aiosqlite
 from loguru import logger
 
+from services.storage import connect_sqlite
+
 _L = logger.bind(channel="debug")
 
 _CREATE_TABLE = """
@@ -48,8 +50,7 @@ class MessageLog:
 
     async def init(self) -> None:
         """Connect to SQLite and create table/index if needed."""
-        self._db = await aiosqlite.connect(self._db_path)
-        self._db.row_factory = aiosqlite.Row
+        self._db = await connect_sqlite(self._db_path)
         await self._db.execute(_CREATE_TABLE)
         for idx in _CREATE_INDEXES:
             await self._db.execute(idx)
@@ -103,6 +104,19 @@ class MessageLog:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in list(rows)[::-1]]
+
+    async def list_group_ids(self) -> list[str]:
+        """Return distinct group IDs seen in the log, excluding private sessions."""
+        if not self._db:
+            return []
+        cursor = await self._db.execute(
+            """SELECT DISTINCT group_id
+               FROM group_messages
+               WHERE group_id NOT LIKE 'session:%'
+               ORDER BY group_id"""
+        )
+        rows = await cursor.fetchall()
+        return [str(row["group_id"]) for row in rows]
 
     async def record_session_msg(
         self,

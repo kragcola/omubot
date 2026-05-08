@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "timezone": {
+      "type": "string",
+      "title": "时区",
+      "description": "用于时间工具展示的 IANA 时区，例如 Asia/Shanghai。"
+    },
+    "include_calendar_context": {
+      "type": "boolean",
+      "title": "包含节假日/特殊日",
+      "description": "开启后时间工具会补充节假日、生日和特殊日。"
+    },
+    "include_schedule": {
+      "type": "boolean",
+      "title": "包含当前日程",
+      "description": "开启后时间工具会补充当前日程段。"
+    }
+  }
+}

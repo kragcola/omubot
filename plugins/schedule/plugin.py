@@ -32,7 +32,7 @@ _L_sys = logger.bind(channel="system")
 class SchedulePlugin(AmadeusPlugin):
     name = "schedule"
     description = "日程与心情：时间感知、心情注入、每日日程生成"
-    version = "1.1.1"
+    version = "1.1.2"
     priority = 20
 
     def __init__(self) -> None:

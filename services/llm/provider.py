@@ -10,7 +10,7 @@ Provider implementations handle:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Literal
 
 
 class ToolUse:
@@ -54,12 +54,50 @@ def build_assistant_message(result: dict[str, Any]) -> list[dict[str, Any]]:
     return content
 
 
+ThinkingMode = Literal["default", "disabled"] | dict[str, Any] | None
+
+
+def normalize_thinking_mode(thinking: ThinkingMode) -> str:
+    """Normalize legacy/provider-specific thinking configs to a small core set."""
+    if thinking is None:
+        return "default"
+    if isinstance(thinking, str):
+        return "disabled" if thinking == "disabled" else "default"
+    thinking_type = str(thinking.get("type", "") or "").lower()
+    if thinking_type == "disabled":
+        return "disabled"
+    return "default"
+
+
+def provider_mode(api_format: str, base_url: str) -> str:
+    """Return a human-readable provider mode for diagnostics/UI."""
+    normalized = str(api_format or "anthropic").strip().lower()
+    url = str(base_url or "").strip().lower()
+    if normalized == "deepseek":
+        return "native-beta" if "/beta" in url else "native"
+    if normalized == "anthropic" and "api.deepseek.com/anthropic" in url:
+        return "anthropic-compat"
+    if normalized == "openai" and "api.deepseek.com" in url:
+        return "openai-compat"
+    return normalized
+
+
+def is_deepseek_v4_model(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    return normalized.startswith("deepseek-v4-")
+
+
 class LLMProvider(ABC):
     """Abstract LLM API provider.
 
     Each provider knows how to format requests and parse responses for a
     specific API format (Anthropic Messages, OpenAI Chat Completions, etc.).
     """
+
+    @abstractmethod
+    def request_url(self) -> str:
+        """Return the HTTP endpoint URL for this provider."""
+        ...
 
     @abstractmethod
     def build_request(
@@ -69,13 +107,17 @@ class LLMProvider(ABC):
         tools: list[dict[str, Any]] | None,
         max_tokens: int,
         model: str,
-        thinking: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        """Build (body, headers) for the HTTP POST request.
+        thinking: ThinkingMode = None,
+        request_options: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
+        """Build (body, headers, request_meta) for the HTTP POST request.
 
         Args:
-            thinking: Optional Anthropic-format thinking control
-                      (e.g. {"type": "disabled"} to suppress reasoning).
+            thinking: Provider-neutral thinking control with legacy dict
+                compatibility. Providers should at least honor "default" and
+                "disabled".
+            request_options: Provider-specific request hints, e.g. stable
+                hashed user_id, reasoning effort, or observability flags.
         """
         ...
 
@@ -99,6 +141,9 @@ class LLMProvider(ABC):
 
 def create_provider(api_format: str, base_url: str, api_key: str) -> LLMProvider:
     """Factory: create the correct provider for the configured API format."""
+    if api_format == "deepseek":
+        from services.llm.providers.deepseek import DeepSeekProvider
+        return DeepSeekProvider(base_url, api_key)
     if api_format == "openai":
         from services.llm.providers.openai import OpenAIProvider
         return OpenAIProvider(base_url, api_key)

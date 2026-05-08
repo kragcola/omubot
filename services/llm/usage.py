@@ -20,10 +20,14 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     user_id         TEXT,
     group_id        TEXT,
     model           TEXT    NOT NULL,
+    provider_kind   TEXT    NOT NULL DEFAULT '',
     input_tokens    INTEGER NOT NULL,
     cache_read_tokens  INTEGER NOT NULL,
     cache_create_tokens INTEGER NOT NULL,
     output_tokens   INTEGER NOT NULL,
+    prompt_cache_hit_tokens  INTEGER NOT NULL DEFAULT 0,
+    prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_replay_tokens  INTEGER NOT NULL DEFAULT 0,
     tool_rounds     INTEGER NOT NULL,
     elapsed_s       REAL    NOT NULL,
     error           TEXT
@@ -39,10 +43,11 @@ _CREATE_INDEXES = [
 
 _INSERT = """
 INSERT INTO llm_calls
-    (ts, call_type, user_id, group_id, model,
+    (ts, call_type, user_id, group_id, model, provider_kind,
      input_tokens, cache_read_tokens, cache_create_tokens, output_tokens,
+     prompt_cache_hit_tokens, prompt_cache_miss_tokens, reasoning_replay_tokens,
      tool_rounds, elapsed_s, error)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -64,6 +69,7 @@ class UsageTracker:
         self._db = await aiosqlite.connect(self._db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute(_CREATE_TABLE)
+        await self._ensure_schema()
         for idx in _CREATE_INDEXES:
             await self._db.execute(idx)
         await self._db.commit()
@@ -72,6 +78,22 @@ class UsageTracker:
         if self._db:
             await self._db.close()
             self._db = None
+
+    async def _ensure_schema(self) -> None:
+        if not self._db:
+            return
+        cursor = await self._db.execute("PRAGMA table_info(llm_calls)")
+        rows = await cursor.fetchall()
+        existing = {str(row["name"]) for row in rows}
+        additions = {
+            "provider_kind": "TEXT NOT NULL DEFAULT ''",
+            "prompt_cache_hit_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "prompt_cache_miss_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "reasoning_replay_tokens": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, ddl in additions.items():
+            if column not in existing:
+                await self._db.execute(f"ALTER TABLE llm_calls ADD COLUMN {column} {ddl}")
 
     def set_alert(
         self,
@@ -167,12 +189,16 @@ class UsageTracker:
         user_id: str | None,
         group_id: str | None,
         model: str,
-        input_tokens: int,
-        cache_read_tokens: int,
-        cache_create_tokens: int,
-        output_tokens: int,
-        tool_rounds: int,
-        elapsed_s: float,
+        provider_kind: str = "",
+        input_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_create_tokens: int = 0,
+        output_tokens: int = 0,
+        prompt_cache_hit_tokens: int = 0,
+        prompt_cache_miss_tokens: int = 0,
+        reasoning_replay_tokens: int = 0,
+        tool_rounds: int = 0,
+        elapsed_s: float = 0.0,
         error: str | None = None,
     ) -> None:
         if not self._db:
@@ -182,16 +208,20 @@ class UsageTracker:
         try:
             await self._db.execute(
                 _INSERT,
-                (ts, call_type, user_id, group_id, model,
+                (ts, call_type, user_id, group_id, model, provider_kind,
                  input_tokens, cache_read_tokens, cache_create_tokens, output_tokens,
+                 prompt_cache_hit_tokens, prompt_cache_miss_tokens, reasoning_replay_tokens,
                  tool_rounds, elapsed_s, error),
             )
             await self._db.commit()
             total_in = input_tokens + cache_read_tokens + cache_create_tokens
             hit_pct = f"{cache_read_tokens / total_in * 100:.0f}%" if total_in > 0 else "n/a"
             _L.info(
-                "usage | type={} user={} group={} in={} out={} cache_r={} cache_w={} hit={} rounds={} {:.1f}s{}",
-                call_type, user_id, group_id,
+                "usage | type={} provider={} user={} group={} in={} out={} cache_r={} cache_w={} hit={} rounds={} {:.1f}s{}",
+                call_type,
+                provider_kind or "unknown",
+                user_id,
+                group_id,
                 input_tokens, output_tokens, cache_read_tokens, cache_create_tokens,
                 hit_pct, tool_rounds, elapsed_s,
                 f" error={error}" if error else "",
@@ -230,6 +260,9 @@ class UsageTracker:
                 COALESCE(SUM(input_tokens), 0)        AS input_tokens,
                 COALESCE(SUM(cache_read_tokens), 0)    AS cache_read_tokens,
                 COALESCE(SUM(cache_create_tokens), 0)  AS cache_create_tokens,
+                COALESCE(SUM(prompt_cache_hit_tokens), 0)  AS prompt_cache_hit_tokens,
+                COALESCE(SUM(prompt_cache_miss_tokens), 0) AS prompt_cache_miss_tokens,
+                COALESCE(SUM(reasoning_replay_tokens), 0) AS reasoning_replay_tokens,
                 COALESCE(SUM(input_tokens + cache_read_tokens + cache_create_tokens), 0) AS total_input_tokens,
                 COALESCE(SUM(output_tokens), 0)        AS total_output_tokens,
                 COALESCE(SUM(CASE WHEN call_type='chat' THEN 1 ELSE 0 END), 0)      AS chat_calls,

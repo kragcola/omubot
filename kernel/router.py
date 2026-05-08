@@ -335,6 +335,18 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
     @driver.on_bot_connect
     async def _on_connect(bot: Bot) -> None:
+        protocol_connections = getattr(ctx, "protocol_connections", None)
+        if protocol_connections is not None and hasattr(protocol_connections, "record_connected"):
+            protocol_connections.record_connected(bot)
+
+        protocol_trace = getattr(ctx, "protocol_trace", None)
+        if (
+            protocol_trace is not None
+            and hasattr(protocol_trace, "wrap_bot")
+            and protocol_trace.wrap_bot(bot)
+        ):
+            _log_system.info("protocol trace wrapper installed | self_id={}", bot.self_id)
+
         ctx.llm_client._bot_self_id = bot.self_id
         ctx.state_board.bot_self_id = bot.self_id
         ctx.prompt_builder.build_static(ctx.identity_mgr.resolve(), bot_self_id=bot.self_id)
@@ -401,6 +413,15 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
         logger.info("Bot 就绪，开始接收消息 ✓")
 
+    if hasattr(driver, "on_bot_disconnect"):
+
+        @driver.on_bot_disconnect  # type: ignore[attr-defined]
+        async def _on_disconnect(bot: Bot) -> None:
+            protocol_connections = getattr(ctx, "protocol_connections", None)
+            if protocol_connections is not None and hasattr(protocol_connections, "record_disconnected"):
+                protocol_connections.record_disconnected(bot)
+            _log_system.warning("bot disconnected | self_id={}", getattr(bot, "self_id", "unknown"))
+
     # ---- group listener ----
 
     group_listener = on_message(priority=1, block=False)
@@ -453,8 +474,16 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         if await bus.fire_on_message(msg_ctx):
             return  # consumed by an interceptor plugin
 
-        # Extract bilibili reply hint (set by BilibiliPlugin on raw_message)
-        video_hint = msg_ctx.raw_message.get("_bilibili_reply")
+        # Build TriggerContext from plugin data or @-detection
+        trigger = msg_ctx.trigger  # set by BilibiliPlugin etc.
+        if trigger is None and is_addressed:
+            from kernel.types import TriggerContext
+            trigger = TriggerContext(
+                reason="有人@了你",
+                mode="at_mention",
+                target_message_id=event.message_id,
+                target_user_id=str(event.user_id),
+            )
 
         # Check slash commands before timeline/scheduler.
         # Cancel any pending debounce so a previous message's thinker doesn't
@@ -468,9 +497,10 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 is_private=False,
                 user_id=str(event.user_id),
                 group_id=group_id,
+                plugin_ctx=ctx,
             )
         ):
-            ctx.scheduler.cancel_debounce(group_id)
+            ctx.scheduler.clear_pending(group_id, cancel_running=plain_text.strip().startswith("/debug"))
             return
 
         content = await _render_message(
@@ -498,7 +528,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     content="@我",
                     message_id=event.message_id,
                 )
-                ctx.scheduler.notify(group_id, is_at=is_addressed, user_id=str(event.user_id), video_hint=video_hint)
+                ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))
             return
 
         preview = content if isinstance(content, str) else "".join(
@@ -516,7 +546,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             content=content,
             message_id=event.message_id,
         )
-        ctx.scheduler.notify(group_id, is_at=is_addressed, user_id=str(event.user_id), video_hint=video_hint)
+        ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))
 
     # ---- group ban notice ----
 
@@ -584,6 +614,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 is_private=True,
                 user_id=str(event.user_id),
                 group_id=None,
+                plugin_ctx=ctx,
             )
         ):
             return

@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "description": "最小上下文评测集：覆盖 memory/doc/graph 命中、禁入内容与重复注入闸门。",
+  "cases": [
+    {
+      "id": "user-memory-and-deploy-doc",
+      "query": "Docker Compose",
+      "user_id": "123",
+      "group_id": null,
+      "top_k": 10,
+      "max_chars": 1200,
+      "max_pack_chars": 600,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "喜欢 Docker Compose 部署方式"
+        },
+        {
+          "type": "doc_chunk",
+          "contains": "Docker Compose 启动 Omubot"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "不要注入的私密内容"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0,
+      "notes": "ContextPlugin 接管前必须证明用户记忆和文档 chunk 都能被统一召回。"
+    },
+    {
+      "id": "group-graph-fact",
+      "query": "音游",
+      "user_id": "123",
+      "group_id": "456",
+      "top_k": 10,
+      "max_chars": 1200,
+      "max_pack_chars": 300,
+      "required_hits": [
+        {
+          "type": "graph_fact",
+          "contains": "音游"
+        }
+      ],
+      "forbidden_hits": [],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0,
+      "notes": "图谱事实必须以派生上下文进入调试结果，但不能替代 CardStore。"
+    },
+    {
+      "id": "unrelated-query-no-context",
+      "query": "完全无关的天气预报",
+      "user_id": "123",
+      "group_id": "456",
+      "top_k": 10,
+      "max_chars": 1200,
+      "max_pack_chars": 0,
+      "required_hits": [],
+      "forbidden_hits": [
+        {
+          "contains": "Docker Compose"
+        },
+        {
+          "contains": "音游"
+        },
+        {
+          "contains": "不要注入的私密内容"
+        }
+      ],
+      "required_recall": 1.0,
+      "max_duplicate_hits": 0,
+      "notes": "无关问题不应为了填充上下文而误召记忆、文档或图谱事实。"
+    }
+  ]
+}
