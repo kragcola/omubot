@@ -4,6 +4,59 @@
 
 ---
 
+## 2026-05-14 阶段 3 第二个视图：LogsView 重构
+
+**变更类型**：frontend / UX
+
+**内容**：
+
+阶段 3 清单里剩 LogsView（606 行）/ LoginView（431 行）/ GroupsView（1833 行）。今天做 LogsView，跳过 LoginView（已用 AppCard + TheLogo 自带设计稿，改动空间小），GroupsView 量大需子组件拆分留到下一轮。
+
+### LogsView 重构要点
+
+[admin/frontend/src/views/logs/LogsView.vue](admin/frontend/src/views/logs/LogsView.vue)：606 → **583 行**（净减 23 行，但组件复用度大幅提升）。
+
+- 实时流渲染改用公共组件 [LogPanel](admin/frontend/src/components/common/LogPanel.vue) —— 删掉 60 行手写 `<div v-for>` / autoscroll / stick-to-bottom 实现；LogPanel 负责渲染+自动滚+暂停；视图层只负责筛选+快照冻结
+- 文件模式保留 `<pre>` 渲染（LogPanel 针对结构化 entry，不适合纯文本尾部查看）
+- 左右栏物理顺序改为「主栏在前 → 侧栏在后」，删 CSS `order: 1/2` 反转 hack
+- 状态徽章统一换为 [StateBadge](admin/frontend/src/components/common/StateBadge.vue)（SSE 在线 / 文件模式 / 实时流模式）
+- 按钮改 `size="small"`，与 PageToolbar 节奏一致
+- LogsView 从"自给自足"变成"消费公共组件"，后续 LogPanel 有任何增强（高亮、过滤、虚拟滚）只改一处
+
+### 行为零回归
+
+- 实时流 SSE 继续消费 `useSSE()`
+- paused 逻辑：`paused=true` 时把当前 sseLogs 冻结到 pausedSnapshot（LogPanel 只负责停止 autoscroll，不冻结数据，快照由视图层管理）
+- 等级筛选 + channel/message 搜索沿用原实现
+- 清屏 / 切换文件 / 重新读取 / 返回实时流 四个按钮行为一致
+- 文件模式最近 500 行读取逻辑不动
+
+### 验证
+
+- `vue-tsc --noEmit` → 0 error
+- `vite build` → 4.80s
+- `docker compose up bot -d --build` 成功，bot 正常就绪
+- 浏览器手动验证留给用户：SSE 流是否正常滚、暂停后能否看到冻结、文件模式 pre 渲染正常、浅深主题无塌陷
+
+### 不做的
+
+- **LoginView 不动** — 它已经用 AppCard + TheLogo，设计稿完成度高，没有冗余组件需要替换，改了收益低
+- **GroupsView（1833 行）** — 需子组件拆分（GroupsToolbar / GroupsList / GroupsDetailDrawer / GroupsActions），单次改动风险大。留到下一轮用 codex 协同 spec 批量推
+
+**影响范围**：
+
+- 仅 LogsView.vue 一个文件
+- 前端零 API 改动、零后端影响
+- LogPanel 组件本身未改
+
+**下一步**：
+
+- 用户视觉验收 LogsView
+- 通过后启动 GroupsView 子组件拆分，采用「先写 spec → 子组件分片做」的方式
+- LoginView 如果后续要改，单独立项
+
+---
+
 ## 2026-05-14 codex 协同流程干跑验证 + 修三个 spec 漏洞
 
 **变更类型**：process / docs

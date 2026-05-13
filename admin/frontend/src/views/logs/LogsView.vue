@@ -6,14 +6,18 @@ import {
   PulseOutline,
   RefreshOutline,
   TerminalOutline,
+  TrashOutline,
 } from '@vicons/ionicons5'
 
 import { api } from '../../api/client'
 import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
+import LogPanel from '../../components/common/LogPanel.vue'
+import type { LogPanelLine } from '../../components/common/LogPanel.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
 import RestartBotButton from '../../components/common/RestartBotButton.vue'
+import StateBadge from '../../components/common/StateBadge.vue'
 import { useSSE, type SSELogEntry } from '../../composables/useSSE'
 
 const files = ref<string[]>([])
@@ -43,7 +47,7 @@ const levelOptions = [
 const currentStream = computed(() => (paused.value ? pausedSnapshot.value : sseLogs.value))
 const isLiveMode = computed(() => !selectedFile.value)
 
-const filteredLogs = computed(() => {
+const filteredEntries = computed(() => {
   let list = currentStream.value
   if (filterLevel.value) list = list.filter(log => log.level === filterLevel.value)
   if (searchText.value.trim()) {
@@ -55,6 +59,16 @@ const filteredLogs = computed(() => {
   }
   return list.slice(-120)
 })
+
+const logPanelLines = computed<LogPanelLine[]>(() =>
+  filteredEntries.value.map((entry, idx) => ({
+    id: `${entry.ts}-${idx}`,
+    level: logLevel(entry.level),
+    timestamp: entry.ts,
+    channel: entry.channel || 'runtime',
+    text: entry.message,
+  })),
+)
 
 const sourceSummary = computed(() => {
   if (selectedFile.value) {
@@ -124,11 +138,12 @@ function togglePause() {
   paused.value = !paused.value
 }
 
-function logType(level: string) {
+function logLevel(level: string): LogPanelLine['level'] {
   if (level === 'ERROR') return 'error'
   if (level === 'WARNING') return 'warning'
-  if (level === 'INFO') return 'info'
-  return 'default'
+  if (level === 'SUCCESS') return 'success'
+  if (level === 'DEBUG') return 'debug'
+  return 'info'
 }
 </script>
 
@@ -140,9 +155,11 @@ function logType(level: string) {
   >
     <template #action>
       <NSpace align="center" :size="12">
-        <NTag round size="small" :type="connected ? 'success' : 'error'">
-          {{ connected ? 'SSE 在线' : 'SSE 断开' }}
-        </NTag>
+        <StateBadge
+          :status="connected ? 'success' : 'error'"
+          :label="connected ? 'SSE 在线' : 'SSE 断开'"
+          compact
+        />
         <NButton secondary :loading="refreshing" @click="loadLogFiles">
           <template #icon>
             <NIcon :component="RefreshOutline" />
@@ -155,141 +172,102 @@ function logType(level: string) {
 
     <div class="om-fill-page">
       <div class="logs-layout om-fill-page__body">
-        <AppCard bordered elevated class="logs-sources om-fill-card">
-        <div class="logs-sources__head">
-          <div>
-            <p class="logs-sources__eyebrow">
-              Archived Files
-            </p>
-            <h3 class="logs-sources__title">
-              历史文件
-            </h3>
-          </div>
-          <NTag size="small">
-            {{ files.length }} 个文件
-          </NTag>
-        </div>
-
-        <button
-          type="button"
-          class="logs-source logs-source--live"
-          :class="{ 'logs-source--active': isLiveMode }"
-          @click="switchToLive"
-        >
-          <div class="logs-source__icon">
-            <NIcon :component="PulseOutline" />
-          </div>
-          <div class="logs-source__copy">
-            <strong>实时流</strong>
-            <span>{{ connected ? '通过 SSE 接收最新日志' : '等待 SSE 恢复' }}</span>
-          </div>
-        </button>
-
-        <div v-if="loading" class="logs-source-list">
-          <NSkeleton :repeat="6" text />
-        </div>
-
-        <div v-else-if="files.length > 0" class="logs-source-list cus-scroll om-fill-scroll">
-          <button
-            v-for="file in files"
-            :key="file"
-            type="button"
-            class="logs-source"
-            :class="{ 'logs-source--active': selectedFile === file }"
-            @click="openFile(file)"
-          >
-            <div class="logs-source__icon">
-              <NIcon :component="DocumentTextOutline" />
-            </div>
-            <div class="logs-source__copy">
-              <strong>{{ file }}</strong>
-              <span>{{ selectedFile === file && totalLines ? `${totalLines} 行已载入` : '按需查看最近 500 行' }}</span>
-            </div>
-          </button>
-        </div>
-
-        <EmptyState
-          v-else
-          compact
-          title="还没有发现日志文件"
-          description="当前日志目录下没有可读取的 .log 或 .txt 文件。实时流仍可继续查看。"
-          :icon="DocumentTextOutline"
-        />
-        </AppCard>
-
+        <!-- ============ Main: live stream or file viewer ============ -->
         <AppCard bordered elevated class="logs-main om-fill-card">
-        <div class="logs-main__head">
-          <div>
-            <p class="logs-main__eyebrow">
-              Terminal View
-            </p>
-            <h3 class="logs-main__title">
-              {{ isLiveMode ? '实时终端流' : '文件尾部视图' }}
-            </h3>
+          <div class="logs-main__head">
+            <div>
+              <p class="logs-main__eyebrow">
+                Terminal View
+              </p>
+              <h3 class="logs-main__title">
+                {{ isLiveMode ? '实时终端流' : '文件尾部视图' }}
+              </h3>
+            </div>
+            <StateBadge
+              :status="isLiveMode ? 'info' : 'default'"
+              :label="sourceSummary"
+              compact
+            />
           </div>
-          <NTag size="small">
-            {{ sourceSummary }}
-          </NTag>
-        </div>
 
-        <PageToolbar>
-          <template #left>
+          <PageToolbar>
+            <template #left>
+              <template v-if="isLiveMode">
+                <NSelect
+                  v-model:value="filterLevel"
+                  :options="levelOptions"
+                  size="small"
+                  style="width: 132px"
+                />
+                <NInput
+                  v-model:value="searchText"
+                  clearable
+                  size="small"
+                  placeholder="搜索消息或 channel"
+                  style="width: min(260px, 100%)"
+                />
+              </template>
+              <template v-else>
+                <StateBadge status="info" label="文件模式" compact />
+                <span class="logs-toolbar-text">{{ selectedFile }}</span>
+                <span v-if="lastUpdatedAt" class="logs-toolbar-text">更新于 {{ lastUpdatedAt }}</span>
+              </template>
+            </template>
+
+            <template #right>
+              <template v-if="isLiveMode">
+                <NButton size="small" secondary @click="togglePause">
+                  <template #icon>
+                    <NIcon :component="paused ? PlayOutline : PauseOutline" />
+                  </template>
+                  {{ paused ? '继续流' : '暂停流' }}
+                </NButton>
+                <NButton size="small" secondary @click="clearLiveStream">
+                  <template #icon>
+                    <NIcon :component="TrashOutline" />
+                  </template>
+                  清屏
+                </NButton>
+              </template>
+              <template v-else>
+                <NButton size="small" secondary :loading="viewing" @click="openFile(selectedFile)">
+                  <template #icon>
+                    <NIcon :component="RefreshOutline" />
+                  </template>
+                  重新读取
+                </NButton>
+                <NButton size="small" secondary @click="switchToLive">
+                  返回实时流
+                </NButton>
+              </template>
+            </template>
+          </PageToolbar>
+
+          <div class="logs-body om-fill-scroll">
+            <!-- Live mode: use LogPanel -->
             <template v-if="isLiveMode">
-              <NSelect
-                v-model:value="filterLevel"
-                :options="levelOptions"
-                style="width: 132px"
+              <LogPanel
+                v-if="logPanelLines.length"
+                :lines="logPanelLines"
+                height="100%"
+                :paused="paused"
+                :icon="TerminalOutline"
+                class="logs-logpanel"
+                empty="实时流暂无新事件"
               />
-              <NInput
-                v-model:value="searchText"
-                clearable
-                placeholder="搜索消息或 channel"
-                style="width: min(260px, 100%)"
+              <EmptyState
+                v-else
+                :title="filterLevel || searchText ? '当前筛选下没有事件' : '实时终端还没有内容'"
+                :description="connected
+                  ? (filterLevel || searchText ? '调整等级或搜索词，或清空筛选条件。' : '事件流已连接，新的日志会在这里持续滚动。')
+                  : 'SSE 暂未连接，请确认后端事件流接口可用。'"
+                :icon="TerminalOutline"
               />
             </template>
-            <template v-else>
-              <NTag size="small" type="info">
-                文件模式
-              </NTag>
-              <span class="logs-toolbar-text">
-                {{ selectedFile }}
-              </span>
-              <span class="logs-toolbar-text" v-if="lastUpdatedAt">
-                更新于 {{ lastUpdatedAt }}
-              </span>
-            </template>
-          </template>
 
-          <template #right>
-            <template v-if="isLiveMode">
-              <NButton secondary @click="togglePause">
-                <template #icon>
-                  <NIcon :component="paused ? PlayOutline : PauseOutline" />
-                </template>
-                {{ paused ? '继续流' : '暂停流' }}
-              </NButton>
-              <NButton secondary @click="clearLiveStream">
-                清屏
-              </NButton>
-            </template>
-            <template v-else>
-              <NButton secondary :loading="viewing" @click="openFile(selectedFile)">
-                <template #icon>
-                  <NIcon :component="RefreshOutline" />
-                </template>
-                重新读取
-              </NButton>
-              <NButton secondary @click="switchToLive">
-                返回实时流
-              </NButton>
-            </template>
-          </template>
-        </PageToolbar>
-
-        <div class="logs-terminal-wrap om-fill-scroll">
-          <NSpin :show="viewing" class="logs-spin">
-            <div class="logs-terminal cus-scroll">
-              <template v-if="!isLiveMode && content">
+            <!-- File mode: raw pre -->
+            <NSpin v-else :show="viewing" class="logs-spin">
+              <div v-if="content" class="logs-terminal cus-scroll">
                 <div class="logs-terminal__bar">
                   <span class="logs-terminal__bar-dot logs-terminal__bar-dot--red" />
                   <span class="logs-terminal__bar-dot logs-terminal__bar-dot--yellow" />
@@ -299,38 +277,13 @@ function logType(level: string) {
                   </span>
                 </div>
                 <pre class="logs-terminal__file">{{ content }}</pre>
-              </template>
-
-              <template v-else-if="!isLiveMode && fileError">
-                <EmptyState
-                  title="日志文件读取失败"
-                  :description="fileError"
-                  :icon="DocumentTextOutline"
-                />
-              </template>
-
-              <template v-else-if="isLiveMode && filteredLogs.length > 0">
-                <div
-                  v-for="(log, index) in filteredLogs"
-                  :key="`${log.ts}-${log.message}-${index}`"
-                  class="logs-line"
-                >
-                  <span class="logs-line__time">{{ log.ts }}</span>
-                  <NTag size="tiny" :type="logType(log.level)" class="logs-line__level">
-                    {{ log.level }}
-                  </NTag>
-                  <span class="logs-line__channel">
-                    {{ log.channel || 'runtime' }}
-                  </span>
-                  <span class="logs-line__message">{{ log.message }}</span>
-                </div>
-              </template>
+              </div>
 
               <EmptyState
-                v-else-if="isLiveMode"
-                title="实时终端还没有内容"
-                :description="connected ? '事件流已连接，新的日志会在这里持续滚动。' : 'SSE 暂未连接，请确认后端事件流接口可用。'"
-                :icon="TerminalOutline"
+                v-else-if="fileError"
+                title="日志文件读取失败"
+                :description="fileError"
+                :icon="DocumentTextOutline"
               />
 
               <EmptyState
@@ -339,9 +292,69 @@ function logType(level: string) {
                 description="这个日志文件可能是空的，或者最近 500 行没有可读取文本。"
                 :icon="DocumentTextOutline"
               />
+            </NSpin>
+          </div>
+        </AppCard>
+
+        <!-- ============ Sidebar: source picker ============ -->
+        <AppCard bordered elevated class="logs-sources om-fill-card">
+          <div class="logs-sources__head">
+            <div>
+              <p class="logs-sources__eyebrow">
+                Sources
+              </p>
+              <h3 class="logs-sources__title">
+                日志来源
+              </h3>
             </div>
-          </NSpin>
-        </div>
+            <StateBadge :label="`${files.length + 1}`" compact />
+          </div>
+
+          <button
+            type="button"
+            class="logs-source logs-source--live"
+            :class="{ 'logs-source--active': isLiveMode }"
+            @click="switchToLive"
+          >
+            <div class="logs-source__icon">
+              <NIcon :component="PulseOutline" />
+            </div>
+            <div class="logs-source__copy">
+              <strong>实时流</strong>
+              <span>{{ connected ? '通过 SSE 接收最新日志' : '等待 SSE 恢复' }}</span>
+            </div>
+          </button>
+
+          <div v-if="loading" class="logs-source-list">
+            <NSkeleton :repeat="6" text />
+          </div>
+
+          <div v-else-if="files.length > 0" class="logs-source-list cus-scroll om-fill-scroll">
+            <button
+              v-for="file in files"
+              :key="file"
+              type="button"
+              class="logs-source"
+              :class="{ 'logs-source--active': selectedFile === file }"
+              @click="openFile(file)"
+            >
+              <div class="logs-source__icon">
+                <NIcon :component="DocumentTextOutline" />
+              </div>
+              <div class="logs-source__copy">
+                <strong>{{ file }}</strong>
+                <span>{{ selectedFile === file && totalLines ? `${totalLines} 行已载入` : '按需查看最近 500 行' }}</span>
+              </div>
+            </button>
+          </div>
+
+          <EmptyState
+            v-else
+            compact
+            title="没有历史日志文件"
+            description="当前日志目录下没有可读取的 .log 或 .txt 文件。"
+            :icon="DocumentTextOutline"
+          />
         </AppCard>
       </div>
     </div>
@@ -351,37 +364,34 @@ function logType(level: string) {
 <style scoped>
 .logs-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) 280px;
+  grid-template-columns: minmax(0, 1fr) 280px;
   gap: 16px;
   min-height: 0;
 }
 
-.logs-sources,
-.logs-main {
+.logs-main,
+.logs-sources {
   min-height: 0;
   padding: 20px;
 }
 
 .logs-main {
-  order: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
-.logs-sources {
-  order: 2;
-}
-
-.logs-sources__head,
-.logs-main__head {
+.logs-main__head,
+.logs-sources__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 18px;
 }
 
-.logs-sources__eyebrow,
-.logs-main__eyebrow {
-  margin: 0 0 8px;
+.logs-main__eyebrow,
+.logs-sources__eyebrow {
+  margin: 0 0 6px;
   color: var(--om-text-3);
   font-size: 11px;
   font-weight: 700;
@@ -389,111 +399,32 @@ function logType(level: string) {
   text-transform: uppercase;
 }
 
-.logs-sources__title,
-.logs-main__title {
+.logs-main__title,
+.logs-sources__title {
   margin: 0;
   color: var(--om-text-1);
   font-size: 18px;
   font-weight: 700;
 }
 
-.logs-source-list {
-  display: grid;
-  gap: 10px;
+.logs-body {
+  flex: 1;
   min-height: 0;
-  padding-right: 2px;
-}
-
-.logs-source {
-  display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
-  width: 100%;
-  padding: 14px;
-  border: 1px solid var(--om-border);
-  border-radius: 16px;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    border-color 0.18s ease,
-    background-color 0.18s ease,
-    transform 0.18s ease,
-    box-shadow 0.18s ease;
-}
-
-.logs-source:hover {
-  transform: translateY(-1px);
-  border-color: var(--om-border-strong);
-  background: var(--om-surface-2);
-}
-
-.logs-source--active {
-  border-color: rgba(var(--primary-color), 0.42);
-  background: rgba(var(--primary-color), 0.1);
-  box-shadow: inset 0 0 0 1px rgba(var(--primary-color), 0.08);
-}
-
-.logs-source--live {
-  margin-bottom: 12px;
-}
-
-.logs-source__icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 14px;
-  background: rgba(var(--primary-color), 0.12);
-  color: rgb(var(--primary-color));
-}
-
-.logs-source__copy {
-  min-width: 0;
-}
-
-.logs-source__copy strong {
-  display: block;
-  overflow: hidden;
-  color: var(--om-text-1);
-  font-size: 14px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.logs-source__copy span {
-  display: block;
-  margin-top: 6px;
-  color: var(--om-text-2);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.logs-toolbar-text {
-  color: var(--om-text-2);
-  font-size: 13px;
-}
-
-.logs-terminal-wrap {
-  margin-top: 16px;
   display: flex;
-  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.logs-terminal {
+.logs-logpanel {
+  flex: 1;
   min-height: 0;
-  height: 100%;
-  padding: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 20px;
-  background:
-    linear-gradient(180deg, rgba(21, 32, 38, 0.96), rgba(13, 21, 26, 0.98));
-  color: #dce7ea;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+}
+
+.logs-logpanel :deep(.log-panel__body) {
+  flex: 1;
+  min-height: 0;
 }
 
 .logs-spin {
@@ -503,6 +434,17 @@ function logType(level: string) {
 
 .logs-spin:deep(.n-spin-content) {
   height: 100%;
+}
+
+.logs-terminal {
+  height: 100%;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(21, 32, 38, 0.96), rgba(13, 21, 26, 0.98));
+  color: #dce7ea;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  overflow: auto;
 }
 
 .logs-terminal__bar {
@@ -549,40 +491,81 @@ function logType(level: string) {
   word-break: break-word;
 }
 
-.logs-line {
+.logs-toolbar-text {
+  color: var(--om-text-2);
+  font-size: 13px;
+}
+
+.logs-source-list {
   display: grid;
-  grid-template-columns: 86px 86px 120px minmax(0, 1fr);
   gap: 10px;
-  align-items: start;
-  padding: 6px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-  font-family: ui-monospace, SFMono-Regular, Monaco, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.7;
+  min-height: 0;
+  padding-right: 2px;
 }
 
-.logs-line:last-child {
-  border-bottom: 0;
+.logs-source {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--om-border);
+  border-radius: 14px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease, transform 0.18s ease;
 }
 
-.logs-line__time {
-  color: rgba(220, 231, 234, 0.54);
+.logs-source:hover {
+  transform: translateY(-1px);
+  border-color: var(--om-border-strong);
+  background: var(--om-surface-2);
 }
 
-.logs-line__level {
-  justify-self: start;
+.logs-source--active {
+  border-color: color-mix(in srgb, rgb(var(--primary-color)) 45%, var(--om-border));
+  background: color-mix(in srgb, rgb(var(--primary-color)) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, rgb(var(--primary-color)) 12%, transparent);
 }
 
-.logs-line__channel {
+.logs-source--live {
+  margin-bottom: 10px;
+}
+
+.logs-source__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: color-mix(in srgb, rgb(var(--primary-color)) 14%, transparent);
+  color: rgb(var(--primary-color));
+}
+
+.logs-source__copy {
+  min-width: 0;
+}
+
+.logs-source__copy strong {
+  display: block;
   overflow: hidden;
-  color: rgba(220, 231, 234, 0.68);
+  color: var(--om-text-1);
+  font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.logs-line__message {
-  color: #dce7ea;
-  word-break: break-word;
+.logs-source__copy span {
+  display: block;
+  margin-top: 4px;
+  color: var(--om-text-2);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 @media (max-width: 1024px) {
@@ -592,15 +575,9 @@ function logType(level: string) {
 }
 
 @media (max-width: 760px) {
-  .logs-line {
-    grid-template-columns: 1fr;
-    gap: 6px;
-    padding: 10px 0;
-  }
-
-  .logs-sources,
-  .logs-main {
-    padding: 18px;
+  .logs-main,
+  .logs-sources {
+    padding: 16px;
   }
 }
 </style>
