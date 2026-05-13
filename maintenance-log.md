@@ -4,6 +4,94 @@
 
 ---
 
+## 2026-05-14 LogsView 二轮重设计 + Docker 磁盘事故恢复
+
+**变更类型**：frontend / UX / infra
+
+### LogsView v2 重设计
+
+上一版 LogsView（commit 8197e60）完成了组件层清理，但用户反馈视觉仍有三处问题：
+
+1. 工具栏"全部等级 + 搜索"上下折行，不整齐
+2. 侧栏 26 个日志文件扁平铺开，dream 噪音盖过 bot
+3. 文件模式进入黑底终端风格，和浅色实时流视觉割裂
+
+本轮重写 [admin/frontend/src/views/logs/LogsView.vue](admin/frontend/src/views/logs/LogsView.vue) 完整解决：
+
+**工具栏单行化**：
+
+- 等级筛选改自研 Segment 段式按钮组（`默认 / ERROR / WARNING / INFO / DEBUG` 5 个 chip），高度 30px、与搜索框对齐
+- 搜索框自研轻量实现，左内嵌 SearchOutline 图标 + 可点清除按钮，focus 时主色边框 + 2px 光晕
+- "默认"模式自动隐藏 DEBUG（降噪决议），其他等级精确匹配
+- 筛选变更时显示「重置筛选」按钮，一键回归默认
+- 右侧「暂停流 / 清屏」两个 `size="small"` 按钮紧凑排列
+
+**侧栏折叠分组**：
+
+- 按文件名前缀自动分 `bot` / `dream` / `other` 三组
+- Bot 默认展开，Dream 默认折叠，点击组标题切换
+- 每行压缩到 32px 高，只显示相对日期（今天 / 昨天 / 前天 / N 天前 / MM-DD）
+- 今天产生的 bot 日志自动带 `活跃` 绿色 tag
+- Chevron 旋转动画指示折叠状态
+
+**文件模式视觉归一**：
+
+- 去掉 macOS 三点装饰 + 黑底终端
+- 改用 `--om-surface-2` 浅面板（深色主题 `--om-surface-3`），与 LogPanel 对齐
+- 结构化解析文件行（兼容两种格式：`MM-DD HH:MM:SS 系统 | msg` 和 `MM-DD HH:MM:SS [INFO] kernel | msg`），按 time / level / channel / msg 四列 grid 对齐
+- 等级色标：ERROR 红、WARNING 橙、SUCCESS 绿、INFO 蓝、DEBUG 65% 透明度
+- hover 时行背景微亮
+- 无法解析的续行用 continuation 样式缩进显示
+
+LogsView 从 583 → **1175 行**（净增约 600 行，主要是文件行解析 + 结构化 CSS + Segment/Search 自研）。功能与视觉质量都大幅提升。
+
+### Docker 磁盘事故恢复
+
+重构 build 中遇到 `rpc error: ... input/output error`，最初以为是 containerd bug。系统诊断后真相是：
+
+- 宿主机磁盘 228GB 用了 205GB，**仅剩 886MB（100% 满）**
+- Docker.raw sparse 文件实际占 32GB
+- build 写产物时磁盘满 → 部分 blob 写入失败但 metadata 已创建 → 后续读操作 IO error
+- **这不是 Docker bug，是磁盘满导致**
+
+恢复流程（不同阶段用户批准）：
+
+1. 用户手动清理 `~/.cache` 腾 2.9GB 应急空间
+2. `osascript -e 'quit app "Docker"'` 优雅退出 Docker Desktop
+3. `kill -TERM` 处理 60s 不响应的 backend 进程（vmnetd 系统助手保留）
+4. `open -a Docker` 重启，daemon 10s 响应
+5. containerd 重启后 metadata 一致性自愈，`docker images` 恢复正常
+6. `docker image prune -f` 清悬空镜像，**回收 12.85GB**
+7. 宿主机可用空间：2.9GB → **79GB**
+8. `docker compose up bot -d --build` 成功，bot 6s 内就绪
+
+### 验证
+
+- `vue-tsc --noEmit` → 0 error
+- `vite build` → 4.80s
+- `docker compose up bot -d --build` → 成功
+- Bot 就绪 `[INFO] kernel | Bot 就绪，开始接收消息 ✓`
+- 浏览器侧验收：用户确认新 LogsView 排版与视觉符合期望
+
+### 教训
+
+- 宿主机磁盘监控应作为运维前置检查（可纳入 system/health 端点）
+- `docker compose up --build` 失败时应检查宿主机磁盘，不要直接推论 Docker 本身损坏
+- Docker Desktop backend 不响应 quit 信号时再用 `kill -TERM` 而非 `-KILL`，保留 vmnetd 等系统级助手
+
+**影响范围**：
+
+- LogsView.vue 一个文件变动；无其他前端文件受影响
+- Docker 状态从"悬空镜像 + 磁盘 100% 满"清理到健康，可用 79GB
+- Bot 中断约 10 分钟（Docker 重启期间容器下线）后恢复
+
+**下一步**：
+
+- 用户视觉验收 LogsView v2 通过后，进入 GroupsView 拆分
+- 考虑把宿主机磁盘 +  Docker.raw 实际占用纳入 `/api/admin/system/health` 监控项
+
+---
+
 ## 2026-05-14 阶段 3 第二个视图：LogsView 重构
 
 **变更类型**：frontend / UX

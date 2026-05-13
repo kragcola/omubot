@@ -232,7 +232,9 @@ storage/
     1. 第一版重构：Hero 压缩 + 3 主 KPI + 24h 调用曲线 + 近 7 天活跃群 Top 5 + 待处理 + 日程+心情合并 + LogPanel。
     2. 布局调整：改两栏主布局，右侧 320px sticky 长条放竖版日程时间线 + 心情 + 下一段，左栏重新排布消除空白。
     3. 新增「今日学习收录」模块 + 后端 `/api/admin/learning/today` 聚合端点，3 栏展示黑话 / 表达风格 / 表情包的今日新入库数量、审核统计、最新 Top 5（表情包带缩略图）。
-  - ✅ **LogsView** — 2026-05-14 重构完成（606 → 583 行）。实时流改用公共 `LogPanel` 组件，删 60 行手写渲染；StateBadge 统一状态徽章；主 / 侧栏改物理顺序去掉 CSS `order` 反转 hack。行为零回归，vue-tsc / vite build / docker compose 全部通过。
+  - ✅ **LogsView** — 2026-05-14 两轮迭代：
+    1. 组件层重构（commit 8197e60，606 → 583 行）：实时流改用公共 LogPanel 组件，删 60 行手写渲染；StateBadge 统一状态徽章；主 / 侧栏改物理顺序。
+    2. 视觉重设计（本次）：工具栏单行化（自研 Segment 段式选等级 + 内嵌图标的搜索框 + 可点清除 + 重置筛选）；默认模式自动隐藏 DEBUG 降噪；侧栏分组折叠（Bot 展开、Dream 折叠、带今日活跃 tag、相对日期显示）；文件模式去黑底终端改用 `--om-surface-2` 浅面板 + 结构化解析 time/level/channel/msg 四列 grid + 等级色标。LogsView 583 → 1175 行，功能视觉完整度大幅提升。
   - ⏸ **LoginView** — 暂不动。已用 AppCard + TheLogo，设计稿完成度高，改动收益低。需要时单独立项。
   - ⏸ **GroupsView（1833 行）** — 需子组件拆分，采用 codex 协同 spec 分片推进，留到下一轮。
 
