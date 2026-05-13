@@ -59,6 +59,8 @@ def create_api_router(
     from admin.routes.api.events import create_events_router
     from admin.routes.api.groups import create_groups_router
     from admin.routes.api.knowledge import create_knowledge_router
+    from admin.routes.api.learning import create_learning_router
+    from admin.routes.api.learning_normalizer import create_learning_normalizer_router
     from admin.routes.api.logs import create_logs_router
     from admin.routes.api.memory import create_memory_router
     from admin.routes.api.memos import create_memos_router
@@ -71,6 +73,7 @@ def create_api_router(
     from admin.routes.api.slang import create_slang_router
     from admin.routes.api.soul import create_soul_router
     from admin.routes.api.stickers import create_stickers_router
+    from admin.routes.api.style import create_style_router
     from admin.routes.api.system import create_system_router
 
     router.include_router(create_auth_router())
@@ -136,6 +139,9 @@ def create_api_router(
     router.include_router(create_dream_router(dream_agent=dream_agent))
     router.include_router(create_sandbox_router(llm_client=llm_client, identity_mgr=identity_mgr, ctx=ctx))
     router.include_router(create_slang_router(ctx=ctx, bus=bus, message_log=message_log, llm_client=llm_client))
+    router.include_router(create_style_router(ctx=ctx, message_log=message_log, llm_client=llm_client))
+    router.include_router(create_learning_normalizer_router(ctx=ctx))
+    router.include_router(create_learning_router(ctx=ctx))
     router.include_router(create_events_router(scheduler=scheduler))
 
     return router

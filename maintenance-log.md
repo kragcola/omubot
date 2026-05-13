@@ -4,6 +4,1107 @@
 
 ---
 
+## 2026-05-14 codex 协同流程干跑验证 + 修三个 spec 漏洞
+
+**变更类型**：process / docs
+
+**内容**：
+
+在 codex 协同流程（见上条）真正派单之前，Claude 做了一轮干跑，发现并修复 3 个会让 spec 失败的漏洞。
+
+### 发现的问题
+
+1. **验收命令用 `git diff main` 不成立**：当前工作区相对 main 有 253 处未提交改动（整轮 admin 重构 + codex handoff 文件本身）。任何基于 `git diff main` 的"只动某某文件"校验都会永远失败。
+2. **spec 预期标注数字不对**：spec 假设"6-7 块 `@audit redundant`"，实际只有 **1 个**标注注释（line 199），下面覆盖 7 个选择器。
+3. **grep 误匹配说明性文字**：`global.css` 文件头 line 134 的文档注释里**字面出现** `@audit redundant` 字符串（解释用途），朴素 `grep -c '@audit redundant'` 会把它算成标注。
+
+### 模拟验证
+
+Claude 本地执行 `sed -i '' '199,244d'` 模拟 codex 删除：
+
+- `!important` 从 51 → **31**（`@audit keep` 的 NButton + NMenu 两块占了约 30 处，这是下限）
+- `vue-tsc --noEmit` 0 error
+- `vite build` 4.72s 通过
+- 文件功能上无损
+
+改完立刻 `cp /tmp/global.css.bak admin/frontend/src/styles/global.css` 回滚，`!important` 恢复 51。工作区零残留。
+
+### Spec 修补
+
+修改三份文件：
+
+- [.claude/handoff/TASK-20260514-01-remove-redundant-important.md](.claude/handoff/TASK-20260514-01-remove-redundant-important.md)
+  - 精确指定 line 199-244 为删除范围
+  - 期望值 `!important` 改为精确等于 **31**（不是 ≤ 20）
+  - 验收用 `grep -c '^/\* @audit redundant'` 排除文档注释
+  - 验收用 `git diff HEAD` 不用 `git diff main`
+  - 用户复制命令段加入 `git stash push -u` 保护 dirty worktree
+  - 合并段改为不 merge 回 main（main 严重落后），留作分支
+  - 备注段记录干跑结果
+- [.claude/handoff/TEMPLATE.md](.claude/handoff/TEMPLATE.md)
+  - 模板 7 步流程统一改为 `git diff HEAD`、`git stash push/pop`、不合并回 main
+- [.claude/handoff/README.md](.claude/handoff/README.md)
+  - 解释为什么用 `git diff HEAD` 不用 `git diff main`
+
+### 现状
+
+- TASK-20260514-01 已可直接用 codex 执行，spec 里 6 条验收命令全部能在命令行 0/非 0 判断
+- TEMPLATE 适配当前 dirty-worktree 实况，不需要用户每次起 task 前先 commit 一大批
+- 用户仍未实际派单 codex —— 流程校验本身不消耗 codex 配额
+
+**影响范围**：
+
+- 仅 `.claude/handoff/` 三份文档与本 log 条目
+- 零代码改动（干跑时模拟删除已完全回滚）
+- 不影响构建、运行时、其他任务
+
+**下一步**：
+
+- 用户可随时按 TASK-01 "用户复制命令段" 派 codex 试跑
+- 如果第一次跑通，后续 spec 按 TEMPLATE 批量产出
+
+---
+
+## 2026-05-14 引入 codex 协同工作流 + 第一个 handoff spec
+
+**变更类型**：process / docs
+
+**内容**：
+
+建立 Claude（决策 + 审查）+ codex（机械执行）的协同机制，目标是把规则明确、判断密度低的改动分流到 codex，节省成本。
+
+新增目录与文件：
+
+- [.claude/handoff/](.claude/handoff/) — 存放交给外部 AI 执行的任务规范
+  - [README.md](.claude/handoff/README.md) — 目录用途、命名规范、生命周期、审查流程
+  - [TEMPLATE.md](.claude/handoff/TEMPLATE.md) — spec 模板，含「用户复制命令段」7 步流程（建分支 / codex 执行 / 验证 / 贴 diff 给 Claude / 合并 / 丢弃重来）
+  - [TASK-20260514-01-remove-redundant-important.md](.claude/handoff/TASK-20260514-01-remove-redundant-important.md) — 第一个实战 spec：删除 `global.css` 里 6 块标注 `@audit redundant` 的 CSS 规则，期望 `!important` 从 51 降到 ≤ 20
+
+协同工作流的核心设计：
+
+- spec 必须满足：动的文件精确到路径、不准动的明确列出、验收命令可在终端 0/非 0 判断、不含"优雅地处理"这种需要判断的词
+- 每个 task 走独立 git 分支，便于失控时一把丢弃
+- 用户操作全部浓缩成「复制到终端」的命令块，不需要改字符
+- codex 交付后用户把 `git diff main` 贴给 Claude 审查，审查要点放在 spec 底部
+- 审查清单自动核对："动的文件"之外未改、"不准动"列表 0 diff、验收命令全 OK、无残留 TODO/console.log
+
+适合给 codex 的活儿定义（基于当前 repo）：
+
+- `!important` 审计清理（已成为 TASK-01）
+- 照 Dashboard 样板迁移 Logs / Login 骨架
+- SlangView / SystemView 子组件拆分（接口明确时）
+- 给新端点补 pytest
+- 内联样式 → UnoCSS shortcut 批量替换
+- `<p class="help">` → `<FieldGroup helper="…">` 机械替换
+- 后端响应 schema → 前端 `interface` 类型同步
+
+不给 codex 做：视觉设计 / 信息架构 / 跨层贯穿改动 / 调试 / 鉴权相关。
+
+**影响范围**：
+
+- 纯新增目录与文档，零代码变更
+- 不影响构建与运行时
+- 第一个 task（TASK-01）待用户决定何时用 codex 试跑
+
+**下一步**：
+
+- 用户按照 TASK-01 的「用户复制命令段」试一次 codex，验证工作流是否顺手
+- 跑完后根据体验调整 TEMPLATE.md（比如验证命令的粒度、审查要点清单项）
+
+---
+
+## 2026-05-14 Dashboard 新增「今日学习收录」模块 + 右侧竖版日程时间线
+
+**变更类型**：frontend / backend / UX
+
+**内容**：
+
+### 右侧竖版日程（之前两栏布局落地）
+
+- 主布局改两栏：左主栏 + 右 320px sticky 长条
+- 日程改为垂直时间线（圆点 + 连接线 + 当前段主色光晕）
+- 心情由 4 条横向 progress 改 4 行竖向 label+bar+%
+- "今日主题 / 心情标签 / 下一段"整合到右栏顶部卡片
+- <1200px 塌成单栏
+
+### 新增后端 [admin/routes/api/learning.py](admin/routes/api/learning.py)
+
+- 路由 `GET /api/admin/learning/today` 聚合今日学习活动
+- 数据源：
+  - **slang**：直查 `slang.db`，统计 `approved_today / reviewed_today / pending / today_hits`，返回今日新入库 Top 5（term + meaning + time）
+  - **style**：直查 `style.db`，统计 `approved_today / reviewed_today / pending`，返回今日新入库 Top 5（style + situation + scope）
+  - **stickers**：读 `storage/stickers/index.json`，按 `created_at` 过滤今日新入库，返回 Top 5（title + usage_hint + HH:MM）
+- 时区处理：slang/style 的 `updated_at` 用 Asia/Shanghai 存，LIKE 前缀匹配安全；stickers 的 `created_at` 是 UTC，需先解析 datetime 再转 UTC+8 判断，避免漏早 8 点前的数据
+- 容错：任一源异常只返回该源的 `error`，不 500 整个端点
+- 注册于 [admin/routes/api/__init__.py](admin/routes/api/__init__.py)
+
+### 新增前端 Dashboard「今日学习收录」模块
+
+插在"Top Groups + 待处理"行下方、关键日志上方。三栏等分：
+
+- **黑话卡**：大号数字"新入库"+ `今审 / 命中 / 待审`三个次级指标（待审用 warning 色）+ 今日新入库 Top 5 时间线（时间 · 词条 · 含义），点击跳 `/slang`
+- **表达风格卡**：同构，数据来自 style，点击跳 `/style`
+- **表情包卡**：大号数字"新入库"+ `总库 N` + 今日新入库 Top 5（时间 + 24px 缩略图 + 描述），点击跳 `/stickers`
+
+每张卡 hover 高亮边框 + 微上浮 1px。今日无入库时显示"今天还没有新入库"占位，不让卡片崩塌。
+
+### 冒烟测试
+
+用真实 storage 直接调 collectors：
+
+- slang 今日 `approved_today=6 reviewed_today=65 pending=127 today_hits=19`
+- style 今日 `approved_today=0 reviewed_today=0 pending=20`（今天尚未审风格）
+- stickers 有今日新入库
+
+**验证**：
+
+- `vue-tsc --noEmit` → 0 error
+- `vite build` → 4.75s
+- Python collector 冒烟测试通过，返回真实数据
+- docker compose up bot -d --build 成功，`/api/admin/learning/today` 响应 401 说明已挂载到鉴权路由（浏览器侧带 session 即可访问）
+
+**影响范围**：
+
+- 新增 1 个后端路由 + 1 个 Dashboard 模块，其他页面零影响
+- 直查 sqlite 而非调 store，避免干扰 store 状态
+- sticker index.json 只读，不产生写入
+
+---
+
+## 2026-05-14 DashboardView 信息密度与视觉重构
+
+**变更类型**：frontend / UX
+
+**内容**：
+
+按 [docs/web-refactor-plan.md](docs/web-refactor-plan.md) 阶段 3 推进，DashboardView 是第一个重做的视图。目标：信息密度提升、视觉层级更清晰，易用性明显改善。
+
+新增组件：
+
+- [admin/frontend/src/components/common/SparklineChart.vue](admin/frontend/src/components/common/SparklineChart.vue) — 纯 SVG 微型面积图，零第三方依赖（不引 ECharts / Chart.js）。接受 values + labels，自动画出渐变填充的趋势曲线，底部 2 行累计与峰值统计。24h 调用曲线用它渲染。
+
+重写 [DashboardView.vue](admin/frontend/src/views/dashboard/DashboardView.vue)（1043 → 约 1070 行，信息量翻倍，代码行略增）：
+
+1. **Hero 瘦身**：顶部合并状态徽章（Bot / NapCat / SSE / 更新时间）+ 大号标题 + 副说明 + 行内"今日主题 / 心情 / 下一段"一行三态，取代原来两张副卡重复陈列。
+2. **Hero 右侧挂 3 张 KPI**：今日调用 / 活跃群 / 待处理，取代原来下方满屏 6 张 KPI 平铺。
+3. **新增"24 小时调用曲线"面板**：`/admin/usage/data?period=day` 拉取时序，SparklineChart 渲染，带累计+峰值小字。
+4. **新增"近 7 天活跃群 Top 5"**：`/admin/usage/data` 的 `top_groups`，显示群号、调用次数、相对占比条，点击跳转 `/groups`。
+5. **待处理 + 学习信号合并**：原单列 todo 改成 todo + 黑话/风格信号双层面板。学习信号新增今日触达 / 已入库 / 启用画像等指标。
+6. **新增 Style 待审入口**：原来只接 slang，现在也带 style pending。
+7. **日程 + 心情合并到第 3 行**：心情从占半屏的 4 条 progress meter 压缩为 4 枚 pill chip，腾出空间让日程用 auto-fill 网格铺开。
+8. **关键日志用新 LogPanel**：替代手写日志列表，自动暂停/清屏/自动滚、等宽字体、level 上色。
+9. **视觉层级**：Hero 用 `--om-hero-gradient` 建立锚点；KPI / 面板 / 时段用 token 阴影与圆角统一（12/18）；浅深主题下 hero-kpi 背景自适配。
+10. **交互升级**：Top Groups 行可点（跳 /groups）、待处理行可点（跳对应详情）、"去日志页"按钮下沉到 LogPanel 动作槽。
+
+API 依赖（全部沿用已有接口，零后端改动）：
+
+- `/api/admin/dashboard` — uptime / usage / mood / schedule
+- `/api/admin/health` — bot / napcat 运行状态
+- `/api/admin/services/health` — alerts / maintenance_window
+- `/api/admin/slang/summary` — 黑话统计
+- `/api/admin/style/summary` — 风格统计
+- `/admin/usage/data?period=day` — 24h timeseries + top_groups
+
+**验证**：
+
+- `./node_modules/.bin/vue-tsc --noEmit` → 0 error
+- `./node_modules/.bin/vite build` → 4.69s，DashboardView chunk 20.85 KB（gzip 8.21 KB）。相比改前 +30%，由引入的公共组件贡献，总 index 未变。
+- `docker compose up bot -d --build` → bot 容器正常重建启动，napcat 未动。日志显示 `group inventory refreshed | total=4 learning=4`、`Bot 就绪，开始接收消息 ✓`，顺带生成 5/14 日程。
+- 访问 `http://localhost:8081/admin/` 即可看到新仪表盘。
+
+**影响范围**：
+
+- 仅 DashboardView 视觉重构 + 新增 SparklineChart 公共组件。
+- 运行时 / 后端 / 数据库 / API 零改动。
+- 不影响其他页面。
+
+**下一步**：
+
+- 等用户对新仪表盘视觉验收。通过后继续阶段 3 其他视图（Logs / Login / Groups）。
+- 未做的易用性项（Cmd+K 跳转、统一 toast、抽屉 sticky 底部、未保存警告）留待后续阶段处理。
+
+---
+
+## 2026-05-13 admin 前端重构阶段 0-2 自主执行完成 · 等待人工视觉验收
+
+**变更类型**：feature / frontend / tooling / docs
+
+**内容**：
+
+阶段 0（环境清理）：
+
+- 新增 [admin/frontend/.nvmrc](admin/frontend/.nvmrc)，锁定 Node 20。
+- [admin/frontend/package.json](admin/frontend/package.json) 补 `engines.node ">=20.0.0 <21"`。
+- [.gitignore](.gitignore) 补 `admin/static/assets/` 与 `.claude/skills/omubot-design-system/`。
+- 审计：`admin/templates/*.html` 在 git 中仍有 9 个追踪记录但 Python 零引用；`admin/static/assets/` 仍追踪 95 个构建产物。两者都需要 `git rm --cached` 清索引，但**未自主执行**，待人工确认后清理。
+
+阶段 1（基础设施固化）：
+
+- [admin/frontend/src/stores/app.ts](admin/frontend/src/stores/app.ts) `buildThemeOverrides()` 扩展：补 `common.placeholderColor / iconColor / closeIconColor`、新增 `Tag` 与 `DataTable` 配置块，浅深两套同时覆盖。
+- [admin/frontend/src/styles/global.css](admin/frontend/src/styles/global.css) 在 `!important` 块上方加审计注释：2 块标 `@audit keep`（`.dark .n-button:not(...)` / `.dark .n-menu` 深度选择器），6 块标 `@audit redundant`（themeOverrides 已覆盖）。**规则未删**，等 playground 验收后由人工拍板删除，预计可从 51 降至 ≤ 18。
+- [admin/frontend/uno.config.ts](admin/frontend/uno.config.ts) 新增 6 个语义 shortcut：`section-title / section-hint / metric-num / chip / panel / toolbar-row`。
+- 新增 [docs/admin-ui-tokens.md](docs/admin-ui-tokens.md) token 速查表。
+
+阶段 2（公共组件补齐）：
+
+- 新增 4 个公共组件：
+  - `StateBadge.vue` — 5 档状态徽章（success / warning / error / info / default），带 icon 或圆点，可紧凑模式。
+  - `LogPanel.vue` — 终端面板外壳：等宽字体、level 上色、暂停/清屏槽、自动滚动、暂停态徽章。
+  - `DataToolbar.vue` — 列表工具条：摘要 / 筛选 / 操作三槽 + dense 模式，窄屏自动纵向。
+  - `FieldGroup.vue` — 表单字段分组：标题 / 必填 / 帮助文字 / 右侧辅助 / inline 模式。
+- 决策：不新建 `SectionCard` —— [AppPanelSection.vue](admin/frontend/src/components/common/AppPanelSection.vue) 已覆盖 style guide §7 全部描述。
+- 新增 `/admin/design-playground` 路由和 [DesignPlaygroundView.vue](admin/frontend/src/views/playground/DesignPlaygroundView.vue)，集成全部公共组件 + Naive UI 基础控件演示，供人工浅 / 深主题视觉验收。后端 `@router.get("/admin/{rest:path}")` catch-all 已覆盖，仅需更新 [vite.config.ts](admin/frontend/vite.config.ts) `SPA_ROUTES`。
+
+新增跟踪文档：
+
+- [docs/tracking/web-refactor.md](docs/tracking/web-refactor.md) — 逐项勾选跟踪，含 `!important` 审计表、阶段 3 视图改造顺位、验收门径。
+
+**验证**：
+
+- `./node_modules/.bin/vue-tsc --noEmit` → 0 error
+- `./node_modules/.bin/vite build` → 4.40s 通过，产物 1.7 MB（未恶化），`DesignPlaygroundView` 独立 chunk 16.62 kB / gzip 6.64 kB
+- 新增组件 + playground 视图 `grep -c '!important'` 全部 0
+
+**影响范围**：
+
+- 运行时：零改动。仅新增组件和路由，不影响已有页面、API、数据结构、依赖版本。
+- 构建：产物大小与构建时间无明显变化。
+- 开发流程：开发者首次 clone 后 `nvm use` 能自动锁定到 Node 20。
+
+**待人工验收**：
+
+1. 启动前端（`cd admin/frontend && ./node_modules/.bin/vite`）或重建 bot 容器后访问 `/admin/design-playground`
+2. 浅 / 深主题各看一遍，逐项核对 KPI 卡 / StateBadge / DataToolbar / DataTable / LogPanel / FieldGroup / EmptyState / Naive 基础控件
+3. 通过 → 允许删除 `global.css` 里 `@audit redundant` 6 块冗余规则 → 进入阶段 3（Dashboard / Logs / Login 骨架迁移）
+4. 不通过 → 指出具体问题项
+
+**未自主执行的动作（待人工确认）**：
+
+- `git rm --cached -r admin/static/assets/` — 让 git 忘掉 95 个构建产物，下次构建不再产生 diff 噪音
+- `git rm admin/templates/*.html` — 清理 git 索引里 9 个已不存在的 Jinja 模板
+
+---
+
+## 2026-05-13 admin 前端重构启动 + 设计系统 skill 落地
+
+**变更类型**：docs / tooling / process
+
+**内容**：
+
+- 新增 [docs/web-refactor-plan.md](docs/web-refactor-plan.md)，把 [admin-ui-style-guide.md](docs/admin-ui-style-guide.md) 转成可执行工程计划：阶段 0 清理 → 阶段 1 themeOverrides 固化 → 阶段 2 公共组件补齐（补 SectionCard/StateBadge/LogPanel/DataToolbar/FieldGroup）→ 阶段 3 高流量页面 Dashboard/Logs/Groups/System/Slang/Config/Login → 阶段 4 长尾渐进 → 阶段 5 可选 pnpm/chunk 拆分。给出每视图 3 段式 PR 模板（骨架迁移/子组件拆分/视觉精修）和 7 项视觉验收清单。
+- 新增 `omubot-design-system` skill，作为 Calm Ops 设计系统执行器，独立于 `omubot-admin-console`。包含：token 速查表（light/dark 色板 + 阴影 + UnoCSS shortcut）、公共组件真实 API（AppPage/AppCard/AppPanelSection/MetricCard/PageToolbar/EmptyState 的 props 和 slot 清单）、Naive UI themeOverrides 单一来源原则、12 条反面样例、新视图骨架模板、大视图重构 3 段式 PR 流程。明确拒绝 bold/maximalist 默认，避免和官方 `frontend-design` skill 的创意取向冲突。
+- skill 三处同步：`.claude/skills/omubot-design-system/`、`~/.claude/skills/omubot-design-system/`、`~/.codex/skills/omubot-design-system/`，339 行一致。
+- `~/.claude/skills/omubot-admin-console/` 从 `~/.codex/skills/` 的旧版（5040b）升级为项目版（5987b，含 Maintenance Log Policy 一节），三处内容统一。
+- 调整 `~/.claude/settings.json` 权限策略：`Bash(*)/Read(*)/Edit(*)/Write(*)` 全通配 + `deny` 规则拦删除类命令（rm/rmdir/unlink/shred/git rm/git clean -f/find -delete/sudo rm/trash/xargs rm），减少许可弹窗同时保底防误删。
+
+**影响范围**：
+
+- 文档：新增两份设计系统参考。
+- agent 行为：两个 skill 对 admin/frontend 任务会自动匹配；`omubot-design-system` 描述里明确列了触发文件（`.vue`、`uno.config.ts`、`global.css`、`stores/app.ts`）。
+- 运行时代码、构建产物、测试、API：无变更。
+
+**后续**：
+
+- 待确认阶段 0 的两个删除决策：清空 `admin/templates/`、`admin/static/assets/` 从 git 移除。
+- 阶段 1-2 人工执行前建议先创建 `docs/tracking/web-refactor.md` 跟踪表。
+
+---
+
+## 2026-05-13 记录页统一补充默认排序 / 时间排序
+
+**变更类型**：feature / backend / frontend / tests
+
+**内容**：
+
+- 为管理端记录型页面补充两档排序模式：`默认排序` 与 `按时间排序`。
+- 表情包页接入真实排序与时间字段：默认按发送热度，时间模式按最近发送 / 收录时间。
+- 记忆管理页与记忆浏览页接入排序切换；浏览页补实体聚合更新时间，避免“时间排序”只在实体内生效。
+- 黑话页改为后端真实排序参数，不再前端对分页结果做本页“最新重排”；默认保留审核队列优先级，时间模式按最近更新/出现。
+- 表达学习页接入表达样本、档案、反馈的排序参数；默认保留待审/置信/计数优先，时间模式按最近记录时间。
+- 知识库页为文档源、图谱关系、候选队列补排序模式；文档源补 `updated_at` 字段贯通到前端展示。
+- 新增前端共用排序选项模块 `admin/frontend/src/views/shared/sort.ts`，统一按钮文案和取值。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_admin_api.py tests/test_style_store.py tests/test_style_api.py -q` 通过，`91 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check admin/routes/api/stickers.py admin/routes/api/memory.py admin/routes/api/memos.py admin/routes/api/slang.py admin/routes/api/style.py admin/routes/api/knowledge.py services/media/sticker_store.py services/memory/card_store.py services/slang/store.py services/style/store.py services/knowledge/types.py services/knowledge/store.py services/knowledge/service.py tests/test_admin_api.py tests/test_style_store.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过，Vite 仅输出第三方 `#__PURE__` 注释提示
+
+**交接说明**：
+
+- 有分页或 limit 的列表都走后端 `sort` 参数，避免前端只排当前页造成直觉错位。
+- “默认排序”保留各页面原有业务语义，不统一强行改成纯时间流。
+
+## 2026-05-13 LearningNormalizer 统一归一化系统层落地
+
+**变更类型**：feature / backend / frontend / tests
+
+**内容**：
+
+- 新增 `services/learning_normalizer`，提供统一 `normalize_key / fingerprint_key / score_similarity` 与 SQLite 聚类、成员、修订表。
+- 引入 `rapidfuzz` 做候选相似度评分；首期不引入拼音/字形纠错重依赖。
+- 黑话与表达存储接入统一归一化层，候选入库时记录 `normalization_cluster_id / normalization_item_id / normalized_key / normalization_features / auto_merged`。
+- 黑话短词 fuzzy 守卫收紧：中文 3 字以内、ASCII 4 字以内只允许 exact/fingerprint 合并，避免“猫饼/猫猫饼”一类短词被误吞。
+- 新增 Admin LearningNormalizer API，并在黑话详情、表达样本卡片内嵌展示归一化簇、代表写法、自动归并痕迹。
+- 页面内补充锁定代表写法、拆出当前变体、撤销最近自动归并入口；不新增独立归一化控制台。
+- 原始聊天记录和 evidence 不改写；归一化只作为派生系统层视图。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_learning_normalizer.py tests/test_similarity.py tests/test_style_store.py tests/test_style_api.py tests/test_style_plugin.py tests/test_style_extractor.py tests/test_slang_store.py tests/test_slang_plugin.py tests/test_slang_semantic_reviewer.py tests/test_admin_api.py tests/test_client.py tests/test_chat_plugin.py tests/test_plugin_bus.py -q` 通过，`305 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/learning_normalizer services/similarity.py services/slang services/style admin/routes/api/learning_normalizer.py admin/routes/api/slang.py admin/routes/api/style.py tests/test_learning_normalizer.py tests/test_style_store.py tests/test_slang_store.py tests/test_style_api.py tests/test_slang_plugin.py tests/test_admin_api.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过，Vite 仅输出第三方 `#__PURE__` 注释提示
+
+**交接说明**：
+
+- 激进自动合并只影响候选归并、别名/变体记录和 count/evidence 累计，不会自动批准黑话或表达。
+- 历史数据尚未批量 backfill；新簇会随后续抽取和人工操作逐步生成。
+
+## 2026-05-13 表达抽取 backlog 与 Web 展示修正
+
+**变更类型**：fix / backend / frontend / tests
+
+**内容**：
+
+- 修复表达手动抽取在大群 backlog 下每次只消费单个小 batch 的问题：Archive cursor 模式下默认每群连续消费最多 5 个 batch，目标有效文本 200 条。
+- 保留旧 MessageLog / legacy fallback 的单批行为，避免无 cursor 场景重复扫描同一批最近消息。
+- 表达抽取 API 返回 `raw_scanned / text_scanned / backlog_raw / backlog_text / has_more / batches`，区分原始消息行和有效文本消息。
+- Admin 表达学习页将“扫描”改为更直观的“有效文本 / 原始行 / 待扫文本”，群级结果显示“仍有待扫”。
+- ConversationArchive 增加 `count_messages_after_pk()`，用于估算当前 scanner cursor 后的剩余待扫量。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_style_api.py tests/test_style_store.py tests/test_style_plugin.py tests/test_conversation_archive_store.py tests/test_admin_api.py -q` 通过，`104 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check admin/routes/api/style.py services/conversation_archive/store.py tests/test_style_api.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过，Vite 仅输出第三方 `#__PURE__` 注释提示
+
+---
+
+## 2026-05-13 高频表情冷却修正
+
+**变更类型**：fix / backend / prompt / tests
+
+**内容**：
+
+- 新增 `storage/stickers/usage.json` scoped 使用记录，保留现有 `index.json` 的 `send_count/last_sent` 长期统计。
+- `send_sticker` 增加硬冷却：同群短窗口重复、全局过热、长期占比过高时不发送、不计数，并返回替代表情 ID 让模型改选。
+- 表情包 prompt 改为动态推荐候选视图，优先展示低频、久未发送、非冷却表情，并提示少量冷却中的 ID。
+- 颜文字强制配图规则保留，但文案调整为“合适且近期未重复”，避免把单张表情当默认万能图。
+- 小表情库或替代候选不足时不启用硬拦截，避免表情功能不可用。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_sticker_store.py tests/test_sticker_tools.py tests/test_chat_plugin.py tests/test_client.py tests/test_config_loader.py tests/test_plugin_bus.py -q` 通过，`228 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check plugins/sticker services/media/sticker_store.py services/tools/sticker_tools.py services/llm/client.py plugins/chat/plugin.py tests/test_sticker_store.py tests/test_sticker_tools.py tests/test_chat_plugin.py` 通过
+
+---
+
+## 2026-05-13 静默群表情收录 live 验收通过
+
+**变更类型**：acceptance
+
+**内容**：
+
+- 用户在静默学习群 `477640404` 发送 QQ 动画表情后，运行日志出现 `silent sticker learned`。
+- 新增表情 `stk_08c3d35b`，来源为 `stolen_silent_learn`，文件保存为 `storage/stickers/stk_08c3d35b.gif`。
+- 常驻群表情仍走原聊天视觉路径；静默群表情现在走轻量 `on_message` 收录路径，不触发回复。
+
+**验证**：
+
+- 日志：`silent sticker learned | group=477640404 sticker_id=stk_08c3d35b file=DC937A0B68A506D77814153F251AED81.jpg`
+- 表情库：`storage/stickers/index.json` 总数从 78 增至 79，新增项 `source=stolen_silent_learn`
+
+---
+
+## 2026-05-13 静默群表情收录权限误拦截修复
+
+**变更类型**：fix / backend / tests / deployment
+
+**内容**：
+
+- Live 验收发现：静默学习群 `477640404` 收到 `sub_type=1`、`summary=[动画表情]` 的 QQ 动画表情，但未出现 `silent sticker learned`，表情库也未新增。
+- 根因：静默群不在主动发言白名单中，`GroupConfig.resolve()` 会把 `tools_enabled` 派生为 `False`；StickerPlugin 误把这个派生值当成显式关闭工具，从而拦截了静默收录。
+- 修复：静默偷表情只尊重全局或群 override 中显式设置的 `tools_enabled=false`，以及 `sticker_mode="off"`；不再被“不能主动发言”派生出的 `tools_enabled=false` 误伤。
+- 已重建并重启 `bot` 服务；NapCat 保持运行，未重建。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_chat_plugin.py tests/test_sticker_tools.py tests/test_sticker_store.py tests/test_client.py tests/test_config_loader.py tests/test_plugin_bus.py -q` 通过，`215 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check plugins/sticker services/tools/sticker_tools.py tests/test_chat_plugin.py tests/test_sticker_tools.py tests/test_client.py tests/test_config_loader.py tests/test_plugin_bus.py` 通过
+- 重建后容器内确认 `StickerPlugin` 已包含 `_silent_sticker_learning_disabled` 修复入口，Bot 已连接 OneBot 并进入接收消息状态
+
+---
+
+## 2026-05-13 静默学习群表情偷取重建验收
+
+**变更类型**：deployment / acceptance / security-note
+
+**内容**：
+
+- 已执行 `docker compose up -d --build bot` 重建并重启 `bot` 服务。
+- NapCat 容器保持运行，未重建。
+- 启动后确认 OneBot WebSocket 已连接，Bot 已进入“开始接收消息”状态。
+- 容器内确认 `plugins/sticker/plugin.json` 已包含 `message` 权限，`StickerPlugin` 已具备 `on_message` 静默学习入口。
+- 重建后观测到静默学习群 `477640404` 的一条普通图片消息：`sub_type=0` 且无表情摘要，未被收录，符合“只偷表情、不偷普通图片”的边界。
+- 审查发现当前运行环境未配置 `ADMIN_TOKEN`，Admin API 会回退默认 token `admin`；需在后续配置中补上强 token 后重启。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_sticker_tools.py tests/test_sticker_store.py tests/test_chat_plugin.py tests/test_client.py tests/test_config_loader.py tests/test_plugin_bus.py -q` 通过，`214 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check plugins/sticker services/tools/sticker_tools.py tests/test_sticker_tools.py tests/test_chat_plugin.py tests/test_client.py tests/test_config_loader.py tests/test_plugin_bus.py` 通过
+- `docker compose ps` 显示 `qq-bot` 与 `napcat` 均为 `Up`
+- Admin API smoke 通过：默认 token 登录后 `/api/admin/health` 返回 `bot=running`、`napcat=connected`、`connected_bots=1`；`/api/admin/plugins` 显示 `sticker` 已启用；`/api/admin/stickers` 返回 200
+- 最近日志未发现 traceback、fatal、database locked、corrupt、abandoned、timeout 等异常
+
+---
+
+## 2026-05-13 静默学习群表情偷取修复
+
+**变更类型**：fix / backend / docs / tests
+
+**内容**：
+
+- 修复 `silent_learn` 群无法偷表情的问题：群消息路由会在静默学习模式下提前返回，导致原先依赖 LLM 识图后调用 `save_sticker` 的路径不会执行。
+- StickerPlugin 新增 `on_message` 轻量收录路径：只在静默学习群、不允许发言时识别 QQ 表情图片，最多每条消息收录 2 张，始终返回 `False`，不消费消息、不触发回复。
+- `save_sticker` 工具调整为支持 bot 主动偷表情：管理员要求时仍需 `requested_by`，主动收录时可留空；显式传入非管理员仍会拒绝。
+- `send_sticker` 保持群策略保护，未开放主动发言或关闭工具的群不会发送表情。
+- 表情包 wiki 补充静默学习群收录规则与关闭条件。
+- 本轮未重启 bot，需下次重建/重启后生效；NapCat 未触碰。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_sticker_tools.py tests/test_sticker_store.py tests/test_chat_plugin.py tests/test_client.py tests/test_config_loader.py tests/test_plugin_bus.py -q` 通过，`214 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check plugins/sticker services/tools/sticker_tools.py tests/test_sticker_tools.py tests/test_chat_plugin.py tests/test_client.py tests/test_config_loader.py tests/test_plugin_bus.py` 通过
+
+---
+
+## 2026-05-13 黑话复核失败回待审
+
+**变更类型**：fix / backend / frontend / docs
+
+**内容**：
+
+- candidate AI 复核超时、解析失败或 LLM 不可用时，不再把词条移入独立“复核失败”队列。
+- 失败项保留 `candidate_review_failed` 等诊断 meta，但 `candidate_reviewed=false`，继续归入“待 AI 复核”，下一轮普通复核会自动重试。
+- Admin 黑话页删除“复核失败”队列、指标卡和“重试失败”按钮。
+- 黑话追踪文档同步更新 Phase 9/Phase 12 口径。
+- 已执行 `docker compose up -d --build bot` 重建并重启 bot；NapCat 保持运行，未重建。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py::test_slang_store_summary_splits_candidate_review_state tests/test_slang_plugin.py::test_slang_plugin_candidate_review_failure_returns_to_unreviewed_queue -q` 通过，`2 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py tests/test_slang_semantic_reviewer.py -q` 通过，`143 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/slang/store.py services/slang/daily_reviewer.py plugins/slang/plugin.py admin/routes/api/slang.py tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过
+- 重启后 Admin API smoke 通过：`/api/admin/health` 返回 `bot=running`、`napcat=connected`、`connected_bots=1`；`/api/admin/slang/summary` 返回 200，历史失败项已计入待 AI 复核口径
+
+---
+
+## 2026-05-13 黑话 AI 复核性能修复重建验收
+
+**变更类型**：deployment / acceptance / backend / frontend
+
+**内容**：
+
+- 重新构建 Admin 前端静态资源。
+- 执行 `docker compose up -d --build bot` 重建并重启 `bot` 服务；NapCat 容器保持运行，未重建。
+- 启动后黑话自动抽取正常完成：`run_4ec4615cbd5efb64`，4 个群扫描 33 条消息，耗时约 12.9 秒，提取 6 条，提升 4 条。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py tests/test_slang_semantic_reviewer.py -q` 通过，`143 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/slang plugins/slang admin/routes/api/slang.py tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py tests/test_slang_semantic_reviewer.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过
+- `source ./scripts/dev/env.sh && uv run python scripts/dev/slang_acceptance_check.py --skip-live` 通过，`149 passed`，ruff 通过，`slang.db` integrity/quick check 均为 `ok`
+- 受保护 Admin API smoke 通过：`/api/admin/health` 返回 `bot=running`、`napcat=connected`、`connected_bots=1`；黑话 settings/summary/stats/runs 与表达 summary 均返回 200
+- `storage/slang.db`、`storage/messages.db`、`storage/style.db` 的 `PRAGMA integrity_check` 与 `quick_check` 均为 `ok`
+- 重启后 5 分钟日志未发现 traceback、fatal、database locked、corrupt、abandoned、timeout 等异常信号
+
+**交接说明**：
+
+- 当前剩余人工验收点：在 Web 黑话页手动点“全量 AI 复核”，观察 `review_all_pending` 行为是否符合预期；真实 LLM 耗时需以 live 操作为准。
+- 未触碰 NapCat，未启用任何物理清理。
+
+---
+
+## 2026-05-13 黑话 AI 复核性能收口
+
+**变更类型**：fix / performance / backend / frontend / tests / docs
+
+**内容**：
+
+- 定时 `daily_ai_review` 不再被 90 秒 `wait_for` 硬取消，避免长复核被下一轮 tick 反复重开并产生大量 `abandoned` run。
+- `review_candidates` 与 `review_all_pending` 解耦：日常复核只处理达到语义阈值的 pending；Admin 手动“全量 AI 复核”才穿透 pending 阈值。
+- pending 三段语义复核改为 3 并发执行，落库仍按结果顺序串行，降低 DB 写竞争风险。
+- pending 语义复核跳过不参与判定的 web search，公网搜索仍保留在新抽取候选的辅助准入路径。
+- Admin API 与黑话页面补充 `review_all_pending` 参数，失败队列重试不再顺带全扫 pending。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_plugin.py tests/test_admin_api.py tests/test_slang_semantic_reviewer.py -q` 通过，`108 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py tests/test_slang_semantic_reviewer.py -q` 通过，`143 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/slang plugins/slang admin/routes/api/slang.py tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py tests/test_slang_semantic_reviewer.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过
+
+---
+
+## 2026-05-13 ConversationArchive Phase 4a 审计修正收口
+
+**变更类型**：fix / backend / storage / health / tests / docs
+
+**内容**：
+
+- `needs_rescan` / 非 active cursor 退回旧最近窗口时，真实 `ConversationArchive` 会写入 `status=legacy_fallback` 的 `conversation_scan_runs`，便于追查 fallback 原因；该路径仍不推进 cursor。
+- 新增 archive evidence ref 写入能力：按 `message_pk` 或 `chat_id + platform_message_id` 将黑话/表达抽取证据挂到 `conversation_message_refs`。
+- 新增业务 refs 回填 helper，可从 `slang_observations` / `style_evidence` 通过 `group_id + message_id` 回填 archive refs；真实清理前必须先跑 refs 同步或等价校验。
+- System health 的 SQLite 卡片新增 messages archive 差异指标：`legacy_count / archive_count / missing_archive_count / archive_extra_count`；只有 legacy 缺 archive 回填时降级为 warning。
+- 未启用真实物理清理，未重启 bot，未触碰 NapCat。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_conversation_archive_store.py tests/test_admin_api.py -q` 通过，`77 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_conversation_archive_store.py tests/test_message_log.py tests/test_style_api.py tests/test_slang_plugin.py tests/test_admin_api.py -q` 通过，`127 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/conversation_archive services/memory/message_log.py services/health.py plugins/slang/plugin.py services/slang/daily_reviewer.py admin/routes/api/style.py admin/routes/api/slang.py tests/test_conversation_archive_store.py tests/test_style_api.py tests/test_slang_plugin.py tests/test_admin_api.py` 通过
+
+**交接说明**：
+
+- `needs_rescan` 仍是人工介入状态，不会自动全量重扫或自动恢复增量 cursor。
+- 当前 `dry_run_cleanup()` 仍只报告候选，不删除 raw rows。
+
+---
+
+## 2026-05-13 ConversationArchive 实机验收热修
+
+**变更类型**：fix / backend / storage / deployment / tests
+
+**内容**：
+
+- 重建并重启 `bot` 服务，未重启 NapCat。
+- 修复 `conversation_messages.message_pk` 是全局稀疏序列时，scanner 用 `last_pk + limit` 可能卡住的问题：
+  - cursor 读取改为按当前 chat 的下一批 N 条消息查询。
+  - 首次 bootstrap 改为取当前 chat 最近 N 条，而不是按全局 pk 做粗略范围。
+- `ConversationArchive.backfill_legacy_messages()` 先检查 `legacy_row_id` 是否已存在，避免重复 init 时消耗 AUTOINCREMENT 序列。
+- `messages.db` 切到 `journal_mode=DELETE` / `synchronous=FULL`，避免 Docker 容器持有 deleted WAL 后宿主 sqlite 看不到 bot 写入。
+- daily/manual 抽取被 timeout/cancel 时会把 active `conversation_scan_runs` 标记为 `abandoned`，不再长期悬挂。
+- 运行中发现 `messages.db` 索引条目不一致，已停 bot、备份、`REINDEX` 修复；备份：`storage/backups/messages.pre-reindex-20260513-003304.db`。
+- 清理本轮自动验收产生的临时表达样本。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_conversation_archive_store.py tests/test_style_api.py tests/test_slang_plugin.py -q` 通过，`55 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_conversation_archive_store.py tests/test_message_log.py -q` 通过，`13 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/conversation_archive services/memory/message_log.py tests/test_conversation_archive_store.py` 通过
+- `source ./scripts/dev/env.sh && uv run ruff check services/conversation_archive plugins/slang/plugin.py services/slang/daily_reviewer.py tests/test_conversation_archive_store.py tests/test_slang_plugin.py` 通过
+- 实机：`PRAGMA integrity_check` 返回 `ok`；容器内 `messages.db` 为 `journal_mode=delete`，没有 `messages.db-wal (deleted)` fd
+- 实机：`/style/extract/run` 对 `426727294` 第一轮 `scan_source=archive, scanned=1, from=17281, to=17367`，第二轮 `scan_source=archive, scanned=0, from=17367, to=17367`
+- 实机：`slang_manual_extract` 自动抽取先消费同一增量并推进 cursor，之后手动两轮均 `scanned=0`，符合“不重复扫旧消息”
+
+**交接说明**：
+
+- 当前仍未启用真实物理清理。
+- daily review 仍可能因公网搜索/LLM 耗时而 timeout，但对应 archive scan run 已能在取消时标记为 `abandoned`。
+
+---
+
+## 2026-05-12 ConversationArchive 黑话/表达 cursor 迁移
+
+**变更类型**：backend / storage / tests / docs
+
+**内容**：
+
+- 新增 archive scan batch 兼容 helper：
+  - 真实 `ConversationArchive` 优先读取 `conversation_messages` + `conversation_scan_cursors`。
+  - 测试 fake、旧 MessageLog-shaped 对象、archive 读取失败、cursor `needs_rescan` 时自动退回旧 `query_recent()` 最近窗口。
+  - 首次启用 cursor 只 bootstrap 最近 `limit` 条消息，不全量重扫历史。
+- 黑话手动抽取改用 `slang_manual_extract` cursor。
+- 黑话 daily review 改用独立 `slang_daily_review` cursor，避免手动抽取推进 daily review 进度；pending 复核无新消息时仍保留最近上下文 fallback。
+- 表达手动抽取改用 `style_manual_extract` cursor，并继续保留黑话边界过滤、global 表达池和人工审核语义。
+- 普通聊天、状态板、Admin 最近消息、client 压缩仍走兼容 `MessageLog` 接口；未启用真实清理，未重启 bot / NapCat。
+- 更新 ConversationArchive、黑话、表达追踪文档。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_conversation_archive_store.py tests/test_style_api.py tests/test_slang_plugin.py -q` 通过，`54 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_admin_api.py tests/test_slang_store.py tests/test_style_plugin.py -q` 通过，`97 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_message_log.py tests/test_group_timeline.py tests/test_state_board.py tests/test_client.py -q` 通过，`121 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_style_store.py tests/test_style_extractor.py tests/test_slang_semantic_reviewer.py tests/test_slang_drift_reviewer.py -q` 通过，`29 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/conversation_archive services/memory/message_log.py admin/routes/api/style.py admin/routes/api/slang.py plugins/slang/plugin.py services/slang/daily_reviewer.py tests/test_conversation_archive_store.py tests/test_style_api.py tests/test_slang_plugin.py` 通过
+
+**交接说明**：
+
+- 下一步是人工验收 `/admin/style` 和 `/admin/slang` 手动抽取：重复触发时应只扫新消息，archive 不可用时仍能退回旧最近窗口。
+- 真实删除 raw rows 仍禁止；dry-run 只报告候选和阻塞原因。
+
+---
+
+## 2026-05-12 ConversationArchive 后端原语落地
+
+**变更类型**：backend / storage / tests / docs
+
+**内容**：
+
+- 新增 `services/conversation_archive`：
+  - 创建首期 5 张核心表：`conversation_messages`、`conversation_scan_cursors`、`conversation_scan_runs`、`conversation_retention_policies`、`conversation_message_refs`。
+  - 保留并维护旧 `group_messages` 表，现有 `MessageLog` 接口行为不变。
+  - 兼容读取首期仍读旧 `group_messages`，避免 Admin 旧表调试删除临时消息后，新 `conversation_messages` 把消息“复活”。
+  - `init()` 会幂等 backfill 旧 `group_messages` 到 `conversation_messages`。
+  - `record()` 旧表写入优先；archive-side 写失败只记录错误，后续 backfill 可补齐。
+  - 新增扫描 cursor、scan run 审计、retention policy、message ref 和 dry-run cleanup 原语。
+- `services/memory/message_log.py` 改为 `ConversationArchive` 兼容包装，现有消费者继续使用 `MessageLog`。
+- 当前没有迁移黑话/表达扫描路径，没有接 Admin，没有启用真实物理清理，没有重启 bot / NapCat。
+- 更新 `docs/conversation-archive-implementation-tracker.md`，将 Phase 1、Phase 2 backfill 原语、Phase 4 dry-run 原语标记为已实现；Phase 3 黑话/表达 cursor 迁移仍待人工确认。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_conversation_archive_store.py tests/test_message_log.py tests/test_admin_api.py -q` 通过，`73 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_group_timeline.py tests/test_state_board.py tests/test_client.py -q` 通过，`117 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_style_api.py tests/test_style_plugin.py tests/test_slang_plugin.py tests/test_slang_store.py -q` 通过，`78 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/conversation_archive services/memory/message_log.py tests/test_conversation_archive_store.py` 通过
+
+**交接说明**：
+
+- 下一步是人工审计是否允许进入 Phase 3：把黑话 daily/manual 与表达 manual 从 `query_recent()` 迁到 cursor 范围扫描。
+- 真实删除 raw rows 仍禁止；当前 dry-run 只报告候选和阻塞原因。
+
+---
+
+## 2026-05-12 ConversationArchive 本地对话归档方案归档
+
+**变更类型**：docs / architecture-plan
+
+**内容**：
+
+- 新增 `docs/conversation-archive-implementation-tracker.md`：
+  - 记录当前 `MessageLog.group_messages` 单表现状和主要消费者。
+  - 固化首期 5 张核心表方案：`conversation_messages`、`conversation_scan_cursors`、`conversation_scan_runs`、`conversation_retention_policies`、`conversation_message_refs`。
+  - 明确 `created_at` 继续使用 REAL epoch，主游标使用 `message_pk`，辅以 `last_created_at` 和小窗口回看。
+  - 明确清理首期只做 dry-run；缺 required scanner cursor 时阻塞；`message_refs` 不作为唯一安全来源。
+  - 将 `conversation_segments`、词频统计、私聊备忘录业务表延后，不混入归档底座首期 schema。
+- `docs/style-learning-implementation-tracker.md` 补充表达学习与 ConversationArchive 的关系：后续迁到 `style_extract` scanner，动态风格档案仍由 `StyleStore` 管理。
+- `docs/slang-module-implementation-tracker.md` 补充黑话模块与 ConversationArchive 的关系：后续迁到 `slang_extract` scanner，黑话业务语义仍由 `SlangStore` 管理。
+- 本轮仅文档归档，不改运行时代码、不迁移 DB、不重启 bot、不碰 NapCat。
+
+**验证**：
+
+- `rg -n "ConversationArchive|conversation_messages|conversation_scan_cursors|dry-run|message_refs" docs/conversation-archive-implementation-tracker.md`
+- `rg -n "ConversationArchive" docs/style-learning-implementation-tracker.md docs/slang-module-implementation-tracker.md maintenance-log.md`
+
+---
+
+## 2026-05-12 表达学习与黑话边界过滤
+
+**变更类型**：fix / admin-api / frontend / tests / data
+
+**内容**：
+
+- 表达学习手动抽取保存前新增“黑话优先”过滤：
+  - 读取当前群和 global 的黑话 term / aliases。
+  - 如果表达候选的 `situation` 或 `style` 直接命中已知黑话 token，则不保存为表达习惯。
+  - 证据文本里出现黑话不直接拦截，因为证据只是来源上下文。
+- `/admin/style` 最近抽取面板新增 `filtered` 数量，方便区分“LLM 抽到了，但因为黑话边界被挡掉”。
+- 修正现有数据：将 `993065015` 中把 `emu/ymy` 归纳成“无意义重复短词”的表达样本标记为 `rejected`，保留 revision。
+- 本轮不改变黑话模块本身，不改 soul 文件。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_style_api.py -q` 通过
+- `source ./scripts/dev/env.sh && uv run ruff check admin/routes/api/style.py tests/test_style_api.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+
+**交接说明**：
+
+- `emu=凤笑梦`、`ymy=有没有` 这类内容仍由黑话模块负责；表达学习只学习“怎么说/怎么接话”，不解释 token 含义。
+
+---
+
+## 2026-05-12 表达学习手动抽取可观测性
+
+**变更类型**：admin-api / frontend / tests / docs
+
+**内容**：
+
+- `POST /api/admin/style/extract/run` 新增 `per_group` 明细，逐群返回：
+  - `scanned`：参与抽取的人类消息数
+  - `extracted`：LLM 返回的表达候选数
+  - `saved`：实际写入/合并的表达数
+  - `approved` / `pending` / `expression_ids`
+- `/admin/style` 新增“最近抽取”面板，手动抽取后显示每个群的扫描、候选和保存结果。
+- 0 候选群现在会显示为“无候选”，避免大群被扫描但没有样本时看起来像“没参与”。
+- 本轮不改变抽取策略，不自动批准，不改 soul 文件。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py tests/test_style_plugin.py tests/test_admin_api.py -q` 通过
+- `source ./scripts/dev/env.sh && uv run ruff check services/style plugins/style admin/routes/api/style.py admin/routes/api/__init__.py tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py tests/test_style_plugin.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过
+
+**交接说明**：
+
+- Web 人工验收时，点击“手动抽取”后看右侧“最近抽取”。若 `477640404` 显示“扫描 > 0 / 候选 0 / 保存 0”，说明该群参与了抽取，但当前窗口没有可保存表达。
+
+---
+
+## 2026-05-12 表达学习二次审计 P1 收口
+
+**变更类型**：fix / backend / frontend / tests / docs
+
+**内容**：
+
+- `StyleExtractor` 新加入库前低信号质量过滤：
+  - 拦截“有人说话 / 可以接话”这类泛化候选，避免污染 pending 队列。
+  - 继续保留骂人、阴阳怪气、过度幼态等真实表达样本，通过 `risk_tags` 和 `output_policy` 交给输出层转译。
+- `/admin/style` 动态风格档案补齐审计缺口：
+  - 非启用档案可直接“启用”。
+  - 当前启用档案可“回滚”到上一版，也可禁用。
+- 补充 extractor 异常/低信号路径测试和 source row fallback 测试。
+- 本轮不改 soul 文件、不重启 bot / NapCat。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py tests/test_style_plugin.py tests/test_admin_api.py -q` 通过，`91 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/style plugins/style admin/routes/api/style.py admin/routes/api/__init__.py tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py tests/test_style_plugin.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过；仅保留 VueUse 第三方 `#__PURE__` 注释提示
+
+**交接说明**：
+
+- 当前仍停在人工端到端验收：进入 `/admin/style` 手动抽取/审核表达，生成档案后测试启用旧版、回滚、禁用和实际回复风格。
+
+---
+
+## 2026-05-12 表达学习 Phase 4-6 反馈、档案与控制台
+
+**变更类型**：backend / plugin / admin-api / frontend / tests / docs
+
+**内容**：
+
+- `StyleStore` 新增 `style_feedback` 与 `style_profiles`：
+  - feedback 记录人工好/坏反馈、profile 操作审计和 bot 回复中性弱信号。
+  - profile 保存动态风格档案版本、启用状态、来源表达和风险说明。
+- `StylePlugin.on_post_reply()` 记录 bot 回复弱信号，但只作为 neutral feedback，不自动学习、不自动改权重。
+- Admin API 新增表达状态、反馈、档案生成、当前档案、启用、禁用、回滚接口。
+- 动态风格档案从 approved 表达生成，可启用/禁用/回滚；Prompt 明确不得改变核心人设、身份、价值观或禁区。
+- 新增 `/admin/style` 轻量控制台：展示指标、表达样本、动态档案、反馈记录，支持手动抽取、审核、好/坏反馈和生成档案。
+- 本轮不做模型微调、不改 soul 文件、不重启 bot / NapCat。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py tests/test_style_plugin.py tests/test_admin_api.py -q` 通过，`88 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/style plugins/style admin/routes/api/style.py admin/routes/api/__init__.py tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py tests/test_style_plugin.py` 通过
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_plugin_bus.py -q` 通过，`46 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_config_loader.py::test_plugin_config_json_default_and_override -q` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过；仅保留 VueUse 第三方 `#__PURE__` 注释提示
+
+**交接说明**：
+
+- 当前停在人工端到端验收：进入 `/admin/style`，先手动抽取/审核表达，再生成动态档案，在测试群确认回复风格。
+- 默认不串群；需要全局表达时配置 `plugins/style` 的 `global_enabled_group_ids`。
+- 如果回复变味，先在 `/admin/style` 禁用档案或静音表达；无需改 soul。
+
+---
+
+## 2026-05-12 表达学习 Phase 3 Prompt 注入初版
+
+**变更类型**：backend / plugin / tests / docs
+
+**内容**：
+
+- 新增 `plugins/style` 目录插件：运行时只读取 `StyleStore` 中 `approved` 的表达习惯，构建 `表达习惯参考` 动态 PromptBlock。
+- 存储层新增 `build_prompt_block()` / `get_prompt_expressions()`：按当前群、当前对话文本、置信度和作用域筛选相关表达；不相关时不注入。
+- 默认不串群：只读取本群 `scope=group` 表达；只有配置 `global_enabled_group_ids` 中的群会额外读取 `scope=global` 表达池。
+- `observe_only` 表达不注入；带 `risk_tags` 的表达即使被人工标为 `allow_use`，Prompt 中也会强制提示“按凤笑梦人设和当前心情转译，不要原样复刻”。
+- 本轮不新增自动抽取、不后台采集 bot 回复质量、不改 soul 文件、不重启 bot / NapCat。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py tests/test_style_plugin.py tests/test_admin_api.py -q` 通过，`83 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/style plugins/style admin/routes/api/style.py admin/routes/api/__init__.py tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py tests/test_style_plugin.py` 通过
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_plugin_bus.py -q` 通过，`46 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_config_loader.py::test_plugin_config_json_default_and_override -q` 通过
+
+**交接说明**：
+
+- 当前停在 Phase 3 人工回复风格验收点：需要在测试群确认 approved 表达注入后，回复更贴近群节奏但仍像凤笑梦。
+- 进入 Phase 4 前，不会学习 bot 自己的回复，也不会根据正负反馈自动强化或降权表达。
+
+---
+
+## 2026-05-12 表达学习 Phase 2 手动抽取初版
+
+**变更类型**：backend / admin-api / tests / docs
+
+**内容**：
+
+- 新增 `services/style/extractor.py`：从群聊窗口抽取可复用表达习惯候选，输出 `situation/style/evidence/confidence/risk_tags/output_policy/persona_fit/mood_fit`。
+- 风险表达不拒学：骂人、阴阳怪气、过度幼态、客服腔等会保留为候选，但必须打风险标签，并通过 `output_policy` 标注未来输出时应转译或只观察。
+- 新增手动 Admin API `POST /api/admin/style/extract/run`：从 `MessageLog` 读取近期人类消息，调用 LLM 抽取并写入 `StyleStore`；默认写入 pending，只有显式 `auto_approve=true` 且高置信、非 `observe_only` 时才 approved。
+- 保持默认群隔离；手动传 `scope=global` 时写入全局表达池，证据仍记录真实来源群。
+- 不注册插件钩子、不后台采集消息、不注入 Prompt、不修改 soul 文件。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py tests/test_admin_api.py -q` 通过，`77 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/style admin/routes/api/style.py admin/routes/api/__init__.py tests/test_style_store.py tests/test_style_extractor.py tests/test_style_api.py` 通过
+
+**交接说明**：
+
+- 当前停在 Phase 2 人工候选验收点：需要人工查看抽出的表达候选是否像表达习惯，而不是黑话词条、事实记忆或人设改写命令。
+- 进入 Phase 3 前，不会影响 bot 回复；表达样本即使 approved，也尚未注入运行时 Prompt。
+
+---
+
+## 2026-05-12 黑话 Web 队列最新优先显示
+
+**变更类型**：backend / frontend / tests
+
+**内容**：
+
+- 调整黑话 Admin 列表排序口径：词条队列、观察中 pending、语义漂移队列均改为最新时间优先，再按状态、置信度、次数做并列排序。
+- 黑话页前端增加列表兜底排序：主队列、观察中候选、漂移治理、最近 run、详情修订记录、观察记录在接收数据后都会按对应时间字段倒序显示。
+- 保持现有页面结构、筛选项、分页和操作按钮不变，只调整“最新信息条在最前面”的显示逻辑。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py::test_slang_store_lists_review_items_newest_first tests/test_admin_api.py::test_slang_api_lifecycle -q` 通过，`2 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py tests/test_slang_semantic_reviewer.py -q` 通过，`133 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/slang/store.py tests/test_slang_store.py admin/routes/api/slang.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过；仅保留 VueUse 第三方 `#__PURE__` 注释提示
+
+**交接说明**：
+
+- 前端静态文件已刷新到 `admin/static`；后端排序变更需要 bot 容器使用新代码后才会体现在 API 顺序上。
+- 页面刷新后，待审、观察不足、复核失败、AI 审核、观察中候选、漂移治理和详情抽屉中的记录都应呈现最新在前。
+
+---
+
+## 2026-05-12 黑话模块重建与自动化验收
+
+**变更类型**：deploy / smoke / tests / docs
+
+**内容**：
+
+- 执行 `docker compose up -d --build bot` 重建并重启 bot 容器；NapCat 容器保持运行，未重建。
+- 自动验收覆盖工作区 doctor、黑话 SQLite 完整性、黑话 pytest/ruff、Admin 登录、健康检查、黑话设置/summary/stats/runs API、live semantic smoke。
+- 修正 `scripts/dev/slang_semantic_smoke.py` 的 live 验收口径：
+  - 强制复核时传 `review_candidates=true`，确保 pending semantic review 真正执行。
+  - 默认 smoke 群优先使用 `/api/admin/slang/groups` 返回的真实群，避免硬编码 `100` 被运行时群过滤后 `groups=0`。
+  - 临时上下文消息不再复用 pending term，避免 daily review 的候选抽取先合并/清掉待复核样本。
+  - Docker 日志计数改为取窗口内最后一个 `semantic_reviewed`，避免旧 run 的 `0` 误导输出。
+- 清理早前失败 smoke 留下的一条孤儿 observation；最终确认 `pending_smoke`、`term_smoke`、`obs_smoke` 均为 0。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && ./scripts/dev/doctor.sh` 通过，`0 fail, 0 warn`
+- `source ./scripts/dev/env.sh && uv run python scripts/dev/slang_acceptance_check.py --skip-live` 通过，`4 passed, 0 failed`
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `docker compose up -d --build bot` 成功；`qq-bot` 与 `napcat` 均为 `Up`
+- `source ./scripts/dev/env.sh && ADMIN_TOKEN=admin uv run python scripts/dev/slang_acceptance_check.py` 通过，`5 passed, 0 failed`
+- `source ./scripts/dev/env.sh && ADMIN_TOKEN=admin uv run python scripts/dev/slang_semantic_smoke.py` 通过，`0 fail, 0 warn`，latest smoke run `semantic_reviewed=1`
+- Admin API 自动检查：`/api/admin/health` 返回 `bot=running`、`napcat=connected`、`connected_bots=1`；`/api/admin/slang/settings`、`summary`、`stats`、`extract/runs` 均返回 200
+- SQLite 残留检查：`pending_smoke=0`、`term_smoke=0`、`obs_smoke=0`
+
+**交接说明**：
+
+- 当前已完成自动化验收，可以进入人工页面/群聊验收。
+- 启动日志里仍能看到早前 LLM `API 402 Insufficient Balance` 记录；后续人工验收如触发真实 LLM 任务失败，优先检查供应商余额/额度，而不是黑话存储。
+- 本轮没有重建 NapCat，也没有改动生产群配置；bot 已保持运行。
+
+---
+
+## 2026-05-12 黑话 alias key 与缓冲 correctness 收口
+
+**变更类型**：backend / tests / docs
+
+**内容**：
+
+- 修复黑话命中缓冲在 `message_id=None` 时的覆盖边界：有消息 ID 时继续按同消息同词去重，无消息 ID 时使用内部 event key，连续多条同词消息不会在缓冲或 flush 分组中互相压成 1 次。
+- 新增 `slang_pending_candidate_keys` 辅助索引表，记录 pending 主 term 与 aliases 的 normalized keys；`SlangStore.init()` 会 backfill 既有 pending，pending 写入、更新、删除、晋升和合并路径同步维护索引。
+- `_merge_pending_candidates_into_existing()` 改为按 `(group_id, normalized_key)` 从 pending key 索引预过滤，再用 `_normalized_term_keys()` 做 Python 二次确认，修复 `P J S K` / `pjsk` 这类 alias 归一化合并漏项。
+- stoplist 语义收口为 term + aliases 彻底停用：extractor、candidate upsert、AI approved upsert、manual create 都会拒绝 alias 命中 stoplist 的新入库；既有词条不删除，但 match、Prompt 注入、lookup 继续隐藏。
+
+**验证**：
+
+- `python -m py_compile services/slang/store.py services/slang/extractor.py plugins/slang/plugin.py admin/routes/api/slang.py tests/test_slang_store.py tests/test_slang_plugin.py` 通过
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py tests/test_slang_semantic_reviewer.py -q` 通过，`132 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_plugin.py::test_slang_plugin_buffers_hits_without_message_id_as_distinct_events tests/test_slang_store.py::test_slang_store_pending_merge_uses_normalized_alias_key_index tests/test_slang_store.py::test_slang_store_rebuilds_pending_key_index_for_legacy_rows tests/test_slang_store.py::test_slang_store_stoplist_alias_blocks_existing_terms_and_intake -q` 通过，`4 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/slang plugins/slang admin/routes/api/slang.py tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py` 通过
+
+**交接说明**：
+
+- 本轮只做黑话 correctness 修复，不部署、不重启、不碰 NapCat，也不改 Admin UI 样式。
+- 新增的是辅助索引表，不改 `slang_terms` / `slang_pending_candidates` 既有列；旧 pending 会在 store 初始化时自动回填 key 索引。
+- stoplist 现在会拦 alias。人工确实要恢复某个词或别名时，先从 stoplist 移除。
+
+---
+
+## 2026-05-12 黑话全局词封闭群选项
+
+**变更类型**：backend / frontend / tests / docs
+
+**内容**：
+
+- 新增黑话设置 `global_excluded_group_ids`：默认所有群可使用 `scope=global` 的已批准黑话；列入该列表的群只使用本群 `scope=group` 词条。
+- `find_matching_terms()`、Prompt 注入和 `slang_lookup` 工具统一遵守该封闭群设置，避免封闭群被全局黑话命中、注入或查询返回。
+- `/admin/slang` 高级设置新增“封闭全局黑话的群”多行输入，留空即保持默认全局开启。
+- Wiki 配置页同步说明全局黑话默认开启与封闭群语义。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py -k 'global_terms_can_be_closed_per_group or slang_lookup_tool_uses_current_group_and_global_terms' -q` 通过，`2 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_admin_api.py::test_slang_api_lifecycle -q` 通过
+- `source ./scripts/dev/env.sh && uv run ruff check services/slang/types.py services/slang/store.py tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过；仅保留 VueUse 第三方 `#__PURE__` 注释提示
+
+**交接说明**：
+
+- 这不是关闭全局候选生成；`auto_promote_global_enabled` 仍单独控制是否扫描跨群 global 候选。
+- 若只想让某个群不吃全局黑话，把群号写入 `/admin/slang` 的“封闭全局黑话的群”即可。
+
+---
+
+## 2026-05-12 群聊发言白名单与黑话学习拆分
+
+**变更类型**：backend / admin-api / frontend / tests / docs
+
+**内容**：
+
+- 修正群门禁语义：`config/group-policy.json` 的白名单/黑名单只控制“能否主动发言、调用工具”，不再代表黑话学习许可。
+- 未列入发言白名单的群默认 `off`，不会回复、不会调工具；单群 Profile 显式开启黑话后进入 `silent_learn`，仍然 `allows_active_group=false`。
+- 当前真人大群 `426727294` 已从发言白名单移出，并在 `config/config.toml` 写入 `presence_mode="silent_learn"`、`slang_enabled=true`；`blacklist` 保持空数组未改。
+- 群管理页文案改为“发言开放/发言关闭”，并说明黑话学习可在单群 Profile 单独开启。
+- 群管理工具与贴纸发送工具补充 `tools_enabled` / 发言门禁校验，闭群不会通过工具外发消息。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_config_loader.py tests/test_admin_api.py tests/test_slang_plugin.py tests/test_scheduler.py -q` 通过，`168 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check kernel/config.py plugins/slang/plugin.py admin/routes/api/groups.py services/tools/group_admin.py services/tools/sticker_tools.py tests/test_config_loader.py tests/test_slang_plugin.py tests/test_admin_api.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过
+- `docker compose up -d --build bot` 后，容器内校验 `426727294 access=false presence=silent_learn slang=true tools=false learn=true speak=false`
+
+**交接说明**：
+
+- 要允许某群发言/工具调用，才把群号加入 `config/group-policy.json` 白名单。
+- 要让某个非白名单群只学习黑话，在 `/admin/groups` 的单群 Profile 打开黑话系统即可；它不会进入回复、调度或工具外发链路。
+
+---
+
+## 2026-05-11 黑话语义漂移误报门控
+
+**变更类型**：backend / admin-api / frontend / tests / docs
+
+**内容**：
+
+- 新增 `SlangDriftReviewer` 专用语义门控，drift 判定输出 `same_meaning / alias_candidate / real_drift / unclear`。
+- `SlangStore._maybe_create_drift_review()` 不再靠 n-gram 低相似度直接开漂移；只有高置信 `real_drift` 才创建或刷新 open drift。
+- `same_meaning` / `unclear` fail closed，不改 approved 释义；`alias_candidate` 只允许合并 alias，不进入 drift。
+- 新增 Admin API `/api/admin/slang/drift/replay`，支持 dry-run / apply 回放历史 open drift，用于关闭 `没米` 这类同义改写误报。
+- Admin 黑话 drift 卡片展示语义门控 verdict / reason，修订记录支持 `drift_suppressed` / `drift_alias_candidate`。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py tests/test_slang_drift_reviewer.py tests/test_slang_plugin.py tests/test_admin_api.py tests/test_client.py tests/test_config_loader.py tests/test_slang_semantic_reviewer.py -q` 通过，`208 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/slang/drift_reviewer.py services/slang/store.py services/slang/__init__.py services/llm/client.py kernel/config.py plugins/slang/plugin.py admin/routes/api/slang.py admin/routes/api/providers.py tests/test_slang_store.py tests/test_slang_drift_reviewer.py tests/test_admin_api.py tests/test_client.py tests/test_config_loader.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过
+
+**交接说明**：
+
+- 漂移队列现在是保守语义门控：模型不可用、超时、解析失败或低置信都会不开 drift。
+- 若需要清理历史 open drift，可先调用 replay dry-run 对账，再 apply；不需要改表结构或清空数据。
+
+---
+
+## 2026-05-11 黑话恢复候选回归口径校正
+
+**变更类型**：tests / docs
+
+**内容**：
+
+- 校正黑话恢复候选的回归断言：`return_ai_reviewed_term_to_candidate()` 会清空 AI 复核痕迹并让词条重新进入 `candidate_ai_unreviewed` 口径。
+- 补充 store / admin API 回归，确认恢复后的词条不再保留旧 `ai_rejected` 计数，也不会继续出现在 `candidate_ai_rejected` 队列。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_semantic_reviewer.py tests/test_slang_store.py tests/test_slang_plugin.py tests/test_admin_api.py -q` 通过
+- `source ./scripts/dev/env.sh && uv run ruff check tests/test_slang_store.py tests/test_admin_api.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+
+**交接说明**：
+
+- 恢复候选后的词条会重新回到“未审候选”队列，后续人工复查应从该队列继续，不要再把它视为已处理项。
+
+---
+
+## 2026-05-10 维护日志归档与 Docker 可见日志瘦身
+
+**变更类型**：ops / docs / observability
+
+**内容**：
+
+- 将 `maintenance-log.md` 调整为“活跃维护日志”，保留 2026-05-07 之后仍常用于交接的记录。
+- 新增归档文件 [docs/audits/maintenance-log-archive-2026-04-29-to-2026-05-06.md](docs/audits/maintenance-log-archive-2026-04-29-to-2026-05-06.md)，收纳 2026-04-29 至 2026-05-06 的早期实施期维护条目。
+- 调整 `bot.py` 的 stderr 格式化层：
+  - 为 `send_queue` 增加独立中文频道标签。
+  - 将 `scheduler`、`reply_workflow`、`send_queue`、长 `message_out` 日志在 Docker 可见输出中收敛为更短的中文观测摘要。
+  - 保留原始结构化消息在文件日志中的细节能力，不改变运行时行为。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run ruff check bot.py` 通过
+
+**交接说明**：
+
+- 之后查看日常交接先读主 `maintenance-log.md`，追早期演进再去归档文件。
+- 本轮日志瘦身只作用于 stderr / `docker compose logs` 可见层；若需要完整原始字段，继续查看 `storage/logs/` 文件日志。
+
+## 归档索引
+
+- 早期实施期维护记录已归档至 [docs/audits/maintenance-log-archive-2026-04-29-to-2026-05-06.md](docs/audits/maintenance-log-archive-2026-04-29-to-2026-05-06.md)
+- 当前主日志保留 2026-05-07 起仍频繁交接的活跃维护记录
+
+---
+
+## 2026-05-10 配置页补齐分段与并发入口
+
+**变更类型**：backend / frontend / tests / docs
+
+**内容**：
+
+- 后端配置模型为 `reply_segmentation` 与 `scheduler.concurrency` 补充结构化编辑元数据：
+  - 可读标签、帮助说明、推荐值、风险等级与重启提示。
+  - `first_segment_humanize` / `later_segment_humanize` 收窄为 `skip | normal` 枚举，管理端会渲染为下拉选择。
+- 管理端配置页新增两个日常任务入口：
+  - `回复分段`：集中编辑分段开关、目标长度、软/硬段数上限、收尾文案、断点策略与段间延迟。
+  - `群聊并发`：集中编辑全局 LLM 并发、队列预留参数与实验性的首段释放开关。
+- 配置 API 保存/预览/审计逻辑保持原路径，仅修正字段错误路径序列化中的无效三元表达式。
+- 修正 `.gitignore` 中 `config/` 规则误伤 `admin/frontend/src/views/config/` 的问题，改为只忽略仓库根目录 `/config/`。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_admin_api.py -k 'config_endpoint or config_preview or config_backups' tests/test_config_loader.py -q` 通过，`4 passed, 73 deselected`
+- `source ./scripts/dev/env.sh && uv run ruff check kernel/config.py admin/routes/api/config.py tests/test_admin_api.py tests/test_config_loader.py` 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过
+- `cd admin/frontend && npm run build` 通过；仅保留 VueUse 第三方 `#__PURE__` 注释提示
+
+**交接说明**：
+
+- 本轮不改变运行时分段/并发语义，只补管理端可编辑性与 schema 说明。
+- `admin/frontend/src/views/config/` 在本轮前被 `.gitignore` 误忽略，修正规则后会作为未跟踪源码目录显示；若提交本轮改动，需要一并纳入。
+- `npm run build` 已刷新 `admin/static` 哈希产物，生产静态包已对应最新配置页。
+
+---
+
 ## 2026-05-08 Context Knowledge System 评测闸门推进
 
 **变更类型**：backend / tests / docs
@@ -2116,2542 +3217,27 @@
 
 ---
 
-## 2026-05-06 Soul 保存目标文件名明确化与 bot 重建
+## 2026-05-10 黑话 daily review pending 复核闭环
 
-**变更类型**：fix / frontend / backend / tests / deployment
+**变更类型**：fix / backend / tests / deployment
 
 **内容**：
 
-- Soul 保存成功与同步失败提示改为完整路径文案：`config/soul/identity.md` 与 `config/soul/instruction.md`，避免旧 `SKILL.md` 文案或浏览器缓存误导
-- `/api/admin/soul/save` 的返回 `message` 同步改为双文件完整路径，不再出现 `SKILL.md` 保存口径
-- 后端测试补充“即使目录中已有旧 `SKILL.md`，保存也不得改写它，且返回消息不得包含 `SKILL.md`”的断言
-- 重新执行前端构建，生成新 Soul 产物 `SoulView-CRq2001F.js`
-- 已执行 `docker compose up -d --build bot` 重建并重启 `qq-bot`，`napcat` 保持运行未重建
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`、`admin/routes/api/soul.py`、`tests/test_admin_api.py`、`admin/static`、`maintenance-log.md`
+- daily review 不再只复核最近消息抽取结果，也会按群限量复核 `slang_pending_candidates`
+- web search 从自动通过的唯一门槛降级为辅助证据；群内重复证据足够时也可 AI 通过
+- AI 明确判定“不通过”的 pending 会转成 `muted` 词条并清出待处理队列
+- 日志补充 `pending_reviewed`、`pending_approved`、`pending_rejected`、`pending_kept`，便于 Docker 日志对账
 
 **验证**：
 
-- `UV_CACHE_DIR=/private/tmp/omubot-uv-cache uv run pytest tests/test_admin_api.py -k soul` 通过
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过；构建前后已清理 AppleDouble 文件
-- 容器内确认加载新 `SoulView-CRq2001F.js`，且 `docker compose ps` 显示 `napcat` 仍为原运行实例、`qq-bot` 已重建启动
+- `uv run pytest tests/test_slang_plugin.py -q` 通过
+- `uv run pytest tests/test_slang_store.py tests/test_admin_api.py -q` 通过
+- `uv run ruff check services/slang/daily_reviewer.py services/slang/store.py plugins/slang/plugin.py tests/test_slang_plugin.py tests/test_slang_store.py tests/test_admin_api.py` 通过
+- `docker compose up bot -d --build --no-deps` 已重建并启动 bot
 
-**交接说明**：`config/soul/SKILL.md` 若仍存在，是旧版保存遗留文件；当前 API、运行时与 Web 保存目标均已回到双文件。未自动删除该文件，避免误删历史内容。
-
----
-
-## 2026-05-06 Soul 回归双文件编辑与 AI 人设规则文档
-
-**变更类型**：fix / backend / frontend / docs
-
-**内容**：
-
-- Soul 管理端保留当前结构化编辑器与顶部节点切换设计，但保存目标回归为 `config/soul/identity.md` 与 `config/soul/instruction.md`
-- `/api/admin/soul` 固定返回 legacy 双文件编辑模型，`/api/admin/soul/save` 不再生成 `SKILL.md`，保存成功后热重载 `identity.md`
-- 运行时启动与 prompt 指令加载统一使用双文件：身份读取 `identity.md`，行为规则读取 `instruction.md`
-- `services.identity` 保留对导入内容 YAML frontmatter 的兼容解析，但注释与测试命名不再称其为 SKILL.md 运行时格式
-- 新增双文件人设生成规则文档，说明用户如何让 AI 把外部资料整理成现有双文件
-- Web 人设页新增规则入口，可直接查看该规则文档；SPA 与旧 Jinja 备用页文案均移除自动迁移/写入 SKILL 的交付口径
-- `identity.md` 一级标题下、第一个 `##` 前的内容稳定映射到 Web 顶部“简述”，避免保存后在结构化编辑器里漂移
-
-**影响范围**：`admin/routes/api/soul.py`、`admin/routes/soul.py`、`admin/templates/soul.html`、`admin/frontend/src/views/soul/SoulView.vue`、`services/identity.py`、`services/llm/prompt_builder.py`、`plugins/chat.py`、`docs/ai-persona-generation-rules.md`、`tests/test_admin_api.py`、`tests/test_identity.py`、`tests/test_prompt.py`
-
-**验证**：
-
-- `UV_CACHE_DIR=/private/tmp/omubot-uv-cache uv run pytest tests/test_admin_api.py tests/test_identity.py tests/test_prompt.py` 通过
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过；预构建钩子已按既有规则清理 AppleDouble 文件，`admin/static` 按既有 Vite 输出刷新
-- 构建与验证后手动执行 `bash scripts/cleanup-appledouble.sh` 收口，确保项目工作区范围内不残留 AppleDouble 文件
-
-**交接说明**：本条 supersede 旧的“人设文件支持 SKILL.md 格式”运行时口径；后续若引入外部 SKILL，只按文档手动转换为双文件，不恢复自动读取或自动迁移。
-
----
-
-## 2026-05-06 Soul AI 人设规则子页面与小标题编辑修复
-
-**变更类型**：fix / frontend / docs
-
-**内容**：
-
-- 将人设规则入口从 API 弹窗改为同风格 SPA 子页面 `/admin/soul/persona-guide`，避免后端未重启时规则文档无法查看
-- 规则文档重命名为 `docs/ai-persona-generation-rules.md`，页面与按钮文案改为“AI 人设生成规则”，不再使用旧的转换类称呼作为产品文案
-- 子页面使用 `AppPage`、`MetricCard`、`AppCard` 呈现项目文档内容，保持 Calm Ops 管理端风格
-- `SoulView` 的块级 `###` 小标题改为可编辑输入框，人物名、关系名、场景名都可在 Web 内直接修改；空小标题保存时不会写出 `###`
-- 后端结构解析扩展为识别 `###` 到 `######` 小标题，兼容更多 AI 生成文档习惯，保存时统一规范成 `###`
-- 左侧菜单在 `/soul/persona-guide` 子路由下继续高亮“人设编辑”
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`、`admin/frontend/src/views/soul/SoulPersonaGuideView.vue`、`admin/frontend/src/router/index.ts`、`admin/frontend/src/layouts/components/SideMenu.vue`、`admin/frontend/vite.config.ts`、`admin/routes/api/soul.py`、`docs/ai-persona-generation-rules.md`、`tests/test_admin_api.py`
-
-**验证**：
-
-- `UV_CACHE_DIR=/private/tmp/omubot-uv-cache uv run pytest tests/test_admin_api.py tests/test_prompt.py` 通过
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过；预构建钩子清理 AppleDouble 文件，`admin/static` 按既有 Vite 输出刷新
-
----
-
-## 2026-05-06 Soul 编辑块合并与 Markdown 标记清洗
-
-**变更类型**：fix / frontend / backend
-
-**内容**：
-
-- 人设编辑页按小标题对连续块进行展示合并：一个小标题下的段落、列表、表格会显示在同一张编辑卡片内，减少“标题说明”和“列表规则”被拆开的割裂感
-- 小标题输入改为作用于整组内容，保存时仍只写出一次 `### 小标题`
-- Soul API 在解析与保存结构化字段时清洗常见 Markdown 标记：`**加粗**`、反引号、链接、引用符、误入的标题/列表前缀等不会直接出现在 Web 输入框里
-- 后端测试补充了 `**祖父**`、反引号文本和更深小标题的清洗断言
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`、`admin/routes/api/soul.py`、`tests/test_admin_api.py`
-
-**验证**：
-
-- `UV_CACHE_DIR=/private/tmp/omubot-uv-cache uv run pytest tests/test_admin_api.py tests/test_prompt.py` 通过
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过；预构建钩子清理 AppleDouble 文件，`admin/static` 按既有 Vite 输出刷新
-
----
-
-## 2026-05-06 Soul 页头操作按钮等宽收敛
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- Soul 页头操作区按钮统一为 `34px` 高度、圆角胶囊形态和一致的最小宽度
-- “刷新结构 / 重置草稿 / AI 人设生成规则 / 保存并同步”在并排时保持视觉尺寸一致，主按钮仅通过颜色突出
-- 状态标签维持轻量高度，避免与操作按钮混成一排时显得大小参差
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过；预构建钩子清理 AppleDouble 文件，`admin/static` 按既有 Vite 输出刷新
-
----
-
-## 2026-05-06 Soul 保存提示文件名兜底修正
-
-**变更类型**：fix / frontend / deployment
-
-**内容**：
-
-- Soul 结构化编辑页保存成功提示不再原样展示后端返回的旧 `message`，统一显示 `identity.md / instruction.md 已保存`
-- 避免旧容器或缓存返回 `SKILL.md 已保存` 时误导管理员判断实际保存目标
-- 说明本轮后端源码改动需要重建 `bot` 镜像；单纯 `docker compose restart bot` 不会更新容器内 Python 代码
-- `.dockerignore` 补充递归 AppleDouble 忽略规则，并排除 `admin/frontend/` 源码目录，Docker 镜像继续只携带已构建的 `admin/static`
-- `scripts/cleanup-appledouble.sh` 不再跳过 `__pycache__`，避免 `._*.pyc` 残留阻塞 Docker buildx 读取构建上下文
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`、`.dockerignore`、`scripts/cleanup-appledouble.sh`、`admin/static`
-
-**验证**：
-
-- 已由顶部 “Soul 保存目标文件名明确化与 bot 重建” 条目补充验证与部署结果
-
----
-
-## 2026-05-06 Soul 横条紧凑化与页面滚动回归
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- Soul 顶部节点横条从横向滚动列表改为自动换行的紧凑网格按钮，节点全部直接显示在页面内，不再左右拖动
-- 进一步合并节点：
-  - `基础信息`、`插话方式`、`身份概览` 合并为首个 `基础与身份` 节点
-  - 行为规则从细分节点收敛为 `回复规则`、`表达素材`、`群聊与人格`、`日常工具记忆` 等复合节点
-- 取消下方配置区、列表编辑器、表格编辑器和 textarea 的内部滚动限制，滚动交还给 AppPage 页面主体，避免鼠标悬停在输入框或编辑区时抢滚轮
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 节点语义合并与长章节分片
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 修正 Soul 顶部横条节点过度按章节切分的问题：
-  - 人设正文按 `身份概览 / 性格与成长 / 关系与边界 / 语气表达` 聚合相似章节
-  - 行为规则按 `底线与禁区 / 回复与分段 / 表情包策略 / 场景话术 / 人格稳固 / 群聊理解 / 日常与搜索 / 工具与记忆` 聚合
-  - 超长章节不再整章塞进一个节点，而是按内部 block 权重拆成多个片段节点
-- `SoulView` 节点结构从“完整章节列表”扩展为“章节片段列表”，仅影响前端展示，不改变保存时的 `editor` 数据结构与后端接口
-- 当前节点配置区增加受控最大高度和内部滚动，避免某个节点把整页拉成多屏，同时短节点会和相近内容合并显示
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 顶部节点编辑器空白与页签切换修复
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 审计当前 Soul 空白态后，收敛为顶部横条节点编辑器的显式渲染结构：
-  - `AppEditorShell` 只承担顶部工具栏
-  - 节点横条与当前节点配置面板改为 `soul-editor` 内的显式兄弟块
-  - 当前节点面板增加 `:key="currentNode.id"`，点击节点后强制按节点重挂载配置区
-  - 增加“没有可切换的配置节点”兜底，避免接口结构异常时只剩空卡片
-- 修复顶部应用页签切换链路：
-  - `AppTab` 从 `NTab @click` 改为受控 `NTabs @update:value`
-  - 关闭当前页签后主动跳转到新的 active tab，避免只更新 store 不更新路由
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`、`admin/frontend/src/layouts/components/AppTab.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 左侧导航废弃，改为顶部横条节点编辑器
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 废弃 `SoulView` 左侧章节导航方案，不再保留 sticky、fixed、floating、docked、scroll spy 或锚点滚动定位逻辑
-- `Soul` 编辑区改为顶部横条节点切换：
-  - 固定包含 `基础信息` 与 `插话方式`
-  - 人设正文与行为规则按章节权重自动分组为若干节点
-  - 点击横条节点只切换当前配置内容，不再驱动页面滚动
-- 单次只渲染当前节点下的配置区，长列表、长键值表和长文本块使用受控高度，避免单个节点把页面拉得过长
-- 回退上一轮仅为悬浮目录新增的 `AppPage surface="plain"` 公共接口，`AppPage` 恢复默认单一内容壳
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`、`admin/frontend/src/components/common/AppPage.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
-**交接说明**：此前 `Soul 左栏由原生 sticky 改为受控悬浮 rail` 记录已被本条 supersede；后续不要再恢复左侧 sticky/fixed/floating 导航方案
-
----
-
-## 2026-05-06 Soul 左栏由原生 sticky 改为受控悬浮 rail
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- `AppPage` 新增轻量内容壳模式 `surface="plain"`，允许页面内容直接落在 `data-page-scroll-root` 中，不再强制包裹大面积玻璃卡片
-- `SoulView` 放弃原生 `position: sticky` 左栏方案，改为单一三态悬浮目录：
-  - `resting`：章节区尚未进入吸附线，左栏保持自然文档流位置
-  - `floating`：进入章节区后，左栏固定在页面滚动根可视区内
-  - `docked`：接近章节区底部时，左栏停靠在 rail 底部，不再继续上滑或越界
-- 目录定位只绑定 `AppPage` 的 `data-page-scroll-root`，并通过 `ResizeObserver + requestAnimationFrame` 同步 `left / top / width / max-height`
-- 保留 `scrollIntoView + scroll-margin-top + IntersectionObserver` 的章节跳转与高亮逻辑，但不再让这些逻辑参与左栏定位
-- 目录桌面宽度调整为 `304px`，中等桌面收敛为 `272px`，`<=980px` 退化为正文前普通卡片
-
-**影响范围**：`admin/frontend/src/components/common/AppPage.vue`、`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
-**交接说明**：此前多轮 sticky/fixed 混合方案已被本条 supersede；后续若继续增强 Soul 左栏，应沿用 `surface="plain" + 受控悬浮 rail`，不要再回退到原生 sticky 试错
-
----
-
-## 2026-05-06 Soul fixed 导航回退为单一 sticky rail
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 对 Soul 左栏导航做清理式重构，移除最近几轮叠加出的 `fixed + ResizeObserver + 几何定位` 方案
-- 恢复为单一 sticky rail 架构：
-  - `soul-nav-rail` 负责吸附
-  - `soul-nav` 只负责卡片视觉与最大高度裁切
-  - `soul-nav__body` 继续作为唯一可滚动的目录列表区
-- 左栏默认桌面宽度提升到 `288px`，中等桌面收敛到 `256px`，`<=980px` 才退化为普通单栏目录
-- 保留 `data-page-scroll-root + scrollIntoView + IntersectionObserver` 的章节联动主链，不再保留 fixed 定位相关状态与观察器
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
-**交接说明**：此前 `Soul 左栏导航改为 fixed 覆盖架构` 记录已被本条 supersede，后续不应再恢复 fixed 方案
-
----
-
-## 2026-05-06 Soul 左栏导航改为 fixed 覆盖架构
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 放弃此前多轮 `sticky` 方案，改为固定式导航壳：
-  - `soul-nav-rail` 继续留在布局中负责占位
-  - 真正可见的 `soul-nav` 在桌面宽度下使用 `position: fixed`
-  - 通过 `navRailElement.getBoundingClientRect()` 实时同步导航卡的 `left / top / width / height`
-- 新增 `ResizeObserver` 监听 rail 与页面滚动根尺寸，避免侧栏折叠、窗口尺寸变化后 fixed 导航错位
-- 保留左栏头部固定、目录列表区内部滚动；桌面下不再依赖 sticky 约束链，因此不会被页面滚动一起卷走
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 左栏内部滚动与悬浮壳分离
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 修复 Soul 左侧目录在悬浮状态下“内容继续往上卷，标题消失”的问题
-- 根因是此前将整张 `soul-nav` 卡片作为滚动容器，滚轮落在左栏时会把目录卡片内部整体卷动
-- 结构调整为：
-  - `soul-nav-rail` 负责 sticky 悬浮
-  - `soul-nav` 负责卡片壳与头部固定
-  - 新增 `soul-nav__body` 作为唯一可滚动的目录列表区
-- 窄屏降级时同时关闭 `soul-nav__body` 内部滚动，恢复为普通静态目录块
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 悬浮目录断点与 rail 架构修正
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 修复 Soul 左侧目录在常规桌面/笔记本宽度下滚动后消失的问题
-- 根因是 `SoulView` 在 `max-width: 1180px` 时会显式关闭 sticky，导致部分笔记本宽度直接退化为普通随页滚动目录
-- 结构上将 sticky 能力从 `soul-nav` 卡片本体挪到 `soul-nav-rail` 外层容器，目录卡片仅负责内部滚动与视觉样式
-- 响应式阈值收紧：
-  - `<=1280px` 仅缩窄 rail 宽度
-  - `<=980px` 才退化为单栏普通目录卡片
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 章节点击跳转恢复
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 修复 Soul 页面左侧目录点击后右侧不跳转的问题
-- `SoulView` 的章节点击从“手算 scrollTop”回退为原生 `scrollIntoView`，继续配合章节锚点上的 `scroll-margin-top` 控制停靠位置
-- 页面滚动根选择收紧为“必须是真正可滚动的 `data-page-scroll-root` 容器”，避免误绑到存在但当前不可滚动的祖先节点
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 单滚动模型回退与左侧悬浮目录重构
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 回退 `Soul` 页面此前“左栏 sticky + 右栏独立滚动”的双滚动域方案，恢复为 `AppPage` 内容区单一滚动模型
-- `AppPage` 内容主体新增稳定 DOM 标记 `data-page-scroll-root`，供页面级目录联动查找真实滚动根
-- `SoulView` 的章节点击与 `IntersectionObserver` 改为统一绑定页面主体滚动容器，不再绑定右栏容器或 `window`
-- 左侧目录改为 rail + sticky card 结构：
-  - rail 负责占位，避免覆盖正文
-  - 目录卡根据页面主体可视高度裁切，自身可滚动
-  - 窄屏下退化为正文前的普通卡片，不再固定到底部或遮挡内容
-
-**影响范围**：`admin/frontend/src/components/common/AppPage.vue`、`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
-**交接说明**：Soul 页后续若再做目录增强，应继续复用 `data-page-scroll-root` 作为唯一滚动根，避免重新引入右栏独立滚动
-
----
-
-## 2026-05-06 Soul 悬浮目录与右侧独立滚动修复
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 针对 Soul 页面“点击目录后左栏被一起顶走”的问题，改为双滚动域：
-  - 左栏 `soul-nav` 保持悬浮目录（sticky）
-  - 右栏 `soul-editor` 改为独立滚动容器（`overflow-y: auto` + `max-height: 100dvh`）
-- `SoulView` 滚动根探测优先绑定右栏编辑容器 `editorScrollContainer`，目录点击与滚动高亮不再驱动整页滚动
-- 保留窄屏单栏降级：`<=1180px` 时关闭右栏独立滚动与左栏悬浮，避免移动端遮挡
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 左侧章节导航可视区固定修复
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 修复 Soul 页面点击章节后左侧导航被整体滚出可视区的问题
-- `soul-console` 容器补充 `min-height: 0` 与 `align-items: start`，稳定双栏布局滚动上下文
-- `soul-nav` 增加 `position: sticky; top: 0`，并启用独立纵向滚动，确保右侧章节跳转时左侧目录持续可见
-- 移动端断点（`<=1180px`）下关闭 sticky，避免单栏模式下导航遮挡内容
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 章节导航点击失效回归修复
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 修复 `admin/frontend/src/views/soul/SoulView.vue` 导航点击偶发“无跳转/错跳转”问题：
-  - 为章节导航引入前端唯一 `anchorId`（`persona-*` / `instruction-*`），避免 legacy 模式下人设与规则章节 `section.id` 重复导致锚点映射冲突
-  - `bindSectionElement` 改为稳定函数引用缓存，降低重渲染时 ref 回调抖动对锚点绑定的影响
-  - `scrollToSection` 改为容器感知滚动：优先对探测到的滚动容器执行 `scrollTo`，无容器时回退 `window.scrollTo`
-  - 新增锚点与 ref 绑定清理逻辑，章节刷新后剔除失效绑定，避免 observer/映射残留
-- 保持后端接口、`SoulEditorPayload` 语义与页面业务字段不变，仅修复导航联动实现细节
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
----
-
-## 2026-05-06 Soul 章节导航 Scroll Spy 联动修复
-
-**变更类型**：fix / frontend
-
-**内容**：
-
-- 修复 `admin/frontend/src/views/soul/SoulView.vue` 左侧章节导航与右侧内容锚点脱耦问题：
-  - 导航锚点从组件 `ref` 改为原生 `<section>` 锚点容器 + function ref 绑定
-  - 点击导航改为滚动到真实 DOM 锚点（`scrollIntoView`）
-- 引入 TOC scroll spy：
-  - 使用 `IntersectionObserver` 监听章节锚点可视状态
-  - 滚动时自动更新 `currentSectionId`，左侧高亮跟随视区变化
-- 引入滚动容器自适配：
-  - 自动探测最近可滚动祖先作为 observer `root`
-  - 根据容器内边距动态计算 `scroll-margin-top` 偏移，避免硬编码
-- 生命周期稳定性增强：
-  - 在 `loadSoul`、`resetDraft`、章节列表变化、窗口尺寸变化时重建 observer
-  - `onBeforeUnmount` 主动断开 observer，避免残留监听
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**验证**：
-
-- `./node_modules/.bin/vue-tsc --noEmit` 通过
-- `npm run build` 通过
-
-**交接说明**：后续若新增章节类型，只要继续包在 `soul-section-anchor` 锚点容器内，目录联动可自动生效
-
----
-
-## 2026-05-06 Docker 定向重建 bot（未触碰 napcat）
-
-**变更类型**：ops / deploy
-
-**内容**：
-
-- 按要求仅对 `docker compose` 中的 `bot` 服务执行定向重建与重建容器
-- 实际执行方式：
-  - 使用 `docker compose up -d --build --no-deps bot`
-  - 显式避免触发依赖服务，因此 `napcat` 未被重启或重建
-- 构建过程中遇到 macOS AppleDouble 影子文件导致 Docker build context 报错：
-  - 首次卡在 `._maintenance-log.md`
-  - 二次卡在 `admin/__pycache__/.___init__.cpython-313.pyc`
-- 已在重建前补做 AppleDouble 清理，随后成功完成 `bot` 镜像重建与容器替换
-
-**影响范围**：运行中的 `qq-bot` 容器；`napcat` 保持原状态
-
-**交接说明**：本次重建后 `qq-bot` 已重新启动；若后续再次出现同类 Docker 构建失败，优先检查仓库中的 `._*` 文件
-
----
-
-## 2026-05-06 Soul 结构页加载失败诊断增强
-
-**变更类型**：fix / docs
-
-**内容**：
-
-- 修正 `admin/frontend/src/views/soul/SoulView.vue` 的加载失败呈现：
-  - 不再把 `/api/admin/soul` 请求失败伪装成“Legacy / 0 章节 / 已同步”
-  - 新增接口形状校验，区分新版 editor model、旧版响应、404、500、401 等错误
-  - 在前端直接提示“前端已更新、后端未重启”这类混合部署问题
-- 新增空状态与指标卡的错误文案联动，方便浏览器侧快速判断故障原因
-- 本地确认：当前仓库里的新版 `/api/admin/soul` 在测试环境下能正常返回完整结构；截图中的“无法加载结构”高概率是运行中的 bot 还未加载新版 Soul API
-
-**影响范围**：`admin/frontend/src/views/soul/SoulView.vue`
-
-**交接说明**：如果浏览器仍提示 Soul API 旧版或缺失，需要在部署新静态资源后重启 bot，使前后端版本一致
-
----
-
-## 2026-05-06 Codex 自动更新维护日志规则
-
-**变更类型**：docs / process
-
-**内容**：
-
-- 将“持久变更后同步更新 `maintenance-log.md`”写入 Codex skill：
-  - `codex-skills/omubot-admin-console/SKILL.md`
-- 同步镜像到 Claude skill，避免两端协作规则漂移：
-  - `.claude/skills/omubot-admin-console/SKILL.md`
-- 在 `docs/agent-ui-guidelines.md` 增补维护日志自动更新规则，明确触发条件：
-  - 部署、运行时、配置、路由、API、存储等行为变化
-  - 管理端阶段性里程碑
-  - Skill / 流程 / 协作规则更新
-- 约定：若任务仅为阅读、调研、答疑且未形成持久仓库改动，可不写维护日志
-
-**影响范围**：`codex-skills/`、`.claude/skills/`、`docs/agent-ui-guidelines.md`
-
-**交接说明**：后续 Codex 在本仓库完成符合触发条件的任务时，应在同一轮内同步更新 `maintenance-log.md`
-
----
-
-## 2026-05-06 管理端审计总结 + Web 重构进度记录 + Codex Skill 接入
-
-**变更类型**：docs / process
-
-**内容**：
-
-- 完成管理端 SPA 审计，确认当前重点为“统一新 Web 页面风格与信息层级”，而不是补主流程功能
-- 沉淀 `Calm Ops / 雾青控制台风格` 规范，形成：
-  - `docs/admin-ui-style-guide.md`
-  - `docs/agent-ui-guidelines.md`
-- 已记录会话交接文档：`docs/session-handoff.md`
-- 当前已完成统一重构页面：
-  - Login、Dashboard
-  - System、Logs
-  - Groups、Memory
-  - Plugins、Knowledge、Usage
-- 建议下一批优先继续：
-  - Scheduler
-  - Sandbox
-  - Memos
-- 新增并接入项目内 Skill：
-  - `.claude/skills/omubot-admin-console/`
-  - `codex-skills/omubot-admin-console/`
-  - `scripts/install-codex-skill.sh`
-- 已确认本机 Codex 全局目录存在 `~/.codex/skills/omubot-admin-console/`
-
-**影响范围**：`docs/`、`.claude/skills/`、`codex-skills/`、`scripts/install-codex-skill.sh`
-
-**交接说明**：下一会话优先阅读 `docs/session-handoff.md`，可直接恢复管理端重构与审计上下文
-
----
-
-## 2026-05-06 card_series 独立表 + admin/static volume 挂载
-
-**变更类型**：feature / infra
-
-**内容**：
-
-- 新增 `card_series` 表：规范化卡片分组，`memory_cards` 加 `series_id` 外键
-- `_backfill_food_series()`：CardStore.init() 自动迁移旧 food 插件卡片到系列
-- food 插件 `_add_preference` 修复：创建 `food_pref:{user_id}` 系列
-- food 插件 `_record_served` 系列感知：`food_served:{user_id}` 系列 + 20 张上限
-- `find_similar()` / `reinforce()` 新增：前缀匹配 + confidence 增量
-- MemoryView 重写：单 NDataTable 内嵌系列折叠行（SeriesHeaderRow + CardRow）
-- MemosView 修复：`Promise.allSettled` 防级联失败、`NCollapse` v-model 改 writable ref
-- admin API：`GET /memory/series` 全量系列端点、`_card_to_dict` 加 `series_id`
-- `docker-compose.yml`：bot 服务添加 `./admin/static:/app/admin/static:ro` volume 挂载
-
-**影响范围**：`services/memory/card_store.py`、`plugins/food.py`、`admin/routes/api/memory.py`、`admin/frontend/src/views/`、`docker-compose.yml`
-
-**部署注意**：加 volume 挂载后，前端更新只需 `npm run build` + `docker compose restart bot`，无需重建容器
-
----
-
-## 2026-05-06 Vue 3 SPA 控制台前端
-
-**变更类型**：feature
-
-**内容**：
-
-- 新增 `admin/frontend/` Vue 3 + TypeScript + Naive UI + UnoCSS 前端项目
-- 17 个页面：仪表盘、用量统计、沙盒、人设编辑、日程心情、记忆管理、好感度、表情包、知识库、Memo、群管理、插件、调度器、配置、系统、日志、登录
-- 56 个 JSON API 端点（`/api/admin/*`），含 SSE 实时推送
-- Vite 开发服务器（5173）+ 生产构建到 `admin/static/`
-- 后端 SPA fallback：所有 `/admin/*` 路由返回 `index.html`
-
-**修复项**：
-
-- P0：`auth.checkAuth()` 启动调用 + `router.beforeEach` 守卫
-- P1：6 个 TypeScript 类型错误
-- P2：`AppPage.showHeader` 默认值改为 `true`
-- P3：清理未使用导入、switch/case 作用域
-- P4：后端 SPA fallback 路由顺序
-- P5：favicon 双重路径
-- 暗色主题：NButton、NMenu、NCard 等组件 CSS 变量覆盖
-- 晚期绑定：stickers/memos 路由添加 `ctx` 回退
-
-**影响范围**：`admin/` 目录，不影响 bot 消息管线
-
-**回滚方案**：删除 `admin/frontend/` 和 `admin/static/`，恢复 `admin/__init__.py` 原始版本
-
----
-
-## 2026-05-05 群聊 @mention 引用回复机制（方案 B：Prompt + 元数据注入）
-
-**变更类型**：feature
-
-**内容**：
-
-**调研阶段**：
-
-- 研究 6 篇论文/项目：W2W (Le et al. 2019)、Inoue et al. (2025)、Multi-Party Hangover (Penzo et al. 2024)、MUCA (Mao et al. 2024)、MaiBot Planner/Replyer、OpenClaw
-- 核心结论：LLM 在收件人识别上准确率仅 80.9%（随机基线 80.1%），假阴性为主——框架应提供 out-of-band 信号（Who/Which message），LLM 做语言决策
-
-**Phase 1 — 触发元数据传递**：
-
-- `services/memory/timeline.py`：`TimelineMessage` 新增 `trigger_reason` + `trigger_target` 字段；新增 `add_pending_trigger(group_id, reason, message_id, target_user_id)` 方法；`merge_user_contents()` 渲染触发标记为 `«触发原因: ... | 来自 QQ=xxx | 消息ID=yyy»`（元数据，非消息体）
-- `services/scheduler.py`：`_do_chat()` 传递 `target_user_id=trigger.target_user_id` 给 `add_pending_trigger()`
-
-**Phase 2 — 框架级 @mention 注入**：
-
-- `services/scheduler.py`：`_do_chat()` 中 @mention 触发时，框架自动在第一条流式分段前拼接 `[CQ:reply,id=X]`（引用回复），后续分段正常发送
-- 实现方式：`first_segment` 标志 + `reply_prefix` 默认参数绑定（ruff B023 兼容）
-- 非流式回退：`on_segment` 未被调用时，在 `reply` 前直接拼接前缀
-- 移除 `[CQ:at,qq=X]`——引用回复已能识别目标，不需要重复 @
-
-**Phase 3 — 指令更新**：
-
-- `config/soul/instruction.md`：@提及决策规则从单行说明扩展为结构化规则块（何时应该 @ / 何时不需要 @ / 与亲昵称呼的关系）
-
-**调试修复**（3 轮）：
-
-- 触发标记顺序：`append()` → `insert(0, msg)`（标记必须在用户消息之前）
-- 重复 `«msg:mid»` 标签：触发标记是元数据，不渲染 `«msg:mid»`
-- 流式分段恢复：@mention 时 `on_segment=None` 导致整条回复不切分 → 改为 `first_segment` 模式
-
-**影响范围**：`services/scheduler.py`、`services/memory/timeline.py`、`config/soul/instruction.md`
-
-**验证**：35/35 scheduler 测试通过，bot 已重建部署
-
-**回滚方案**：`git revert` 即可；instruction.md 为 volume mount，删除新增规则块即回退
-
----
-
-## 2026-05-05 FoodPlugin 群聊引用回复 + 版本提升
-
-**变更类型**：feature
-
-**内容**：
-- `plugins/food.py`：新增 `_send_reply()` 辅助方法，群聊场景自动在回复前拼接 `[CQ:reply,id=X][CQ:at,qq=X]`，解决多人同时 `/吃什么` 时回复混在一起的问题
-- 覆盖全部 8 个 handler：`_handle_eat`（含首次提示/空结果）、`_feedback_recommend`（拒绝重新推荐，从 `on_message` 传入 `message_id`）、`_handle_like`、`_handle_dislike`、`_handle_location`、`_handle_info`、`_handle_search_toggle`、`_handle_food_help`
-- 私聊不受影响（`cmd_ctx.group_id` 为 None 时不加前缀）
-- 移除各 handler 中不再需要的 `Message` 局部导入
-
-**版本**：FoodPlugin 0.1.4 → 0.1.5，bot 1.2.5 → 1.2.6
-
-**影响范围**：FoodPlugin 全部命令回复
-
----
-
-## 2026-05-05 调度器重构：TriggerContext 统一触发器 + 概率参数调优
-
-**变更类型**：refactor + fix
-
-**内容**：
-
-**Phase 1-2 — TriggerContext 统一触发器模型**：
-- `kernel/types.py`：新增 `TriggerContext` dataclass（reason/mode/target_message_id/target_user_id/extra），替代 ad-hoc 的 `video_hint` dict + `force_reply` bool + `is_at` flag；`MessageContext` 新增 `trigger` 字段
-- `services/memory/timeline.py`：`TimelineMessage` 新增 `trigger_reason` 字段；新增 `add_pending_trigger()` 方法，将触发原因写入 pending buffer 而非 transient `user_content`
-- `plugins/bilibili.py`：设置 `ctx.trigger = TriggerContext(...)` 替代 `_bilibili_reply`
-- `kernel/router.py`：对 @ 消息构造 `TriggerContext(mode="at_mention")`，传递给 scheduler
-- `services/scheduler.py`：`_GroupSlot` 用 `trigger: TriggerContext` 替代 `video_hint` + `force_reply`；`notify()` 在所有 skip 路径清除 `slot.trigger = None`（**修复 video_hint 泄漏 bug**）；概率计算从 `trigger.extra` 取值
-
-**Phase 3 — Thinker 强制回复守卫**：
-- `services/llm/client.py`：thinker 前加 `and not force_reply` 守卫，@ 触发和 video_always 跳过 thinker 决策，保证必回复且省 token
-
-**Phase 4 — QQ 引用回复**：
-- `services/scheduler.py`：`_send_to_group()` 检测 `[CQ:reply,id=X]` 前缀并记录日志
-- `services/memory/timeline.py`：`add_pending_trigger()` 传入 `message_id`，渲染为 `«msg:id»` 标签供 LLM 使用
-- `config/soul/instruction.md` 已有 CQ reply/at 格式文档，LLM 可直接输出
-
-**概率参数调优**：
-- `config/talk_schedule.json`：全部时段乘数上限从 1.2 降到 0.7
-- `services/scheduler.py`：autonomous 高兴趣 time_mult 覆盖从 `1.0` 改为 `max(time_mult, 0.7)`（保底不封顶）
-- `services/scheduler.py`：interest blend 地板从 `0.3 + 0.7×interest` 改为 `0.1 + 0.9×interest`（低兴趣视频从 ~28% 降到 ~12%）
-
-**测试**：
-- `tests/test_scheduler.py`：35 个测试全部迁移到 `TriggerContext` 参数，零回归
-
-**影响范围**：scheduler、timeline、bilibili plugin、router、llm client、talk_schedule 配置
-
----
-
-## 2026-05-05 文档更新：插件开发指南 + wiki 修订
-
-**变更类型**：docs
-
-**内容**：
-- 新增 `docs/wiki/Plugin-Development.md`：插件开发完整教程（插件形态、最简结构、钩子生命周期、命令注册含门禁字段、RichCommandContext 使用、工具注册、Prompt 注入、消息拦截、定时任务、最佳实践 7 条）
-- 更新 `docs/wiki/Plugins.md`：重写"命令注册"章节——门禁字段表格、子命令示例、RichCommandContext、format_help()、完整示例链接
-- 更新 `docs/wiki/Commands.md`：全部命令表格含权限列、`/debug` 详解、门禁字段文档
-- 更新 `docs/wiki/_Sidebar.md`：新增"插件开发"链接
-
-**影响范围**：仅 wiki 文档，无代码变更
-
----
-
-## 2026-05-05 指令系统重构：统一门禁、自动帮助、RichCommandContext
-
-**变更类型**：refactor
-
-**内容**：
-- `kernel/types.py`：新增 `RichCommandContext`（携带 `plugin_ctx` 全部服务，handler 不再需要 `self._ctx` 间接访问）；`Command` 新增 5 个元数据字段——`admin_only`、`private_only`、`require_args`、`hidden`、`passthrough_unknown`；新增 `format_help()` 自动生成帮助文本（含门禁标注）
-- `services/command.py`：重写 `_dispatch_cmd`——统一门禁层（admin/private/args 在调用 handler 前自动检查）、未知子命令检测（列出可用子命令）、`passthrough_unknown` 支持 `/debug <text>` 透传至 LLM；`dispatch()` 签名新增 `plugin_ctx` 参数；修复尾部空格误触"未知子命令"bug
-- `kernel/router.py`：两处 `dispatch()` 调用传入 `plugin_ctx`
-- `plugins/food.py`：删除 `_require_private` 方法（17 行）；handler 去除手动 args 校验和 ctx None 检查；`_handle_food_help` 改用 `format_help()` 动态生成；`/food search` 新增 `admin_only` 保护；`/food like/dislike/location` 新增 `require_args`；首次提示加上"（本消息只显示一次）"
-- `plugins/chat.py`：`/debug` 设为 `admin_only` + `passthrough_unknown`；3 个子命令 handler 删除手动 admin 检查；`/debug split` 新增 `require_args`
-- `plugins/debug_commands.py`：`/plugins` 设为 `admin_only`；handler 删除手动 admin 检查 + ctx None 检查
-
-**影响范围**：`kernel/types.py`、`services/command.py`、`kernel/router.py`、`plugins/food.py`、`plugins/chat.py`、`plugins/debug_commands.py`
-
-**验证**：ruff check 零新增；677 passed, 8 预存失败，零回归；bot 已重启验证
-
-**回滚方案**：`CommandContext` 保留未删除，且 `RichCommandContext` 是其超集；回退到旧 `CommandDispatcher` 即可，所有 Command 注册向后兼容（新字段默认值与原行为一致）
-
----
-
-## 2026-05-05 人格文件支持 SKILL.md 格式
-
-**变更类型**：enhancement
-
-**内容**：
-- `services/identity.py`：`parse_identity()` 兼容 SKILL.md 格式（YAML frontmatter + Markdown body）。检测 `---` frontmatter 提取 name/description 元数据，body 部分沿用原有 `# 标题` + `## 插话方式` 解析逻辑。新增 `_strip_frontmatter()` 工具函数。`Identity` 模型新增 `description` 字段
-- `services/llm/prompt_builder.py`：`load_instruction()` 优先读取 `config/soul/SKILL.md`（剥离 frontmatter 后返回 body），回退到 `instruction.md`
-- `admin/routes/soul.py`：Web 编辑器支持双模式——SKILL.md 存在时展示单文件编辑器（name/description 表单 + body 文本域），否则展示旧双编辑器
-- `admin/templates/soul.html`：新增 SKILL.md 模式 UI
-- `plugins/chat.py`：启动时优先加载 `SKILL.md` 作为 identity 文件
-- 新增 8 个测试（6 个 parse_identity SKILL.md 解析 + 2 个 load_instruction SKILL.md）
-
-**影响范围**：`services/identity.py`、`services/llm/prompt_builder.py`、`admin/routes/soul.py`、`admin/templates/soul.html`、`plugins/chat.py`
-
-**验证**：ruff check 零新增；677 passed, 8 预存失败，零回归
-
-**回滚方案**：删除 `config/soul/SKILL.md` 即可回退到旧 identity.md + instruction.md 双文件模式；代码向后兼容旧格式
-
----
-
-## 2026-05-05 FoodPlugin thinking 参数透传修复 (v0.1.4)
-
-**变更类型**：bugfix
-
-**内容**：
-- 第一次尝试：移除 `thinking={"type": "disabled"}` → TypeError 解决，但 deepseek-v4-flash 默认开启 thinking，64 tokens 被 thinking 吃光 → `extract_text` 返回空 → "脑袋空空了"
-- 最终方案：将 `thinking` 参数从 `LLMClient._call` → `call_api` 完整透传：
-  - `call_api()` 新增 `thinking: dict | None = None`，非空时写入 `body["thinking"]`
-  - `LLMClient._call()` 新增 `thinking` 参数并转发给 `call_api`
-  - `plugins/food.py` 两处恢复 `thinking={"type": "disabled"}`，同时 `max_tokens` 从 64 提升到 128 作为安全余量
-- 根因：`call_api` 是直接构建 Anthropic 请求的独立函数，不经过 Provider 抽象层；Provider 的 `build_request` 虽支持 `thinking`，但 food plugin 走 `_call → call_api` 路径
-
-**影响范围**：`plugins/food.py`、`services/llm/client.py`
-
-**验证**：ruff check 零新增；bot 已重建部署
-
-**回滚方案**：移除 `thinking` 参数，改为增大 `max_tokens` 到 512 以上以容纳默认 thinking 消耗
-
----
-
-## 2026-05-05 FoodPlugin 食物库上线 + Web 搜索开关
-
-**变更类型**：feature
-
-**内容**：
-- **食物库**（`plugins/food_library.json`）：1094 条食物条目，覆盖 16 个品类、56 个品牌
-  - 10 个标签字段：name / taste / region / available_time / category / staple / meat_veg / cooking_method / temperature / brand
-  - staple 从 8 种扩展为 12 种：汉堡/披萨/三明治/糕点/面点 独立分类（汉堡不再归类为"面包"）
-  - available_time 从 36 条扩展至 189 条精确标注：早餐(97) / 下午茶(39) / 夜宵(53)
-  - 品牌覆盖：麦当劳、肯德基、海底捞、太二、费大厨、西贝等 56 个连锁品牌
-- **食物库筛选逻辑**（`plugins/food.py`）：
-  - `_filter_food_library()`：按时段→排除品牌→口味偏好→最近排除→用户偏好 五层过滤，最多返回 40 条给 LLM
-  - `_parse_exclusions()`：从"不要麦当劳""不吃面"等自然语言提取结构化排除条件（brand/staple/taste/category）
-  - `_format_library_items()`：格式化为 `食物名 [品牌 | 口味 | 分类 | 主食 | 烹饪 | 温度]`
-- **Web 搜索开关**（默认关闭）：
-  - `_search_enabled = False`：/吃什么 跳过搜索，直接从食物库筛选后由 LLM 选择
-  - `/food search on|off` 运行时切换，`/food info` 显示当前状态
-  - 开启后恢复 Web 搜索 → 食物库 fallback 的双路径
-- **版本**：FoodPlugin 0.1.2 → 0.1.3
-
-**影响范围**：`plugins/food.py`、`plugins/food_library.json`（新增）
-
-**验证**：ruff check 零新增；pytest 690 passed（9 预存失败与食物插件无关）
-
-**回滚方案**：`git revert` 即可；或 `/food search on` 恢复旧的 Web 搜索路径
-
----
-
-## 2026-05-04 B站 JSON 卡片多 URL 遍历 + 无 scheme URL 修复
-
-**变更类型**：bugfix
-
-**内容**：
-- **JSON 卡片多 URL 遍历**（`plugins/bilibili.py`）：
-  - `_extract_bilibili_json_info()` 改为收集全部候选 URL（`_all_urls`），不止取第一个
-  - `on_message()` 遍历全部 URL 逐个尝试解析，任一成功即停止
-  - 根因：QQ 小程序卡片 `detail_1` 同时包含 `url`（QQ 小程序页）和 `share_url`（b23.tv 短链），旧代码只取第一个 → 拿到无用的 QQ 页面 URL → 解析失败 → 回退搜索 → 搜索也失败
-  - 效果："萍儿的低皮质醇" → `m.q.qq.com/a/s/...`（无用）跳过，`b23.tv/qmz0jXy?...`（b23.tv）成功解析 → `BV1jGRgB4EZr`
-- **无 scheme URL 归一化**（`plugins/bilibili.py`）：
-  - `_resolve_urls_to_vid()` 对不含 `://` 的 URL（如 `m.q.qq.com/a/s/...`）自动补 `https://` 前缀
-  - 根因：QQ 小程序卡片 URL 不含协议头，`url.startswith("http")` 为 False → HTTP 重定向跟踪永不触发
-- **调试日志增强**：
-  - 列出全部候选 URL（`urls=N` + 逐个 `url[i]=...`）
-  - 无 URL 时打印 `detail_1`/`meta`/`data` 的 keys 以诊断数据格式
-  - JSON 原始数据截断从 500 字符扩展到 2000 字符
-
-**影响范围**：`plugins/bilibili.py`（bilibili 1.1.1 → 1.1.2）
-
-**回滚方案**：`git revert` 即可
-
----
-
----
-
-## 2026-05-03 B站搜索匹配修复：前置标识词惩罚 + qqdocurl 跳转
-
-**变更类型**：bugfix
-
-**内容**：
-- **前置标识词不匹配惩罚**（`plugins/bilibili.py`）：
-  - 新增 `_extract_first_word()` — 提取关键词首个有意义的词（2-3 字，跳过括号/标点）作为身份标识
-  - `_title_match_score()` 字符集模糊匹配分支：若前置标识词不在候选标题中，得分 × 0.3
-  - 根因：字符集匹配给"的低皮质醇"（通用描述）和"萍儿/豹"（关键标识）同等权重 → "萍儿的低皮质醇"误匹配到"豹的低皮质醇~"
-  - 效果：误匹配 "萍儿→豹" 从 0.21 降至 0.064，正确匹配不受影响
-- **qqdocurl 通用跳转跟随**（`plugins/bilibili.py`）：
-  - `_resolve_urls_to_vid()` 新增通用 HTTP 重定向跟随：`http(s)` 开头的未知短链自动跟随跳转，从最终 URL 提取 BV 号
-  - 根因：QQ 小程序卡片通过 `qqdocurl` 跳转到 B站，旧代码只处理 b23.tv 一种短链，不认识 qqdocurl → URL 解析失败 → 回退到搜索
-  - 效果：有 `qqdocurl` 的卡片可通过 HTTP 重定向解出 BV 号，根本不需要搜索（100% 准确）
-
-**影响范围**：`plugins/bilibili.py`
-
-**验证**：659 passed, 8 预存失败，零回归
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 Thinker 启用 + B站关键词配置化 + image_ref 修复
-
-**变更类型**：bugfix + enhancement
-
-**内容**：
-- **Thinker 启用**：`config.toml` 新增 `[thinker]` 段（`enabled = true`）。多阶段流水线代码（Phase 1-4）虽已实现但 ThinkerConfig.enabled 默认为 false，导致预回复思考从未在生产中运行。启用后每次回复前 Thinker 预判 action/thought/sticker/tone，主 LLM 收到 `【你决定说话：...】【sticker: yes/no】【tone: ...】` 指令后再生成回复。
-- **image_ref 过滤修复**（`services/llm/client.py`）：Thinker 调用前过滤图片块，只保留 text 类型。根因：Thinker 调用在 `resolve_image_refs()` 之前，消息中的 `image_ref` 内部类型直接发给 Anthropic API → 400 unknown variant。
-- **B站兴趣关键词配置化**（`plugins/bilibili.py` + `plugins/bilibili.toml`）：`_HIGH_INTEREST`/`_MEDIUM_INTEREST`/`_LOW_INTEREST` 关键词列表和 `_INTEREST_LLM_FALLBACK` 阈值从模块级常量迁移至 TOML 配置文件。`BilibiliConfig` 新增 4 个字段，`evaluate_interest()` 支持参数传入关键词，`on_startup` 从配置读取。修改关键词或阈值只需 `restart`，无需 rebuild。
-
-**影响范围**：`config/config.toml`、`services/llm/client.py`、`plugins/bilibili.py`、`plugins/bilibili.toml`
-
-**验证**：rebuild 后启动正常，Thinker 过滤逻辑生效
-
-**回滚方案**：`[thinker].enabled = false` 关闭 Thinker；git revert 恢复关键词硬编码
-
----
-
-## 2026-05-03 多阶段流水线架构 — Phase 1-4 实施
-
-**变更类型**：enhancement
-
-**内容**：
-- **Phase 1 — 接线 Thinker**：
-  - `services/llm/client.py`: `chat()` 中主 LLM 调用前先调 `think()` (wait → return None; reply → 注入 thought 到 system prompt)
-  - 新增 `_build_thinker_mood_text()` / `_build_thinker_affection_text()` 辅助方法
-  - `__init__` 新增 `mood_getter` 参数
-  - `ReplyContext` 填充 `thinker_action` / `thinker_thought`
-  - `plugins/chat.py`: 传递 `mood_getter` lambda 给 LLMClient
-- **Phase 2 — sticker 决策移入 Thinker**：
-  - `services/llm/thinker.py`: `ThinkDecision` 新增 `sticker: bool` 和 `tone: str` 字段
-  - thinker prompt 新增表情包决策和语气决策指令
-  - `parse_think_output()` 解析新字段
-  - `client.py`: thinker block 注入 `sticker: yes/no` 和 `tone: 元气/日常/安慰/认真` 指令
-- **Phase 3 — instruction.md 重排序**：
-  - 新增「底线规则速查」放在文件最前（长度控制、禁止括号、sticker 后规则、禁用 Markdown）
-  - 表情包章节前移（原在末尾）
-  - 记忆系统、工具使用移至末尾（有工具定义辅助）
-- **Phase 4 — `_clean_reply()` 增强**：
-  - 新增 `_STICKER_NARRATION_RE` 匹配"已发送表情包""表情包补上啦""表情包来啦"等
-  - `_STAGE_ACTION_CHARS` 扩展 "发送补"
-  - `_clean_reply()` 增加空行/纯叙述行过滤
-
-**影响范围**：回复生成全流程
-
-**回滚方案**：git revert
-
----
-
-## 2026-05-03 DeepSeek thinking blocks 400 修复（回归）
-
-**变更类型**：bugfix
-
-**内容**：
-- `plugins/dream.py`: Dream Agent 工具循环中未保留 thinking_blocks → API 400
-- `services/llm/client.py`: Compaction 工具循环中未保留 thinking_blocks → API 400
-- 修复方式：两处 assistant_content 构建前追加 `result.get("thinking_blocks", [])`
-- 主聊天流程（`client.py:1217-1225`）已正确保留，本次补全其余两个 API 调用路径
-- 根因：DeepSeek thinking mode 要求 thinking blocks（含 signature）必须在后续请求中原样回传
-
-**影响范围**：Dream Agent 第二轮起、compaction 有工具调用时 → 400 错误中断
-
-**回滚方案**：git revert
-
----
-
-## 2026-05-03 B站兴趣评分强化 + 调度器阈值联动修复
-
-**变更类型**：bugfix
-
-**内容**：
-- **兴趣关键词扩展**（`plugins/bilibili.py`）：
-  - `_HIGH_INTEREST` 新增 Project Sekai 全组/角色：25时、nightcord、ニーゴ、25ji、vivid bad squad、vbs、ビビバス、more more jump、mmj、モモジャン、leo/need、レオニ、各角色名（宵崎、朝比奈、東雲、花里、白石 等）、rin/len/luka/リン/レン/ルカ、缤纷舞台、プロジェクトセカイ、mmd、3d、blender
-  - `_MEDIUM_INTEREST` 新增：手书、手描き、描いてみた
-- **LLM 评估门槛与合并策略修正**：`_INTEREST_LLM_FALLBACK` 0.2→0.6；LLM 评分与关键词评分取 max（`interest = max(interest, llm_score)`）而非替换
-  - 根因：添加更多关键词后关键词评分反而可能低于纯 LLM 评估（0.85），旧代码用 LLM 分直接覆盖关键词分导致退步
-- **调度器兴趣公式改为混合下限**（`services/scheduler.py`）：`threshold *= interest_score` → `threshold = base_talk_value * (0.3 + 0.7 * interest_score)`
-  - 效果：0.05→0.335、0.55→0.685、0.85→0.895、1.0→1.0，高兴趣分不再被乘法过度放大
-- **高兴趣视频免时段抑制**：interest ≥0.6 时 `time_mult = 1.0`，bot 对其真正关心的内容无论时段都回复
-
-**影响范围**：`plugins/bilibili.py`、`services/scheduler.py`
-
-**验证**：659 passed, 8 预存失败，零回归
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 B站小程序卡片复读误触发修复
-
-**变更类型**：bugfix
-
-**内容**：
-- `plugins/echo.py`：`build_echo_key()` 新增 `json` 类型 segment 处理，从 JSON data 中提取 `prompt`/`desc` 字段生成差异化 key
-  - 根因：多个不同 B站 mini-program 转发卡片的 segment type 均为 `json`，旧代码只生成 `[json]` 固定 key → 即使内容不同的视频也被识别为"同一条消息"→ 第三个转发即触发复读
-  - 修复后：`[json:视频标题/prompt 文本]`，不同视频的卡片各自独立
-- JSON 解析异常保护：空字符串、无效 JSON 均静默回退
-
-**影响范围**：`plugins/echo.py`
-
-**验证**：659 passed, 8 预存失败，零回归
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 多阶段流水线架构方案（调研文档）
-
-**变更类型**：docs
-
-**内容**：
-- 新建 `docs/superpowers/plans/2026-05-03-multi-stage-pipeline.md`
-- 归档四阶段实施建议：接线 Thinker → sticker 决策移入 Thinker → instruction.md 重排序 → 后处理增强
-- 未改代码，仅调研结论与方案
-
----
-
-## 2026-05-03 回复质量修复：禁止括号动作描述 + 禁止提及表情包发送
-
-**变更类型**：bugfix
-
-**内容**：
-- **指令强化**（`config/soul/instruction.md`）：
-  - send_sticker 规则扩展：明确列出禁止的表述（"（已发送表情包）""表情包补上啦"等），规定发送后若无话可说就 pass_turn
-  - 新增"括号动作描述"禁令："（揉眼睛）""（好困）""（笑瘫.jpg）""（身体好沉）"等括号舞台提示一律禁止；状态通过语气传达，不通过括号里的字面描述
-- **代码安全网**（`services/llm/client.py`）：
-  - 新增 `_strip_stage_direction()` 函数：用正则匹配并移除中文括号（）+半角括号()中的动作/状态描述
-  - 新增 `_clean_reply()` 统一清洗管线：markdown strip + stage direction strip
-  - 所有回复路径（`if not tool_uses` 和 `tool loop exhausted`）均改用 `_clean_reply`
-  - 正则区分动作括号与颜文字（(≧▽≦)、(◕‿◕)、(｡･ω･｡) 保留不删）；区分动作括号与自然语中括号（"我姐姐（就是上次那个）" 保留不删）
-  - 动作关键词覆盖：困累饿躺趴揉打眨伸爬走跑跳坐站睡抱推拉哭笑叹捂挥滚晃闹踢踹蹲跪等
-
-**影响范围**：`config/soul/instruction.md`、`services/llm/client.py`
-
-**验证**：16 条测试用例全部通过（动作括号正确移除、颜文字保留、自然语括号保留）；659 passed, 8 预存失败
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 B站搜索误匹配修复
-
-**变更类型**：bugfix
-
-**内容**：
-- **搜索不再盲取第一项**（`plugins/bilibili.py`）：`_search_video()` 改取前10条结果，用 `_title_match_score()` 逐条评分后选最高分
-  - 根因：QQ 小程序卡片分享 B站视频时只有标题没有 BV ID，bot 通过搜索匹配。对含常见词的短标题（如"遮阳伞汽水"），B站搜索把练习室镜面排在第1、原曲排在第2，盲取 `items[0]` 导致错误匹配
-- **评分函数 `_title_match_score()`**：关键词子串匹配基础分 + 练习/教程信号惩罚（自用、镜面、扒舞、喊拍等 -0.15）+ 原曲信号奖励（pjsk、mmj、live、MV 等 +0.05）
-- **JSON 卡片额外提取 URL**：`_extract_bilibili_json_info()` 新增提取 `url`/`qqdocurl` 字段，可直接解析 BV ID 跳过搜索
-- **新增 `_resolve_urls_to_vid()`**：从 URL 解析 b23.tv 短链或完整 bilibili 链接
-
-**影响范围**：`plugins/bilibili.py`
-
-**验证**：遮阳伞汽水搜索 5 条结果中 MMJ 原曲 0.876 > 练习室镜面 0.436；659 passed, 8 预存失败
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 网页搜索修复：DuckDuckGo 更换包 + 新增 Bing API
-
-**变更类型**：bugfix
-
-**内容**：
-- **更换搜索后端**（`services/tools/web_search.py`）：重写为双后端架构
-  - 主后端：Bing Web Search API（设置 `SEARCH_API_KEY` 环境变量时启用，返回 JSON，稳定可靠）
-  - 回退：DuckDuckGo（`ddgs` 包 v9.14.1，已在 Docker 容器验证可用）
-  - 根因：`duckduckgo-search` v8.1.1 对数据中心 IP 返回空结果（DDG 反爬拦截），且该包已更名为 `ddgs`
-- **依赖更新**（`pyproject.toml`）：`duckduckgo-search>=8.1.1` → `ddgs>=9.0.0`
-- **配置**（`kernel/config.py`）：`_ENV_MAP` 新增 `SEARCH_API_KEY`
-
-**影响范围**：`services/tools/web_search.py`、`pyproject.toml`、`kernel/config.py`
-
-**验证**：Docker 内中英文查询均返回正确结果；659 passed, 8 预存失败
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 Memo 组件修复：user_msg 传递 + 缓存失效 + Dream 首轮
-
-**变更类型**：bugfix
-
-**内容**：
-- **`user_msg` 传递**（`kernel/types.py`）：`ReplyContext` 新增 `user_msg: str = ""` 字段；`client.py` 两处 `fire_on_post_reply` 构造点传入 `content_text(user_content)`；`memo.py` 使用 `ctx.user_msg` 替代硬编码 `""`
-  - 根因：MemoExtractor 只能看到 bot 回复，看不到用户说了什么（"用户: \n助手: ..."），提取质量严重受损
-- **提取后缓存失效**（`plugins/memo.py`）：`on_post_reply` 的 done callback 中清空 `_index_cache` + 调用 `_retrieval.invalidate_entity(scope, scope_id)`
-  - 根因：新卡片写入后 RetrievalGate 返回陈旧内容，最多 5 分钟 TTL 到期才恢复
-- **删除死代码**（`plugins/memo.py`）：移除 `_content_text()`（~11行，从未被调用）
-- **DreamAgent 首轮立即执行**（`plugins/dream.py`）：`_loop()` 在 `while True` sleep 前先 `await self._run()`
-  - 根因：默认 interval_hours=24 时需要等 24 小时才首次整理，改为启动即运行
-
-**影响范围**：`kernel/types.py`、`services/llm/client.py`、`plugins/memo.py`、`plugins/dream.py`
-
-**验证**：659 passed, 8 预存失败，零回归
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 颜文字强制表情包功能修复
-
-**变更类型**：bugfix
-
-**内容**：
-- `services/llm/client.py`：恢复 kaomoji→sticker 强制执行逻辑（~20行），在 `if not tool_uses:` 块中检测颜文字后注入强制 sticker 轮次
-  - 根因：2026-05-03"移除独立 Thinker + 合并 Sticker 强制执行"重构中删除了 ~23 行 enforcement 代码，`_text_has_kaomoji()` 定义但从未调用
-- 版本：bot 1.2.1 → 1.2.2，chat 插件 1.1.4 → 1.1.5，sticker 插件 1.1.1 → 1.1.2
-
-**影响范围**：`services/llm/client.py`、`plugins/chat.py`、`plugins/sticker.py`、`pyproject.toml`
-
-**验证**：659 passed, 8 预存失败，零回归
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 Dockerfile 构建源修改 + Apple Double 防护
-
-**变更类型**：infra
-
-**内容**：
-- **Dockerfile**：`COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv` → `RUN pip install uv`
-  - 根因：ghcr.io 在国内网络不可达（`i/o timeout`），改用 PyPI 安装 uv
-- **Apple Double 防护**：
-  - `~/.zshrc`：新增 `export COPYFILE_DISABLE=1`，阻止 macOS 在非 APFS 卷上生成 `._*` 资源分支文件
-  - `CLAUDE.md`：rebuild 命令改为 `dot_clean . && docker compose up bot -d --build`
-
-**影响范围**：`Dockerfile`、`~/.zshrc`、`CLAUDE.md`
-
-**回滚方案**：恢复 Dockerfile 原 `COPY --from` 行；取消 `COPYFILE_DISABLE` 环境变量
-
----
-
-## 2026-05-03 句尾从句标点剥离修复
-
-**变更类型**：bugfix
-
-**内容**：
-- `_split_naturally()` 在 `_smart_chunk` 切分后新增从句标点剥离：`c.rstrip(_TRAILING_CLAUSE)` — 移除段尾的 `，；：、,;:`
-- 根因：`_smart_chunk` 在从句标点处切分时，标点留在前一段末尾（如"虽然我主要玩烤和邦邦，"），导致这条独立 QQ 消息末尾挂着无意义的连接符
-- 句末标点（`。！？～`）保留——它们承载语气信息；从句标点（`，；：、`）仅在连续文本中有连接作用，独立成段时剥离
-- 测试更新：`test_mid_sentence_merge` 断言 `result[0] == "恋爱捉迷藏配上AI修复"`（移除末尾逗号）
-
-**影响范围**：`services/llm/client.py`（新增 `_TRAILING_CLAUSE` 常量 + 一行 rstrip）、`tests/test_client.py`（调整 1 个断言）
-
-**验证**：659 passed, 8 预存失败（libvips + sticker），零回归
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 文本分段算法重写：回溯式标点优先级切分
-
-**变更类型**：refactor + bugfix
-
-**内容**：
-- **算法重写**（`services/llm/client.py`）：删除 `_split_on_sentence_end` + `_split_long_on_comma`（~50行），替换为 `_smart_chunk`（~55行）——回溯式标点优先级切分
-  - 优先级1：在 `。！？～…` 句末标点后切分
-  - 优先级2：在 `，；：、` 从句边界后切分
-  - 优先级3：中文字符边界（保护英文单词完整性，不撕开 "AI" 等）
-  - 优先级4：硬切（最后手段，基本不触发）
-  - 标点留在段尾而非推到段首
-  - 内置尾段合并（< `_MIN_CHUNK` = 6 的尾段合并到前一段）
-- **`～` 升级为句末标点**：从仅用于 `\n` 合并判断升级为一级切分点，与 `。！？` 同级
-- **`/debug split` 误输入保护**（`plugins/chat.py`）：`_handle_debug` 现在检测纯 ASCII 小写首词是否为已知子命令，否则提示可用子命令而非送 LLM
-- **测试**：`tests/test_client.py` 新增 4 个测试（段首无标点、英文完整性、尾段合并、精确回归），共 13 个 split 测试
-- **版本**：bot 1.2.0 → 1.2.1，chat 插件 1.1.3 → 1.1.4
-
-**影响范围**：`services/llm/client.py`、`plugins/chat.py`、`tests/test_client.py`、`pyproject.toml`
-
-**验证**：659 passed, 8 预存失败（libvips + sticker），零回归
-
-**回滚方案**：`git revert` 即可
-
----
-
-## 2026-05-03 文本分段修复：句中断行合并 + /debug split 子命令
-
-**变更类型**：bugfix + feature
-
-**内容**：
-- **句中断行合并**（`services/llm/client.py`）：新增 `_SENTENCE_ENDING` 字符集（`。！？～…」』）\"!?~)`），`\n` 从硬分段边界降级为软提示——仅当上一行末尾有句末标点时才切分，句内换行直接合并。修复「感觉像在看超高清\n的童话舞台剧！」被切成孤儿碎片的问题
-- **`_MIN_CHUNK` 提升**：3 → 6，避免 4-5 字短片段逃脱合并逻辑
-- **超长句语义切分**：`_split_on_sentence_end` 的硬字符切分（`chunk[i:i+MAX]`）替换为 `_split_long_on_comma`（逗号层级语义切分），避免把合并后的完整句子重新撕成碎片
-- **指令更新**（`config/soul/instruction.md`）：分段指导从「换行即分段」改为「一个完整想法写完后再换行，不要在句子中途强行换行」
-- **`/debug split` 子命令**（`plugins/chat.py`）：新增 `_handle_debug_split` handler，实时测试 `_split_naturally()` 分段效果，别名 `/debug 分段`/`/debug 分割`
-- **测试**：`tests/test_client.py` 新增 `TestSplitNaturally`（9 个测试），覆盖句中断行合并、句末标点切分、`---cut---` 分隔符、长句语义切分、`_MIN_CHUNK` 合并等场景
-- **版本**：bot 1.1.1 → 1.2.0
-
-**影响范围**：`services/llm/client.py`、`config/soul/instruction.md`、`plugins/chat.py`、`tests/test_client.py`、`pyproject.toml`
-
-**回滚方案**：`git revert` 即可
-
 ---
-
-## 2026-05-03 B站插件回复模式 + HTML 标签修复 + 兴趣评估
-
-**变更类型**：feature + bugfix
-
-**内容**：
-- 新增 4 种视频回复模式（`plugins/bilibili.toml` → `reply_mode`）：
-  - `mood`（默认）：跟随主 bot 心情/时段概率，不改 scheduler 行为
-  - `always`：检测到视频即强制回复，绕过 proactive/at_only/概率/interval 全部限制
-  - `dedicated`：使用独立概率 `bilibili_talk_value`（默认 0.8），心情/时段乘数照常
-  - `autonomous`：在 dedicated 基础上 × 兴趣分（关键词匹配 bot 人设，高分视频回复率更高）
-- 新增 `evaluate_interest()` 函数：三级关键词表（高/中/低权重），匹配视频标题计算 0-1 兴趣分
-- 数据流：bilibili.on_message() → raw_message["_bilibili_reply"] hint → router 提取 → scheduler.notify(video_hint=...)
-- Scheduler 适配：notify() 新增可选 video_hint 参数，"always" 模式类似 @ 直接 fire
-- 修复 B 站搜索 API 返回 HTML 标签（`<em class="keyword">`）导致 loguru 格式解析崩溃
-- 修复 plain_text 被覆盖导致用户原文丢失
-- 新增 15 个测试（7 兴趣评估 + 4 reply hint + 9 scheduler 集成），总计 88 passed
-
-**影响范围**：`plugins/bilibili.py`、`plugins/bilibili.toml`、`services/scheduler.py`、`kernel/router.py`、`tests/test_bilibili.py`、`tests/test_scheduler.py`
-
-**回滚方案**：`reply_mode = "mood"` 即恢复原行为
-
----
-
-## 2026-05-03 B站视频链接识别插件
-
-**变更类型**：新插件
-
-**内容**：
-- 新增 `plugins/bilibili.py`：BilibiliPlugin（priority=190），在消息管线中拦截B站视频链接并注入视频摘要
-- 识别格式：BV号、av号、b23.tv短链接、bilibili.com/video/ 完整链接、番剧ep/ss链接
-- b23.tv短链接自动跟随HTTP重定向解析真实URL
-- 通过 bilibili-api-python 获取视频信息（标题、时长、播放量、UP主、简介、分区）
-- 封面图下载后通过 Qwen VL (VisionClient) 描述画面内容
-- 摘要注入到消息segments中，`_render_message` 自然包含视频上下文
-- 本地缓存视频信息（默认3600秒），避免重复API请求
-- 新增配置 `plugins/bilibili.toml`：enabled / cache_ttl / cover_timeout
-- 新增依赖 `bilibili-api-python>=17.0.0`
-- 新增33个单元测试（URL匹配、摘要格式、插件集成、缓存、降级处理）
-
-**影响范围**：
-- 群聊中发送B站视频链接时，bot能理解视频内容再回复
-- API故障或封面下载失败时静默降级，不阻断消息流
-- 返回 False 不消费消息，正常流继续走 scheduler
-
-**回滚方案**：将 `plugins/bilibili.toml` 中 `enabled = false` 即可禁用插件
-
-## 2026-05-03 — 调度器日志可见性修复 + 心情缓存修复
-
-- **类型**：bugfix
-- **操作人**：Claude Code (assisted)
-- **问题**：
-  1. scheduler 频道的 skip 决策日志（prob skip / interval too short / at_only 等）使用 `logger.debug()`，被 NoneBot 的 `default_filter`（默认只放行 INFO+）拦截，开启 `scheduler = true` 后仍不可见
-  2. `mood_getter` lambda 只读 `mood_engine._cache`，重启后首次聊天触发前缓存为空 → 心情乘数始终 1.0，心情系统未实际介入概率调度
-- **修复**：
-  - `services/scheduler.py`：5 处调度决策日志从 `_L.debug()` 提升为 `_L.info()`
-  - `plugins/chat.py`：`mood_getter` lambda 改为主动调用 `mood_engine.evaluate(schedule)`，确保首次访问即计算心情（evaluate 自带 15 分钟缓存）
-- **影响范围**：`services/scheduler.py`、`plugins/chat.py`
-- **测试**：ruff 通过，26/26 scheduler 测试通过
-- **回滚**：`git revert` 即可
-
----
-
-## 2026-05-03 — 群聊延迟优化：概率调度 + 移除独立 Thinker + 合并 Sticker 强制执行
-
-- **类型**：performance + refactor
-- **操作人**：Claude Code (assisted)
-- **背景**：群聊回复链路耗时 17-22s，根因三步串行 LLM 调用（Thinker ~3s + 主回复 ~3-5s + Sticker 强制执行 ~5s）+ 固定 debounce 5s。参考 MaiBot 的概率调度设计。
-- **变更内容**：
-  - **概率调度替代 debounce**（`services/scheduler.py`）：非@消息不再每条触发，改为 `talk_value` 概率（默认 0.3=30%）+ `planner_smooth` 最小间隔（默认 3s）。连续跳过 3 次后阈值翻倍，5 次后强制回复。删除 `_debounce()` 方法。
-  - **移除独立 Thinker**（`services/llm/client.py`）：删除 ~55 行 think() 调用块。原 Thinker 的 reply/wait/search 决策由 LLM 工具调用（`pass_turn`）自然接管。`ThinkerConfig.enabled` 默认值改为 `False`。`services/llm/thinker.py` 文件保留（向后兼容）。
-  - **合并 Sticker 强制执行**（`services/llm/client.py`）：删除 ~23 行 kaomoji 检测 + 强制 sticker 轮次。LLM 可在主回复轮次中自然调用 `send_sticker`。
-  - **配置层**（`kernel/config.py`）：`GroupConfig`/`GroupOverride`/`ResolvedGroupConfig` 新增 `talk_value`、`planner_smooth` 字段。`config.example.toml` 同步更新。
-- **版本**：bot 1.1.0→1.1.1，chat 插件 1.1.2→1.1.3
-- **效果**：延迟从 17-22s 降至 ~3-5s；非@消息回复频率大幅降低，减少无效插话。
-- **测试**：21 个 scheduler 测试重写适配新调度逻辑，ruff 通过，pyright 无新增错误
-- **回滚**：`git revert` 即可
-
----
-
-## 2026-05-03 — 心情系统 × 概率调度联动
-
-- **类型**：feature
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - `services/scheduler.py`：新增 `mood_getter` 回调参数（可选），新增 `_get_mood_multiplier()` 方法，用心情三维度（valence 正负面、energy 精力、openness 开放度）计算 talk_value 乘数（范围 [0.25, 2.0]）。好心情更爱插话，坏心情更沉默。@ 消息和管理员命令不受影响。
-  - `plugins/chat.py`：创建 scheduler 时注入 mood_getter lambda，从 `ctx.mood_engine._cache` 读取当前心情。
-  - 心情乘数公式：`mood_factor = 0.4×openness + 0.3×energy + 0.3×(valence+1)/2`，`mult = 0.25 + 1.75×mood_factor`
-- **版本**：bot 1.1.0→1.1.1，chat 插件 1.1.2→1.1.3
-- **影响范围**：`services/scheduler.py`、`plugins/chat.py`、`tests/test_scheduler.py`（+5 个心情测试，共 26 个）
-- **测试**：ruff check 通过，26/26 scheduler 测试通过，582/590 全量（8 个预存失败与本次无关）
-- **回滚**：`git revert` 即可
-
----
-
-## 2026-05-03 — 多级命令支持 (sub-commands)
-
-- **类型**：feature
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - 框架层：`Command` 数据类新增 `sub_commands: list[Command]` 字段，`CommandDispatcher.dispatch()` 支持递归子命令匹配，未命中子命令时回退到父 handler
-  - `/debug` 注册 `save`（别名: 保存/收录/添加表情）和 `send`（别名: 发/发送）两个子命令，替代原有 ad-hoc 关键词匹配
-  - 修复 debug 模式空文本回退 "…" 问题，增加 debug 回复日志
-- **版本**：bot 1.0.7→1.1.0，chat 插件 1.1.1→1.1.2
-- **影响范围**：`kernel/types.py`、`services/command.py`、`plugins/chat.py`
-- **回滚**：`git revert` 即可
-
----
-
-## 2026-05-02 — 插件配置迁移至插件目录
-
-- **类型**：重构
-- **操作人**：Claude Code (assisted)
-- **变更内容**：将 6 个插件的配置从中央 `config.toml` 迁移至各插件目录下的同名 `.toml` 文件（`plugins/<name>.toml`）。Config Pydantic 模型同时从 `kernel/config.py` 搬至插件 `.py` 文件，新增 `load_plugin_config()` 工具函数统一加载。ChatPlugin 现在从插件 TOML 读取配置创建服务对象。
-- **迁移清单**：sticker、memo、schedule、affection、dream、element_detection
-- **影响范围**：
-  - 新增 6 个 `plugins/*.toml`
-  - 修改：`kernel/config.py`、`kernel/__init__.py`、`plugins/chat.py`、`bot.py`、`config.example.toml`、`config/config.toml`
-  - 修改 6 个插件 `.py` 文件（新增 Config 模型 + 更新 on_startup）
-- **回滚**：`git revert` 即可，注意恢复后需同步 `config.toml` 中对应段落
-
----
-
-## 2026-05-02 — 启用要素察觉 + 修复 identity 引用
-
-- **类型**：bugfix + feature enablement
-- **操作人**：Claude Code (assisted)
-- **问题与根因**：`ElementDetectorPlugin` 从未触发，因为 `config.toml` 和 `config.example.toml` 均无 `[element_detection]` 段落，`rules` 为空导致 `on_startup` 中 `self._detector = None`。此外 `element_detector.py:79` 引用了不存在的 `ctx.identity_mgr`（应为 `ctx.identity`）。
-- **修复**：
-  - `config.example.toml`：新增 `[element_detection]` 段落，含 2 条示例规则（感叹词检测 + 番剧询问检测）
-  - `config/config.toml`：同上
-  - `plugins/element_detector.py`：`ctx.identity_mgr` → `ctx.identity`，移除不必要的 `.resolve()` 调用
-- **影响范围**：`config.example.toml`、`config/config.toml`、`plugins/element_detector.py`
-- **测试**：ruff check 通过，9 个 element_detector 测试全过，启动日志确认 `element detection enabled | rules=2`
-- **回滚**：git revert 即可
-
----
-
-## 2026-05-02 — 补全 NoneBot NICKNAME 配置，修复适配器层昵称检测
-
-- **类型**：bugfix (配置缺陷)
-- **操作人**：Claude Code (assisted)
-- **问题与根因**：`config/.env` 缺少 `NICKNAME`（NoneBot 标准配置键），导致适配器层 `_check_nickname()` 永远不触发。虽然 `router.py` 中有自定义 `BOT_NICKNAMES` 匹配（任意位置皆可检测），但 NoneBot 层的昵称剥离和 `to_me` 标记完全缺失。
-- **修复**：
-  - `config/.env`：新增 `NICKNAME` 行，值与 `BOT_NICKNAMES` 保持一致
-  - `plugins/chat.py`：优先从 `nonebot.get_driver().config.nickname` 读取昵称列表，`BOT_NICKNAMES` 仅作 fallback
-- **影响范围**：`config/.env`、`plugins/chat.py`
-- **测试**：ruff check 通过，pytest 通过
-- **回滚**：git revert 即可
-
----
-
-## 2026-05-02 — 移除重启后自动触发群聊回复
-
-- **类型**：bugfix
-- **操作人**：Claude Code (assisted)
-- **问题与根因**：每次 bot 容器重启后，历史加载器回填近期消息到 timeline，随后 `router.py` 调用 `scheduler.trigger()` 强制触发一次回复。由于每次加载的近期历史相同，LLM 收到相同上下文后产生同话题重复发言。多次重载 → 多次重复。
-- **修复**：移除 `kernel/router.py` 中 `is_first_connect` 后的 `scheduler.trigger()` 调用。Bot 重启后静默加载历史作为上下文，等待新的群消息（@/debounce/batch）自然触发回复。
-- **影响范围**：`kernel/router.py`（移除 5 行）
-- **测试**：ruff check 通过，pytest 通过（20 个 scheduler 测试全过，预存失败与本次无关）
-- **回滚**：git revert 即可
-
----
-
-## 2026-05-02 — 好感度群聊归因修复：调度器传入 user_id
-
-- **类型**：bugfix
-- **操作人**：Claude Code (assisted)
-- **问题与根因**：群聊中好感度始终为 0。`GroupChatScheduler._do_chat()` 硬编码 `user_id=""`，导致好感度引擎无法将互动归因到任何用户。
-- **修复**：
-  - `services/scheduler.py`：`_GroupSlot` 新增 `last_user_id` 字段，`notify()` 接收并存储 `user_id`，`_do_chat()` 使用存储的 user_id 而非空字符串
-  - `kernel/router.py`：两处 `scheduler.notify()` 调用传入 `user_id=str(event.user_id)`
-- **影响范围**：`services/scheduler.py`、`kernel/router.py`、`plugins/affection/plugin.py`（1.0.1→1.0.2）
-- **验证**：ruff check 通过，pytest 通过（预存失败与本次无关）
-- **回滚**：git revert 即可
-
----
-
-## 2026-05-02 — 调试保存表情包三项修复：mface 识别、Qwen VL 限流、历史加载干扰
-
-- **类型**：bugfix
-- **操作人**：Claude Code (assisted)
-- **问题与根因**：
-  1. **mface（QQ 商城表情）无法识别**：NoneBot OneBot v11 适配器不识别 NapCat 的 `mface` 段类型，可能将其转为纯文本（如 `[星星眼]`），导致 `seg.type == "mface"` 永远不匹配。只能收到 3 张普通图片。
-  2. **Qwen VL 连续调用失败**：`/debug 保存四张表情` 触发 4 次连续 vision API 调用，硅基流动对快速连续请求限流，第 2-3 次调用超时返回空错误。
-  3. **Bot 重启后历史加载触发正常回复**：历史加载器回填旧消息（含之前的 `/debug` 输出文本）进入 timeline，触发 thinker/chat 流程产生多余回复。
-- **修复**：
-  - `plugins/chat.py`：mface 检测增加 `market_face` 类型 + 从 `event.raw_message` 解析 `[mface:...]`/`[market_face:...]` CQ 码兜底；增加 segment 类型扫描日志；连续 vision 调用间增加 1.5s 延迟避免限流
-  - `plugins/history_loader.py`：新增 `_contains_debug_command()` 跳过含 `/debug` 的历史消息
-  - `services/media/vision.py`：错误日志增加异常类型名，不再只显示空字符串
-  - `bot.py`：VisionClient timeout 10s → 15s
-- **影响范围**：`plugins/chat.py`（1.0.3→1.0.4）、`plugins/history_loader.py`（1.0.0→1.0.1）、`services/media/vision.py`、`bot.py`
-- **测试**：ruff check 通过，pytest 通过（预存失败与本次无关）
-- **回滚**：git revert 即可
-
-## 2026-05-02 — 图像描述提升至系统层 + 接入硅基流动 Qwen3-VL
-
-- **类型**：enhancement (架构变更)
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  1. **VisionPlugin 删除**：`plugins/vision.py` → `services/media/vision.py`（系统服务层，与 image_cache 同级）。VisionClient 现在由 `bot.py` 在启动时根据 `api_key` 是否填写自动初始化，不在插件总线中注册。
-  2. **配置简化**：`QwenVLConfig` 移除 `enabled` 字段——api_key 非空即启用，留空即关闭。无需额外开关。
-  3. **接入硅基流动 VLM**：`config.toml` 配置 `Qwen/Qwen3-VL-30B-A3B-Instruct` 模型（API: siliconflow.cn），DeepSeek V4 本身不支持多模态，现在由 Qwen VL 先描述图片再传给主模型。
-  4. **StickerPlugin 1.0.1 → 1.0.2**：`format_prompt_view()` 新增 `[动图]`/`[静态]` 格式标签，摘除未使用的 loguru 导入。
-  5. **config.example.toml**：补上 `[vision.qwen]` 示例段落。
-- **影响范围**：`services/media/vision.py`（新）、`plugins/vision.py`（删）、`bot.py`、`kernel/config.py`、`config.example.toml`、`plugins/sticker.py`、`config/config.toml`
-- **版本**：bot 1.0.4 → 1.0.5
-- **测试**：ruff check 通过，pytest 通过（8 个预存失败与本次无关）
-- **回滚**：git revert + 恢复 `config.toml` 的 `[vision.qwen]` 为空值
-
-## 2026-05-02 — 表情包发送全线修复：sub_type 蛇形命名 + /debug 直接调度 + 指令防抖取消
-
-- **类型**：bugfix (critical) + enhancement
-- **操作人**：Claude Code (assisted)
-- **问题与根因**：
-  1. **表情包发送全线失败（retcode=1200）**：`SendStickerTool` 使用驼峰 `subType=1` 设置 QQ 贴图类型，但 OneBot v11 协议要求蛇形 `sub_type`。NapCat 静默忽略未知 key，导致表情包始终作为普通图片发送。
-  2. **Docker 容器文件系统隔离**：bot 和 napcat 在不同容器，napcat 无法读取 bot 的 `/app/storage/` 路径。改为 base64 编码内联传输。
-  3. **`/debug` 指令触发 LLM 工具循环但 DeepSeek V4 幻觉**：LLM 不认识 `send_sticker`，总是返回 `pass_turn`。新增直接调度路径绕过 LLM。
-  4. **指令被复读插件检测**：`EchoPlugin` 未过滤 `/` 开头的消息。
-  5. **`/debug` 处理期间 thinker 仍触发**：上一条消息的 debounce 计时器在 `/debug` 到达时已启动，到期后 thinker 照常运行。
-- **修复**：
-  - `services/tools/sticker_tools.py`：`subType` → `sub_type`（蛇形命名）+ `summary=[动画表情]` + base64 编码 + 异常保护 record_send
-  - `plugins/chat.py`：新增 `_debug_direct_dispatch()` 直接实例化 `SendStickerTool` 绕过 LLM；关键词从 `startswith` 改为 `in` 匹配，覆盖 gif/动图/贴图 等
-  - `plugins/echo.py`：跳过以 `/` 开头的消息
-  - `kernel/router.py`：命令匹配成功后调用 `ctx.scheduler.cancel_debounce(group_id)` 取消待处理的 thinker 触发
-  - 参考旧项目 `amadeus-in-shell` 确认正确模式为 `sub_type=1` + `summary=[动画表情]`
-- **影响范围**：`services/tools/sticker_tools.py`、`plugins/chat.py`、`plugins/echo.py`、`kernel/router.py`
-- **测试**：`tests/test_sticker_tools.py` 更新以验证 `sub_type` 和 `summary` 设置；ruff check + pytest 通过（9 个预存失败与本次无关）
-- **回滚**：git revert 即可
-
-## 2026-05-02 — 表情包强制执行循环修复
-
-- **类型**：bugfix
-- **操作人**：Claude Code (assisted)
-- **根因**：`chat()` 中颜文字→表情包强制执行逻辑（line 1135）在 LLM 不调用 `send_sticker` 时反复触发。`_sticker_sent` 始终为 False，每轮都检测到 kaomoji → 强制执行 → LLM 仍不发 → 再强制执行，直到 MAX_TOOL_ROUNDS=5 耗尽。日志中出现 4 次连续 enforcement 事件。
-- **修复**：强制执行一次后立即设置 `_sticker_sent = True`，阻止后续轮次再次触发。
-- **附加**：StickerPlugin 版本 1.0.0 → 1.0.1
-- **影响范围**：`services/llm/client.py`（一行）、`plugins/sticker.py`（版本号）
-- **回滚**：git revert 即可
-
-## 2026-05-02 — /debug 模式重构：支持工具执行
-
-- **类型**：enhancement
-- **操作人**：Claude Code (assisted)
-- **问题**：`/debug` 调用 `_call()` 裸 API，无工具循环，导致 `send_sticker` 等工具无法执行。用户无法用 `/debug` 调试表情包等功能。
-- **修复**：重写 `_handle_debug` 为完整工具循环（镜像 `chat()` 的工具执行逻辑），LLM 可调用任何已注册工具。同时明确 system 指令："你是调试助手，直接执行用户的指令"。
-- **变更**：
-  - `plugins/chat.py`：`_handle_debug` 从单轮 `_call()` 改为工具循环（最多5轮），支持 `pass_turn`、`send_sticker` 等全部工具
-  - 新增 imports: `asyncio`, `json`, `_PASS_TURN_TOOL`, `_strip_markdown`, `_to_anthropic_tools`, `ToolContext`
-  - ChatPlugin 版本 1.0.2 → 1.0.3
-- **影响范围**：`plugins/chat.py`
-- **回滚**：git revert 即可
-
----
-
-## 2026-05-02 — 分段根本修复：force_reply 绕过分段逻辑
-
-- **类型**：bugfix (critical)
-- **操作人**：Claude Code (assisted)
-- **根因**：`chat()` 方法中 `force_reply=True` 时完全跳过 `_split_naturally()`，直接 `segments=[reply]`。而 scheduler 对所有 `is_at=True` 的消息（@提及、昵称称呼）都设 `force_reply=True`，导致这些消息永远不分段发送。
-- **修复**：移除两处 `force_reply` 的分段绕过（工具循环内 + 工具循环耗尽后），所有回复统一走 `_split_naturally`。`force_reply` 现在仅跳过 thinker（在 line 1041 处理），不再影响分段。
-- **附加**：ChatPlugin 版本 1.0.1 → 1.0.2
-- **影响范围**：`services/llm/client.py`（两处 force_reply 分支移除）、`plugins/chat.py`（版本号）
-- **测试**：ruff check 通过，pytest 577/587 通过（10 个预存失败与本次无关）
-- **回滚**：git revert 即可
-
-## 2026-05-02 — 日志频道恢复 + 分段修复 + 插件日志增强
-
-- **类型**：bugfix + enhancement
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - **日志频道默认值**：`LogChannelConfig.system` 默认改为 `True`（多个插件使用 system 频道输出必要信息）
-  - **config.toml 频道开关**：启用 message_in、message_out、thinking、mood、affection、schedule、system（之前全部为 false 导致日志全被过滤）
-  - **好感度插件日志**：`AffectionPlugin` 新增 INFO 级别日志（on_pre_prompt 记录用户好感度层级和分数，on_post_reply 记录互动后的分数变化），版本 1.0.0 → 1.0.1
-  - **记忆提取器日志**：`MemoPlugin` 卡片提取成功日志从 DEBUG 提升到 INFO，版本 1.0.0 → 1.0.1
-  - **日程插件**：版本 1.0.0 → 1.0.1
-  - **ChatPlugin**：补上版本号 1.0.1
-  - **分段修复（services/llm/client.py）**：
-    - `_split_on_sentence_end` 增加硬字符上限强制切分，防止无标点长句成为单条超长消息
-    - `---cut---` 检测从子字符串匹配改为逐行精确匹配，防止嵌入文本误触发
-    - `_split_naturally` 尾段合并仅对纯标点片段生效，避免将硬切分的内容片段错误并回
-    - `on_segment=None` 且多分段时不再静默丢弃前面分段，改为合并返回完整文本
-- **影响范围**：`kernel/config.py`（LogChannelConfig.system 默认）、`config/config.toml`（频道开关）、`plugins/affection/plugin.py`（日志+版本）、`plugins/memo.py`（日志级别+版本）、`plugins/schedule/plugin.py`（版本）、`plugins/chat.py`（版本号）、`services/llm/client.py`（分段逻辑）
-- **测试**：ruff check 通过，pytest 577/587 通过（10 个预存失败与本次无关）
-- **回滚**：git revert 即可
-
-## 2026-05-02 — 记忆与好感度数据迁移：从 amadeus-in-shell 同步
-
-- **类型**：data migration
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - **memory_cards.db**：从 amadeus-in-shell 复制 6 张卡片（4 张 user/1416930401 + 2 张 group/984198159, 993065015），schema 完全一致无需转换
-  - **affection/1416930401.json**：从 amadeus-in-shell 复制好感度数据（score=12, total_interactions=15），JSON 格式兼容
-  - storage 目录是 Docker volume mount，复制后即时生效无需重建
-- **影响范围**：`storage/memory_cards.db`、`storage/affection/1416930401.json`
-- **回滚**：从旧项目重新复制或删除这两个文件即可
-
-## 2026-05-02 — Soul 迁移：从 amadeus-in-shell 同步角色配置
-
-- **类型**：config
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - **identity.md**：从 `amadeus-in-shell/soul/identity.md` 完整复制，143 行详细 Emu 角色设定，含 `# 凤笑梦 (Emu Otori)` 标题 + `## 插话方式` 章节（解析器可正确提取 proactive 规则，不再 fallback 到内置默认身份）
-  - **instruction.md**：从 `amadeus-in-shell/soul/instruction.md` 适配，核心差异：
-    - 记忆系统：`recall_memo`/`update_memo` → `lookup_cards`/`update_cards`（适配 CardStore）
-    - 图片：移除所有 `describe_image` 引用（omubot 在消息渲染阶段自动通过 Qwen VL 描述图片）
-    - 保留全部人格规则：回复风格、场景差分（7 模式）、语气污染、分段发送、日常心情、角色生日、群聊上下文理解、保密规则、稳固人格、工具使用、主动搜索、表情包
-  - **根因**：旧 identity.md 无 `# Title` 行，解析器返回 None → fallback 到 `_builtin_default()` 其中 `proactive=None` → Scheduler 跳过所有群消息
-- **影响范围**：`config/soul/identity.md`、`config/soul/instruction.md`
-- **回滚**：从 git 恢复旧 soul 文件即可
-
-## 2026-05-02 — v1.0.1 修复：@提及回复 + Thinker + 指令别名
-
-- **类型**：bugfix + feature
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - **指令别名系统**：`Command` dataclass 新增 `aliases: list[str]` 字段，`CommandDispatcher._load()` 将别名一并索引
-  - **`/plugins` 多入口**：新增 `/p`、`/plg`、`/插件` 三个别名
-  - **全部插件开发者签名**：`AmadeusPlugin` 基类 `author` 默认值改为 `"kragcola"`
-  - **修复 @提及不回复**：`scheduler.notify()` 的 `proactive is None` 守卫现在仅在非 @ 消息时生效，@ 消息始终触发回复
-  - **修复 force_reply 语义过载**：`client.chat()` 中 `force_reply=True` 不再注入调试块或剥离心情/好感度块（那是 `/debug` 的职责，不应影响普通 @ 回复）
-  - **版本升级**：omubot → 1.0.1，debug_commands 插件 → 1.1.0
-- **影响范围**：`kernel/types.py`（Command 别名、author 默认）、`services/command.py`（别名索引）、`services/scheduler.py`（守卫条件）、`services/llm/client.py`（移除 force_reply 调试卷入）、`plugins/debug_commands.py`（别名注册、作者、版本）、`services/version.py`（版本号）、`pyproject.toml`（版本号）、`CHANGELOG.md`
-- **测试**：ruff check 通过，pytest 通过（排除 libvips 预存失败）
-- **回滚**：git revert 即可
-
-## 2026-05-01 — 服务层指令系统：CommandDispatcher + /debug 迁移
-
-- **类型**：feature
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - **新增 `services/command.py`**：`CommandDispatcher` 服务，从 PluginBus 收集命令注册表，解析 `/command args` 前缀并分发执行
-  - **新增 `CommandContext`**：`kernel/types.py` 新增 dataclass，作为命令 handler 的标准入参
-  - **迁移 `/debug`**：从 `kernel/router.py` 硬编码（`_check_debug_prefix` 函数 + `_DEBUG_PREFIX` 常量）迁移至 `plugins/chat.py` → `ChatPlugin.register_commands()` 注册
-  - **消息流集成**：私聊和群聊均在 LLM 处理前检查命令（群聊在 interceptor 之后、scheduler 之前；私聊在 render 之后、chat 之前）
-  - **扩展性**：任何插件实现 `register_commands()` 返回 `Command` 实例即可注册新指令
-- **影响范围**：router.py 移除 ~25 行硬编码，新增 dispatcher 集成；bot.py 新增 1 行初始化；chat.py 新增 ~65 行命令注册+handler
-- **测试**：547/547 通过，lint 干净
-- **回滚**：git revert 即可恢复旧 `/debug` 硬编码行为
-
-## 2026-05-01 — Phase 7a: 单文件插件 + plugin.json 清单
-
-- **类型**：refactor
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - **PluginBus 侧车 .json 支持**：`discover_plugins()` Pass 2 为单文件插件自动拾取同名 `.json`，`_load_plugin_module` 统一 manifest 解析
-  - **8 个插件转为单文件**：echo、element_detector、history_loader、dream、memo、vision、chat、sticker 从子目录迁为 `plugins/<name>.py`，合并所有辅助模块
-  - **保留目录形态**：affection (4 文件)、schedule (7 文件) 因复杂度保持目录
-  - **plugin.json 清单**：全部 10 个插件创建清单文件（8 个侧车 + 2 个目录内），sticker 声明 `"vision": ">=1.0.0"` 依赖
-  - **import 路径更新**：bot.py (8 处)、kernel/router.py (1 处)、plugins/chat.py (1 处)、5 个测试文件
-- **影响范围**：插件层结构变更，内核 API 不变，服务层不受影响
-- **测试**：547/547 通过（排除 libvips 和 e2e 预存失败）
-- **回滚**：git revert 即可，旧子目录需手动恢复
-
-## 2026-05-01 — 开源准备：config/ 隔离 + 人格解耦 + 仓库推送
-
-- **类型**：refactor + devops
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - **config/ 目录隔离**：
-    - 创建 `config/` 目录，将 `.env` 移入，`config.toml` 和 `config/soul/` 均在此目录下
-    - `kernel/config.py`：`SoulConfig.dir` 默认值 `"soul"` → `"config/soul"`，`load_config()` 默认路径 `"config/config.toml"`
-    - `docker-compose.yml`：env_file 和 volumes 路径全部更新
-    - `.gitignore`：一条 `config/` 规则替代原有分散列举，新增 `._*` 防 Apple Double 文件
-    - `.claude/settings.json`：hook 匹配模式更新为 `config/(config\.toml|soul/|\.env)`
-    - Admin 路由默认值同步更新
-  - **人格硬编码解耦**：
-    - `services/llm/thinker.py`：`THINKER_SYSTEM_PROMPT` 使用 `{name}` 占位符，`think()` 新增 `identity_name` 参数
-    - `services/llm/client.py`：调试模式提示移除 "凤笑梦"，传 `identity.name` 给 thinker
-    - `plugins/schedule/generator.py`：`_SCHEDULE_SYSTEM_PROMPT` 重写为通用模板，移除 W×S 具体设定，`ScheduleGenerator` 接受 `identity_name`
-    - `plugins/schedule/calendar.py`：新增 `set_self_name()`/`get_self_name()`，`is_self_birthday` 可配置
-    - `plugins/schedule/mood.py`：生日检测改用 `is_self_birthday`
-    - `plugins/sticker/plugin.py`："frequently" 提示使用 `{name}` 占位符
-    - `admin/templates.py`：`admin_title` → `"Omubot Admin"`
-    - `plugins/chat/plugin.py`：启动时调用 `set_self_name()` 并传 `identity_name`
-    - 测试文件更新：通用示例名替代 "凤笑梦"、QQ 号
-  - **文件清理**：删除 `_omubot_public_api.py`、`rewrite-plan.md`
-  - **Git 仓库重建**：`rm -rf .git && git init`，全新干净历史，推送至 `github.com/kragcola/omubot`
-  - **文档更新**：CLAUDE.md、README.md、docs/setup-guide.md、docs/operations.md、docs/architecture.md、wiki/05-services.md 路径全部同步
-- **影响**：项目可安全开源 — 所有个人配置隔离在 `config/`（gitignored），源代码零硬编码人格引用
-- **测试**：578 passed, 9 failed（6 libvips + 3 sticker git mismatch 预存），零回归
-- **Lint**：ruff all checks passed
-
-## 2026-05-01 — 重建 Docker 部署文件
-
-- **类型**：infra
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - 重建 `Dockerfile`：多阶段构建（builder + runtime），python:3.12-slim + libvips，uv 管理依赖
-  - 重建 `docker-compose.yml`：napcat + bot 双容器，端口 8081:8080，volumes 挂载 storage/soul/config.toml/.env
-  - 重建 `config.example.toml`：完整 16 节配置模板（含 schedule/affection/log.channels 节，旧版缺失）
-  - 更新 `.dockerignore`：排除 storage/tests/wiki/*.md/.gitignore
-- **影响**：项目恢复 Docker 部署能力；新操作员可从零 `docker compose up -d --build` 启动
-
-## 2026-05-01 — src/ 耦合彻底清理 + 垫片删除 + 文档全线更新
-
-- **类型**：refactor + docs
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - 消除 `omubot/kernel/`、`omubot/services/`、`omubot/plugins/`、`omubot/admin/` 中全部 20 处 `from src.` 导入耦合
-  - 修复 12 个测试文件的导入路径：`src.config` → `kernel.config`，`src.identity.models` → `services.identity`，私有符号 `_call_api` → `call_api` 等
-  - `bot.py` 最后一个 `from src.config_loader` 改为 `from kernel.config`
-  - `kernel/config.py` 默认值 `plugin_dirs: ["src/plugins"]` → `["plugins"]`
-  - `pyproject.toml` ruff 路径修正
-  - **删除 `src/` 目录**（28 个垫片文件）— 零个 `from src.` 导入残留
-  - **删除 `旧内容待删/` 目录**（旧 amadeus 内容）
-  - **更新维护日志 (maintenance-log.md)**：记录本次清理
-  - **文档全线更新**：
-    - CLAUDE.md — 命令、路径、配置引用修正
-    - docs/architecture.md — `omubot/` → 根级目录，`src/` → 新路径，PluginBus 发现路径修正
-    - docs/project-info.md — 命令速查、lint 路径、TUI 命令修正
-    - docs/setup-guide.md — 目录结构移除 `src/` 和 `omubot/`，导入范例修正
-    - wiki/02-kernel-api.md — 导入路径、plugin_dirs 默认值、向后兼容说明更新
-    - wiki/04-plugin-guide.md — 示例导入路径修正
-    - wiki/05-services.md — 服务迁移状态更新为已完成
-    - wiki/06-config.md — 导入路径、默认值、向后兼容说明更新
-    - wiki/07-tools.md — 模块路径修正
-    - wiki/08-migration.md — 状态表更新（Phase 5/6 完成），`ruff check src/` 修正
-    - wiki/README.md — 项目结构更新为扁平化布局，版本状态更新
-- **影响**：项目完全独立，`kernel/`/`services/`/`plugins/`/`admin/` 四目录零耦合；文档与代码完全一致
-- **测试**：578 passed, 9 failed（6 libvips + 3 sticker_tools git stash 预存），零回归
-- **Lint**：ruff all checks passed
-- **类型检查**：121 预存错误（非本次引入）
-
-## 2026-05-01 — 工作区迁移：omubot 扁平化到根目录
-
-- **类型**：refactor（工作区重组）
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - 将 `omubot/kernel/`, `omubot/services/`, `omubot/plugins/`, `omubot/admin/`, `omubot/wiki/`, `omubot/docs/` 移动到根目录
-  - 旧的 amadeus-in-shell 内容（Dockerfile, README.md, config.toml, soul/, storage/, napcat/, scripts/ 等）移入 `旧内容待删/`
-  - `pyproject.toml`：更新 NoneBot 插件路径 `plugins.chat`，扩展 `known-first-party`
-  - `bot.py`：更新 `discover_plugins` 路径，导入路径从 `omubot.` 改为直接导入
-  - 全局替换 `from omubot.` → `from `（所有 .py 文件）
-  - 根目录 `__init__.py` 重命名为 `_omubot_public_api.py`（避免包冲突）
-  - `tests/test_client.py`：修复 mock patch 路径
-  - `src/` 保留在根目录因 omubot 代码尚未完全迁移，仍耦合
-- **影响**：工作区根目录现仅包含 omubot 重构内容 + 必要的 `src/`/`tests/`/`bot.py`；旧内容隔离在 `旧内容待删/`
-- **测试**：581 passed, 6 failed（6 个 libvips 预存失败），零回归
-
-## 2026-05-01 — 文档全面更新 + 搭建教程
-
-- **类型**：docs
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - `omubot/docs/architecture.md`：完整重写，新增 Omubot 三层架构、PluginBus 机制、插件发现流程、14 个插件一览、plugin.json 规范、开发钩子参考
-  - `omubot/docs/project-info.md`：新增三层模型说明、14 个插件表、配置完整列表；更新存储路径、API 端点、命令速查
-  - `omubot/docs/setup-guide.md`：新文件，从零搭建教程（6 步，预计 30-60 分钟），含开发指南、添加新插件范例、常见问题
-  - `omubot/rewrite-plan.md`：更新追踪表 7.1/7.2 状态，新增当前状态总结段落，更新最后更新时间
-- **影响**：外部人员可按 setup-guide 独立搭建；架构文档反映最新三层框架设计
-- **Docker 验证**：构建成功，bot 正常启动，admin 面板正常（303 重定向至登录页）
-
-## 2026-05-01 — Phase 7.1-7.2：单文件插件发现 + plugin.json 解析
-
-- **类型**：feature
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - `PluginBus.discover_plugins()` 重构为两轮扫描：Pass 1 子目录（优先），Pass 2 独立 `.py` 文件（跳过 `__init__`，同名时目录优先）
-  - 新增 `_load_plugin_module()` 和 `_apply_manifest()` 辅助方法，消除重复代码
-  - `plugin.json` 解析：若插件目录下有 `plugin.json`，解析后用字段（name, version, description, priority, enabled, dependencies）覆盖实例属性
-  - `bot.py`：移除 5 个单文件插件（DateTime, GroupAdmin, HttpApi, WebFetch, WebSearch）的手动 import 和 register，改为 `_bus.discover_plugins("omubot/plugins")` 自动发现
-- **影响**：单文件插件无需在 `bot.py` 中手动注册；plugin.json 可独立于代码更新元数据
-- **测试**：581 passed（6 个 libvips 预存失败），零回归
-
-## 2026-05-01 — Phase 6：Admin Panel 迁移到 omubot/admin/
-
-- **类型**：refactor
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - 新建 `omubot/admin/`：17 个文件从 `src/admin/` 复制，内部 import 更新为 `omubot.admin.*`
-  - `create_admin_router()` 重构：改为接受 `PluginContext`，从 ctx 解构所需服务引用（usage_tracker, msg_log, config.group, card_store, admins 等）
-  - `auth.py`：`_get_admin_token()` 移除对 `src.config_loader` 的依赖，只从环境变量读取
-  - `bot.py`：提前设置 `ctx.bot_start_time`；从 `omubot.admin` 导入并挂载 admin router + `AdminAuthMiddleware`
-  - `ChatPlugin`：移除 ~16 行 admin 挂载代码
-  - `src/admin/`：`__init__.py`、`auth.py`、`templates.py` 改为 shim re-export
-- **影响**：Admin 面板从 `src/` 迁出，成为 `omubot/` 下的系统服务；路由挂载权从 ChatPlugin 移至 `bot.py`
-- **测试**：581 passed（6 个 libvips 预存失败），零回归
-
-## 2026-05-01 — 零散事项：tick 循环基础设施 + ScheduleGenerator 移入 SchedulePlugin
-
-- **类型**：refactor
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - `PluginBus` 新增 `start_tick_loop(ctx, interval=60)` / `stop_tick_loop()` 方法，后台 asyncio 循环驱动 `fire_on_tick`
-  - `router.py` 首次连接时启动 tick 循环（`bus.start_tick_loop(ctx)`）；移除 `datetime`/`ZoneInfo` 无用 import
-  - `SchedulePlugin` 新增 `on_bot_connect`（启动 ScheduleGenerator + 缺失日程即时生成）和 `on_shutdown`（停止生成器）
-  - `router.py` 移除 ~12 行日程启动代码，逻辑完整迁移至 SchedulePlugin
-- **影响**：`fire_on_tick` 现在有生产环境驱动循环，插件可开始实现 `on_tick`；ScheduleGenerator 生命周期完全由 SchedulePlugin 管理
-- **测试**：581 passed（6 个 libvips 预存失败），零回归
-
-## 2026-05-01 — Phase 5 完成：全部插件切出 + PromptBuilder 精简
-
-- **类型**：refactor（里程碑）
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - 5.9 AffectionPlugin: `on_pre_prompt` + `on_post_reply` 钩子
-  - 5.10 SchedulePlugin（新）: `on_pre_prompt` 注入心情块
-  - 5.11 MemoPlugin: `on_pre_prompt`（全局索引 stable + 实体记忆 dynamic）+ `on_post_reply`（记忆提取）
-  - 5.12 StickerPlugin: `on_pre_prompt`（表情包规则 static + 库视图 stable）
-  - 5.8 HistoryLoaderPlugin（新）: `on_bot_connect` 钩子，群聊历史加载
-  - 5.13 DreamPlugin（新）: `on_startup` 创建 DreamAgent，`on_bot_connect` 启动，`on_shutdown` 停止
-  - 5.14 VisionPlugin（新）: `on_startup` 创建 VisionClient
-  - 框架增强: `AmadeusPlugin.on_bot_connect` 钩子；`PluginContext.memo_extractor` 字段
-  - `PromptBuilder` 精简：从 ~310 行缩减到 ~130 行，只保留 static identity + state_board
-  - `client.py`：`PromptBlock.position` 分派（static/stable 获得 cache_control）
-  - `ChatPlugin`：移除 ~60 行 VisionClient/DreamAgent/MemoExtractor 创建代码
-- **影响**：Phase 5 全部 14 个插件完成切出；所有业务逻辑通过插件钩子驱动
-- **测试**：579 passed，零回归
-
-## 2026-05-01 — Phase 5a：框架增强（enabled/dependencies/commands/admin routes/manifest）
-
-- **类型**：feature
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - `AmadeusPlugin` 新增 `enabled`、`dependencies` 字段
-  - 新增 `Command`、`AdminRoute` 类型 + `register_commands()`、`register_admin_routes()` 方法
-  - `PluginBus._safe_call()` 检查 `plugin.enabled`；新增 `collect_commands()`、`collect_admin_routes()`
-  - 新增 `PluginBus._resolve_dependencies()`：Kahn 拓扑排序 + 版本检查 + 循环依赖降级
-  - 新增 `omubot/kernel/manifest.py`：`PluginManifest` + SemVer 约束解析器（`== >= > <= < ^ ~ *`）
-- **测试**：581 passed，零回归
-
-## 2026-05-01 — Phase 5.2-5.7：工具类插件切出 + ElementDetector
-
-- **类型**：refactor
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - 5.2 ElementDetectorPlugin: 目录插件，`on_message` 拦截器，搬入 detector 逻辑
-  - 5.3 DateTimePlugin: 单文件，`register_tools`
-  - 5.4 WebSearchPlugin: 单文件，`register_tools`
-  - 5.5 WebFetchPlugin: 单文件，`register_tools`
-  - 5.6 HttpApiPlugin: 单文件，`register_tools`
-  - 5.7 GroupAdminPlugin: 单文件，`register_tools`
-  - `ChatPlugin` 移除对应工具的初始化代码
-- **测试**：581 passed，零回归
-
-## 2026-05-01 — Phase 5.1: EchoPlugin 切出
-
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - 新建 `omubot/plugins/echo/plugin.py`：EchoPlugin（priority=200，`on_message` 拦截器），将 EchoTracker 和 build_echo_key 移入
-  - `MessageContext` 新增 `bot`、`nickname` 字段（供拦截器发送消息）
-  - `router.py`：echo_key 构建移至 `fire_on_message` 之前，echo 检测逻辑移除；修复 SIM102 lint
-  - `ChatPlugin`：移除 EchoTracker 初始化
-  - `bot.py`：注册 EchoPlugin
-  - `src/plugins/echo.py` → 兼容 shim
-- **影响**：echo 复读检测现在通过 PluginBus 钩子运行，与 router 解耦
-- **测试**：24 echo 测试 + 581 全量测试通过，零回归，lint 通过
-
----
-## 2026-05-01 — Phase 4 完成：ChatPlugin 适配到 PluginBus
-
-- **类型**：架构重构（里程碑）
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - 新建 `omubot/kernel/router.py` (~520 行) — NoneBot 事件 → PluginBus 桥接：消息渲染、群聊监听、私聊处理、禁言监听
-  - 新建 `omubot/plugins/chat/plugin.py` (~270 行) — ChatPlugin（priority=0），`on_startup` 中初始化全部系统服务存入 PluginContext，`on_shutdown` 清理
-  - `src/plugins/chat/__init__.py` → 兼容 shim（~11 行）
-  - `bot.py` 新增 PluginContext / PluginBus / ChatPlugin 注册 / setup_routers 调用
-  - `LLMClient.__init__` 新增 `bus` 参数；`chat()` 中触发 `fire_on_pre_prompt`（收集 plugin_blocks）和 `fire_on_post_reply`（副作用通知）
-  - `PromptBuilder.build_blocks()` 新增 `plugin_blocks` 参数
-  - `PluginContext` 新增 `bus` 字段
-- **影响**：系统通过 PluginBus 运转；bot.py 负责组装，ChatPlugin 负责初始化，router 负责事件路由；后续 Phase 5 可直接切出独立插件
-- **测试结果**：581 passed，7 预存在失败，零回归，零 lint
-- **下一步**：Phase 5（逐个切出插件：Echo → ElementDetector → 工具类 → Affection → Schedule → Memo）
-
-## 2026-05-01 — Phase 3 完成：系统服务迁移（16 模块，6 批次）
-
-- **类型**：架构重构（里程碑）
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - Batch 1（零依赖）：`message_log`、`types`、`card_store`、`migrate`、`image_cache`、`sticker_store`、`usage`、`humanizer`、`tools/context`、`tools/registry`
-  - Batch 2：`timeline`、`short_term`
-  - Batch 3：`identity`（Identity + IdentityManager 合并）、`state_board`、`retrieval`
-  - Batch 4：`prompt_builder`（原 prompt.py）、`thinker`
-  - Batch 5：`llm/client`（1578 行，最大单文件）
-  - Batch 6：`scheduler`
-  - 全部旧位置替换为兼容 shim（`from omubot.services.xxx import *`），旧 import 路径仍可用
-- **迁移模式**：cp + sed 批量替换 import 路径 → 重命名 `_` 前缀标识符（Python `import *` 限制）→ 修复测试 patch 目标路径 → ruff check --fix → pytest 验证
-- **测试结果**：581 passed，7 预存在失败（image_cache × 6 + mood × 1），零回归
-
-## 2026-05-01 — Phase 2 完成：配置系统重组
-
-- **类型**：架构重构（里程碑）
-- **操作人**：Claude Code (assisted)
-- **变更**：
-  - 新建 `omubot/kernel/config.py`（~370 行）— 所有 Pydantic 配置模型（23 个类）+ `KernelConfig`（plugin_dirs, disabled_plugins, max_hook_time_ms）+ `load_config()` 函数
-  - `src/config.py` → 兼容 shim（从 `omubot.kernel.config` re-export 全部模型）
-  - `src/config_loader.py` → 兼容 shim（从 `omubot.kernel.config` re-export `load_config`）
-  - `omubot/kernel/__init__.py` 和 `omubot/__init__.py` 新增配置类型导出
-- **向后兼容**：所有 `from src.config import ...` 和 `from src.config_loader import ...` 导入路径不变，现有代码无需修改
-- **新增 `KernelConfig`**：`plugin_dirs=["src/plugins"]`、`disabled_plugins=[]`、`max_hook_time_ms=5000`，已作为 `BotConfig.kernel` 子字段
-- **测试结果**：581 passed，7 预存在失败（image_cache × 6 + mood × 1），零回归，零 lint
-- **下一步**：Phase 3（系统服务迁移）或 Phase 4（ChatPlugin 适配）
-
-## 2026-05-01 — Phase 1 完成 + 项目 Wiki 创建
-
-- **类型**：架构重构（里程碑）
-- **操作人**：Claude Code (assisted)
-- **Phase 1 交付物**：
-  - `omubot/kernel/types.py`（~320 行）— 6 种 Context 类型、AmadeusPlugin 基类（8 钩子）、PromptBlock、Tool ABC、ToolContext、Identity、Content/TextBlock/ImageRefBlock
-  - `omubot/kernel/bus.py`（~250 行）— PluginBus 调度器：注册/卸载/发现、8 种 fire_* 方法、异常隔离 _safe_call、目录扫描 discover_plugins
-  - `tests/test_kernel_types.py`（36 tests）— Context/Block/Tool/Plugin/Identity 全覆盖
-  - `tests/test_plugin_bus.py`（37 tests）— 注册排序/生命周期/消息管线/prompt 收集/工具收集/tick/异常隔离/插件发现
-  - `omubot/__init__.py`、`omubot/kernel/__init__.py` — 包入口，导出全部公开 API
-- **测试结果**：73 new passed，0 lint errors，581 已有测试零回归
-- **Wiki**：创建 `omubot/wiki/` 目录，10 个文档覆盖架构/内核 API/Context 类型/插件开发/系统服务/配置/工具/迁移/术语/FAQ
-- **下一步**：Phase 2（配置系统重组）或 Phase 3（系统服务迁移）
-
-
-
-## 2026-05-01 — Omubot 重写计划启动
-
-- **类型**：架构重构
-- **操作人**：Claude Code (assisted)
-- **背景**：amadeus-in-shell 项目功能持续增加（好感度、日程、表情包、记忆卡片、检索门控、视觉、梦境……），`src/plugins/chat/__init__.py` 已膨胀至 ~1000 行单体，`LLMClient` 和 `PromptBuilder` 直接依赖 7-10 个子系统。每次加新功能都需要改动核心文件，维护成本日益上升。
-- **目标**：设计一套插件框架（PluginBus），将可插拔功能以独立插件形式挂载，每个插件只通过 1-3 个管线钩子与核心通信，彻底解耦。
-- **参考项目**：
-  - **MaiBot**（旧 bot）：组件注册模型（Action/Command/Tool/EventHandler）+ 事件管道（ON_MESSAGE → ON_PLAN → AFTER_LLM → POST_SEND）+ 插件目录扫描 + @register_plugin 装饰器 + `_manifest.json` 元数据
-  - **MCDReforged**：单线程 TaskExecutor + 事件驱动 + 热重载 + 插件独立存储
-  - **pluggy**：hookspec/hookimpl 装饰器模式 + 异常隔离
-  - **wphooks**：WordPress 风格 action/filter 双钩子范式
-- **已完成**：
-  - 全项目 57 个 .py 文件审计，功能分为 6 类（Framework API / Core / Plugin / Admin / Config / Support）
-  - 设计草案 `AmadeusPlugin` 基类 + `PluginBus` 调度器 + 6 种 Context 类型
-  - 定义 8 个管线钩子：`on_startup` / `on_shutdown` / `on_message` / `on_thinker_decision` / `on_pre_prompt` / `on_post_reply` / `register_tools` / `on_tick`
-  - 规划 14 个插件（7 个业务插件 + 7 个工具插件）
-  - 完成新目录结构设计（`omubot/` 包，~50 个文件，5 层架构）
-  - 创建 `Omubot/` 目录，生成 [feature-classification.md](Omubot/feature-classification.md) 功能分类文档 + 迁移映射速查表
-  - 确定三层架构（内核 → 系统服务 → 插件），对标鸿蒙 OS 分层模型
-  - 完成 [rewrite-plan.md](Omubot/rewrite-plan.md) 详细实施方案（8 个 Phase，含操作提示词）
-- **设计原则**：
-  - 钩子默认串行（by priority），与 async/await 自然契合
-  - 异常隔离：单个插件崩溃不影响其他插件
-  - 消息消费短路：on_message 返回 True 即停止后续处理
-  - 单进程架构（不引入 MaiBot 式 IPC），保持调试简单
-  - 核心插件 priority 0-99，业务插件 100-199，可选插件 200+
-- **分阶段实施计划**：
-
-	| 阶段 | 内容 | 影响 |
-	| --- | --- | --- |
-	| Phase 1 | 创建 `omubot/plugin_bus.py`，chat 插件内部重构为使用 bus | 零行为变化 |
-	| Phase 2 | 切出 echo + element_detector（只有 on_message 钩子） | 验证模式 |
-	| Phase 3 | 切出 affection + schedule（有 on_pre_prompt + on_post_reply） | 核心解耦 |
-	| Phase 4 | 切出 sticker + memo + dream + vision | 完成解耦 |
-	| Phase 5 | 插件热重载、独立配置 schema、目录扫描自动发现 | 锦上添花 |
-- **回滚方案**：每阶段独立 PR，出问题只回滚该阶段；PluginBus 通过 feature flag 控制是否启用
-
-### Phase 1 完成 (2026-05-01)
-
-- **新增文件**：
-  - `omubot/__init__.py` — 包入口，导出全部公开 API
-  - `omubot/kernel/__init__.py` — 内核层入口
-  - `omubot/kernel/types.py` — 类型系统（~320 行）：6 种 Context 类型、AmadeusPlugin 基类（8 个钩子）、PromptBlock、Tool ABC（从 src/tools/base.py 提升）、ToolContext、Identity、Content/TextBlock/ImageRefBlock（从 src/memory/types.py 提升）
-  - `omubot/kernel/bus.py` — PluginBus 调度器（~250 行）：注册/卸载/发现、8 种 fire_* 调度方法、异常隔离 _safe_call、目录扫描 discover_plugins
-  - `tests/test_kernel_types.py` — 36 个测试：覆盖所有 Context/Block/Tool/Plugin/Identity
-  - `tests/test_plugin_bus.py` — 37 个测试：覆盖注册排序/生命周期/消息管线/prompt 收集/工具收集/tick/异常隔离/插件发现
-- **测试结果**：73 passed（+73），0 lint 错误
-- **未变更**：`bot.py`、所有现有 `src/` 文件——零回归，581 个已有测试仍然通过
-
-
----
-
-## 2026-05-01 — 启动历史加载修复
-
-- **类型**：bug fix
-- **操作人**：Claude Code (assisted)
-- **问题**：每次重启后 `load_history failed | group=984198159`、`load_history failed | group=993065015`，启动时无法从 NapCat 拉取群历史消息
-- **根因**：`history_loader.py` 通过 `POST {napcat_url}/get_group_msg_history` 裸 HTTP 调用 NapCat，但 NapCat 的 OneBot HTTP server 未启用（`onebot11_384801062.json` 中 `httpServers: []`），端口 29300 连接被拒
-- **修复**：
-  - 重写 `load_group_history()` 接受 `bot: Bot` 参数，改用 `bot.call_api("get_group_msg_history", ...)` 通过已有 WebSocket 连接调用
-  - `_load_one_group()` 用 `ActionFailed` 异常处理替代 `retcode` 检查
-  - 修改 `chat/__init__.py` 调用点，传入 `bot=bot` 替代 `napcat_url`
-  - 重写 `tests/test_history_self_messages.py`：Mock `bot.call_api` 替代 `aiohttp.ClientSession.post`，新增 API 异常和空消息测试
-- **效果**：启动后成功加载群历史（993065015: 23条, 984198159: 29条），群聊上下文立即可用
-
-## 2026-05-01 — @mention 不回复修复
-
-- **类型**：bug fix
-- **操作人**：Claude Code (assisted)
-- **问题**：@bot 消息仍然被 thinker 判定为 wait，导致不回复
-- **根因**：`GroupChatScheduler._do_chat()` 调用 `_llm.chat()` 时未传 `force_reply`，thinker 对 @mention 也执行了 wait 判断
-- **修复**：
-  - `_GroupSlot` 新增 `force_reply: bool` 标记
-  - `notify(is_at=True)` 时设为 True
-  - `_fire()` 捕获标记并传入 `_do_chat(force_reply=...)`
-  - `_do_chat()` 传递 `force_reply` 给 `_llm.chat()`，绕过 thinker wait
-
-## 2026-05-01 — 第三期：检索门控（Retrieval Gating）
-
-- **类型**：新功能
-- **操作人**：Claude Code (assisted)
-- **背景**：Phase 2 后每轮对话将实体所有活跃卡片全量注入 system prompt，O(n) 膨胀。大部分卡片与当前话题无关，浪费上下文窗口
-- **变更内容**：
-  - 新增 `src/memory/retrieval.py`：`RetrievalGate` 类，4 级门控策略（全量→周期刷新→关键词→最小提示），~170 行
-  - 修改 `src/llm/prompt.py`：`PromptBuilder` 新增 `retrieval_gate`/`session_id`/`conversation_text` 参数，memo block 双路径（门控/旧缓存），新增 `rewind_retrieval_turn()`
-  - 修改 `src/llm/client.py`：调用前提取对话文本（群聊 `get_recent_text()`，私聊直接用 user_content），传入 `session_id`/`conversation_text`；thinker wait 后调用 `rewind_retrieval_turn()`
-  - 修改 `src/memory/group_timeline.py`：新增 `get_recent_text(group_id, last_n=3)` 拼接最近 N 轮对话文本
-  - 修改 `src/plugins/chat/__init__.py`：创建 `RetrievalGate(card_store=card_store, refresh_interval=10)`，传入 PromptBuilder
-  - 新增 `tests/test_retrieval.py`：25 个测试覆盖 4 级门控 / 关键词提取 / 缓存失效 / turn 回退 / 作用域隔离 / 会话上限
-- **4 级门控策略**：
-
-  | 级别 | 触发条件 | 行为 |
-  | --- | --- | --- |
-  | 全量检索 | 新会话首轮 / 每 10 轮周期刷新 | 注入全部卡片（缓存，不重复查 DB） |
-  | 关键词检索 | 对话文本关键词匹配到卡片 | 注入匹配卡片（上限 10 张） |
-  | 最小提示 | 以上都不满足但有卡片 | 提示卡片数量 + 建议用 `lookup_cards` 工具 |
-  | 空 | 实体无卡片 | 空字符串 |
-- **thinker wait 回退**：thinker 判定 wait 时 `rewind_retrieval_turn()` 回退 turn_count，避免空消耗全量检索配额
-- **影响范围**：memo block 从固定内容变为按需注入，首轮后 token 消耗降低约 80%；LLM 可通过 `lookup_cards` 工具主动查询未注入卡片
-- **测试结果**：523 passed（+25），7 failed（6 libvips 预存 + 1 flaky mood）
-- **回滚方案**：`PromptBuilder(retrieval_gate=None)` 即可回退旧行为
-
----
-
-## 2026-05-01 — 第二期：类型化记忆卡片（CardStore）
-
-- **类型**：重构
-- **操作人**：Claude Code (assisted)
-- **背景**：
-  - 旧 MemoStore 用 `.md` 文件存储记忆，纯文本无结构，存在 6 个已诊断问题（群聊 memo/nickname 错乱）
-  - 借鉴 KokoroMemo 的卡片设计，用 SQLite 存储有类型、有作用域、支持取代关系的记忆卡片
-- **变更内容**：
-  - 新增 `src/memory/card_store.py`：核心存储层，SQLite + aiosqlite，14 列 schema，Card/NewCard 数据类，12 个公共 API
-  - 新增 `src/memory/migrate.py`：一次性 MD→卡片迁移，6 张卡片从 3 个旧 `.md` 文件，幂等，源文件改为 `.md.migrated`
-  - 新增 `src/memory/memo_extractor.py`：每轮对话后提取 `[category] 内容` 格式的新事实卡片
-  - 新增 `src/memory/state_board.py`：群聊状态板，从 MessageLog SQLite 推导活跃用户/话题/频率/@提及
-  - 修改 `src/llm/prompt.py`：memo_store → card_store，stable block 用 `build_global_index()`（计数式索引），memo block 用 `build_entity_prompt()`（`[类别] 内容` 格式），6 块布局
-  - 修改 `src/llm/client.py`：`append_memo` → `add_card`（scope/scope_id/category/content），compact 系统提示词重写
-  - 修改 `src/llm/dream.py`：6 个新 LLM 工具（list/search/update/supersede/expire cards + list entities），系统提示词重写为分类→去重→交叉验证→取代工作流
-  - 修改 `src/tools/memo_tools.py`：RecallMemoTool → CardLookupTool，UpdateMemoTool → CardUpdateTool（add/update/supersede/expire）
-  - 修改 `src/plugins/chat/__init__.py`：MemoStore → CardStore(db_path="storage/memory_cards.db")，全部依赖链切换
-  - 修改 `src/admin/__init__.py`：memo_store 参数 → card_store
-  - 新增 `tests/test_card_store.py`：~17 个测试覆盖 CRUD/supersede/索引输出/迁移
-  - 重写 `tests/test_memo_tools.py`：11 个测试覆盖 CardLookupTool/CardUpdateTool
-  - 重写 `tests/test_dream.py`：10 个测试覆盖 CardStore 版 DreamAgent
-  - 修改 `tests/test_client.py`、`tests/test_e2e_live.py`、`tests/test_prompt.py`：适配 CardStore
-  - 删除 `src/memory/memo_store.py`、`tests/test_memo_store.py`
-  - 新增 `src/llm/thinker.py`、`src/memory/state_board.py`、`tests/test_state_board.py`（第一期合并带入）
-- **卡片模型**：
-  - 7 类：preference(偏好)/boundary(边界)/relationship(关系)/event(事件)/promise(承诺)/fact(事实)/status(状态)
-  - 3 作用域：user/group/global，confidence 0.0-1.0，supersedes 取代边
-- **迁移结果**：`1416930401.md` → 3 cards，`984198159.md` → 1 card，`993065015.md` → 1 card，共 6 张（全部 fact 类别，等待 Dream Agent 首次运行后重新分类）
-- **影响范围**：所有记忆相关路径（prompt 构建、compact、dream、工具调用、extractor、admin debug）全部切换至 CardStore；prompt 格式从全文 memo body 变为 `[类别] 内容`；全局索引从文本 mention 变为计数式 `用户 @QQ: 偏好×1 事实×3`
-- **测试结果**：481 passed（+2），7 failed（6 个 libvips 预存，1 个 flaky 无关）
-- **回滚方案**：git revert 到 9f2e72e，旧 `.md.migrated` 文件可手动改回 `.md`
-
-## 2026-05-01 — GIF 动画表情保存为静态图修复 + 上下文追踪修复（项目侧）
-
-- **类型**：Bug 修复
-- **操作人**：Claude Code (assisted)
-- **背景**：
-  - Bot 收录 GIF 动画表情时，pyvips 只加载第一帧并保存为 JPEG（静态图）
-  - StickerStore._detect_format() 显式拒绝 GIF
-  - Thinker wait 时 last_input_tokens 被重置为 0，丢失上下文追踪
-- **变更内容**：
-  - 修改 `src/memory/image_cache.py`：新增 `_find_cached()`（多扩展名缓存命中），`_process_and_save()` 检测 GIF magic bytes → 保存原始字节为 `.gif` 跳过 pyvips
-  - 修改 `src/sticker/store.py`：`_detect_format()` 接受 GIF 返回 `"gif"`
-  - 修改 `src/llm/client.py`：Thinker wait 时用实际 input_tokens 代替 0
-- **影响范围**：新收录的 GIF 表情包可保留动画；缓存命中支持多扩展名；上下文追踪更准确
-- **注意**：client.py 的上下文追踪修复后因"问题与项目无关"被回退 — 此条目仅记录 GIF 修复
-
----
-
-## 2026-04-30 — 第一期：群聊状态板（Group State Board）
-
-- **类型**：新功能
-- **操作人**：Claude Code (assisted)
-- **背景**：
-  - Bot 在群聊中缺乏对"当前正在发生什么"的结构化认知，完全依赖原始对话历史
-  - 导致上下文跟踪差、称呼混乱、回复时机不当
-  - 借鉴 KokoroMemo 的热记忆/状态板设计，采用轻量级规则方案
-- **变更内容**：
-  - 新增 `src/memory/state_board.py`：`GroupStateBoard` 类，基于规则从 `MessageLog` SQLite 推导线活跃用户、近期话题（二元组频率）、消息频率、@提及
-  - 修改 `src/llm/prompt.py`：`build_blocks()` 返回值从 5 块扩展为 6 块 `[static, mood, state_board, affection, stable, memo]`；新增 `_build_state_board()` 方法
-  - 修改 `src/llm/client.py`：将状态板文本注入 thinker 的 mood_text，使 reply/wait 决策感知群聊状态
-  - 修改 `src/plugins/chat/__init__.py`：实例化并注入 `GroupStateBoard`，bot 连接时更新 `bot_self_id`
-  - 新增 `tests/test_state_board.py`：14 个测试覆盖快照格式化、QQ 解析、文本清洗、二元组提取、活跃用户/频率/话题/@提及推导
-- **影响范围**：群聊 prompt 中新增 `【当前群聊状态】` 块；thinker 决策可感知群聊活跃度；私聊不受影响（空块）
-- **设计原则**：无新外部依赖、无额外 LLM API 调用、从现有 MessageLog 读取、cache_control: ephemeral
-
----
-
-## 2026-04-30 — 群聊图片自动描述 + Loguru 格式错误修复
-
-- **类型**：Bug 修复 + 功能恢复
-- **操作人**：Claude Code (assisted)
-- **背景**：
-  1. 群聊图片只显示 `«图片»` 占位符，LLM 无法在上下文中看到图片内容，必须先调用 `describe_image` 工具才能理解
-  2. NapCat 发送 `[json:data={...}]` 消息时，loguru stderr colorizer 将 JSON 中的花括号解析为 format field 导致 `ValueError: unmatched '{' in format spec`
-- **变更内容**：
-  - `_render_message()`：群聊图片下载后移除 `«图片»` 占位符，改为通过 Qwen VL 自动描述（与私聊一致）；动画表情（`sub_type=1`）仍显示 `«动画表情»`
-  - `bot.py` `_channel_format()`：对 `record['message']` 中的 `{`/`}` 做转义（`{{`/`}}`），loguru colorizer 解析后自动还原为单花括号
-- **影响范围**：群聊图片现在自动携带描述文本供 LLM 理解；`[json:...]` 消息不再触发日志格式异常
-
----
-
-## 2026-04-30 — @提及绕过 thinker + 缓存告警排除 0 轮调用
-
-- **类型**：Bug 修复 + 逻辑优化
-- **操作人**：Claude Code (assisted)
-- **背景**：
-  1. 用户 @bot 后，thinker 决定 wait（沉默），导致提及必回复失效。根因：thinker 收到的群聊消息不包含 is_at 信息
-  2. 缓存命中率告警频繁误报。根因：0 轮调用（直接回复）命中率 ~19%（仅静态系统块命中），多轮调用 ~60-80%，混合采样拉低平均值
-- **变更内容**：
-  - `_GroupSlot` 新增 `force_reply` 字段；`notify(is_at=True)` 设置该标志；`_do_chat()` 传入 `_llm.chat(force_reply=True)` 绕过 thinker
-  - `UsageTracker._check_alerts()` 排除 `tool_rounds == 0` 的调用，仅多轮调用参与缓存命中率采样
-  - 冷启动检查移至 tool_rounds 过滤之前，确保首次调用正确消费
-- **影响范围**：@提及必定回复；缓存告警仅在多轮调用命中率异常低时触发
-
----
-
-## 2026-04-30 — 群聊隐私遮掩
-
-- **类型**：新功能
-- **操作人**：Claude Code (assisted)
-- **背景**：群聊与私聊共享同一份好感度记忆，在公开场合暴露对用户的深入了解会显得不自然。需要在群聊中模拟公私场合区别，但记忆本身保持共通。
-- **变更内容**：
-  - `AffectionEngine.build_affection_block()` 新增 `in_group` 参数：群聊中隐藏好感度分数、使用模糊 tier 标签（"不太熟"/"有点面熟"等）、注入社交距离指令（"不要主动暴露深入了解"）、隐藏昵称偏好和心情加成
-  - `PromptBuilder.build_blocks()` 根据 `group_id is not None` 自动推导 `in_group`
-  - 新增 `privacy_mask` 配置开关（`GroupConfig` / `ResolvedGroupConfig`，默认 true），允许对特定群关闭遮掩
-  - `LLMClient.chat()` → `PromptBuilder.build_blocks()` 链路传递 `privacy_mask` 参数
-  - `GroupChatScheduler._do_chat()` 解析群配置后传入
-- **影响范围**：仅群聊。`privacy_mask=false` 或私聊时行为与旧版一致。私聊中深度询问仍可触发完整记忆。
-- **回滚方案**：`[group].privacy_mask = false` 或在群覆盖中关闭。
-
----
-
-## 2026-04-30 — 表情包频率上调
-
-- **类型**：参数调整
-- **操作人**：Claude Code (assisted)
-- **背景**：主动表情包发送偏保守，需更符合元气二次元角色设定。
-- **变更内容**（`src/llm/prompt.py` `frequently` 档）：
-  - 触发阈值 ≥4 → ≥2（消息表达任意情绪即触发）
-  - 移除连发惩罚（原 -1）
-  - 新增"随口接话 +1~2"评分项
-  - 态度：宁可多发不要错过
-- **影响范围**：rebuild 后生效。
-
----
-## 2026-04-30 — 要素察觉功能框架（含 LLM 模式）
-
-- **类型**：新功能
-- **操作人**：Claude Code (assisted)
-- **背景**：群聊中某些触发词适合用预设回复快速响应（如"早安""晚安"），类似复读机制在 LLM 调度前拦截。后期扩展 LLM 模式支持反差吐槽等需要生成能力的场景。
-- **变更内容**：
-  - 新增 `ElementRule` / `ElementDetectionConfig` 配置模型（`src/config.py`），`ElementRule` 含 `use_llm` 字段
-  - 新增 `ElementDetector` 插件（`src/plugins/element_detector.py`）：静态模板替换 + LLM 模式分发
-  - 在 `collect_group_context` 中接入：复读检测之后、timeline 写入之前触发
-  - LLM 模式：`reply` 字段作为 system prompt 指令，调用 `_llm._call` 生成回复（绕过 thinker/心情）
-  - 配置 `[element_detection]`，静态规则示例 `这X神了↔这X拉了`、`我也要X吗→对`，LLM 规则 `X是这样的→反差吐槽`
-  - 测试 9 条（`tests/test_element_detector.py`）
-- **LLM 模式注意事项**：system prompt 需保持简短（~200 字符），角色描述过长会触发内心独白而非直接回复；只用 `result["text"]` 不用 thinking_blocks。
-- **影响范围**：仅群聊。enabled=false 或 rules=[] 时无开销。
-- **回滚方案**：设置 `[element_detection].enabled = false`。
-
----
-
-## 2026-04-30 — 防检测人性化延迟
-
-- **类型**：新功能
-- **操作人**：Claude Code (assisted)
-- **背景**：账号因发送消息过于规律被腾讯风控。需要在每次发消息前插入随机延迟模拟人类打字节奏。
-- **变更内容**：
-  - 新增 `AntiDetectConfig` 配置（`src/config.py`）：enabled / min_delay / max_delay / char_delay
-  - 新增 `Humanizer` 单例模块（`src/anti_detect.py`）：`delay(text)` 方法按消息长度随机等待
-  - 覆盖所有群聊发送路径：scheduler `_send_to_group`、echo/要素察觉/表情包发送
-  - 管理员 `SendGroupMsgTool` 不加延迟
-  - 配置 `[anti_detect]`（`config.toml` / `config.example.toml`）
-- **默认参数**：基础延迟 0.5s–3.0s + 每字符 20ms
-- **影响范围**：所有群聊和私聊消息发送。enabled=false 完全关闭。
-- **回滚方案**：`anti_detect.enabled = false`。
-
----
-## 2026-04-30 — Prompt 缓存命中率优化（P0–P3）
-
-- **类型**：性能优化
-- **操作人**：Claude Code (assisted)
-- **背景**：排查发现 DeepSeek V4 Flash 缓存命中率 ~74%，波动剧烈（19%–87%）。根因四层：MemoExtractor 每轮 invalidate entity_block → 私聊每轮 cache MISS；mood/affection block 无 cache_control 且夹在两个缓存块之间；entity_block 混合稳定内容（索引/sticker）与高频内容（memo body）；thinker 调用无缓存标记且 tokens 未记入统计。
-- **变更内容**：
-
-  **P0 — 移除 MemoExtractor 即时 invalidate**（`src/memory/memo_extractor.py`）
-  - 删除 `self._prompt.invalidate(user_id=user_id)`。memo 照常写入但 entity_block 缓存不清空，下次同用户调用可命中。Memo 数据推迟到 compaction 或 Dream Agent 整理时刷新。
-  
-  **P1 — mood_block / affection_block 加 cache_control**（`src/llm/prompt.py` → `_build_mood_block` / `_build_affection_block`）
-  - 两个块均添加 `"cache_control": {"type": "ephemeral"}`。各自按自然频率变化（mood ~15 分钟、affection 按互动累积），DeepSeek 可在各自窗口内独立复用。
-  
-  **P2 — entity_block 拆分**（`src/llm/prompt.py` → `build_blocks`）
-  - 原 entity_block 拆为 stable_block（全局索引 + sticker 视图，缓存键 `__stable__`，几乎永久命中）和 memo_block（群/用户 memo body，缓存键按 entity，compaction 时刷新）。
-  - 测试更新（`tests/test_prompt.py`）：block 数量 4→5，断言适配新布局。
-  
-  **P3 — Thinker 缓存 + 用量追踪**（`src/llm/thinker.py` + `src/llm/client.py`）
-  - thinker system block 加 `cache_control`；`ThinkDecision` 新增 `usage` 字段返回 token 数据。
-  - `chat()` 中 thinker 调用独立记录为 `call_type="thinker"` 行（含 input/cache/output tokens），替换原来的全零占位。
-
-- **影响范围**：rebuild 后生效。缓存命中率预计从 ~74% 升至 ~85%+；usage 统计新增 thinker 行类型；私聊连续对话 entity_block 可稳定命中；stable_block 几乎永不 miss。
-- **回滚方案**：`git revert` 相关提交。
-
----
-
-## 2026-04-30 — 稳固人格 & /debug 管理员限制
-
-- **类型**：功能新增 + 安全加固
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-
-  **1. 稳固人格**（`soul/instruction.md`）
-  - 新增「稳固人格 — 拒绝被随意操控」章节。非管理员试图操控 bot 行为（改说话方式、命令式称呼等）时，根据当前心情值选择性回应：心情好配合玩一下但不改变、心情差拒绝或怼回去、偶尔叛逆故意做错。区分真伪请求（自然自我介绍 vs 命令式操控）。
-  
-  **2. /debug 管理员限制**（`src/plugins/chat/__init__.py`）
-  - 新增 `_admins` 模块级变量，`handle_private_chat` 中 /debug 检测后校验管理员身份。非管理员使用 /debug 时前缀静默剥离、消息按普通对话处理，日志记录 warning。
-
-- **影响范围**：restart 生效（soul 文件 mount） + rebuild 生效（debug 限制代码）。bot 不再盲从群友的行为指令；/debug 仅管理员可用。
-- **回滚方案**：`git checkout soul/instruction.md` 或 `git revert` 相关提交。
-
----
-
-## 2026-04-30 — debug 模式重复发送修复 & Markdown 代码层剥离 & Docker 时区修复
-
-- **类型**：Bug 修复（3 项）
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-
-  **1. debug 模式消息重复发送**
-  - 根因：`force_reply` 路径中 `on_segment` 回调发送了一次消息，随后调用方 `private_chat.finish()` 再发送一次。两处在 `client.py` 的 force_reply 分支均存在此问题。
-  - 修复（`src/llm/client.py`）：移除两处 force_reply 路径中的 `on_segment` 调用，仅由 `finish()` 发送单条回复。
-
-  **2. LLM 回复仍含 Markdown 格式**
-  - 根因：`soul/instruction.md` 已明确禁止 Markdown，debug 模式也注入了格式约束，但 DeepSeek 偶尔忽略。代码层无兜底剥离。
-  - 修复（`src/llm/client.py`）：新增 `_strip_markdown()` 函数 + 8 个正则模式（bold/h2/list/olist/inline-code/fence/strikethrough），在两处 reply 提取点（tool loop 内和 tool loop 耗尽后）调用。跳过 italic（单 `*` 在东亚文字中太常见易误伤）。
-
-  **3. Docker 容器时区为 UTC**
-  - 根因：`docker-compose.yml` 中 napcat 和 bot 均未设 `TZ` 环境变量，容器默认 UTC。日志时间戳显示前一天（如 CST 4/30 凌晨 → 日志显示 4/29）。
-  - 修复（`docker-compose.yml`）：napcat 和 bot 服务均添加 `TZ=Asia/Shanghai` 环境变量。
-
-- **影响范围**：rebuild 后生效。debug 模式消息不再重复；LLM 回复中的 `**加粗**`、`# 标题`、\`代码\`、```代码块```、`- 列表` 等格式自动剥离；日志时间戳正确显示 CST。
-- **回滚方案**：`git revert` 相关提交。
-
----
-## 2026-04-30 — 颜文字→表情包程序化强制执行 & 主动记忆提取系统
-
-- **类型**：Bug 修复 + 功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-
-  **1. 颜文字→表情包程序化强制执行**
-  - 根因：system prompt 中的"逐条自评打分"模式依赖 LLM 自觉执行，deepseek-v4-flash 在专注于写作时经常忘记同时调用 send_sticker。用户反馈「(≧▽≦)/」等颜文字发了但表情包没跟上。
-  - 修复（双层方案）：
-    - **Prompt 层**（`src/llm/prompt.py`）：三种频率模式的 prompt 全部重构，将「颜文字强制配图」提升为第一条硬性规则（位置在评分系统之前），明确标注"这不是可选的——颜文字=表情包"
-    - **代码层**（`src/llm/client.py`）：新增 kaomoji 正则检测（`_KAOMOJI_RE`），当 LLM 返回的文本含颜文字但未调用 send_sticker 时，自动注入强制 sticker 选择轮次（追加 system 指令 + continue 工具循环），不再依赖 LLM 自觉
-  - 工作机制：LLM 忘发 → 代码检测到颜文字 → 强制追加一轮 tool call → LLM 只需选表情包发送（不再需要自我评分）
-
-  **2. 主动记忆提取系统（MemoExtractor）**
-  - 根因：memo 仅在上下文压缩（compact）时写入，而压缩只在 token 超阈值时触发。私聊对话短、永远不触发压缩 → `storage/memories/users/` 目录完全为空 → bot 每次都是"脑袋空空的"。旧 MaiBot 使用 HippoMemorizer（定时批量处理），但有一致性延迟。
-  - 修复（新增 `src/memory/memo_extractor.py`）：
-    - 每次对话回合结束后，异步（fire-and-forget）调用轻量 LLM（max_tokens=256）提取用户事实
-    - 提取到的事实通过 `MemoStore.append()` 写入用户备忘录的「待整理」区
-    - Dream Agent 后续整理时可合并去重
-    - 下次对话时 `recall_memo` 立即可查
-  - 比旧项目更好的点：
-    - **即时性**：每轮对话后立即提取（旧 MaiBot 是定时批量，有延迟）
-    - **轻量**：单次 256 token 输出，不增加用户感知延迟（后台异步）
-    - **精准**：只提取当前轮次的新事实，不重复扫描历史
-    - **渐进**：记忆随对话自然累积，而非等压缩触发
-  - 接线位置：`src/plugins/chat/__init__.py` 创建 MemoExtractor 实例，传入 LLMClient；`src/llm/client.py` → `chat()` 在返回回复前启动后台提取任务
-
-- **影响范围**：rebuild 后生效。颜文字表情包现在有代码兜底保证发送；私聊记忆从零变为每轮自动记录。群聊记忆仍依赖压缩（后续可扩展 extractor 支持群聊）。
-- **回滚方案**：`git revert` 相关提交。
-
----
-## 2026-04-30 — 模拟思考后续修复 & 日志花括号转义 & 自动识图错误可见性
-
-- **类型**：Bug 修复（3 项）
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-
-  **1. Thinker 导致不再主动发表情包**
-  - 根因：thinker 的 `[思考] ...` 被注入为 user 角色消息，盖过 system prompt 中的表情包频率规则（"总评分 ≥ 4 时调用 send_sticker"），LLM 严格按字面执行 thinking 指令而忽略 sticker 规则
-  - 修复（`src/llm/client.py`）：thought 从 user 消息改为追加到 system blocks（`[思考指引] + 注意：仍需遵循所有指令包括表情包使用规则`），让 system 层两条指令并列生效
-
-  **2. 日志花括号 KeyError**
-  - 根因：`tool_call` / `tool_result` 日志的 JSON 字符串含 `{` `}` 花括号，被 loguru Handler #3（NoneBot 默认 handler）的格式解析器误读为格式字段，抛出 `KeyError: '"image_tag"'` 等错误
-  - 修复（`src/llm/client.py`）：对 JSON 字符串做花括号转义（`{` → `{{`，`}` → `}}`），避免被下游 handler 二次解析
-
-  **3. 自动识图静默失败**
-  - 根因：`_render_message()` 中的 `_describe_one()` 用 `except Exception: pass` 静默吞掉所有异常，Qwen VL 自动识图失败时既无日志也无法诊断
-  - 修复（`src/plugins/chat/__init__.py`）：失败时打 WARNING 日志（含文件路径）；将 `_vision_client` 全局变量改为使用函数参数 `vision_client` 传入
-
-- **影响范围**：rebuild 后生效。表情包恢复主动发送；日志不再出现 KeyError；图片识别失败时可见具体原因。
-- **回滚方案**：`git revert` 相关提交。
-
----
-## 2026-04-29 — 预回复思考阶段（模拟思考）
-
-- **类型**：功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - `src/llm/thinker.py`：新增预回复思考模块。`ThinkDecision` 数据类（action: reply/wait/search + thought），`THINKER_SYSTEM_PROMPT` 指导 LLM 快速判断下一步行动（6 条决策原则），`parse_think_output()` 解析 JSON 输出，`think()` 异步函数执行思考 LLM 调用
-  - `src/config.py`：新增 `ThinkerConfig`（enabled=true, max_tokens=256），`BotConfig` 新增 `thinker` 字段
-  - `config.toml` / `config.example.toml`：新增 `[thinker]` 配置节
-  - `src/llm/client.py`：`LLMClient.__init__` 新增 `thinker_enabled` / `thinker_max_tokens` 参数；`chat()` 在工具循环之前调用 thinker，wait 返回 None（等同 pass_turn），reply/search 将 thought 注入消息列表
-  - `src/plugins/chat/__init__.py`：LLMClient 构造传入 thinker 配置
-- **背景**：bot 在短时间内连续回复多条消息（拆成多个事件分别回复），缺乏「说话前先想一下」的机制。借鉴旧 MaiBot Planner→Replyer 架构，在 LLM 生成回复之前先用轻量调用判断下一步行动：回复、沉默、或搜索。
-- **影响范围**：rebuild 后生效。每次回复前额外一次轻量 LLM 调用（max_tokens=256），约增加 0.5-1.5s 延迟。wait 决策可减少不必要的回复，降低 token 消耗。`[thinker].enabled = false` 可关闭该功能。
-
----
-## 2026-04-29 — 日志频道过滤系统
-
-- **类型**：功能增强
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - `src/config.py`：新增 `LogChannelConfig`（12 bool 字段），`LogConfig` 新增 `channels` 字段
-  - `config.toml` / `config.example.toml`：新增 `[log.channels]` 节，默认开启 6 个关键频道（message_in/out/thinking/mood/affection/schedule），其余关闭
-  - `bot.py`：`_quiet_filter` 改为 `_make_channel_filter()` 闭包，根据 `LogChannelConfig` 开关过滤 stderr 日志；ERROR 始终放行，文件日志不受影响
-  - 全项目 16 个源文件打日志频道标签（`logger.bind(channel="...")`）：message_in、message_out、thinking、mood、affection、schedule、scheduler、usage、compact、system、debug、dream
-- **背景**：`docker compose logs` 输出大量调试信息（matcher noise、调度器决策、token 用量等），人眼难以提取关键信息。用户要求按重要性分级，默认 ERROR 级别 + 6 个关键频道可见。
-- **影响范围**：重启后生效。stderr 输出大幅减少，默认只看到收/发消息、工具调用、心情、好感度、日程和所有 ERROR。文件日志 `storage/logs/bot_*.log` 不受影响（始终全部 DEBUG）。无需重建镜像（restart 即可）。
-
----
-- **类型**：功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - 新增 `src/schedule/calendar.py`：`DayContext` / `BirthdayEntry` 数据类 + `get_day_context()` 函数。硬编码 2026 年中国法定节假日（7 个节日共 40 天）、6 个调休上班日、15 个不放假的特殊节日（七夕/圣诞等）、世界计划全 26 位角色生日
-  - `src/schedule/__init__.py`：导出 `DayContext`、`BirthdayEntry`、`get_day_context`
-  - `src/schedule/generator.py`：`_SCHEDULE_SYSTEM_PROMPT` 新增日期类型指引（上学日/周末/节假日/调休日/角色生日），`_generate()` 用户消息改为包含 `DayContext` 详细信息
-  - `src/schedule/mood.py`：`_compute()` 新增第 5 步「日期类型心情加成」——节假日 +0.15 valence +0.1 energy，调休日 -0.05 valence，角色生日 +0.1 valence +0.1 openness，自己生日额外 +0.15 valence +0.1 energy。`build_mood_block()` 新增生日/特殊节日提示文本
-  - `src/tools/datetime_tool.py`：`execute()` 返回内容附加节假日/特殊日/生日信息
-  - `soul/instruction.md`：新增「角色生日」小节，指导 LLM 在角色生日当天自然庆祝
-  - 测试：`tests/test_calendar.py`（35 个测试）全部通过
-- **背景**：日程生成完全不感知真实日期（周一至周五全在上学、节假日也在上课、角色生日无人提及）。用户要求结合真实日期但保留虚拟感。
-- **影响范围**：rebuild 后生效。心情系统自动感知节假日/生日并调整情绪；日程生成 prompt 包含日期类型指引；`get_datetime` 工具返回特殊日期信息；mood_block 约增加 0~150 chars（仅特殊日期时）。无需新增配置项——日历数据硬编码，每年更新一次即可。
-- **回滚方案**：`git revert` 相关提交。
----
-## 2026-04-29 — 称呼与好感度系统
-
-- **类型**：功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - 新增 `src/affection/` 模块：`models.py`（AffectionProfile 数据类，score/tier/mood_bonus/suffix）、`store.py`（JSON 文件持久化，`storage/affection/{user_id}.json`）、`engine.py`（好感度计算、昵称解析、affection_block 文本构建）、`__init__.py`
-  - 新增 `src/tools/affection_tools.py`：`set_nickname` 工具，LLM 可在用户说"叫我xx"时调用
-  - `src/config.py` 新增 `AffectionConfig`（enabled/score_increment=0.8/daily_cap=10.0）
-  - `src/llm/prompt.py`：`PromptBuilder` 新增 `affection_engine` 参数，`build_blocks()` 返回 4 个 block（static/mood/affection/entity），affection_block 每次刷新不缓存
-  - `src/plugins/chat/__init__.py`：初始化 AffectionStore/AffectionEngine，注册 SetNicknameTool，传入 PromptBuilder 和 LLMClient
-  - `src/llm/client.py`：`LLMClient` 新增 `affection_engine` 参数，`chat()` 中每次 LLM 调用前记录互动
-  - `config.toml` / `config.example.toml` 新增 `[affection]` 配置节
-  - `soul/instruction.md` 新增「你的日常与心情」节：心情对说话影响、不可主动提及日程的规则
-  - 测试：`tests/test_affection.py`（32 个测试）全部通过，`tests/test_prompt.py` 更新 block 索引
-- **规则**：每次互动 +0.8 分，日上限 10.0 分，新用户 0 分起；好感度 ≥ 60 时 affection_block 注入"对他态度更温和"；称呼优先级：自定义 > 群名片 > QQ昵称 > QQ号
-- **影响范围**：build 后生效。好感度数据存储在 `storage/affection/`，affection_block 约 150-250 chars 注入 system prompt。总开关 `[affection].enabled = false` 可关闭。
-- **回滚方案**：`git revert` 相关提交，或设 `[affection].enabled = false`
-
----
-## 2026-04-29 — 清理 soul 中的日文
-
-- **类型**：配置变更
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - `soul/identity.md`：`わんだほーい☆` → `哇嚯☆`（5 处），`鳳えむ` → `凤笑梦`，昵称列表移除 `えむ`/`鳳えむ`
-  - `soul/instruction.md`：`わんだほーい` → `哇嚯`（6 处）
-  - `src/schedule/mood.py`：心情提示中的 `わんだほーい` → `哇嚯`（2 处）
-- **背景**：用户检查测试群聊日志，要求 bot 输出中不出现日文。
-- **影响范围**：soul 文件 volume mount，restart 即生效；mood.py 需 rebuild。
-
----
-## 2026-04-29 — 模拟日程系统
-
-- **类型**：功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - 新增 `src/schedule/` 模块：`types.py`（Schedule/TimeSlot/MoodProfile 数据类）、`store.py`（JSON 持久化+内存缓存）、`generator.py`（每日凌晨 2:00 通过 LLM 生成日程 JSON）、`mood.py`（MoodEngine 实时心情计算 + 19 个 mood_hint→MoodProfile 预设 + 9 个心情→行为 prompt 映射 + 20% 反常情绪机制）、`__init__.py`（导出）
-  - `src/config.py` 新增 `ScheduleConfig`（enabled/storage_dir/generate_at_hour/mood_anomaly_chance/mood_refresh_minutes）
-  - `src/llm/prompt.py`：`PromptBuilder` 新增 `schedule_store`/`mood_engine` 参数，`build_blocks()` 在 static_block 和 entity_block 之间插入非缓存的 `mood_block`（当前时间+活动+心情+行为指引+反泄漏规则），entity_block 缓存结构从 `list[blocks]` 改为单 `dict`
-  - `src/plugins/chat/__init__.py`：`_init()` 初始化 ScheduleStore/MoodEngine/ScheduleGenerator；`_on_connect()` 加载当日日程+启动后台生成循环；`_shutdown()` 停止生成循环；DateTimeTool 注册时传入 schedule_store
-  - `src/tools/datetime_tool.py`：`DateTimeTool` 新增可选 `schedule_store` 参数，返回当前时间时附加「你正在：xxx」上下文
-  - `soul/instruction.md` 新增「你的日常与心情」节：心情对说话影响、不可主动提及日程的规则
-  - `config.toml` / `config.example.toml` 新增 `[schedule]` 配置节
-  - 测试：`tests/test_schedule_store.py`（12 个）、`tests/test_schedule_generator.py`（8 个）、`tests/test_mood.py`（23 个）——共 43 个测试全部通过
-  - **Bug 修复**：`_lookup_base()` 原先直接返回 `_MOOD_BASE` 字典中的 MoodProfile 对象，`_compute()` 对其原地修改导致模块级预设被污染（后续调用看到前一次的反常情绪理由）。改为每次返回新 MoodProfile 副本。
-- **背景**：用户希望 bot 像"过着真实一天"的人，语气/情绪随日程自然变化而非随机切换。详见计划文档。
-- **影响范围**：rebuild 后生效。心情系统在每次 LLM 调用时实时计算（15 分钟缓存窗口），mood_block 约 200 chars 注入 system prompt。日程生成每天 1 次 LLM 调用（~2300 token），几乎无额外成本。总开关 `[schedule].enabled = false` 可完全关闭。
-- **回滚方案**：`git revert` 相关提交，或设 `[schedule].enabled = false`
-
----
-## 2026-04-29 — 主动搜索行为指令增强
-
-- **类型**：配置变更
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - `soul/instruction.md`：重写「工具使用」→「主动搜索」小节，新增核心原则"不知道就查，不要猜"
-  - 明确触发场景：不认识图片角色/作品/人物、不了解的新梗/热点/术语、不确定的事实性问题、听不懂的群话题
-  - 搜索策略：多关键词并行 web_search、不够时 web_fetch 深入、矛盾时以权威来源为准
-  - 搜索后回应：用自己的语气自然输出，不要"根据搜索结果……"句式；搜不到坦诚说但保持元气
-- **背景**：bot 与群友交流时常因不认识图片角色或不了解话题而哑火。虽然 web_search/web_fetch 工具一直可用，但缺少明确的行为指令驱动主动使用。
-- **影响范围**：`docker compose restart bot` 即刻生效，无需 rebuild
-
----
-## 2026-04-29 — 群聊复读功能
-
-- **类型**：功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - 新增 `src/plugins/echo.py`：`EchoTracker` 类 + `build_echo_key()` 函数。按群跟踪消息重复次数，5 分钟内同一内容出现 3 次触发复读
-  - `build_echo_key()` 从 OneBot 原始消息段构建 key，覆盖文本/表情包(image:sub_type:md5)/QQ表情(face)/@。同一表情包重发（相同 MD5）可被识别为重复
-  - 5% 概率不参与复读，改为发送"打断复读！"
-  - 连续"打断复读！"消息触发打断链："打断复读！" → "打断打断复读！" → "打断打断打断复读！"...
-  - `src/plugins/chat/__init__.py`：在 `collect_group_context` 中插入快速路径，复读命中后 cancel_debounce + 记录用户消息到 timeline + 记录 echo 到 timeline，然后 return，不触发 LLM
-  - `src/llm/scheduler.py`：新增 `cancel_debounce()` 方法，复读命中时取消待处理的 debounce 任务并重置计数器，防止 LLM 在复读后自顾自说话
-  - `tests/test_echo.py`：24 个测试用例（14 个 EchoTracker + 10 个 build_echo_key）
-- **背景**：用户要求新增 QQ 群传统复读功能。初版仅支持纯文本，用户反馈表情包也应可复读、复读后 bot 不应继续说话。二版通过 `build_echo_key` 覆盖表情包/图片（基于 NapCat 提供的 MD5 去重），通过 `cancel_debounce` 防止后续 LLM 触发。
-- **影响范围**：仅群聊生效，私聊不影响。复读命中后 bot 直接发送消息并 return，不调用 scheduler，零 token 消耗。
-- **回滚方案**：`git revert` 相关提交，`docker compose up bot -d --build`
-
----
-## 2026-04-29 — 表情包主动发送频率 + sub_type 修正
-
-- **类型**：功能新增 + Bug 修复
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - `src/config.py` → `StickerConfig` 新增 `frequency` 字段（`"rarely"` / `"normal"` / `"frequently"`），默认 `"normal"`
-  - `src/llm/prompt.py` → 新增 `_STICKER_FREQUENCY_PROMPTS` 字典，`PromptBuilder` 接受 `sticker_frequency` 参数并在 system prompt 中注入对应频率的行为指令
-  - `src/plugins/chat/__init__.py` → 初始化 `PromptBuilder` 时传入 `bot_config.sticker.frequency`
-  - `src/tools/sticker_tools.py` → `SendStickerTool` 中 `"subType"` 修正为 `"sub_type"`（OneBot v11 snake_case 标准），新增 `"summary": "[动画表情]"`（QQ 据此区分表情尺寸）。根因：旧 MaiBot-Napcat-Adapter 使用 `"subtype": 1` 全小写格式，当前代码用了不被识别的驼峰格式
-  - `tests/test_sticker_tools.py` → 更新 subType 断言为 `sub_type` + `summary`
-  - `soul/instruction.md` → 表情包「发送原则」重写，新增何时发送、如何选择、流程等详细指引
-  - `config.toml` / `config.example.toml` → 新增 `frequency = "frequently"` / `frequency = "normal"`
-- **背景**：bot 被 @ 或要求时才会发表情，不会主动使用。用户希望 bot 像二次元角色一样在对话中自然甩表情包。初版按固定频率（每 N 轮）设计，用户反馈"欸——好狡猾这种话天然适配表情包为什么不发"，改为逐条评估：每条消息独立打分，超过阈值就发，频率设置只改变阈值高低而非间隔。表情包以普通图片尺寸显示是因为 `subType` 字段名不被 NapCat 识别。
-- **影响范围**：rebuild 后生效。`frequency` 改变 LLM 使用 `send_sticker` 的倾向——`rarely` 保守，`frequently` 积极甩表情包。
-- **回滚方案**：设 `frequency = "rarely"` 或 `enabled = false` 关闭表情包系统。
-
----
-## 2026-04-29 — Qwen VL 表情包识别 + 偷取表情包
-
-- **类型**：功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - 新增 `src/vision/client.py`：`VisionClient` 通过 OpenAI 兼容 API 调用 Qwen2.5-VL-7B 小模型描述图片内容
-  - `src/config.py` 新增 `QwenVLConfig`（enabled/base_url/api_key/model），挂载在 `VisionConfig.qwen` 下
-  - `config.toml` 新增 `[vision.qwen]` 配置节，启用 Qwen VL 并配置 DashScope API
-  - `src/config_loader.py` 新增 `QWEN_VL_API_KEY`/`QWEN_VL_BASE_URL`/`QWEN_VL_MODEL` 环境变量映射
-  - `src/plugins/chat/__init__.py`：`_render_message()` 下载图片后自动调用 Qwen VL 生成文字描述，注入 `«图片N: 描述»` 到消息中，让文本模型 DeepSeek 也能"看到"图片
-  - `src/tools/sticker_tools.py`：
-    - 新增 `DescribeImageTool`（describe_image），LLM 可主动请求详细查看某张图片
-    - `SaveStickerTool` 权限放宽：`requested_by` 改为可选——bot 主动偷取时留空直接收录（source="stolen"），用户请求时仍需管理员权限（source="admin"）
-  - `soul/instruction.md` 表情包节重写：新增「识别图片内容」「偷取表情包」小节，教导 LLM 主动发现、识别、收录群友发的表情包
-- **背景**：DeepSeek V4 不支持视觉，bot 无法理解图片/表情包，也无法主动收藏。通过 Qwen VL 小模型代为描述图片，既便宜（~$0.0001/张）又快速。
-- **影响范围**：rebuild 后生效。群聊和私聊中的图片会自动附带文字描述，bot 能看懂表情包并主动偷取喜欢的。注意：需要配置有效的 DashScope API key（`[vision.qwen].api_key` 或 `QWEN_VL_API_KEY` 环境变量）。
-- **回滚方案**：`git revert` 相关提交，或设 `[vision.qwen].enabled = false` 关闭。
-
----
-## 2026-04-29 — 群内黑话主动学习机制
-
-- **类型**：功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - `soul/instruction.md` 记忆系统新增「群内黑话学习」节，指引 LLM 主动识别、记录和使用群内黑话
-  - 识别规则：多人反复使用的不熟悉词汇、有人直接解释的词、非标准汉语但有明确语义的词、音游/游戏术语
-  - 记录格式：`- **词汇** (N次): 在这个群语境下的含义`，写入群备忘录 `### 群内惯用词`
-  - 使用原则：已记录的可以自然使用，不确定的先不用，不堆砌
-- **背景**：旧 MaiBot 的 442 条惯用词 + 186 条惯用表达已迁移到群备忘录，bot 重启后 LLM 能在 system prompt 中看到。但缺少主动学习新黑话的指令。
-- **影响范围**：bot 重启后生效，LLM 将在群聊中主动捕捉新词汇并记录到群备忘录
-
----
-## 2026-04-29 — 修复换行不分段 + DeepSeek thinking blocks 400
-
-- **类型**：Bug 修复（2 个）
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - **换行不分段**：`_split_naturally()` 改为 `\n` 硬切分（每行一条消息），仅 < 4 字的极短行合并到邻居。原先算法把同一段内所有行拼到 45 字才切，导致 LLM 写的多行被合并成一条。
-  - **DeepSeek thinking blocks 400**：`_call_api()` 新增 `thinking` 和 `thinking_delta` 事件捕获，返回值新增 `thinking_blocks`。`chat()` 构建 assistant 消息时，将 thinking blocks 原样插入 content 头部。根因是 DeepSeek V4 thinking mode 要求第二轮 API 调用必须把第一轮返回的 thinking block 传回，否则 400。
-  - `_call_api()` 新增 400 错误响应体日志（`logger.error("API {} | body={}")`），方便后续排查。
-- **影响范围**：工具调用（get_datetime 等）恢复正常；私聊/群聊多行回复正确拆分。rebuild 后生效。
-- **回滚方案**：`git revert` 相关提交，`docker compose up bot -d --build`
-
----
-## 2026-04-29 — 自然分句发送（仿真人逐条回复）
-
-- **类型**：功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - `src/llm/client.py`：新增 `_split_naturally()` / `_split_on_sentence_end()` / `_split_long_on_comma()`，按优先级自动切分 LLM 回复：
-    1. `\n\n`（段落空行）→ 必定切分
-    2. `\n`（换行）→ 主切分点，每行一个想法
-    3. `。！？` → 单行超 45 字时在此切分
-    4. `,，;；:：、` → 单句仍超 45 字时最后手段
-  - 参数：`_MAX_CHUNK=45`、`_MIN_CHUNK=4`、段间延迟 1.2s
-  - 保留 `---cut---` 显式切分机制
-  - 修复末尾标点（`。！？`）孤立成段的 bug：`_split_on_sentence_end` 末尾标点自动回贴、合并逻辑对标点不加 `\n`
-  - `soul/instruction.md`「分段发送」节更新：引导 LLM 每行写一个想法、每条控制在 2~3 行/40 字以内
-- **影响范围**：群聊和私聊 LLM 回复均自动逐条发送，模拟真人连发。rebuild 后生效。
-- **回滚方案**：`git revert` 相关提交，`docker compose up bot -d --build`
-
----
-## 2026-04-29 — 昵称提及检测 + @/昵称必回复
-
-- **类型**：功能新增
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - `.env` 新增 `BOT_NICKNAMES` 环境变量，包含 bot 所有昵称（凤笑梦、emu、笑梦、姆、姆姆、凤同学、Emu、凤、凤えむ、えむ）
-  - `src/plugins/chat/__init__.py`：`collect_group_context()` 新增文本昵称扫描，消息中含 bot 昵称时视为 `is_at=True`，强制触发 LLM 调用
-  - `soul/identity.md`：`## 插话方式` 重构，将 @提及、回复、叫名字/昵称升级为「必须回复」（不可 pass_turn），其余场景为「视情况回复」
-  - `src/admin/auth.py`：修复 form token 类型标注导致 pyright 报错
-- **影响范围**：群聊中提及 bot 昵称将立即触发回复（等同原生 @）。rebuild 后生效。
-- **回滚方案**：`git revert` 相关提交，`docker compose up bot -d --build`
-
----
-## 2026-04-29 — Admin Dashboard 实现 + 端口修正
-
-- **类型**：部署 / 配置变更
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - 新增 Admin Dashboard（`src/admin/`），基于 Jinja2 + htmx + Chart.js（CDN），6 个页面：总览、用量统计、群聊管理、配置查看、Soul 编辑、日志查看
-  - 认证方式：`admin_token`（config.toml）或 `ADMIN_TOKEN` 环境变量 → HMAC 签名 Cookie
-  - `BotConfig` 新增 `admin_token` 字段，`config_loader.py` 新增 `ADMIN_TOKEN` env var 映射
-  - `MessageLog` 新增 `query_recent()` 方法
-  - Docker Compose bot 服务新增 `8081:8080` 端口映射（宿主机 8080 被 Calibre 占用）
-  - `docker-compose.yml` 从无端口暴露改为 `ports: ["8081:8080"]`
-  - `pyproject.toml` 新增 `jinja2`、`python-multipart` 依赖，ruff 排除 `._*` 文件
-- **影响范围**：bot rebuild 后生效，访问 `http://localhost:8081/admin/` 即可进入管理面板。默认 token 为 `admin`，建议通过环境变量设置强密码。
-- **回滚方案**：`git revert` 相关提交，`docker compose up bot -d --build`
-
----
-## 2026-04-29 — 凤笑梦 soul 文件重构
-
-- **类型**：配置变更
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - 基于三份参考文档（`凤笑梦参考/` 目录下）重构 `soul/identity.md` 和 `soul/instruction.md`
-  - 参考文档：《凤笑梦_角色扮演知识谱.md》《凤笑梦_语料风格包.md》《凤笑梦_剧情文案原文出处索引.md》
-  - `identity.md`：完全重写，新增「基础身份」表格、「一句话定义」、「性格结构」（表层/深层/行动力/核心驱动力/成长主轴）、「人际关系」（司/宁宁/类/真冬/家庭）、「语气与说话方式」（核心公式/口头禅用法/严肃模式）、「像与不像」判据；保留「插话方式」章节
-  - `instruction.md`：完全重写，新增「场景差分」（日常/兴奋/安慰/低落/解释/邀请/对象差分）、「必须避免的语气污染」；保留分段发送(---cut---)、群聊上下文理解、工具使用、记忆系统、表情包规则
-  - 新增群备忘录分区支持：`### 群内惯用词`、`### 惯用表达`（配合之前的惯用词迁移数据）
-- **影响范围**：bot 重启后即刻生效，角色扮演精度大幅提升
-- **回滚方案**：`git checkout soul/identity.md soul/instruction.md`
-
----
-## 2026-04-29 — 惯用词与表达迁移：旧 MaiBot → 新 bot 群备忘录
-
-- **类型**：数据迁移
-- **操作人**：Claude Code (assisted)
-- **变更内容**：
-  - 从旧 MaiBot 数据库 (`/Users/kragcola/MaiM-with-u/MaiBot/data/MaiBot.db`) 提取全部惯用词和惯用表达
-  - 写入新 bot 群备忘录 `storage/memories/groups/993065015.md` 和 `984198159.md`
-  - 群 993065015（烤）：442 条惯用词 + 186 条惯用表达
-  - 群 984198159（测试）：1 条惯用词 + 1 条惯用表达
-  - `config.toml` → `[memo].group_max_chars` 从 500 提升至 60000（容纳大量惯用词）
-  - 创建 `storage/memories/index.md` 索引文件
-- **数据来源**：旧 MaiBot SQLite → `jargon` 表（筛选 `is_jargon=1, count≥2`）+ `expression` 表（筛选 `checked=1, rejected=0`）
-- **chat_id 映射**：通过逆向 MaiBot 哈希算法 (`md5("qq_{群号}")`) 确认 `0469082337...` → 群 993065015、`77b74300...` → 群 984198159
-- **影响范围**：bot 启动后，群聊 system prompt 将自动加载对应群的惯用词/表达，提升角色扮演的语境贴合度
-- **回滚方案**：删除 `storage/memories/groups/` 下的 .md 文件，恢复 `group_max_chars = 500`
-
----
-## 2026-04-29 — 新 bot 初始化部署
-
-**背景**：用本项目（amadeus-in-shell）替换原有的 MaiBot（v7.3.5），全新部署。
-
-**旧 maibot 参考数据**（提取自 `/Users/kragcola/MaiM-with-u/`）：
-
-| 项目 | 值 |
-| --- | --- |
-| 旧 bot QQ | 384801062（昵称：emu不吃小杯面） |
-| 旧 bot 框架 | MaiBot v7.3.5 + MaiBot-Napcat-Adapter + LPMM |
-| 旧 bot 活跃群 | 984198159（测试）、993065015（烤） |
-| 旧 bot 部署日 | 2026-01-16，累计 28,769 请求 |
-| 旧 bot 模型 | deepseek-v3 (planner) + qwen3-30b (replyer) + qwen3-vl-30 (vision) |
-| 旧 LLM 端点 | DeepSeek v1 + SiliconFlow（均为 OpenAI 格式） |
-| 人设变迁 | 牧濑红莉栖 → 凤笑梦（旧 bot 后来也已改为 Emu） |
-
-**新 bot 配置概要**：
-
-| 项目 | 值 |
-| --- | --- |
-| 人设 | 凤笑梦 (Emu Otori) — Wonderlands×Showtime |
-| LLM | DeepSeek V4 Flash（Anthropic 兼容端点，1M 上下文） |
-| API 端点 | `https://api.deepseek.com/anthropic` |
-| 管理员 QQ | 1416930401（工丿囗） |
-| 部署方式 | Docker Compose（NapCat + Bot） |
-| NapCat 版本 | mlikiowa/napcat-docker:v4.15.0 |
-| Git remote | `github.com/RoggeOhta/amadeus-in-shell` |
-
-**关键架构差异**：
-
-- LLM API 从 OpenAI 格式 (`/v1`) 改为 Anthropic 兼容格式 (`/anthropic`)，支持原生 tool_use + cache_control
-- 不再使用 Planner+Replyer 分离架构，改为单一 LLM 调用 + Tool loop（最多 5 轮）
-- 记忆系统从 LPMM 知识图谱改为 .md 备忘录 + GroupTimeline
-- 主动插话从 `talk_value` 概率值改为 `## 插话方式` 规则 + `pass_turn` 工具
-- 不再内置错别字生成器，靠 prompt 控制风格
-- 部署从本地 Python 进程改为 Docker Compose
-
-**部署前 checklist**：
-
-- [ ] `.env` — SUPERUSERS、ONEBOT_WS_URLS、LLM_* 环境变量已配置
-- [ ] `config.toml` — LLM 接入、群聊参数、vision/sticker/dream 已配置
-- [ ] `soul/identity.md` — 凤笑梦人设已编写（从旧 MaiBot `personality` 字段迁移）
-- [ ] `soul/instruction.md` — 行为指令已调整
-- [ ] NapCat WebUI (`:6099`) 扫码登录新 QQ 号
-- [ ] 目标 QQ 群（984198159、993065015）测试 @bot 回复、主动插话、工具调用
-
-**部署步骤**：
-
-```bash
-docker compose up napcat -d    # 先起 NapCat，扫码登录
-docker compose up bot -d       # 再起 Bot
-```
-
-**注意事项**：
-
-- NapCat 容器**必须用 `restart`，禁止 `down`+`up`**（device fingerprint 变 = 触发 QQ 风控）
-- NapCat 持久化目录：`napcat/config/`（配置）、`napcat/data/`（QQ session/device fingerprint）
-- Bot 的 `soul/` 和 `.env` 通过 volume mount 注入，修改后 `docker compose restart bot` 生效
-- `storage/` 目录持久化所有运行数据（用量库、消息库、日志、记忆、图片缓存、表情包）
-- 旧 MaiBot 数据保留在 `/Users/kragcola/MaiM-with-u/MaiBot/data/`，如需迁移表情包或记忆可从此提取
-
----
-## 模板 — 日常维护
-### 部署记录
-```markdown
-## YYYY-MM-DD — <标题>
-- **类型**：部署 / 配置变更 / 故障处理 / 升级
-- **操作人**：
-- **变更内容**：
-- **影响范围**：
-- **回滚方案**：
-- **验证结果**：
-```
-### 故障记录
-```markdown
-## YYYY-MM-DD — <故障标题>
-- **发现时间**：
-- **现象**：
-- **根因**：
-- **处理步骤**：
-- **恢复时间**：
-- **后续措施**：
-```
----
-## 快速排查命令
-```bash
-# 查看 Bot 日志
-docker compose logs bot --tail=100 -f
-# 查看 NapCat 日志
-docker compose logs napcat --tail=100 -f
-# 检查容器状态
-docker compose ps
-# 用量 TUI
-uv run python -m src.llm.usage_cli tui day
-# 用量 API
-curl http://localhost:8080/usage/summary/today
-# 重启 Bot（人设/配置变更后）
-docker compose restart bot
-# 重建 Bot（代码/依赖变更后）
-docker compose up bot -d --build
-# 重启 NapCat（断线/风控后）
-docker compose restart napcat
-# 进入 Bot 容器
-docker compose exec bot .venv/bin/python -c "..."
-# 检查 storage 目录
-ls -la storage/logs/ storage/usage.db storage/messages.db
-```
-
-## 2026-05-08 — 在线重启说明澄清
-- 调整 Admin Web 与 `/api/admin/system` 的重启说明文案，明确“在线重启”只会重启当前 Bot 进程，不会重建 Docker 镜像。
-- 系统页与重启弹窗新增“适合在线重启 / 需要先重建镜像”提示，避免把配置重载和代码更新混为一谈。
-- 重启成功提示同步改为提醒：改了代码、依赖或 Dockerfile 时应执行 `docker compose build bot && docker compose up -d bot`。
 
-## 2026-05-08 — 插件中心协议探针 + Legacy 阻断 + 白名单锁定
-- 插件 API 新增 `GET /api/admin/plugins/meta`，返回 `plugin_api_version`、`plugin_layout_version`、`build_commit`、`frontend_build_id`、`legacy_detected` 等运行时元信息，用于快速判断“代码已更新但容器未更新”。
-- 插件中心接入 legacy 阻断：检测到 `plugins/` 根目录旧版单文件插件时，`/api/admin/plugins` 与插件详情/设置/启停接口直接返回阻断状态，避免出现“看起来可配但实际协议不兼容”的假状态。
-- 插件列表与详情补齐 `config_status`（`ready|missing_schema|read_only|legacy_blocked`），并持续输出 `tier/locked/configurable`。
-- 系统级插件策略硬化为白名单：仅 `chat`、`history_loader`、`vision` 可被视为 system/locked；其他插件即使声明 `tier=system` 也会降级为 user，防止误锁。
-- `PluginBus` 与 `bot.py` 同步修复 manifest 应用链路：显式注册插件改为从 `plugin.py` 导入，确保运行时能稳定读取 `plugin.json` 元数据。
-- Docker 构建新增插件布局门禁：`scripts/check_plugin_layout.py --strict`，发现 legacy 根目录插件文件时构建直接失败，避免旧格式再次进入生产镜像。
+## 归档索引
 
-## 2026-05-08 — 知识库与知识图谱研究审计
-- 新增 `docs/audits/knowledge-graph-rag-research-and-roadmap-2026-05-08.md`，基于 Omubot 当前知识库实现、论文与成熟项目源码，整理知识库/RAG/知识图谱改造路线。
-- 本地审计快照固定在 `/private/tmp/omubot-kb-audit`，覆盖 Microsoft GraphRAG、LightRAG、HippoRAG、LlamaIndex、Haystack、Neo4j GraphRAG Python。
-- 审计结论明确当前 P0 是修复 Admin 知识库搜索断链与结构化命中结果，而不是直接引入重型向量库或 Neo4j。
+- 早期实施期维护记录已归档至 [docs/audits/maintenance-log-archive-2026-04-29-to-2026-05-06.md](docs/audits/maintenance-log-archive-2026-04-29-to-2026-05-06.md)
+- 当前主日志保留 2026-05-07 起仍频繁交接的活跃维护记录

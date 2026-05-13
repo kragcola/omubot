@@ -26,7 +26,7 @@
 | 984198159 | 测试 | 旧 maibot 活跃群 |
 | 993065015 | 烤 | 旧 maibot 活跃群 |
 
-> 群聊白名单通过 `config/config.json`（兼容 legacy `config.toml`）→ `group.allowed_groups` 控制，空 = 所有群。
+> 群聊访问门禁通过 `config/group-policy.json` 控制；`whitelist` 模式只开启白名单群，`blacklist` 模式只关闭黑名单群。Web 端在 `/admin/groups` 编辑。
 
 ## 技术架构
 
@@ -87,6 +87,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | `config/.env` | NoneBot 框架层（SUPERUSERS, ONEBOT_WS_URLS） + LLM 环境变量 | `nonebot.init()` |
 | `config/config.json` | Bot 业务层主配置（LLM、群聊、vision、compact 等） | `kernel/config.py` |
 | `config/config.toml` | legacy 兼容配置源（首次管理端保存后会迁移为 JSON） | `kernel/config.py` |
+| `config/group-policy.json` | 群聊访问门禁（白/黑名单） | `kernel/config.py` + `/admin/groups` |
 | `plugins/<name>/config.default.json` | 插件默认配置（仅目录插件） | 插件通过 `load_plugin_config()` 读取 |
 | `storage/plugins/config/<name>.json` | Admin Web 保存的插件运行时覆盖 | `PluginConfigStore` 合并 |
 
@@ -219,34 +220,66 @@ storage/
 - 顶部“运维建议 / 健康告警”只展示达到阈值的高优先级异常，用于减少长期运行下的噪声。
 - 下方“服务级健康”继续保留完整 warning / error 细节，便于人工排查轻量退化和回退链路。
 
-#### 当前前端重构状态（2026-05-06）
+#### 当前前端重构状态（2026-05-14）
 
-- 已完成统一风格页面：
-  - `LoginView`
-  - `DashboardView`
-  - `SystemView`
-  - `LogsView`
-  - `GroupsView`
-  - `MemoryView`
-  - `PluginsView`
-  - `KnowledgeView`
-  - `UsageView`
-- 统一风格文档：
-  - [admin-ui-style-guide.md](./admin-ui-style-guide.md)
-  - [agent-ui-guidelines.md](./agent-ui-guidelines.md)
-  - [session-handoff.md](./session-handoff.md)
-- 下一批建议优先处理：
-  - `SchedulerView`
-  - `SandboxView`
-  - `MemosView`
+**阶段 0-2 已完成，阶段 3 首个视图 Dashboard 重构完成并上线**。详细跟踪见 [docs/tracking/web-refactor.md](./tracking/web-refactor.md)，阶段方案见 [web-refactor-plan.md](./web-refactor-plan.md)。
+
+- 阶段 0（环境清理）：`.nvmrc` Node 20 锁定 + `package.json engines` + `.gitignore admin/static/assets/`。`git rm --cached` 待人工确认。
+- 阶段 1（基础设施固化）：`themeOverrides` 扩展（Tag / DataTable / placeholder / icon），`uno.config.ts` 加 6 个语义 shortcut，新增 [admin-ui-tokens.md](./admin-ui-tokens.md) 速查表。`global.css` 里 6 块冗余 `!important` 已标 `@audit redundant`，等验收后由人工删除（预计从 51 降至 ≤ 18）。
+- 阶段 2（公共组件补齐）：新增 `StateBadge / LogPanel / DataToolbar / FieldGroup / SparklineChart` 共 5 个公共组件；`SectionCard` 评估为重复造轮子，跳过。新增 `/admin/design-playground` 视觉验收路由。
+- 阶段 3 进行中：
+  - ✅ **DashboardView** — 2026-05-14 完成三轮迭代：
+    1. 第一版重构：Hero 压缩 + 3 主 KPI + 24h 调用曲线 + 近 7 天活跃群 Top 5 + 待处理 + 日程+心情合并 + LogPanel。
+    2. 布局调整：改两栏主布局，右侧 320px sticky 长条放竖版日程时间线 + 心情 + 下一段，左栏重新排布消除空白。
+    3. 新增「今日学习收录」模块 + 后端 `/api/admin/learning/today` 聚合端点，3 栏展示黑话 / 表达风格 / 表情包的今日新入库数量、审核统计、最新 Top 5（表情包带缩略图）。
+  - ⏸ LogsView / LoginView / GroupsView — 待 Dashboard 验收通过后继续。
+
+历史已统一风格的页面（2026-05-06 第一轮手工统一）：
+
+- `LoginView` / `DashboardView` / `SystemView` / `LogsView` / `GroupsView` / `MemoryView` / `PluginsView` / `KnowledgeView` / `UsageView`
+
+这一批仍会按本次重构的 PR A 模板再过一遍骨架迁移，目标是消除内联样式、接入新公共组件。
+
+统一风格文档：
+
+- [admin-ui-style-guide.md](./admin-ui-style-guide.md)
+- [admin-ui-tokens.md](./admin-ui-tokens.md)（**新**，token / shortcut 速查）
+- [agent-ui-guidelines.md](./agent-ui-guidelines.md)
+- [web-refactor-plan.md](./web-refactor-plan.md)（**新**，分阶段方案）
+- [tracking/web-refactor.md](./tracking/web-refactor.md)（**新**，逐项勾选跟踪）
+- [session-handoff.md](./session-handoff.md)
 
 #### 项目内 Agent / Codex Skill
 
-- 项目内 Skill：`$omubot-admin-console`
-- Claude 版本目录：`.claude/skills/omubot-admin-console/`
+项目内两个 Skill 并行生效：
+
+- `$omubot-admin-console` — 工作流 Skill：admin/frontend 重构、wiki/代码审计、增量修改的整体流程。包含 Maintenance Log Policy 条款。
+- `$omubot-design-system` — 设计系统执行 Skill：Calm Ops 色板/圆角/间距锁定、公共组件 API 速查、Naive UI themeOverrides 单一来源、反面样例与 PR 视觉验收清单。触发于 `.vue`、`uno.config.ts`、`global.css`、`stores/app.ts` 改动。
+
+安装位置：
+
+- 项目内（Claude 版本）：`.claude/skills/omubot-admin-console/`、`.claude/skills/omubot-design-system/`
 - Codex 仓库源包：`codex-skills/omubot-admin-console/`
 - Codex 安装脚本：`scripts/install-codex-skill.sh`
-- 当前本机已确认安装到：`~/.codex/skills/omubot-admin-console/`
+- 本机已同步：
+  - `~/.codex/skills/omubot-admin-console/`、`~/.codex/skills/omubot-design-system/`
+  - `~/.claude/skills/omubot-admin-console/`、`~/.claude/skills/omubot-design-system/`
+
+#### Claude × codex 协同工作流（2026-05-14 新增）
+
+分工：Claude 负责决策 + 审查，codex 负责机械执行。目标是把规则明确、判断密度低的改动分流到 codex，节约成本。
+
+- 规范目录：[.claude/handoff/](../.claude/handoff/)
+  - [README.md](../.claude/handoff/README.md) — 命名规范、生命周期、审查流程
+  - [TEMPLATE.md](../.claude/handoff/TEMPLATE.md) — spec 模板
+  - `TASK-YYYYMMDD-NN-slug.md` — 具体任务
+- 流程：Claude 写 spec → 用户 `git stash` + 建分支 `task-YYYYMMDD-NN` → codex 执行 → 用户把 `git diff HEAD` 贴给 Claude 审查 → 通过后 commit + `git stash pop`（不 merge 回 main，main 可能严重落后）
+- spec 必含字段：目标 / 约束 / 动的文件 / 不准动 / 验收命令（可 0/非 0 判断）/ 用户复制命令段（6 步）/ 审查要点
+- 2026-05-14 已做一轮干跑验证，修复三个初版 spec 漏洞（`git diff main` → `git diff HEAD`、grep 误匹配文档注释、期望数字与实际不一致）。详见 maintenance-log。
+- 当前第一个 spec：[TASK-20260514-01](../.claude/handoff/TASK-20260514-01-remove-redundant-important.md) — 删除 `global.css` 冗余 `!important` 块（期望 `!important` 从 51 降到 31）
+
+适合给 codex 做的：机械转换 / 照表执行 / 规则明确的样板代码。
+不给 codex 做：视觉设计 / 信息架构 / 跨层贯穿改动 / 调试 / 鉴权相关。
 
 ## 常用命令速查
 
@@ -287,7 +320,7 @@ curl http://localhost:8081/api/usage/today
 3. NapCat WebUI (`:6099`) — QQ 是否在线
 4. `config/.env` → `SUPERUSERS` JSON 格式正确（双引号，无尾逗号）
 5. `config/config.json`（或 legacy `config.toml`）中的 `llm.api_key` 有效、余额充足
-6. `[group].allowed_groups` — 是否限制了目标群
+6. `config/group-policy.json` — 当前群是否被门禁关闭（也可在 `/admin/groups` 查看）
 7. 在群里 @bot 或私聊测试
 
 ### 修改人设后不生效
