@@ -85,7 +85,26 @@ function buildThemeOverrides(primary: string, isDark: boolean): GlobalThemeOverr
       borderRadius: '16px',
       borderRadiusSmall: '12px',
       fontWeightStrong: '600',
+      placeholderColor: isDark ? '#768B92' : '#8A979D',
+      placeholderColorDisabled: isDark ? '#5A6E76' : '#A9B5BA',
+      iconColor: isDark ? '#9CB0B8' : '#607078',
+      closeIconColor: isDark ? '#9CB0B8' : '#607078',
       ...palette,
+    },
+    Tag: {
+      colorBordered: isDark ? 'rgba(255, 255, 255, 0.04)' : '#F4F8F9',
+      textColor: isDark ? '#E7F0F2' : '#1F2A30',
+      borderColor: isDark ? 'rgba(123, 149, 157, 0.22)' : 'rgba(111, 137, 146, 0.22)',
+    },
+    DataTable: {
+      thColor: isDark ? 'rgba(255, 255, 255, 0.04)' : '#F4F8F9',
+      thColorHover: isDark ? 'rgba(255, 255, 255, 0.06)' : '#EAF1F2',
+      thTextColor: isDark ? '#E7F0F2' : '#1F2A30',
+      tdColor: 'transparent',
+      tdColorHover: isDark ? 'rgba(99, 178, 186, 0.06)' : 'rgba(49, 108, 114, 0.05)',
+      tdColorStriped: isDark ? 'rgba(99, 178, 186, 0.04)' : 'rgba(49, 108, 114, 0.03)',
+      tdTextColor: isDark ? '#E7F0F2' : '#1F2A30',
+      borderColor: isDark ? 'rgba(123, 149, 157, 0.22)' : 'rgba(111, 137, 146, 0.22)',
     },
   }
 }

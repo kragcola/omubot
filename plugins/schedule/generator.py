@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from plugins.schedule.calendar import get_day_context
+from plugins.calendar_context.service import CalendarContextService
 from plugins.schedule.store import ScheduleStore
 from plugins.schedule.types import Schedule, TimeSlot
 
@@ -64,10 +64,12 @@ class ScheduleGenerator:
         store: ScheduleStore,
         generate_at_hour: int = 2,
         identity_name: str = "Bot",
+        calendar_service: CalendarContextService | None = None,
     ) -> None:
         self._store = store
         self._generate_at_hour = generate_at_hour
         self._identity_name = identity_name
+        self._calendar_service = calendar_service
         self._task: asyncio.Task[None] | None = None
 
     def start(self, api_call: ApiCaller) -> None:
@@ -127,7 +129,10 @@ class ScheduleGenerator:
 
         system = [{"type": "text", "text": _SCHEDULE_SYSTEM_PROMPT.format(name=self._identity_name)}]
 
-        day_ctx = get_day_context(now)
+        if self._calendar_service is None:
+            _L.warning("calendar service unavailable during schedule generation")
+            return
+        day_ctx = self._calendar_service.get_day_context(now)
         day_type_cn = {
             "school_day": "上学日",
             "weekend": "周末",
@@ -142,8 +147,8 @@ class ScheduleGenerator:
         ]
         if day_ctx.holiday_name:
             user_parts.append(f"正在放{day_ctx.holiday_name}假。")
-        if day_ctx.special_day:
-            user_parts.append(f"今天是{day_ctx.special_day}。")
+        if day_ctx.special_days:
+            user_parts.append(f"今天是{'、'.join(day_ctx.special_days)}。")
         if day_ctx.has_birthday:
             for b in day_ctx.birthdays:
                 wxs_tag = "（W×S成员）" if b.is_wxs_member else ""

@@ -6,6 +6,9 @@ import contextlib
 import json
 import re
 import secrets
+import sqlite3
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -13,7 +16,10 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
-from services.similarity import NgramSimilarityProvider, normalize_text_key
+from services.learning_normalizer import LearningNormalizerStore, normalize_key, score_similarity
+from services.similarity import NgramSimilarityProvider
+from services.slang.drift_reviewer import SlangDriftAssessment
+from services.slang.quality import matches_slang_candidate
 from services.slang.types import (
     VALID_REPEAT_POLICIES,
     VALID_SCOPES,
@@ -32,6 +38,63 @@ from services.slang.types import (
 from services.storage import connect_sqlite
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
+_CACHE_TTL_S = 5.0
+
+
+@dataclass(slots=True)
+class _SettingsCacheEntry:
+    settings: SlangSettings
+    cached_at: float
+
+
+@dataclass(slots=True)
+class _TermSnapshotCacheEntry:
+    terms: list[SlangTerm]
+    cached_at: float
+
+
+_SETTINGS_CACHE: dict[str, _SettingsCacheEntry] = {}
+_TERM_SNAPSHOT_CACHE: dict[tuple[str, str], _TermSnapshotCacheEntry] = {}
+_DRIFT_LEXICAL_SAME_THRESHOLD = 0.28
+_AI_REJECT_REOBSERVE_COUNT_THRESHOLD = 3
+_AI_REJECT_REOBSERVE_USER_THRESHOLD = 2
+_AI_REJECT_REOBSERVE_BACKFILL_VERSION = 1
+_AI_REJECT_REOBSERVE_MAX_TRACKED_MESSAGES = 100
+_AI_REJECT_REOBSERVE_MAX_EVIDENCE_CHARS = 500
+
+
+@dataclass(slots=True)
+class _DriftReviewOutcome:
+    drift_id: str | None = None
+    verdict: str = "not_applicable"
+    confidence: float = 0.0
+    reason: str = ""
+    meaning_similarity: float = 0.0
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def opens_drift(self) -> bool:
+        return bool(self.drift_id)
+
+    @property
+    def allows_alias_merge(self) -> bool:
+        return self.verdict in {"not_applicable", "alias_candidate"}
+
+    @property
+    def allows_meaning_update(self) -> bool:
+        return self.verdict == "not_applicable"
+
+
+class SlangDatabaseCorruptError(RuntimeError):
+    """Raised when the slang SQLite database fails health checks."""
+
+    def __init__(self, db_path: str | Path, detail: str) -> None:
+        self.db_path = str(db_path)
+        self.detail = str(detail).strip() or "database integrity check failed"
+        super().__init__(
+            f"slang database corrupt | db={self.db_path} "
+            f"error={self.detail} repair=scripts/dev/slang_db_repair.py"
+        )
 
 _CREATE_TERMS = """\
 CREATE TABLE IF NOT EXISTS slang_terms (
@@ -96,6 +159,15 @@ CREATE TABLE IF NOT EXISTS slang_pending_candidates (
     meta_json         TEXT NOT NULL DEFAULT '{}'
 )"""
 
+_CREATE_PENDING_KEYS = """\
+CREATE TABLE IF NOT EXISTS slang_pending_candidate_keys (
+    pending_id TEXT NOT NULL,
+    group_id   TEXT NOT NULL,
+    term_key   TEXT NOT NULL,
+    key_kind   TEXT NOT NULL DEFAULT 'alias',
+    PRIMARY KEY (pending_id, term_key)
+)"""
+
 _CREATE_RUNS = """\
 CREATE TABLE IF NOT EXISTS slang_extraction_runs (
     run_id              TEXT PRIMARY KEY,
@@ -152,6 +224,8 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_slang_ob_msg ON slang_observations(term_id, message_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_slang_pending_scope ON slang_pending_candidates(term_key, group_id)",
     "CREATE INDEX IF NOT EXISTS idx_slang_pending_group ON slang_pending_candidates(group_id, count)",
+    "CREATE INDEX IF NOT EXISTS idx_slang_pending_keys_lookup ON slang_pending_candidate_keys(group_id, term_key)",
+    "CREATE INDEX IF NOT EXISTS idx_slang_pending_keys_pending ON slang_pending_candidate_keys(pending_id)",
     "CREATE INDEX IF NOT EXISTS idx_slang_runs_started ON slang_extraction_runs(started_at)",
     "CREATE INDEX IF NOT EXISTS idx_slang_revisions_term ON slang_term_revisions(term_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_slang_drift_status ON slang_drift_reviews(status, updated_at)",
@@ -163,13 +237,35 @@ def _now_iso() -> str:
     return datetime.now(TZ_SHANGHAI).isoformat(timespec="seconds")
 
 
+def _normalizer_db_path_for(db_path: str) -> str:
+    path = Path(db_path)
+    if path.parent and str(path.parent) != ".":
+        return str(path.parent / "learning_normalizer.db")
+    return "storage/learning_normalizer.db"
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(8)}"
 
 
 def normalize_term(value: str) -> str:
     """Normalize a slang term for lookup and merging."""
-    return normalize_text_key(value)
+    return normalize_key(value, "slang")
+
+
+def _slang_fuzzy_allowed(left_key: str, right_key: str) -> bool:
+    """Guard aggressive fuzzy merging for short slang tokens.
+
+    Short Chinese slang terms often differ by one character while meaning
+    something different. Exact/fingerprint matches are handled before fuzzy
+    scoring, so this guard only decides whether rapidfuzz-style similarity is
+    safe enough to use.
+    """
+    if not left_key or not right_key:
+        return False
+    if min(len(left_key), len(right_key)) <= 3:
+        return False
+    return not (left_key.isascii() and right_key.isascii() and min(len(left_key), len(right_key)) <= 4)
 
 
 def _ngram_similarity(left: str, right: str) -> float:
@@ -196,6 +292,53 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(key)
         result.append(item)
     return result
+
+
+def _normalization_summary(meta: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(meta, dict):
+        return None
+    cluster_id = str(meta.get("normalization_cluster_id") or "").strip()
+    if not cluster_id:
+        return None
+    return {
+        "cluster_id": cluster_id,
+        "item_id": str(meta.get("normalization_item_id") or ""),
+        "canonical_text": str(meta.get("normalized_from") or ""),
+        "normalized_key": str(meta.get("normalized_key") or ""),
+        "method": str(meta.get("normalization_method") or ""),
+        "score": float(meta.get("normalization_score") or 0.0),
+        "auto_merged": bool(meta.get("auto_merged")),
+        "features": meta.get("normalization_features") if isinstance(meta.get("normalization_features"), dict) else {},
+    }
+
+
+def _normalized_term_keys(term: str, aliases: list[str] | None = None) -> set[str]:
+    keys = {normalize_term(term)}
+    for alias in aliases or []:
+        keys.add(normalize_term(alias))
+    return {key for key in keys if key}
+
+
+def _matches_any_key(term: str, aliases: list[str] | None, keys: set[str]) -> bool:
+    if not keys:
+        return False
+    return bool(_normalized_term_keys(term, aliases) & keys)
+
+
+def _merge_alias_values(existing_term: str, existing_aliases: list[str], term: str, aliases: list[str]) -> list[str]:
+    extra_terms: list[str] = []
+    existing_key = normalize_term(existing_term)
+    if normalize_term(term) and normalize_term(term) != existing_key:
+        extra_terms.append(term)
+    return [
+        item
+        for item in _dedupe([*existing_aliases, *extra_terms, *aliases])
+        if normalize_term(item) != existing_key
+    ]
+
+
+def _merge_aliases_for_existing(existing: SlangTerm, term: str, aliases: list[str]) -> list[str]:
+    return _merge_alias_values(existing.term, existing.aliases, term, aliases)
 
 
 def _row_to_term(row: aiosqlite.Row) -> SlangTerm:
@@ -294,6 +437,7 @@ def _term_revision_snapshot(term: SlangTerm | None) -> dict[str, Any]:
         "repeat_policy": term.repeat_policy,
         "notes": term.notes,
         "meta": term.meta,
+        "normalization": _normalization_summary(term.meta),
     }
 
 
@@ -350,6 +494,20 @@ def _term_stats_dict(term: SlangTerm) -> dict[str, Any]:
     }
 
 
+def _settings_cache_key(db_path: str) -> str:
+    return db_path
+
+
+def _term_snapshot_cache_key(db_path: str, group_id: str) -> tuple[str, str]:
+    return db_path, group_id
+
+
+def _clear_term_snapshot_cache(db_path: str) -> None:
+    keys = [key for key in _TERM_SNAPSHOT_CACHE if key[0] == db_path]
+    for key in keys:
+        _TERM_SNAPSHOT_CACHE.pop(key, None)
+
+
 def _ai_review_sql_condition() -> str:
     return (
         "(source = 'ai_auto_review' "
@@ -365,25 +523,150 @@ def _human_reviewed_sql_condition() -> str:
     )
 
 
+def _candidate_reviewed_sql_condition() -> str:
+    failed = _candidate_review_failed_sql_condition()
+    return (
+        "((meta_json LIKE '%\"candidate_reviewed\": true%' "
+        "OR meta_json LIKE '%\"candidate_reviewed\":true%') "
+        f"AND NOT {failed})"
+    )
+
+
+def _candidate_review_approved_sql_condition() -> str:
+    return (
+        "(meta_json LIKE '%\"candidate_review_approved\": true%' "
+        "OR meta_json LIKE '%\"candidate_review_approved\":true%')"
+    )
+
+
+def _candidate_review_failed_sql_condition() -> str:
+    return (
+        "(meta_json LIKE '%\"candidate_review_failed\": true%' "
+        "OR meta_json LIKE '%\"candidate_review_failed\":true%' "
+        "OR meta_json LIKE '%\"candidate_review_state\": \"failed\"%' "
+        "OR meta_json LIKE '%\"candidate_review_state\":\"failed\"%')"
+    )
+
+
+def _ai_rejected_sql_condition() -> str:
+    return (
+        "(meta_json LIKE '%\"ai_rejected\": true%' "
+        "OR meta_json LIKE '%\"ai_rejected\":true%' "
+        "OR meta_json LIKE '%\"candidate_review_state\": \"rejected\"%' "
+        "OR meta_json LIKE '%\"candidate_review_state\":\"rejected\"%')"
+    )
+
+
+def _is_ai_rejected_muted_term(term: SlangTerm | None) -> bool:
+    if term is None or term.status != "muted":
+        return False
+    meta = term.meta or {}
+    if meta.get("human_reviewed") is True or str(meta.get("reviewed_by") or "").strip():
+        return False
+    return bool(meta.get("ai_rejected") is True or meta.get("candidate_review_state") == "rejected")
+
+
+def _meta_string_list(meta: dict[str, Any], key: str) -> list[str]:
+    value = meta.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _clear_ai_reject_review_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(meta)
+    for key in (
+        "ai_rejected",
+        "candidate_reviewed",
+        "candidate_reviewed_at",
+        "candidate_review_complete",
+        "candidate_review_decision",
+        "candidate_review_decision_confidence",
+        "candidate_review_confidence",
+        "candidate_review_approved",
+        "candidate_review_is_public_meme",
+        "candidate_review_reason",
+        "candidate_review_state",
+        "ai_reviewed_at",
+        "ai_reason",
+        "reviewed_at",
+        "reviewed_by",
+    ):
+        cleaned.pop(key, None)
+    if cleaned.get("review_decision") == "denied":
+        cleaned.pop("review_decision", None)
+    return cleaned
+
+
+def _candidate_observe_sql_condition() -> str:
+    approved = _candidate_review_approved_sql_condition()
+    observe_state = (
+        "(meta_json LIKE '%\"review_decision\": \"observe_more\"%' "
+        "OR meta_json LIKE '%\"review_decision\":\"observe_more\"%' "
+        "OR meta_json LIKE '%\"candidate_review_state\": \"observing\"%' "
+        "OR meta_json LIKE '%\"candidate_review_state\":\"observing\"%')"
+    )
+    legacy_kept = (
+        "(meta_json LIKE '%\"candidate_review_state\": \"kept\"%' "
+        "OR meta_json LIKE '%\"candidate_review_state\":\"kept\"%')"
+    )
+    return (
+        f"({observe_state} OR ({legacy_kept} AND NOT {approved}))"
+    )
+
+
+def _candidate_review_state_sql_condition(state: str) -> str:
+    escaped = state.replace("'", "''")
+    return (
+        f"(meta_json LIKE '%\"candidate_review_state\": \"{escaped}\"%' "
+        f"OR meta_json LIKE '%\"candidate_review_state\":\"{escaped}\"%')"
+    )
+
+
 class SlangStore:
     """Manage slang terms, observations, and runtime settings."""
 
     def __init__(self, db_path: str | Path = "storage/slang.db") -> None:
         self._db_path = str(db_path)
         self._db: aiosqlite.Connection | None = None
+        self._drift_reviewer: Any = None
+
+    def set_drift_reviewer(self, reviewer: Any | None) -> None:
+        """Attach the optional semantic drift gate used before opening drift reviews."""
+        self._drift_reviewer = reviewer
 
     async def init(self) -> None:
-        self._db = await connect_sqlite(self._db_path)
-        await self._db.execute(_CREATE_TERMS)
-        await self._db.execute(_CREATE_OBSERVATIONS)
-        await self._db.execute(_CREATE_SETTINGS)
-        await self._db.execute(_CREATE_PENDING)
-        await self._db.execute(_CREATE_RUNS)
-        await self._db.execute(_CREATE_REVISIONS)
-        await self._db.execute(_CREATE_DRIFT_REVIEWS)
-        for statement in _INDEXES:
-            await self._db.execute(statement)
-        await self._db.commit()
+        db_path = Path(self._db_path)
+        existed_before = db_path.exists() and db_path.stat().st_size > 0
+        try:
+            self._db = await connect_sqlite(self._db_path)
+            await self._db.execute("PRAGMA journal_mode=DELETE")
+            await self._db.execute("PRAGMA synchronous=FULL")
+            if existed_before:
+                await self.quick_check()
+            await self._db.execute(_CREATE_TERMS)
+            await self._db.execute(_CREATE_OBSERVATIONS)
+            await self._db.execute(_CREATE_SETTINGS)
+            await self._db.execute(_CREATE_PENDING)
+            await self._db.execute(_CREATE_PENDING_KEYS)
+            await self._db.execute(_CREATE_RUNS)
+            await self._db.execute(_CREATE_REVISIONS)
+            await self._db.execute(_CREATE_DRIFT_REVIEWS)
+            for statement in _INDEXES:
+                await self._db.execute(statement)
+            await self.rebuild_pending_key_index()
+            await self.backfill_ai_rejected_reobserve_meta()
+            await self._db.commit()
+            await self.quick_check()
+        except SlangDatabaseCorruptError:
+            await self.close()
+            raise
+        except sqlite3.DatabaseError as exc:
+            await self.close()
+            raise SlangDatabaseCorruptError(self._db_path, str(exc)) from exc
+        except Exception:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         if self._db:
@@ -394,10 +677,143 @@ class SlangStore:
     def initialized(self) -> bool:
         return self._db is not None
 
+    @property
+    def db_path(self) -> str:
+        return self._db_path
+
     def _require_db(self) -> aiosqlite.Connection:
         if self._db is None:
             raise RuntimeError("SlangStore is not initialized")
         return self._db
+
+    async def quick_check(self) -> str:
+        db = self._require_db()
+        try:
+            cursor = await db.execute("PRAGMA quick_check")
+            rows = await cursor.fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise SlangDatabaseCorruptError(self._db_path, str(exc)) from exc
+        messages = [str(row[0]).strip() for row in rows if row and row[0] is not None]
+        if not messages:
+            return "ok"
+        if all(message.lower() == "ok" for message in messages):
+            return "ok"
+        raise SlangDatabaseCorruptError(self._db_path, "; ".join(messages[:5]))
+
+    async def _invalidate_term_snapshot_cache(self) -> None:
+        _clear_term_snapshot_cache(self._db_path)
+
+    async def _upsert_pending_key_index(
+        self,
+        pending_id: str,
+        *,
+        term: str,
+        aliases: list[str] | None,
+        group_id: str,
+    ) -> None:
+        db = self._require_db()
+        await db.execute("DELETE FROM slang_pending_candidate_keys WHERE pending_id = ?", (pending_id,))
+        term_key = normalize_term(term)
+        rows: list[tuple[str, str, str, str]] = []
+        if term_key:
+            rows.append((pending_id, str(group_id), term_key, "term"))
+        for alias in aliases or []:
+            alias_key = normalize_term(alias)
+            if alias_key and alias_key != term_key:
+                rows.append((pending_id, str(group_id), alias_key, "alias"))
+        if rows:
+            await db.executemany(
+                """INSERT OR IGNORE INTO slang_pending_candidate_keys
+                   (pending_id, group_id, term_key, key_kind)
+                   VALUES (?, ?, ?, ?)""",
+                rows,
+            )
+
+    async def _attach_normalizer_candidate(
+        self,
+        *,
+        domain: str,
+        scope: str,
+        group_id: str,
+        raw_text: str,
+        source_table: str,
+        source_id: str,
+        message_id: int | None = None,
+        user_id: str = "",
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalizer: LearningNormalizerStore | None = None
+        try:
+            normalizer = LearningNormalizerStore(_normalizer_db_path_for(self._db_path))
+            await normalizer.init()
+            result = await normalizer.attach_candidate(
+                domain=domain,  # type: ignore[arg-type]
+                scope=scope,  # type: ignore[arg-type]
+                group_id=group_id,
+                raw_text=raw_text,
+                source_table=source_table,
+                source_id=source_id,
+                message_id=message_id,
+                user_id=user_id,
+                profile="slang",
+                meta=meta or {},
+            )
+            return result.to_meta()
+        except Exception as exc:
+            return {"normalization_error": str(exc)}
+        finally:
+            if normalizer is not None:
+                with contextlib.suppress(Exception):
+                    await normalizer.close()
+
+    async def _delete_pending_candidate(self, pending_id: str) -> None:
+        db = self._require_db()
+        await db.execute("DELETE FROM slang_pending_candidate_keys WHERE pending_id = ?", (pending_id,))
+        await db.execute("DELETE FROM slang_pending_candidates WHERE pending_id = ?", (pending_id,))
+
+    async def rebuild_pending_key_index(self) -> None:
+        db = self._require_db()
+        await db.execute("DELETE FROM slang_pending_candidate_keys")
+        cursor = await db.execute("SELECT * FROM slang_pending_candidates")
+        rows = await cursor.fetchall()
+        for row in rows:
+            pending = _row_to_pending(row)
+            await self._upsert_pending_key_index(
+                pending.pending_id,
+                term=pending.term,
+                aliases=pending.aliases,
+                group_id=pending.group_id,
+            )
+
+    def _get_cached_settings(self) -> SlangSettings | None:
+        cache = _SETTINGS_CACHE.get(_settings_cache_key(self._db_path))
+        if cache is None:
+            return None
+        if time.monotonic() - cache.cached_at > _CACHE_TTL_S:
+            _SETTINGS_CACHE.pop(_settings_cache_key(self._db_path), None)
+            return None
+        return cache.settings
+
+    def _set_cached_settings(self, settings: SlangSettings) -> None:
+        _SETTINGS_CACHE[_settings_cache_key(self._db_path)] = _SettingsCacheEntry(
+            settings=settings,
+            cached_at=time.monotonic(),
+        )
+
+    def _get_cached_term_snapshot(self, group_id: str) -> list[SlangTerm] | None:
+        cache = _TERM_SNAPSHOT_CACHE.get(_term_snapshot_cache_key(self._db_path, group_id))
+        if cache is None:
+            return None
+        if time.monotonic() - cache.cached_at > _CACHE_TTL_S:
+            _TERM_SNAPSHOT_CACHE.pop(_term_snapshot_cache_key(self._db_path, group_id), None)
+            return None
+        return cache.terms
+
+    def _set_cached_term_snapshot(self, group_id: str, terms: list[SlangTerm]) -> None:
+        _TERM_SNAPSHOT_CACHE[_term_snapshot_cache_key(self._db_path, group_id)] = _TermSnapshotCacheEntry(
+            terms=terms,
+            cached_at=time.monotonic(),
+        )
 
     async def record_revision(
         self,
@@ -454,18 +870,87 @@ class SlangStore:
         reason: str,
         meta: dict[str, Any] | None = None,
         settings: SlangSettings | None = None,
-    ) -> str | None:
+    ) -> _DriftReviewOutcome:
         settings = settings or await self.load_settings()
         if not settings.drift_detection_enabled:
-            return None
+            return _DriftReviewOutcome()
         if existing.status != "approved" or confidence < settings.drift_min_confidence:
-            return None
+            return _DriftReviewOutcome()
         new_meaning = str(new_meaning or "").strip()
         if not new_meaning or not existing.meaning.strip():
-            return None
+            return _DriftReviewOutcome()
         similarity = _ngram_similarity(existing.meaning, new_meaning)
-        if similarity >= 0.28:
-            return None
+        drift_meta = {
+            **(meta or {}),
+            "meaning_similarity": round(similarity, 3),
+            "source_status": existing.status,
+        }
+        if similarity >= _DRIFT_LEXICAL_SAME_THRESHOLD:
+            drift_meta.update({
+                "drift_semantic_reviewed": False,
+                "drift_semantic_verdict": "same_meaning",
+                "drift_semantic_confidence": round(similarity, 3),
+                "drift_semantic_reason": "lexical_similarity_guard",
+            })
+            return _DriftReviewOutcome(
+                verdict="same_meaning",
+                confidence=similarity,
+                reason="lexical_similarity_guard",
+                meaning_similarity=similarity,
+                meta=drift_meta,
+            )
+
+        reviewer = self._drift_reviewer
+        if reviewer is None or not hasattr(reviewer, "review_drift"):
+            drift_meta.update({
+                "drift_semantic_reviewed": False,
+                "drift_semantic_verdict": "unclear",
+                "drift_semantic_reason": "drift_reviewer_unavailable",
+            })
+            return _DriftReviewOutcome(
+                verdict="unclear",
+                reason="drift_reviewer_unavailable",
+                meaning_similarity=similarity,
+                meta=drift_meta,
+            )
+        try:
+            assessment = await reviewer.review_drift(
+                existing=existing,
+                new_meaning=new_meaning,
+                aliases=aliases,
+                evidence=evidence,
+                confidence=confidence,
+                reason=reason,
+            )
+        except Exception as exc:
+            assessment = SlangDriftAssessment(
+                verdict="unclear",
+                reviewed=True,
+                error=f"drift_reviewer_failed:{exc}",
+            )
+        drift_meta.update(assessment.to_meta())
+        if assessment.verdict != "real_drift":
+            if assessment.reviewed and not assessment.error:
+                await self.record_revision(
+                    existing.term_id,
+                    action="drift_alias_candidate" if assessment.verdict == "alias_candidate" else "drift_suppressed",
+                    actor="ai",
+                    before=_term_revision_snapshot(existing),
+                    after=_term_revision_snapshot(existing),
+                    reason=assessment.reason or reason or "semantic drift gate suppressed",
+                    meta={
+                        **drift_meta,
+                        "new_meaning": new_meaning,
+                        "candidate_aliases": aliases,
+                    },
+                )
+            return _DriftReviewOutcome(
+                verdict=assessment.verdict,
+                confidence=assessment.confidence,
+                reason=assessment.reason or assessment.error,
+                meaning_similarity=similarity,
+                meta=drift_meta,
+            )
         db = self._require_db()
         cursor = await db.execute(
             """SELECT drift_id FROM slang_drift_reviews
@@ -476,11 +961,6 @@ class SlangStore:
         )
         row = await cursor.fetchone()
         now = _now_iso()
-        drift_meta = {
-            **(meta or {}),
-            "meaning_similarity": round(similarity, 3),
-            "source_status": existing.status,
-        }
         if row is not None:
             drift_id = row["drift_id"]
             await db.execute(
@@ -500,7 +980,14 @@ class SlangStore:
                 ),
             )
             await db.commit()
-            return drift_id
+            return _DriftReviewOutcome(
+                drift_id=drift_id,
+                verdict=assessment.verdict,
+                confidence=assessment.confidence,
+                reason=assessment.reason,
+                meaning_similarity=similarity,
+                meta=drift_meta,
+            )
         drift_id = _new_id("drift")
         await db.execute(
             """INSERT INTO slang_drift_reviews
@@ -533,9 +1020,19 @@ class SlangStore:
             reason=reason or "detected conflicting meaning",
             meta=drift_meta,
         )
-        return drift_id
+        return _DriftReviewOutcome(
+            drift_id=drift_id,
+            verdict=assessment.verdict,
+            confidence=assessment.confidence,
+            reason=assessment.reason,
+            meaning_similarity=similarity,
+            meta=drift_meta,
+        )
 
     async def load_settings(self) -> SlangSettings:
+        cached = self._get_cached_settings()
+        if cached is not None:
+            return cached
         db = self._require_db()
         cursor = await db.execute("SELECT value_json FROM slang_settings WHERE key = 'settings'")
         row = await cursor.fetchone()
@@ -545,9 +1042,11 @@ class SlangStore:
             return settings
         data = _json_loads(row["value_json"], {})
         try:
-            return SlangSettings.model_validate(data)
+            settings = SlangSettings.model_validate(data)
         except Exception:
-            return SlangSettings()
+            settings = SlangSettings()
+        self._set_cached_settings(settings)
+        return settings
 
     async def save_settings(self, settings: SlangSettings | dict[str, Any]) -> SlangSettings:
         db = self._require_db()
@@ -560,15 +1059,22 @@ class SlangStore:
             (model.model_dump_json(), now),
         )
         await db.commit()
+        self._set_cached_settings(model)
         return model
 
-    async def is_stoplisted(self, term: str, settings: SlangSettings | None = None) -> bool:
+    async def is_stoplisted(
+        self,
+        term: str,
+        settings: SlangSettings | None = None,
+        aliases: list[str] | None = None,
+    ) -> bool:
         settings = settings or await self.load_settings()
-        key = normalize_term(term)
-        if not key:
+        candidate_keys = _normalized_term_keys(term, aliases)
+        if not candidate_keys:
             return True
         stop_keys = {normalize_term(item) for item in settings.stoplist}
-        return key in stop_keys
+        stop_keys = {key for key in stop_keys if key}
+        return bool(candidate_keys & stop_keys)
 
     async def is_muted_term(self, *, term: str, group_id: str) -> bool:
         existing = await self.find_existing(term=term, group_id=group_id, scope="group")
@@ -576,6 +1082,197 @@ class SlangStore:
             return True
         global_existing = await self.find_existing(term=term, group_id="", scope="global")
         return bool(global_existing and global_existing.status == "muted")
+
+    async def _ai_reject_reobserve_base(
+        self,
+        term: SlangTerm,
+        *,
+        extra_user_id: str = "",
+    ) -> tuple[int, list[str]]:
+        """Return lightweight evidence counts for an AI-rejected muted term."""
+        db = self._require_db()
+        cursor = await db.execute(
+            """SELECT COUNT(*) AS cnt FROM slang_observations
+               WHERE term_id = ? AND group_id = ?""",
+            (term.term_id, term.group_id),
+        )
+        observation_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            """SELECT DISTINCT user_id FROM slang_observations
+               WHERE term_id = ? AND group_id = ? AND user_id != ''""",
+            (term.term_id, term.group_id),
+        )
+        observation_users = [str(row["user_id"]) for row in await cursor.fetchall() if str(row["user_id"]).strip()]
+        users = _dedupe([
+            *term.unique_users,
+            *_meta_string_list(term.meta, "rejected_reobserve_users"),
+            *observation_users,
+            str(extra_user_id or ""),
+        ])
+        count = max(
+            int(term.usage_count or 0),
+            observation_count,
+            int(term.meta.get("rejected_reobserve_count") or 0),
+        )
+        return count, users
+
+    async def _record_ai_rejected_reobservation(
+        self,
+        term: SlangTerm,
+        *,
+        group_id: str,
+        user_id: str,
+        message_id: int | None,
+        raw_text: str,
+        context: str,
+        observed_count: int,
+    ) -> str | None:
+        if not _is_ai_rejected_muted_term(term) or str(term.group_id) != str(group_id):
+            return term.term_id
+        meta = dict(term.meta)
+        message_key = str(message_id) if message_id is not None else ""
+        message_ids = _meta_string_list(meta, "rejected_reobserve_message_ids")
+        if message_key and message_key in set(message_ids):
+            return term.term_id
+
+        base_count, users = await self._ai_reject_reobserve_base(term, extra_user_id=user_id)
+        increment = max(1, int(observed_count or 1))
+        next_count = base_count + increment
+        now = _now_iso()
+        if message_key:
+            message_ids = [*message_ids, message_key][-_AI_REJECT_REOBSERVE_MAX_TRACKED_MESSAGES:]
+        evidence = (raw_text or context or meta.get("rejected_reobserve_evidence") or meta.get("evidence") or "")
+        next_meta = {
+            **meta,
+            "rejected_reobserve_count": next_count,
+            "rejected_reobserve_users": users,
+            "rejected_reobserve_user_count": len(users),
+            "last_rejected_reobserve_at": now,
+            "rejected_reobserve_evidence": str(evidence)[:_AI_REJECT_REOBSERVE_MAX_EVIDENCE_CHARS],
+            "rejected_reobserve_message_ids": message_ids,
+            "rejected_reobserve_threshold_count": _AI_REJECT_REOBSERVE_COUNT_THRESHOLD,
+            "rejected_reobserve_threshold_users": _AI_REJECT_REOBSERVE_USER_THRESHOLD,
+        }
+        should_revive = (
+            next_count >= _AI_REJECT_REOBSERVE_COUNT_THRESHOLD
+            or len(users) >= _AI_REJECT_REOBSERVE_USER_THRESHOLD
+        )
+        if should_revive:
+            next_meta = _clear_ai_reject_review_meta(next_meta)
+            next_meta.update({
+                "revived_from_ai_reject": True,
+                "revived_at": now,
+                "revival_reason": "reobserved_after_ai_reject",
+            })
+            await self.update_term(
+                term.term_id,
+                status="candidate",
+                source="ai_reject_reobserved",
+                meta=next_meta,
+                last_inferred_at=now,
+                revision_action="ai_reject_reobserve_revival",
+                revision_actor="system",
+                revision_reason="AI-rejected slang candidate reobserved after mute",
+                revision_meta={
+                    "rejected_reobserve_count": next_count,
+                    "rejected_reobserve_user_count": len(users),
+                    "threshold_count": _AI_REJECT_REOBSERVE_COUNT_THRESHOLD,
+                    "threshold_users": _AI_REJECT_REOBSERVE_USER_THRESHOLD,
+                },
+            )
+        else:
+            await self.update_term(
+                term.term_id,
+                meta=next_meta,
+                last_inferred_at=now,
+                revision_action="ai_reject_reobserve",
+                revision_actor="system",
+                revision_reason="AI-rejected slang candidate reobserved below threshold",
+                revision_meta={
+                    "rejected_reobserve_count": next_count,
+                    "rejected_reobserve_user_count": len(users),
+                },
+            )
+        return term.term_id
+
+    async def backfill_ai_rejected_reobserve_meta(self) -> dict[str, int]:
+        db = self._require_db()
+        cursor = await db.execute(
+            f"""SELECT * FROM slang_terms
+                WHERE status = 'muted' AND {_ai_rejected_sql_condition()}"""
+        )
+        checked = updated = revived = 0
+        now = _now_iso()
+        for row in await cursor.fetchall():
+            term = _row_to_term(row)
+            if not _is_ai_rejected_muted_term(term):
+                continue
+            if int(term.meta.get("rejected_reobserve_backfill_version") or 0) >= _AI_REJECT_REOBSERVE_BACKFILL_VERSION:
+                continue
+            checked += 1
+            count, users = await self._ai_reject_reobserve_base(term)
+            latest_cursor = await db.execute(
+                """SELECT raw_text, context FROM slang_observations
+                   WHERE term_id = ? AND group_id = ?
+                   ORDER BY observed_at DESC LIMIT 1""",
+                (term.term_id, term.group_id),
+            )
+            latest = await latest_cursor.fetchone()
+            evidence = ""
+            if latest is not None:
+                evidence = str(latest["raw_text"] or latest["context"] or "")
+            evidence = evidence or str(term.meta.get("rejected_reobserve_evidence") or term.meta.get("evidence") or "")
+            next_meta = {
+                **term.meta,
+                "rejected_reobserve_count": count,
+                "rejected_reobserve_users": users,
+                "rejected_reobserve_user_count": len(users),
+                "rejected_reobserve_evidence": evidence[:_AI_REJECT_REOBSERVE_MAX_EVIDENCE_CHARS],
+                "rejected_reobserve_threshold_count": _AI_REJECT_REOBSERVE_COUNT_THRESHOLD,
+                "rejected_reobserve_threshold_users": _AI_REJECT_REOBSERVE_USER_THRESHOLD,
+                "rejected_reobserve_backfill_version": _AI_REJECT_REOBSERVE_BACKFILL_VERSION,
+                "rejected_reobserve_backfilled_at": now,
+            }
+            should_revive = (
+                count >= _AI_REJECT_REOBSERVE_COUNT_THRESHOLD
+                or len(users) >= _AI_REJECT_REOBSERVE_USER_THRESHOLD
+            )
+            if should_revive:
+                next_meta = _clear_ai_reject_review_meta(next_meta)
+                next_meta.update({
+                    "revived_from_ai_reject": True,
+                    "revived_at": now,
+                    "revival_reason": "reobserved_after_ai_reject",
+                })
+                if await self.update_term(
+                    term.term_id,
+                    status="candidate",
+                    source="ai_reject_reobserved",
+                    meta=next_meta,
+                    last_inferred_at=now,
+                    revision_action="ai_reject_reobserve_backfill_revival",
+                    revision_actor="system",
+                    revision_reason="AI-rejected slang candidate revived from backfilled observations",
+                    revision_meta={
+                        "rejected_reobserve_count": count,
+                        "rejected_reobserve_user_count": len(users),
+                    },
+                ):
+                    revived += 1
+                    updated += 1
+            elif await self.update_term(
+                term.term_id,
+                meta=next_meta,
+                revision_action="ai_reject_reobserve_backfill",
+                revision_actor="system",
+                revision_reason="AI-rejected slang candidate reobserve counters backfilled",
+                revision_meta={
+                    "rejected_reobserve_count": count,
+                    "rejected_reobserve_user_count": len(users),
+                },
+            ):
+                updated += 1
+        return {"checked": checked, "updated": updated, "revived": revived}
 
     async def get_meta(self, key: str, default: Any = None) -> Any:
         db = self._require_db()
@@ -595,29 +1292,73 @@ class SlangStore:
         )
         await db.commit()
 
-    async def find_existing(self, *, term: str, group_id: str, scope: SlangScope = "group") -> SlangTerm | None:
-        key = normalize_term(term)
-        if not key:
+    async def find_existing(
+        self,
+        *,
+        term: str,
+        group_id: str,
+        scope: SlangScope = "group",
+        aliases: list[str] | None = None,
+    ) -> SlangTerm | None:
+        candidate_keys = _normalized_term_keys(term, aliases)
+        if not candidate_keys:
             return None
         db = self._require_db()
         cursor = await db.execute(
-            "SELECT * FROM slang_terms WHERE term_key = ? AND scope = ? AND group_id = ?",
-            (key, scope, "" if scope == "global" else group_id),
-        )
-        row = await cursor.fetchone()
-        if row:
-            return _row_to_term(row)
-
-        cursor = await db.execute(
-            "SELECT * FROM slang_terms WHERE scope = ? AND group_id = ?",
+            """SELECT * FROM slang_terms
+               WHERE scope = ? AND group_id = ?
+               ORDER BY
+                 CASE status WHEN 'approved' THEN 0 WHEN 'candidate' THEN 1 WHEN 'muted' THEN 2 ELSE 3 END,
+                 confidence DESC,
+                 created_at ASC""",
             (scope, "" if scope == "global" else group_id),
         )
         for candidate in await cursor.fetchall():
             term_obj = _row_to_term(candidate)
-            alias_keys = {normalize_term(alias) for alias in term_obj.aliases}
-            if key in alias_keys:
+            existing_keys = _normalized_term_keys(term_obj.term, term_obj.aliases)
+            if candidate_keys & existing_keys:
                 return term_obj
         return None
+
+    async def find_similar_existing(
+        self,
+        *,
+        term: str,
+        group_id: str,
+        scope: SlangScope = "group",
+        min_score: float = 0.92,
+    ) -> SlangTerm | None:
+        key = normalize_term(term)
+        if not key:
+            return None
+        if not _slang_fuzzy_allowed(key, key):
+            return None
+        db = self._require_db()
+        cursor = await db.execute(
+            """SELECT * FROM slang_terms
+               WHERE scope = ? AND group_id = ?
+                 AND status IN ('approved', 'candidate')
+               ORDER BY
+                 CASE status WHEN 'approved' THEN 0 ELSE 1 END,
+                 confidence DESC,
+                 updated_at DESC
+               LIMIT 300""",
+            (scope, "" if scope == "global" else group_id),
+        )
+        best: tuple[SlangTerm, float] | None = None
+        for row in await cursor.fetchall():
+            candidate = _row_to_term(row)
+            values = [candidate.term, *candidate.aliases]
+            scores: list[float] = []
+            for value in values:
+                value_key = normalize_term(value)
+                if not _slang_fuzzy_allowed(key, value_key):
+                    continue
+                scores.append(score_similarity(term, value, "slang").score)
+            score = max(scores) if scores else 0.0
+            if score >= min_score and (best is None or score > best[1]):
+                best = (candidate, score)
+        return best[0] if best else None
 
     async def _upsert_pending_candidate(
         self,
@@ -645,6 +1386,19 @@ class SlangStore:
         row = await cursor.fetchone()
         if row is None:
             pending_id = _new_id("pending")
+            merged_meta = {
+                **(meta or {}),
+                **await self._attach_normalizer_candidate(
+                    domain="slang",
+                    scope="group",
+                    group_id=group_id,
+                    raw_text=term,
+                    source_table="slang_pending_candidates",
+                    source_id=pending_id,
+                    user_id=user_id,
+                    meta={"path": "pending_candidate"},
+                ),
+            }
             unique_users = [user_id] if user_id else []
             await db.execute(
                 """INSERT INTO slang_pending_candidates
@@ -667,8 +1421,14 @@ class SlangStore:
                     repeat_policy,
                     now,
                     now,
-                    json.dumps(meta or {}, ensure_ascii=False),
+                    json.dumps(merged_meta, ensure_ascii=False),
                 ),
+            )
+            await self._upsert_pending_key_index(
+                pending_id,
+                term=term,
+                aliases=aliases,
+                group_id=group_id,
             )
             await db.commit()
             await self.record_observation(
@@ -689,7 +1449,20 @@ class SlangStore:
         if user_id:
             unique_users.add(str(user_id))
         new_count = pending.count + max(1, observed_count)
-        merged_meta = {**pending.meta, **(meta or {})}
+        merged_meta = {
+            **pending.meta,
+            **(meta or {}),
+            **await self._attach_normalizer_candidate(
+                domain="slang",
+                scope="group",
+                group_id=group_id,
+                raw_text=term,
+                source_table="slang_pending_candidates",
+                source_id=pending.pending_id,
+                user_id=user_id,
+                meta={"path": "pending_candidate_reinforce"},
+            ),
+        }
         await db.execute(
             """UPDATE slang_pending_candidates
                SET meaning = ?, aliases_json = ?, confidence = ?, count = ?,
@@ -709,6 +1482,12 @@ class SlangStore:
                 json.dumps(merged_meta, ensure_ascii=False),
                 pending.pending_id,
             ),
+        )
+        await self._upsert_pending_key_index(
+            pending.pending_id,
+            term=pending.term,
+            aliases=merged_aliases,
+            group_id=group_id,
         )
         await db.commit()
         await self.record_observation(
@@ -730,10 +1509,82 @@ class SlangStore:
         if row is None:
             return None
         pending = _row_to_pending(row)
-        existing = await self.find_existing(term=pending.term, group_id=pending.group_id, scope="group")
+        existing = await self.find_existing(
+            term=pending.term,
+            aliases=pending.aliases,
+            group_id=pending.group_id,
+            scope="group",
+        )
         if existing:
-            await db.execute("DELETE FROM slang_pending_candidates WHERE pending_id = ?", (pending_id,))
+            await db.execute(
+                "UPDATE slang_observations SET term_id = ? WHERE term_id = ?",
+                (existing.term_id, pending.pending_id),
+            )
+            if existing.status not in {"muted", "expired"}:
+                settings = await self.load_settings()
+                drift_outcome = await self._maybe_create_drift_review(
+                    existing,
+                    new_meaning=pending.meaning,
+                    aliases=pending.aliases,
+                    evidence=pending.evidence,
+                    confidence=pending.confidence,
+                    reason=pending.reason or "pending_candidate_promote",
+                    meta=pending.meta,
+                    settings=settings,
+                )
+                merged_meta = {
+                    **existing.meta,
+                    **pending.meta,
+                    "merged_pending_ids": _dedupe([
+                        *(str(item) for item in existing.meta.get("merged_pending_ids", [])),
+                        pending.pending_id,
+                    ]),
+                }
+                if drift_outcome.drift_id:
+                    merged_meta["last_pending_drift_id"] = drift_outcome.drift_id
+                updates: dict[str, Any] = {
+                    "confidence": max(existing.confidence, pending.confidence),
+                    "last_inferred_at": _now_iso(),
+                    "meta": merged_meta,
+                    "revision_action": "pending_promote_merge",
+                    "revision_reason": pending.reason or "pending candidate merged into existing term",
+                    "revision_meta": {
+                        "pending_id": pending.pending_id,
+                        "drift_id": drift_outcome.drift_id or "",
+                        "drift_verdict": drift_outcome.verdict,
+                    },
+                }
+                if drift_outcome.allows_alias_merge:
+                    updates["aliases"] = _merge_aliases_for_existing(existing, pending.term, pending.aliases)
+                if pending.repeat_policy and existing.repeat_policy == "understand_only":
+                    updates["repeat_policy"] = pending.repeat_policy
+                if (
+                    drift_outcome.allows_meaning_update
+                    and pending.meaning
+                    and (not existing.meaning or pending.confidence >= existing.confidence)
+                ):
+                    updates["meaning"] = pending.meaning.strip()
+                await self.update_term(existing.term_id, **updates)
+                users = sorted({*existing.unique_users, *pending.unique_users})
+                now = _now_iso()
+                await db.execute(
+                    """UPDATE slang_terms
+                       SET usage_count = usage_count + ?,
+                           unique_users_json = ?,
+                           last_seen_at = ?,
+                           updated_at = ?
+                       WHERE term_id = ?""",
+                    (
+                        max(1, pending.count),
+                        json.dumps(users, ensure_ascii=False),
+                        pending.last_seen_at or now,
+                        now,
+                        existing.term_id,
+                    ),
+                )
+            await self._delete_pending_candidate(pending_id)
             await db.commit()
+            await self._invalidate_term_snapshot_cache()
             return existing.term_id
         now = _now_iso()
         term_id = _new_id("slang")
@@ -768,9 +1619,130 @@ class SlangStore:
                WHERE term_id = ?""",
             (term_id, pending.pending_id),
         )
-        await db.execute("DELETE FROM slang_pending_candidates WHERE pending_id = ?", (pending_id,))
+        await self._delete_pending_candidate(pending_id)
         await db.commit()
+        await self._invalidate_term_snapshot_cache()
         return term_id
+
+    async def _merge_pending_candidates_into_existing(
+        self,
+        existing: SlangTerm,
+        *,
+        term: str,
+        aliases: list[str],
+        settings: SlangSettings | None = None,
+    ) -> None:
+        pending_keys = _normalized_term_keys(term, aliases)
+        if not pending_keys:
+            return
+        db = self._require_db()
+        sorted_keys = sorted(pending_keys)
+        cursor = await db.execute(
+            f"""SELECT DISTINCT pending_id
+                FROM slang_pending_candidate_keys
+                WHERE group_id = ?
+                  AND term_key IN ({','.join('?' for _ in sorted_keys)})""",
+            (existing.group_id, *sorted_keys),
+        )
+        pending_ids = [str(row["pending_id"]) for row in await cursor.fetchall()]
+        if not pending_ids:
+            return
+        cursor = await db.execute(
+            f"""SELECT * FROM slang_pending_candidates
+                WHERE pending_id IN ({','.join('?' for _ in pending_ids)})""",
+            pending_ids,
+        )
+        rows = await cursor.fetchall()
+        pending_rows: list[SlangPendingCandidate] = []
+        for row in rows:
+            pending = _row_to_pending(row)
+            if _normalized_term_keys(pending.term, pending.aliases) & pending_keys:
+                pending_rows.append(pending)
+        if not pending_rows:
+            return
+
+        settings = settings or await self.load_settings()
+        merged_aliases = list(existing.aliases)
+        merged_meta = dict(existing.meta)
+        merged_users = set(existing.unique_users)
+        total_usage = 0
+        last_seen_at = existing.last_seen_at
+        latest_inferred_at = existing.last_inferred_at or _now_iso()
+        repeat_policy = existing.repeat_policy
+        best_meaning = existing.meaning
+        best_confidence = existing.confidence
+        merged_pending_ids = [str(item) for item in existing.meta.get("merged_pending_ids", [])]
+        drift_ids: list[str] = []
+
+        for pending in pending_rows:
+            await db.execute(
+                "UPDATE slang_observations SET term_id = ? WHERE term_id = ?",
+                (existing.term_id, pending.pending_id),
+            )
+            merged_meta.update(pending.meta)
+            merged_pending_ids.append(pending.pending_id)
+            merged_users.update(pending.unique_users)
+            total_usage += max(1, pending.count)
+            last_seen_at = max(last_seen_at, pending.last_seen_at)
+            latest_inferred_at = max(latest_inferred_at, pending.last_seen_at)
+            if repeat_policy == "understand_only" and pending.repeat_policy in VALID_REPEAT_POLICIES:
+                repeat_policy = pending.repeat_policy
+            drift_outcome = await self._maybe_create_drift_review(
+                existing,
+                new_meaning=pending.meaning,
+                aliases=pending.aliases,
+                evidence=pending.evidence,
+                confidence=pending.confidence,
+                reason=pending.reason or "pending_candidate_merge",
+                meta=pending.meta,
+                settings=settings,
+            )
+            if drift_outcome.allows_alias_merge:
+                merged_aliases = _merge_alias_values(existing.term, merged_aliases, pending.term, pending.aliases)
+            if drift_outcome.drift_id:
+                drift_ids.append(drift_outcome.drift_id)
+            elif (
+                drift_outcome.allows_meaning_update
+                and pending.meaning
+                and (not best_meaning or pending.confidence >= best_confidence)
+            ):
+                best_meaning = pending.meaning.strip()
+            best_confidence = max(best_confidence, pending.confidence)
+            await self._delete_pending_candidate(pending.pending_id)
+
+        merged_meta["merged_pending_ids"] = _dedupe(merged_pending_ids)
+        if drift_ids:
+            merged_meta["last_pending_drift_id"] = drift_ids[-1]
+        await self.update_term(
+            existing.term_id,
+            aliases=merged_aliases,
+            confidence=best_confidence,
+            meaning=best_meaning,
+            repeat_policy=repeat_policy,
+            meta=merged_meta,
+            last_inferred_at=latest_inferred_at,
+            revision_action="pending_candidate_merge_existing",
+            revision_reason="pending candidates merged into existing term",
+            revision_meta={"pending_ids": merged_pending_ids, "drift_ids": drift_ids},
+        )
+        now = _now_iso()
+        await db.execute(
+            """UPDATE slang_terms
+               SET usage_count = usage_count + ?,
+                   unique_users_json = ?,
+                   last_seen_at = ?,
+                   updated_at = ?
+               WHERE term_id = ?""",
+            (
+                total_usage,
+                json.dumps(sorted(merged_users), ensure_ascii=False),
+                last_seen_at,
+                now,
+                existing.term_id,
+            ),
+        )
+        await db.commit()
+        await self._invalidate_term_snapshot_cache()
 
     async def upsert_candidate(
         self,
@@ -796,21 +1768,56 @@ class SlangStore:
         if not key or not group_id:
             return None
         settings = settings or await self.load_settings()
-        if await self.is_stoplisted(term, settings):
-            return None
-        if await self.is_muted_term(term=term, group_id=str(group_id)):
-            return None
         aliases = _dedupe(aliases or [])
+        if await self.is_stoplisted(term, settings, aliases):
+            return None
         confidence = max(0.0, min(1.0, float(confidence)))
         candidate_meta = {**(meta or {}), "llm_confidence": confidence}
         if repeat_policy not in VALID_REPEAT_POLICIES:
             repeat_policy = "understand_only"
 
-        existing = await self.find_existing(term=term, group_id=group_id, scope="group")
+        existing = await self.find_existing(term=term, aliases=aliases, group_id=group_id, scope="group")
+        if existing is None:
+            existing = await self.find_similar_existing(term=term, group_id=group_id, scope="group")
+            if existing is not None:
+                candidate_meta["normalizer_similar_existing"] = True
+        if existing and await self.is_stoplisted(existing.term, settings, [*existing.aliases, term, *aliases]):
+            return None
         if existing and existing.status in {"muted", "expired"}:
+            if _is_ai_rejected_muted_term(existing):
+                return await self._record_ai_rejected_reobservation(
+                    existing,
+                    group_id=str(group_id),
+                    user_id=user_id,
+                    message_id=message_id,
+                    raw_text=raw_text,
+                    context=context,
+                    observed_count=observed_count,
+                )
             return existing.term_id
+        global_existing = await self.find_existing(term=term, aliases=aliases, group_id="", scope="global")
+        if global_existing and await self.is_stoplisted(
+            global_existing.term,
+            settings,
+            [*global_existing.aliases, term, *aliases],
+        ):
+            return None
+        if global_existing and global_existing.status == "muted":
+            return None
         if existing:
-            drift_id = await self._maybe_create_drift_review(
+            norm_meta = await self._attach_normalizer_candidate(
+                domain="slang",
+                scope=existing.scope,
+                group_id=existing.group_id,
+                raw_text=term,
+                source_table="slang_terms",
+                source_id=existing.term_id,
+                message_id=message_id,
+                user_id=user_id,
+                meta={"path": "existing_term_hit"},
+            )
+            candidate_meta = {**candidate_meta, **norm_meta}
+            drift_outcome = await self._maybe_create_drift_review(
                 existing,
                 new_meaning=meaning,
                 aliases=aliases,
@@ -820,7 +1827,7 @@ class SlangStore:
                 meta=candidate_meta,
                 settings=settings,
             )
-            if drift_id:
+            if drift_outcome.drift_id:
                 await self.record_hit(
                     existing.term_id,
                     group_id=group_id,
@@ -831,19 +1838,43 @@ class SlangStore:
                     reason=reason or "drift_observation",
                 )
                 return existing.term_id
-            merged_aliases = _dedupe([*existing.aliases, *aliases])
+            if not drift_outcome.allows_alias_merge and not drift_outcome.allows_meaning_update:
+                await self.record_hit(
+                    existing.term_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    message_id=message_id,
+                    raw_text=raw_text,
+                    context=context,
+                    reason=reason or "drift_gate_suppressed",
+                )
+                return existing.term_id
             updates: dict[str, Any] = {
-                "aliases": merged_aliases,
                 "confidence": max(existing.confidence, confidence),
                 "last_inferred_at": _now_iso(),
                 "revision_action": "candidate_update",
                 "revision_reason": reason,
+                "revision_meta": {"normalization": _normalization_summary(candidate_meta)},
             }
-            if meaning and (not existing.meaning or confidence >= existing.confidence):
+            merged_meta = {**existing.meta, **candidate_meta}
+            updates["meta"] = merged_meta
+            if drift_outcome.allows_alias_merge:
+                updates["aliases"] = _merge_aliases_for_existing(existing, term, aliases)
+            if (
+                drift_outcome.allows_meaning_update
+                and meaning
+                and (not existing.meaning or confidence >= existing.confidence)
+            ):
                 updates["meaning"] = meaning.strip()
             if repeat_policy and existing.repeat_policy == "understand_only":
                 updates["repeat_policy"] = repeat_policy
             await self.update_term(existing.term_id, **updates)
+            await self._merge_pending_candidates_into_existing(
+                await self.get_term(existing.term_id) or existing,
+                term=term,
+                aliases=aliases,
+                settings=settings,
+            )
             await self.record_hit(
                 existing.term_id,
                 group_id=group_id,
@@ -881,6 +1912,20 @@ class SlangStore:
 
         now = _now_iso()
         term_id = _new_id("slang")
+        candidate_meta = {
+            **candidate_meta,
+            **await self._attach_normalizer_candidate(
+                domain="slang",
+                scope="group",
+                group_id=str(group_id),
+                raw_text=term,
+                source_table="slang_terms",
+                source_id=term_id,
+                message_id=message_id,
+                user_id=user_id,
+                meta={"path": "new_term_candidate"},
+            ),
+        }
         unique_users = [user_id] if user_id else []
         await db.execute(
             """INSERT INTO slang_terms
@@ -909,6 +1954,7 @@ class SlangStore:
             ),
         )
         await db.commit()
+        await self._invalidate_term_snapshot_cache()
         await self.record_observation(
             term_id,
             group_id=group_id,
@@ -950,8 +1996,16 @@ class SlangStore:
         normalized_group_id = "" if scope == "global" else str(group_id or "").strip()
         if scope == "group" and not normalized_group_id:
             raise ValueError("group_id is required for group scope")
+        aliases = _dedupe(aliases or [])
+        if await self.is_stoplisted(term_value, aliases=aliases):
+            raise ValueError("term is stoplisted")
 
-        existing = await self.find_existing(term=term_value, group_id=normalized_group_id, scope=scope)
+        existing = await self.find_existing(
+            term=term_value,
+            aliases=aliases,
+            group_id=normalized_group_id,
+            scope=scope,
+        )
         if existing is not None:
             raise ValueError("term already exists in this scope")
 
@@ -960,6 +2014,19 @@ class SlangStore:
         if status == "approved":
             confidence_value = max(confidence_value, 0.8)
         term_id = _new_id("slang")
+        term_meta = {
+            "manual": source == "manual",
+            **(meta or {}),
+            **await self._attach_normalizer_candidate(
+                domain="slang",
+                scope=scope,
+                group_id=normalized_group_id or "global",
+                raw_text=term_value,
+                source_table="slang_terms",
+                source_id=term_id,
+                meta={"path": "manual_create"},
+            ),
+        }
         db = self._require_db()
         await db.execute(
             """INSERT INTO slang_terms
@@ -985,12 +2052,13 @@ class SlangStore:
                 str(source or "manual"),
                 repeat_policy,
                 str(notes or ""),
-                json.dumps({"manual": source == "manual", **(meta or {})}, ensure_ascii=False),
+                json.dumps(term_meta, ensure_ascii=False),
                 now,
                 now,
             ),
         )
         await db.commit()
+        await self._invalidate_term_snapshot_cache()
         if evidence.strip():
             await self.record_observation(
                 term_id,
@@ -1036,13 +2104,12 @@ class SlangStore:
         if not key or not group_id:
             return None
         settings = settings or await self.load_settings()
-        if await self.is_stoplisted(term, settings):
+        now = _now_iso()
+        aliases = _dedupe(aliases or [])
+        if await self.is_stoplisted(term, settings, aliases):
             return None
         if await self.is_muted_term(term=term, group_id=str(group_id)):
             return None
-
-        now = _now_iso()
-        aliases = _dedupe(aliases or [])
         confidence_value = max(0.8, min(1.0, float(confidence)))
         if repeat_policy not in VALID_REPEAT_POLICIES:
             repeat_policy = "understand_only"
@@ -1055,12 +2122,12 @@ class SlangStore:
             "ai_reason": reason,
             "llm_confidence": confidence_value,
         }
-        existing = await self.find_existing(term=term, group_id=str(group_id), scope="group")
+        existing = await self.find_existing(term=term, aliases=aliases, group_id=str(group_id), scope="group")
         if existing and existing.status in {"muted", "expired"}:
             return existing.term_id
 
         if existing:
-            drift_id = await self._maybe_create_drift_review(
+            drift_outcome = await self._maybe_create_drift_review(
                 existing,
                 new_meaning=meaning,
                 aliases=aliases,
@@ -1070,7 +2137,7 @@ class SlangStore:
                 meta=ai_meta,
                 settings=settings,
             )
-            if drift_id:
+            if drift_outcome.drift_id:
                 await self.record_hit(
                     existing.term_id,
                     group_id=str(group_id),
@@ -1082,12 +2149,22 @@ class SlangStore:
                 )
                 await self._clear_pending_for_key(key, str(group_id), existing.term_id)
                 return existing.term_id
-            merged_aliases = _dedupe([*existing.aliases, *aliases])
+            if not drift_outcome.allows_alias_merge and not drift_outcome.allows_meaning_update:
+                await self.record_hit(
+                    existing.term_id,
+                    group_id=str(group_id),
+                    user_id=user_id,
+                    message_id=message_id,
+                    raw_text=raw_text,
+                    context=context,
+                    reason=reason or "daily_ai_review_drift_gate_suppressed",
+                )
+                await self._clear_pending_for_key(key, str(group_id), existing.term_id)
+                return existing.term_id
             merged_meta = {**existing.meta, **ai_meta}
             if existing.meta.get("human_reviewed") is True:
                 merged_meta["human_reviewed"] = True
             updates: dict[str, Any] = {
-                "aliases": merged_aliases,
                 "confidence": max(existing.confidence, confidence_value),
                 "status": "approved",
                 "source": existing.source if existing.meta.get("human_reviewed") else "ai_auto_review",
@@ -1099,9 +2176,21 @@ class SlangStore:
                 "revision_action": "ai_auto_review",
                 "revision_reason": reason,
             }
-            if meaning and (not existing.meaning or confidence_value >= existing.confidence):
+            if drift_outcome.allows_alias_merge:
+                updates["aliases"] = _merge_aliases_for_existing(existing, term, aliases)
+            if (
+                drift_outcome.allows_meaning_update
+                and meaning
+                and (not existing.meaning or confidence_value >= existing.confidence)
+            ):
                 updates["meaning"] = meaning.strip()
             await self.update_term(existing.term_id, **updates)
+            await self._merge_pending_candidates_into_existing(
+                await self.get_term(existing.term_id) or existing,
+                term=term,
+                aliases=aliases,
+                settings=settings,
+            )
             await self.record_hit(
                 existing.term_id,
                 group_id=str(group_id),
@@ -1145,6 +2234,7 @@ class SlangStore:
             ),
         )
         await db.commit()
+        await self._invalidate_term_snapshot_cache()
         await self._clear_pending_for_key(key, str(group_id), term_id)
         await self.record_observation(
             term_id,
@@ -1180,8 +2270,190 @@ class SlangStore:
                 "UPDATE slang_observations SET term_id = ? WHERE term_id = ?",
                 (target_term_id, pending_id),
             )
-            await db.execute("DELETE FROM slang_pending_candidates WHERE pending_id = ?", (pending_id,))
+            await self._delete_pending_candidate(pending_id)
         await db.commit()
+
+    async def resolve_pending_candidate(self, pending_id: str, target_term_id: str) -> bool:
+        db = self._require_db()
+        cursor = await db.execute(
+            "SELECT 1 FROM slang_pending_candidates WHERE pending_id = ?",
+            (pending_id,),
+        )
+        if await cursor.fetchone() is None:
+            return False
+        await db.execute(
+            "UPDATE slang_observations SET term_id = ? WHERE term_id = ?",
+            (target_term_id, pending_id),
+        )
+        await self._delete_pending_candidate(pending_id)
+        await db.commit()
+        await self._invalidate_term_snapshot_cache()
+        return True
+
+    async def reject_pending_candidate(
+        self,
+        pending_id: str,
+        *,
+        group_id: str = "",
+        reason: str = "",
+        meta: dict[str, Any] | None = None,
+    ) -> str | None:
+        db = self._require_db()
+        cursor = await db.execute(
+            "SELECT * FROM slang_pending_candidates WHERE pending_id = ?",
+            (pending_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        pending = _row_to_pending(row)
+        if group_id and str(pending.group_id) != str(group_id):
+            return None
+
+        now = _now_iso()
+        reject_meta = {
+            **pending.meta,
+            **(meta or {}),
+            "pending_id": pending.pending_id,
+            "ai_rejected": True,
+            "review_decision": "denied",
+            "reviewed_at": now,
+            "ai_reviewed_at": now,
+            "ai_reason": reason or pending.reason,
+        }
+        existing = await self.find_existing(
+            term=pending.term,
+            aliases=pending.aliases,
+            group_id=pending.group_id,
+            scope="group",
+        )
+        if existing is not None:
+            await self.resolve_pending_candidate(pending.pending_id, existing.term_id)
+            if existing.status == "candidate":
+                await self.update_term(
+                    existing.term_id,
+                    status="muted",
+                    meta={**existing.meta, **reject_meta},
+                    revision_action="ai_reject_pending",
+                    revision_actor="ai",
+                    revision_reason=reason or pending.reason or "daily_ai_review_reject",
+                    revision_meta=reject_meta,
+                )
+            return existing.term_id
+
+        term_id = _new_id("slang")
+        await db.execute(
+            """INSERT INTO slang_terms
+               (term_id, term_key, term, meaning, aliases_json, scope, group_id, confidence,
+                status, usage_count, unique_users_json, first_seen_at, last_seen_at,
+                last_inferred_at, source, repeat_policy, notes, meta_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'group', ?, ?, 'muted', ?, ?, ?, ?, ?,
+                       'daily_ai_review', ?, '', ?, ?, ?)""",
+            (
+                term_id,
+                normalize_term(pending.term),
+                pending.term,
+                pending.meaning,
+                json.dumps(pending.aliases, ensure_ascii=False),
+                pending.group_id,
+                max(0.0, min(1.0, float(pending.confidence or 0.0))),
+                max(1, int(pending.count or 1)),
+                json.dumps(pending.unique_users, ensure_ascii=False),
+                pending.first_seen_at,
+                pending.last_seen_at,
+                now,
+                pending.repeat_policy,
+                json.dumps(reject_meta, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        await db.execute(
+            "UPDATE slang_observations SET term_id = ? WHERE term_id = ?",
+            (term_id, pending.pending_id),
+        )
+        await self._delete_pending_candidate(pending.pending_id)
+        await db.commit()
+        await self._invalidate_term_snapshot_cache()
+        created = await self.get_term(term_id)
+        await self.record_revision(
+            term_id,
+            action="ai_reject_pending",
+            actor="ai",
+            before={},
+            after=_term_revision_snapshot(created),
+            reason=reason or pending.reason or "daily_ai_review_reject",
+            meta=reject_meta,
+        )
+        return term_id
+
+    async def update_pending_candidate_meta(
+        self,
+        pending_id: str,
+        *,
+        meta: dict[str, Any] | None = None,
+    ) -> bool:
+        db = self._require_db()
+        cursor = await db.execute(
+            "SELECT meta_json FROM slang_pending_candidates WHERE pending_id = ?",
+            (pending_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return False
+        current_meta = _json_loads(row["meta_json"], {})
+        merged_meta = {**current_meta, **(meta or {})}
+        await db.execute(
+            """UPDATE slang_pending_candidates
+               SET meta_json = ?
+               WHERE pending_id = ?""",
+            (json.dumps(merged_meta, ensure_ascii=False), pending_id),
+        )
+        await db.commit()
+        return True
+
+    async def promote_pending_candidate(
+        self,
+        pending_id: str,
+        *,
+        meta: dict[str, Any] | None = None,
+        meaning: str | None = None,
+        aliases: list[str] | None = None,
+        confidence: float | None = None,
+        revision_action: str = "semantic_review_candidate",
+        revision_actor: str = "ai",
+        revision_reason: str = "",
+    ) -> str | None:
+        if meta:
+            await self.update_pending_candidate_meta(pending_id, meta=meta)
+        term_id = await self._promote_pending_candidate(pending_id)
+        if term_id is None:
+            return None
+        if not meta and meaning is None and aliases is None and confidence is None:
+            return term_id
+        term = await self.get_term(term_id)
+        if term is None:
+            return term_id
+        meta = meta or {}
+        updates: dict[str, Any] = {
+            "meta": {**term.meta, **meta},
+            "last_inferred_at": _now_iso(),
+            "revision_action": revision_action,
+            "revision_actor": revision_actor,
+            "revision_reason": revision_reason or "semantic review promoted pending candidate",
+            "revision_meta": meta,
+        }
+        if meaning is not None:
+            updates["meaning"] = meaning
+        if aliases is not None:
+            updates["aliases"] = aliases
+        if confidence is not None:
+            updates["confidence"] = confidence
+        await self.update_term(
+            term_id,
+            **updates,
+        )
+        return term_id
 
     async def mark_human_reviewed(self, term_id: str, *, reviewer: str = "admin") -> SlangTerm | None:
         term = await self.get_term(term_id)
@@ -1230,21 +2502,55 @@ class SlangStore:
         )
         return await self.get_term(term_id)
 
-    async def return_ai_reviewed_term_to_candidate(self, term_id: str) -> SlangTerm | None:
+    async def return_ai_reviewed_term_to_candidate(
+        self,
+        term_id: str,
+        *,
+        reviewer: str = "admin",
+    ) -> SlangTerm | None:
         term = await self.get_term(term_id)
         if term is None:
             return None
-        meta = {
-            **term.meta,
-            "human_reviewed": False,
-            "review_decision": "returned_to_candidate",
-            "returned_to_candidate_at": _now_iso(),
-        }
+        now = _now_iso()
+        meta = dict(term.meta)
+        meta.update(
+            {
+                "human_reviewed": False,
+                "review_decision": "returned_to_candidate",
+                "returned_to_candidate_at": now,
+                "returned_from_status": term.status,
+                "returned_from_source": term.source,
+            }
+        )
+        for key in (
+            "ai_approved",
+            "ai_rejected",
+            "candidate_reviewed",
+            "candidate_reviewed_at",
+            "candidate_review_complete",
+            "candidate_review_decision",
+            "candidate_review_decision_confidence",
+            "candidate_review_confidence",
+            "candidate_review_approved",
+            "candidate_review_is_public_meme",
+            "candidate_review_reason",
+            "candidate_review_state",
+            "human_reviewed",
+            "human_reviewed_at",
+            "ai_reviewed_at",
+            "ai_reason",
+            "denied_at",
+            "reviewed_at",
+            "reviewed_by",
+        ):
+            meta.pop(key, None)
         await self.update_term(
             term_id,
             status="candidate",
+            source="admin_returned",
             meta=meta,
             revision_action="return_to_candidate",
+            revision_actor=str(reviewer or "admin"),
             revision_reason="AI-approved term returned to candidate queue",
         )
         return await self.get_term(term_id)
@@ -1260,36 +2566,94 @@ class SlangStore:
         context: str = "",
         reason: str = "message_match",
     ) -> bool:
-        term = await self.get_term(term_id)
-        if term is None or term.status in {"muted", "expired"}:
-            return False
-        if message_id is not None and await self._observation_exists(term_id, message_id):
-            return False
-        users = set(term.unique_users)
-        if user_id:
-            users.add(str(user_id))
-        now = _now_iso()
+        return bool(
+            await self.record_hits(
+                [term_id],
+                group_id=group_id,
+                user_id=user_id,
+                message_id=message_id,
+                raw_text=raw_text,
+                context=context,
+                reason=reason,
+            )
+        )
+
+    async def record_hits(
+        self,
+        term_ids: list[str],
+        *,
+        group_id: str,
+        user_id: str = "",
+        message_id: int | None = None,
+        raw_text: str = "",
+        context: str = "",
+        reason: str = "message_match",
+    ) -> int:
+        unique_term_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for term_id in term_ids:
+            key = str(term_id or "").strip()
+            if not key or key in seen_ids:
+                continue
+            seen_ids.add(key)
+            unique_term_ids.append(key)
+        if not unique_term_ids:
+            return 0
         db = self._require_db()
-        await db.execute(
-            """UPDATE slang_terms
-               SET usage_count = usage_count + 1,
-                   unique_users_json = ?,
-                   last_seen_at = ?,
-                   updated_at = ?
-               WHERE term_id = ?""",
-            (json.dumps(sorted(users), ensure_ascii=False), now, now, term_id),
-        )
-        await db.commit()
-        await self.record_observation(
-            term_id,
-            group_id=group_id,
-            user_id=user_id,
-            message_id=message_id,
-            raw_text=raw_text,
-            context=context,
-            reason=reason,
-        )
-        return True
+        placeholders = ",".join("?" for _ in unique_term_ids)
+        cursor = await db.execute(f"SELECT * FROM slang_terms WHERE term_id IN ({placeholders})", unique_term_ids)
+        terms = {row["term_id"]: _row_to_term(row) for row in await cursor.fetchall()}
+        observed_term_ids: set[str] = set()
+        if message_id is not None:
+            cursor = await db.execute(
+                f"SELECT term_id FROM slang_observations WHERE message_id = ? AND term_id IN ({placeholders})",
+                [message_id, *unique_term_ids],
+            )
+            observed_term_ids = {str(row["term_id"]) for row in await cursor.fetchall()}
+        now = _now_iso()
+        changed = 0
+        try:
+            await db.execute("BEGIN")
+            for term_id in unique_term_ids:
+                term = terms.get(term_id)
+                if term is None or term.status in {"muted", "expired"} or term_id in observed_term_ids:
+                    continue
+                users = set(term.unique_users)
+                if user_id:
+                    users.add(str(user_id))
+                await db.execute(
+                    """UPDATE slang_terms
+                       SET usage_count = usage_count + 1,
+                           unique_users_json = ?,
+                           last_seen_at = ?,
+                           updated_at = ?
+                       WHERE term_id = ?""",
+                    (json.dumps(sorted(users), ensure_ascii=False), now, now, term_id),
+                )
+                await db.execute(
+                    """INSERT INTO slang_observations
+                       (observation_id, term_id, group_id, user_id, message_id, raw_text, context, observed_at, reason)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        _new_id("obs"),
+                        term_id,
+                        str(group_id),
+                        str(user_id or ""),
+                        message_id,
+                        raw_text[:2000],
+                        context[:4000],
+                        now,
+                        reason[:500],
+                    ),
+                )
+                changed += 1
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+        if changed:
+            await self._invalidate_term_snapshot_cache()
+        return changed
 
     async def _observation_exists(self, term_id: str, message_id: int) -> bool:
         db = self._require_db()
@@ -1348,12 +2712,15 @@ class SlangStore:
         review_filter: str = "",
         limit: int = 50,
         offset: int = 0,
+        sort: str = "default",
     ) -> tuple[list[SlangTerm], int]:
         db = self._require_db()
         where: list[str] = []
         values: list[Any] = []
         ai_reviewed = _ai_review_sql_condition()
         human_reviewed = _human_reviewed_sql_condition()
+        candidate_reviewed = _candidate_reviewed_sql_condition()
+        candidate_review_approved = _candidate_review_approved_sql_condition()
         if group_id:
             where.append("group_id = ?")
             values.append(group_id)
@@ -1372,20 +2739,62 @@ class SlangStore:
             values.append(float(min_confidence))
         if review_filter == "ai_approved":
             where.append(ai_reviewed)
+        elif review_filter == "ai_rejected":
+            where.append(f"status IN ('candidate', 'muted') AND {_ai_rejected_sql_condition()}")
+        elif review_filter == "observe_more":
+            where.append(f"status = 'candidate' AND {_candidate_observe_sql_condition()}")
+        elif review_filter == "review_failed":
+            where.append(f"status = 'candidate' AND {_candidate_review_failed_sql_condition()}")
         elif review_filter == "needs_human_review":
             where.append(f"status = 'approved' AND {ai_reviewed} AND NOT {human_reviewed}")
         elif review_filter == "human_reviewed":
             where.append(human_reviewed)
+        elif review_filter == "candidate_ai_unreviewed":
+            where.append(f"status = 'candidate' AND NOT {candidate_reviewed}")
+        elif review_filter == "candidate_ai_approved":
+            where.append(f"status = 'candidate' AND {candidate_review_approved}")
+        elif review_filter == "candidate_ai_rejected":
+            where.append(f"status IN ('candidate', 'muted') AND {_ai_rejected_sql_condition()}")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         count_cursor = await db.execute(f"SELECT COUNT(*) AS cnt FROM slang_terms {where_sql}", values)
         total = int((await count_cursor.fetchone())["cnt"])
-        cursor = await db.execute(
-            f"""SELECT * FROM slang_terms {where_sql}
-                ORDER BY
+        if sort == "time":
+            order_sql = """ORDER BY
+                  updated_at DESC,
+                  last_seen_at DESC,
+                  created_at DESC,
+                  confidence DESC,
+                  usage_count DESC"""
+        else:
+            candidate_reviewed = _candidate_reviewed_sql_condition()
+            candidate_review_approved = _candidate_review_approved_sql_condition()
+            candidate_observe = _candidate_observe_sql_condition()
+            candidate_review_failed = _candidate_review_failed_sql_condition()
+            ai_rejected = _ai_rejected_sql_condition()
+            order_sql = """ORDER BY
                   CASE status WHEN 'candidate' THEN 0 WHEN 'approved' THEN 1 WHEN 'muted' THEN 2 ELSE 3 END,
+                  CASE
+                    WHEN status = 'candidate' AND NOT ({candidate_reviewed}) THEN 0
+                    WHEN status = 'candidate' AND ({candidate_review_approved}) THEN 1
+                    WHEN status = 'candidate' AND ({candidate_observe}) THEN 2
+                    WHEN status = 'candidate' AND ({candidate_review_failed}) THEN 3
+                    WHEN status = 'candidate' AND ({ai_rejected}) THEN 4
+                    ELSE 5
+                  END,
                   confidence DESC,
                   usage_count DESC,
-                  updated_at DESC
+                  last_seen_at DESC,
+                  updated_at DESC"""
+            order_sql = order_sql.format(
+                candidate_reviewed=candidate_reviewed,
+                candidate_review_approved=candidate_review_approved,
+                candidate_observe=candidate_observe,
+                candidate_review_failed=candidate_review_failed,
+                ai_rejected=ai_rejected,
+            )
+        cursor = await db.execute(
+            f"""SELECT * FROM slang_terms {where_sql}
+                {order_sql}
                 LIMIT ? OFFSET ?""",
             [*values, limit, offset],
         )
@@ -1431,8 +2840,8 @@ class SlangStore:
             f"""SELECT * FROM slang_drift_reviews {where_sql}
                 ORDER BY
                   CASE status WHEN 'open' THEN 0 ELSE 1 END,
-                  confidence DESC,
-                  updated_at DESC
+                  updated_at DESC,
+                  confidence DESC
                 LIMIT ? OFFSET ?""",
             [*values, max(1, min(int(limit or 50), 200)), max(0, int(offset or 0))],
         )
@@ -1458,6 +2867,74 @@ class SlangStore:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+    async def replay_open_drift_reviews(self, *, limit: int = 100, apply: bool = False) -> dict[str, Any]:
+        """Re-run the semantic drift gate over open reviews and optionally close false positives."""
+        reviewer = self._drift_reviewer
+        stats: dict[str, Any] = {
+            "ok": reviewer is not None and hasattr(reviewer, "review_drift"),
+            "apply": bool(apply),
+            "reviewed": 0,
+            "closed_same_meaning": 0,
+            "aliased": 0,
+            "kept_real_drift": 0,
+            "kept_unclear": 0,
+            "failed": 0,
+            "error": "" if reviewer is not None and hasattr(reviewer, "review_drift") else "drift_reviewer_unavailable",
+        }
+        if not stats["ok"]:
+            return stats
+        reviews, _total = await self.list_drift_reviews(status="open", limit=max(1, min(int(limit or 100), 200)))
+        for drift in reviews:
+            term = await self.get_term(drift.term_id)
+            if term is None:
+                stats["failed"] += 1
+                if apply:
+                    await self._set_drift_status(
+                        drift.drift_id,
+                        "rejected",
+                        {"semantic_replay": True, "semantic_replay_error": "missing_term"},
+                    )
+                continue
+            try:
+                assessment = await reviewer.review_drift(
+                    existing=term,
+                    new_meaning=drift.new_meaning,
+                    aliases=drift.aliases,
+                    evidence=drift.evidence,
+                    confidence=drift.confidence,
+                    reason=drift.reason,
+                )
+            except Exception as exc:
+                assessment = SlangDriftAssessment(
+                    verdict="unclear",
+                    reviewed=True,
+                    error=f"drift_replay_failed:{exc}",
+                )
+            stats["reviewed"] += 1
+            meta = {**assessment.to_meta(), "semantic_replay": True}
+            if assessment.verdict == "same_meaning":
+                stats["closed_same_meaning"] += 1
+                if apply:
+                    await self.reject_drift_review(
+                        drift.drift_id,
+                        reviewer="semantic_drift_replay",
+                        meta=meta,
+                    )
+            elif assessment.verdict == "alias_candidate":
+                stats["aliased"] += 1
+                if apply:
+                    await self.alias_drift_review(drift.drift_id, reviewer="semantic_drift_replay")
+                    await self._set_drift_status(drift.drift_id, "aliased", meta)
+            elif assessment.verdict == "real_drift":
+                stats["kept_real_drift"] += 1
+                if apply:
+                    await self._set_drift_status(drift.drift_id, "open", meta)
+            else:
+                stats["kept_unclear"] += 1
+                if apply:
+                    await self._set_drift_status(drift.drift_id, "open", meta)
+        return stats
 
     async def accept_drift_review(self, drift_id: str, *, reviewer: str = "admin") -> SlangTerm | None:
         drift = await self._get_drift_review(drift_id)
@@ -1491,7 +2968,13 @@ class SlangStore:
         await self._set_drift_status(drift_id, "accepted", {"reviewed_by": reviewer})
         return await self.get_term(term.term_id)
 
-    async def reject_drift_review(self, drift_id: str, *, reviewer: str = "admin") -> bool:
+    async def reject_drift_review(
+        self,
+        drift_id: str,
+        *,
+        reviewer: str = "admin",
+        meta: dict[str, Any] | None = None,
+    ) -> bool:
         drift = await self._get_drift_review(drift_id)
         if drift is None:
             return False
@@ -1504,9 +2987,9 @@ class SlangStore:
                 before=_term_revision_snapshot(term),
                 after=_term_revision_snapshot(term),
                 reason=drift.reason or "drift rejected",
-                meta={"drift_id": drift.drift_id, "new_meaning": drift.new_meaning},
+                meta={"drift_id": drift.drift_id, "new_meaning": drift.new_meaning, **(meta or {})},
             )
-        return await self._set_drift_status(drift_id, "rejected", {"reviewed_by": reviewer})
+        return await self._set_drift_status(drift_id, "rejected", {"reviewed_by": reviewer, **(meta or {})})
 
     async def alias_drift_review(self, drift_id: str, *, reviewer: str = "admin") -> SlangTerm | None:
         drift = await self._get_drift_review(drift_id)
@@ -1642,6 +3125,8 @@ class SlangStore:
                     reason=revision_reason,
                     meta=revision_meta if isinstance(revision_meta, dict) else {},
                 )
+        if changed:
+            await self._invalidate_term_snapshot_cache()
         return changed
 
     async def set_status(
@@ -1768,6 +3253,7 @@ class SlangStore:
             ),
         )
         await db.commit()
+        await self._invalidate_term_snapshot_cache()
         merged = await self.get_term(target_id)
         await self.record_revision(
             target_id,
@@ -1803,7 +3289,7 @@ class SlangStore:
         total = int((await cursor.fetchone())["cnt"])
         cursor = await db.execute(
             f"""SELECT * FROM slang_pending_candidates {where_sql}
-                ORDER BY count DESC, confidence DESC, last_seen_at DESC
+                ORDER BY last_seen_at DESC, count DESC, confidence DESC
                 LIMIT ? OFFSET ?""",
             [*values, limit, offset],
         )
@@ -1875,6 +3361,82 @@ class SlangStore:
         )
         return [_row_to_run(row) for row in await cursor.fetchall()]
 
+    async def list_running_extraction_runs(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int = 20,
+    ) -> list[SlangExtractionRun]:
+        db = self._require_db()
+        if kind:
+            cursor = await db.execute(
+                """SELECT * FROM slang_extraction_runs
+                   WHERE status = 'running'
+                     AND json_extract(meta_json, '$.kind') = ?
+                   ORDER BY started_at ASC
+                   LIMIT ?""",
+                (kind, limit),
+            )
+        else:
+            cursor = await db.execute(
+                """SELECT * FROM slang_extraction_runs
+                   WHERE status = 'running'
+                   ORDER BY started_at ASC
+                   LIMIT ?""",
+                (limit,),
+            )
+        return [_row_to_run(row) for row in await cursor.fetchall()]
+
+    async def list_stale_extraction_runs(
+        self,
+        *,
+        kind: str,
+        stale_before_iso: str,
+        limit: int = 20,
+    ) -> list[SlangExtractionRun]:
+        db = self._require_db()
+        cursor = await db.execute(
+            """SELECT * FROM slang_extraction_runs
+               WHERE status = 'running'
+                 AND started_at < ?
+                 AND json_extract(meta_json, '$.kind') = ?
+               ORDER BY started_at ASC
+               LIMIT ?""",
+            (stale_before_iso, kind, limit),
+        )
+        return [_row_to_run(row) for row in await cursor.fetchall()]
+
+    async def has_successful_extraction_run(
+        self,
+        *,
+        kind: str,
+        started_date: str,
+    ) -> bool:
+        db = self._require_db()
+        cursor = await db.execute(
+            """SELECT 1 FROM slang_extraction_runs
+               WHERE status = 'success'
+                 AND substr(started_at, 1, 10) = ?
+                 AND json_extract(meta_json, '$.kind') = ?
+               LIMIT 1""",
+            (started_date, kind),
+        )
+        return await cursor.fetchone() is not None
+
+    async def abandon_extraction_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "stale_run_recovered",
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        await self.finish_extraction_run(
+            run_id,
+            status="abandoned",
+            error=reason,
+            meta={"abandoned": True, "abandon_reason": reason, **(meta or {})},
+        )
+
     async def scan_global_candidates(self, *, min_groups: int = 3) -> dict[str, Any]:
         db = self._require_db()
         cursor = await db.execute(
@@ -1882,11 +3444,16 @@ class SlangStore:
                WHERE scope = 'group' AND status IN ('candidate', 'approved')"""
         )
         groups: dict[str, list[SlangTerm]] = {}
+        alias_sources: dict[str, list[SlangTerm]] = {}
         for row in await cursor.fetchall():
             term = _row_to_term(row)
-            groups.setdefault(normalize_term(term.term), []).append(term)
+            term_key = normalize_term(term.term)
+            if term_key:
+                groups.setdefault(term_key, []).append(term)
             for alias in term.aliases:
-                groups.setdefault(normalize_term(alias), []).append(term)
+                alias_key = normalize_term(alias)
+                if alias_key:
+                    alias_sources.setdefault(alias_key, []).append(term)
         created = 0
         skipped = 0
         seen_source_sets: set[tuple[str, ...]] = set()
@@ -1900,7 +3467,18 @@ class SlangStore:
                 skipped += 1
                 continue
             seen_source_sets.add(source_set)
-            existing_global = await self.find_existing(term=terms[0].term, group_id="", scope="global")
+            related_alias_terms = alias_sources.get(key, [])
+            aliases = _dedupe(
+                [term.term for term in terms]
+                + [alias for term in terms for alias in term.aliases]
+                + [term.term for term in related_alias_terms]
+            )
+            existing_global = await self.find_existing(
+                term=terms[0].term,
+                aliases=aliases,
+                group_id="",
+                scope="global",
+            )
             if existing_global:
                 skipped += 1
                 continue
@@ -1946,6 +3524,7 @@ class SlangStore:
                         "global_candidate": True,
                         "source_term_ids": [term.term_id for term in terms],
                         "source_groups": sorted(unique_groups),
+                        "alias_source_term_ids": [term.term_id for term in related_alias_terms],
                     }, ensure_ascii=False),
                     now,
                     now,
@@ -1953,7 +3532,41 @@ class SlangStore:
             )
             created += 1
         await db.commit()
+        if created:
+            await self._invalidate_term_snapshot_cache()
         return {"ok": True, "created": created, "skipped": skipped}
+
+    async def _load_group_term_snapshot(self, group_id: str, *, include_global: bool = True) -> list[SlangTerm]:
+        cached = self._get_cached_term_snapshot(group_id)
+        if include_global and cached is not None:
+            return cached
+        db = self._require_db()
+        if include_global:
+            cursor = await db.execute(
+                """SELECT * FROM slang_terms
+                   WHERE scope = 'global' OR (scope = 'group' AND group_id = ?)
+                   ORDER BY
+                     CASE status WHEN 'approved' THEN 0 WHEN 'candidate' THEN 1 WHEN 'muted' THEN 2 ELSE 3 END,
+                     confidence DESC,
+                     usage_count DESC,
+                     updated_at DESC""",
+                (group_id,),
+            )
+        else:
+            cursor = await db.execute(
+                """SELECT * FROM slang_terms
+                   WHERE scope = 'group' AND group_id = ?
+                   ORDER BY
+                     CASE status WHEN 'approved' THEN 0 WHEN 'candidate' THEN 1 WHEN 'muted' THEN 2 ELSE 3 END,
+                     confidence DESC,
+                     usage_count DESC,
+                     updated_at DESC""",
+                (group_id,),
+            )
+        terms = [_row_to_term(row) for row in await cursor.fetchall()]
+        if include_global:
+            self._set_cached_term_snapshot(group_id, terms)
+        return terms
 
     async def find_matching_terms(
         self,
@@ -1964,23 +3577,22 @@ class SlangStore:
     ) -> list[SlangTerm]:
         if not group_id or not text:
             return []
-        statuses = ("approved", "candidate") if include_candidates else ("approved",)
-        placeholders = ",".join("?" for _ in statuses)
-        db = self._require_db()
-        cursor = await db.execute(
-            f"""SELECT * FROM slang_terms
-                WHERE status IN ({placeholders})
-                  AND (scope = 'global' OR (scope = 'group' AND group_id = ?))""",
-            [*statuses, group_id],
-        )
-        normalized_text = normalize_term(text)
+        statuses = {"approved", "candidate"} if include_candidates else {"approved"}
+        settings = await self.load_settings()
+        stop_keys = {normalize_term(item) for item in settings.stoplist}
+        stop_keys = {key for key in stop_keys if key}
         result: list[SlangTerm] = []
-        for row in await cursor.fetchall():
-            term = _row_to_term(row)
+        for term in await self._load_group_term_snapshot(
+            str(group_id),
+            include_global=settings.allows_global_terms(group_id),
+        ):
+            if term.status not in statuses:
+                continue
+            if _matches_any_key(term.term, term.aliases, stop_keys):
+                continue
             candidates = [term.term, *term.aliases]
             for candidate in candidates:
-                key = normalize_term(candidate)
-                if len(key) >= 2 and key in normalized_text:
+                if matches_slang_candidate(candidate, text):
                     result.append(term)
                     break
         return result
@@ -1995,20 +3607,23 @@ class SlangStore:
     ) -> list[SlangTerm]:
         if not group_id:
             return []
-        db = self._require_db()
-        cursor = await db.execute(
-            """SELECT * FROM slang_terms
-               WHERE status = 'approved'
-                 AND confidence >= ?
-                 AND (scope = 'global' OR (scope = 'group' AND group_id = ?))""",
-            (max(0.0, min(1.0, float(min_confidence or 0.0))), group_id),
-        )
-        terms = [_row_to_term(row) for row in await cursor.fetchall()]
-        normalized_text = normalize_term(conversation_text)
+        settings = await self.load_settings()
+        stop_keys = {normalize_term(item) for item in settings.stoplist}
+        stop_keys = {key for key in stop_keys if key}
+        terms = [
+            term
+            for term in await self._load_group_term_snapshot(
+                str(group_id),
+                include_global=settings.allows_global_terms(group_id),
+            )
+            if term.status == "approved"
+            and term.confidence >= max(0.0, min(1.0, float(min_confidence or 0.0)))
+            and not _matches_any_key(term.term, term.aliases, stop_keys)
+        ]
 
         def score(term: SlangTerm) -> tuple[int, int, float, int, str]:
             names = [term.term, *term.aliases]
-            direct = any(normalize_term(name) in normalized_text for name in names if len(normalize_term(name)) >= 2)
+            direct = any(matches_slang_candidate(name, conversation_text) for name in names)
             scope_priority = 1 if term.scope == "group" else 0
             return (1 if direct else 0, scope_priority, term.confidence, term.usage_count, term.last_seen_at)
 
@@ -2027,10 +3642,16 @@ class SlangStore:
         query_value = str(query or "").strip()
         key = normalize_term(query_value)
         min_conf = max(0.0, min(1.0, float(min_confidence or 0.0)))
+        settings = await self.load_settings()
+        stop_keys = {normalize_term(item) for item in settings.stoplist}
+        stop_keys = {item for item in stop_keys if item}
         where = ["status = 'approved'", "confidence >= ?"]
         values: list[Any] = [min_conf]
         if group_id:
-            where.append("(scope = 'global' OR (scope = 'group' AND group_id = ?))")
+            if settings.allows_global_terms(group_id):
+                where.append("(scope = 'global' OR (scope = 'group' AND group_id = ?))")
+            else:
+                where.append("(scope = 'group' AND group_id = ?)")
             values.append(str(group_id))
         else:
             where.append("scope = 'global'")
@@ -2045,11 +3666,23 @@ class SlangStore:
                 LIMIT ?""",
             [*values, max(1, min(int(limit or 6), 20))],
         )
-        terms = [_row_to_term(row) for row in await cursor.fetchall()]
+        terms = [
+            term
+            for term in (_row_to_term(row) for row in await cursor.fetchall())
+            if not _matches_any_key(term.term, term.aliases, stop_keys)
+        ]
         if terms or not key:
             return terms
-        scope_sql = "scope = 'global'" if not group_id else "(scope = 'global' OR (scope = 'group' AND group_id = ?))"
-        scope_values: list[Any] = [] if not group_id else [str(group_id)]
+        if not group_id:
+            scope_sql = "scope = 'global'"
+            scope_values: list[Any] = []
+        else:
+            scope_sql = (
+                "(scope = 'global' OR (scope = 'group' AND group_id = ?))"
+                if settings.allows_global_terms(group_id)
+                else "(scope = 'group' AND group_id = ?)"
+            )
+            scope_values = [str(group_id)]
         cursor = await db.execute(
             f"""SELECT * FROM slang_terms
                 WHERE status = 'approved'
@@ -2062,10 +3695,12 @@ class SlangStore:
         matches: list[SlangTerm] = []
         for row in await cursor.fetchall():
             term = _row_to_term(row)
+            if _matches_any_key(term.term, term.aliases, stop_keys):
+                continue
             names = [term.term, *term.aliases]
             meaning_similarity = _ngram_similarity(query_value, term.meaning)
             if (
-                any(key in normalize_term(name) or normalize_term(name) in key for name in names)
+                any(matches_slang_candidate(name, query_value) for name in names)
                 or meaning_similarity >= 0.2
             ):
                 matches.append(term)
@@ -2080,18 +3715,26 @@ class SlangStore:
         max_terms: int = 8,
         max_chars: int = 1200,
     ) -> str:
+        conversation_text = str(conversation_text or "").strip()
+        if not conversation_text:
+            return ""
         terms = await self.get_injectable_terms(
             group_id=group_id,
             conversation_text=conversation_text,
             max_terms=max_terms,
             min_confidence=(await self.load_settings()).min_inject_confidence,
         )
-        if not terms:
+        direct_terms = [
+            term
+            for term in terms
+            if any(matches_slang_candidate(name, conversation_text) for name in [term.term, *term.aliases])
+        ]
+        if not direct_terms:
             return ""
         lines = [
-            "以下是当前群的黑话/约定用语。优先用于理解群聊上下文，不要为了显得懂梗而强行复述。",
+            "以下是当前群本轮上下文命中的已批准黑话。优先用于理解群聊上下文，不要为了显得懂梗而强行复述。",
         ]
-        for term in terms:
+        for term in direct_terms:
             aliases = f"；别名：{'、'.join(term.aliases[:5])}" if term.aliases else ""
             policy = {
                 "understand_only": "仅理解，不主动复述",
@@ -2232,6 +3875,7 @@ class SlangStore:
         latest_run = _row_to_run(run_row) if run_row else None
         ai_reviewed = _ai_review_sql_condition()
         human_reviewed = _human_reviewed_sql_condition()
+        ai_rejected = _ai_rejected_sql_condition()
         cursor = await db.execute(
             f"SELECT COUNT(*) AS cnt FROM slang_terms WHERE status = 'approved' AND {ai_reviewed}"
         )
@@ -2241,8 +3885,54 @@ class SlangStore:
                 WHERE status = 'approved' AND {ai_reviewed} AND NOT {human_reviewed}"""
         )
         ai_pending_review_count = int((await cursor.fetchone())["cnt"] or 0)
+        candidate_reviewed = _candidate_reviewed_sql_condition()
+        candidate_review_approved = _candidate_review_approved_sql_condition()
+        candidate_review_observe = _candidate_observe_sql_condition()
+        candidate_review_failed = _candidate_review_failed_sql_condition()
+        cursor = await db.execute(
+            f"""SELECT COUNT(*) AS cnt FROM slang_terms
+                WHERE status = 'candidate' AND {candidate_reviewed}"""
+        )
+        candidate_reviewed_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            f"""SELECT COUNT(*) AS cnt FROM slang_terms
+                WHERE status = 'candidate' AND NOT {candidate_reviewed}"""
+        )
+        candidate_unreviewed_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            f"""SELECT COUNT(*) AS cnt FROM slang_terms
+                WHERE status = 'candidate' AND {candidate_review_approved}"""
+        )
+        candidate_review_approved_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            f"""SELECT COUNT(*) AS cnt FROM slang_terms
+                WHERE status IN ('candidate', 'muted') AND {ai_rejected}"""
+        )
+        candidate_review_rejected_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            f"""SELECT COUNT(*) AS cnt FROM slang_terms
+                WHERE status = 'candidate' AND {candidate_review_observe}"""
+        )
+        candidate_review_kept_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            f"""SELECT COUNT(*) AS cnt FROM slang_terms
+                WHERE status = 'candidate' AND {candidate_review_failed}"""
+        )
+        candidate_review_failed_count = int((await cursor.fetchone())["cnt"] or 0)
+        candidate_total_count = counts.get("candidate", 0)
         return {
-            "candidate_count": counts.get("candidate", 0),
+            # Backward compatibility: old admin bundles used candidate_count for
+            # the "待审核" card. Keep that legacy field fail-closed as the
+            # actually unreviewed count so cached JS cannot display all
+            # candidates as unreviewed again.
+            "candidate_count": candidate_unreviewed_count,
+            "candidate_total_count": candidate_total_count,
+            "candidate_reviewed_count": candidate_reviewed_count,
+            "candidate_unreviewed_count": candidate_unreviewed_count,
+            "candidate_review_approved_count": candidate_review_approved_count,
+            "candidate_review_rejected_count": candidate_review_rejected_count,
+            "candidate_review_kept_count": candidate_review_kept_count,
+            "candidate_review_failed_count": candidate_review_failed_count,
             "approved_count": counts.get("approved", 0),
             "muted_count": counts.get("muted", 0),
             "expired_count": counts.get("expired", 0),

@@ -12,7 +12,7 @@ const SPA_ROUTES = new Set([
   '/admin/soul', '/admin/soul/persona-guide', '/admin/schedule', '/admin/memory', '/admin/affection',
   '/admin/stickers', '/admin/knowledge', '/admin/memos', '/admin/slang', '/admin/groups',
   '/admin/plugins', '/admin/scheduler', '/admin/config', '/admin/system',
-  '/admin/logs',
+  '/admin/logs', '/admin/design-playground',
 ])
 const SPA_ROUTE_PREFIXES = [
   '/admin/plugins/',

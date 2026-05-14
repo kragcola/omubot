@@ -65,6 +65,7 @@ schedule = false
 scheduler = false
 usage = false
 compact = false
+reply_workflow = false
 
 # ---------------------------------------------------------------------------
 # 人设与指令（soul 目录）
@@ -97,7 +98,10 @@ cache_alert_cooldown_m = 10.0
 # 启动时从 NapCat 拉取的历史消息条数
 history_load_count = 30
 
-# 群聊白名单，只处理这些群的消息。空数组 = 不限制
+# Legacy 兼容字段：旧配置里填过的群会保持 active 发言，避免迁移后突然静默。
+# 新装与日常维护请改用 /admin/groups 页面，它会写入独立文件：
+#   config/group-policy.json
+# 规则：whitelist=白名单群开启，其余关闭；blacklist=黑名单群关闭，其余开启。
 # allowed_groups = [100001, 100002]
 allowed_groups = []
 
@@ -121,6 +125,80 @@ blocked_users = []
 
 # 群聊隐私遮掩（发言人 QQ 号脱敏为 "某群友"）
 privacy_mask = true
+
+# 新群默认静默学习：只记录和学习黑话，不主动/被动回复。
+# 如需让某个群发言，在管理端群 Profile 里把“参与模式”改为 active；
+# 或在配置 JSON/TOML 中设置 group.overrides.<群号>.presence_mode = "active"。
+#
+# [group.presence]
+# default_mode = "silent_learn"  # active / silent_learn / off
+#
+# [group.overrides.100001]
+# presence_mode = "active"
+#
+# 独立门禁文件 config/group-policy.json:
+# {
+#   "mode": "whitelist",
+#   "whitelist": [100001],
+#   "blacklist": [],
+#   "log_dropped": true
+# }
+
+# ---------------------------------------------------------------------------
+# 回复分段
+# 控制可见回复如何切段与逐段发送；不影响知识库 chunking
+# ---------------------------------------------------------------------------
+[reply_segmentation]
+enabled = true
+max_segment_chars = 20
+min_segment_chars = 6
+# 0 = 不限制正常分段数量；仅在需要防极端刷屏时设为正数
+max_send_segments = 0
+# 极端长回复软上限：超过后截断并补自然收尾；0 = 默认关闭软上限
+soft_max_send_segments = 0
+soft_limit_notice = "先说到这里啦，不然我要刷屏了☆"
+# pysbd_hybrid = pySBD 候选句边界 + Omubot 聊天节奏；local = 本地规则回退
+boundary_backend = "pysbd_hybrid"
+prefer_sentence_break = true
+preserve_ascii_tokens = true
+merge_short_tail = true
+first_segment_humanize = "skip"
+later_segment_humanize = "normal"
+inter_segment_delay_s = 0.8
+
+# ---------------------------------------------------------------------------
+# 回复工作流观测
+# shadow 只记录观测日志；semantic 使用小模型 gate；off 关闭观测。
+# 旧值 rules 会被兼容读取为 shadow，不再消费真实行为。
+# ---------------------------------------------------------------------------
+[reply_workflow]
+# shadow = 记录观测日志；semantic = 高置信语义承接转 directed_followup；off = 关闭观测。
+mode = "shadow"
+# semantic 模式下，小模型返回 force_reply 且置信度不低于该值才会强触发
+semantic_force_threshold = 0.78
+# semantic gate 单次调用超时毫秒数；超时 fail closed。DeepSeek 线上首字节常超过 600ms。
+semantic_timeout_ms = 2200
+# 进入 semantic gate 的当前消息最大字符数
+semantic_max_chars = 48
+# 承接类短句判断最近 bot 回复的时间窗口（秒）
+directed_followup_window_s = 180.0
+# 是否记录私聊当前直进 LLM 路径的观测日志
+shadow_log_private = true
+
+# ---------------------------------------------------------------------------
+# 群聊调度并发
+# ---------------------------------------------------------------------------
+[scheduler.concurrency]
+# 全局同时进行的群聊 LLM 调用数。建议 2 起步，稳定后再调高。
+global_llm_limit = 2
+# 预留：单群队列软上限。当前保守实现仅暴露配置，后续 actor 化时启用。
+max_group_queue = 8
+# 预留：低优先级队列软上限。
+max_low_priority_queue = 3
+# 实验项：首段发送后释放下一轮生成。当前默认关闭，避免贴纸/文字顺序交错。
+first_segment_release = false
+# 预留：低优先级事件过期时间。
+drop_stale_low_priority_after_s = 45.0
 
 # ---------------------------------------------------------------------------
 # 群聊单群覆盖（可选）

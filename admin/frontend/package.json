@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0 <21"
+  },
   "scripts": {
     "predev": "bash ../../scripts/cleanup-appledouble.sh",
     "dev": "vite",

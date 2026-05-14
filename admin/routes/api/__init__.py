@@ -142,6 +142,6 @@ def create_api_router(
     router.include_router(create_style_router(ctx=ctx, message_log=message_log, llm_client=llm_client))
     router.include_router(create_learning_normalizer_router(ctx=ctx))
     router.include_router(create_learning_router(ctx=ctx))
-    router.include_router(create_events_router(scheduler=scheduler))
+    router.include_router(create_events_router(scheduler=scheduler, message_log=message_log, ctx=ctx))
 
     return router

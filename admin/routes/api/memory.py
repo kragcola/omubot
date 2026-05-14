@@ -23,6 +23,7 @@ def create_memory_router(
     async def list_cards(
         scope: str = Query(""),
         scope_id: str = Query(""),
+        sort: str = Query("default"),
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ):
@@ -36,10 +37,12 @@ def create_memory_router(
                 kwargs["scope"] = scope
             if scope_id:
                 kwargs["scope_id"] = scope_id
+            kwargs["sort"] = "time" if sort == "time" else "default"
             cards = await store.list_cards(**kwargs)
             return {
                 "cards": [_card_to_dict(c) for c in cards],
                 "total": len(cards),
+                "sort": kwargs["sort"],
             }
         except Exception as e:
             return {"cards": [], "total": 0, "error": str(e)}
@@ -190,6 +193,7 @@ def create_memory_router(
                     "label": s.label or s.series_key,
                     "source": s.source,
                     "created_at": s.created_at,
+                    "updated_at": s.updated_at,
                 })
             return {"series": result}
         except Exception as e:
@@ -212,6 +216,7 @@ def create_memory_router(
                     "source": s.source,
                     "card_count": len(cards),
                     "created_at": s.created_at,
+                    "updated_at": s.updated_at,
                 })
             return {"series": result}
         except Exception as e:

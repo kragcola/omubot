@@ -39,6 +39,13 @@ cd omubot
 uv sync
 ```
 
+macOS 外置盘开发可选说明：
+
+- 如果仓库放在 `exFAT` 外置盘上，推荐先用 `scripts/dev/mount-workspace.sh --create` 建立 sparseimage 工作区，再把仓库复制到挂载点里开发；如果 APFS 镜像在你的外置盘上无法挂载，可设置 `OMUBOT_WORKSPACE_FS='JHFS+'` 使用 HFS+ 兜底。
+- 默认挂载点建议放在用户家目录，例如 `~/OmubotWorkspace`；映像文件本身仍然放在外置盘上，所以主要容量仍占外置盘。
+- 进入新的工作区后，使用 `./scripts/dev/bootstrap.sh` 创建仓库内真实 `.venv`，再执行 `source ./scripts/dev/env.sh && ./scripts/dev/doctor.sh` 检查 `.venv` 和 `uv/pip` 缓存是否仍越界到 `~/...`。
+- 这套工作流只针对 macOS 外置盘开发者；普通用户和服务器部署不需要它。
+
 ### 2. 配置
 
 ```bash

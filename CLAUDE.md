@@ -10,6 +10,29 @@ uv run pytest tests/test_identity.py::test_name -v  # Single test
 uv run pyright                 # Type check
 ```
 
+macOS + exFAT 外置盘开发可选工作流：
+
+```bash
+cd "$HOME/OmubotWorkspace/omubot"
+source ./scripts/dev/env.sh                # Export repo-local uv/pip caches into the shell
+./scripts/dev/doctor.sh                    # Check FS / .venv / uv-cache / AppleDouble state
+```
+
+本机活跃开发根是 `~/OmubotWorkspace/omubot`，不要把 `/Volumes/我的电脑/omubot` 当作日常开发目录；后者是 `exFAT` 外置盘上的 staging checkout。
+如果工作区未挂载，先从外置盘 checkout 运行：
+
+```bash
+cd '/Volumes/我的电脑/omubot'
+OMUBOT_WORKSPACE_FS='JHFS+' \
+OMUBOT_WORKSPACE_BUNDLE='/Volumes/我的电脑/omubot/.workspace/OmubotWorkspace.sparseimage' \
+OMUBOT_WORKSPACE_MOUNT_POINT="$HOME/OmubotWorkspace" \
+./scripts/dev/mount-workspace.sh
+```
+
+本机已验证 APFS sparseimage 在该 exFAT 外置盘上挂载不稳定；当前稳定方案是 `JHFS+` sparseimage + `~/OmubotWorkspace` 挂载点。
+如需重建依赖，在新工作区执行 `./scripts/dev/bootstrap.sh`，然后 `source ./scripts/dev/env.sh && ./scripts/dev/doctor.sh`。
+更多 agent 约定见 [AGENTS.md](AGENTS.md)。
+
 | Task | Command |
 |------|---------|
 | Run locally | `docker compose up napcat -d && uv run python bot.py` |

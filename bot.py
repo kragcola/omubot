@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import time
 from pathlib import Path
 
@@ -55,9 +56,17 @@ logger.info(
     _c.group.debounce_seconds, _c.group.batch_size,
 )
 logger.info(
-    "[Group] history_load={} allowed={}",
+    "[Group] history_load={} presence_default={} legacy_allowed={}",
     _c.group.history_load_count,
+    _c.group.presence.default_mode,
     _c.group.allowed_groups or "无限制",
+)
+logger.info(
+    "[GroupAccess] mode={} whitelist={} blacklist={} log_dropped={}",
+    _c.group.access.mode,
+    _c.group.access.whitelist or [],
+    _c.group.access.blacklist or [],
+    _c.group.access.log_dropped,
 )
 logger.info(
     "[Access] admins={} private_whitelist={}",
@@ -92,7 +101,220 @@ _CHANNEL_LABELS = {
     "debug": "调试    ",
     "dream": "梦境    ",
     "bilibili": "B站     ",
+    "reply_workflow": "回复流  ",
+    "send_queue": "发送队列",
 }
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _trim_text(value: object, limit: int = 72) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _humanize_scheduler_message(message: str) -> str:
+    if " at_mention -> fire" in message:
+        return message.replace("at_mention -> fire", "@触发，立即回复")
+    if " directed_followup -> fire" in message:
+        return message.replace("directed_followup -> fire", "承接追问，立即回复")
+    if " video_always -> fire" in message:
+        return message.replace("video_always -> fire", "视频触发，立即回复")
+
+    match = re.search(
+        r"scheduler \| group=(?P<group>\d+) prob (?P<action>fire|skip) "
+        r"\(threshold=(?P<threshold>[0-9.]+) mood=(?P<mood>[0-9.]+) "
+        r"time=(?P<time>[0-9.]+) msgs=(?P<msgs>\d+) skips=(?P<skips>\d+) mode=(?P<mode>[^)]+)\)",
+        message,
+    )
+    if match:
+        action = "命中回复" if match.group("action") == "fire" else "本轮跳过"
+        return (
+            f"group={match.group('group')} 概率调度：{action} "
+            f"(阈值={match.group('threshold')} 心情={match.group('mood')} "
+            f"时段={match.group('time')} 攒消息={match.group('msgs')} "
+            f"连续跳过={match.group('skips')} 模式={match.group('mode')})"
+        )
+
+    match = re.search(
+        r"scheduler llm slow \| group=(?P<group>\d+) elapsed=(?P<elapsed>[0-9.]+)s trigger=(?P<trigger>\S+)",
+        message,
+    )
+    if match:
+        return (
+            f"group={match.group('group')} LLM 偏慢 "
+            f"(耗时={match.group('elapsed')}s 触发={match.group('trigger')})"
+        )
+
+    match = re.search(
+        r"scheduler reply batch metrics \| group=(?P<group>\d+) segments=(?P<segments>\d+) "
+        r"reply_batch_queue_wait_s=(?P<queue>[0-9.]+) first_segment_elapsed_s=(?P<first>[0-9.]+) "
+        r"tail_send_elapsed_s=(?P<tail>[0-9.]+) total_send_elapsed_s=(?P<total>[0-9.]+) "
+        r"interleave_count=(?P<interleave>\d+)",
+        message,
+    )
+    if match:
+        return (
+            f"group={match.group('group')} 回复批次：{match.group('segments')} 段 "
+            f"(排队={match.group('queue')}s 首段={match.group('first')}s "
+            f"尾段={match.group('tail')}s 总发送={match.group('total')}s "
+            f"插队={match.group('interleave')})"
+        )
+
+    match = re.search(
+        r"scheduler reply batch send complete \| group=(?P<group>\d+) segments=(?P<segments>\d+) "
+        r"send_total=(?P<total>[0-9.]+)s first_release=(?P<release>\S+)",
+        message,
+    )
+    if match:
+        release = "首段即放行" if match.group("release") == "True" else "完整批次后放行"
+        return (
+            f"group={match.group('group')} 回复发送完成 "
+            f"({match.group('segments')} 段，总耗时={match.group('total')}s，{release})"
+        )
+
+    match = re.search(
+        r"scheduler reply batch released after first segment \| group=(?P<group>\d+) "
+        r"segments_sent=(?P<segments>\d+) send_elapsed=(?P<elapsed>[0-9.]+)s",
+        message,
+    )
+    if match:
+        return (
+            f"group={match.group('group')} 首段已发出并释放后续生成 "
+            f"(已发={match.group('segments')} 段，耗时={match.group('elapsed')}s)"
+        )
+
+    match = re.search(
+        r"scheduler reply send complete \| group=(?P<group>\d+) "
+        r"segments=(?P<segments>\d+) send_total=(?P<total>[0-9.]+)s",
+        message,
+    )
+    if match:
+        return (
+            f"group={match.group('group')} 回复发送完成 "
+            f"({match.group('segments')} 段，总耗时={match.group('total')}s)"
+        )
+
+    match = re.search(r"scheduler \| group=(?P<group>\d+) (?P<rest>.+)", message)
+    if match:
+        return f"group={match.group('group')} {match.group('rest')}"
+    return message
+
+
+def _humanize_reply_workflow_message(message: str) -> str:
+    if "semantic gate failed closed" in message:
+        match = re.search(
+            r"semantic gate failed closed \| error_type=(?P<etype>\w+) timeout_ms=(?P<timeout>\d+) error=(?P<error>.*)",
+            message,
+        )
+        if match:
+            detail = _trim_text(match.group("error"), 48)
+            suffix = f" 详情={detail}" if detail else ""
+            return (
+                f"语义 gate 失败，按静默回退 "
+                f"(类型={match.group('etype')} 超时={match.group('timeout')}ms{suffix})"
+            )
+        return "语义 gate 失败，按静默回退"
+
+    match = re.search(
+        r"reply_workflow \| conversation=(?P<conversation>\S+) event_id=(?P<event>\S+) "
+        r"mode=(?P<mode>\S+) action=(?P<action>\S+) source=(?P<source>\S+) "
+        r"confidence=(?P<confidence>[0-9.]+) latency_ms=(?P<latency>[0-9.]+) "
+        r"reason=(?P<reason>\S+) fields=(?P<fields>.*)",
+        message,
+    )
+    if not match:
+        return message
+
+    fields_text = match.group("fields")
+    preview_match = re.search(r"'text_preview': '([^']*)'", fields_text)
+    candidate_match = re.search(r"'candidate_reason': '([^']*)'", fields_text)
+    consumed_match = re.search(r"'consumed': (True|False)", fields_text)
+    intent_match = re.search(r"'intent': '([^']*)'", fields_text)
+
+    extra_parts = []
+    if preview_match:
+        extra_parts.append(f"文本={_trim_text(preview_match.group(1), 24)}")
+    if candidate_match:
+        extra_parts.append(f"候选={candidate_match.group(1)}")
+    if intent_match:
+        extra_parts.append(f"意图={intent_match.group(1)}")
+    if consumed_match:
+        extra_parts.append(f"消费={consumed_match.group(1)}")
+    extra = " ".join(extra_parts)
+    if extra:
+        extra = f" {extra}"
+
+    return (
+        f"{match.group('conversation')} 回复流：{match.group('mode')} -> {match.group('action')} "
+        f"(来源={match.group('source')} 置信度={match.group('confidence')} "
+        f"耗时={match.group('latency')}ms 原因={match.group('reason')}{extra})"
+    )
+
+
+def _humanize_send_queue_message(message: str) -> str:
+    match = re.search(
+        r"reply batch yielded between segments \| group=(?P<group>\d+) desc=(?P<desc>.+) interleaved=(?P<item>.+)",
+        message,
+    )
+    if match:
+        return (
+            f"group={match.group('group')} 回复批次段间让位 "
+            f"(批次={_trim_text(match.group('desc'), 18)} 插入={_trim_text(match.group('item'), 18)})"
+        )
+    match = re.search(
+        r"send queue slow \| group=(?P<group>\d+) kind=(?P<kind>\S+) "
+        r"desc=(?P<desc>.*?) humanize=(?P<humanize>\S+) "
+        r"len=(?P<len>\S+) elapsed=(?P<elapsed>[0-9.]+)s",
+        message,
+    )
+    if match:
+        return (
+            f"group={match.group('group')} 发送偏慢 "
+            f"(类型={match.group('kind')} 描述={_trim_text(match.group('desc'), 18)} "
+            f"长度={match.group('len')} 耗时={match.group('elapsed')}s)"
+        )
+    return message
+
+
+def _humanize_message_out(message: str) -> str:
+    match = re.search(
+        r"(?P<preview>'.*?') \| sticker=(?P<sticker>\S+) len=(?P<len>\d+) segments=(?P<segments>\d+) "
+        r"segmentation_raw_count=(?P<raw>\d+) segmentation_capped_count=(?P<capped>\d+) "
+        r"segmentation_limit=(?P<limit>\S+) segmentation_strategy=(?P<strategy>\S+) "
+        r"segmentation_break_reasons=(?P<reasons>\S+) llm=(?P<llm>[0-9.]+)s "
+        r"send_partial_elapsed=(?P<send>[0-9.]+)s total=(?P<total>[0-9.]+)s",
+        message,
+    )
+    if match:
+        preview = _trim_text(match.group("preview").strip("'"), 36)
+        return (
+            f"{preview} | 表情={match.group('sticker')} 长度={match.group('len')} "
+            f"分段={match.group('segments')} 原始={match.group('raw')} "
+            f"实际={match.group('capped')} 限制={match.group('limit')} "
+            f"切分={match.group('strategy')} 断点={match.group('reasons')} "
+            f"LLM={match.group('llm')}s 发送={match.group('send')}s 总计={match.group('total')}s"
+        )
+    return message
+
+
+def _humanize_console_message(channel: str | None, message: str) -> str:
+    if channel == "scheduler":
+        return _humanize_scheduler_message(message)
+    if channel == "reply_workflow":
+        return _humanize_reply_workflow_message(message)
+    if channel == "send_queue":
+        return _humanize_send_queue_message(message)
+    if channel == "message_out":
+        return _humanize_message_out(message)
+    return message
 
 
 def _channel_format(record: loguru.Record) -> str:
@@ -101,7 +323,8 @@ def _channel_format(record: loguru.Record) -> str:
     channel = record["extra"].get("channel")
     # Escape curly braces so that loguru's stderr colorizer doesn't parse
     # JSON-like content (e.g. [json:data={...}]) in messages as format fields.
-    msg = record["message"].replace("{", "{{").replace("}", "}}")
+    msg = _humanize_console_message(channel, record["message"])
+    msg = msg.replace("{", "{{").replace("}", "}}")
 
     if channel and channel in _CHANNEL_LABELS:
         label = _CHANNEL_LABELS[channel]

@@ -26,6 +26,12 @@ export default defineConfig({
     ['auto-bg-highlight', 'bg-[var(--om-surface-2)]'],
     ['text-highlight', 'rounded-8 px-10 py-4 bg-[var(--om-surface-2)] text-[var(--om-text-2)]'],
     ['card-shadow', 'shadow-[0_16px_40px_rgba(23,42,48,0.12)] dark:shadow-[0_18px_44px_rgba(0,0,0,0.34)]'],
+    ['section-title', 'text-16 font-600 text-[var(--om-text-1)]'],
+    ['section-hint', 'text-12 text-[var(--om-text-3)] leading-relaxed'],
+    ['metric-num', 'text-28 font-700 text-[var(--om-text-1)] tracking-tight'],
+    ['chip', 'inline-flex items-center gap-4 px-8 py-2 rounded-999 text-12 border card-border'],
+    ['panel', 'rounded-12 bg-[var(--om-surface)] border card-border p-16'],
+    ['toolbar-row', 'flex items-center justify-between gap-12 py-12'],
   ],
   theme: {
     colors: {

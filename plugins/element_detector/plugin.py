@@ -5,6 +5,7 @@ Pipeline interceptor (priority=210), runs after EchoPlugin (200).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
 from dataclasses import dataclass
@@ -99,6 +100,8 @@ class ElementDetectorPlugin(AmadeusPlugin):
     async def on_message(self, ctx: MessageContext) -> bool:
         if ctx.is_private or self._detector is None:
             return False
+        if not getattr(ctx, "allow_speaking", True):
+            return False
 
         plain_text: str = ctx.raw_message.get("plain_text", "")
         if not plain_text:
@@ -134,22 +137,63 @@ class ElementDetectorPlugin(AmadeusPlugin):
                 logger.exception("element llm call failed")
             if not reply_text:
                 reply_text = "确实 (｡･ω･｡)"
-            await self._humanizer.delay(reply_text)
-            await ctx.bot.send_group_msg(group_id=int(group_id), message=reply_text)
-            self._timeline.add(
-                group_id, role="assistant", speaker="", content=reply_text, message_id=0,
-            )
+            await self._record_and_send_reply(ctx, group_id, reply_text)
             _log.info(
                 "element+llm | group={} {}({}) reply={!r}",
                 group_id, ctx.nickname, ctx.user_id, reply_text[:80],
             )
         else:
             reply_text = match.reply_template
-            await self._humanizer.delay(reply_text)
-            await ctx.bot.send_group_msg(group_id=int(group_id), message=reply_text)
-            self._timeline.add(
-                group_id, role="assistant", speaker="", content=reply_text, message_id=0,
-            )
+            await self._record_and_send_reply(ctx, group_id, reply_text)
             _log.info("element | group={} {}({}) matched", group_id, ctx.nickname, ctx.user_id)
 
         return True
+
+    async def _record_and_send_reply(self, ctx: MessageContext, group_id: str, reply_text: str) -> None:
+        scheduler_enqueue = getattr(self._scheduler, "enqueue_group_text", None)
+        if scheduler_enqueue is not None:
+            send_done = await scheduler_enqueue(
+                group_id,
+                reply_text,
+                description="element_detector",
+            )
+            turn_id = self._timeline.add(
+                group_id,
+                role="assistant",
+                speaker="",
+                content=reply_text,
+                message_id=0,
+                assistant_visible_state="pending",
+            )
+            task = asyncio.create_task(self._mark_visible_when_sent(group_id, turn_id, send_done))
+            task.add_done_callback(self._consume_background_result)
+            return
+
+        await self._humanizer.delay(reply_text)
+        await ctx.bot.send_group_msg(group_id=int(group_id), message=reply_text)
+        self._timeline.add(
+            group_id,
+            role="assistant",
+            speaker="",
+            content=reply_text,
+            message_id=0,
+        )
+
+    async def _mark_visible_when_sent(
+        self,
+        group_id: str,
+        turn_id: str | None,
+        send_done: asyncio.Future[float],
+    ) -> None:
+        try:
+            await send_done
+        except Exception:
+            self._timeline.mark_assistant_visible_state(group_id, turn_id, "failed")
+            logger.exception("element queued send failed | group={}", group_id)
+            return
+        self._timeline.mark_assistant_visible_state(group_id, turn_id, "complete")
+
+    @staticmethod
+    def _consume_background_result(task: asyncio.Task[None]) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()

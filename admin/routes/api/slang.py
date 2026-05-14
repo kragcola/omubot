@@ -3,13 +3,30 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import aiosqlite
 from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
+from loguru import logger
 
-from services.slang import SlangExtractor, SlangSettings, SlangStore, normalize_term
+from services.conversation_archive import add_evidence_message_ref, finish_scan_batch, read_scan_batch
+from services.slang import (
+    SlangDailyReviewer,
+    SlangDatabaseCorruptError,
+    SlangDriftReviewer,
+    SlangExtractor,
+    SlangSettings,
+    SlangStore,
+    normalize_term,
+)
+from services.slang.quality import estimate_slang_occurrences, select_slang_source_row, speaker_to_user_id
 from services.slang.types import (
     SlangDriftReview,
     SlangExtractionRun,
@@ -18,6 +35,21 @@ from services.slang.types import (
     SlangTerm,
     SlangTermRevision,
 )
+
+_L = logger.bind(channel="system")
+_REPAIR_SCRIPT = "scripts/dev/slang_db_repair.py"
+
+
+def _slang_db_error_payload(detail: str, db_path: str = "") -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error_code": "slang_db_corrupt",
+        "error": str(detail or "").strip() or "slang database corrupt",
+        "repair_script": _REPAIR_SCRIPT,
+    }
+    if db_path:
+        payload["db_path"] = db_path
+    return payload
 
 
 def _term_to_dict(term: SlangTerm) -> dict[str, Any]:
@@ -40,6 +72,16 @@ def _term_to_dict(term: SlangTerm) -> dict[str, Any]:
         "repeat_policy": term.repeat_policy,
         "notes": term.notes,
         "meta": term.meta,
+        "normalization": term.meta.get("normalization_cluster_id") and {
+            "cluster_id": term.meta.get("normalization_cluster_id"),
+            "item_id": term.meta.get("normalization_item_id"),
+            "canonical_text": term.meta.get("normalized_from"),
+            "normalized_key": term.meta.get("normalized_key"),
+            "method": term.meta.get("normalization_method"),
+            "score": term.meta.get("normalization_score"),
+            "auto_merged": term.meta.get("auto_merged"),
+            "features": term.meta.get("normalization_features") or {},
+        },
         "created_at": term.created_at,
         "updated_at": term.updated_at,
     }
@@ -76,6 +118,16 @@ def _pending_to_dict(candidate: SlangPendingCandidate) -> dict[str, Any]:
         "first_seen_at": candidate.first_seen_at,
         "last_seen_at": candidate.last_seen_at,
         "meta": candidate.meta,
+        "normalization": candidate.meta.get("normalization_cluster_id") and {
+            "cluster_id": candidate.meta.get("normalization_cluster_id"),
+            "item_id": candidate.meta.get("normalization_item_id"),
+            "canonical_text": candidate.meta.get("normalized_from"),
+            "normalized_key": candidate.meta.get("normalized_key"),
+            "method": candidate.meta.get("normalization_method"),
+            "score": candidate.meta.get("normalization_score"),
+            "auto_merged": candidate.meta.get("auto_merged"),
+            "features": candidate.meta.get("normalization_features") or {},
+        },
     }
 
 
@@ -128,29 +180,6 @@ def _drift_to_dict(drift: SlangDriftReview) -> dict[str, Any]:
     }
 
 
-def _speaker_to_user_id(speaker: str | None) -> str:
-    if not speaker:
-        return ""
-    tail = str(speaker).rsplit("(", 1)
-    if len(tail) == 2 and tail[1].endswith(")"):
-        value = tail[1][:-1]
-        return value if value.isdigit() else ""
-    return ""
-
-
-def _estimate_occurrences(term: str, aliases: list[str], rows: list[dict[str, Any]]) -> int:
-    keys = {normalize_term(term), *(normalize_term(alias) for alias in aliases)}
-    keys = {key for key in keys if len(key) >= 2}
-    if not keys:
-        return 1
-    count = 0
-    for row in rows:
-        text_key = normalize_term(str(row.get("content_text") or ""))
-        if any(key in text_key for key in keys):
-            count += 1
-    return max(1, count)
-
-
 def create_slang_router(
     *,
     ctx: Any = None,
@@ -159,8 +188,55 @@ def create_slang_router(
     llm_client: Any = None,
     store: SlangStore | None = None,
 ) -> APIRouter:
-    router = APIRouter()
     fallback_store: SlangStore | None = store
+
+    def _slang_db_path() -> str:
+        plugin = _plugin()
+        plugin_store = getattr(plugin, "store", None)
+        if plugin_store is not None:
+            return str(getattr(plugin_store, "db_path", getattr(plugin_store, "_db_path", "")) or "")
+        if ctx is not None:
+            ctx_store = getattr(ctx, "slang_store", None)
+            if ctx_store is not None:
+                return str(getattr(ctx_store, "db_path", getattr(ctx_store, "_db_path", "")) or "")
+        if fallback_store is not None:
+            return str(getattr(fallback_store, "db_path", getattr(fallback_store, "_db_path", "")) or "")
+        return ""
+
+    class SlangDBGuardRoute(APIRoute):
+        def get_route_handler(self):
+            original_handler = super().get_route_handler()
+
+            async def custom_route_handler(request: Request):
+                try:
+                    return await original_handler(request)
+                except SlangDatabaseCorruptError as exc:
+                    _L.error(
+                        "slang database corrupt | db={} error={} repair={}",
+                        exc.db_path,
+                        exc.detail,
+                        _REPAIR_SCRIPT,
+                    )
+                    return JSONResponse(
+                        status_code=503,
+                        content=_slang_db_error_payload(exc.detail, exc.db_path),
+                    )
+                except (sqlite3.DatabaseError, aiosqlite.DatabaseError) as exc:
+                    db_path = _slang_db_path()
+                    _L.error(
+                        "slang database corrupt | db={} error={} repair={}",
+                        db_path or "unknown",
+                        str(exc),
+                        _REPAIR_SCRIPT,
+                    )
+                    return JSONResponse(
+                        status_code=503,
+                        content=_slang_db_error_payload(str(exc), db_path),
+                    )
+
+            return custom_route_handler
+
+    router = APIRouter(route_class=SlangDBGuardRoute)
 
     def _plugin() -> Any:
         if bus is not None and hasattr(bus, "get_plugin"):
@@ -172,18 +248,26 @@ def create_slang_router(
         plugin = _plugin()
         plugin_store = getattr(plugin, "store", None)
         if plugin_store is not None:
+            if getattr(plugin_store, "_drift_reviewer", None) is None:
+                plugin_store.set_drift_reviewer(SlangDriftReviewer(_llm_client()))
             return plugin_store
         ctx_store = getattr(ctx, "slang_store", None) if ctx is not None else None
         if ctx_store is not None:
+            if getattr(ctx_store, "_drift_reviewer", None) is None:
+                ctx_store.set_drift_reviewer(SlangDriftReviewer(_llm_client()))
             return ctx_store
         if fallback_store is None:
             storage_dir = Path(getattr(ctx, "storage_dir", Path("storage"))) if ctx is not None else Path("storage")
             fallback_store = SlangStore(storage_dir / "slang.db")
             await fallback_store.init()
+            fallback_store.set_drift_reviewer(SlangDriftReviewer(_llm_client()))
             if ctx is not None:
                 ctx.slang_store = fallback_store
         elif not fallback_store.initialized:
             await fallback_store.init()
+            fallback_store.set_drift_reviewer(SlangDriftReviewer(_llm_client()))
+        elif getattr(fallback_store, "_drift_reviewer", None) is None:
+            fallback_store.set_drift_reviewer(SlangDriftReviewer(_llm_client()))
         return fallback_store
 
     def _message_log() -> Any:
@@ -220,6 +304,7 @@ def create_slang_router(
         scope: str = Query(""),
         status: str = Query(""),
         search: str = Query(""),
+        sort: str = Query("default"),
         min_confidence: float | None = Query(None, ge=0, le=1),
         review_filter: str = Query(""),
         page: int = Query(1, ge=1),
@@ -235,12 +320,14 @@ def create_slang_router(
             review_filter=review_filter,
             limit=page_size,
             offset=(page - 1) * page_size,
+            sort="time" if sort == "time" else "default",
         )
         return {
             "terms": [_term_to_dict(term) for term in terms],
             "total": total,
             "page": page,
             "page_size": page_size,
+            "sort": "time" if sort == "time" else "default",
         }
 
     @router.post("/slang/terms/bulk")
@@ -366,6 +453,17 @@ def create_slang_router(
             return {"ok": False, "error": "Drift review not found"}
         return {"ok": True, "term": _term_to_dict(term)}
 
+    @router.post("/slang/drift/replay")
+    async def replay_drift_reviews(request: Request):
+        body = await _read_json(request)
+        apply = bool(body.get("apply", False))
+        try:
+            limit = max(1, min(int(body.get("limit") or 100), 200))
+        except Exception:
+            limit = 100
+        slang_store = await _store()
+        return await slang_store.replay_open_drift_reviews(limit=limit, apply=apply)
+
     @router.get("/slang/terms/{term_id}")
     async def get_term(term_id: str):
         slang_store = await _store()
@@ -468,6 +566,307 @@ def create_slang_router(
         runs = await slang_store.list_extraction_runs(limit=limit)
         return {"runs": [_run_to_dict(run) for run in runs]}
 
+    @router.post("/slang/review/run")
+    async def run_daily_review(request: Request):
+        body = await _read_json(request)
+        group_id = str(body.get("group_id") or "").strip() or None
+        force = bool(body.get("force", False))
+        review_candidates = bool(body.get("review_candidates", False))
+        review_all_pending = bool(body.get("review_all_pending", False))
+        rerun_reviewed_candidates = bool(body.get("rerun_reviewed_candidates", False))
+        candidate_review_filter = str(body.get("candidate_review_filter") or "").strip()
+        slang_store = await _store()
+        settings = await slang_store.load_settings()
+        plugin = _plugin()
+        if plugin is not None:
+            if force and hasattr(plugin, "run_daily_ai_review"):
+                return await plugin.run_daily_ai_review(
+                    ctx,
+                    settings=settings,
+                    group_id=group_id,
+                    review_candidates=review_candidates,
+                    review_all_pending=review_all_pending,
+                    rerun_reviewed_candidates=rerun_reviewed_candidates,
+                    candidate_review_filter=candidate_review_filter,
+                )
+            if hasattr(plugin, "run_daily_ai_review_if_due"):
+                return await plugin.run_daily_ai_review_if_due(ctx, settings=settings)
+
+        log = _message_log()
+        if log is None:
+            return {"ok": False, "error": "MessageLog not available"}
+        llm = _llm_client()
+        if llm is None:
+            return {"ok": False, "error": "LLMClient not available"}
+        reviewer = SlangDailyReviewer(llm)
+        return await reviewer.run(
+            store=slang_store,
+            message_log=log,
+            settings=settings,
+            tool_registry=getattr(ctx, "tool_registry", None) if ctx is not None else None,
+            group_id=group_id,
+            review_candidates=review_candidates,
+            review_all_pending=review_all_pending,
+            rerun_reviewed_candidates=rerun_reviewed_candidates,
+            candidate_review_filter=candidate_review_filter,
+        )
+
+    @router.post("/slang/debug/message/seed")
+    async def seed_debug_message(request: Request):
+        body = await _read_json(request)
+        group_id = str(body.get("group_id") or "").strip()
+        content_text = str(body.get("content_text") or "").strip()
+        if not group_id or not content_text:
+            return {"ok": False, "error": "group_id and content_text are required"}
+        role = str(body.get("role") or "user").strip() or "user"
+        speaker = str(body.get("speaker") or "SmokeUser(999000)").strip() or "SmokeUser(999000)"
+        message_id = body.get("message_id")
+        try:
+            message_id_int = int(message_id) if message_id is not None and str(message_id).strip() != "" else None
+        except Exception:
+            message_id_int = None
+        log = _message_log()
+        if log is None or not hasattr(log, "record"):
+            return {"ok": False, "error": "MessageLog not available"}
+        await log.record(
+            group_id=group_id,
+            role=role,
+            speaker=speaker,
+            content_text=content_text,
+            content_json=None,
+            message_id=message_id_int,
+        )
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "role": role,
+            "speaker": speaker,
+            "content_text": content_text,
+            "message_id": message_id_int,
+        }
+
+    @router.post("/slang/debug/message/delete")
+    async def delete_debug_message(request: Request):
+        body = await _read_json(request)
+        group_id = str(body.get("group_id") or "").strip()
+        content_text = str(body.get("content_text") or "").strip()
+        if not group_id or not content_text:
+            return {"ok": False, "error": "group_id and content_text are required"}
+        message_id = body.get("message_id")
+        try:
+            message_id_int = int(message_id) if message_id is not None and str(message_id).strip() != "" else None
+        except Exception:
+            message_id_int = None
+        log = _message_log()
+        db = getattr(log, "_db", None) if log is not None else None
+        if db is None:
+            return {"ok": False, "error": "MessageLog database not available"}
+        if message_id_int is None:
+            await db.execute(
+                "DELETE FROM group_messages WHERE group_id = ? AND content_text = ?",
+                (group_id, content_text),
+            )
+        else:
+            await db.execute(
+                "DELETE FROM group_messages WHERE group_id = ? AND content_text = ? AND message_id = ?",
+                (group_id, content_text, message_id_int),
+            )
+        await db.commit()
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "content_text": content_text,
+            "message_id": message_id_int,
+        }
+
+    @router.post("/slang/debug/pending/seed")
+    async def seed_debug_pending(request: Request):
+        slang_store = await _store()
+        body = await _read_json(request)
+        group_id = str(body.get("group_id") or "").strip()
+        term = str(body.get("term") or "").strip()
+        if not group_id or not term:
+            return {"ok": False, "error": "group_id and term are required"}
+        aliases = body.get("aliases", [])
+        if isinstance(aliases, str):
+            aliases = [part.strip() for part in aliases.replace("，", ",").split(",") if part.strip()]
+        if not isinstance(aliases, list):
+            aliases = []
+        try:
+            count = max(1, int(body.get("count") or 2))
+        except Exception:
+            count = 2
+        try:
+            confidence = max(0.0, min(1.0, float(body.get("confidence") or 0.6)))
+        except Exception:
+            confidence = 0.6
+        pending_id = str(body.get("pending_id") or f"pending_smoke_{time.time_ns():x}")
+        term_key = normalize_term(term)
+        if not term_key:
+            return {"ok": False, "error": "term is required"}
+        meaning = str(body.get("meaning") or "自动化烟雾测试样本")
+        evidence = str(body.get("evidence") or f"{term} 这是临时烟雾测试样本")
+        reason = str(body.get("reason") or "semantic_smoke_seed")
+        repeat_policy = str(body.get("repeat_policy") or "understand_only")
+        meta = body.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta = {**meta, "smoke_seed": True, "smoke_seed_term": term}
+        now = datetime.now().isoformat(timespec="seconds")
+
+        db = slang_store._require_db()
+        delete_observation_sql = (
+            "DELETE FROM slang_observations WHERE term_id = ? OR term_id IN "
+            "(SELECT term_id FROM slang_terms WHERE group_id = ? AND term_key = ?)"
+        )
+        delete_revisions_sql = (
+            "DELETE FROM slang_term_revisions WHERE term_id IN "
+            "(SELECT term_id FROM slang_terms WHERE group_id = ? AND term_key = ?)"
+        )
+        delete_drift_sql = (
+            "DELETE FROM slang_drift_reviews WHERE term_id IN "
+            "(SELECT term_id FROM slang_terms WHERE group_id = ? AND term_key = ?)"
+        )
+        term_cursor = await db.execute(
+            "SELECT term_id FROM slang_terms WHERE group_id = ? AND term_key = ?",
+            (group_id, term_key),
+        )
+        term_ids = [str(row[0]) for row in await term_cursor.fetchall()]
+        await db.execute(delete_observation_sql, (pending_id, group_id, term_key))
+        await db.execute(delete_revisions_sql, (group_id, term_key))
+        await db.execute(delete_drift_sql, (group_id, term_key))
+        await db.execute(
+            "DELETE FROM slang_pending_candidates WHERE pending_id = ? OR (group_id = ? AND term_key = ?)",
+            (pending_id, group_id, term_key),
+        )
+        await db.execute(
+            "DELETE FROM slang_terms WHERE group_id = ? AND term_key = ?",
+            (group_id, term_key),
+        )
+        for term_id in term_ids:
+            await db.execute("DELETE FROM slang_observations WHERE term_id = ?", (term_id,))
+            await db.execute("DELETE FROM slang_term_revisions WHERE term_id = ?", (term_id,))
+            await db.execute("DELETE FROM slang_drift_reviews WHERE term_id = ?", (term_id,))
+
+        await db.execute(
+            """INSERT INTO slang_pending_candidates
+               (pending_id, term_key, term, meaning, aliases_json, group_id, confidence,
+                count, unique_users_json, evidence, reason, repeat_policy, first_seen_at,
+                last_seen_at, meta_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pending_id,
+                term_key,
+                term,
+                meaning,
+                json.dumps(aliases, ensure_ascii=False),
+                group_id,
+                confidence,
+                count,
+                json.dumps(["smoke"], ensure_ascii=False),
+                evidence,
+                reason,
+                repeat_policy,
+                now,
+                now,
+                json.dumps(meta, ensure_ascii=False),
+            ),
+        )
+        await db.execute(
+            """INSERT INTO slang_observations
+               (observation_id, term_id, group_id, user_id, message_id, raw_text, context, observed_at, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                f"obs_smoke_{pending_id.removeprefix('pending_smoke_')}",
+                pending_id,
+                group_id,
+                "smoke",
+                None,
+                evidence,
+                evidence,
+                now,
+                reason,
+            ),
+        )
+        await db.commit()
+        await slang_store.rebuild_pending_key_index()
+        await db.commit()
+        return {
+            "ok": True,
+            "pending_id": pending_id,
+            "group_id": group_id,
+            "term": term,
+            "term_key": term_key,
+            "count": count,
+            "confidence": confidence,
+        }
+
+    @router.post("/slang/debug/pending/delete")
+    async def delete_debug_pending(request: Request):
+        slang_store = await _store()
+        body = await _read_json(request)
+        pending_id = str(body.get("pending_id") or "").strip()
+        term = str(body.get("term") or body.get("term_key") or "").strip()
+        group_id = str(body.get("group_id") or "").strip()
+        if not pending_id and not (group_id and term):
+            return {"ok": False, "error": "pending_id or group_id+term is required"}
+        term_key = normalize_term(term)
+        db = slang_store._require_db()
+        if pending_id and (not group_id or not term_key):
+            cursor = await db.execute(
+                "SELECT group_id, term_key FROM slang_pending_candidates WHERE pending_id = ?",
+                (pending_id,),
+            )
+            row = await cursor.fetchone()
+            if row is not None:
+                group_id = group_id or str(row["group_id"])
+                term_key = term_key or str(row["term_key"])
+        if not group_id or not term_key:
+            return {"ok": False, "error": "pending not found"}
+
+        delete_observation_sql = (
+            "DELETE FROM slang_observations WHERE term_id = ? OR term_id IN "
+            "(SELECT term_id FROM slang_terms WHERE group_id = ? AND term_key = ?)"
+        )
+        delete_revisions_sql = (
+            "DELETE FROM slang_term_revisions WHERE term_id IN "
+            "(SELECT term_id FROM slang_terms WHERE group_id = ? AND term_key = ?)"
+        )
+        delete_drift_sql = (
+            "DELETE FROM slang_drift_reviews WHERE term_id IN "
+            "(SELECT term_id FROM slang_terms WHERE group_id = ? AND term_key = ?)"
+        )
+        term_cursor = await db.execute(
+            "SELECT term_id FROM slang_terms WHERE group_id = ? AND term_key = ?",
+            (group_id, term_key),
+        )
+        term_ids = [str(row[0]) for row in await term_cursor.fetchall()]
+        await db.execute(delete_observation_sql, (pending_id, group_id, term_key))
+        await db.execute(delete_revisions_sql, (group_id, term_key))
+        await db.execute(delete_drift_sql, (group_id, term_key))
+        await db.execute(
+            "DELETE FROM slang_pending_candidates WHERE pending_id = ? OR (group_id = ? AND term_key = ?)",
+            (pending_id, group_id, term_key),
+        )
+        await db.execute(
+            "DELETE FROM slang_terms WHERE group_id = ? AND term_key = ?",
+            (group_id, term_key),
+        )
+        for term_id in term_ids:
+            await db.execute("DELETE FROM slang_observations WHERE term_id = ?", (term_id,))
+            await db.execute("DELETE FROM slang_term_revisions WHERE term_id = ?", (term_id,))
+            await db.execute("DELETE FROM slang_drift_reviews WHERE term_id = ?", (term_id,))
+        await db.commit()
+        await slang_store.rebuild_pending_key_index()
+        await db.commit()
+        return {
+            "ok": True,
+            "pending_id": pending_id,
+            "group_id": group_id,
+            "term_key": term_key,
+            "deleted_terms": len(term_ids),
+        }
+
     @router.post("/slang/global/scan")
     async def scan_global_candidates(request: Request):
         slang_store = await _store()
@@ -530,32 +929,78 @@ def create_slang_router(
         scanned = 0
         try:
             for gid in groups:
-                rows = await log.query_recent(str(gid), limit=limit)
-                user_rows = [row for row in rows if row.get("role") == "user" and row.get("content_text")]
-                scanned += len(user_rows)
-                extractions = await extractor.extract(user_rows, settings=settings)
-                extracted += len(extractions)
-                for item in extractions:
-                    source = user_rows[-1] if user_rows else {}
-                    term_id = await slang_store.upsert_candidate(
-                        term=item.term,
-                        meaning=item.meaning,
-                        aliases=item.aliases,
-                        group_id=str(gid),
-                        user_id=_speaker_to_user_id(source.get("speaker")),
-                        message_id=source.get("message_id"),
-                        raw_text=str(source.get("content_text") or item.evidence),
-                        context="\n".join(str(row.get("content_text") or "") for row in user_rows[-8:]),
-                        confidence=item.confidence,
-                        reason=item.reason,
-                        repeat_policy=item.repeat_policy,
-                        meta={"evidence": item.evidence},
-                        min_count=settings.candidate_min_count,
-                        observed_count=_estimate_occurrences(item.term, item.aliases, user_rows),
-                        settings=settings,
+                batch = await read_scan_batch(
+                    log,
+                    scanner_name="slang_manual_extract",
+                    group_id=str(gid),
+                    limit=limit,
+                    scanner_version="v1",
+                    meta={"admin_fallback": True, "run_id": run_id},
+                )
+                group_scanned = 0
+                group_extracted = 0
+                group_promoted = 0
+                try:
+                    rows = list(batch.get("rows") or [])
+                    user_rows = [row for row in rows if row.get("role") == "user" and row.get("content_text")]
+                    group_scanned = len(user_rows)
+                    scanned += group_scanned
+                    extractions = await extractor.extract(user_rows, settings=settings)
+                    group_extracted = len(extractions)
+                    extracted += group_extracted
+                    for item in extractions:
+                        source = select_slang_source_row(item.evidence, user_rows)
+                        term_id = await slang_store.upsert_candidate(
+                            term=item.term,
+                            meaning=item.meaning,
+                            aliases=item.aliases,
+                            group_id=str(gid),
+                            user_id=speaker_to_user_id(source.get("speaker")),
+                            message_id=source.get("message_id"),
+                            raw_text=str(source.get("content_text") or item.evidence),
+                            context="\n".join(str(row.get("content_text") or "") for row in user_rows[-8:]),
+                            confidence=item.confidence,
+                            reason=item.reason,
+                            repeat_policy=item.repeat_policy,
+                            meta={"evidence": item.evidence},
+                            min_count=settings.candidate_min_count,
+                            observed_count=estimate_slang_occurrences(item.term, item.aliases, user_rows),
+                            settings=settings,
+                        )
+                        if term_id:
+                            await add_evidence_message_ref(
+                                log,
+                                group_id=str(gid),
+                                source_row=source,
+                                ref_owner="slang",
+                                external_table="slang_terms",
+                                external_id=term_id,
+                                snapshot_text=str(source.get("content_text") or item.evidence),
+                                meta={"source": "slang_manual_extract", "slang_run_id": run_id},
+                            )
+                            promoted += 1
+                            group_promoted += 1
+                    await finish_scan_batch(
+                        log,
+                        batch,
+                        status="success",
+                        scanned_count=group_scanned,
+                        extracted_count=group_extracted,
+                        saved_count=group_promoted,
+                        meta={"slang_run_id": run_id},
                     )
-                    if term_id:
-                        promoted += 1
+                except Exception as exc:
+                    await finish_scan_batch(
+                        log,
+                        batch,
+                        status="failed",
+                        scanned_count=group_scanned,
+                        extracted_count=group_extracted,
+                        saved_count=group_promoted,
+                        error=str(exc),
+                        advance_cursor=False,
+                    )
+                    raise
             await slang_store.set_meta("last_extracted_at", time.strftime("%Y-%m-%d %H:%M:%S"))
             await slang_store.finish_extraction_run(
                 run_id,

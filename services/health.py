@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from services.slang import SlangDatabaseCorruptError
+
 
 def _service(
     service_id: str,
@@ -105,6 +107,63 @@ def _sqlite_probe(path: Path) -> dict[str, Any]:
         "detail": detail,
         "size_bytes": path.stat().st_size if path.exists() else 0,
     }
+
+
+def _messages_archive_metrics(path: Path) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "available": False,
+        "legacy_count": None,
+        "archive_count": None,
+        "missing_archive_count": 0,
+        "archive_extra_count": 0,
+    }
+    if not path.exists():
+        return metrics
+    try:
+        with sqlite3.connect(str(path), timeout=1.0) as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    """SELECT name FROM sqlite_master
+                       WHERE type = 'table'
+                         AND name IN ('group_messages', 'conversation_messages')"""
+                ).fetchall()
+            }
+            if {"group_messages", "conversation_messages"} - tables:
+                return metrics
+            legacy_count = int(conn.execute("SELECT COUNT(*) FROM group_messages").fetchone()[0] or 0)
+            archive_count = int(conn.execute("SELECT COUNT(*) FROM conversation_messages").fetchone()[0] or 0)
+            missing_archive_count = int(
+                conn.execute(
+                    """SELECT COUNT(*)
+                       FROM group_messages AS gm
+                       LEFT JOIN conversation_messages AS cm
+                         ON cm.legacy_row_id = gm.id
+                       WHERE cm.message_pk IS NULL"""
+                ).fetchone()[0]
+                or 0
+            )
+            archive_extra_count = int(
+                conn.execute(
+                    """SELECT COUNT(*)
+                       FROM conversation_messages AS cm
+                       LEFT JOIN group_messages AS gm
+                         ON gm.id = cm.legacy_row_id
+                       WHERE cm.legacy_row_id IS NULL OR gm.id IS NULL"""
+                ).fetchone()[0]
+                or 0
+            )
+    except Exception as exc:
+        metrics["error"] = str(exc)[:180]
+        return metrics
+    metrics.update({
+        "available": True,
+        "legacy_count": legacy_count,
+        "archive_count": archive_count,
+        "missing_archive_count": missing_archive_count,
+        "archive_extra_count": archive_extra_count,
+    })
+    return metrics
 
 
 async def _count_from_store(store: Any, sql: str) -> int | None:
@@ -318,11 +377,17 @@ def _build_maintenance_window(
         summary_text = f"当前存在 {alert_error_count} 项高优先级异常，建议在群聊低峰期集中处理，并在完成后复查系统页。"
     elif alert_warning_count > 0:
         title = "建议安排低峰维护"
-        summary_text = f"当前存在 {alert_warning_count} 项达到阈值的留意项，虽然不一定阻断运行，但更适合放到维护窗口内统一处理。"
+        summary_text = (
+            f"当前存在 {alert_warning_count} 项达到阈值的留意项，虽然不一定阻断运行，"
+            "但更适合放到维护窗口内统一处理。"
+        )
     else:
         title = "当前运行面整体稳定"
         if service_warning_count > 0 or service_error_count > 0:
-            summary_text = f"当前没有达到阈值的顶部告警，但仍有 {service_warning_count + service_error_count} 项轻量提醒保留在服务级健康卡中。"
+            summary_text = (
+                "当前没有达到阈值的顶部告警，但仍有 "
+                f"{service_warning_count + service_error_count} 项轻量提醒保留在服务级健康卡中。"
+            )
         else:
             summary_text = "当前没有明显服务告警。常规配置调整仍建议先创建备份，再按需重启验证。"
 
@@ -546,12 +611,17 @@ def _check_sqlite(*, ctx: Any = None, storage_dir: Path) -> dict[str, Any]:
         _resolve_path(getattr(slang_store, "_db_path", None), storage_dir / "slang.db"),
     ]
     probes = [_sqlite_probe(path) for path in paths]
+    messages_archive = _messages_archive_metrics(paths[0])
     error_count = sum(1 for item in probes if item["status"] == "error")
     missing_count = sum(1 for item in probes if not item["exists"])
     ok_count = sum(1 for item in probes if item["status"] == "ok")
+    missing_archive_count = int(messages_archive.get("missing_archive_count") or 0)
     if error_count:
         status = "error"
         detail = f"{error_count} 个 SQLite 数据库检查失败"
+    elif missing_archive_count > 0:
+        status = "warning"
+        detail = f"messages archive 缺 {missing_archive_count} 条 legacy 回填"
     elif missing_count:
         status = "warning"
         detail = f"{missing_count} 个数据库文件尚未创建"
@@ -569,6 +639,7 @@ def _check_sqlite(*, ctx: Any = None, storage_dir: Path) -> dict[str, Any]:
             "missing_count": missing_count,
             "error_count": error_count,
             "ok_count": ok_count,
+            "messages_archive": messages_archive,
         },
     )
 
@@ -645,7 +716,24 @@ async def _check_memory(*, ctx: Any = None) -> dict[str, Any]:
 
 
 async def _check_slang(*, ctx: Any = None, storage_dir: Path) -> dict[str, Any]:
+    plugin = getattr(ctx, "slang_plugin", None) if ctx is not None else None
     store = getattr(ctx, "slang_store", None) if ctx is not None else None
+    startup_error = str(getattr(plugin, "_slang_disabled_reason", "") or "").strip()
+    plugin_db_path = str(getattr(plugin, "_db_path", "") or "").strip()
+    if startup_error:
+        detail = f"{startup_error} | repair=scripts/dev/slang_db_repair.py"
+        return _service(
+            "slang",
+            "Slang",
+            "error",
+            detail,
+            metric="0 approved",
+            meta={
+                "db_path": plugin_db_path or str(storage_dir / "slang.db"),
+                "startup_error": startup_error,
+                "repair_script": "scripts/dev/slang_db_repair.py",
+            },
+        )
     if store is None:
         db_path = storage_dir / "slang.db"
         if db_path.exists():
@@ -656,6 +744,7 @@ async def _check_slang(*, ctx: Any = None, storage_dir: Path) -> dict[str, Any]:
         return _service("slang", "Slang", "warning", "黑话 store 尚未初始化")
 
     try:
+        quick_check = await store.quick_check()
         summary = await store.summary()
         candidate = int(summary.get("candidate_count", 0) or 0)
         approved = int(summary.get("approved_count", 0) or 0)
@@ -664,12 +753,26 @@ async def _check_slang(*, ctx: Any = None, storage_dir: Path) -> dict[str, Any]:
             "slang",
             "Slang",
             "ok",
-            "黑话 store 可查询",
+            f"黑话 store 可查询 | quick_check={quick_check}",
             metric=f"{approved} approved",
             meta={
                 "candidate_count": candidate,
                 "approved_count": approved,
                 "observing_count": observing,
+                "db_path": str(getattr(store, "db_path", getattr(store, "_db_path", "")) or ""),
+            },
+        )
+    except SlangDatabaseCorruptError as exc:
+        return _service(
+            "slang",
+            "Slang",
+            "error",
+            f"{exc.detail} | repair=scripts/dev/slang_db_repair.py",
+            metric="0 approved",
+            meta={
+                "db_path": exc.db_path,
+                "error": exc.detail,
+                "repair_script": "scripts/dev/slang_db_repair.py",
             },
         )
     except Exception as exc:

@@ -18,7 +18,7 @@ from pathlib import Path
 from types import UnionType
 from typing import Any, Literal, Self, TypeVar, Union, get_args, get_origin
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 T = TypeVar("T")
 
@@ -140,10 +140,27 @@ class LLMConfig(BaseModel):
             "thinker": "thinker" if "thinker" in self.profiles else (self.default_profile or "main"),
             "compact": "compact" if "compact" in self.profiles else (self.default_profile or "main"),
             "slang": "slang" if "slang" in self.profiles else (self.default_profile or "main"),
+            "slang_review": (
+                "slang_review"
+                if "slang_review" in self.profiles
+                else self.task_profiles.get("slang", self.default_profile or "main")
+            ),
+            "slang_drift": (
+                "slang_drift"
+                if "slang_drift" in self.profiles
+                else self.task_profiles.get(
+                    "slang_review",
+                    self.task_profiles.get("slang", self.default_profile or "main"),
+                )
+            ),
             "vision": "vision" if "vision" in self.profiles else (self.default_profile or "main"),
         }
         for task, profile_name in defaults.items():
             self.task_profiles.setdefault(task, profile_name)
+        self.task_profiles.setdefault(
+            "reply_gate",
+            "reply_gate" if "reply_gate" in self.profiles else self.task_profiles.get("thinker", "main"),
+        )
         return self
 
 
@@ -168,6 +185,7 @@ class LogChannelConfig(BaseModel):
     debug: bool = False
     dream: bool = False
     bilibili: bool = True
+    reply_workflow: bool = False
 
 
 class LogConfig(BaseModel):
@@ -195,11 +213,93 @@ class SoulConfig(BaseModel):
 
 GroupReplyStyle = Literal["default", "gentle", "playful", "concise", "energetic", "steady"]
 GroupStickerMode = Literal["inherit", "off", "rarely", "normal", "frequently"]
+GroupAccessMode = Literal["whitelist", "blacklist"]
+GroupPresenceMode = Literal["active", "silent_learn", "off"]
+
+
+def _normalize_group_ids(value: Any) -> list[int]:
+    if value is None or value == "":
+        return []
+    items = value if isinstance(value, list) else [value]
+    normalized: list[int] = []
+    for item in items:
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        normalized.append(int(raw))
+    return sorted(set(normalized))
+
+
+class GroupAccessConfig(BaseModel):
+    """群聊发言门禁：控制哪些群可以主动发言/调用工具。"""
+
+    mode: GroupAccessMode = Field(
+        default="blacklist",
+        json_schema_extra={
+            "display_label": "群聊访问模式",
+            "help": "blacklist=黑名单群关闭，其余群默认开启；whitelist=白名单群开启，其余群默认关闭。",
+            "restart_hint": "recommended",
+        },
+    )
+    whitelist: list[int] = Field(
+        default_factory=list,
+        json_schema_extra={
+            "display_label": "群聊白名单",
+            "help": "访问模式为 whitelist 时，只有这些群可以主动发言/调用工具，其余群默认关闭。",
+            "restart_hint": "recommended",
+        },
+    )
+    blacklist: list[int] = Field(
+        default_factory=list,
+        json_schema_extra={
+            "display_label": "群聊黑名单",
+            "help": "访问模式为 blacklist 时，这些群完全关闭，其余群默认开启。",
+            "restart_hint": "recommended",
+        },
+    )
+    log_dropped: bool = Field(
+        default=True,
+        json_schema_extra={
+            "display_label": "记录拦截日志",
+            "help": "群被访问策略拦截时，写一条固定格式日志，便于排查新群状态。",
+        },
+    )
+
+    @field_validator("whitelist", "blacklist", mode="before")
+    @classmethod
+    def _normalize_lists(cls, value: Any) -> list[int]:
+        return _normalize_group_ids(value)
+
+    def allows_group(self, group_id: int | str | None) -> bool:
+        if group_id is None:
+            return False
+        gid = int(group_id)
+        if self.mode == "whitelist":
+            return gid in set(self.whitelist)
+        return gid not in set(self.blacklist)
+
+    def allows_active(self, group_id: int | str | None) -> bool:
+        return self.allows_group(group_id)
+
+
+class GroupPresenceConfig(BaseModel):
+    """群聊在未单独配置时的参与模式。"""
+
+    default_mode: GroupPresenceMode = Field(
+        default="active",
+        json_schema_extra={
+            "display_label": "默认群参与模式",
+            "help": "active=可回复；silent_learn=仅对显式开启黑话的群学习；off=完全忽略群聊。",
+            "restart_hint": "recommended",
+        },
+    )
 
 
 class ResolvedGroupConfig(BaseModel):
     """resolve() 返回的扁平群配置。"""
 
+    access_allowed: bool = False
+    presence_mode: GroupPresenceMode = "silent_learn"
     blocked_users: set[int] = set()
     allowed_tools: set[str] = set()
     blocked_tools: set[str] = set()
@@ -234,11 +334,16 @@ class GroupOverride(BaseModel):
     tools_enabled: bool | None = None
     sticker_mode: GroupStickerMode | None = None
     slang_enabled: bool | None = None
+    presence_mode: GroupPresenceMode | None = None
 
 
 class GroupConfig(BaseModel):
     """群聊上下文配置。"""
 
+    _legacy_allowed_groups_as_active: bool = PrivateAttr(default=True)
+
+    access: GroupAccessConfig = Field(default_factory=GroupAccessConfig)
+    presence: GroupPresenceConfig = Field(default_factory=GroupPresenceConfig)
     history_load_count: int = 30
     allowed_groups: list[int] = []
     talk_value: float = 0.3
@@ -257,13 +362,119 @@ class GroupConfig(BaseModel):
     slang_enabled: bool = True
     overrides: dict[int, GroupOverride] = {}
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_group_allowlist(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        data = dict(value)
+        legacy_groups = _normalize_group_ids(data.get("allowed_groups"))
+        if "access" not in data and legacy_groups:
+            data["access"] = {
+                "mode": "whitelist",
+                "whitelist": legacy_groups,
+                "blacklist": [],
+            }
+
+            # Legacy allowed_groups meant these groups could already speak.
+            # Preserve that behavior while keeping all newly seen groups silent.
+            overrides = dict(data.get("overrides") or {})
+            for gid in legacy_groups:
+                existing = overrides.get(gid, overrides.get(str(gid), {}))
+                if hasattr(existing, "model_dump"):
+                    existing_payload = existing.model_dump(mode="python")
+                elif isinstance(existing, dict):
+                    existing_payload = dict(existing)
+                else:
+                    existing_payload = {}
+                existing_payload.setdefault("presence_mode", "active")
+                overrides[str(gid)] = existing_payload
+            data["overrides"] = overrides
+        return data
+
+    @field_validator("allowed_groups", "blocked_users", mode="before")
+    @classmethod
+    def _normalize_group_id_lists(cls, value: Any) -> list[int]:
+        return _normalize_group_ids(value)
+
+    @model_validator(mode="after")
+    def _sync_legacy_allowed_groups(self) -> Self:
+        if self.access.mode == "whitelist" and not self.allowed_groups and self.access.whitelist:
+            self.allowed_groups = list(self.access.whitelist)
+        return self
+
+    def active_access_allowed(self, group_id: int | str | None) -> bool:
+        return self.access.allows_active(group_id)
+
+    def presence_mode_for(self, group_id: int | str | None) -> GroupPresenceMode:
+        if group_id is None:
+            return "off"
+        gid = int(group_id)
+        access_allowed = self.active_access_allowed(gid)
+        override = self.overrides.get(gid)
+        if override is not None and override.presence_mode is not None:
+            if access_allowed:
+                return override.presence_mode
+            if override.presence_mode == "silent_learn":
+                return "silent_learn"
+            if override.presence_mode == "off":
+                return "off"
+            return "silent_learn" if override.slang_enabled is True else "off"
+        if not access_allowed:
+            if override is not None and (override.slang_enabled is True):
+                return "silent_learn"
+            return "off"
+        if self._legacy_allowed_groups_as_active and gid in set(self.allowed_groups):
+            return "active"
+        if self.access.mode == "whitelist":
+            return "active"
+        return self.presence.default_mode
+
+    def allows_learning_group(self, group_id: int | str | None) -> bool:
+        if group_id is None:
+            return False
+        gid = int(group_id)
+        resolved = self.resolve(gid)
+        if resolved.presence_mode == "off" or not resolved.slang_enabled:
+            return False
+        if self.active_access_allowed(gid):
+            return True
+        return gid in self.overrides
+
+    def allows_active_group(self, group_id: int | str | None) -> bool:
+        return self.presence_mode_for(group_id) == "active" and self.active_access_allowed(group_id)
+
     def resolve(self, group_id: int) -> ResolvedGroupConfig:
         base_blocked = set(self.blocked_users)
         base_allowed_tools = {str(name).strip() for name in self.allowed_tools if str(name).strip()}
         base_blocked_tools = {str(name).strip() for name in self.blocked_tools if str(name).strip()}
         override = self.overrides.get(group_id)
+        access_allowed = self.active_access_allowed(group_id)
         if override is None:
+            if not access_allowed:
+                return ResolvedGroupConfig(
+                    access_allowed=False,
+                    presence_mode="off",
+                    blocked_users=base_blocked,
+                    allowed_tools=set(),
+                    blocked_tools=base_blocked_tools,
+                    at_only=False,
+                    talk_value=0.3,
+                    planner_smooth=3.0,
+                    debounce_seconds=5.0,
+                    batch_size=10,
+                    history_load_count=self.history_load_count,
+                    privacy_mask=self.privacy_mask,
+                    reply_style=self.reply_style,
+                    custom_prompt=self.custom_prompt,
+                    tools_enabled=False,
+                    sticker_mode="inherit",
+                    slang_enabled=False,
+                )
             return ResolvedGroupConfig(
+                access_allowed=access_allowed,
+                presence_mode=self.presence_mode_for(group_id),
                 blocked_users=base_blocked,
                 allowed_tools=base_allowed_tools - base_blocked_tools,
                 blocked_tools=base_blocked_tools,
@@ -291,8 +502,20 @@ class GroupConfig(BaseModel):
             if o.blocked_tools is None
             else {str(name).strip() for name in o.blocked_tools if str(name).strip()}
         )
+        presence_mode = self.presence_mode_for(group_id)
+        tools_enabled = (
+            (o.tools_enabled if o.tools_enabled is not None else self.tools_enabled)
+            if access_allowed
+            else False
+        )
+        if o.slang_enabled is not None:
+            slang_enabled = o.slang_enabled if access_allowed else (o.slang_enabled and presence_mode != "off")
+        else:
+            slang_enabled = self.slang_enabled if access_allowed else presence_mode != "off"
         return ResolvedGroupConfig(
-            blocked_users=base_blocked | set(o.blocked_users),
+            access_allowed=access_allowed,
+            presence_mode=presence_mode,
+            blocked_users=base_blocked | set(o.blocked_users or []),
             allowed_tools=allowed_tools - blocked_tools,
             blocked_tools=blocked_tools,
             at_only=o.at_only if o.at_only is not None else self.at_only,
@@ -304,9 +527,9 @@ class GroupConfig(BaseModel):
             privacy_mask=self.privacy_mask,
             reply_style=o.reply_style if o.reply_style is not None else self.reply_style,
             custom_prompt=o.custom_prompt if o.custom_prompt is not None else self.custom_prompt,
-            tools_enabled=o.tools_enabled if o.tools_enabled is not None else self.tools_enabled,
+            tools_enabled=tools_enabled,
             sticker_mode=o.sticker_mode if o.sticker_mode is not None else self.sticker_mode,
-            slang_enabled=o.slang_enabled if o.slang_enabled is not None else self.slang_enabled,
+            slang_enabled=slang_enabled,
         )
 
 
@@ -482,6 +705,281 @@ class AntiDetectConfig(BaseModel):
     char_delay: float = 0.02
 
 
+class ReplySegmentationConfig(BaseModel):
+    """可见回复分段与发送节奏配置。"""
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用可见回复分段发送。",
+        json_schema_extra={
+            "display_label": "启用回复分段",
+            "help": "开启后长回复会按句子、短句和显式 ---cut--- 分段逐条发送。",
+            "restart_hint": "recommended",
+        },
+    )
+    max_segment_chars: int = Field(
+        default=20,
+        description="单段目标最大字符数。",
+        json_schema_extra={
+            "display_label": "单段目标长度",
+            "help": "分段器会尽量在该长度附近寻找自然断点，不是硬性截断。",
+            "recommended": "18 - 32",
+            "restart_hint": "recommended",
+        },
+    )
+    min_segment_chars: int = Field(
+        default=6,
+        description="过短尾段合并参考长度。",
+        json_schema_extra={
+            "display_label": "短尾合并阈值",
+            "help": "尾段短于该值时，会优先并入前一段，减少一两个字单独刷屏。",
+            "recommended": "4 - 8",
+            "restart_hint": "recommended",
+        },
+    )
+    max_send_segments: int = Field(
+        default=0,
+        description="硬性发送段数上限；0 表示不启用硬上限。",
+        json_schema_extra={
+            "display_label": "硬性段数上限",
+            "help": "0 表示不限制正常动态长度；设为正数会把超出的内容并回最后一段。",
+            "recommended": "保持 0，除非需要强制防刷屏",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    soft_max_send_segments: int = Field(
+        default=0,
+        description="软性发送段数上限；0 表示关闭软上限。",
+        json_schema_extra={
+            "display_label": "软性段数上限",
+            "help": "0 表示默认不截断正常长回复；设为正数后，超过该段数会截断并追加自然收尾。",
+            "recommended": "保持 0；需要临时防刷屏时再设为 10 - 16",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    soft_limit_notice: str = Field(
+        default="先说到这里啦，不然我要刷屏了☆",
+        description="软上限触发时追加的自然收尾。",
+        json_schema_extra={
+            "display_label": "软上限收尾文案",
+            "help": "只在回复极长且触发软上限时使用。",
+            "restart_hint": "recommended",
+        },
+    )
+    boundary_backend: Literal["pysbd_hybrid", "local"] = Field(
+        default="pysbd_hybrid",
+        description="回复分段边界候选后端。",
+        json_schema_extra={
+            "display_label": "分段边界后端",
+            "help": "pysbd_hybrid 使用 pySBD 作为句边界候选并保留 Omubot 聊天节奏规则；local 使用本地规则回退。",
+            "recommended": "pysbd_hybrid / local",
+            "restart_hint": "recommended",
+        },
+    )
+    prefer_sentence_break: bool = Field(
+        default=True,
+        description="优先按句末标点切分。",
+        json_schema_extra={
+            "display_label": "优先句末断点",
+            "help": "开启后会优先在句号、问号、感叹号等自然位置切段。",
+            "restart_hint": "recommended",
+        },
+    )
+    preserve_ascii_tokens: bool = Field(
+        default=True,
+        description="避免切开 URL、CQ 码和 ASCII token。",
+        json_schema_extra={
+            "display_label": "保护链接与 CQ 码",
+            "help": "开启后尽量不切断 URL、CQ 码、英文 token 和编号。",
+            "restart_hint": "recommended",
+        },
+    )
+    merge_short_tail: bool = Field(
+        default=True,
+        description="合并过短尾段。",
+        json_schema_extra={
+            "display_label": "合并过短尾段",
+            "help": "开启后避免最后一个很短的词或标点单独成为一条消息。",
+            "restart_hint": "recommended",
+        },
+    )
+    first_segment_humanize: Literal["skip", "normal"] = Field(
+        default="skip",
+        description="首段发送前的人性化延迟策略。",
+        json_schema_extra={
+            "display_label": "首段延迟策略",
+            "help": "skip 表示首段尽快发出；normal 表示按拟人延迟等待。",
+            "recommended": "skip / normal",
+            "restart_hint": "recommended",
+        },
+    )
+    later_segment_humanize: Literal["skip", "normal"] = Field(
+        default="normal",
+        description="后续分段发送前的人性化延迟策略。",
+        json_schema_extra={
+            "display_label": "后续段延迟策略",
+            "help": "normal 表示后续段按拟人节奏发送；skip 会让所有段更快排出。",
+            "recommended": "normal / skip",
+            "restart_hint": "recommended",
+        },
+    )
+    inter_segment_delay_s: float = Field(
+        default=0.8,
+        description="分段之间的固定间隔秒数。",
+        json_schema_extra={
+            "display_label": "分段固定间隔",
+            "help": "每两段之间额外等待的秒数；过大可能让长回复显得拖沓。",
+            "recommended": "0.5 - 1.2 秒",
+            "restart_hint": "recommended",
+        },
+    )
+
+
+class SchedulerConcurrencyConfig(BaseModel):
+    """群聊调度器并发配置。"""
+
+    global_llm_limit: int = Field(
+        default=2,
+        description="全局同时进行的群聊 LLM 调用数。",
+        json_schema_extra={
+            "display_label": "全局生成并发",
+            "help": "限制所有群同时进行的 LLM 生成数量，避免多群同时触发把模型打满。",
+            "recommended": "2 起步，稳定后再调高",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    max_group_queue: int = Field(
+        default=8,
+        description="单群队列软上限预留配置。",
+        json_schema_extra={
+            "display_label": "单群队列上限",
+            "help": "预留给后续 actor 化调度使用；当前保留为运行参数，不建议频繁调整。",
+            "recommended": "8",
+            "restart_hint": "recommended",
+        },
+    )
+    max_low_priority_queue: int = Field(
+        default=3,
+        description="低优先级队列软上限预留配置。",
+        json_schema_extra={
+            "display_label": "低优先级队列上限",
+            "help": "预留给低优先级自然插话队列使用，强触发不会按这个值直接丢弃。",
+            "recommended": "3",
+            "restart_hint": "recommended",
+        },
+    )
+    first_segment_release: bool = Field(
+        default=False,
+        description="首段发送后释放下一轮生成的实验开关。",
+        json_schema_extra={
+            "display_label": "首段后释放生成",
+            "help": "实验项。开启后首段发出即可处理下一轮触发，但更容易让贴纸和尾段交错。",
+            "risk_level": "danger",
+            "restart_hint": "recommended",
+        },
+    )
+    drop_stale_low_priority_after_s: float = Field(
+        default=45.0,
+        description="低优先级事件过期秒数预留配置。",
+        json_schema_extra={
+            "display_label": "低优先级过期秒数",
+            "help": "预留给自然插话过期控制使用；时间过长会让旧话题更容易滞后触发。",
+            "recommended": "30 - 60 秒",
+            "restart_hint": "recommended",
+        },
+    )
+
+
+class SchedulerConfig(BaseModel):
+    """群聊调度器运行时配置。"""
+
+    concurrency: SchedulerConcurrencyConfig = SchedulerConcurrencyConfig()
+
+
+ReplyWorkflowMode = Literal["off", "shadow", "semantic", "rules"]
+
+
+class ReplyWorkflowConfig(BaseModel):
+    """回复工作流观测与后续 actor 化配置。"""
+
+    mode: ReplyWorkflowMode = Field(
+        default="shadow",
+        description="回复工作流模式；shadow 只记录观测日志，semantic 使用语义 gate 消费高置信承接。",
+        json_schema_extra={
+            "display_label": "回复工作流模式",
+            "help": (
+                "shadow 只记录观测日志；semantic 会调用小模型判断承接意图；"
+                "rules 为旧兼容值，运行时按 shadow 处理。"
+            ),
+            "recommended": "shadow",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+            "options": ["off", "shadow", "semantic"],
+        },
+    )
+    semantic_force_threshold: float = Field(
+        default=0.78,
+        description="语义 gate 判定 force_reply 的最低置信度。",
+        json_schema_extra={
+            "display_label": "语义强触发阈值",
+            "help": "semantic 模式下，小模型返回 force_reply 且置信度不低于该值才会转成 directed_followup。",
+            "recommended": "0.75 - 0.85",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    semantic_timeout_ms: int = Field(
+        default=2200,
+        description="语义 gate 单次调用超时毫秒数。",
+        json_schema_extra={
+            "display_label": "语义 gate 超时",
+            "help": "超过该时间则 fail closed，不强触发，继续走原调度路径。",
+            "recommended": "1800 - 3000",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    semantic_max_chars: int = Field(
+        default=48,
+        description="进入语义 gate 的当前消息最大字符数。",
+        json_schema_extra={
+            "display_label": "语义候选最大字数",
+            "help": "较长消息不作为短承接 gate 候选，避免每条群消息都调用小模型。",
+            "recommended": "40 - 64",
+            "restart_hint": "recommended",
+        },
+    )
+    directed_followup_window_s: float = Field(
+        default=180.0,
+        description="承接类短句判断最近 bot 回复的时间窗口。",
+        json_schema_extra={
+            "display_label": "承接判断窗口",
+            "help": "用于 shadow 观测继续说、接着讲等短句是否可能指向 bot。当前不改变强触发行为。",
+            "recommended": "120 - 240 秒",
+            "restart_hint": "recommended",
+        },
+    )
+    shadow_log_private: bool = Field(
+        default=True,
+        description="是否记录私聊当前直进 LLM 路径的 shadow 日志。",
+        json_schema_extra={
+            "display_label": "记录私聊观测",
+            "help": "开启后会记录私聊目前会直接进入 LLM 的事实，为后续 wait actor 提供基线。",
+            "restart_hint": "recommended",
+        },
+    )
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize_legacy_rules_mode(cls, value: object) -> object:
+        if str(value or "").strip().lower() == "rules":
+            return "shadow"
+        return value
+
+
 # ============================================================================
 # 根配置
 # ============================================================================
@@ -495,6 +993,9 @@ class BotConfig(BaseModel):
 
     # 子系统
     anti_detect: AntiDetectConfig = AntiDetectConfig()
+    reply_segmentation: ReplySegmentationConfig = ReplySegmentationConfig()
+    reply_workflow: ReplyWorkflowConfig = ReplyWorkflowConfig()
+    scheduler: SchedulerConfig = SchedulerConfig()
     llm: LLMConfig = LLMConfig()
     log: LogConfig = LogConfig()
     compact: CompactConfig = CompactConfig()
@@ -641,6 +1142,28 @@ def _resolve_config_file(config_path: str | None = None) -> Path:
     return default_json
 
 
+def _resolve_group_policy_file(config_file: Path) -> Path:
+    return config_file.parent / "group-policy.json"
+
+
+def _load_group_access_policy(policy_path: Path) -> GroupAccessConfig | None:
+    if not policy_path.is_file():
+        return None
+    try:
+        data = json.loads(policy_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    payload = data.get("access", data)
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return GroupAccessConfig.model_validate(payload)
+    except Exception:
+        return None
+
+
 def load_config(
     config_path: str | None = None,
     cli_overrides: dict[str, str] | None = None,
@@ -690,7 +1213,16 @@ def load_config(
             ann = field_types.get(root_key, str)
             _deep_set(data, dotted_key, _coerce_cli_value(value, ann))
 
-    return BotConfig.model_validate(data)
+    cfg = BotConfig.model_validate(data)
+
+    group_policy = _load_group_access_policy(_resolve_group_policy_file(resolved_file))
+    if group_policy is not None:
+        cfg.group.access = group_policy
+        cfg.group._legacy_allowed_groups_as_active = False
+    else:
+        cfg.group._legacy_allowed_groups_as_active = True
+
+    return cfg
 
 
 def _infer_plugin_name(path: Path) -> str:

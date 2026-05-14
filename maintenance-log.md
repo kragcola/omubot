@@ -4,6 +4,80 @@
 
 ---
 
+## 2026-05-14 GroupsView 重设计 + 修复群 625618470 配置 bug
+
+**变更类型**：frontend / UX / config-fix
+
+### 背景
+
+进入阶段 3 第三个高流量页面：原 [GroupsView](admin/frontend/src/views/groups/GroupsView.vue) 1833 行，存在以下信息密度 / 操作性问题：
+
+- 顶部 4 张指标卡片（群数 / 自定义 / 主动 / 静默）+ 大块门禁面板，首屏被占 ~300px，但日常打开页面只为浏览群差异
+- 表格 7 列：「回复模式 / 参与模式 / 风格 / 能力策略 / 发言值 / 配置」中"能力策略"列固定 6 个 chip 永远显示，全默认群 6 个全绿一堆噪音
+- 配置抽屉：Snapshot 块 + 长 Profile 表单 1:1 重复信息；底层节奏参数（发言值 / 规划间隔 / 回复冷却 / 批量窗口 / 历史载入）混在「回复风格 / 参与模式」语义配置里；工具矩阵每行 3 按钮组 + window.confirm
+
+### 重构方案
+
+按用户拍板「全 A」执行：
+
+**主页面**：
+
+- 4 张指标卡片 → 单行紧凑概览条（群数 / 自定义 / 主动 / 静默 / 关闭 / 门禁），首屏 ~150px → ~52px
+- 表格列数 7 → 4：群 / 参与模式 (StateBadge) / 差异标签 / 发言值；点行打开抽屉，删除尾列"配置"按钮
+- 差异标签哲学："偏离全局默认"才显示；全默认群 = `继承全局默认` 一行字，最常见场景最干净
+- 删除「回复模式」筛选下拉（使用率低）
+- 门禁块从首屏移到独立抽屉，页头按钮 + 概览条 chip 双入口
+
+**抽屉**：旧单页长滚 → `基础 / 节奏 / 高级` 三 NTabs
+
+- 基础：FieldGroup + NRadioGroup 段式按钮（参与模式 / 回复风格 / 贴纸策略）+ inline 开关（@才回复 / 工具调用 / 黑话系统）+ 群附加提示词 + 屏蔽用户
+- 节奏：5 个底层数字独立 Tab，默认不抢首屏
+- 高级：工具矩阵（3 按钮组 → 单 NSelect 节省 60% 空间）+ 实时状态 + 最近消息 + 策略审计
+- `window.confirm` → NPopconfirm
+- 抽屉宽 680 → 640；底部加未保存提示
+
+### 实现细节
+
+- 新增组件依赖：[FieldGroup.vue](admin/frontend/src/components/common/FieldGroup.vue) + [StateBadge.vue](admin/frontend/src/components/common/StateBadge.vue)
+- 删除组件依赖：MetricCard / PageToolbar
+- 删除内部状态：`replyMode` / `showAdvancedDetails` / `toolsDisabledCount` / `slangDisabledCount` / `selectedFeatureChips` / `presenceTagType` / `groupFeatureChips`
+- 新增内部函数：`groupDiffChips`（diff-only chips）/ `presenceStatus` + `presenceLabel`（合并门禁 + presence）/ `rowProps`（点行打开抽屉）/ `openPolicyDrawer`
+- 改为单 select 的工具模式：`toolMode` 的 `'inherit' | 'allow' | 'block'` 类型保留
+
+### 验收
+
+- `vue-tsc --noEmit`：0 error
+- `vite build`：4.74s，GroupsView chunk 30.42 KB / gzip 10.04 KB（旧版未单独测，但本身 1833 行；新版 1756 行同时少了 4 张 MetricCard 引用，体积属合理范围）
+- `docker compose up bot -d --build`：成功；napcat 未动
+- 等用户在浏览器视觉验收
+
+### 配置事故修复
+
+rebuild 后 bot 启动失败，pydantic v2 报：
+> ValidationError: group.overrides.625618470.blocked_users  Input should be a valid list, input_value=None
+
+排查：[config/config.json:226](config/config.json#L226) 群 625618470 override 的 `blocked_users` 字段被某次保存写成了 `null`，但 [GroupOverride](kernel/config.py) 模型定义是 `blocked_users: list[int] = []`。其他 4 个群都正常是 `[]`。这是**预先存在的配置脏数据**（旧 bot 在内存里继续运行所以未暴露），不是 GroupsView 改动引发。
+
+修复：手工把那一行改成 `"blocked_users": []`，restart 通过。
+
+**后续待办**：建议给 `/api/admin/groups/{id}/profile` POST 加 `field_validator`，把 `blocked_users: None` 兜底成 `[]`，避免再次写脏数据。归到下次维护。
+
+### 文件变化
+
+- [admin/frontend/src/views/groups/GroupsView.vue](admin/frontend/src/views/groups/GroupsView.vue)：1833 → 1756 行（净减 77 行 + 信息密度大涨）
+- [docs/tracking/web-refactor.md](docs/tracking/web-refactor.md)：阶段 3 GroupsView 标记完成
+- [config/config.json](config/config.json)：修一个脏数据
+
+### 影响范围
+
+仅前端 + 一行配置修复。后端 API、消息处理链路、其他页面不受影响。
+
+### 回滚
+
+`git checkout -- admin/frontend/src/views/groups/GroupsView.vue` 回到前次提交版本，再 `vite build && docker compose up bot -d --build`。配置脏数据修复保留即可。
+
+---
+
 ## 2026-05-14 LogsView 二轮重设计 + Docker 磁盘事故恢复
 
 **变更类型**：frontend / UX / infra

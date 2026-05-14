@@ -19,6 +19,10 @@ dependencies = [
     "jinja2>=3.1.0",
     "python-multipart>=0.0.18",
     "bilibili-api-python>=17.0.0",
+    "chinesecalendar>=1.11.0",
+    "lunardate>=0.2.2",
+    "pysbd>=0.3.4",
+    "rapidfuzz>=3.10.0",
 ]
 
 [tool.nonebot]

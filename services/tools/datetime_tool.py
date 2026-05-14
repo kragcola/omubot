@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from plugins.schedule.calendar import get_day_context
+from plugins.calendar_context.service import CalendarContextService
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 
@@ -17,12 +17,14 @@ class DateTimeTool(Tool):
     def __init__(
         self,
         schedule_store: object | None = None,
+        calendar_service: CalendarContextService | None = None,
         *,
         timezone: str = "Asia/Shanghai",
         include_calendar_context: bool = True,
         include_schedule: bool = True,
     ) -> None:
         self._schedule_store = schedule_store
+        self._calendar_service = calendar_service
         self._timezone = timezone or "Asia/Shanghai"
         self._include_calendar_context = include_calendar_context
         self._include_schedule = include_schedule
@@ -49,14 +51,14 @@ class DateTimeTool(Tool):
         result = f"{now.strftime('%Y-%m-%d %H:%M:%S')} {weekday}"
 
         # Calendar context — holidays, special days, birthdays
-        if self._include_calendar_context:
-            day_ctx = get_day_context(now)
+        if self._include_calendar_context and self._calendar_service is not None:
+            day_ctx = self._calendar_service.get_day_context(now)
             if day_ctx.holiday_name:
                 result += f"\n今天正在放{day_ctx.holiday_name}假。"
             elif day_ctx.is_makeup_day:
                 result += "\n今天是调休日，虽然是周末但要上课。"
-            if day_ctx.special_day:
-                result += f"\n今天是{day_ctx.special_day}。"
+            if day_ctx.special_days:
+                result += f"\n今天是{'、'.join(day_ctx.special_days)}。"
             for b in day_ctx.birthdays:
                 result += f"\n今天是{b.name_cn}（{b.group}）的生日！"
 

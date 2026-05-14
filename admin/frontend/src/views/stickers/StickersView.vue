@@ -13,6 +13,7 @@ import {
   NInput,
   NPagination,
   NPopconfirm,
+  NSelect,
   NSkeleton,
   NTag,
   NText,
@@ -28,6 +29,7 @@ import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
+import { recordSortOptions } from '../shared/sort'
 
 interface Sticker {
   id: string
@@ -35,12 +37,15 @@ interface Sticker {
   usage_hint: string
   send_count: number
   source: string
+  created_at?: string
+  last_sent?: string
 }
 
 const stickers = ref<Sticker[]>([])
 const loading = ref(true)
 const refreshing = ref(false)
 const searchText = ref('')
+const sortMode = ref<'default' | 'time'>('default')
 const currentPage = ref(1)
 const stickersPerPage = 36
 
@@ -98,7 +103,9 @@ async function loadStickers(silent = false) {
   else loading.value = true
 
   try {
-    const data = await api('/api/admin/stickers')
+    const data = await api('/api/admin/stickers', {
+      params: { sort: sortMode.value },
+    })
     stickers.value = data.stickers || []
   } catch (error) {
     console.error('Failed to load stickers:', error)
@@ -177,6 +184,19 @@ async function remove(id: string) {
 
 function resetFilters() {
   searchText.value = ''
+  sortMode.value = 'default'
+}
+
+function formatTime(value?: string) {
+  if (!value) return '--'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 </script>
 
@@ -238,6 +258,12 @@ function resetFilters() {
             <NIcon :component="SearchOutline" />
           </template>
         </NInput>
+        <NSelect
+          v-model:value="sortMode"
+          :options="recordSortOptions"
+          style="width: 140px"
+          @update:value="() => loadStickers(true)"
+        />
       </template>
 
       <template #right>
@@ -313,6 +339,9 @@ function resetFilters() {
             <p class="sticker-card__hint">
               {{ sticker.usage_hint || '还没有编写使用提示。' }}
             </p>
+            <p class="sticker-card__time">
+              {{ sortMode === 'time' ? `最近发送 ${formatTime(sticker.last_sent)}` : `收录 ${formatTime(sticker.created_at)}` }}
+            </p>
           </div>
         </AppCard>
 
@@ -364,6 +393,14 @@ function resetFilters() {
                 <div class="stickers-detail__stat">
                   <span>来源</span>
                   <strong>{{ selected.source || '--' }}</strong>
+                </div>
+                <div class="stickers-detail__stat">
+                  <span>最近发送</span>
+                  <strong>{{ formatTime(selected.last_sent) }}</strong>
+                </div>
+                <div class="stickers-detail__stat">
+                  <span>收录时间</span>
+                  <strong>{{ formatTime(selected.created_at) }}</strong>
                 </div>
               </div>
             </AppPanelSection>
@@ -490,6 +527,12 @@ function resetFilters() {
   color: var(--om-text-2);
   font-size: 13px;
   line-height: 1.65;
+}
+
+.sticker-card__time {
+  margin: 0;
+  color: var(--om-text-3);
+  font-size: 12px;
 }
 
 .stickers-detail {

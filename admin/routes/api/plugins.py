@@ -357,6 +357,12 @@ def create_plugins_router(
         }
         if health is not None:
             payload["health"] = health
+        runtime_meta = getattr(plugin, "runtime_meta", None)
+        if callable(runtime_meta):
+            try:
+                payload["runtime_meta"] = dict(runtime_meta() or {})
+            except Exception:
+                payload["runtime_meta"] = {}
         return payload
 
     def _capability_payload(entry: dict[str, Any], *, legacy_blocked: bool = False) -> dict[str, Any]:

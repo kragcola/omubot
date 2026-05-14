@@ -18,6 +18,19 @@ _PNG_DATA = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64 + b"png-payload-a"
 _GIF_DATA = b"GIF89a" + b"\x00" * 64 + b"gif-payload"
 
 
+def _jpeg_variant(index: int) -> bytes:
+    return b"\xff\xd8\xff\xe0" + bytes([index % 256]) * 64 + f"jpeg-variant-{index}".encode()
+
+
+def _add_stickers(store: StickerStore, count: int) -> list[str]:
+    sticker_ids: list[str] = []
+    for i in range(count):
+        sid, is_new = store.add(_jpeg_variant(i), f"测试表情{i}", f"场景{i}", source="auto")
+        assert is_new
+        sticker_ids.append(sid)
+    return sticker_ids
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -73,7 +86,7 @@ def test_save_sticker_schema(store: StickerStore, superusers: set[str]) -> None:
     assert "image_tag" in props
     assert "description" in props
     assert "usage_hint" in props
-    assert set(schema["required"]) == {"image_tag", "description", "usage_hint", "requested_by"}
+    assert set(schema["required"]) == {"image_tag", "description", "usage_hint"}
 
 
 def test_save_sticker_name_and_description(store: StickerStore, superusers: set[str]) -> None:
@@ -233,15 +246,30 @@ async def test_save_sticker_bot_steal(
     tool = SaveStickerTool(store, superusers)
     ctx = _ctx_with_tag("regular_user", "img:1", str(jpeg_file))
 
-    result = await tool.execute(
-        ctx, image_tag="img:1", description="可爱表情", usage_hint="开心时发", requested_by="admin1",
-    )
+    result = await tool.execute(ctx, image_tag="img:1", description="可爱表情", usage_hint="开心时发")
 
     assert "已收录" in result
     stk_id = result.split(" ")[0]
     entry = store.get(stk_id)
     assert entry is not None
     assert entry["source"] == "stolen"
+
+
+async def test_save_sticker_bot_steal_rejects_explicit_non_admin_request(
+    store: StickerStore, superusers: set[str], jpeg_file: Path
+) -> None:
+    tool = SaveStickerTool(store, superusers)
+    ctx = _ctx_with_tag("regular_user", "img:1", str(jpeg_file))
+
+    result = await tool.execute(
+        ctx,
+        image_tag="img:1",
+        description="可爱表情",
+        usage_hint="开心时发",
+        requested_by="regular_user",
+    )
+
+    assert "管理员" in result
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +485,34 @@ async def test_send_sticker_group_success(
     fake_seg.data.__setitem__.assert_any_call("summary", "[动画表情]")
 
 
+async def test_send_sticker_group_uses_send_queue_when_available(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    stk_id, _ = store.add(_JPEG_DATA, "desc", "hint")
+    tool = SendStickerTool(store)
+    send_queue = MagicMock()
+    send_queue.send_group_message = AsyncMock()
+    ctx = ToolContext(
+        bot=mock_bot,
+        user_id="123456",
+        group_id="987654",
+        extra={"send_queue": send_queue},
+    )
+
+    fake_seg = MagicMock()
+    with patch("nonebot.adapters.onebot.v11.MessageSegment.image", return_value=fake_seg):
+        result = await tool.execute(ctx, sticker_id=stk_id)
+
+    assert f"已发送 {stk_id}" in result
+    send_queue.send_group_message.assert_awaited_once_with(
+        "987654",
+        fake_seg,
+        description=f"send_sticker:{stk_id}",
+    )
+    mock_bot.send_group_msg.assert_not_awaited()
+    assert store.get(stk_id)["send_count"] == 1  # type: ignore[index]
+
+
 # ---------------------------------------------------------------------------
 # SendStickerTool — success (private)
 # ---------------------------------------------------------------------------
@@ -496,6 +552,9 @@ async def test_send_sticker_records_send(
         await tool.execute(ctx, sticker_id=stk_id)
 
     assert store.get(stk_id)["send_count"] == 1  # type: ignore[index]
+    reloaded = StickerStore(storage_dir=str(store.storage_dir))
+    decision = reloaded.check_send_allowed(stk_id, user_id="123456")
+    assert decision.allowed is True  # Small one-item test library keeps hard cooldown disabled.
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +574,47 @@ async def test_send_sticker_not_found(
     assert "stk_00000000" in result
     mock_bot.send_private_msg.assert_not_awaited()
     mock_bot.send_group_msg.assert_not_awaited()
+
+
+async def test_send_sticker_cooldown_blocks_send_without_counting(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    ids = _add_stickers(store, 8)
+    blocked_id = ids[0]
+    store.record_send(blocked_id, group_id="987654")
+    before_count = store.get(blocked_id)["send_count"]  # type: ignore[index]
+
+    tool = SendStickerTool(store)
+    ctx = ToolContext(bot=mock_bot, user_id="123456", group_id="987654")
+
+    with patch("nonebot.adapters.onebot.v11.MessageSegment.image") as mock_ctor:
+        result = await tool.execute(ctx, sticker_id=blocked_id)
+
+    assert "暂时冷却" in result
+    assert "请改选" in result
+    assert any(sticker_id in result for sticker_id in ids[1:])
+    mock_ctor.assert_not_called()
+    mock_bot.send_group_msg.assert_not_awaited()
+    mock_bot.send_private_msg.assert_not_awaited()
+    assert store.get(blocked_id)["send_count"] == before_count  # type: ignore[index]
+
+
+async def test_send_sticker_records_group_scope_after_success(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    ids = _add_stickers(store, 8)
+    target_id = ids[0]
+    tool = SendStickerTool(store)
+    ctx = ToolContext(bot=mock_bot, user_id="123456", group_id="987654")
+
+    with patch("nonebot.adapters.onebot.v11.MessageSegment.image", return_value=MagicMock()):
+        result = await tool.execute(ctx, sticker_id=target_id)
+
+    assert f"已发送 {target_id}" in result
+    decision_same_group = store.check_send_allowed(target_id, group_id="987654")
+    decision_other_group = store.check_send_allowed(target_id, group_id="111111")
+    assert decision_same_group.allowed is False
+    assert decision_other_group.allowed is True
 
 
 # ---------------------------------------------------------------------------

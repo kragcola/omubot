@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse
 
 
@@ -37,24 +37,28 @@ def create_stickers_router(
         return FileResponse(str(path), media_type=media_types.get(ext, "application/octet-stream"))
 
     @router.get("/stickers")
-    async def list_stickers():
+    async def list_stickers(sort: str = Query("default")):
         store = _store()
         if store is None:
             return {"stickers": []}
 
         try:
-            all_items = store.list_all()
-            stickers = []
-            for sid, info in all_items.items():
-                stickers.append({
-                    "id": sid,
-                    "description": info.get("description", ""),
-                    "usage_hint": info.get("usage_hint", ""),
-                    "send_count": info.get("send_count", 0),
-                    "source": info.get("source", ""),
-                })
-            stickers.sort(key=lambda s: s.get("send_count", 0), reverse=True)
-            return {"stickers": stickers}
+            sort_mode = "time" if sort == "time" else "default"
+            stickers = store.list_sorted(sort_mode) if hasattr(store, "list_sorted") else []
+            if not stickers:
+                all_items = store.list_all()
+                for sid, info in all_items.items():
+                    stickers.append({
+                        "id": sid,
+                        "description": info.get("description", ""),
+                        "usage_hint": info.get("usage_hint", ""),
+                        "send_count": info.get("send_count", 0),
+                        "source": info.get("source", ""),
+                        "created_at": info.get("created_at"),
+                        "last_sent": info.get("last_sent"),
+                    })
+                stickers.sort(key=lambda s: s.get("send_count", 0), reverse=True)
+            return {"stickers": stickers, "sort": sort_mode}
         except Exception as e:
             return {"stickers": [], "error": str(e)}
 
@@ -74,6 +78,8 @@ def create_stickers_router(
                 "usage_hint": info.get("usage_hint", ""),
                 "send_count": info.get("send_count", 0),
                 "source": info.get("source", ""),
+                "created_at": info.get("created_at"),
+                "last_sent": info.get("last_sent"),
             }
         except Exception as e:
             return {"error": str(e)}

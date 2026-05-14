@@ -155,6 +155,15 @@ class CardSeries:
 
 
 @dataclass
+class MemoryEntitySummary:
+    scope: str
+    scope_id: str
+    card_count: int
+    updated_at: str
+    created_at: str
+
+
+@dataclass
 class NewCardSeries:
     series_key: str
     scope: str
@@ -403,6 +412,39 @@ class CardStore:
         rows = await cursor.fetchall()
         return [r["scope_id"] for r in rows]
 
+    async def list_entity_summaries(
+        self,
+        scope: str,
+        *,
+        sort: str = "default",
+    ) -> list[MemoryEntitySummary]:
+        order_sql = (
+            "ORDER BY MAX(updated_at) DESC, MAX(created_at) DESC, scope_id ASC"
+            if sort == "time"
+            else "ORDER BY COUNT(*) DESC, MAX(updated_at) DESC, scope_id ASC"
+        )
+        cursor = await self._db.execute(
+            f"""SELECT scope, scope_id, COUNT(*) AS card_count,
+                       MAX(updated_at) AS updated_at,
+                       MAX(created_at) AS created_at
+                FROM memory_cards
+                WHERE scope = ? AND status = 'active'
+                GROUP BY scope, scope_id
+                {order_sql}""",
+            (scope,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            MemoryEntitySummary(
+                scope=row["scope"],
+                scope_id=row["scope_id"],
+                card_count=int(row["card_count"] or 0),
+                updated_at=str(row["updated_at"] or ""),
+                created_at=str(row["created_at"] or ""),
+            )
+            for row in rows
+        ]
+
     async def count_entity_cards(self, scope: str, scope_id: str) -> dict[str, int]:
         cursor = await self._db.execute(_COUNT_ENTITY, (scope, scope_id))
         rows = await cursor.fetchall()
@@ -416,6 +458,7 @@ class CardStore:
         status: str = "active",
         limit: int = 100,
         offset: int = 0,
+        sort: str = "default",
     ) -> list[Card]:
         """List cards with optional scope/scope_id filters and pagination."""
         sql = "SELECT * FROM memory_cards WHERE status = ?"
@@ -426,7 +469,10 @@ class CardStore:
         if scope_id:
             sql += " AND scope_id = ?"
             params.append(scope_id)
-        sql += " ORDER BY priority DESC, updated_at DESC LIMIT ? OFFSET ?"
+        if sort == "time":
+            sql += " ORDER BY updated_at DESC, created_at DESC, priority DESC LIMIT ? OFFSET ?"
+        else:
+            sql += " ORDER BY priority DESC, updated_at DESC, created_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         cursor = await self._db.execute(sql, params)
         rows = await cursor.fetchall()

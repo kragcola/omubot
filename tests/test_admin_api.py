@@ -13,6 +13,7 @@ from admin.auth import AdminAuthMiddleware
 from admin.routes.api import create_api_router
 from admin.routes.api.auth import create_auth_router
 from admin.routes.api.groups import create_groups_router
+from admin.routes.api.learning_normalizer import create_learning_normalizer_router
 from admin.routes.api.memory import create_memory_router
 from admin.routes.api.plugins import create_plugins_router
 from admin.routes.api.protocol import create_protocol_router
@@ -24,10 +25,11 @@ from kernel.bus import PluginBus
 from kernel.config import BotConfig
 from kernel.types import AmadeusPlugin, Command, MessageContext
 from services.errors import RuntimeErrorStore
+from services.learning_normalizer import LearningNormalizerStore
 from services.plugin_config import PluginConfigStore
 from services.plugin_state import PluginStateStore
 from services.protocol_trace import ProtocolConnectionHistory, ProtocolTraceStore
-from services.slang import SlangSettings, SlangStore
+from services.slang import SlangDriftAssessment, SlangSettings, SlangStore
 from services.tools.base import Tool
 from services.tools.registry import ToolRegistry
 
@@ -44,6 +46,21 @@ class _DummyMessageLog:
             "message_id": 1,
             "created_at": 1_746_563_200.0,
         }]
+
+
+class _FakeDriftReviewer:
+    def __init__(self, verdict: str = "real_drift", confidence: float = 0.9, reason: str = "test") -> None:
+        self.verdict = verdict
+        self.confidence = confidence
+        self.reason = reason
+
+    async def review_drift(self, **_kwargs):
+        return SlangDriftAssessment(
+            verdict=self.verdict,  # type: ignore[arg-type]
+            confidence=self.confidence,
+            reason=self.reason,
+            reviewed=True,
+        )
 
 
 class _DummyScheduler:
@@ -91,9 +108,12 @@ class _DummyGroupConfig:
     def __init__(self) -> None:
         self.overrides = {111: object()}
         self.allowed_groups = [222]
+        self.access = SimpleNamespace(mode="blacklist", whitelist=[], blacklist=[])
+        self.presence = SimpleNamespace(default_mode="active")
 
     def resolve(self, group_id: int) -> SimpleNamespace:
         return SimpleNamespace(
+            access_allowed=True,
             at_only=group_id == 111,
             talk_value=0.5,
             planner_smooth=3.0,
@@ -109,6 +129,7 @@ class _DummyGroupConfig:
             tools_enabled=True,
             sticker_mode="inherit",
             slang_enabled=True,
+            presence_mode="active",
         )
 
 
@@ -171,6 +192,20 @@ class _BetaPlugin(AmadeusPlugin):
 
     def register_tools(self) -> list[Tool]:
         return [_DummyTool("beta_tool")]
+
+
+class _RuntimeMetaPlugin(AmadeusPlugin):
+    name = "calendar_context"
+    description = "calendar runtime"
+    version = "1.0.0"
+
+    def runtime_meta(self) -> dict[str, object]:
+        return {
+            "loaded_years": [2026, 2027],
+            "current_year": 2027,
+            "current_year_available": True,
+            "data_source": "storage",
+        }
 
 
 class _FailingMessagePlugin(AmadeusPlugin):
@@ -241,6 +276,117 @@ def test_admin_events_requires_auth(monkeypatch) -> None:
     assert authed.json() == {"ok": True}
 
 
+def test_learning_normalizer_api_lists_items_and_revisions(tmp_path: Path) -> None:
+    async def _seed(store: LearningNormalizerStore) -> tuple[str, str]:
+        first = await store.attach_candidate(
+            domain="slang",
+            scope="group",
+            group_id="100",
+            raw_text="凤笑梦bot",
+            source_table="slang_terms",
+            source_id="a",
+            profile="slang",
+        )
+        await store.attach_candidate(
+            domain="slang",
+            scope="group",
+            group_id="100",
+            raw_text="凤笑梦bot啊",
+            source_table="slang_terms",
+            source_id="b",
+            profile="slang",
+        )
+        return first.cluster_id, first.item_id
+
+    store = LearningNormalizerStore(tmp_path / "ln.db")
+    asyncio.run(store.init())
+    try:
+        cluster_id, _item_id = asyncio.run(_seed(store))
+        app = FastAPI()
+        app.include_router(
+            create_learning_normalizer_router(ctx=SimpleNamespace(learning_normalizer_store=store)),
+            prefix="/api/admin",
+        )
+        client = TestClient(app)
+
+        clusters_resp = client.get("/api/admin/learning-normalizer/clusters", params={"domain": "slang"})
+        assert clusters_resp.status_code == 200
+        assert clusters_resp.json()["total"] == 1
+
+        items_resp = client.get(f"/api/admin/learning-normalizer/clusters/{cluster_id}/items")
+        assert items_resp.status_code == 200
+        payload = items_resp.json()
+        assert len(payload["items"]) == 2
+        revisions = payload["revisions"]
+        auto_merge = next(item for item in revisions if item["action"] == "auto_merge")
+
+        undo_resp = client.post(f"/api/admin/learning-normalizer/revisions/{auto_merge['revision_id']}/undo")
+        assert undo_resp.status_code == 200
+        assert undo_resp.json()["ok"] is True
+    finally:
+        asyncio.run(store.close())
+
+
+def test_learning_normalizer_api_syncs_source_meta_after_undo(tmp_path: Path) -> None:
+    async def _seed(slang_store: SlangStore, normalizer: LearningNormalizerStore) -> tuple[str, str, str]:
+        term = await slang_store.create_term(
+            term="凤笑梦bot",
+            meaning="测试用语",
+            aliases=[],
+            group_id="100",
+            status="candidate",
+        )
+        term_id = term.term_id
+        first = await normalizer.attach_candidate(
+            domain="slang",
+            scope="group",
+            group_id="100",
+            raw_text="凤笑梦bot",
+            source_table="slang_terms",
+            source_id=term_id,
+            profile="slang",
+        )
+        second = await normalizer.attach_candidate(
+            domain="slang",
+            scope="group",
+            group_id="100",
+            raw_text="凤笑梦bot啊",
+            source_table="slang_terms",
+            source_id=term_id,
+            profile="slang",
+        )
+        await slang_store.update_term(term_id, meta=second.to_meta(), record_revision=False)
+        revisions = await normalizer.list_cluster_revisions(first.cluster_id, action="auto_merge")
+        return term_id, second.cluster_id, revisions[0].revision_id
+
+    slang_store = SlangStore(tmp_path / "slang.db")
+    normalizer = LearningNormalizerStore(tmp_path / "ln.db")
+    asyncio.run(slang_store.init())
+    asyncio.run(normalizer.init())
+    try:
+        term_id, old_cluster_id, revision_id = asyncio.run(_seed(slang_store, normalizer))
+        app = FastAPI()
+        app.include_router(
+            create_learning_normalizer_router(
+                ctx=SimpleNamespace(learning_normalizer_store=normalizer, slang_store=slang_store),
+            ),
+            prefix="/api/admin",
+        )
+        client = TestClient(app)
+
+        resp = client.post(f"/api/admin/learning-normalizer/revisions/{revision_id}/undo")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        term = asyncio.run(slang_store.get_term(term_id))
+        assert term is not None
+        assert term.meta["normalization_cluster_id"] != old_cluster_id
+        assert term.meta["normalization_method"] == "manual_adjust"
+    finally:
+        asyncio.run(normalizer.close())
+        asyncio.run(slang_store.close())
+
+
 def test_create_api_router_uses_custom_config_path(tmp_path: Path) -> None:
     config_path = tmp_path / "custom.json"
     config_path.write_text('{"llm":{"model":"x"}}', encoding="utf-8")
@@ -257,6 +403,106 @@ def test_create_api_router_uses_custom_config_path(tmp_path: Path) -> None:
     assert payload["migration_pending"] is False
     assert "schema" in payload["editor"]
     assert payload["editor"]["values"]["llm"]["model"] == "x"
+
+
+def test_config_endpoint_exposes_segmentation_and_scheduler_controls(tmp_path: Path) -> None:
+    config_path = tmp_path / "custom.json"
+    config_path.write_text(json.dumps({
+        "reply_segmentation": {
+            "max_segment_chars": 20,
+            "max_send_segments": 0,
+            "soft_max_send_segments": 12,
+        },
+        "scheduler": {
+            "concurrency": {
+                "global_llm_limit": 2,
+                "first_segment_release": False,
+            },
+        },
+        "reply_workflow": {
+            "mode": "shadow",
+            "semantic_force_threshold": 0.78,
+            "semantic_timeout_ms": 2200,
+            "semantic_max_chars": 48,
+            "directed_followup_window_s": 180.0,
+            "shadow_log_private": True,
+        },
+    }), encoding="utf-8")
+
+    app = FastAPI()
+    app.include_router(create_api_router(config_path=str(config_path)))
+    client = TestClient(app)
+
+    resp = client.get("/api/admin/config")
+    assert resp.status_code == 200
+    payload = resp.json()
+    values = payload["editor"]["values"]
+
+    assert values["reply_segmentation"]["max_send_segments"] == 0
+    assert values["reply_segmentation"]["soft_max_send_segments"] == 12
+    assert values["scheduler"]["concurrency"]["global_llm_limit"] == 2
+    assert values["scheduler"]["concurrency"]["first_segment_release"] is False
+    assert values["reply_workflow"]["mode"] == "shadow"
+    assert values["reply_workflow"]["semantic_force_threshold"] == 0.78
+    assert values["reply_workflow"]["semantic_timeout_ms"] == 2200
+    assert values["reply_workflow"]["semantic_max_chars"] == 48
+    assert values["reply_workflow"]["directed_followup_window_s"] == 180.0
+    assert values["reply_workflow"]["shadow_log_private"] is True
+
+    schema_by_path = {
+        child["path"]: child
+        for section in payload["editor"]["schema"]
+        for child in section.get("children", [])
+    }
+    top_schema_by_path = {section["path"]: section for section in payload["editor"]["schema"]}
+    assert schema_by_path["reply_segmentation.max_send_segments"]["display_label"] == "硬性段数上限"
+    assert schema_by_path["reply_segmentation.soft_max_send_segments"]["risk_level"] == "careful"
+    assert schema_by_path["reply_segmentation.boundary_backend"]["display_label"] == "分段边界后端"
+    assert top_schema_by_path["reply_workflow"]["kind"] == "object"
+    reply_workflow_children = {
+        child["path"]: child
+        for child in top_schema_by_path["reply_workflow"]["children"]
+    }
+    assert reply_workflow_children["reply_workflow.mode"]["display_label"] == "回复工作流模式"
+    assert reply_workflow_children["reply_workflow.mode"]["kind"] == "select"
+    assert reply_workflow_children["reply_workflow.mode"]["options"] == ["off", "shadow", "semantic"]
+    assert reply_workflow_children["reply_workflow.semantic_force_threshold"]["kind"] == "number"
+    assert schema_by_path["scheduler.concurrency"]["kind"] == "object"
+
+    concurrency_children = {
+        child["path"]: child
+        for child in schema_by_path["scheduler.concurrency"]["children"]
+    }
+    assert concurrency_children["scheduler.concurrency.global_llm_limit"]["kind"] == "number"
+    assert concurrency_children["scheduler.concurrency.first_segment_release"]["risk_level"] == "danger"
+
+    values["reply_segmentation"]["max_segment_chars"] = 28
+    values["reply_segmentation"]["soft_max_send_segments"] = 10
+    values["scheduler"]["concurrency"]["global_llm_limit"] = 3
+    values["reply_workflow"]["mode"] = "semantic"
+    values["reply_workflow"]["semantic_force_threshold"] = 0.82
+
+    preview_resp = client.post("/api/admin/config/preview", json={"mode": "structured", "values": values})
+    assert preview_resp.status_code == 200
+    preview = preview_resp.json()
+    assert preview["ok"] is True
+    changed_paths = {item["path"] for item in preview["changes"]}
+    assert "reply_segmentation.max_segment_chars" in changed_paths
+    assert "reply_segmentation.soft_max_send_segments" in changed_paths
+    assert "scheduler.concurrency.global_llm_limit" in changed_paths
+    assert "reply_workflow.mode" in changed_paths
+    assert "reply_workflow.semantic_force_threshold" in changed_paths
+
+    save_resp = client.post("/api/admin/config", json={"mode": "structured", "values": values})
+    assert save_resp.status_code == 200
+    saved = save_resp.json()
+    assert saved["ok"] is True
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["reply_segmentation"]["max_segment_chars"] == 28
+    assert written["reply_segmentation"]["soft_max_send_segments"] == 10
+    assert written["scheduler"]["concurrency"]["global_llm_limit"] == 3
+    assert written["reply_workflow"]["mode"] == "semantic"
+    assert written["reply_workflow"]["semantic_force_threshold"] == 0.82
 
 
 def test_knowledge_api_returns_structured_hits_from_live_context() -> None:
@@ -391,6 +637,91 @@ def test_knowledge_graph_api_returns_runtime_graph() -> None:
     assert candidates.json()["candidates"][0]["candidate_id"] == "gc_1"
     assert scope_risks.status_code == 200
     assert scope_risks.json()["relationships"][0]["fact_id"] == "gf_risk"
+
+
+def test_knowledge_api_sort_modes() -> None:
+    class _Source:
+        def __init__(self, source: str, status: str, chunk_count: int, updated_at: str) -> None:
+            self._payload = {
+                "source": source,
+                "path": f"docs/{source}",
+                "status": status,
+                "chunk_count": chunk_count,
+                "updated_at": updated_at,
+            }
+
+        def to_dict(self) -> dict[str, object]:
+            return dict(self._payload)
+
+    class _Knowledge:
+        loaded = True
+
+        def stats(self):
+            return {"loaded": True, "chunk_count": 6, "source_count": 2}
+
+        def sources(self):
+            return [
+                _Source("older.md", "indexed", 2, "2026-05-12T09:00:00+08:00"),
+                _Source("newer.md", "skipped", 1, "2026-05-13T09:00:00+08:00"),
+            ]
+
+    class _Graph:
+        async def list_relationships(self, *, limit: int = 100):
+            assert limit == 100
+            return [
+                {
+                    "fact_id": "gf_old",
+                    "confidence": 0.4,
+                    "updated_at": "2026-05-13T09:00:00+08:00",
+                    "created_at": "2026-05-13T08:00:00+08:00",
+                },
+                {
+                    "fact_id": "gf_best",
+                    "confidence": 0.9,
+                    "updated_at": "2026-05-12T09:00:00+08:00",
+                    "created_at": "2026-05-12T08:00:00+08:00",
+                },
+            ]
+
+        async def list_candidates(self, *, status: str = "pending", limit: int = 100):
+            assert status == "pending"
+            assert limit == 100
+            return [
+                {
+                    "candidate_id": "gc_old",
+                    "confidence": 0.4,
+                    "updated_at": "2026-05-13T09:00:00+08:00",
+                    "created_at": "2026-05-13T08:00:00+08:00",
+                },
+                {
+                    "candidate_id": "gc_best",
+                    "confidence": 0.9,
+                    "updated_at": "2026-05-12T09:00:00+08:00",
+                    "created_at": "2026-05-12T08:00:00+08:00",
+                },
+            ]
+
+    app = FastAPI()
+    app.include_router(create_api_router(ctx=SimpleNamespace(knowledge_base=_Knowledge(), knowledge_graph=_Graph())))
+    client = TestClient(app)
+
+    sources_default = client.get("/api/admin/knowledge/sources").json()["sources"]
+    sources_time = client.get("/api/admin/knowledge/sources", params={"sort": "time"}).json()["sources"]
+    assert sources_default[0]["source"] == "older.md"
+    assert sources_time[0]["source"] == "newer.md"
+
+    relationships_default = client.get("/api/admin/knowledge/graph/relationships").json()["relationships"]
+    relationships_time = client.get(
+        "/api/admin/knowledge/graph/relationships",
+        params={"sort": "time"},
+    ).json()["relationships"]
+    assert relationships_default[0]["fact_id"] == "gf_best"
+    assert relationships_time[0]["fact_id"] == "gf_old"
+
+    candidates_default = client.get("/api/admin/knowledge/graph/candidates").json()["candidates"]
+    candidates_time = client.get("/api/admin/knowledge/graph/candidates", params={"sort": "time"}).json()["candidates"]
+    assert candidates_default[0]["candidate_id"] == "gc_best"
+    assert candidates_time[0]["candidate_id"] == "gc_old"
 
 
 def test_context_metrics_api_returns_runtime_metrics() -> None:
@@ -601,6 +932,150 @@ def test_groups_endpoint_discovers_groups_and_normalizes_messages() -> None:
     assert len(msg["timestamp"]) == 19
 
 
+def test_groups_endpoint_uses_runtime_inventory_when_live_refresh_fails() -> None:
+    ctx = SimpleNamespace(
+        group_inventory={
+            "666": {"group_id": 666, "group_name": "Runtime Group A"},
+            "777": {"group_id": 777, "group_name": "Runtime Group B"},
+        },
+        bot=_FailingProtocolBot(),
+    )
+    app = FastAPI()
+    app.include_router(
+        create_groups_router(
+            group_config=_DummyGroupConfig(),
+            ctx=ctx,
+        ),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    resp = client.get("/api/admin/groups")
+    assert resp.status_code == 200
+    groups_by_id = {item["group_id"]: item for item in resp.json()["groups"]}
+    assert {"111", "222", "666", "777"}.issubset(groups_by_id)
+    assert groups_by_id["666"]["group_name"] == "Runtime Group A"
+    assert groups_by_id["777"]["group_name"] == "Runtime Group B"
+
+
+def test_groups_policy_endpoint_persists_separate_json(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    runtime_config = BotConfig.model_validate({
+        "group": {
+            "allowed_groups": [111],
+        },
+    })
+
+    app = FastAPI()
+    app.include_router(
+        create_groups_router(
+            config=runtime_config,
+            group_config=runtime_config.group,
+            message_log=_DummyMessageLog(),
+            config_path=str(config_path),
+        ),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    initial = client.get("/api/admin/groups/policy")
+    assert initial.status_code == 200
+    assert initial.json()["policy"]["mode"] == "whitelist"
+    assert initial.json()["policy"]["whitelist"] == [111]
+
+    saved_resp = client.post(
+        "/api/admin/groups/policy",
+        json={
+            "mode": "blacklist",
+            "whitelist": [111],
+            "blacklist": [333],
+            "log_dropped": False,
+        },
+    )
+    assert saved_resp.status_code == 200
+    saved = saved_resp.json()
+    assert saved["ok"] is True
+    assert saved["policy"]["mode"] == "blacklist"
+    assert saved["policy"]["blacklist"] == [333]
+    assert runtime_config.group.access.mode == "blacklist"
+    assert runtime_config.group.access.blacklist == [333]
+
+    policy_file = tmp_path / "group-policy.json"
+    assert policy_file.is_file()
+    written = json.loads(policy_file.read_text(encoding="utf-8"))
+    assert written == {
+        "mode": "blacklist",
+        "whitelist": [111],
+        "blacklist": [333],
+        "log_dropped": False,
+    }
+
+    groups_by_id = {item["group_id"]: item for item in saved["groups"]}
+    assert groups_by_id["111"]["access_allowed"] is True
+    assert groups_by_id["333"]["access_allowed"] is False
+
+
+def test_groups_profile_can_enable_slang_learning_without_speaking_access(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    runtime_config = BotConfig.model_validate({
+        "group": {
+            "access": {
+                "mode": "whitelist",
+                "whitelist": [111],
+                "blacklist": [],
+            },
+        },
+    })
+
+    app = FastAPI()
+    app.include_router(
+        create_groups_router(
+            config=runtime_config,
+            group_config=runtime_config.group,
+            message_log=_DummyMessageLog(),
+            config_path=str(config_path),
+        ),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    detail = client.get("/api/admin/groups/222/profile").json()["group"]
+    assert detail["access_allowed"] is False
+    assert detail["presence_mode"] == "off"
+    assert detail["slang_enabled"] is False
+
+    payload = {
+        "blocked_users": detail["blocked_users"],
+        "allowed_tools": detail["allowed_tools"],
+        "blocked_tools": detail["blocked_tools"],
+        "at_only": detail["at_only"],
+        "talk_value": detail["talk_value"],
+        "planner_smooth": detail["planner_smooth"],
+        "debounce_seconds": detail["debounce_seconds"],
+        "batch_size": detail["batch_size"],
+        "history_load_count": detail["history_load_count"],
+        "reply_style": detail["reply_style"],
+        "custom_prompt": detail["custom_prompt"],
+        "tools_enabled": detail["tools_enabled"],
+        "sticker_mode": detail["sticker_mode"],
+        "slang_enabled": True,
+        "presence_mode": "off",
+    }
+    saved_resp = client.post("/api/admin/groups/222/profile", json=payload)
+    assert saved_resp.status_code == 200
+    saved = saved_resp.json()["group"]
+    assert saved["access_allowed"] is False
+    assert saved["presence_mode"] == "silent_learn"
+    assert saved["slang_enabled"] is True
+    assert runtime_config.group.allows_learning_group(222) is True
+    assert runtime_config.group.allows_active_group(222) is False
+
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    override = written["group"]["overrides"]["222"]
+    assert override["presence_mode"] == "silent_learn"
+    assert override["slang_enabled"] is True
+
+
 def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     bus = PluginBus()
@@ -643,6 +1118,8 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
     assert detail["ok"] is True
     assert detail["group"]["global_blocked_users"] == [70001]
     assert detail["group"]["allowed_tools"] == ["alpha_tool"]
+    assert detail["group"]["presence_mode"] == "active"
+    assert detail["group"]["access_allowed"] is True
     assert {tool["name"] for tool in detail["tool_catalog"]} == {"alpha_tool", "beta_tool"}
     assert detail["audit"]["entries"] == []
 
@@ -663,6 +1140,7 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
             "tools_enabled": False,
             "sticker_mode": "off",
             "slang_enabled": False,
+            "presence_mode": "silent_learn",
         },
     )
     assert save_resp.status_code == 200
@@ -675,6 +1153,8 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
     assert saved["group"]["reply_style"] == "playful"
     assert saved["group"]["tools_enabled"] is False
     assert saved["group"]["slang_enabled"] is False
+    assert saved["group"]["presence_mode"] == "silent_learn"
+    assert saved["group"]["access_allowed"] is True
     assert saved["audit_entry"]["summary"]["changed_count"] >= 1
 
     resolved = runtime_config.group.resolve(123456)
@@ -687,6 +1167,7 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
     assert resolved.tools_enabled is False
     assert resolved.sticker_mode == "off"
     assert resolved.slang_enabled is False
+    assert resolved.presence_mode == "silent_learn"
 
     written = json.loads(config_path.read_text(encoding="utf-8"))
     override = written["group"]["overrides"]["123456"]
@@ -709,6 +1190,7 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
     assert reset["group"]["profile_customized"] is False
     assert reset["group"]["blocked_users"] == [70001]
     assert reset["group"]["allowed_tools"] == ["alpha_tool"]
+    assert reset["group"]["presence_mode"] == "active"
 
     resolved_after_reset = runtime_config.group.resolve(123456)
     assert resolved_after_reset.at_only is False
@@ -816,6 +1298,27 @@ def test_memory_create_card_requires_scope_id_for_user_group() -> None:
     assert store.last_card.scope_id == "global"
 
 
+def test_memory_cards_accept_sort_param() -> None:
+    class _ListStore:
+        def __init__(self) -> None:
+            self.last_kwargs: dict[str, object] | None = None
+
+        async def list_cards(self, **kwargs):
+            self.last_kwargs = kwargs
+            return []
+
+    store = _ListStore()
+    app = FastAPI()
+    app.include_router(create_memory_router(card_store=store), prefix="/api/admin")
+    client = TestClient(app)
+
+    resp = client.get("/api/admin/memory/cards", params={"sort": "time"})
+    assert resp.status_code == 200
+    assert resp.json()["sort"] == "time"
+    assert store.last_kwargs is not None
+    assert store.last_kwargs["sort"] == "time"
+
+
 def test_plugin_endpoints_include_ownership() -> None:
     bus = _DummyBus([_AlphaPlugin(), _BetaPlugin()])
 
@@ -880,6 +1383,20 @@ def test_plugin_health_and_state_endpoint_refreshes_tools(tmp_path: Path) -> Non
     state_resp = client.get("/api/admin/plugins/state")
     assert state_resp.status_code == 200
     assert state_resp.json()["plugins"]["alpha"]["enabled"] is False
+
+
+def test_plugin_detail_exposes_runtime_meta() -> None:
+    bus = _DummyBus([_RuntimeMetaPlugin()])
+
+    app = FastAPI()
+    app.include_router(create_plugins_router(bus=bus), prefix="/api/admin")
+    client = TestClient(app)
+
+    detail_resp = client.get("/api/admin/plugins/calendar_context")
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()
+    assert detail["runtime_meta"]["current_year"] == 2027
+    assert detail["runtime_meta"]["data_source"] == "storage"
 
 
 def test_plugin_list_exposes_friendly_permission_limited_health() -> None:
@@ -1001,6 +1518,30 @@ def test_plugin_list_reports_config_status_for_user_plugin(tmp_path: Path) -> No
     assert alpha["locked"] is False
     assert alpha["config_status"] == "ready"
     assert alpha["configurable"] is True
+
+
+def test_calendar_context_settings_schema_matches_current_config(tmp_path: Path) -> None:
+    from plugins.calendar_context.plugin import CalendarContextPlugin
+
+    bus = PluginBus()
+    bus.register(CalendarContextPlugin())
+    config_store = PluginConfigStore(tmp_path / "plugin-config.json")
+
+    app = FastAPI()
+    app.include_router(
+        create_plugins_router(bus=bus, plugin_config_store=config_store),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    resp = client.get("/api/admin/plugins/calendar_context/settings")
+    assert resp.status_code == 200
+    properties = resp.json()["schema"]["properties"]
+
+    assert "builtin_dataset" not in properties
+    assert "extra_data_files" not in properties
+    assert "builtin_birthdays_file" in properties
+    assert "extra_year_files" in properties
 
 
 def test_non_whitelist_system_plugin_is_downgraded_to_user() -> None:
@@ -1283,6 +1824,7 @@ def test_provider_and_protocol_endpoints() -> None:
     assert providers_resp.json()["rate_limits"]["profiles"]["slang"]["rate_limited"] == 1
     task_profiles = {item["task"]: item["profile"] for item in providers_resp.json()["task_profiles"]}
     assert task_profiles["slang"] == "slang"
+    assert task_profiles["reply_gate"] == "main"
 
     provider_test_resp = client.post("/api/admin/providers/slang/test")
     assert provider_test_resp.status_code == 200
@@ -1375,6 +1917,7 @@ def test_provider_selection_persists_and_hot_switches(tmp_path: Path) -> None:
         "default_profile": "alt",
         "task_profiles": {
             "thinker": "alt",
+            "reply_gate": "alt",
             "compact": "main",
             "slang": "slang",
             "vision": "alt",
@@ -1389,10 +1932,12 @@ def test_provider_selection_persists_and_hot_switches(tmp_path: Path) -> None:
     assert hot_client.names["main"] == "alt"
     assert hot_client.models["main"] == "alt-main"
     assert hot_client.names["slang"] == "slang"
+    assert hot_client.names["reply_gate"] == "alt"
 
     written = json.loads(config_path.read_text(encoding="utf-8"))
     assert written["llm"]["default_profile"] == "alt"
     assert written["llm"]["task_profiles"]["main"] == "alt"
+    assert written["llm"]["task_profiles"]["reply_gate"] == "alt"
     assert written["llm"]["task_profiles"]["compact"] == "main"
 
     providers_resp = client.get("/api/admin/providers")
@@ -1758,6 +2303,126 @@ def test_system_services_health_endpoint(tmp_path: Path) -> None:
     assert payload["maintenance_window"]["restart_recommended"] is False
 
 
+def test_system_services_health_warns_on_missing_archive_backfill(tmp_path: Path) -> None:
+    from services.health import collect_service_health
+
+    with sqlite3.connect(tmp_path / "messages.db") as conn:
+        conn.execute(
+            """CREATE TABLE group_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                speaker TEXT,
+                content_text TEXT,
+                content_json TEXT,
+                message_id INTEGER,
+                created_at REAL NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE conversation_messages (
+                message_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                legacy_row_id INTEGER
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO group_messages
+               (group_id, role, speaker, content_text, content_json, message_id, created_at)
+               VALUES ('100', 'user', 'A(1)', 'missing', NULL, 1, 1.0)"""
+        )
+    for name in ("memory_cards.db", "slang.db"):
+        with sqlite3.connect(tmp_path / name) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS marker (id INTEGER PRIMARY KEY)")
+
+    ctx = SimpleNamespace(
+        storage_dir=tmp_path,
+        bus=PluginBus(),
+        llm_client=object(),
+        protocol_trace=ProtocolTraceStore(),
+        protocol_connections=ProtocolConnectionHistory(),
+        runtime_errors=RuntimeErrorStore(),
+        msg_log=SimpleNamespace(_db_path=str(tmp_path / "messages.db")),
+        card_store=SimpleNamespace(_db_path=str(tmp_path / "memory_cards.db")),
+        slang_store=SimpleNamespace(_db_path=str(tmp_path / "slang.db")),
+    )
+    ctx.bus.register(_AlphaPlugin())
+    config = BotConfig.model_validate({
+        "llm": {
+            "base_url": "https://llm.example/v1",
+            "api_key": "sk-test",
+            "model": "omubot-main",
+        },
+        "napcat": {"api_url": "http://napcat.example"},
+    })
+
+    payload = asyncio.run(collect_service_health(ctx=ctx, config=config, bot=_DummyBot()))
+    sqlite_service = next(item for item in payload["services"] if item["id"] == "sqlite")
+    assert sqlite_service["status"] == "warning"
+    assert sqlite_service["meta"]["messages_archive"]["missing_archive_count"] == 1
+    assert payload["alerts"] == []
+
+
+def test_system_services_health_allows_archive_extra_rows(tmp_path: Path) -> None:
+    from services.health import collect_service_health
+
+    with sqlite3.connect(tmp_path / "messages.db") as conn:
+        conn.execute(
+            """CREATE TABLE group_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                speaker TEXT,
+                content_text TEXT,
+                content_json TEXT,
+                message_id INTEGER,
+                created_at REAL NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE conversation_messages (
+                message_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                legacy_row_id INTEGER
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO group_messages
+               (group_id, role, speaker, content_text, content_json, message_id, created_at)
+               VALUES ('100', 'user', 'A(1)', 'synced', NULL, 1, 1.0)"""
+        )
+        conn.execute("INSERT INTO conversation_messages (legacy_row_id) VALUES (1)")
+        conn.execute("INSERT INTO conversation_messages (legacy_row_id) VALUES (999)")
+    for name in ("memory_cards.db", "slang.db"):
+        with sqlite3.connect(tmp_path / name) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS marker (id INTEGER PRIMARY KEY)")
+
+    ctx = SimpleNamespace(
+        storage_dir=tmp_path,
+        bus=PluginBus(),
+        llm_client=object(),
+        protocol_trace=ProtocolTraceStore(),
+        protocol_connections=ProtocolConnectionHistory(),
+        runtime_errors=RuntimeErrorStore(),
+        msg_log=SimpleNamespace(_db_path=str(tmp_path / "messages.db")),
+        card_store=SimpleNamespace(_db_path=str(tmp_path / "memory_cards.db")),
+        slang_store=SimpleNamespace(_db_path=str(tmp_path / "slang.db")),
+    )
+    ctx.bus.register(_AlphaPlugin())
+    config = BotConfig.model_validate({
+        "llm": {
+            "base_url": "https://llm.example/v1",
+            "api_key": "sk-test",
+            "model": "omubot-main",
+        },
+        "napcat": {"api_url": "http://napcat.example"},
+    })
+
+    payload = asyncio.run(collect_service_health(ctx=ctx, config=config, bot=_DummyBot()))
+    sqlite_service = next(item for item in payload["services"] if item["id"] == "sqlite")
+    assert sqlite_service["status"] == "ok"
+    assert sqlite_service["meta"]["messages_archive"]["missing_archive_count"] == 0
+    assert sqlite_service["meta"]["messages_archive"]["archive_extra_count"] == 1
+
+
 def test_system_services_health_flags_throttled_plugin_bus(tmp_path: Path) -> None:
     config = BotConfig.model_validate({
         "llm": {
@@ -1824,11 +2489,16 @@ def test_slang_api_lifecycle(tmp_path: Path) -> None:
     assert approve_resp.json()["term"]["status"] == "approved"
 
     settings_resp = client.post("/api/admin/slang/settings", json={
-        "settings": {"max_injected_terms": 5, "group_allowlist": ["100"]},
+        "settings": {
+            "max_injected_terms": 5,
+            "group_allowlist": ["100"],
+            "global_excluded_group_ids": ["200"],
+        },
     })
     assert settings_resp.status_code == 200
     assert settings_resp.json()["settings"]["max_injected_terms"] == 5
     assert settings_resp.json()["settings"]["group_allowlist"] == ["100"]
+    assert settings_resp.json()["settings"]["global_excluded_group_ids"] == ["200"]
 
     asyncio.run(store.close())
 
@@ -1900,6 +2570,306 @@ def test_slang_api_v2_bulk_merge_stats_pending_and_runs(tmp_path: Path) -> None:
     stats_resp = client.get("/api/admin/slang/stats")
     assert stats_resp.status_code == 200
     assert stats_resp.json()["review"]["total_terms"] >= 2
+
+    asyncio.run(store.close())
+
+
+def test_slang_api_extract_runs_includes_abandoned_status(tmp_path: Path) -> None:
+    store = SlangStore(tmp_path / "slang.db")
+    asyncio.run(store.init())
+    run_id = asyncio.run(store.start_extraction_run(group_count=1, meta={"kind": "daily_ai_review"}))
+    asyncio.run(store.abandon_extraction_run(run_id, reason="daily_ai_review_timeout"))
+
+    app = FastAPI()
+    app.include_router(create_slang_router(store=store), prefix="/api/admin")
+    client = TestClient(app)
+
+    runs_resp = client.get("/api/admin/slang/extract/runs")
+    assert runs_resp.status_code == 200
+    payload = runs_resp.json()["runs"]
+    assert payload[0]["run_id"] == run_id
+    assert payload[0]["status"] == "abandoned"
+    assert payload[0]["error"] == "daily_ai_review_timeout"
+
+    asyncio.run(store.close())
+
+
+def test_slang_api_force_daily_review_uses_plugin(tmp_path: Path) -> None:
+    store = SlangStore(tmp_path / "slang.db")
+    asyncio.run(store.init())
+
+    class _ReviewPlugin:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str | None, bool, bool, bool, bool, str]] = []
+
+        async def run_daily_ai_review(
+            self,
+            ctx: object,
+            settings=None,
+            group_id=None,
+            review_candidates=False,
+            review_all_pending=False,
+            rerun_reviewed_candidates=False,
+            candidate_review_filter="",
+        ):
+            del ctx
+            self.calls.append((
+                group_id,
+                bool(getattr(settings, "daily_ai_review_enabled", False)),
+                bool(review_candidates),
+                bool(review_all_pending),
+                bool(rerun_reviewed_candidates),
+                str(candidate_review_filter or ""),
+            ))
+            return {
+                "ok": True,
+                "run_id": "run_force_review",
+                "groups": [group_id or ""],
+                "semantic_reviewed": 1,
+                "semantic_approved": 0,
+                "semantic_rejected": 0,
+                "semantic_kept": 0,
+                "semantic_no_info": 0,
+                "semantic_failed": 0,
+            }
+
+    plugin = _ReviewPlugin()
+    bus = SimpleNamespace(get_plugin=lambda name: plugin if name == "slang" else None)
+
+    app = FastAPI()
+    app.include_router(
+        create_slang_router(ctx=SimpleNamespace(tool_registry=None), bus=bus, store=store),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    resp = client.post("/api/admin/slang/review/run", json={"group_id": "100", "force": True})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["run_id"] == "run_force_review"
+    assert plugin.calls == [("100", True, False, False, False, "")]
+
+    resp = client.post(
+        "/api/admin/slang/review/run",
+        json={"group_id": "100", "force": True, "review_candidates": True},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["run_id"] == "run_force_review"
+    assert plugin.calls[-1] == ("100", True, True, False, False, "")
+
+    resp = client.post(
+        "/api/admin/slang/review/run",
+        json={
+            "group_id": "100",
+            "force": True,
+            "review_candidates": True,
+            "review_all_pending": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert plugin.calls[-1] == ("100", True, True, True, False, "")
+
+    resp = client.post(
+        "/api/admin/slang/review/run",
+        json={
+            "group_id": "100",
+            "force": True,
+            "review_candidates": True,
+            "rerun_reviewed_candidates": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert plugin.calls[-1] == ("100", True, True, False, True, "")
+
+    asyncio.run(store.close())
+
+
+def test_slang_api_extract_run_fallback_uses_shared_quality_helpers(tmp_path: Path) -> None:
+    store = SlangStore(tmp_path / "slang.db")
+    asyncio.run(store.init())
+    settings = asyncio.run(store.load_settings())
+    settings.candidate_min_count = 1
+    asyncio.run(store.save_settings(settings))
+
+    class _ExtractMessageLog:
+        async def list_group_ids(self) -> list[str]:
+            return ["100"]
+
+        async def query_recent(self, group_id: str, limit: int = 20) -> list[dict[str, object]]:
+            assert group_id == "100"
+            return [
+                {
+                    "role": "user",
+                    "speaker": "Alice(10001)",
+                    "content_text": "先来一句无关话",
+                    "message_id": 1,
+                    "created_at": 1.0,
+                },
+                {
+                    "role": "user",
+                    "speaker": "Bob(10002)",
+                    "content_text": "abc! 继续",
+                    "message_id": 2,
+                    "created_at": 2.0,
+                },
+                {
+                    "role": "user",
+                    "speaker": "Carol(10003)",
+                    "content_text": "末尾再补一句",
+                    "message_id": 3,
+                    "created_at": 3.0,
+                },
+            ]
+
+    class _ExtractLLM:
+        async def _call(self, system_blocks, messages, tools=None, max_tokens=1024, thinking=None):
+            del system_blocks, messages, tools, max_tokens, thinking
+            return {
+                "text": (
+                    '{"terms":[{"term":"abc","meaning":"群里短缩写",'
+                    '"aliases":[],"evidence":"abc! 继续","confidence":0.78,'
+                    '"reason":"群内解释","repeat_policy":"understand_only"}]}'
+                )
+            }
+
+    app = FastAPI()
+    app.include_router(
+        create_slang_router(
+            ctx=SimpleNamespace(msg_log=_ExtractMessageLog()),
+            llm_client=_ExtractLLM(),
+            store=store,
+        ),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    resp = client.post("/api/admin/slang/extract/run", json={"group_id": "100", "limit": 20})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["candidates"] == 1
+
+    terms, total = asyncio.run(store.list_terms(group_id="100"))
+    assert total == 1
+    [term] = terms
+    assert term.term == "abc"
+    assert term.usage_count == 1
+    assert term.unique_users == ["10002"]
+
+    observations = asyncio.run(store.list_observations(term.term_id))
+    assert len(observations) == 1
+    assert observations[0].message_id == 2
+    assert observations[0].raw_text == "abc! 继续"
+    assert observations[0].user_id == "10002"
+
+    asyncio.run(store.close())
+
+
+def test_slang_api_debug_message_seed_and_delete(tmp_path: Path) -> None:
+    store = SlangStore(tmp_path / "slang.db")
+    asyncio.run(store.init())
+
+    class _DebugDB:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+        async def execute(self, sql: str, params: tuple[object, ...]) -> None:
+            self.calls.append((sql, params))
+
+        async def commit(self) -> None:
+            self.calls.append(("COMMIT", ()))
+
+    class _DebugMessageLog:
+        def __init__(self) -> None:
+            self.records: list[dict[str, object]] = []
+            self._db = _DebugDB()
+
+        async def record(self, **kwargs):
+            self.records.append(kwargs)
+
+    msg_log = _DebugMessageLog()
+
+    app = FastAPI()
+    app.include_router(
+        create_slang_router(ctx=SimpleNamespace(msg_log=msg_log), store=store),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    seed_resp = client.post("/api/admin/slang/debug/message/seed", json={
+        "group_id": "100",
+        "role": "user",
+        "speaker": "SmokeUser(999000)",
+        "content_text": "烟雾测试消息",
+        "message_id": 123456,
+    })
+    assert seed_resp.status_code == 200
+    assert seed_resp.json()["ok"] is True
+    assert msg_log.records == [{
+        "group_id": "100",
+        "role": "user",
+        "speaker": "SmokeUser(999000)",
+        "content_text": "烟雾测试消息",
+        "content_json": None,
+        "message_id": 123456,
+    }]
+
+    delete_resp = client.post("/api/admin/slang/debug/message/delete", json={
+        "group_id": "100",
+        "content_text": "烟雾测试消息",
+        "message_id": 123456,
+    })
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["ok"] is True
+    assert msg_log._db.calls[0][0].startswith("DELETE FROM group_messages")
+    assert msg_log._db.calls[0][1] == ("100", "烟雾测试消息", 123456)
+    assert msg_log._db.calls[1][0] == "COMMIT"
+
+    asyncio.run(store.close())
+
+
+def test_slang_api_debug_pending_seed_and_delete(tmp_path: Path) -> None:
+    store = SlangStore(tmp_path / "slang.db")
+    asyncio.run(store.init())
+
+    app = FastAPI()
+    app.include_router(create_slang_router(store=store), prefix="/api/admin")
+    client = TestClient(app)
+
+    seed_resp = client.post("/api/admin/slang/debug/pending/seed", json={
+        "group_id": "100",
+        "term": "烟雾复核测试",
+        "meaning": "自动化烟雾测试样本",
+        "aliases": ["烟雾测试"],
+        "count": 100,
+        "confidence": 0.99,
+        "evidence": "烟雾复核测试 这是临时烟雾测试样本",
+        "reason": "semantic_smoke_seed",
+    })
+    assert seed_resp.status_code == 200
+    payload = seed_resp.json()
+    assert payload["ok"] is True
+    pending_id = payload["pending_id"]
+
+    pending_resp = client.get("/api/admin/slang/pending", params={"group_id": "100"})
+    assert pending_resp.status_code == 200
+    pending = pending_resp.json()["pending"]
+    assert any(item["pending_id"] == pending_id for item in pending)
+
+    delete_resp = client.post("/api/admin/slang/debug/pending/delete", json={
+        "pending_id": pending_id,
+        "group_id": "100",
+        "term": "烟雾复核测试",
+    })
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["ok"] is True
+
+    pending_resp = client.get("/api/admin/slang/pending", params={"group_id": "100"})
+    assert pending_resp.status_code == 200
+    assert all(item["pending_id"] != pending_id for item in pending_resp.json()["pending"])
 
     asyncio.run(store.close())
 
@@ -2022,12 +2992,27 @@ def test_slang_api_ai_review_filters_and_actions(tmp_path: Path) -> None:
     assert deny_resp.json()["term"]["status"] == "muted"
     assert deny_resp.json()["term"]["meta"]["review_decision"] == "denied"
 
+    rejected_resp = client.get("/api/admin/slang/terms", params={"review_filter": "ai_rejected"})
+    assert rejected_resp.status_code == 200
+    assert rejected_resp.json()["total"] == 0
+
+    returned_again_resp = client.post(f"/api/admin/slang/terms/{term_id}/return-candidate")
+    assert returned_again_resp.status_code == 200
+    returned_again_payload = returned_again_resp.json()
+    assert returned_again_payload["ok"] is True
+    assert returned_again_payload["term"]["status"] == "candidate"
+    assert returned_again_payload["term"]["source"] == "admin_returned"
+    assert returned_again_payload["term"]["meta"]["review_decision"] == "returned_to_candidate"
+    assert "ai_approved" not in returned_again_payload["term"]["meta"]
+    assert "candidate_review_state" not in returned_again_payload["term"]["meta"]
+
     asyncio.run(store.close())
 
 
 def test_slang_api_v3_drift_and_revisions(tmp_path: Path) -> None:
     store = SlangStore(tmp_path / "slang.db")
     asyncio.run(store.init())
+    store.set_drift_reviewer(_FakeDriftReviewer("real_drift", reason="核心指代变化"))
     term = asyncio.run(store.create_term(
         term="猫饼",
         meaning="群里说离谱但可爱的操作",
@@ -2069,6 +3054,50 @@ def test_slang_api_v3_drift_and_revisions(tmp_path: Path) -> None:
     processed_resp = client.get("/api/admin/slang/drift", params={"status": "accepted"})
     assert processed_resp.status_code == 200
     assert processed_resp.json()["total"] == 1
+
+    asyncio.run(store.close())
+
+
+def test_slang_api_replays_open_drift_reviews(tmp_path: Path) -> None:
+    store = SlangStore(tmp_path / "slang.db")
+    asyncio.run(store.init())
+    store.set_drift_reviewer(_FakeDriftReviewer("real_drift", reason="核心指代变化"))
+    asyncio.run(store.create_term(
+        term="没米",
+        meaning="没有钱或没有资源",
+        scope="group",
+        group_id="100",
+        status="approved",
+        confidence=0.9,
+    ))
+    settings = SlangSettings(drift_detection_enabled=True, drift_min_confidence=0.6)
+    asyncio.run(store.upsert_candidate(
+        term="没米",
+        meaning="一种完全不同的新释义",
+        group_id="100",
+        raw_text="没米了",
+        confidence=0.9,
+        reason="冲突释义",
+        settings=settings,
+    ))
+    store.set_drift_reviewer(_FakeDriftReviewer("same_meaning", reason="回放判定同义"))
+
+    app = FastAPI()
+    app.include_router(create_slang_router(store=store), prefix="/api/admin")
+    client = TestClient(app)
+
+    dry_run_resp = client.post("/api/admin/slang/drift/replay", json={"apply": False})
+    assert dry_run_resp.status_code == 200
+    assert dry_run_resp.json()["closed_same_meaning"] == 1
+    assert client.get("/api/admin/slang/drift").json()["total"] == 1
+
+    apply_resp = client.post("/api/admin/slang/drift/replay", json={"apply": True})
+    assert apply_resp.status_code == 200
+    assert apply_resp.json()["closed_same_meaning"] == 1
+    assert client.get("/api/admin/slang/drift").json()["total"] == 0
+    rejected_payload = client.get("/api/admin/slang/drift", params={"status": "rejected"}).json()
+    assert rejected_payload["total"] == 1
+    assert rejected_payload["reviews"][0]["meta"]["drift_semantic_verdict"] == "same_meaning"
 
     asyncio.run(store.close())
 

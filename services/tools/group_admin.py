@@ -6,6 +6,28 @@ from services.tools.base import Tool
 from services.tools.context import ToolContext
 
 
+def _group_policy_allows_tool_use(ctx: ToolContext, group_id: str) -> bool:
+    policy = ctx.extra.get("group_policy")
+    if policy is None:
+        return True
+    checker = getattr(policy, "allows_active_group", None)
+    if callable(checker):
+        try:
+            if not bool(checker(group_id)):
+                return False
+        except Exception:
+            return True
+    resolver = getattr(policy, "resolve", None)
+    if callable(resolver):
+        try:
+            resolved = resolver(int(group_id))
+            if not bool(getattr(resolved, "tools_enabled", True)):
+                return False
+        except Exception:
+            return True
+    return True
+
+
 def _check_auth(ctx: ToolContext, superusers: set[str]) -> str | None:
     """鉴权检查。返回 None 表示通过，否则返回错误信息。"""
     if not ctx.bot or not ctx.group_id:
@@ -56,6 +78,8 @@ class MuteUserTool(Tool):
         if err := _check_auth(ctx, self._superusers):
             return err
         assert ctx.group_id is not None
+        if not _group_policy_allows_tool_use(ctx, ctx.group_id):
+            return "当前群未开放工具调用"
         user_id: str = kwargs["user_id"]
         duration: int = int(kwargs.get("duration", self._default_duration))
         if self._max_duration and duration > self._max_duration:
@@ -93,6 +117,8 @@ class SetTitleTool(Tool):
         if err := _check_auth(ctx, self._superusers):
             return err
         assert ctx.group_id is not None
+        if not _group_policy_allows_tool_use(ctx, ctx.group_id):
+            return "当前群未开放工具调用"
         user_id: str = kwargs["user_id"]
         title: str = kwargs["title"]
         await ctx.bot.set_group_special_title(
@@ -131,5 +157,14 @@ class SendGroupMsgTool(Tool):
             return "权限不足: 仅管理员可执行此操作"
         group_id: str = kwargs["group_id"]
         message: str = kwargs["message"]
-        await ctx.bot.send_group_msg(group_id=int(group_id), message=message)
+        if not _group_policy_allows_tool_use(ctx, group_id):
+            return f"当前群 {group_id} 未开放主动发言"
+        send_queue = ctx.extra.get("send_queue")
+        if send_queue is not None and hasattr(send_queue, "send_group_text"):
+            try:
+                await send_queue.send_group_text(group_id, message, humanize="skip")
+            except PermissionError:
+                return f"当前群 {group_id} 未开放主动发言"
+        else:
+            await ctx.bot.send_group_msg(group_id=int(group_id), message=message)
         return f"已发送消息到群 {group_id}"

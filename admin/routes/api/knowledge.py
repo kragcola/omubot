@@ -130,7 +130,7 @@ def create_knowledge_router(
             return {"ok": False, "available": True, "error": f"reindex_failed:{type(exc).__name__}"}
 
     @router.get("/knowledge/sources")
-    async def knowledge_sources():
+    async def knowledge_sources(sort: str = Query("default")):
         kb = _resolve_knowledge_base()
         if kb is None:
             return {"available": False, "sources": []}
@@ -142,7 +142,23 @@ def create_knowledge_router(
                 source.to_dict() if hasattr(source, "to_dict") else dict(source)
                 for source in kb.sources()
             ]
-        return {"available": True, "sources": sources}
+        if sort == "time":
+            sources.sort(
+                key=lambda item: (
+                    str(item.get("updated_at") or ""),
+                    str(item.get("source") or ""),
+                ),
+                reverse=True,
+            )
+        else:
+            sources.sort(
+                key=lambda item: (
+                    0 if item.get("status") == "indexed" else 1,
+                    -int(item.get("chunk_count") or 0),
+                    str(item.get("source") or ""),
+                ),
+            )
+        return {"available": True, "sources": sources, "sort": "time" if sort == "time" else "default"}
 
     @router.get("/knowledge/search")
     async def knowledge_search(
@@ -166,11 +182,33 @@ def create_knowledge_router(
         return {"available": True, "entities": await graph.list_entities(limit=limit)}
 
     @router.get("/knowledge/graph/relationships")
-    async def graph_relationships(limit: int = Query(100, ge=1, le=500)):
+    async def graph_relationships(
+        limit: int = Query(100, ge=1, le=500),
+        sort: str = Query("default"),
+    ):
         graph = _resolve_knowledge_graph()
         if graph is None:
             return {"available": False, "relationships": []}
-        return {"available": True, "relationships": await graph.list_relationships(limit=limit)}
+        relationships = await graph.list_relationships(limit=limit)
+        if sort == "time":
+            relationships.sort(
+                key=lambda item: (
+                    str(item.get("updated_at") or ""),
+                    str(item.get("created_at") or ""),
+                    float(item.get("confidence") or 0),
+                ),
+                reverse=True,
+            )
+        else:
+            relationships.sort(
+                key=lambda item: (
+                    float(item.get("confidence") or 0),
+                    str(item.get("updated_at") or ""),
+                    str(item.get("created_at") or ""),
+                ),
+                reverse=True,
+            )
+        return {"available": True, "relationships": relationships, "sort": "time" if sort == "time" else "default"}
 
     @router.get("/knowledge/graph/scope-risks")
     async def graph_scope_risks(limit: int = Query(100, ge=1, le=500)):
@@ -226,13 +264,34 @@ def create_knowledge_router(
     async def graph_candidates(
         status: str = Query("pending"),
         limit: int = Query(100, ge=1, le=500),
+        sort: str = Query("default"),
     ):
         graph = _resolve_knowledge_graph()
         if graph is None:
             return {"available": False, "candidates": []}
+        candidates = await graph.list_candidates(status=status, limit=limit)
+        if sort == "time":
+            candidates.sort(
+                key=lambda item: (
+                    str(item.get("updated_at") or ""),
+                    str(item.get("created_at") or ""),
+                    float(item.get("confidence") or 0),
+                ),
+                reverse=True,
+            )
+        else:
+            candidates.sort(
+                key=lambda item: (
+                    float(item.get("confidence") or 0),
+                    str(item.get("updated_at") or ""),
+                    str(item.get("created_at") or ""),
+                ),
+                reverse=True,
+            )
         return {
             "available": True,
-            "candidates": await graph.list_candidates(status=status, limit=limit),
+            "candidates": candidates,
+            "sort": "time" if sort == "time" else "default",
         }
 
     @router.post("/knowledge/graph/candidates/{candidate_id}/approve")

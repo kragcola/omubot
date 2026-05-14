@@ -19,6 +19,12 @@ admin/slang     →  Web 审核控制台与设置面板
 - AI 自动通过的词条仍是 `approved`，但会在 `source/meta` 中标记，方便管理员复核。
 - v3 默认保持轻依赖，不引入 embedding、FAISS、BM25、jieba、numpy。
 
+## 与表达学习的边界
+
+黑话系统只负责"词义治理"：识别群内约定用语、缩写、梗和临时语境词，并在审核后帮助 LLM 理解当前群聊上下文。
+
+长期的"真实表述方式学习"不归黑话模块承载。表达学习会作为独立能力跟踪，负责学习场景化说法、接话节奏和动态风格档案；它不是长期记忆卡片，也不是自动改写 `config/soul/identity.md` 或 `config/soul/instruction.md` 的机制。相关长期方案见 [Omubot 表达学习与动态风格档案改造跟踪](../style-learning-implementation-tracker.md)。
+
 ## 生命周期
 
 | 状态 | 说明 | 是否注入 Prompt |

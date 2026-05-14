@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 
 import aiohttp
@@ -31,6 +32,10 @@ from kernel.types import (
     PluginContext,
     TextBlock,
 )
+from services.private_conversation import (
+    get_private_conversation_actor,
+    log_private_transition,
+)
 
 logger = _base_logger
 _log_msg_in = _base_logger.bind(channel="message_in")
@@ -38,9 +43,16 @@ _log_msg_out = _base_logger.bind(channel="message_out")
 _log_system = _base_logger.bind(channel="system")
 _log_usage = _base_logger.bind(channel="usage")
 _log_debug = _base_logger.bind(channel="debug")
+_log_reply_workflow = _base_logger.bind(channel="reply_workflow")
 
 _REPLY_PREVIEW_MAX = 50
 _REPLY_PREVIEW_MAX_SELF = 200
+_DIRECTED_FOLLOWUP_RE = re.compile(
+    r"^(我也?)?(能|可以|可不可以|能不能)(来|去|参加|一起|加入|玩)(吗|嘛|么)?[。.!！?？~～\s]*$"
+    r"|^(我也?)?可以(吗|嘛|么)?[。.!！?？~～\s]*$"
+    r"|^(带上?我(吗|嘛|么)?|算我一个|我也想(来|去|参加|一起|加入|玩))[。.!！?？~～\s]*$"
+)
+_DIRECTED_FOLLOWUP_WINDOW_S = 180.0
 
 
 # ============================================================================
@@ -52,6 +64,202 @@ def _session_id(event: MessageEvent) -> str:
     if isinstance(event, GroupMessageEvent):
         return f"group_{event.group_id}"
     return f"private_{event.user_id}"
+
+
+def _content_to_text(content: Content) -> str:
+    if isinstance(content, str):
+        return content
+    return " ".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def _extract_group_command_text(
+    msg: Message,
+    self_id: str,
+    bot_nicknames: list[str] | tuple[str, ...] | None = None,
+) -> str | None:
+    """Return a command text only when the command is for the bot or naked."""
+    saw_bot_at = False
+    text_parts: list[str] = []
+
+    for seg in msg:
+        if seg.type == "reply":
+            continue
+        if seg.type == "at":
+            qq = str(seg.data.get("qq", ""))
+            if qq == str(self_id):
+                saw_bot_at = True
+                continue
+            return None
+        if seg.type == "text":
+            text = str(seg.data.get("text", ""))
+            if not text_parts and not saw_bot_at and not text.strip():
+                text_parts.append(text)
+                continue
+            if (
+                not text_parts
+                and not saw_bot_at
+                and not text.lstrip().startswith("/")
+                and not bot_nicknames
+            ):
+                return None
+            text_parts.append(text)
+            continue
+        if not text_parts or not "".join(text_parts).strip():
+            return None
+
+    candidate = "".join(text_parts).strip()
+    if not candidate.startswith("/"):
+        if saw_bot_at:
+            return None
+        slash_index = candidate.find("/")
+        if slash_index <= 0:
+            return None
+        prefix = candidate[:slash_index].strip()
+        if not _is_textual_bot_mention_prefix(prefix, str(self_id), bot_nicknames or ()):
+            return None
+        candidate = candidate[slash_index:].strip()
+    return candidate
+
+
+def _is_textual_bot_mention_prefix(
+    prefix: str,
+    self_id: str,
+    bot_nicknames: list[str] | tuple[str, ...],
+) -> bool:
+    normalized = prefix.strip()
+    match = re.match(r"^@(?P<name>.+?)\s*\((?P<qq>\d+)\)\s*$", normalized)
+    if match is not None and match.group("qq") != str(self_id):
+        return False
+    return _is_bot_nickname_prefix(normalized, bot_nicknames)
+
+
+def _is_bot_nickname_prefix(prefix: str, bot_nicknames: list[str] | tuple[str, ...]) -> bool:
+    normalized = prefix.lstrip("@").strip()
+    normalized = re.sub(r"\s*\(\d+\)\s*$", "", normalized).strip()
+    if not normalized:
+        return False
+    for nickname in bot_nicknames:
+        nick = str(nickname).strip()
+        if nick and normalized.startswith(nick):
+            return True
+    return False
+
+
+def _is_directed_followup_text(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    if len(compact) > 24:
+        return False
+    return bool(_DIRECTED_FOLLOWUP_RE.match(compact))
+
+
+def _message_has_other_at(msg: Message, self_id: str) -> bool:
+    for seg in msg:
+        if seg.type != "at":
+            continue
+        qq = str(seg.data.get("qq", ""))
+        if qq and qq != str(self_id):
+            return True
+    return False
+
+
+def _reply_targets_bot(reply: object | None, self_id: str) -> bool:
+    sender = getattr(reply, "sender", None)
+    if sender is None:
+        return False
+    return str(getattr(sender, "user_id", "") or "") == str(self_id)
+
+
+def _has_recent_assistant_reply(timeline: object, group_id: str, *, within_s: float) -> bool:
+    try:
+        turns = timeline.get_turns(group_id)
+    except Exception:
+        return False
+    now = time.time()
+    for idx in range(len(turns) - 1, -1, -1):
+        turn = turns[idx]
+        if turn.get("role") != "assistant":
+            continue
+        try:
+            turn_time = float(timeline.get_turn_time(group_id, idx))
+        except Exception:
+            return False
+        return turn_time > 0 and now - turn_time <= within_s
+    return False
+
+
+def _latest_assistant_reply_info(
+    timeline: object,
+    group_id: str,
+    *,
+    within_s: float,
+) -> tuple[bool, str, float | None]:
+    try:
+        turns = timeline.get_turns(group_id)
+    except Exception:
+        return False, "", None
+    now = time.time()
+    for idx in range(len(turns) - 1, -1, -1):
+        turn = turns[idx]
+        if turn.get("role") != "assistant":
+            continue
+        try:
+            turn_time = float(timeline.get_turn_time(group_id, idx))
+        except Exception:
+            return False, "", None
+        elapsed = now - turn_time
+        if turn_time <= 0 or elapsed > within_s:
+            return False, "", elapsed
+        return True, _content_to_text(turn.get("content", "")), elapsed
+    return False, "", None
+
+
+def _last_assistant_replied_to_user(
+    timeline: object,
+    group_id: str,
+    user_id: str,
+    *,
+    within_s: float,
+) -> bool:
+    """Return whether the latest assistant turn answered only the current user."""
+    try:
+        turns = timeline.get_turns(group_id)
+    except Exception:
+        return False
+    now = time.time()
+    current_user_suffix = f"({user_id})"
+    for idx in range(len(turns) - 1, -1, -1):
+        turn = turns[idx]
+        if turn.get("role") != "assistant":
+            continue
+        try:
+            turn_time = float(timeline.get_turn_time(group_id, idx))
+        except Exception:
+            return False
+        if turn_time <= 0 or now - turn_time > within_s:
+            return False
+        if idx <= 0:
+            return False
+        previous = turns[idx - 1]
+        if previous.get("role") != "user":
+            return False
+        content = str(previous.get("content", ""))
+        active_user_lines = [
+            line
+            for line in content.splitlines()
+            if (
+                line.strip()
+                and "已跳过，仅作历史背景" not in line
+                and "触发原因:" not in line
+            )
+        ]
+        if not active_user_lines:
+            return False
+        return all(current_user_suffix in line for line in active_user_lines)
+    return False
 
 
 async def _render_forward_msg(forward_id: str, bot: Bot) -> str:
@@ -335,6 +543,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
     @driver.on_bot_connect
     async def _on_connect(bot: Bot) -> None:
+        ctx.bot = bot
         protocol_connections = getattr(ctx, "protocol_connections", None)
         if protocol_connections is not None and hasattr(protocol_connections, "record_connected"):
             protocol_connections.record_connected(bot)
@@ -384,12 +593,25 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
         try:
             group_list: list[dict[str, object]] = await bot.get_group_list()
-            group_ids = [str(g["group_id"]) for g in group_list]
-            if ctx.allowed_groups:
-                group_ids = [gid for gid in group_ids if int(gid) in ctx.allowed_groups]
+            group_inventory: dict[str, dict[str, object]] = {}
+            for item in group_list:
+                gid = str(item.get("group_id", "") or "").strip()
+                if not gid:
+                    continue
+                group_inventory[gid] = dict(item)
+            ctx.group_inventory = group_inventory
+            group_ids = list(group_inventory)
+            group_cfg = getattr(ctx.config, "group", None)
+            if group_cfg is not None and hasattr(group_cfg, "allows_learning_group"):
+                group_ids = [gid for gid in group_ids if group_cfg.allows_learning_group(gid)]
         except Exception:
             logger.exception("failed to get group list")
             return
+        _log_system.info(
+            "group inventory refreshed | total={} learning={}",
+            len(getattr(ctx, "group_inventory", {}) or {}),
+            len(group_ids),
+        )
 
         if not is_first_connect:
             _log_system.info("reconnected, skipping first-connect setup")
@@ -420,6 +642,9 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             protocol_connections = getattr(ctx, "protocol_connections", None)
             if protocol_connections is not None and hasattr(protocol_connections, "record_disconnected"):
                 protocol_connections.record_disconnected(bot)
+            current_bot = getattr(ctx, "bot", None)
+            if current_bot is bot or str(getattr(current_bot, "self_id", "")) == str(getattr(bot, "self_id", "")):
+                ctx.bot = None
             _log_system.warning("bot disconnected | self_id={}", getattr(bot, "self_id", "unknown"))
 
     # ---- group listener ----
@@ -429,16 +654,24 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
     @group_listener.handle()
     async def _collect_group_context(bot: Bot, event: GroupMessageEvent) -> None:
         from plugins.echo import build_echo_key
+        from services.admin_events import publish_group_message
 
-        if ctx.allowed_groups and event.group_id not in ctx.allowed_groups:
-            return
         if str(event.user_id) == bot.self_id:
             return
-        if ctx.scheduler.is_muted(str(event.group_id)):
-            return
         resolved = ctx.config.group.resolve(event.group_id)
+        publish_group_message(
+            group_id=str(event.group_id),
+            user_id=str(event.user_id),
+            ts=time.time(),
+            presence_mode=resolved.presence_mode,
+        )
+        if not ctx.config.group.allows_learning_group(event.group_id):
+            return
         if event.user_id in resolved.blocked_users:
             return
+        group_id = str(event.group_id)
+        muted = ctx.scheduler.is_muted(group_id)
+        allow_speaking = ctx.config.group.allows_active_group(event.group_id) and not muted
 
         msg = event.get_message()
         echo_key = build_echo_key(msg)
@@ -450,7 +683,6 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         ):
             is_addressed = True
 
-        group_id = str(event.group_id)
         nickname = event.sender.nickname or str(event.user_id)
 
         # Build MessageContext and fire bus.on_message for interceptors
@@ -458,7 +690,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             session_id=f"group_{group_id}",
             group_id=group_id,
             user_id=str(event.user_id),
-            content="",  # rendered later
+            content=plain_text,
             raw_message={
                 "message_id": event.message_id,
                 "echo_key": echo_key,
@@ -470,9 +702,25 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             message_id=event.message_id,
             bot=bot,
             nickname=nickname,
+            allow_speaking=allow_speaking,
+            group_presence_mode=resolved.presence_mode,
+            group_access_allowed=resolved.access_allowed,
         )
         if await bus.fire_on_message(msg_ctx):
             return  # consumed by an interceptor plugin
+
+        if not allow_speaking:
+            if plain_text:
+                preview = plain_text if len(plain_text) <= 120 else plain_text[:120] + "…"
+                _log_msg_in.info("group={} silent_learn {}({}) | {}", group_id, nickname, event.user_id, preview)
+                ctx.timeline.add(
+                    group_id,
+                    role="user",
+                    speaker=f"{nickname}({event.user_id})",
+                    content=plain_text,
+                    message_id=event.message_id,
+                )
+            return
 
         # Build TriggerContext from plugin data or @-detection
         trigger = msg_ctx.trigger  # set by BilibiliPlugin etc.
@@ -488,19 +736,24 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         # Check slash commands before timeline/scheduler.
         # Cancel any pending debounce so a previous message's thinker doesn't
         # fire while the user is interactively debugging.
+        command_text = _extract_group_command_text(
+            msg,
+            bot.self_id,
+            getattr(ctx, "bot_nicknames", []),
+        )
         if (
-            plain_text
+            command_text
             and hasattr(ctx, "command_dispatcher")
             and ctx.command_dispatcher is not None
             and await ctx.command_dispatcher.dispatch(
-                bot, event, plain_text.strip(),
+                bot, event, command_text,
                 is_private=False,
                 user_id=str(event.user_id),
                 group_id=group_id,
                 plugin_ctx=ctx,
             )
         ):
-            ctx.scheduler.clear_pending(group_id, cancel_running=plain_text.strip().startswith("/debug"))
+            ctx.scheduler.clear_pending(group_id, cancel_running=command_text.startswith("/debug"))
             return
 
         content = await _render_message(
@@ -528,7 +781,8 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     content="@我",
                     message_id=event.message_id,
                 )
-                ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))
+                if not muted:
+                    ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))
             return
 
         preview = content if isinstance(content, str) else "".join(
@@ -546,7 +800,141 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             content=content,
             message_id=event.message_id,
         )
-        ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))
+        reply_workflow_config = getattr(ctx.config, "reply_workflow", None)
+        legacy_directed = _is_directed_followup_text(_content_to_text(content))
+        followup_window_s = float(
+            getattr(reply_workflow_config, "directed_followup_window_s", _DIRECTED_FOLLOWUP_WINDOW_S),
+        )
+        has_recent_assistant, last_assistant_text, assistant_elapsed_s = _latest_assistant_reply_info(
+            ctx.timeline,
+            group_id,
+            within_s=followup_window_s,
+        )
+        last_assistant_to_user = _last_assistant_replied_to_user(
+            ctx.timeline,
+            group_id,
+            str(event.user_id),
+            within_s=followup_window_s,
+        )
+        reply_workflow_mode = "shadow"
+        if reply_workflow_config is not None:
+            from services.reply_workflow import workflow_mode
+
+            reply_workflow_mode = workflow_mode(reply_workflow_config)
+        semantic_result = None
+        semantic_candidate_reason = ""
+        if reply_workflow_mode in {"shadow", "semantic"}:
+            from services.reply_workflow import (
+                ReplyGateFeatures,
+                evaluate_group_gate_shadow,
+                evaluate_semantic_gate,
+                log_shadow_decision,
+                should_call_semantic_gate,
+                should_consume_semantic_gate,
+            )
+
+            t0 = time.perf_counter()
+            decision, classification = evaluate_group_gate_shadow(
+                text=_content_to_text(content),
+                has_trigger=trigger is not None,
+                trigger_mode=trigger.mode if trigger is not None else "",
+                is_addressed=is_addressed,
+                legacy_directed=legacy_directed,
+                has_recent_assistant=has_recent_assistant,
+                has_other_at=_message_has_other_at(msg, bot.self_id),
+                reply_to_bot=_reply_targets_bot(getattr(event, "reply", None), bot.self_id),
+                last_assistant_to_user=last_assistant_to_user,
+            )
+            log_shadow_decision(
+                decision,
+                conversation=f"group_{group_id}",
+                mode="group_gate_shadow",
+                event_id=str(event.message_id),
+                text=_content_to_text(content),
+                latency_ms=(time.perf_counter() - t0) * 1000,
+                extra={
+                    "classification_reason": classification.reason,
+                    "current_trigger": trigger.mode if trigger is not None else "none",
+                },
+            )
+            features = ReplyGateFeatures(
+                current_text=_content_to_text(content),
+                current_user_id=str(event.user_id),
+                has_current_trigger=trigger is not None,
+                has_recent_assistant=has_recent_assistant,
+                has_other_at=_message_has_other_at(msg, bot.self_id),
+                reply_to_bot=_reply_targets_bot(getattr(event, "reply", None), bot.self_id),
+                last_assistant_to_user=last_assistant_to_user,
+                last_assistant_text=last_assistant_text,
+                elapsed_since_assistant_s=assistant_elapsed_s,
+            )
+            should_call_gate, semantic_candidate_reason = should_call_semantic_gate(
+                features,
+                max_chars=int(getattr(reply_workflow_config, "semantic_max_chars", 48)),
+            )
+            if reply_workflow_mode == "semantic" and should_call_gate:
+                gate_start = time.perf_counter()
+                semantic_result = await evaluate_semantic_gate(
+                    features,
+                    api_call=lambda system, messages: ctx.llm_client._call_reply_gate(
+                        system,
+                        messages,
+                        tools=None,
+                        max_tokens=96,
+                        thinking=None,
+                        user_id=str(event.user_id),
+                        group_id=group_id,
+                    ),
+                    timeout_ms=int(getattr(reply_workflow_config, "semantic_timeout_ms", 600)),
+                )
+                consumed = should_consume_semantic_gate(
+                    semantic_result,
+                    threshold=float(getattr(reply_workflow_config, "semantic_force_threshold", 0.78)),
+                )
+                if semantic_result is not None:
+                    semantic_decision = semantic_result.to_decision(candidate_reason=semantic_candidate_reason)
+                else:
+                    from services.reply_workflow import ReplyGateDecision
+
+                    semantic_decision = ReplyGateDecision(
+                        action="pass",
+                        source="llm_gate",
+                        confidence=0.0,
+                        reason="semantic_gate_failed_closed",
+                        labels={"candidate_reason": semantic_candidate_reason, "consumed": False},
+                    )
+                log_shadow_decision(
+                    semantic_decision,
+                    conversation=f"group_{group_id}",
+                    mode="semantic_gate",
+                    event_id=str(event.message_id),
+                    text=_content_to_text(content),
+                    latency_ms=(time.perf_counter() - gate_start) * 1000,
+                    extra={"consumed": consumed},
+                )
+        semantic_consumed = False
+        if reply_workflow_mode == "semantic":
+            from services.reply_workflow import should_consume_semantic_gate
+
+            semantic_consumed = should_consume_semantic_gate(
+                semantic_result,
+                threshold=float(getattr(reply_workflow_config, "semantic_force_threshold", 0.78)),
+            )
+        if (
+            trigger is None
+            and not is_addressed
+            and has_recent_assistant
+            and (legacy_directed or semantic_consumed)
+        ):
+            from kernel.types import TriggerContext
+            trigger = TriggerContext(
+                reason="用户追问上一轮回复",
+                mode="directed_followup",
+                target_message_id=event.message_id,
+                target_user_id=str(event.user_id),
+            )
+        if not muted:
+            ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))
 
     # ---- group ban notice ----
 
@@ -622,39 +1010,85 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         sid = _session_id(event)
         identity = ctx.identity_mgr.resolve()
         tool_ctx = ToolContext(bot=bot, user_id=str(event.user_id), group_id=None, session_id=sid)
+        private_actor = get_private_conversation_actor(sid)
+
+        reply_workflow_config = getattr(ctx.config, "reply_workflow", None)
+        if (
+            getattr(reply_workflow_config, "mode", "shadow") == "shadow"
+            and getattr(reply_workflow_config, "shadow_log_private", True)
+        ):
+            from services.reply_workflow import log_shadow_decision, private_current_path_decision
+
+            private_text = _content_to_text(user_content)
+            t0 = time.perf_counter()
+            decision = private_current_path_decision(text=private_text)
+            log_shadow_decision(
+                decision,
+                conversation=sid,
+                mode="private_actor_shadow",
+                event_id=str(getattr(event, "message_id", "") or ""),
+                text=private_text,
+                latency_ms=(time.perf_counter() - t0) * 1000,
+            )
 
         async def send_segment(text: str) -> None:
             await bot.send(event, Message(text))
 
-        reply: str | None = None
-        for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
-            try:
-                reply = await ctx.llm_client.chat(
-                    session_id=sid,
-                    user_id=str(event.user_id),
-                    user_content=user_content,
-                    identity=identity,
-                    group_id=None,
-                    ctx=tool_ctx,
-                    on_segment=send_segment,
-                    force_reply=False,
-                )
-                break
-            except RateLimitError:
-                if attempt >= RATE_LIMIT_MAX_RETRIES:
-                    logger.error("private chat rate limit exhausted after {} retries", RATE_LIMIT_MAX_RETRIES)
-                    reply = "当前请求太多，请稍后再试"
+        async with private_actor.turn(
+            event_id=str(getattr(event, "message_id", "") or ""),
+            user_id=str(event.user_id),
+            text=_content_to_text(user_content),
+        ) as turn:
+            reply: object | None = None
+            for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+                try:
+                    reply = await ctx.llm_client.chat(
+                        session_id=sid,
+                        user_id=str(event.user_id),
+                        user_content=user_content,
+                        identity=identity,
+                        group_id=None,
+                        ctx=tool_ctx,
+                        on_segment=send_segment,
+                        force_reply=False,
+                    )
                     break
-                delay = RATE_LIMIT_BASE_DELAY * (2 ** attempt)
-                logger.warning(
-                    "private chat rate limited, retry {}/{} in {:.0f}s",
-                    attempt + 1, RATE_LIMIT_MAX_RETRIES, delay,
-                )
-                await asyncio.sleep(delay)
-            except Exception:
-                logger.exception("chat error")
-                reply = "出错了，请稍后再试"
-                break
+                except RateLimitError:
+                    if attempt >= RATE_LIMIT_MAX_RETRIES:
+                        logger.error("private chat rate limit exhausted after {} retries", RATE_LIMIT_MAX_RETRIES)
+                        reply = "当前请求太多，请稍后再试"
+                        break
+                    delay = RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        "private chat rate limited, retry {}/{} in {:.0f}s",
+                        attempt + 1, RATE_LIMIT_MAX_RETRIES, delay,
+                    )
+                    await asyncio.sleep(delay)
+                except Exception:
+                    logger.exception("chat error")
+                    reply = "出错了，请稍后再试"
+                    break
 
-        if reply:
-            await private_chat.finish(Message(reply))
+            reply_text = ""
+            if isinstance(reply, str):
+                reply_text = reply.strip()
+            elif reply is not None:
+                reply_text = str(getattr(reply, "full_reply", reply) or "").strip()
+
+            if not reply_text:
+                thinker_action = str(getattr(ctx.llm_client, "_last_thinker_action", "") or "")
+                thinker_thought = str(getattr(ctx.llm_client, "_last_thinker_thought", "") or "")
+                reason = "thinker_wait" if thinker_action == "wait" else "llm_returned_no_visible_reply"
+                metadata = {}
+                if thinker_thought:
+                    metadata["thinker_thought"] = thinker_thought
+                transition = turn.mark_wait(reason, metadata=metadata or None)
+                log_private_transition(transition)
+                return
+
+            transition = turn.mark_complete(
+                "assistant_reply_sent",
+                reply_text=reply_text,
+            )
+            log_private_transition(transition)
+            await private_chat.finish(Message(reply_text))

@@ -26,7 +26,8 @@ class SaveStickerTool(Tool):
         return (
             "收录一张对话中的图片到你的表情包库。"
             "image_tag 使用图片旁边的 «img:N» 标签。"
-            "只在管理员要求时才调用，必须将管理员QQ号填入 requested_by。"
+            "管理员要求收录时，将管理员QQ号填入 requested_by。"
+            "如果是你主动看中并偷收表情包，requested_by 留空。"
             "只在你完全理解图片含义、清楚使用场景、且符合自己性格时才调用。"
         )
 
@@ -52,7 +53,7 @@ class SaveStickerTool(Tool):
                     "description": "发起请求的用户QQ号（群聊中从消息上下文提取）",
                 },
             },
-            "required": ["image_tag", "description", "usage_hint", "requested_by"],
+            "required": ["image_tag", "description", "usage_hint"],
         }
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
@@ -60,8 +61,10 @@ class SaveStickerTool(Tool):
         description: str = kwargs["description"]
         usage_hint: str = kwargs["usage_hint"]
 
-        requester = ctx.user_id or kwargs.get("requested_by", "")
-        if requester not in self._superusers:
+        requested_by = str(kwargs.get("requested_by", "") or "").strip()
+        bot_initiated = not requested_by
+        requester = requested_by or ctx.user_id
+        if not bot_initiated and requester not in self._superusers:
             return "只有管理员可以收录表情包"
 
         tag_map: dict[str, str] = ctx.extra.get("image_tags", {})
@@ -76,7 +79,8 @@ class SaveStickerTool(Tool):
         image_data = path.read_bytes()
 
         try:
-            stk_id, is_new = self._store.add(image_data, description, usage_hint, source="admin")
+            source = "admin" if not bot_initiated and requester in self._superusers else "stolen"
+            stk_id, is_new = self._store.add(image_data, description, usage_hint, source=source)
         except ValueError as e:
             return f"无法收录: {e}"
 
@@ -208,6 +212,15 @@ class SendStickerTool(Tool):
         if file_path is None:
             return f"表情包不存在: {sticker_id}"
 
+        decision = self._store.check_send_allowed(
+            sticker_id,
+            group_id=ctx.group_id,
+            user_id=ctx.user_id,
+        )
+        if not decision.allowed:
+            alternatives = "、".join(decision.alternatives) if decision.alternatives else "暂无可替代表情"
+            return f"这张表情暂时冷却：{decision.reason}。请改选：{alternatives}"
+
         from nonebot.adapters.onebot.v11 import MessageSegment
 
         # Read file as base64 — napcat container can't access bot's filesystem.
@@ -227,13 +240,33 @@ class SendStickerTool(Tool):
 
         try:
             if ctx.group_id:
-                await ctx.bot.send_group_msg(group_id=int(ctx.group_id), message=img_seg)
+                policy = ctx.extra.get("group_policy")
+                checker = getattr(policy, "allows_active_group", None)
+                if callable(checker) and not checker(ctx.group_id):
+                    return "当前群未开放主动发言，已跳过表情发送"
+                resolver = getattr(policy, "resolve", None)
+                if callable(resolver):
+                    try:
+                        resolved = resolver(int(ctx.group_id))
+                        if not bool(getattr(resolved, "tools_enabled", True)):
+                            return "当前群未开放工具调用，已跳过表情发送"
+                    except Exception:
+                        pass
+                send_queue = ctx.extra.get("send_queue")
+                if send_queue is not None and hasattr(send_queue, "send_group_message"):
+                    await send_queue.send_group_message(
+                        ctx.group_id,
+                        img_seg,
+                        description=f"send_sticker:{sticker_id}",
+                    )
+                else:
+                    await ctx.bot.send_group_msg(group_id=int(ctx.group_id), message=img_seg)
             else:
                 await ctx.bot.send_private_msg(user_id=int(ctx.user_id), message=img_seg)
         except Exception as e:
             logger.error("send_sticker send failed for {}: {}", sticker_id, e)
             return f"发送失败: {sticker_id}"
 
-        self._store.record_send(sticker_id)
-        logger.info("[send_sticker ok] id={}", sticker_id)
+        self._store.record_send(sticker_id, group_id=ctx.group_id, user_id=ctx.user_id)
+        logger.info("[send_sticker ok] id={} group={} user={}", sticker_id, ctx.group_id, ctx.user_id)
         return f"已发送 {sticker_id}"

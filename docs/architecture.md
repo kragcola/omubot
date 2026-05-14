@@ -279,7 +279,8 @@ Key config sections:
 | `llm.usage` | `enabled`, `slow_threshold_s` | Usage tracking & slow call alerts |
 | `compact` | `ratio`, `compress_ratio`, `max_failures`, `cache_hit_warn`, `cache_alert_window_m`, `cache_alert_cooldown_m` | Context compaction & cache alerting |
 | `dream` | `enabled`, `interval_hours`, `max_rounds` | Dream agent (periodic memo consolidation) |
-| `group` | `history_load_count`, `allowed_groups`, `debounce_seconds`, `batch_size`, `at_only`, `blocked_users`, `overrides` | Group chat behavior, scheduler & per-group overrides |
+| `group` | `history_load_count`, `presence`, `debounce_seconds`, `batch_size`, `at_only`, `blocked_users`, `overrides` | Group chat behavior, scheduler & per-group overrides |
+| `config/group-policy.json` | `mode`, `whitelist`, `blacklist`, `log_dropped` | Group access gate; edited from `/admin/groups` |
 | `napcat` | `api_url` | NapCat HTTP API endpoint |
 | `memo` | `dir`, `user_max_chars`, `group_max_chars`, `index_max_lines`, `history_enabled` | Long-term memo storage |
 | `soul` | `dir` | Soul config directory |
@@ -415,7 +416,7 @@ During context compaction, the LLM receives an `append_memo` tool that allows it
 
 ## Access Control
 
-- `allowed_groups`: group whitelist (empty = allow all)
+- `config/group-policy.json`: group access gate. `whitelist` mode opens listed groups and closes the rest; `blacklist` mode closes listed groups and opens the rest.
 - `allowed_private_users`: private chat whitelist (empty = allow all)
 - `admins`: QQ→nickname dict injected into system prompt as trusted sources; authorized for admin tools (MuteUser, SetTitle, SendGroupMsg, SaveSticker with `admin` source tag)
 

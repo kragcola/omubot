@@ -5,10 +5,10 @@ from __future__ import annotations
 import random
 import time
 from datetime import datetime
+from typing import Callable
 from zoneinfo import ZoneInfo
 
-from plugins.schedule.calendar import get_day_context
-from plugins.schedule.calendar import get_self_name as _get_self_name
+from plugins.calendar_context.service import DayContext
 from plugins.schedule.types import MoodProfile, Schedule
 
 CST = ZoneInfo("Asia/Shanghai")
@@ -119,9 +119,11 @@ class MoodEngine:
         self,
         anomaly_chance: float = 0.2,
         refresh_minutes: int = 15,
+        day_context_getter: Callable[[datetime], DayContext] | None = None,
     ) -> None:
         self._anomaly_chance = anomaly_chance
         self._refresh_s = refresh_minutes * 60
+        self._day_context_getter = day_context_getter
         self._cache: tuple[MoodProfile, float] | None = None  # (profile, timestamp)
 
     def evaluate(
@@ -145,9 +147,10 @@ class MoodEngine:
     # ------------------------------------------------------------------
 
     def _compute(self, schedule: Schedule | None, recent_interactions: int) -> MoodProfile:
+        now_dt = datetime.now(CST)
+
         # 1. Get base mood from current schedule slot
         if schedule is not None:
-            now_dt = datetime.now(CST)
             slot = schedule.current_slot(now_dt)
             if slot is not None:
                 profile = self._lookup_base(slot.mood_hint)
@@ -170,7 +173,6 @@ class MoodEngine:
         profile.tension += random.uniform(-0.15, 0.15)
 
         # 3. Time-of-day correction
-        now_dt = datetime.now(CST)
         hour = now_dt.hour
         if hour >= 23 or hour < 5:
             profile.energy -= 0.2  # late night penalty
@@ -187,18 +189,19 @@ class MoodEngine:
             profile.energy -= 0.05  # social fatigue
 
         # 5. Day-type modifiers (calendar-based)
-        day_ctx = get_day_context(datetime.now(CST))
-        if day_ctx.is_holiday:
-            profile.valence += 0.15
-            profile.energy += 0.1
-        elif day_ctx.is_makeup_day:
-            profile.valence -= 0.05
-        if day_ctx.has_birthday:
-            profile.valence += 0.1
-            profile.openness += 0.1
-            if day_ctx.is_self_birthday:
+        day_ctx = self._get_day_context(now_dt)
+        if day_ctx is not None:
+            if day_ctx.is_holiday:
                 profile.valence += 0.15
                 profile.energy += 0.1
+            elif day_ctx.is_makeup_day:
+                profile.valence -= 0.05
+            if day_ctx.has_birthday:
+                profile.valence += 0.1
+                profile.openness += 0.1
+                if day_ctx.is_self_birthday:
+                    profile.valence += 0.15
+                    profile.energy += 0.1
 
         # 6. Anomaly check — 20% chance to flip mood significantly
         anomaly = random.random() < self._anomaly_chance
@@ -223,6 +226,14 @@ class MoodEngine:
 
         profile.clamp()
         return profile
+
+    def _get_day_context(self, now: datetime) -> DayContext | None:
+        if self._day_context_getter is None:
+            return None
+        try:
+            return self._day_context_getter(now)
+        except Exception:
+            return None
 
     def _lookup_base(self, mood_hint: str) -> MoodProfile:
         """Fuzzy lookup: try exact match, then substring match, then default.
@@ -282,7 +293,7 @@ class MoodEngine:
                 lines.append(f"\n【你现在正在做的事】{slot.activity}")
 
         # Special day / birthday hints
-        day_ctx = get_day_context(now)
+        day_ctx = self._get_day_context(now)
         day_lines = self._build_day_context_lines(day_ctx)
         if day_lines:
             lines.extend(day_lines)
@@ -308,9 +319,6 @@ class MoodEngine:
 
     @staticmethod
     def _build_day_context_lines(day_ctx: object) -> list[str]:
-        """Build day-context hint lines for the mood block. 导入放在方法内避免循环引用。"""
-        from plugins.schedule.calendar import DayContext
-
         lines: list[str] = []
         if not isinstance(day_ctx, DayContext):
             return lines
@@ -320,8 +328,8 @@ class MoodEngine:
         elif day_ctx.is_makeup_day:
             lines.append("\n【今日特殊】今天是调休日——虽然是周末但要上课，心情略带无奈。")
 
-        if day_ctx.special_day:
-            lines.append(f"\n【今日特殊】今天是{day_ctx.special_day}，可以在聊天中自然地提到。")
+        if day_ctx.special_days:
+            lines.append(f"\n【今日特殊】今天是{'、'.join(day_ctx.special_days)}，可以在聊天中自然地提到。")
 
         if day_ctx.is_self_birthday:
             lines.append(
@@ -329,9 +337,9 @@ class MoodEngine:
                 '不用主动喊「今天是我生日」。'
             )
         for b in day_ctx.birthdays:
-            if day_ctx.is_self_birthday and b.name_cn == _get_self_name():
-                continue  # handled above
-            elif b.is_wxs_member:
+            if day_ctx.is_self_birthday and any(name.strip() == b.name_cn for name in day_ctx.self_names):
+                continue
+            if b.is_wxs_member:
                 lines.append(
                     f"\n【今日特殊】今天是{b.name_cn}（{b.group}）的生日！"
                     "作为W×S的好伙伴，你可以在群里开心地说句生日快乐——像真人朋友那样随口一提就好，不用太刻意。"

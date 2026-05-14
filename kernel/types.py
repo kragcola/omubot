@@ -172,6 +172,7 @@ class PluginContext:
     llm_client: Any = None
     prompt_builder: Any = None
     thinker: Any = None
+    calendar_service: Any = None
 
     # 工具与调度 —— ToolRegistry / GroupChatScheduler
     tool_registry: Any = None
@@ -186,6 +187,10 @@ class PluginContext:
     bus: Any = None
     plugin_state_store: Any = None
     plugin_config_store: Any = None
+    bot: Any = None  # 当前连接的 OneBot bot；断线时置空，供 admin/API 做运行期查询
+    group_inventory: dict[str, dict[str, Any]] = field(default_factory=dict)  # 未经过群策略过滤的在线群清单
+    slang_store: Any = None
+    slang_plugin: Any = None
     protocol_trace: Any = None
     protocol_connections: Any = None
     runtime_errors: Any = None
@@ -223,6 +228,9 @@ class MessageContext:
     bot: Any = None  # nonebot Bot 实例（供拦截器发送消息）
     nickname: str = ""  # 发送者昵称
     trigger: TriggerContext | None = None  # 由拦截器（如 BilibiliPlugin）设置的触发上下文
+    allow_speaking: bool = True  # False 时插件只能做静默学习/记录，不能发消息或设置回复触发
+    group_presence_mode: str = "active"  # active | silent_learn | off，供插件做轻量判断
+    group_access_allowed: bool = True  # 当前群是否通过主动发言访问策略
 
     @property
     def is_group(self) -> bool:

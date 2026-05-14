@@ -14,6 +14,9 @@ find "$ROOT_DIR" \
   \( \
     -path "$ROOT_DIR/.git" \
     -o -path "$ROOT_DIR/.venv" \
+    -o -path "$ROOT_DIR/.cache" \
+    -o -path "$ROOT_DIR/.workspace" \
+    -o -path "$ROOT_DIR/.workspace_mount" \
     -o -path "$ROOT_DIR/.ruff_cache" \
     -o -path "$ROOT_DIR/.pytest_cache" \
     -o -path "$ROOT_DIR/admin/frontend/node_modules" \

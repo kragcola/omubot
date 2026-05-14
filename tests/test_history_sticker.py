@@ -147,3 +147,54 @@ async def test_history_unknown_image_not_in_sticker_store_kept(
     assert _is_image_ref_block(block)
     # Path should still be in image_cache (not the sticker store)
     assert "image_cache" in block["path"]  # type: ignore[index]
+
+
+async def test_history_new_sticker_like_image_is_added_to_store(
+    sticker_store: StickerStore,
+    image_cache: ImageCache,
+) -> None:
+    """Silent-learning history images that look like stickers should be added to the store."""
+    new_jpeg = b"\xff\xd8\xff\xe0" + b"\x02" * 64 + b"new-history-sticker"
+    segments = [
+        {
+            "type": "image",
+            "data": {
+                "url": "http://example.com/img3.jpg",
+                "file": "history_new_12345678",
+                "sub_type": 1,
+                "summary": "[动画表情]",
+            },
+        },
+    ]
+
+    def fake_process(data: bytes, path: Path) -> ImageRefBlock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return ImageRefBlock(type="image_ref", path=str(path), media_type="image/jpeg")
+
+    original_process = image_cache._process_and_save
+    image_cache._process_and_save = fake_process  # type: ignore[method-assign]
+    mock_session = _make_mock_session(new_jpeg)
+
+    try:
+        content = await _extract_content(
+            segments,
+            mock_session,
+            image_cache,
+            sticker_store,
+            learn_new_stickers=True,
+        )  # type: ignore[arg-type]
+    finally:
+        image_cache._process_and_save = original_process  # type: ignore[method-assign]
+
+    assert isinstance(content, list)
+    assert len(content) == 1
+    block = content[0]
+    assert _is_image_ref_block(block)
+    assert "stickers" in block["path"]  # type: ignore[index]
+
+    added_id = sticker_store.lookup_by_hash(new_jpeg)
+    assert added_id is not None
+    entry = sticker_store.get(added_id)
+    assert entry is not None
+    assert entry["source"] == "history_loader_sticker_learn"

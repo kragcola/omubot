@@ -28,6 +28,7 @@ import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
+import { recordSortOptions } from '../shared/sort'
 
 interface Card {
   card_id: string
@@ -53,6 +54,7 @@ interface CardSeries {
   source: string
   card_count?: number
   created_at: string
+  updated_at?: string
 }
 
 interface SeriesHeaderRow {
@@ -92,6 +94,7 @@ const expandedSeries = ref<Set<string>>(new Set())
 const filterScope = ref<string>('')
 const filterScopeId = ref('')
 const filterSeries = ref<string>('')
+const sortMode = ref<'default' | 'time'>('default')
 
 const drawerVisible = ref(false)
 const editingCard = ref<Card | null>(null)
@@ -163,9 +166,29 @@ const flatRows = computed<FlatRow[]>(() => {
   }
 
   const rows: FlatRow[] = []
-  for (const series of seriesList.value) {
+  const orderedSeries = [...seriesList.value]
+  if (sortMode.value === 'time') {
+    orderedSeries.sort((left, right) => {
+      const leftTime = Math.max(
+        Date.parse(left.updated_at || left.created_at || '') || 0,
+        ...((grouped.get(left.series_id) || []).map(card => Date.parse(card.updated_at || card.created_at || '') || 0)),
+      )
+      const rightTime = Math.max(
+        Date.parse(right.updated_at || right.created_at || '') || 0,
+        ...((grouped.get(right.series_id) || []).map(card => Date.parse(card.updated_at || card.created_at || '') || 0)),
+      )
+      return rightTime - leftTime
+    })
+  }
+  for (const series of orderedSeries) {
     const seriesCards = grouped.get(series.series_id)
     if (!seriesCards?.length) continue
+    if (sortMode.value === 'time') {
+      seriesCards.sort((left, right) => (
+        (Date.parse(right.updated_at || right.created_at || '') || 0)
+        - (Date.parse(left.updated_at || left.created_at || '') || 0)
+      ))
+    }
     const expanded = expandedSeries.value.has(series.series_id)
     rows.push({
       _type: 'series-header',
@@ -181,6 +204,12 @@ const flatRows = computed<FlatRow[]>(() => {
     }
   }
 
+  if (sortMode.value === 'time') {
+    standalone.sort((left, right) => (
+      (Date.parse(right.updated_at || right.created_at || '') || 0)
+      - (Date.parse(left.updated_at || left.created_at || '') || 0)
+    ))
+  }
   for (const card of standalone) {
     rows.push({ _type: 'card', _indent: false, card })
   }
@@ -355,6 +384,7 @@ async function loadCards(silent = false) {
     const params: Record<string, string | number> = { limit: 500 }
     if (filterScope.value) params.scope = filterScope.value
     if (filterScopeId.value.trim()) params.scope_id = filterScopeId.value.trim()
+    params.sort = sortMode.value
 
     const [cardResult, seriesResult] = await Promise.allSettled([
       api('/api/admin/memory/cards', { params }),
@@ -393,8 +423,13 @@ function resetFilters() {
   filterScope.value = ''
   filterScopeId.value = ''
   filterSeries.value = ''
+  sortMode.value = 'default'
   void loadCards()
 }
+
+watch(sortMode, () => {
+  void loadCards(true)
+})
 
 function toggleSeries(seriesId: string) {
   const next = new Set(expandedSeries.value)
@@ -593,6 +628,11 @@ function statusLabel(status: string) {
           clearable
           placeholder="按系列筛选"
           style="width: min(220px, 100%)"
+        />
+        <NSelect
+          v-model:value="sortMode"
+          :options="recordSortOptions"
+          style="width: 140px"
         />
       </template>
       <template #right>

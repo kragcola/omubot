@@ -171,6 +171,107 @@ class TestGroupTimelineLifecycle:
         p1.clear()
         assert len(tl.get_pending("g1")) == 2
 
+    def test_deactivate_pending_removes_from_active_only(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="user", content="skipped video", speaker="A(1)")
+        tl.add("g1", role="user", content="skipped image", speaker="B(2)")
+
+        changed = tl.deactivate_pending("g1", "prob_skip:video_autonomous")
+
+        assert changed == 2
+        assert len(tl.get_pending("g1")) == 2
+        assert tl.get_active_pending("g1") == []
+        assert all(msg["pending_state"] == "background" for msg in tl.get_pending("g1"))
+
+    def test_assistant_flush_keeps_background_history_marker(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="user", content="skipped video", speaker="A(1)")
+        tl.deactivate_pending("g1", "prob_skip:video_autonomous")
+        tl.add("g1", role="user", content="current question", speaker="B(2)")
+        tl.add("g1", role="assistant", content="answer")
+
+        turns = tl.get_turns("g1")
+        assert len(turns) == 2
+        assert "已跳过，仅作历史背景" in turns[0]["content"]
+        assert "skipped video" in turns[0]["content"]
+        assert "current question" in turns[0]["content"]
+        assert tl.get_pending("g1") == []
+
+    def test_assistant_flush_count_preserves_later_pending(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="user", content="current question", speaker="A(1)")
+        tl.add("g1", role="user", content="queued @bot", speaker="B(2)")
+
+        tl.add("g1", role="assistant", content="answer", flush_pending_count=1)
+
+        turns = tl.get_turns("g1")
+        pending = tl.get_pending("g1")
+        assert len(turns) == 2
+        assert "current question" in turns[0]["content"]
+        assert "queued @bot" not in turns[0]["content"]
+        assert len(pending) == 1
+        assert pending[0]["content"] == "queued @bot"
+        assert pending[0].get("pending_state", "active") == "active"
+
+    def test_assistant_default_flushes_all_pending(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="user", content="msg1", speaker="A(1)")
+        tl.add("g1", role="user", content="msg2", speaker="B(2)")
+
+        tl.add("g1", role="assistant", content="answer")
+
+        assert tl.get_pending("g1") == []
+        assert "msg1" in tl.get_turns("g1")[0]["content"]
+        assert "msg2" in tl.get_turns("g1")[0]["content"]
+
+    def test_assistant_visible_state_defaults_complete(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="assistant", content="answer")
+
+        turn = tl.get_turns("g1")[0]
+        assert turn["visible_state"] == "complete"
+        assert turn["visible_updated_at"] > 0
+
+    def test_mark_latest_assistant_visible_state(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="assistant", content="answer", assistant_visible_state="pending")
+
+        changed = tl.mark_latest_assistant_visible_state("g1", "complete")
+
+        assert changed is True
+        assert tl.get_turns("g1")[0]["visible_state"] == "complete"
+
+    def test_mark_assistant_visible_state_by_turn_id(self, tl: GroupTimeline) -> None:
+        first_id = tl.add("g1", role="assistant", content="first", assistant_visible_state="pending")
+        second_id = tl.add("g1", role="assistant", content="second", assistant_visible_state="pending")
+
+        changed = tl.mark_assistant_visible_state("g1", first_id, "complete")
+
+        assert changed is True
+        assert first_id != second_id
+        assert tl.get_turns("g1")[0]["visible_state"] == "complete"
+        assert tl.get_turns("g1")[1]["visible_state"] == "pending"
+
+    def test_get_turns_for_prompt_strips_visible_metadata(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="user", content="question", speaker="A(1)")
+        tl.add("g1", role="assistant", content="answer", assistant_visible_state="complete")
+
+        prompt_turns = tl.get_turns_for_prompt("g1")
+
+        assert prompt_turns[-1] == {"role": "assistant", "content": "answer"}
+        assert "visible_state" not in prompt_turns[-1]
+
+    def test_get_turns_for_prompt_masks_incomplete_assistant(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="assistant", content="full answer not visible", assistant_visible_state="pending")
+
+        prompt_turns = tl.get_turns_for_prompt("g1")
+
+        assert "full answer not visible" not in prompt_turns[0]["content"]
+        assert "visible_state=pending" in prompt_turns[0]["content"]
+
+    def test_clamp_compact_split_to_visible_stops_before_incomplete_assistant(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="user", content="Q1", speaker="A(1)")
+        tl.add("g1", role="assistant", content="A1")
+        tl.add("g1", role="user", content="Q2", speaker="A(1)")
+        tl.add("g1", role="assistant", content="A2", assistant_visible_state="first_segment_sent")
+
+        assert tl.clamp_compact_split_to_visible("g1", 4) == 2
+        assert tl.clamp_compact_split_to_visible("g1", 2) == 2
+
     # -- group isolation --
 
     def test_group_isolation(self, tl: GroupTimeline) -> None:

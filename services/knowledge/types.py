@@ -56,6 +56,7 @@ class KnowledgeSourceStatus:
     chunk_count: int = 0
     source_hash: str = ""
     skipped_reason: str = ""
+    updated_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,4 +66,5 @@ class KnowledgeSourceStatus:
             "chunk_count": self.chunk_count,
             "source_hash": self.source_hash,
             "skipped_reason": self.skipped_reason,
+            "updated_at": self.updated_at,
         }

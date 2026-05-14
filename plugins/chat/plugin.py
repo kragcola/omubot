@@ -16,7 +16,7 @@ from typing import Any
 import nonebot
 from loguru import logger
 
-from kernel.config import BotConfig, load_plugin_config
+from kernel.config import BotConfig, ReplySegmentationConfig, load_plugin_config
 from kernel.types import AmadeusPlugin, PluginContext
 
 _L = logger.bind(channel="system")
@@ -50,6 +50,29 @@ def _sanitize_debug_reply(text: str, *, fallback: str = "这次没有执行到�
     if not cleaned:
         return fallback
     return cleaned
+
+
+def _load_bot_nicknames(nb_nicknames: object, env_value: str | None) -> list[str]:
+    nicknames: list[str] = []
+    for value in nb_nicknames or ():
+        nick = str(value).strip()
+        if nick and nick not in nicknames:
+            nicknames.append(nick)
+
+    if env_value:
+        try:
+            env_names = json.loads(env_value)
+        except json.JSONDecodeError:
+            env_names = []
+        if isinstance(env_names, str):
+            env_names = [env_names]
+        if isinstance(env_names, list):
+            for value in env_names:
+                nick = str(value).strip()
+                if nick and nick not in nicknames:
+                    nicknames.append(nick)
+
+    return nicknames
 
 
 class ChatPlugin(AmadeusPlugin):
@@ -132,6 +155,7 @@ class ChatPlugin(AmadeusPlugin):
             bot=cmd_ctx.bot,
             user_id=str(cmd_ctx.user_id),
             group_id=str(cmd_ctx.group_id) if not cmd_ctx.is_private else None,
+            extra={"group_policy": ctx.config.group},
         )
 
         # ---- LLM path ----
@@ -139,7 +163,10 @@ class ChatPlugin(AmadeusPlugin):
             # Include sticker library so the LLM can pick sticker IDs
             sticker_view = ""
             if ctx.sticker_store is not None:
-                sticker_view = ctx.sticker_store.format_prompt_view()
+                sticker_view = ctx.sticker_store.format_prompt_view(
+                    group_id=tool_ctx_obj.group_id,
+                    user_id=tool_ctx_obj.user_id,
+                )
             system_blocks = [
                 {"type": "text", "text": (
                     "你是工具执行器。用户指令=工具调用。\n"
@@ -439,6 +466,7 @@ class ChatPlugin(AmadeusPlugin):
             bot=cmd_ctx.bot,
             user_id=str(cmd_ctx.user_id),
             group_id=str(cmd_ctx.group_id) if cmd_ctx.group_id else None,
+            extra={"group_policy": ctx.config.group},
         )
         results: list[str] = []
         for idx, image_path in enumerate(image_paths):
@@ -507,6 +535,7 @@ class ChatPlugin(AmadeusPlugin):
             bot=cmd_ctx.bot,
             user_id=str(cmd_ctx.user_id),
             group_id=str(cmd_ctx.group_id) if cmd_ctx.group_id else None,
+            extra={"group_policy": ctx.config.group},
         )
 
         # stk_id in args → send specific
@@ -541,15 +570,26 @@ class ChatPlugin(AmadeusPlugin):
         """Handle /debug split — test _split_naturally on arbitrary text."""
         from nonebot.adapters.onebot.v11 import Message
 
-        from services.llm.client import _split_naturally
+        from services.llm.segmentation import segment_reply
 
         text = cmd_ctx.args.strip()
-        segments = _split_naturally(text)
-        output = f"输入: {text}\n分段数: {len(segments)}\n---\n"
-        for i, seg in enumerate(segments, 1):
-            output += f"[{i}] {seg}\n"
+        cfg = self._ctx.config.reply_segmentation if self._ctx else ReplySegmentationConfig()
+        result = segment_reply(text, cfg)
+        output = (
+            f"输入: {text}\n"
+            f"策略: {result.strategy}\n"
+            f"原始分段数: {result.raw_count}\n"
+            f"发送分段数: {result.capped_count}\n"
+            f"切分原因: {', '.join(result.break_reasons)}\n"
+            "---\n"
+        )
+        for i, seg in enumerate(result.segments, 1):
+            output += f"[{i}] ({seg.reason}) {seg.text}\n"
 
-        logger.info("debug split | input_len={} segments={}", len(text), len(segments))
+        logger.info(
+            "debug split | input_len={} raw={} capped={} strategy={}",
+            len(text), result.raw_count, result.capped_count, result.strategy,
+        )
         await cmd_ctx.bot.send(cmd_ctx.event, Message(output.strip()))
 
     async def on_startup(self, ctx: PluginContext) -> None:
@@ -559,17 +599,9 @@ class ChatPlugin(AmadeusPlugin):
         # ---- config-derived globals ----
         ctx.bot_start_time = time.time()
 
-        # Prefer NoneBot's nickname config (NICKNAME env var), fall back to BOT_NICKNAMES.
         nb_nicknames = nonebot.get_driver().config.nickname
-        if nb_nicknames:
-            ctx.bot_nicknames = list(nb_nicknames)
-        else:
-            import json as _json
-            raw = os.environ.get("BOT_NICKNAMES", "[]")
-            try:
-                ctx.bot_nicknames = _json.loads(raw)
-            except _json.JSONDecodeError:
-                ctx.bot_nicknames = []
+        ctx.bot_nicknames = _load_bot_nicknames(nb_nicknames, os.environ.get("BOT_NICKNAMES"))
+        _L.info("bot nicknames loaded | nicknames={}", ctx.bot_nicknames)
 
         ctx.allowed_groups = set(config.group.allowed_groups)
         ctx.allowed_private_users = set(config.allowed_private_users)
@@ -648,20 +680,27 @@ class ChatPlugin(AmadeusPlugin):
             ctx.mood_engine = MoodEngine(
                 anomaly_chance=schedule_cfg.mood_anomaly_chance,
                 refresh_minutes=schedule_cfg.mood_refresh_minutes,
+                day_context_getter=(
+                    (lambda now: ctx.calendar_service.get_day_context(now))
+                    if ctx.calendar_service is not None
+                    else None
+                ),
             )
             ctx.schedule_gen = ScheduleGenerator(
                 store=ctx.schedule_store,
                 generate_at_hour=schedule_cfg.generate_at_hour,
                 identity_name=ctx.identity.name,
+                calendar_service=ctx.calendar_service,
             )
-            from plugins.schedule.calendar import set_self_name
-            set_self_name(ctx.identity.name)
             _L.info("schedule system initialized | dir={}", schedule_cfg.storage_dir)
         else:
             ctx.schedule_store = None
             ctx.mood_engine = None
             ctx.schedule_gen = None
         ctx.schedule_enabled = schedule_cfg.enabled
+
+        if ctx.calendar_service is not None:
+            ctx.calendar_service.set_self_names(ctx.identity.name)
 
         # ---- affection system ----
         from plugins.affection.plugin import AffectionConfig
@@ -773,7 +812,7 @@ class ChatPlugin(AmadeusPlugin):
         # ---- LLM client ----
         from services.llm.client import LLMClient
 
-        llm_tasks = ("main", "thinker", "compact", "slang", "vision")
+        llm_tasks = ("main", "thinker", "reply_gate", "compact", "slang", "vision")
         task_profiles = {
             task: config.llm.resolve_task_profile(task)
             for task in llm_tasks
@@ -813,6 +852,7 @@ class ChatPlugin(AmadeusPlugin):
             bus=ctx.bus,
             task_profiles=task_profiles,
             group_config=config.group,
+            reply_segmentation=config.reply_segmentation,
         )
         llm.set_task_profile_names(task_profile_names)
 
@@ -850,6 +890,10 @@ class ChatPlugin(AmadeusPlugin):
             group_config=config.group,
             humanizer=humanizer,
             talk_schedule=talk_schedule,
+            reply_segmentation=config.reply_segmentation,
+            reply_workflow=config.reply_workflow,
+            global_llm_limit=config.scheduler.concurrency.global_llm_limit,
+            first_segment_release=config.scheduler.concurrency.first_segment_release,
             mood_getter=(
                 lambda: ctx.mood_engine.evaluate(
                     ctx.schedule_store.current if ctx.schedule_store else None,

@@ -15,6 +15,7 @@ import {
   NButton,
   NIcon,
   NInput,
+  NSelect,
   NSkeleton,
   NTag,
   NText,
@@ -26,6 +27,7 @@ import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
+import { recordSortOptions } from '../shared/sort'
 
 interface Card {
   card_id: string
@@ -48,7 +50,17 @@ interface CardSeries {
   series_key: string
   label: string
   card_count: number
+  created_at?: string
+  updated_at?: string
   cards: Card[]
+}
+
+interface MemoEntitySummary {
+  scope?: string
+  scope_id: string
+  card_count?: number
+  updated_at?: string
+  created_at?: string
 }
 
 interface AffectionProfile {
@@ -75,10 +87,11 @@ const emit = defineEmits<{
   (e: 'change-view', view: MemoryViewMode): void
 }>()
 
-const userEntities = ref<string[]>([])
-const groupEntities = ref<string[]>([])
+const userEntities = ref<MemoEntitySummary[]>([])
+const groupEntities = ref<MemoEntitySummary[]>([])
 const loading = ref(true)
 const refreshing = ref(false)
+const sortMode = ref<'default' | 'time'>('default')
 
 const selectedScope = ref('')
 const selectedId = ref('')
@@ -136,7 +149,7 @@ async function loadEntities(silent = false) {
   else loading.value = true
 
   try {
-    const data = await api('/api/admin/memos')
+    const data = await api('/api/admin/memos', { params: { sort: sortMode.value } })
     userEntities.value = data.entities || []
     groupEntities.value = data.group_entities || []
   } catch (error) {
@@ -161,7 +174,7 @@ async function openEntity(scope: string, scopeId: string) {
 
   try {
     const [cardResult, seriesResult, affectionResult] = await Promise.allSettled([
-      api('/api/admin/memos', { params: { scope, scope_id: scopeId, limit: 200 } }),
+      api('/api/admin/memos', { params: { scope, scope_id: scopeId, limit: 200, sort: sortMode.value } }),
       api(`/api/admin/memos/${scope}/${scopeId}/series`),
       scope === 'user' ? api(`/api/admin/affection/${scopeId}`) : Promise.resolve(null),
     ])
@@ -254,6 +267,14 @@ function formatDate(value: string) {
     minute: '2-digit',
   })
 }
+
+watch(sortMode, () => {
+  if (selectedScope.value && selectedId.value) {
+    void openEntity(selectedScope.value, selectedId.value)
+    return
+  }
+  void loadEntities(true)
+})
 
 function categoryStyle(category: string) {
   const color = CATEGORY_COLORS[category] || '#607080'
@@ -353,6 +374,11 @@ function affectionTierLabel(value?: string) {
             {{ selectedId }}
           </NTag>
         </template>
+        <NSelect
+          v-model:value="sortMode"
+          :options="recordSortOptions"
+          style="width: 140px"
+        />
       </template>
 
       <template #right>
@@ -386,18 +412,20 @@ function affectionTierLabel(value?: string) {
 
           <div v-if="userEntities.length > 0" class="memos-entity-list">
             <button
-              v-for="uid in userEntities"
-              :key="uid"
+              v-for="entity in userEntities"
+              :key="entity.scope_id"
               type="button"
               class="memos-entity-item"
-              @click="openEntity('user', uid)"
+              @click="openEntity('user', entity.scope_id)"
             >
               <div class="memos-entity-item__icon">
                 <NIcon :component="PersonOutline" />
               </div>
               <div class="memos-entity-item__copy">
-                <strong>{{ uid }}</strong>
-                <span>查看该用户的系列与独立卡片</span>
+                <strong>{{ entity.scope_id }}</strong>
+                <span>
+                  {{ sortMode === 'time' ? `最近更新 ${formatDate(entity.updated_at || entity.created_at || '')}` : `共 ${entity.card_count || 0} 张卡片` }}
+                </span>
               </div>
               <NIcon :component="ChevronForwardOutline" />
             </button>
@@ -429,18 +457,20 @@ function affectionTierLabel(value?: string) {
 
           <div v-if="groupEntities.length > 0" class="memos-entity-list">
             <button
-              v-for="gid in groupEntities"
-              :key="gid"
+              v-for="entity in groupEntities"
+              :key="entity.scope_id"
               type="button"
               class="memos-entity-item"
-              @click="openEntity('group', gid)"
+              @click="openEntity('group', entity.scope_id)"
             >
               <div class="memos-entity-item__icon">
                 <NIcon :component="PeopleOutline" />
               </div>
               <div class="memos-entity-item__copy">
-                <strong>{{ gid }}</strong>
-                <span>查看该群聊的系列与独立卡片</span>
+                <strong>{{ entity.scope_id }}</strong>
+                <span>
+                  {{ sortMode === 'time' ? `最近更新 ${formatDate(entity.updated_at || entity.created_at || '')}` : `共 ${entity.card_count || 0} 张卡片` }}
+                </span>
               </div>
               <NIcon :component="ChevronForwardOutline" />
             </button>

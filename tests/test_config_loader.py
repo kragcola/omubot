@@ -45,6 +45,18 @@ def test_load_defaults_without_file(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert cfg.group.history_load_count == 30
     assert cfg.group.debounce_seconds == 5.0
     assert cfg.group.batch_size == 10
+    assert cfg.scheduler.concurrency.global_llm_limit == 2
+    assert cfg.scheduler.concurrency.first_segment_release is False
+    assert cfg.reply_workflow.mode == "shadow"
+    assert cfg.reply_workflow.semantic_force_threshold == 0.78
+    assert cfg.reply_workflow.semantic_timeout_ms == 2200
+    assert cfg.reply_workflow.semantic_max_chars == 48
+    assert cfg.reply_workflow.directed_followup_window_s == 180.0
+    assert cfg.reply_workflow.shadow_log_private is True
+    assert cfg.reply_segmentation.max_segment_chars == 20
+    assert cfg.reply_segmentation.max_send_segments == 0
+    assert cfg.reply_segmentation.soft_max_send_segments == 0
+    assert cfg.reply_segmentation.boundary_backend == "pysbd_hybrid"
     assert cfg.napcat.api_url == "http://localhost:29300"
     assert cfg.admins == {}
 
@@ -86,6 +98,26 @@ history_load_count = 50
 debounce_seconds = 3.0
 batch_size = 5
 
+[reply_segmentation]
+max_segment_chars = 24
+max_send_segments = 3
+soft_max_send_segments = 9
+soft_limit_notice = "先刹车一下☆"
+boundary_backend = "local"
+inter_segment_delay_s = 0.3
+
+[scheduler.concurrency]
+global_llm_limit = 4
+first_segment_release = true
+
+[reply_workflow]
+mode = "semantic"
+semantic_force_threshold = 0.82
+semantic_timeout_ms = 500
+semantic_max_chars = 42
+directed_followup_window_s = 240.0
+shadow_log_private = false
+
 [napcat]
 api_url = "http://napcat:29300"
 """,
@@ -104,8 +136,37 @@ api_url = "http://napcat:29300"
     assert cfg.group.history_load_count == 50
     assert cfg.group.debounce_seconds == 3.0
     assert cfg.group.batch_size == 5
+    assert cfg.reply_segmentation.max_segment_chars == 24
+    assert cfg.reply_segmentation.max_send_segments == 3
+    assert cfg.reply_segmentation.soft_max_send_segments == 9
+    assert cfg.reply_segmentation.soft_limit_notice == "先刹车一下☆"
+    assert cfg.reply_segmentation.boundary_backend == "local"
+    assert cfg.reply_segmentation.inter_segment_delay_s == 0.3
+    assert cfg.scheduler.concurrency.global_llm_limit == 4
+    assert cfg.scheduler.concurrency.first_segment_release is True
+    assert cfg.reply_workflow.mode == "semantic"
+    assert cfg.reply_workflow.semantic_force_threshold == 0.82
+    assert cfg.reply_workflow.semantic_timeout_ms == 500
+    assert cfg.reply_workflow.semantic_max_chars == 42
+    assert cfg.reply_workflow.directed_followup_window_s == 240.0
+    assert cfg.reply_workflow.shadow_log_private is False
     assert cfg.napcat.api_url == "http://napcat:29300"
     assert cfg.admins == {"123456": "管理员A", "789012": "管理员B"}
+
+
+def test_reply_workflow_rules_mode_loads_as_shadow(tmp_path: Path) -> None:
+    toml_file = tmp_path / "config.toml"
+    _write_toml(
+        toml_file,
+        """
+[reply_workflow]
+mode = "rules"
+""",
+    )
+
+    cfg = load_config(config_path=str(toml_file))
+
+    assert cfg.reply_workflow.mode == "shadow"
 
 
 def test_load_from_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,8 +261,12 @@ def test_llm_task_profiles_select_named_profiles(tmp_path: Path) -> None:
 
     cfg = load_config(config_path=str(json_file))
     assert cfg.llm.profile_name_for_task("thinker") == "compact-mini"
+    assert cfg.llm.profile_name_for_task("reply_gate") == "compact-mini"
     assert cfg.llm.resolve_task_profile("thinker").model == "small-thinker"
+    assert cfg.llm.resolve_task_profile("reply_gate").model == "small-thinker"
     assert cfg.llm.resolve_task_profile("slang").api_format == "openai"
+    assert cfg.llm.profile_name_for_task("slang_review") == "slang-json"
+    assert cfg.llm.profile_name_for_task("slang_drift") == "slang-json"
     assert cfg.llm.profile_name_for_task("compact") == "main"
 
 
@@ -421,6 +486,71 @@ def test_compact_config_rejects_invalid_ratio():
 
 
 class TestGroupConfigResolve:
+    def test_group_defaults_are_active_when_access_is_open(self) -> None:
+        cfg = GroupConfig()
+        assert cfg.presence.default_mode == "active"
+        assert cfg.allows_learning_group(999) is True
+        assert cfg.allows_active_group(999) is True
+        resolved = cfg.resolve(999)
+        assert resolved.presence_mode == "active"
+        assert resolved.access_allowed is True
+        assert resolved.slang_enabled is True
+
+    def test_legacy_allowed_groups_migrate_to_active_whitelist(self) -> None:
+        cfg = GroupConfig(allowed_groups=[100, 200])
+        assert cfg.access.mode == "whitelist"
+        assert cfg.access.whitelist == [100, 200]
+        assert cfg.allowed_groups == [100, 200]
+        assert cfg.allows_learning_group(100) is True
+        assert cfg.allows_active_group(100) is True
+        assert cfg.resolve(100).presence_mode == "active"
+        assert cfg.resolve(999).presence_mode == "off"
+        assert cfg.allows_learning_group(999) is False
+        assert cfg.allows_active_group(999) is False
+
+    def test_group_policy_file_overrides_legacy_allowlist(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps({
+                "group": {
+                    "allowed_groups": [100, 200],
+                    "presence": {
+                        "default_mode": "active",
+                    },
+                    "overrides": {
+                        "999": {
+                            "presence_mode": "silent_learn",
+                            "slang_enabled": True,
+                        },
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+        policy_file = tmp_path / "group-policy.json"
+        policy_file.write_text(
+            json.dumps({
+                "mode": "whitelist",
+                "whitelist": [300],
+                "blacklist": [200],
+                "log_dropped": True,
+            }),
+            encoding="utf-8",
+        )
+
+        cfg = load_config(config_path=str(config_file))
+
+        assert cfg.group.access.mode == "whitelist"
+        assert cfg.group.access.whitelist == [300]
+        assert cfg.group.active_access_allowed(200) is False
+        assert cfg.group.active_access_allowed(100) is False
+        assert cfg.group.resolve(100).presence_mode == "off"
+        assert cfg.group.resolve(200).presence_mode == "off"
+        assert cfg.group.resolve(300).presence_mode == "active"
+        assert cfg.group.resolve(999).presence_mode == "silent_learn"
+        assert cfg.group.resolve(999).slang_enabled is True
+        assert cfg.group.allows_learning_group(999) is True
+
     def test_resolve_no_override(self) -> None:
         """No override for group — returns global defaults."""
         cfg = GroupConfig(
@@ -439,6 +569,8 @@ class TestGroupConfigResolve:
         assert resolved.history_load_count == 30
         assert resolved.reply_style == "steady"
         assert resolved.custom_prompt == "保持冷静。"
+        assert resolved.presence_mode == "active"
+        assert resolved.access_allowed is True
         assert resolved.tools_enabled is False
         assert resolved.sticker_mode == "rarely"
         assert resolved.slang_enabled is False
@@ -449,7 +581,8 @@ class TestGroupConfigResolve:
             debounce_seconds=5.0, batch_size=10, blocked_users=[100], allowed_tools=["lookup_cards", "web_search"],
             overrides={
                 123: GroupOverride(
-                    blocked_users=[200], allowed_tools=["lookup_cards", "send_sticker"], blocked_tools=["lookup_cards"], at_only=True,
+                    blocked_users=[200], allowed_tools=["lookup_cards", "send_sticker"],
+                    blocked_tools=["lookup_cards"], at_only=True,
                     debounce_seconds=10.0, batch_size=20, history_load_count=50,
                     reply_style="playful", custom_prompt="多接梗。",
                     tools_enabled=False, sticker_mode="off", slang_enabled=False,

@@ -68,6 +68,7 @@ class KnowledgeIndexStore:
                 chunk_count=int(row["chunk_count"]),
                 source_hash=row["source_hash"],
                 skipped_reason=row["skipped_reason"],
+                updated_at=row["updated_at"],
             )
             for row in self._db.execute("SELECT * FROM knowledge_sources ORDER BY source")
         }

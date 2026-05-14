@@ -7,6 +7,7 @@
 | `config/.env` | NoneBot 框架层 + LLM 环境变量 | `nonebot.init()` |
 | `config/config.json` | Bot 业务层主配置，Admin Web 保存目标 | `kernel/config.py` |
 | `config/config.toml` | Legacy 业务配置，兼容读取 | `kernel/config.py` |
+| `config/group-policy.json` | 群聊访问门禁（白/黑名单） | `kernel/config.py` + `/admin/groups` |
 
 配置加载优先级：**CLI 参数 > `_CLI_*` 环境变量 > 环境变量 > 配置文件 > Pydantic 默认值**。
 
@@ -46,11 +47,18 @@ JSON 主配置示例：
     "max_tokens": 1024
   },
   "group": {
-    "allowed_groups": [984198159, 993065015],
+    "presence": {
+      "default_mode": "silent_learn"
+    },
     "at_only": false,
     "debounce_seconds": 5.0,
     "batch_size": 10,
-    "privacy_mask": true
+    "privacy_mask": true,
+    "overrides": {
+      "984198159": {
+        "presence_mode": "active"
+      }
+    }
   },
   "vision": {
     "enabled": true,
@@ -83,6 +91,19 @@ JSON 主配置示例：
 }
 ```
 
+独立群门禁文件 `config/group-policy.json` 示例：
+
+```json
+{
+  "mode": "whitelist",
+  "whitelist": [984198159, 993065015],
+  "blacklist": [],
+  "log_dropped": true
+}
+```
+
+`group.presence.default_mode` 仍控制新群默认是否静默学习；`group-policy.json` 只管哪些群进入学习/回复链路。旧的 `allowed_groups` 仍兼容，会让历史已启用群继续保持 active，但新日常维护请走 `/admin/groups`。
+
 已有 `config/config.toml` 仍可继续读取。管理端“配置”页会按 `BotConfig` 递归生成结构化控件，并提供高级 JSON 兜底。
 
 配置页当前还提供两层运维辅助：
@@ -90,6 +111,48 @@ JSON 主配置示例：
 - 保存前变更预览：调用 `/api/admin/config/preview`，展示服务端校验后的规范化 diff
 - 最近保存审计：从 `storage/config/config-audit.json` 读取最近几次落盘摘要，敏感字段只显示遮罩值
 - 可恢复配置快照：从 `storage/config/config-backups.json` 与 `storage/config/backups/` 读取最近快照摘要，并通过 `/api/admin/config/restore` 执行回滚；Web 端只显示摘要，不展示快照里的 secret 明文
+
+## 回复分段
+
+`reply_segmentation` 控制的是 Bot 可见回复如何切段与逐段发送，不影响知识库文档 chunk、记忆检索或 Prompt 打包：
+
+```json
+{
+  "reply_segmentation": {
+    "enabled": true,
+    "max_segment_chars": 20,
+    "min_segment_chars": 6,
+    "max_send_segments": 0,
+    "soft_max_send_segments": 0,
+    "soft_limit_notice": "先说到这里啦，不然我要刷屏了☆",
+    "boundary_backend": "pysbd_hybrid",
+    "prefer_sentence_break": true,
+    "preserve_ascii_tokens": true,
+    "merge_short_tail": true,
+    "first_segment_humanize": "skip",
+    "later_segment_humanize": "normal",
+    "inter_segment_delay_s": 0.8
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `reply_segmentation.enabled` | `true` | 是否启用新分段器；关闭后回复按单段返回 |
+| `max_segment_chars` | `20` | 单段目标最大字符数，超过后优先按句/子句切 |
+| `min_segment_chars` | `6` | 短尾合并阈值，避免产生肉眼难读的孤儿段 |
+| `max_send_segments` | `0` | 硬上限，默认关闭；设为正数时超出后会合并到最后一段，仅建议调试或临时限流使用 |
+| `soft_max_send_segments` | `0` | 软上限，默认关闭；设为正数后超出会截断并追加自然收尾，不会把尾段合并成一大条 |
+| `soft_limit_notice` | `先说到这里啦，不然我要刷屏了☆` | 软上限触发时发送的最后一段收尾文本 |
+| `boundary_backend` | `pysbd_hybrid` | 分段边界候选后端；`pysbd_hybrid` 使用 pySBD 句边界候选并保留 Omubot 聊天节奏规则，`local` 为本地规则回退 |
+| `prefer_sentence_break` | `true` | 优先在完整句边界切段，而不是先按子句切 |
+| `preserve_ascii_tokens` | `true` | 保护 `ContextService`、`Potential`、URL、版本号等 ASCII 技术词不被拆坏 |
+| `merge_short_tail` | `true` | 是否合并过短的末尾片段 |
+| `first_segment_humanize` | `skip` | 首段发送的人性化策略 |
+| `later_segment_humanize` | `normal` | 后续分段的人性化策略 |
+| `inter_segment_delay_s` | `0.8` | Bot 在逐段发送时的段间等待秒数 |
 
 ## LLM Profiles
 
@@ -189,6 +252,9 @@ Omubot 现在支持“定义”和“任务映射”分离的 Provider 管理：
 | `daily_ai_auto_approve_enabled` | 是否允许 AI 自动通过 |
 | `drift_detection_enabled` | v3 语义漂移检测 |
 | `lookup_tool_enabled` | 是否注册 `slang_lookup` 工具 |
+| `global_excluded_group_ids` | 封闭全局黑话的群；留空表示所有群默认可使用 global 已批准词 |
+
+全局黑话默认可被所有群理解和按需查询。若某个群需要保持封闭语境，把群号加入 `global_excluded_group_ids` 后，该群只会使用本群 `scope=group` 的已批准黑话，不注入也不通过 `slang_lookup` 返回 `scope=global` 的词条。
 
 ## 管理员
 

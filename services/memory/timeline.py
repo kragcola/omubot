@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 _MAX_GROUPS = 200
 
+AssistantVisibleState = Literal["pending", "first_segment_sent", "complete", "failed"]
+
 
 class TimelineMessage(TypedDict):
     role: Literal["user", "assistant"]
@@ -23,6 +25,9 @@ class TimelineMessage(TypedDict):
     message_id: NotRequired[int | None]  # QQ message_id for reply references
     trigger_reason: NotRequired[str]  # 触发原因标记（如 "有人@了你"），合并时包裹为 «触发原因: ...»
     trigger_target: NotRequired[str]  # 触发者 QQ 号，合并时渲染为 «来自 QQ=xxx»
+    pending_state: NotRequired[Literal["active", "background"]]
+    skip_reason: NotRequired[str]
+    skipped_at: NotRequired[float]
 
 
 # ------------------------------------------------------------------
@@ -42,6 +47,7 @@ def merge_user_contents(batch: list[TimelineMessage]) -> Content:
         lines: list[str] = []
         for m in batch:
             assert isinstance(m["content"], str)
+            background_prefix = _background_prefix(m)
             trigger = m.get("trigger_reason")
             mid = m.get("message_id")
             if trigger:
@@ -52,18 +58,20 @@ def merge_user_contents(batch: list[TimelineMessage]) -> Content:
                     parts.append(f"来自 QQ={target}")
                 if mid is not None:
                     parts.append(f"消息ID={mid}")
-                lines.append(f"«{' | '.join(parts)}»")
+                lines.append(f"{background_prefix}«{' | '.join(parts)}»")
             else:
                 # Regular message
                 tag = f"«msg:{mid}» " if mid is not None else ""
                 if m["speaker"] is not None:
-                    lines.append(f"{tag}{m['speaker']}: {m['content']}")
+                    lines.append(f"{background_prefix}{tag}{m['speaker']}: {m['content']}")
                 else:
-                    lines.append(f"{tag}{m['content']}" if tag else m["content"])
+                    line = f"{background_prefix}{tag}{m['content']}" if tag else f"{background_prefix}{m['content']}"
+                    lines.append(line)
         return "\n".join(lines)
 
     merged: list[ContentBlock] = []
     for m in batch:
+        background_prefix = _background_prefix(m)
         trigger = m.get("trigger_reason")
         mid = m.get("message_id")
         if trigger:
@@ -74,11 +82,14 @@ def merge_user_contents(batch: list[TimelineMessage]) -> Content:
                 parts.append(f"来自 QQ={target}")
             if mid is not None:
                 parts.append(f"消息ID={mid}")
-            merged.append(TextBlock(type="text", text=f"«{' | '.join(parts)}»"))
+            merged.append(TextBlock(type="text", text=f"{background_prefix}«{' | '.join(parts)}»"))
         else:
             # Regular message
             tag = f"«msg:{mid}» " if mid is not None else ""
-            prefix = f"{tag}{m['speaker']}: " if m["speaker"] is not None else tag
+            if m["speaker"] is not None:
+                prefix = f"{background_prefix}{tag}{m['speaker']}: "
+            else:
+                prefix = f"{background_prefix}{tag}"
             if isinstance(m["content"], str):
                 merged.append(TextBlock(type="text", text=f"{prefix}{m['content']}"))
             else:
@@ -90,6 +101,19 @@ def merge_user_contents(batch: list[TimelineMessage]) -> Content:
                     else:
                         merged.append(block)
     return merged
+
+
+def _is_active_pending(msg: TimelineMessage) -> bool:
+    return msg.get("pending_state", "active") == "active"
+
+
+def _background_prefix(msg: TimelineMessage) -> str:
+    if _is_active_pending(msg):
+        return ""
+    reason = msg.get("skip_reason", "").strip()
+    if reason:
+        return f"«已跳过，仅作历史背景: {reason}» "
+    return "«已跳过，仅作历史背景» "
 
 
 # ------------------------------------------------------------------
@@ -148,6 +172,7 @@ class _GroupState:
     __slots__ = (
         "last_cached_msg_index",
         "last_input_tokens",
+        "next_assistant_turn_id",
         "pending",
         "summary",
         "turn_times",
@@ -161,6 +186,7 @@ class _GroupState:
         self.summary: str = ""
         self.last_input_tokens: int = 0
         self.last_cached_msg_index: int = 0
+        self.next_assistant_turn_id: int = 0
 
 
 # ------------------------------------------------------------------
@@ -215,7 +241,9 @@ class GroupTimeline:
         content: Content,
         speaker: str | None = None,
         message_id: int | None = None,
-    ) -> None:
+        flush_pending_count: int | None = None,
+        assistant_visible_state: AssistantVisibleState = "complete",
+    ) -> str | None:
         """Add a message to the timeline.
 
         role="user"  → appends to pending buffer.
@@ -223,6 +251,7 @@ class GroupTimeline:
                            then appends both user and assistant turns to turns.
         """
         state = self._get_or_create(group_id)
+        assistant_turn_id: str | None = None
 
         if role == "user":
             msg = TimelineMessage(role="user", speaker=speaker, content=content)
@@ -232,14 +261,28 @@ class GroupTimeline:
         else:
             # Flush pending user messages into a merged user turn
             now = time.time()
-            if state.pending:
-                user_content = merge_user_contents(state.pending)
+            pending_to_flush = state.pending
+            if flush_pending_count is not None:
+                pending_to_flush = state.pending[:max(0, flush_pending_count)]
+            if pending_to_flush:
+                user_content = merge_user_contents(pending_to_flush)
                 state.turns.append({"role": "user", "content": user_content})
                 state.turn_times.append(now)
-                state.pending.clear()
+                if flush_pending_count is None:
+                    state.pending.clear()
+                else:
+                    del state.pending[:len(pending_to_flush)]
 
             # Append assistant turn
-            state.turns.append({"role": "assistant", "content": content})
+            state.next_assistant_turn_id += 1
+            assistant_turn_id = f"{group_id}:{state.next_assistant_turn_id}"
+            state.turns.append({
+                "role": "assistant",
+                "content": content,
+                "turn_id": assistant_turn_id,
+                "visible_state": assistant_visible_state,
+                "visible_updated_at": now,
+            })
             state.turn_times.append(now)
 
         # Fire-and-forget SQLite write
@@ -252,6 +295,7 @@ class GroupTimeline:
                 content_json=self._content_to_json(content),
                 message_id=message_id,
             ))
+        return assistant_turn_id
 
     def add_pending_trigger(
         self, group_id: str, *, reason: str,
@@ -287,11 +331,146 @@ class GroupTimeline:
             return TurnLog()
         return self._store[group_id].turns
 
+    def get_turns_for_prompt(self, group_id: str) -> list[dict[str, Any]]:
+        """Return Anthropic-compatible turns, stripping timeline metadata.
+
+        Incomplete assistant turns are represented as a short state marker
+        rather than exposing a full response that may not be visible in chat yet.
+        """
+        turns = self.get_turns(group_id)
+        prompt_turns: list[dict[str, Any]] = []
+        for turn in turns:
+            role = turn.get("role")
+            content = turn.get("content", "")
+            if role == "assistant":
+                visible_state = turn.get("visible_state", "complete")
+                if visible_state != "complete":
+                    content = f"«上一轮回复仍在发送中，visible_state={visible_state}，暂不作为完整上下文。»"
+            prompt_turns.append({"role": role, "content": content})
+        return prompt_turns
+
+    def mark_latest_assistant_visible_state(
+        self,
+        group_id: str,
+        visible_state: AssistantVisibleState,
+    ) -> bool:
+        """Update the newest assistant turn's visible state."""
+        return self.mark_assistant_visible_state(group_id, None, visible_state)
+
+    def mark_assistant_visible_state(
+        self,
+        group_id: str,
+        turn_id: str | None,
+        visible_state: AssistantVisibleState,
+    ) -> bool:
+        """Update an assistant turn's visible state.
+
+        When ``turn_id`` is None, the newest assistant turn is updated for
+        backward compatibility.
+        """
+        state = self._store.get(group_id)
+        if state is None:
+            return False
+        for turn in reversed(list(state.turns)):
+            if turn.get("role") == "assistant" and (turn_id is None or turn.get("turn_id") == turn_id):
+                turn["visible_state"] = visible_state
+                turn["visible_updated_at"] = time.time()
+                return True
+        return False
+
+    def clamp_compact_split_to_visible(self, group_id: str, split: int) -> int:
+        """Avoid compacting assistant turns that are not fully visible yet."""
+        state = self._store.get(group_id)
+        if state is None or split <= 0:
+            return 0
+        split = min(split, len(state.turns))
+        for idx, turn in enumerate(state.turns[:split]):
+            if turn.get("role") == "assistant" and turn.get("visible_state", "complete") != "complete":
+                if idx > 0 and state.turns[idx - 1].get("role") == "user":
+                    return idx - 1
+                return idx
+        return split
+
     def get_pending(self, group_id: str) -> list[TimelineMessage]:
         """Return a copy of the pending user message buffer."""
         if group_id not in self._store:
             return []
         return list(self._store[group_id].pending)
+
+    def pending_len(self, group_id: str) -> int:
+        """Return the number of pending messages currently buffered."""
+        if group_id not in self._store:
+            return 0
+        return len(self._store[group_id].pending)
+
+    def get_active_pending(self, group_id: str) -> list[TimelineMessage]:
+        """Return pending messages that should participate in the next reply."""
+        if group_id not in self._store:
+            return []
+        return [msg for msg in self._store[group_id].pending if _is_active_pending(msg)]
+
+    def deactivate_pending(self, group_id: str, reason: str) -> int:
+        """Mark active pending messages as background history.
+
+        The messages remain in the pending buffer and are flushed into turns
+        when the assistant next replies, but they are not used as the current
+        reply target.
+        """
+        state = self._store.get(group_id)
+        if state is None:
+            return 0
+        changed = 0
+        now = time.time()
+        for msg in state.pending:
+            if not _is_active_pending(msg):
+                continue
+            msg["pending_state"] = "background"
+            msg["skip_reason"] = reason
+            msg["skipped_at"] = now
+            changed += 1
+        return changed
+
+    def deactivate_latest_pending(self, group_id: str, reason: str, *, count: int = 1) -> int:
+        """Mark the newest active pending messages as background history."""
+        state = self._store.get(group_id)
+        if state is None or count <= 0:
+            return 0
+        changed = 0
+        now = time.time()
+        for msg in reversed(state.pending):
+            if not _is_active_pending(msg):
+                continue
+            msg["pending_state"] = "background"
+            msg["skip_reason"] = reason
+            msg["skipped_at"] = now
+            changed += 1
+            if changed >= count:
+                break
+        return changed
+
+    def deactivate_pending_except_latest_active(self, group_id: str, reason: str) -> int:
+        """Mark active pending messages before the latest active one as background."""
+        state = self._store.get(group_id)
+        if state is None:
+            return 0
+        latest_active_index: int | None = None
+        for idx in range(len(state.pending) - 1, -1, -1):
+            if _is_active_pending(state.pending[idx]):
+                latest_active_index = idx
+                break
+        if latest_active_index is None:
+            return 0
+
+        changed = 0
+        now = time.time()
+        for msg in state.pending[:latest_active_index]:
+            if not _is_active_pending(msg):
+                continue
+            msg["pending_state"] = "background"
+            msg["skip_reason"] = reason
+            msg["skipped_at"] = now
+            changed += 1
+        return changed
 
     def get_turn_time(self, group_id: str, index: int) -> float:
         """Return the timestamp of the turn at the given index."""

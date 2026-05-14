@@ -27,6 +27,10 @@ class TestPluginContext:
         assert ctx.config is None
         assert ctx.card_store is None
         assert ctx.llm_client is None
+        assert ctx.bot is None
+        assert ctx.group_inventory == {}
+        assert ctx.slang_store is None
+        assert ctx.slang_plugin is None
         assert ctx.storage_dir is not None  # Path default
 
     def test_set_storage_dir(self) -> None:

@@ -57,11 +57,28 @@ api_key = "sk-your-deepseek-api-key"   # 或通过环境变量 LLM_API_KEY
 base_url = "https://api.deepseek.com/anthropic"
 model = "deepseek-v4-flash"
 
-[group]
-allowed_groups = []                    # 空 = 所有群。也可以填 ["群号1", "群号2"]
+[admins]
+"你的QQ号" = "管理员"
 
-admins = { "你的QQ号" = "管理员" }
+[group]
+allowed_groups = [984198159, 993065015]  # legacy 兼容字段，老群会继续保持 active
+
+[group.presence]
+default_mode = "silent_learn"           # 新群默认静默学习，不主动说话
 ```
+
+群聊访问门禁现在单独放在 `config/group-policy.json`，也可以在 `/admin/groups` 的“群聊门禁”卡片里编辑：
+
+```json
+{
+  "mode": "whitelist",
+  "whitelist": [984198159, 993065015],
+  "blacklist": [],
+  "log_dropped": true
+}
+```
+
+白名单模式下，白名单群开启、其余关闭；黑名单模式下，黑名单群关闭、其余开启。如果你要把新群先放在“只学习不发言”的状态，保持 `presence.default_mode = "silent_learn"` 就行；需要某个群主动发言时，再到 `/admin/groups` 里把该群的参与模式切成 `active`。
 
 ## 第四步：启动 NapCat 并扫码登录
 
@@ -160,6 +177,32 @@ uv sync
 # 直接运行（方便调试）
 uv run python bot.py
 ```
+
+### macOS 外置盘 exFAT 开发（可选）
+
+如果你的仓库放在 `exFAT` 外置盘上，建议改用外置盘里的 sparseimage 工作区，避免 `.venv` 外链、`uv` 家目录缓存、AppleDouble 元数据和 Codex 可写根不匹配问题。若 APFS 镜像在该外置盘上无法挂载，可设置 `OMUBOT_WORKSPACE_FS='JHFS+'` 使用 HFS+ 兜底。
+
+```bash
+# 1. 在外置盘上创建并挂载工作区（只需第一次加 --create）
+./scripts/dev/mount-workspace.sh --create
+
+# 2. 把仓库复制到新挂载点后进入新路径
+cd ~/OmubotWorkspace/omubot
+
+# 3. 创建仓库内真实 .venv，并把 uv/pip 缓存收口到 .cache/
+./scripts/dev/bootstrap.sh
+
+# 4. 检查当前环境是否仍然越界到 ~/venvs 或 ~/.cache
+source ./scripts/dev/env.sh
+./scripts/dev/doctor.sh
+```
+
+说明：
+
+- 这套流程只影响本机开发环境，不影响 Docker 部署和其他下载用户。
+- 默认挂载点建议使用 `~/OmubotWorkspace` 这类用户可写目录；映像文件本身仍在外置盘，主要容量不占主硬盘。
+- `doctor` 如果提示有 `._*` AppleDouble 文件，可运行 `./scripts/cleanup-appledouble.sh` 清理。
+- 容器内 `.venv` 逻辑保持不变；这套方案只收口宿主机开发环境。
 
 ### 运行测试
 

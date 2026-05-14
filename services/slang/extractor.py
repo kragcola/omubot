@@ -101,8 +101,6 @@ class SlangExtractor:
             if is_noise_term(term):
                 continue
             meaning = str(item.get("meaning", "")).strip()
-            if normalize_slang_key(term) in stop_keys:
-                continue
             aliases = item.get("aliases", [])
             if isinstance(aliases, str):
                 aliases = [part.strip() for part in re.split(r"[,，\n]", aliases) if part.strip()]
@@ -110,6 +108,12 @@ class SlangExtractor:
                 aliases = []
             quality = assess_candidate_quality(term, meaning, [str(alias) for alias in aliases])
             if not quality.accepted:
+                continue
+            candidate_keys = {
+                normalize_slang_key(term),
+                *(normalize_slang_key(alias) for alias in quality.cleaned_aliases),
+            }
+            if any(key and key in stop_keys for key in candidate_keys):
                 continue
             policy = str(item.get("repeat_policy") or settings.repeat_policy)
             if policy not in VALID_REPEAT_POLICIES:

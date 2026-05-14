@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from plugins.calendar_context.service import CalendarContextService
 from plugins.schedule.generator import _extract_text, _parse_schedule
+
+CST = ZoneInfo("Asia/Shanghai")
 
 
 class TestExtractText:
@@ -87,3 +93,16 @@ class TestParseSchedule:
         assert schedule.theme == ""
         assert schedule.day_narrative == ""
         assert schedule.slots[0].location == ""
+
+
+class TestGeneratorCalendarContext:
+    def test_generator_uses_calendar_service_for_prompt_context(self):
+        service = CalendarContextService()
+        service.load_dataset(
+            birthdays_path=__import__("pathlib").Path("plugins/calendar_context/data/birthdays.json"),
+            special_days_path=__import__("pathlib").Path("plugins/calendar_context/data/special_days.json"),
+            builtin_years_dir=__import__("pathlib").Path("plugins/calendar_context/data/years"),
+        )
+        ctx = service.get_day_context(datetime(2026, 9, 9, 12, 0, tzinfo=CST))
+        assert ctx.has_birthday
+        assert ctx.birthdays[0].name_cn == "凤笑梦"

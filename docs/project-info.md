@@ -222,7 +222,7 @@ storage/
 
 #### 当前前端重构状态（2026-05-14）
 
-**阶段 0-2 已完成，阶段 3 首个视图 Dashboard 重构完成并上线**。详细跟踪见 [docs/tracking/web-refactor.md](./tracking/web-refactor.md)，阶段方案见 [web-refactor-plan.md](./web-refactor-plan.md)。
+**阶段 0-2 已完成，阶段 3 已落地 Dashboard / Logs / Groups 三个高流量视图**。详细跟踪见 [docs/tracking/web-refactor.md](./tracking/web-refactor.md)，阶段方案见 [web-refactor-plan.md](./web-refactor-plan.md)。
 
 - 阶段 0（环境清理）：`.nvmrc` Node 20 锁定 + `package.json engines` + `.gitignore admin/static/assets/`。`git rm --cached` 待人工确认。
 - 阶段 1（基础设施固化）：`themeOverrides` 扩展（Tag / DataTable / placeholder / icon），`uno.config.ts` 加 6 个语义 shortcut，新增 [admin-ui-tokens.md](./admin-ui-tokens.md) 速查表。`global.css` 里 6 块冗余 `!important` 已标 `@audit redundant`，等验收后由人工删除（预计从 51 降至 ≤ 18）。
@@ -235,8 +235,9 @@ storage/
   - ✅ **LogsView** — 2026-05-14 两轮迭代：
     1. 组件层重构（commit 8197e60，606 → 583 行）：实时流改用公共 LogPanel 组件，删 60 行手写渲染；StateBadge 统一状态徽章；主 / 侧栏改物理顺序。
     2. 视觉重设计（本次）：工具栏单行化（自研 Segment 段式选等级 + 内嵌图标的搜索框 + 可点清除 + 重置筛选）；默认模式自动隐藏 DEBUG 降噪；侧栏分组折叠（Bot 展开、Dream 折叠、带今日活跃 tag、相对日期显示）；文件模式去黑底终端改用 `--om-surface-2` 浅面板 + 结构化解析 time/level/channel/msg 四列 grid + 等级色标。LogsView 583 → 1175 行，功能视觉完整度大幅提升。
+  - ✅ **GroupsView** — 2026-05-14 完成（1833 → 1756 行）：4 张指标卡片 → 单行紧凑概览条；表格 7 列 → 4 列（参与模式 StateBadge + 差异标签 diff-only）；点行打开抽屉；门禁块挪到独立抽屉，页头按钮 + 概览条 chip 双入口；配置抽屉单页长滚 → `基础 / 节奏 / 高级` 三 NTabs；NRadioGroup 段式按钮替代 NSelect；工具矩阵 3 按钮组 → 单 NSelect；`window.confirm` → NPopconfirm。配套修复 `config/config.json` 群 625618470 `blocked_users: null` 脏数据导致的 bot 启动 ValidationError。
   - ⏸ **LoginView** — 暂不动。已用 AppCard + TheLogo，设计稿完成度高，改动收益低。需要时单独立项。
-  - ⏸ **GroupsView（1833 行）** — 需子组件拆分，采用 codex 协同 spec 分片推进，留到下一轮。
+  - ⏸ **SystemView (3326) / SlangView (3281) / ConfigView (1937)** — 体量大，下一轮排期。
 
 历史已统一风格的页面（2026-05-06 第一轮手工统一）：
 

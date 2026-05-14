@@ -27,11 +27,13 @@ class DateTimePlugin(AmadeusPlugin):
     async def on_startup(self, ctx: PluginContext) -> None:
         self._config = load_plugin_config("plugins/datetime/config.default.json", DateTimeConfig)
         self._schedule_store = ctx.schedule_store
+        self._calendar_service = ctx.calendar_service
 
     def register_tools(self) -> list[Tool]:
         return [
             DateTimeTool(
                 schedule_store=self._schedule_store,
+                calendar_service=self._calendar_service,
                 timezone=self._config.timezone,
                 include_calendar_context=self._config.include_calendar_context,
                 include_schedule=self._config.include_schedule,

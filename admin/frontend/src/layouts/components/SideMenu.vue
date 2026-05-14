@@ -11,6 +11,7 @@ import {
   ServerOutline,
   NewspaperOutline,
   PricetagsOutline,
+  SparklesOutline,
   CubeOutline,
 } from '@vicons/ionicons5'
 import { useAppStore } from '../../stores/app'
@@ -35,6 +36,7 @@ const menuOptions: MenuOption[] = [
       { label: '记忆', key: '/memory', icon: renderIcon(LayersOutline) },
       { label: '表情包', key: '/stickers', icon: renderIcon(HappyOutline) },
       { label: '群内黑话', key: '/slang', icon: renderIcon(PricetagsOutline) },
+      { label: '表达学习', key: '/style', icon: renderIcon(SparklesOutline) },
       { label: '知识库', key: '/knowledge', icon: renderIcon(LibraryOutline) },
     ],
   },

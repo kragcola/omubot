@@ -12,6 +12,7 @@ import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
+import { recordSortOptions } from '../shared/sort'
 
 type KnowledgeTab = 'sources' | 'search' | 'context' | 'metrics' | 'graph' | 'candidates'
 
@@ -36,6 +37,7 @@ interface KnowledgeSource {
   chunk_count: number
   source_hash?: string
   skipped_reason?: string
+  updated_at?: string
 }
 
 interface KnowledgeResult {
@@ -144,6 +146,7 @@ const contextUnsupported = ref(false)
 const available = ref(false)
 const stats = ref<KnowledgeStats>({})
 const sources = ref<KnowledgeSource[]>([])
+const sourceSortMode = ref<'default' | 'time'>('default')
 
 const searchQ = ref('')
 const searchResults = ref<KnowledgeResult[]>([])
@@ -164,6 +167,7 @@ const graphEntities = ref<GraphEntity[]>([])
 const graphRelationships = ref<GraphRelationship[]>([])
 const graphScopeRisks = ref<GraphRelationship[]>([])
 const graphLoading = ref(false)
+const graphSortMode = ref<'default' | 'time'>('default')
 const factBusy = ref('')
 const factRollbackNotes = ref<Record<string, string>>({})
 const supersedeDrafts = ref<Record<string, {
@@ -177,6 +181,7 @@ const candidates = ref<GraphCandidate[]>([])
 const candidateLoading = ref(false)
 const candidateBusy = ref('')
 const rejectNotes = ref<Record<string, string>>({})
+const candidateSortMode = ref<'default' | 'time'>('default')
 
 const entryCount = computed(() => stats.value.chunk_count || 0)
 const sourceCount = computed(() => stats.value.source_count || sources.value.length || 0)
@@ -269,7 +274,7 @@ async function loadStats() {
 
 async function loadSources() {
   try {
-    const data = await api('/api/admin/knowledge/sources')
+    const data = await api('/api/admin/knowledge/sources', { params: { sort: sourceSortMode.value } })
     if (typeof data.available === 'boolean') available.value = data.available
     sources.value = data.sources || []
   } catch (error) {
@@ -378,7 +383,7 @@ async function loadGraph() {
   try {
     const [entitiesData, relationshipsData, scopeRiskData] = await Promise.all([
       api('/api/admin/knowledge/graph/entities', { params: { limit: 80 } }),
-      api('/api/admin/knowledge/graph/relationships', { params: { limit: 120 } }),
+      api('/api/admin/knowledge/graph/relationships', { params: { limit: 120, sort: graphSortMode.value } }),
       api('/api/admin/knowledge/graph/scope-risks', { params: { limit: 80 } }).catch((error) => {
         if (isNotFound(error)) return { available: false, relationships: [] }
         throw error
@@ -463,7 +468,7 @@ async function loadCandidates() {
   candidateLoading.value = true
   try {
     const data = await api('/api/admin/knowledge/graph/candidates', {
-      params: { status: 'pending', limit: 120 },
+      params: { status: 'pending', limit: 120, sort: candidateSortMode.value },
     })
     candidates.value = data.candidates || []
   } catch (error) {
@@ -557,6 +562,18 @@ function shortHash(value?: string) {
   return value.slice(0, 12)
 }
 
+function formatTime(value?: string) {
+  if (!value) return '--'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 function evidenceText(candidate: GraphCandidate) {
   const evidence = candidate.evidence || {}
   const id = evidence.id || evidence.card_id || evidence.chunk_id || ''
@@ -608,6 +625,18 @@ function syncSupersedeDrafts() {
 function isNotFound(error: unknown) {
   return (error as { response?: { status?: number } })?.response?.status === 404
 }
+
+watch(sourceSortMode, () => {
+  void loadSources()
+})
+
+watch(graphSortMode, () => {
+  void loadGraph()
+})
+
+watch(candidateSortMode, () => {
+  void loadCandidates()
+})
 </script>
 
 <template>
@@ -705,6 +734,7 @@ function isNotFound(error: unknown) {
               <span class="knowledge-toolbar__hint">确认哪些 Markdown 文件已进入知识库，哪些被跳过。</span>
             </template>
             <template #right>
+              <NSelect v-model:value="sourceSortMode" :options="recordSortOptions" style="width: 140px" />
               <NButton secondary :loading="reindexing" @click="reindex">
                 重新扫描
               </NButton>
@@ -731,6 +761,7 @@ function isNotFound(error: unknown) {
               <div class="source-card__meta">
                 <span>{{ source.chunk_count }} 个片段</span>
                 <span>hash {{ shortHash(source.source_hash) }}</span>
+                <span>更新 {{ formatTime(source.updated_at) }}</span>
               </div>
               <p v-if="source.skipped_reason" class="source-card__reason">
                 跳过原因：{{ source.skipped_reason }}
@@ -1042,6 +1073,7 @@ function isNotFound(error: unknown) {
               <span class="knowledge-toolbar__hint">图谱是派生事实层，可重建、可回滚，不替代记忆卡片。</span>
             </template>
             <template #right>
+              <NSelect v-model:value="graphSortMode" :options="recordSortOptions" style="width: 140px" />
               <NButton secondary :loading="graphLoading" @click="loadGraph">
                 刷新图谱
               </NButton>
@@ -1202,6 +1234,7 @@ function isNotFound(error: unknown) {
               <span class="knowledge-toolbar__hint">中置信事实进入这里，人工通过后才写入图谱。</span>
             </template>
             <template #right>
+              <NSelect v-model:value="candidateSortMode" :options="recordSortOptions" style="width: 140px" />
               <NButton secondary :loading="candidateLoading" @click="loadCandidates">
                 刷新候选
               </NButton>

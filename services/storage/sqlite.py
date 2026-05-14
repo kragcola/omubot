@@ -24,11 +24,15 @@ async def connect_sqlite(
         path.parent.mkdir(parents=True, exist_ok=True)
 
     db = await aiosqlite.connect(str(path))
-    if row_factory:
-        db.row_factory = aiosqlite.Row
+    try:
+        if row_factory:
+            db.row_factory = aiosqlite.Row
 
-    await db.execute("PRAGMA journal_mode=WAL")
-    await db.execute("PRAGMA synchronous=NORMAL")
-    await db.execute("PRAGMA foreign_keys=ON")
-    await db.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-    return db
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        return db
+    except Exception:
+        await db.close()
+        raise

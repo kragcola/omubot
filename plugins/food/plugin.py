@@ -338,11 +338,17 @@ class FoodPlugin(AmadeusPlugin):
             _L.warning("card read failed, using empty prefs | user={}", user_id)
             cards = {"likes": [], "dislikes": [], "location": ""}
 
-        # First-time user: no cards at all → show brief tip once, then proceed
-        if not cards["likes"] and not cards["dislikes"] and not cards["location"] \
-                and user_id not in self._tutorial_shown:
+        try:
+            has_food_history = await self._has_food_history(user_id)
+        except Exception:
+            _L.warning("food history check failed, fallback to prefs | user={}", user_id)
+            has_food_history = bool(cards["likes"] or cards["dislikes"] or cards["location"])
+
+        # First-time user: no food-related cards at all → show brief tip once, then proceed
+        if not has_food_history and user_id not in self._tutorial_shown:
             self._tutorial_shown.add(user_id)
             _L.info("first-time user, showing tip | user={}", user_id)
+            await self._record_tutorial_seen_safe(user_id)
             await self._send_reply(cmd_ctx,
                 "你还没设置过口味偏好呢~\n"
                 "发送 /food help 查看如何设置，之后推荐会更准哦\n"
@@ -377,6 +383,8 @@ class FoodPlugin(AmadeusPlugin):
         runs in a background task so the message pipeline isn't blocked.
         """
         if ctx.is_private or not ctx.group_id:
+            return False
+        if not getattr(ctx, "allow_speaking", True):
             return False
 
         user_id = ctx.user_id
@@ -1066,6 +1074,83 @@ class FoodPlugin(AmadeusPlugin):
         result = {"likes": likes, "dislikes": dislikes, "location": location}
         self._pref_cache[user_id] = result
         return result
+
+    async def _has_food_history(self, user_id: str) -> bool:
+        """Return True when the user already has any food-related cards."""
+        ctx = self._ctx
+        if ctx is None or ctx.card_store is None:
+            return False
+
+        store = ctx.card_store
+        active_cards = await store.get_entity_cards("user", user_id)
+        for card in active_cards:
+            if card.source == "food_plugin":
+                _L.debug("food history hit | user={} source=active_card card={}", user_id, card.card_id)
+                return True
+
+        for series in await store.list_entity_series("user", user_id):
+            if series.source == "food_plugin" or series.series_key.startswith("food_"):
+                _L.debug("food history hit | user={} source=series series={}", user_id, series.series_id)
+                return True
+
+        for status in ("expired", "superseded"):
+            cards = await store.list_cards(scope="user", scope_id=user_id, status=status, limit=200)
+            for card in cards:
+                if card.source == "food_plugin":
+                    _L.debug(
+                        "food history hit | user={} source=inactive_card status={} card={}",
+                        user_id, status, card.card_id,
+                    )
+                    return True
+
+        for card in active_cards:
+            if card.source != "user_config":
+                continue
+            content = card.content.strip()
+            if card.category == "preference" and (
+                content.startswith("喜欢吃") or content.startswith("不喜欢吃")
+            ):
+                _L.debug("food history hit | user={} source=user_config card={}", user_id, card.card_id)
+                return True
+            if card.category == "fact" and ("位于" in content or "住在" in content):
+                _L.debug("food history hit | user={} source=user_config card={}", user_id, card.card_id)
+                return True
+        return False
+
+    async def _record_tutorial_seen(self, user_id: str) -> None:
+        """Persist that the first-time food tutorial has been shown."""
+        ctx = self._ctx
+        if ctx is None or ctx.card_store is None:
+            _L.debug("record tutorial skipped | user={} reason=no_card_store", user_id)
+            return
+
+        store = ctx.card_store
+        series = await store.get_or_create_series(
+            f"food_tutorial:{user_id}", scope="user", scope_id=user_id,
+            label="食物推荐教程", source="food_plugin",
+        )
+        existing_cards = await store.get_series_cards(series.series_id)
+        if existing_cards:
+            await store.mark_seen(existing_cards[0].card_id)
+            return
+
+        now = datetime.now(CST).strftime("%m-%d %H:%M")
+        await store.add_card(NewCard(
+            scope="user",
+            scope_id=user_id,
+            category="event",
+            content=f"已显示食物推荐教程（{now}）",
+            confidence=0.5,
+            source="food_plugin",
+            series_id=series.series_id,
+        ))
+        _L.info("record tutorial seen | user={} series={}", user_id, series.series_id)
+
+    async def _record_tutorial_seen_safe(self, user_id: str) -> None:
+        try:
+            await self._record_tutorial_seen(user_id)
+        except Exception:
+            _L.warning("record tutorial seen failed | user={}", user_id, exc_info=True)
 
     async def _add_preference(self, user_id: str, pref_type: str, value: str) -> None:
         """Add a food preference card to CardStore."""

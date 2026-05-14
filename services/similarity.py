@@ -7,22 +7,17 @@ without changing slang or memory call sites.
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from abc import ABC, abstractmethod
 from typing import Literal
+
+from services.learning_normalizer.normalize import normalize_key
 
 SimilarityBackend = Literal["ngram", "embedding"]
 
 
 def normalize_text_key(value: str) -> str:
     """Normalize Chinese/English mixed text for fuzzy matching."""
-    value = unicodedata.normalize("NFKC", value or "").strip().lower()
-    value = re.sub(r"https?://\S+", "", value)
-    value = re.sub(r"\[[^\]]+\]\([^)]+\)", "", value)
-    value = re.sub(r"^[#>\-\s*`_~]+", "", value)
-    value = re.sub(r"[\s`*_~#>\[\](){}《》<>:：,，。.!！?？;；\"'“”‘’|/\\]+", "", value)
-    return value
+    return normalize_key(value, "general")
 
 
 class SimilarityProvider(ABC):

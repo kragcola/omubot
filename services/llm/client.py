@@ -20,6 +20,13 @@ from kernel.types import ReplyContext, ThinkerContext
 from services.identity import Identity
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.provider import ToolUse, create_provider, is_deepseek_v4_model, provider_mode
+from services.llm.segmentation import (
+    ReplySegmentationConfig,
+    segment_reply,
+)
+from services.llm.segmentation import (
+    fix_cq_codes as fix_cq_codes,
+)
 from services.llm.usage import UsageTracker
 from services.media.image_cache import ImageCache
 from services.memory.card_store import CardStore, NewCard
@@ -45,12 +52,7 @@ _log_thinking = _base_logger.bind(channel="thinking")
 _log_compact = _base_logger.bind(channel="compact")
 _log_debug = _base_logger.bind(channel="debug")
 
-_SEGMENT_SEP = "---cut---"
-_SEGMENT_DELAY = 0.8  # seconds between segment sends (human-like pacing)
-_MAX_SEND_SEGMENTS = 4
 _BLANK_LINE_RE = re.compile(r"\n{2,}")
-_CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
-_CQ_KV_FIX_RE = re.compile(r",(\w+):")
 _GROUP_REPLY_STYLE_HINTS: dict[str, str] = {
     "gentle": "回复风格偏柔和、耐心、安抚感更强，避免过硬或过冲的表达。",
     "playful": "回复风格可以更轻松俏皮，允许一点点玩梗和抖机灵，但不要失控。",
@@ -61,9 +63,11 @@ _GROUP_REPLY_STYLE_HINTS: dict[str, str] = {
 _STICKER_TOOL_NAMES = {"send_sticker", "save_sticker", "manage_sticker"}
 _DEEPSEEK_V4_COMPACT_RATIO = 0.88
 _EMPTY_VISIBLE_REPLY_FALLBACK = "我先缓一下，马上接你。"
+_BACKGROUND_HISTORY_MARKER_RE = re.compile(r"«已跳过，仅作历史背景(?:: [^»]*)?»\s*")
 _CONTROL_TOKEN_RE = re.compile(
     r"(?is)\s*(?:\[\s*pass[_\s-]*turn\s*\]|pass[_\s-]*turn|passturn)\s*(?:[:：\-]\s*.*)?\s*"
 )
+_LEADING_REPLY_CQ_RE = re.compile(r"^(?:\s*\[CQ:reply,id[:=]-?\d+\]\s*)+")
 _VISIBLE_TOOL_OUTPUT_NAMES = {"send_sticker", "send_group_msg"}
 
 # Markdown stripping — QQ does not render Markdown.
@@ -75,6 +79,15 @@ _MD_OLIST_RE = re.compile(r"^\d+\.\s+", re.MULTILINE)
 _MD_CODE_INLINE_RE = re.compile(r"`([^`]+)`")
 _MD_STRIKE_RE = re.compile(r"~~(.+?)~~")
 _MD_FENCE_RE = re.compile(r"```[\s\S]*?```")
+
+
+@dataclass(frozen=True)
+class CollectedReply:
+    """A generated reply whose visible segments have not been sent yet."""
+
+    segments: list[str]
+    full_reply: str
+    assistant_turn_id: str | None = None
 
 
 def _extract_fence_content(fence: str) -> str:
@@ -174,6 +187,15 @@ def _strip_control_tokens(text: str) -> tuple[str, bool]:
 
 def _contains_control_token(text: str) -> bool:
     return bool(_CONTROL_TOKEN_RE.search(text or ""))
+
+
+def _strip_leading_reply_cq(text: str) -> tuple[str, bool]:
+    """Remove LLM-leaked quote-reply CQ prefixes from visible reply text."""
+    raw = text or ""
+    match = _LEADING_REPLY_CQ_RE.match(raw)
+    if match is None:
+        return raw, False
+    return raw[match.end():].lstrip(), True
 
 # Kaomoji / action-description detection for sticker enforcement.
 #
@@ -308,165 +330,13 @@ def _clean_text(text: str) -> str:
     return _BLANK_LINE_RE.sub("\n", text).strip()
 
 
-def fix_cq_codes(text: str) -> str:
-    """Normalize CQ code params: [CQ:reply,id:123] → [CQ:reply,id=123]."""
-    return _CQ_CODE_RE.sub(lambda m: _CQ_KV_FIX_RE.sub(r",\1=", m.group(0)), text)
-
-
-def _split_segments(text: str) -> list[str]:
-    """Split reply into multiple messages by --- separator, cleaning blank lines."""
-    text = fix_cq_codes(text)
-    segments: list[str] = []
-    current: list[str] = []
-    for line in text.split("\n"):
-        if line.strip() == _SEGMENT_SEP:
-            seg = "\n".join(current).strip()
-            if seg:
-                segments.append(_clean_text(seg))
-            current = []
-        else:
-            current.append(line)
-    last = "\n".join(current).strip()
-    if last:
-        segments.append(_clean_text(last))
-    return segments or [_clean_text(text)]
-
-
-_SENTENCE_ENDING = set("。！？～…」』）\"!?~)")  # chars that terminate a thought
-_SENTENCE_BREAK = set("。！？～…!?~")  # priority 1: sentence-ending breaks
-_CLAUSE_BREAK = set("，；：、,;:")     # priority 2: clause-level breaks
-_MIN_CHUNK = 6
-_MAX_CHUNK = 20
-
-
-def _smart_chunk(text: str, max_len: int = _MAX_CHUNK) -> list[str]:
-    """Split text into segments ≤ max_len, preferring natural punctuation breaks.
-
-    Scans backward from max_len to find the best split point:
-    1. After sentence-ending punctuation (。！？～…) — delimiter stays with preceding text
-    2. After clause punctuation (，；：、)
-    3. At a character boundary that doesn't break an English word
-    4. Hard split at max_len (last resort, should rarely fire)
-
-    A trailing segment shorter than _MIN_CHUNK is merged into the previous one.
-    """
-    segments: list[str] = []
-    t = text
-    while t:
-        if len(t) <= max_len:
-            segments.append(t)
-            break
-
-        best = 0
-        half = max_len // 2
-
-        # Priority 1: sentence-ending break
-        for i in range(max_len - 1, half - 1, -1):
-            if t[i] in _SENTENCE_BREAK:
-                best = i + 1
-                break
-
-        # Priority 2: clause break
-        if best == 0:
-            for i in range(max_len - 1, half - 1, -1):
-                if t[i] in _CLAUSE_BREAK:
-                    best = i + 1
-                    break
-
-        # Priority 3: character boundary (don't break English words)
-        if best == 0:
-            for i in range(max_len, half - 1, -1):
-                if i >= len(t):
-                    continue
-                if i > 0 and t[i - 1].isalpha() and (i < len(t) and t[i].isalpha()):
-                    continue
-                best = i
-                break
-
-        # Priority 4: hard split
-        if best == 0:
-            best = max_len
-
-        segments.append(t[:best])
-        t = t[best:].lstrip()
-
-    # Post-process: merge trailing short segment
-    if len(segments) >= 2 and len(segments[-1]) < _MIN_CHUNK:
-        segments[-2] += segments[-1]
-        segments.pop()
-
-    return segments or [text]
+def _strip_background_history_markers(text: str) -> str:
+    return _BACKGROUND_HISTORY_MARKER_RE.sub("", text)
 
 
 def _split_naturally(text: str) -> list[str]:
-    """Split text for human-like sequential sending.
-
-    Each newline is a split point (as told to the LLM).
-    Short consecutive lines are merged to avoid fragmentation;
-    long single lines are split on 。！？ then comma.
-    Honors explicit ---cut--- markers.
-    """
-    if any(line.strip() == _SEGMENT_SEP for line in text.split("\n")):
-        return _split_segments(text)
-
-    # Step 1: paragraphs (double newline = topic shift, always split)
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    if not paragraphs:
-        return [text]
-
-    chunks: list[str] = []
-    for para in paragraphs:
-        # Step 2: split on \n but only as a real boundary when the previous
-        # line ends with sentence-ending punctuation.  Otherwise the \n is
-        # likely a mid-sentence line-wrap from the LLM — merge the two lines.
-        lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
-        if not lines:
-            continue
-
-        merged: list[str] = []
-        for line in lines:
-            if not merged:
-                merged.append(line)
-            elif merged[-1] and merged[-1][-1] in _SENTENCE_ENDING:
-                # Previous line ended a thought → \n is intentional
-                merged.append(line)
-            elif len(line) < _MIN_CHUNK:
-                # Short line → fragment, always merge
-                merged[-1] += line
-            else:
-                # Previous line didn't end with sentence-ending punctuation
-                # and this line isn't trivially short — \n is mid-sentence.
-                # Merge without adding \n to preserve natural reading.
-                merged[-1] += line
-
-        # Step 3: split any merged line that's still too long
-        for line in merged:
-            if len(line) <= _MAX_CHUNK:
-                chunks.append(line)
-            else:
-                chunks.extend(_smart_chunk(line))
-
-    # Strip trailing clause punctuation — meaningless at end of a standalone message
-    _TRAILING_CLAUSE = "，；：、,;:"
-    chunks = [c.rstrip(_TRAILING_CLAUSE) for c in chunks]
-
-    return chunks or [text]
-
-
-def _coalesce_segments(segments: list[str], max_segments: int = _MAX_SEND_SEGMENTS) -> list[str]:
-    """Cap visible send fragments by merging overflow into the last segment."""
-    if len(segments) <= max_segments:
-        return segments
-    if max_segments <= 1:
-        return ["\n".join(segments)]
-    head = segments[: max_segments - 1]
-    tail = "\n".join(segments[max_segments - 1:])
-    return [*head, tail]
-
-
-def _reply_segments(reply: str) -> tuple[list[str], int]:
-    raw_segments = _split_naturally(reply)
-    return _coalesce_segments(raw_segments), len(raw_segments)
+    """Compatibility wrapper for tests/debug callers."""
+    return segment_reply(text, ReplySegmentationConfig()).texts
 
 
 def _cached_text(text: str) -> dict[str, Any]:
@@ -490,7 +360,7 @@ def _pending_conversation_text(timeline: GroupTimeline | None, group_id: str | N
         return ""
     parts: list[str] = []
     with contextlib.suppress(Exception):
-        for msg in timeline.get_pending(group_id):
+        for msg in timeline.get_active_pending(group_id):
             if msg.get("trigger_reason"):
                 continue
             text = content_text(msg.get("content", ""))
@@ -500,7 +370,7 @@ def _pending_conversation_text(timeline: GroupTimeline | None, group_id: str | N
 
 
 def _hash_scope_id(scope: str, raw_id: str, salt: str) -> str:
-    digest = hashlib.sha256(f"{scope}:{salt}:{raw_id}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{scope}:{salt}:{raw_id}".encode()).hexdigest()[:16]
     return f"{scope}_{digest}"
 
 
@@ -983,6 +853,7 @@ class LLMClient:
         bus: object | None = None,
         task_profiles: dict[str, Any] | None = None,
         group_config: Any | None = None,
+        reply_segmentation: ReplySegmentationConfig | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
             enable_cleanup_closed=True,
@@ -1018,6 +889,10 @@ class LLMClient:
         self._mood_getter = mood_getter
         self._bus = bus
         self._group_config = group_config
+        self._reply_segmentation = reply_segmentation or ReplySegmentationConfig()
+        self._last_thinker_action = ""
+        self._last_thinker_thought = ""
+        self._last_thinker_conversation_mode = ""
         self._task_profiles = task_profiles or {}
         self._task_profile_names = {
             task: str(getattr(profile, "name", "") or task)
@@ -1030,6 +905,61 @@ class LLMClient:
 
     def set_group_config(self, group_config: Any | None) -> None:
         self._group_config = group_config
+
+    def set_reply_segmentation(self, reply_segmentation: ReplySegmentationConfig | None) -> None:
+        self._reply_segmentation = reply_segmentation or ReplySegmentationConfig()
+
+    async def _emit_reply_segments(
+        self,
+        *,
+        session_id: str,
+        reply: str,
+        on_segment: Callable[[str], Awaitable[None]] | None,
+        inter_segment_delay_s: float,
+    ) -> tuple[str, str, float, Any]:
+        segmentation = segment_reply(reply, self._reply_segmentation)
+        segments = segmentation.texts
+        if segmentation.raw_count > segmentation.capped_count:
+            _log_msg_out.debug(
+                "segments coalesced | session={} segmentation_raw_count={} "
+                "segmentation_capped_count={} segmentation_limit={} strategy={} break_reasons={}",
+                session_id,
+                segmentation.raw_count,
+                segmentation.capped_count,
+                segmentation.limit_status,
+                segmentation.strategy,
+                ",".join(segmentation.break_reasons),
+            )
+
+        send_start = time.monotonic()
+        if on_segment and len(segments) > 1:
+            for seg in segments[:-1]:
+                await on_segment(seg)
+                await asyncio.sleep(inter_segment_delay_s)
+            last_seg = segments[-1] if segments else reply
+        elif not on_segment and len(segments) > 1:
+            last_seg = "\n".join(segments)
+        else:
+            last_seg = segments[-1] if segments else reply
+        send_elapsed = time.monotonic() - send_start
+        full_reply = "\n".join(segments)
+        return last_seg, full_reply, send_elapsed, segmentation
+
+    def _collect_reply_segments(self, *, session_id: str, reply: str) -> tuple[CollectedReply, Any]:
+        segmentation = segment_reply(reply, self._reply_segmentation)
+        if segmentation.raw_count > segmentation.capped_count:
+            _log_msg_out.debug(
+                "segments coalesced | session={} segmentation_raw_count={} "
+                "segmentation_capped_count={} segmentation_limit={} strategy={} break_reasons={}",
+                session_id,
+                segmentation.raw_count,
+                segmentation.capped_count,
+                segmentation.limit_status,
+                segmentation.strategy,
+                ",".join(segmentation.break_reasons),
+            )
+        segments = segmentation.texts or [reply]
+        return CollectedReply(segments=segments, full_reply="\n".join(segments)), segmentation
 
     async def _call(
         self, system_blocks: list[dict[str, Any]], messages: list[Any], tools: list[dict[str, Any]] | None = None,
@@ -1051,7 +981,8 @@ class LLMClient:
             user_id=user_id,
             group_id=group_id,
         )
-        if api_format == "deepseek" and task in {"thinker", "compact", "slang"} and thinking is None:
+        no_thinking_tasks = {"thinker", "compact", "slang", "slang_drift", "reply_gate"}
+        if api_format == "deepseek" and task in no_thinking_tasks and thinking is None:
             thinking = {"type": "disabled"}
         try:
             t_call = time.monotonic()
@@ -1128,6 +1059,54 @@ class LLMClient:
         return await self._call(
             system_blocks, messages, tools=tools,
             max_tokens=max_tokens, thinking=thinking, task="slang",
+            user_id=user_id, group_id=group_id,
+        )
+
+    async def _call_slang_review(
+        self,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 1024,
+        thinking: dict[str, Any] | None = None,
+        user_id: str = "",
+        group_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._call(
+            system_blocks, messages, tools=tools,
+            max_tokens=max_tokens, thinking=thinking, task="slang_review",
+            user_id=user_id, group_id=group_id,
+        )
+
+    async def _call_slang_drift(
+        self,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 512,
+        thinking: dict[str, Any] | None = None,
+        user_id: str = "",
+        group_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._call(
+            system_blocks, messages, tools=tools,
+            max_tokens=max_tokens, thinking=thinking, task="slang_drift",
+            user_id=user_id, group_id=group_id,
+        )
+
+    async def _call_reply_gate(
+        self,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 128,
+        thinking: dict[str, Any] | None = None,
+        user_id: str = "",
+        group_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._call(
+            system_blocks, messages, tools=tools,
+            max_tokens=max_tokens, thinking=thinking, task="reply_gate",
             user_id=user_id, group_id=group_id,
         )
 
@@ -1474,6 +1453,7 @@ class LLMClient:
         reply: str,
         session_id: str,
         force_reply: bool,
+        allow_empty_fallback: bool,
         has_visible_tool_output: bool,
         is_group: bool,
     ) -> tuple[str, str]:
@@ -1487,11 +1467,14 @@ class LLMClient:
                 cleaned = ""
 
         normalized = cleaned.strip()
+        normalized, reply_cq_stripped = _strip_leading_reply_cq(normalized)
+        if reply_cq_stripped:
+            _log_msg_out.info("reply_cq_prefix_stripped | session={}", session_id)
         if normalized in ("", "...", "☆", "~"):
             if has_visible_tool_output:
                 _log_msg_out.info("reply_suppressed_empty | session={} reason=tool_visible", session_id)
                 return "", "suppressed"
-            if force_reply or not is_group:
+            if (force_reply and allow_empty_fallback) or not is_group:
                 _log_msg_out.info("reply_fallback_emitted | session={}", session_id)
                 return _EMPTY_VISIBLE_REPLY_FALLBACK, "fallback"
             _log_msg_out.info("reply_suppressed_empty | session={} reason=autonomous", session_id)
@@ -1525,10 +1508,10 @@ class LLMClient:
             messages.append({"role": "assistant", "content": "好的，我已了解之前的对话内容。"})
 
         # Turns — finalized, byte-identical to previous API calls
-        messages.extend(self._timeline.get_turns(group_id))
+        messages.extend(self._timeline.get_turns_for_prompt(group_id))
 
         # Pending — temporary merge as tail user message
-        pending = self._timeline.get_pending(group_id)
+        pending = self._timeline.get_active_pending(group_id)
         if pending:
             from services.memory.timeline import merge_user_contents
             messages.append({"role": "user", "content": merge_user_contents(pending)})
@@ -1640,7 +1623,9 @@ class LLMClient:
         force_reply: bool = False,
         *,
         privacy_mask: bool = True,
-    ) -> str | None:
+        allow_empty_fallback: bool = True,
+        collect_segments: bool = False,
+    ) -> str | CollectedReply | None:
         content_preview = user_content[:80] if isinstance(user_content, str) else str(user_content)[:80]
         _log_msg_in.info(
             "chat | session={} user={} identity={} text={!r}",
@@ -1650,6 +1635,9 @@ class LLMClient:
         prompt_start = time.perf_counter()
 
         is_group = group_id is not None and self._timeline is not None
+        self._last_thinker_action = ""
+        self._last_thinker_thought = ""
+        self._last_thinker_conversation_mode = "group" if is_group else "private"
         _, _, _, main_model, main_api_format = self._profile_for_task("main")
         deepseek_native_main = main_api_format == "deepseek" and is_deepseek_v4_model(main_model)
         compact_ratio = self._compact_ratio_for_main()
@@ -1665,12 +1653,14 @@ class LLMClient:
                     int(self._max_context_tokens * compact_ratio),
                 )
                 await self._compact_group(group_id, identity)
+            reply_pending_cutoff = self._timeline.pending_len(group_id)
             messages = self._build_group_messages(group_id)
             # Append user_content as a transient user message so directives
             # like "respond to this video" reach the LLM in group context.
             if user_content:
                 messages.append({"role": "user", "content": user_content})
         else:
+            reply_pending_cutoff = None
             # Private: use ShortTermMemory
             self._short_term.add(session_id, "user", user_content)
             # Persist to SQLite so /debug works after restart
@@ -1725,29 +1715,34 @@ class LLMClient:
             mood_text = self._build_thinker_mood_text()
             affection_text = self._build_thinker_affection_text(user_id)
             thinker_decision = await think(
-                api_call=lambda system, thinker_messages, tools=None, max_tokens=1024, thinking=None: self._call_thinker(
-                    system,
-                    thinker_messages,
-                    tools=tools,
-                    max_tokens=max_tokens,
-                    thinking=thinking,
-                    user_id=user_id,
-                    group_id=group_id,
-                ),
+                api_call=lambda system, thinker_messages, tools=None, max_tokens=1024, thinking=None:
+                    self._call_thinker(
+                        system,
+                        thinker_messages,
+                        tools=tools,
+                        max_tokens=max_tokens,
+                        thinking=thinking,
+                        user_id=user_id,
+                        group_id=group_id,
+                    ),
                 recent_messages=recent_for_thinker,
                 max_tokens=self._thinker_max_tokens,
                 mood_text=mood_text,
                 affection_text=affection_text,
                 identity_name=identity.name,
+                conversation_mode="group" if is_group else "private",
             )
             # Persist decision in prompt context so plugins can see it
             thinker_action = thinker_decision.action
             thinker_thought = thinker_decision.thought
+            self._last_thinker_action = thinker_action
+            self._last_thinker_thought = thinker_thought
 
             if thinker_action == "search":
                 _log_thinking.info("thinker_search_coerced | session={} thought={!r}", session_id, thinker_thought)
                 thinker_action = "reply"
                 thinker_decision.action = "reply"
+                self._last_thinker_action = thinker_action
 
             await self._fire_thinker_decision(
                 session_id=session_id,
@@ -1851,7 +1846,7 @@ class LLMClient:
             d = thinker_decision
             if d.sticker:
                 hints.append(
-                    "sticker: yes — 请在本轮同时调用 send_sticker 发送匹配的表情包，"
+                    "sticker: yes — 请在本轮同时调用 send_sticker 发送匹配且近期未重复的表情包，"
                     "发送后直接接文字内容，不要提及已发送表情包"
                 )
             else:
@@ -1890,6 +1885,7 @@ class LLMClient:
         acc_llm_elapsed = 0.0
 
         _sticker_sent = False
+        deferred_reply_after_sticker = ""
         tool_call_records: list[dict[str, Any]] = []
 
         for round_i in range(MAX_TOOL_ROUNDS):
@@ -1914,6 +1910,15 @@ class LLMClient:
 
             # Check for pass_turn
             pass_turn = next((tu for tu in tool_uses if tu.name == "pass_turn"), None)
+            if pass_turn and deferred_reply_after_sticker:
+                reason = pass_turn.input.get("reason", "")
+                _log_msg_out.info(
+                    "reply_deferred_after_sticker | session={} reason=pass_turn pass_reason={!r}",
+                    session_id, reason,
+                )
+                text = deferred_reply_after_sticker
+                tool_uses = []
+                pass_turn = None
             if pass_turn:
                 reason = pass_turn.input.get("reason", "")
                 total_elapsed = time.monotonic() - t0
@@ -1938,13 +1943,26 @@ class LLMClient:
                 return None
 
             if not tool_uses:
-                reply, reply_state = self._finalize_visible_reply(
+                if not text and deferred_reply_after_sticker:
+                    _log_msg_out.info(
+                        "reply_deferred_after_sticker | session={} reason=empty_reply",
+                        session_id,
+                    )
+                    text = deferred_reply_after_sticker
+                reply, _reply_state = self._finalize_visible_reply(
                     reply=text or "...",
                     session_id=session_id,
                     force_reply=force_reply,
+                    allow_empty_fallback=allow_empty_fallback,
                     has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
                     is_group=is_group,
                 )
+                if not reply and deferred_reply_after_sticker:
+                    _log_msg_out.info(
+                        "reply_deferred_after_sticker | session={} reason=control_or_suppressed_empty",
+                        session_id,
+                    )
+                    reply = deferred_reply_after_sticker
 
                 if not reply:
                     if is_group and group_id is not None and self._timeline is not None:
@@ -1975,6 +1993,7 @@ class LLMClient:
                     and round_i < MAX_TOOL_ROUNDS - 1
                 ):
                     _sticker_sent = True  # prevent re-entry
+                    deferred_reply_after_sticker = reply
                     assistant_content = []
                     for tb in result.get("thinking_blocks", []):
                         assistant_content.append(tb)
@@ -1985,42 +2004,60 @@ class LLMClient:
                         "role": "user",
                         "content": [{
                             "type": "text",
-                            "text": "请现在发送一个表情包来配合你刚才的颜文字"
+                            "text": "请现在发送一个合适且近期未重复的表情包来配合你刚才的颜文字"
                                     "（只调用 send_sticker，不要重复文字内容）",
                         }],
                     })
                     _log_thinking.info("kaomoji_enforce | forcing sticker round after kaomoji detected")
                     continue
 
-                segments, raw_segment_count = _reply_segments(reply)
-                if raw_segment_count > len(segments):
-                    _log_msg_out.debug(
-                        "segments coalesced | session={} raw={} capped={}",
-                        session_id, raw_segment_count, len(segments),
-                    )
-                send_start = time.monotonic()
-                if on_segment and len(segments) > 1:
-                    for seg in segments[:-1]:
-                        await on_segment(seg)
-                        await asyncio.sleep(_SEGMENT_DELAY)
-                    last_seg = segments[-1] if segments else reply
-                elif not on_segment and len(segments) > 1:
-                    # No callback to send segments — rejoin so caller gets full text
-                    last_seg = "\n".join(segments)
+                if collect_segments:
+                    collected_reply, segmentation = self._collect_reply_segments(session_id=session_id, reply=reply)
+                    last_seg = collected_reply.segments[-1]
+                    full_reply = collected_reply.full_reply
+                    send_elapsed = 0.0
                 else:
-                    last_seg = segments[-1] if segments else reply
-                send_elapsed = time.monotonic() - send_start
-                full_reply = "\n".join(segments)
+                    last_seg, full_reply, send_elapsed, segmentation = await self._emit_reply_segments(
+                        session_id=session_id,
+                        reply=reply,
+                        on_segment=on_segment,
+                        inter_segment_delay_s=self._reply_segmentation.inter_segment_delay_s,
+                    )
                 total_elapsed = time.monotonic() - t0
                 preview = full_reply[:120] + "…" if len(full_reply) > 120 else full_reply
                 _log_msg_out.info(
-                    "{!r} | sticker={} len={} segments={} raw_segments={} llm={:.1f}s send_partial={:.1f}s total={:.1f}s",
+                    "{!r} | sticker={} len={} segments={} segmentation_raw_count={} "
+                    "segmentation_capped_count={} segmentation_limit={} "
+                    "segmentation_strategy={} segmentation_break_reasons={} "
+                    "llm={:.1f}s send_partial_elapsed={:.1f}s total={:.1f}s",
                     preview, "sent" if _sticker_sent else "none",
-                    len(full_reply), len(segments), raw_segment_count,
+                    len(full_reply), len(segmentation.segments), segmentation.raw_count, segmentation.capped_count,
+                    segmentation.limit_status, segmentation.strategy, ",".join(segmentation.break_reasons),
                     acc_llm_elapsed, send_elapsed, total_elapsed,
                 )
                 if is_group and group_id is not None and self._timeline is not None:
-                    self._timeline.add(group_id, role="assistant", content=full_reply)
+                    assistant_visible_state = (
+                        "pending"
+                        if collect_segments
+                        else "first_segment_sent"
+                        if on_segment and len(segmentation.texts) > 1
+                        else "pending"
+                    )
+                    if not collect_segments and (ctx is None or "send_queue" not in ctx.extra):
+                        assistant_visible_state = "complete"
+                    assistant_turn_id = self._timeline.add(
+                        group_id,
+                        role="assistant",
+                        content=full_reply,
+                        flush_pending_count=reply_pending_cutoff,
+                        assistant_visible_state=assistant_visible_state,
+                    )
+                    if collect_segments:
+                        collected_reply = CollectedReply(
+                            segments=collected_reply.segments,
+                            full_reply=collected_reply.full_reply,
+                            assistant_turn_id=assistant_turn_id,
+                        )
                     self._timeline.set_input_tokens(group_id, result["input_tokens"])
                 else:
                     self._short_term.add(session_id, "assistant", full_reply)
@@ -2053,7 +2090,7 @@ class LLMClient:
                     tool_calls=tool_call_records,
                 )
 
-                return last_seg
+                return collected_reply if collect_segments else last_seg
 
             for tu in tool_uses:
                 args_str = json.dumps(tu.input, ensure_ascii=False)[:200]
@@ -2122,13 +2159,26 @@ class LLMClient:
         acc_prompt_cache_hit += round_cache_hit
         acc_prompt_cache_miss += round_cache_miss
         acc_reasoning_replay += round_reasoning_replay
-        reply, reply_state = self._finalize_visible_reply(
+        if not result["text"] and deferred_reply_after_sticker:
+            _log_msg_out.info(
+                "reply_deferred_after_sticker | session={} reason=tool_exhausted_empty",
+                session_id,
+            )
+            result["text"] = deferred_reply_after_sticker
+        reply, _reply_state = self._finalize_visible_reply(
             reply=result["text"] or "...",
             session_id=session_id,
             force_reply=force_reply,
+            allow_empty_fallback=allow_empty_fallback,
             has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
             is_group=is_group,
         )
+        if not reply and deferred_reply_after_sticker:
+            _log_msg_out.info(
+                "reply_deferred_after_sticker | session={} reason=tool_exhausted_control_or_suppressed_empty",
+                session_id,
+            )
+            reply = deferred_reply_after_sticker
         if not reply:
             if is_group and group_id is not None and self._timeline is not None:
                 self._timeline.set_input_tokens(group_id, result["input_tokens"])
@@ -2147,26 +2197,41 @@ class LLMClient:
                 tool_rounds=MAX_TOOL_ROUNDS, elapsed_s=acc_llm_elapsed,
             )
             return None
-        segments, raw_segment_count = _reply_segments(reply)
-        if raw_segment_count > len(segments):
-            _log_msg_out.debug(
-                "segments coalesced | session={} raw={} capped={}",
-                session_id, raw_segment_count, len(segments),
-            )
-        send_start = time.monotonic()
-        if on_segment and len(segments) > 1:
-            for seg in segments[:-1]:
-                await on_segment(seg)
-                await asyncio.sleep(_SEGMENT_DELAY)
-            last_seg = segments[-1] if segments else reply
-        elif not on_segment and len(segments) > 1:
-            last_seg = "\n".join(segments)
+        if collect_segments:
+            collected_reply, segmentation = self._collect_reply_segments(session_id=session_id, reply=reply)
+            last_seg = collected_reply.segments[-1]
+            full_reply = collected_reply.full_reply
+            send_elapsed = 0.0
         else:
-            last_seg = segments[-1] if segments else reply
-        send_elapsed = time.monotonic() - send_start
-        full_reply = "\n".join(segments)
+            last_seg, full_reply, send_elapsed, segmentation = await self._emit_reply_segments(
+                session_id=session_id,
+                reply=reply,
+                on_segment=on_segment,
+                inter_segment_delay_s=self._reply_segmentation.inter_segment_delay_s,
+            )
         if is_group and group_id is not None and self._timeline is not None:
-            self._timeline.add(group_id, role="assistant", content=full_reply)
+            assistant_visible_state = (
+                "pending"
+                if collect_segments
+                else "first_segment_sent"
+                if on_segment and len(segmentation.texts) > 1
+                else "pending"
+            )
+            if not collect_segments and (ctx is None or "send_queue" not in ctx.extra):
+                assistant_visible_state = "complete"
+            assistant_turn_id = self._timeline.add(
+                group_id,
+                role="assistant",
+                content=full_reply,
+                flush_pending_count=reply_pending_cutoff,
+                assistant_visible_state=assistant_visible_state,
+            )
+            if collect_segments:
+                collected_reply = CollectedReply(
+                    segments=collected_reply.segments,
+                    full_reply=collected_reply.full_reply,
+                    assistant_turn_id=assistant_turn_id,
+                )
             self._timeline.set_input_tokens(group_id, result["input_tokens"])
         else:
             self._short_term.add(session_id, "assistant", full_reply)
@@ -2177,8 +2242,20 @@ class LLMClient:
                 )
         elapsed = time.monotonic() - t0
         _log_msg_out.info(
-            "tool_exhausted_reply | session={} segments={} raw_segments={} llm={:.1f}s send_partial={:.1f}s total={:.1f}s",
-            session_id, len(segments), raw_segment_count, acc_llm_elapsed, send_elapsed, elapsed,
+            "tool_exhausted_reply | session={} segments={} segmentation_raw_count={} "
+            "segmentation_capped_count={} segmentation_limit={} "
+            "segmentation_strategy={} segmentation_break_reasons={} "
+            "llm={:.1f}s send_partial_elapsed={:.1f}s total={:.1f}s",
+            session_id,
+            len(segmentation.segments),
+            segmentation.raw_count,
+            segmentation.capped_count,
+            segmentation.limit_status,
+            segmentation.strategy,
+            ",".join(segmentation.break_reasons),
+            acc_llm_elapsed,
+            send_elapsed,
+            elapsed,
         )
         self._record_usage(
             call_type="proactive" if is_group else "chat",
@@ -2203,7 +2280,7 @@ class LLMClient:
             thinker_thought=thinker_thought,
             tool_calls=tool_call_records,
         )
-        return last_seg
+        return collected_reply if collect_segments else last_seg
 
     # ------------------------------------------------------------------
     # Compact — private chat
@@ -2436,6 +2513,13 @@ class LLMClient:
             assert self._timeline is not None
             turns = self._timeline.get_turns(group_id)
             drop = max(2, int(len(turns) * self._compress_ratio))
+            drop = self._timeline.clamp_compact_split_to_visible(group_id, drop)
+            if drop < 2:
+                _log_compact.info(
+                    "compact circuit breaker skipped | group={} drop={} blocked_by_incomplete_visible_turn",
+                    group_id, drop,
+                )
+                return
             self._timeline.drop_oldest(group_id, drop)
             _log_compact.warning("compact circuit breaker active, dropped {} turns | group={}", drop, group_id)
             return
@@ -2448,6 +2532,13 @@ class LLMClient:
 
             old_summary = self._timeline.get_summary(group_id)
             split = max(2, int(len(turns) * self._compress_ratio))
+            split = self._timeline.clamp_compact_split_to_visible(group_id, split)
+            if split < 2:
+                _log_compact.info(
+                    "compact_group skipped | group={} split={} blocked_by_incomplete_visible_turn",
+                    group_id, split,
+                )
+                return
 
             # Assemble content for compression with speaker info
             lines: list[str] = []
@@ -2479,7 +2570,7 @@ class LLMClient:
             else:
                 # Fallback: reconstruct from turns content (no speaker info)
                 for turn in turns[:split]:
-                    text = content_text(turn.get("content", ""))
+                    text = _strip_background_history_markers(content_text(turn.get("content", "")))
                     if turn["role"] == "assistant":
                         lines.append(f"{identity.name}: {text}")
                     else:

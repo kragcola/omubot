@@ -6,14 +6,16 @@
     "en": "Sticker"
   },
   "description": "表情包工具：保存、发送、管理表情包及图片描述",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "priority": 40,
   "tier": "user",
   "toggle_policy": "runtime",
   "category": "expression",
   "permissions": [
+    "message",
     "prompt",
     "tool",
+    "tick",
     "storage"
   ],
   "capabilities": [

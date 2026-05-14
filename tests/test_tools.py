@@ -1,10 +1,14 @@
 """工具系统测试：注册表、SSRF 校验、鉴权。"""
 
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
+from plugins.calendar_context.service import CalendarContextService
 from services.tools.context import ToolContext
 from services.tools.datetime_tool import DateTimeTool
-from services.tools.group_admin import MuteUserTool
+from services.tools.group_admin import MuteUserTool, SendGroupMsgTool
 from services.tools.registry import ToolRegistry
 from services.tools.web_fetch import _is_safe_url
 from services.tools.web_search import WebSearchTool
@@ -85,15 +89,59 @@ async def test_mute_requires_group() -> None:
     assert "仅在群聊中" in result
 
 
+async def test_send_group_msg_uses_send_queue_when_available() -> None:
+    bot = MagicMock()
+    bot.send_group_msg = AsyncMock()
+    send_queue = MagicMock()
+    send_queue.send_group_text = AsyncMock()
+    tool = SendGroupMsgTool(superusers={"admin1"})
+    ctx = ToolContext(bot=bot, user_id="admin1", group_id="123", extra={"send_queue": send_queue})
+
+    result = await tool.execute(ctx, group_id="456", message="hello")
+
+    assert "已发送消息到群 456" in result
+    send_queue.send_group_text.assert_awaited_once_with("456", "hello", humanize="skip")
+    bot.send_group_msg.assert_not_awaited()
+
+
+async def test_send_group_msg_direct_fallback_without_send_queue() -> None:
+    bot = MagicMock()
+    bot.send_group_msg = AsyncMock()
+    tool = SendGroupMsgTool(superusers={"admin1"})
+    ctx = ToolContext(bot=bot, user_id="admin1", group_id="123")
+
+    result = await tool.execute(ctx, group_id="456", message="hello")
+
+    assert "已发送消息到群 456" in result
+    bot.send_group_msg.assert_awaited_once_with(group_id=456, message="hello")
+
+
 # ── DateTimeTool ──
 
 
 async def test_datetime_tool() -> None:
-    tool = DateTimeTool()
+    service = CalendarContextService()
+    service.load_dataset(
+        birthdays_path=Path("plugins/calendar_context/data/birthdays.json"),
+        special_days_path=Path("plugins/calendar_context/data/special_days.json"),
+        builtin_years_dir=Path("plugins/calendar_context/data/years"),
+    )
+    tool = DateTimeTool(calendar_service=service)
     ctx = ToolContext(user_id="123")
     result = await tool.execute(ctx)
     assert "周" in result  # 包含星期
     assert "-" in result  # 日期格式
+
+
+async def test_datetime_tool_renders_multiple_special_days() -> None:
+    service = CalendarContextService()
+    service.load_dataset(
+        birthdays_path=Path("plugins/calendar_context/data/birthdays.json"),
+        special_days_path=Path("plugins/calendar_context/data/special_days.json"),
+        builtin_years_dir=Path("plugins/calendar_context/data/years"),
+    )
+    ctx = service.get_day_context(__import__("datetime").datetime(2026, 6, 1, 12, 0))
+    assert ctx.special_days == ["儿童节", "国际牛奶日"]
 
 
 # ── ToolRegistry 错误处理 ──

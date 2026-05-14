@@ -1,5 +1,7 @@
 """Tests for StickerConfig and StickerStore."""
 
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,6 +33,19 @@ _GIF87_DATA = b"GIF87a" + b"\x00" * 64 + b"gif87-payload"
 
 # Unknown format
 _UNKNOWN_DATA = b"\x00\x01\x02\x03" + b"\xde\xad\xbe\xef" * 20
+
+
+def _jpeg_variant(index: int) -> bytes:
+    return b"\xff\xd8\xff\xe0" + bytes([index % 256]) * 64 + f"jpeg-variant-{index}".encode()
+
+
+def _add_stickers(store: StickerStore, count: int) -> list[str]:
+    sticker_ids: list[str] = []
+    for i in range(count):
+        sid, is_new = store.add(_jpeg_variant(i), f"测试表情{i}", f"场景{i}", source="auto")
+        assert is_new
+        sticker_ids.append(sid)
+    return sticker_ids
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +289,101 @@ def test_record_send_nonexistent_is_noop(store: StickerStore) -> None:
     store.record_send("stk_00000000")
 
 
+def test_record_send_writes_scoped_usage(store: StickerStore) -> None:
+    sid, _ = store.add(_JPEG_DATA, "desc", "hint")
+
+    store.record_send(sid, group_id="100", user_id="200")
+
+    usage_path = store.storage_dir / "usage.json"
+    data = json.loads(usage_path.read_text(encoding="utf-8"))
+    assert data["events"][-1]["sticker_id"] == sid
+    assert data["events"][-1]["group_id"] == "100"
+    assert data["events"][-1]["user_id"] == "200"
+
+
+def test_group_recent_cooldown_blocks_repeated_sticker(store: StickerStore) -> None:
+    ids = _add_stickers(store, 8)
+
+    store.record_send(ids[0], group_id="100")
+
+    decision = store.check_send_allowed(ids[0], group_id="100")
+    assert decision.allowed is False
+    assert "本群最近 6 次" in decision.reason
+    assert ids[0] not in decision.alternatives
+    assert len(decision.alternatives) >= 3
+
+
+def test_group_recent_cooldown_does_not_affect_other_group(store: StickerStore) -> None:
+    ids = _add_stickers(store, 8)
+
+    store.record_send(ids[0], group_id="100")
+
+    decision = store.check_send_allowed(ids[0], group_id="200")
+    assert decision.allowed is True
+
+
+def test_global_hot_cooldown_blocks_across_groups(store: StickerStore) -> None:
+    ids = _add_stickers(store, 8)
+
+    for group_id in ("100", "101", "102", "103"):
+        store.record_send(ids[0], group_id=group_id)
+
+    decision = store.check_send_allowed(ids[0], group_id="999")
+    assert decision.allowed is False
+    assert "全局最近 20 次" in decision.reason
+
+
+def test_long_term_share_cooldown_blocks_recent_dominant_sticker(store: StickerStore) -> None:
+    ids = _add_stickers(store, 8)
+
+    for _ in range(3):
+        store.record_send(ids[0], group_id="100")
+    for sid in ids[1:]:
+        store.record_send(sid, group_id="100")
+
+    decision = store.check_send_allowed(ids[0], group_id="999")
+    assert decision.allowed is False
+    assert "占比过高" in decision.reason
+
+
+def test_small_library_disables_hard_cooldown(store: StickerStore) -> None:
+    ids = _add_stickers(store, 4)
+
+    store.record_send(ids[0], group_id="100")
+
+    decision = store.check_send_allowed(ids[0], group_id="100")
+    assert decision.allowed is True
+
+
+def test_candidates_exclude_cooled_and_prefer_low_frequency(store: StickerStore) -> None:
+    ids = _add_stickers(store, 8)
+    for _ in range(3):
+        store.record_send(ids[0], group_id="100")
+    store.record_send(ids[1], group_id="100")
+
+    candidates = store.suggest_candidates(group_id="100", limit=4)
+
+    assert ids[0] not in candidates
+    assert ids[1] not in candidates
+    assert candidates
+    assert candidates[0] in set(ids[2:])
+
+
+def test_long_term_share_ignores_old_last_sent(store: StickerStore) -> None:
+    ids = _add_stickers(store, 8)
+    for _ in range(3):
+        store.record_send(ids[0], group_id="100")
+    for sid in ids[1:]:
+        store.record_send(sid, group_id="100")
+
+    entry = store.get(ids[0])
+    assert entry is not None
+    entry["last_sent"] = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+
+    decision = store.check_send_allowed(ids[0], group_id="999")
+    assert decision.allowed is True
+
+
 # ------------------------------------------------------------------
 # update()
 # ------------------------------------------------------------------
@@ -353,7 +463,8 @@ def test_format_prompt_view_empty(store: StickerStore) -> None:
 def test_format_prompt_view_nonempty(store: StickerStore) -> None:
     sid, _ = store.add(_JPEG_DATA, "开心大笑", "搞笑对话时", source="auto")
     view = store.format_prompt_view()
-    assert "当前表情包库：" in view
+    assert "当前表情包库" in view
+    assert "推荐候选" in view
     assert f"«表情包:{sid}»" in view
     assert "开心大笑" in view
     assert "搞笑对话时" in view
@@ -375,8 +486,20 @@ def test_format_prompt_view_multiple(store: StickerStore) -> None:
     store.add(_PNG_DATA, "PNG贴", "悲伤时", source="auto")
     view = store.format_prompt_view()
     lines = view.splitlines()
-    # header + 2 entries
-    assert len(lines) == 3
+    # header + recommended label + 2 entries
+    assert len(lines) == 4
+
+
+def test_format_prompt_view_lists_cooling_when_alternatives_sufficient(store: StickerStore) -> None:
+    ids = _add_stickers(store, 8)
+    store.record_send(ids[0], group_id="100")
+
+    view = store.format_prompt_view(group_id="100")
+
+    assert "冷却中，请不要选择" in view
+    assert ids[0] in view
+    recommended_section = view.split("冷却中，请不要选择", 1)[0]
+    assert f"«表情包:{ids[0]}»" not in recommended_section
 
 
 # ------------------------------------------------------------------

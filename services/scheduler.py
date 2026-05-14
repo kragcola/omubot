@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
+import itertools
 import random
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from kernel.config import GroupConfig
+from kernel.config import GroupConfig, ReplySegmentationConfig, ReplyWorkflowConfig
 from kernel.types import TriggerContext
-from services.llm.client import RATE_LIMIT_BASE_DELAY, RATE_LIMIT_MAX_RETRIES, RateLimitError
+from services.llm.client import (
+    RATE_LIMIT_BASE_DELAY,
+    RATE_LIMIT_MAX_RETRIES,
+    CollectedReply,
+    RateLimitError,
+)
 from services.memory.timeline import GroupTimeline
+from services.send_queue import BatchSendHandle, GroupSendQueue, ReplySegmentBatch
 from services.tools.context import ToolContext
 
 if TYPE_CHECKING:
@@ -21,14 +30,36 @@ if TYPE_CHECKING:
 
     from services.identity import IdentityManager
     from services.llm.client import LLMClient
+    from services.reply_workflow import ReplyWorkflowAction
 
 _L = logger.bind(channel="scheduler")
 
 
+_TRIGGER_PRIORITIES: dict[str, int] = {
+    "at_mention": 10,
+    "video_always": 20,
+    "directed_followup": 30,
+}
+_DEFAULT_TRIGGER_PRIORITY = 100
+
+_FORCE_REPLY_FOCUS_DIRECTIVE = (
+    "请优先直接回应本轮最后一条触发消息；"
+    "不要因为历史对话、知识库资料或群记忆自行切换话题。"
+)
+
+
+@dataclass(order=True)
+class _QueuedTrigger:
+    priority: int
+    sequence: int
+    trigger: TriggerContext = field(compare=False)
+
+
 class _GroupSlot:
     __slots__ = (
-        "consecutive_skip", "debounce_task", "last_fire_time",
-        "last_user_id", "msg_count", "pending_at", "running_task", "trigger",
+        "_pending_triggers", "_trigger_sequence", "consecutive_skip",
+        "debounce_task", "last_fire_time", "last_user_id", "msg_count",
+        "running_task", "trigger",
     )
 
     def __init__(self) -> None:
@@ -36,10 +67,43 @@ class _GroupSlot:
         self.debounce_task: asyncio.Task[None] | None = None
         self.running_task: asyncio.Task[None] | None = None
         self.msg_count: int = 0
-        self.pending_at: bool = False
+        self._pending_triggers: list[_QueuedTrigger] = []
         self.last_fire_time: float = 0.0
         self.last_user_id: str = ""
         self.trigger: TriggerContext | None = None
+        self._trigger_sequence = itertools.count()
+
+    @property
+    def pending_at(self) -> bool:
+        """Backward-compatible view: whether any strong trigger is queued."""
+        return bool(self._pending_triggers)
+
+    @pending_at.setter
+    def pending_at(self, value: bool) -> None:
+        # Existing tests and reset paths assign False. Assigning True without a
+        # TriggerContext would be ambiguous, so it is intentionally a no-op.
+        if not value:
+            self._pending_triggers.clear()
+
+    @property
+    def pending_trigger_count(self) -> int:
+        return len(self._pending_triggers)
+
+    def enqueue_trigger(self, trigger: TriggerContext) -> None:
+        priority = _TRIGGER_PRIORITIES.get(trigger.mode, _DEFAULT_TRIGGER_PRIORITY)
+        heapq.heappush(
+            self._pending_triggers,
+            _QueuedTrigger(priority=priority, sequence=next(self._trigger_sequence), trigger=trigger),
+        )
+        self.trigger = trigger
+
+    def pop_trigger(self) -> TriggerContext | None:
+        if not self._pending_triggers:
+            self.trigger = None
+            return None
+        queued = heapq.heappop(self._pending_triggers)
+        self.trigger = self._pending_triggers[0].trigger if self._pending_triggers else None
+        return queued.trigger
 
 
 class GroupChatScheduler:
@@ -54,6 +118,10 @@ class GroupChatScheduler:
         humanizer: Any = None,
         mood_getter: Callable[[], Any] | None = None,
         talk_schedule: Any = None,
+        reply_segmentation: ReplySegmentationConfig | None = None,
+        reply_workflow: ReplyWorkflowConfig | None = None,
+        global_llm_limit: int = 2,
+        first_segment_release: bool = False,
     ) -> None:
         self._llm = llm
         self._timeline = timeline
@@ -62,12 +130,25 @@ class GroupChatScheduler:
         self._humanizer = humanizer
         self._mood_getter = mood_getter
         self._talk_schedule = talk_schedule
+        self._reply_segmentation = reply_segmentation or ReplySegmentationConfig()
+        self._reply_workflow = reply_workflow or ReplyWorkflowConfig()
+        self._first_segment_release = bool(first_segment_release)
+        if first_segment_release:
+            _L.warning("scheduler | first_segment_release enabled (experimental)")
         self._slots: dict[str, _GroupSlot] = {}
+        self._tail_send_tasks: set[asyncio.Task[None]] = set()
         self._bot: Bot | None = None
         self._muted_groups: set[str] = set()
+        self._llm_semaphore = asyncio.Semaphore(max(1, int(global_llm_limit)))
+        self._send_queue = GroupSendQueue(
+            humanizer=self._humanizer,
+            muted_checker=lambda gid: gid in self._muted_groups,
+            send_allowed_checker=self._can_send_to_group,
+        )
 
     def set_bot(self, bot: Bot) -> None:
         self._bot = bot
+        self._send_queue.set_bot(bot)
 
     # ------------------------------------------------------------------
     # Mute management
@@ -93,6 +174,21 @@ class GroupChatScheduler:
     def is_muted(self, group_id: str) -> bool:
         return group_id in self._muted_groups
 
+    def _can_send_to_group(self, group_id: str) -> bool:
+        checker = getattr(self._group_config, "allows_active_group", None)
+        if callable(checker):
+            try:
+                return bool(checker(group_id))
+            except Exception:
+                return True
+        try:
+            resolved = self._group_config.resolve(int(group_id))
+            access_allowed = bool(getattr(resolved, "access_allowed", True))
+            presence_mode = str(getattr(resolved, "presence_mode", "active") or "active")
+            return access_allowed and presence_mode == "active"
+        except Exception:
+            return True
+
     def get_all_slots(self) -> dict[str, dict[str, object]]:
         """Return public state for all group slots (admin API)."""
         result: dict[str, dict[str, object]] = {}
@@ -101,6 +197,7 @@ class GroupChatScheduler:
                 "consecutive_skip": slot.consecutive_skip,
                 "msg_count": slot.msg_count,
                 "pending_at": slot.pending_at,
+                "pending_trigger_count": slot.pending_trigger_count,
                 "last_fire_time": slot.last_fire_time,
                 "last_user_id": slot.last_user_id,
                 "has_trigger": slot.trigger is not None,
@@ -113,18 +210,61 @@ class GroupChatScheduler:
     # Public API
     # ------------------------------------------------------------------
 
+    def _log_workflow_shadow(
+        self,
+        group_id: str,
+        *,
+        action: ReplyWorkflowAction,
+        reason: str,
+        threshold: float | None = None,
+        mood_mult: float | None = None,
+        time_mult: float | None = None,
+        msg_count: int = 0,
+        skips: int = 0,
+        trigger_mode: str = "none",
+    ) -> None:
+        if getattr(self._reply_workflow, "mode", "shadow") != "shadow":
+            return
+        from services.reply_workflow import log_shadow_decision, scheduler_shadow_decision
+
+        decision = scheduler_shadow_decision(
+            action=action,
+            reason=reason,
+            threshold=threshold,
+            mood_mult=mood_mult,
+            time_mult=time_mult,
+            msg_count=msg_count,
+            skips=skips,
+            trigger_mode=trigger_mode,
+        )
+        log_shadow_decision(
+            decision,
+            conversation=f"group_{group_id}",
+            mode="group_scheduler_shadow",
+        )
+
     def notify(self, group_id: str, *, trigger: TriggerContext | None = None,
                user_id: str = "") -> None:
         """Called on every group message. Manages probability-based dispatch."""
         if group_id in self._muted_groups:
             return
+        if not self._can_send_to_group(group_id):
+            _L.info("scheduler | group={} speaking disabled by group policy, skip", group_id)
+            return
         identity = self._identity_mgr.resolve()
         is_at = trigger is not None and trigger.mode == "at_mention"
+        is_directed = trigger is not None and trigger.mode == "directed_followup"
         is_video_always = trigger is not None and trigger.mode == "video_always"
-        if identity.proactive is None and not is_at and not is_video_always:
+        if identity.proactive is None and not is_at and not is_directed and not is_video_always:
             # Skip non-@ messages when there are no proactive interjection rules.
             # @ mentions and video always-reply bypass this check.
             _L.info("scheduler | group={} proactive=None, skip (non-@)", group_id)
+            self._log_workflow_shadow(
+                group_id,
+                action="pass",
+                reason="proactive_none_non_addressed",
+                trigger_mode=trigger.mode if trigger is not None else "none",
+            )
             return
 
         resolved = self._group_config.resolve(int(group_id))
@@ -133,49 +273,119 @@ class GroupChatScheduler:
         slot.msg_count += 1
         if user_id:
             slot.last_user_id = user_id
-        if trigger is not None:
-            slot.trigger = trigger  # always update so latest trigger takes priority
 
-        if is_at:
+        if is_at or is_directed:
             if slot.running_task and not slot.running_task.done():
-                slot.pending_at = True
-                _L.debug("scheduler | group={} @ queued (task running)", group_id)
+                assert trigger is not None
+                slot.enqueue_trigger(trigger)
+                _L.debug(
+                    "scheduler | group={} {} queued (task running, queue_len={})",
+                    group_id, trigger.mode, slot.pending_trigger_count,
+                )
+                self._log_workflow_shadow(
+                    group_id,
+                    action="force_reply",
+                    reason=f"{trigger.mode}_queued_task_running",
+                    msg_count=slot.msg_count,
+                    skips=slot.consecutive_skip,
+                    trigger_mode=trigger.mode,
+                )
                 return
-            _L.info("scheduler | group={} @ -> fire", group_id)
-            self._fire(group_id)
+            _L.info("scheduler | group={} {} -> fire", group_id, trigger.mode if trigger else "unknown")
+            self._log_workflow_shadow(
+                group_id,
+                action="force_reply",
+                reason=f"{trigger.mode if trigger else 'unknown'}_force_fire",
+                msg_count=slot.msg_count,
+                skips=slot.consecutive_skip,
+                trigger_mode=trigger.mode if trigger else "unknown",
+            )
+            self._fire(group_id, trigger=trigger)
             return
 
         # Video always-reply: force fire for B站 video shares
         if is_video_always:
             if slot.running_task and not slot.running_task.done():
-                slot.pending_at = True
-                _L.debug("scheduler | group={} bilibili always queued (task running)", group_id)
+                assert trigger is not None
+                slot.enqueue_trigger(trigger)
+                _L.debug(
+                    "scheduler | group={} bilibili always queued (task running, queue_len={})",
+                    group_id, slot.pending_trigger_count,
+                )
+                self._log_workflow_shadow(
+                    group_id,
+                    action="force_reply",
+                    reason="video_always_queued_task_running",
+                    msg_count=slot.msg_count,
+                    skips=slot.consecutive_skip,
+                    trigger_mode=trigger.mode,
+                )
                 return
             _L.info("scheduler | group={} bilibili always -> fire", group_id)
-            self._fire(group_id)
+            self._log_workflow_shadow(
+                group_id,
+                action="force_reply",
+                reason="video_always_force_fire",
+                msg_count=slot.msg_count,
+                skips=slot.consecutive_skip,
+                trigger_mode=trigger.mode if trigger else "video_always",
+            )
+            self._fire(group_id, trigger=trigger)
             return
 
         # at_only mode: only respond to @ messages
         if resolved.at_only:
             _L.info("scheduler | group={} at_only, skip (msgs={})", group_id, slot.msg_count)
+            self._timeline.deactivate_pending(group_id, "at_only")
             slot.trigger = None  # clear trigger on skip — prevent leak
+            self._log_workflow_shadow(
+                group_id,
+                action="suppress",
+                reason="at_only",
+                msg_count=slot.msg_count,
+                skips=slot.consecutive_skip,
+                trigger_mode=trigger.mode if trigger is not None else "none",
+            )
+            slot.msg_count = 0
             return
 
         if slot.running_task and not slot.running_task.done():
             _L.info("scheduler | group={} busy, skip (msgs={})", group_id, slot.msg_count)
+            self._timeline.deactivate_latest_pending(group_id, "scheduler_busy")
+            slot.trigger = None
+            self._log_workflow_shadow(
+                group_id,
+                action="suppress",
+                reason="scheduler_busy",
+                msg_count=slot.msg_count,
+                skips=slot.consecutive_skip,
+                trigger_mode=trigger.mode if trigger is not None else "none",
+            )
+            slot.msg_count = 0
             return
 
         # Probability-based dispatch with minimum interval (replaces debounce).
         now = time.monotonic()
         if now - slot.last_fire_time < resolved.planner_smooth:
             _L.info("scheduler | group={} interval too short, skip (msgs={})", group_id, slot.msg_count)
+            self._timeline.deactivate_pending(group_id, "interval_too_short")
             slot.trigger = None  # clear trigger on skip — prevent leak
+            self._log_workflow_shadow(
+                group_id,
+                action="suppress",
+                reason="interval_too_short",
+                msg_count=slot.msg_count,
+                skips=slot.consecutive_skip,
+                trigger_mode=trigger.mode if trigger is not None else "none",
+            )
+            slot.msg_count = 0
             return
 
         # Dynamic threshold: become more responsive after prolonged silence.
         # Use bilibili-specific talk_value when a video trigger is present.
         is_video_prob = trigger is not None and trigger.mode in ("video_dedicated", "video_autonomous")
         if is_video_prob:
+            assert trigger is not None
             base_talk_value = float(trigger.extra.get("bilibili_talk_value", resolved.talk_value))
         else:
             base_talk_value = resolved.talk_value
@@ -192,6 +402,7 @@ class GroupChatScheduler:
         # Skip when consecutive_skip >= 5 so the forced-reply guarantee holds.
         is_autonomous = trigger is not None and trigger.mode == "video_autonomous"
         if is_autonomous and slot.consecutive_skip < 5:
+            assert trigger is not None
             interest_score = float(trigger.extra.get("interest_score", 0.3))
             # Blend so interest acts as a floor: 0.1 + 0.9×interest maps
             # 0.05→0.145, 0.55→0.595, 0.85→0.865, 1.0→1.0
@@ -204,6 +415,7 @@ class GroupChatScheduler:
         # bot can still reply during off hours, but never exceed the cap.
         time_mult = self._talk_schedule.get_time_multiplier() if self._talk_schedule else 1.0
         if is_autonomous:
+            assert trigger is not None
             interest_score = float(trigger.extra.get("interest_score", 0.3))
             if interest_score >= 0.6:
                 time_mult = max(time_mult, 0.7)
@@ -218,14 +430,38 @@ class GroupChatScheduler:
             )
             slot.consecutive_skip = 0
             slot.last_fire_time = now
-            self._fire(group_id)
+            self._log_workflow_shadow(
+                group_id,
+                action="force_reply",
+                reason="probability_fire",
+                threshold=threshold,
+                mood_mult=mood_mult,
+                time_mult=time_mult,
+                msg_count=slot.msg_count,
+                skips=slot.consecutive_skip,
+                trigger_mode=mode_label,
+            )
+            self._fire(group_id, trigger=trigger)
         else:
             slot.consecutive_skip += 1
             _L.info(
                 "scheduler | group={} prob skip (threshold={:.2f} mood={:.2f} time={:.2f} msgs={} skips={} mode={})",
                 group_id, threshold, mood_mult, time_mult, slot.msg_count, slot.consecutive_skip, mode_label,
             )
+            self._timeline.deactivate_pending(group_id, f"prob_skip:{mode_label}")
             slot.trigger = None  # clear trigger on skip — prevent leak
+            self._log_workflow_shadow(
+                group_id,
+                action="pass",
+                reason="probability_skip",
+                threshold=threshold,
+                mood_mult=mood_mult,
+                time_mult=time_mult,
+                msg_count=slot.msg_count,
+                skips=slot.consecutive_skip,
+                trigger_mode=mode_label,
+            )
+            slot.msg_count = 0
 
     def cancel_debounce(self, group_id: str) -> None:
         """Reset message counter. Called after echo handles the batch. (no-op after prob dispatch)"""
@@ -273,6 +509,14 @@ class GroupChatScheduler:
                 tasks.append(slot.running_task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        tail_tasks = list(self._tail_send_tasks)
+        for task in tail_tasks:
+            if not task.done():
+                task.cancel()
+        if tail_tasks:
+            await asyncio.gather(*tail_tasks, return_exceptions=True)
+        self._tail_send_tasks.clear()
+        await self._send_queue.close()
 
     # ------------------------------------------------------------------
     # Internal
@@ -298,23 +542,29 @@ class GroupChatScheduler:
         )
         return 0.25 + 1.75 * mood_factor
 
-    def _fire(self, group_id: str) -> None:
+    def _fire(self, group_id: str, *, trigger: TriggerContext | None = None) -> None:
         slot = self._slots.get(group_id)
         if not slot:
             return
+        if slot.running_task and not slot.running_task.done():
+            if trigger is not None:
+                slot.enqueue_trigger(trigger)
+            return
         # Snapshot and clear trigger so it's consumed exactly once.
-        trigger = slot.trigger
+        if trigger is None:
+            trigger = slot.trigger
         slot.trigger = None
         slot.msg_count = 0
         slot.running_task = asyncio.create_task(self._do_chat(group_id, trigger=trigger))
         slot.running_task.add_done_callback(lambda _: None)
 
-    async def _send_to_group(self, group_id: str, text: str, *, humanize: str = "normal") -> float:
-        """Send a text message to a group with retry on failure."""
+    async def send_group_text(self, group_id: str, text: str, *, humanize: str = "normal") -> float:
+        """Send visible group text through the per-group send queue."""
         if not self._bot:
             return 0.0
-        from nonebot.adapters.onebot.v11 import Message
-        from nonebot.adapters.onebot.v11.exception import ActionFailed
+        if not self._can_send_to_group(group_id):
+            _L.info("scheduler | group={} speaking disabled, drop text send", group_id)
+            return 0.0
 
         # Detect [CQ:reply,id=X] prefix for quote-reply targeting.
         # OneBot v11 Message handles CQ codes natively — we just log it.
@@ -323,36 +573,125 @@ class GroupChatScheduler:
             if m := re.match(r"\[CQ:reply,id=(-?\d+)\]", text):
                 _L.info("scheduler | group={} reply targets msg_id={}", group_id, m.group(1))
 
-        delay = 2.0
-        max_delay = 60.0
-        while True:
-            if group_id in self._muted_groups:
-                _L.warning("scheduler | group={} muted, dropping message", group_id)
-                return 0.0
-            try:
-                t_send = time.monotonic()
-                if self._humanizer is not None and humanize != "skip":
-                    await self._humanizer.delay(text)
-                await self._bot.send_group_msg(group_id=int(group_id), message=Message(text))
-                elapsed = time.monotonic() - t_send
-                if elapsed >= 8.0:
-                    _L.warning(
-                        "scheduler send slow | group={} humanize={} len={} elapsed={:.1f}s",
-                        group_id, humanize, len(text), elapsed,
-                    )
-                else:
-                    _L.debug(
-                        "scheduler send ok | group={} humanize={} len={} elapsed={:.1f}s",
-                        group_id, humanize, len(text), elapsed,
-                    )
-                return elapsed
-            except ActionFailed as e:
-                _L.warning(
-                    "scheduler | group={} send failed: {} | retry in {}s",
-                    group_id, e.info.get("wording") or e.info.get("message", str(e)), delay,
+        return await self._send_queue.send_group_text(group_id, text, humanize=humanize)
+
+    async def enqueue_group_text(
+        self,
+        group_id: str,
+        text: str,
+        *,
+        humanize: str = "normal",
+        description: str = "scheduler_text",
+    ) -> asyncio.Future[float]:
+        """Enqueue visible group text and return a completion future."""
+        if not self._bot:
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[float] = loop.create_future()
+            future.set_result(0.0)
+            return future
+        if not self._can_send_to_group(group_id):
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            future.set_result(0.0)
+            _L.info("scheduler | group={} speaking disabled, drop queued text send", group_id)
+            return future
+
+        return await self._send_queue.enqueue_group_text(
+            group_id,
+            text,
+            humanize=humanize,
+            description=description,
+        )
+
+    async def _send_to_group(self, group_id: str, text: str, *, humanize: str = "normal") -> float:
+        """Backward-compatible scheduler text send wrapper."""
+        return await self.send_group_text(group_id, text, humanize=humanize)
+
+    async def _send_reply_batch(
+        self,
+        group_id: str,
+        segments: list[str],
+        *,
+        reply_prefix: str = "",
+        assistant_turn_id: str | None = None,
+        release_after_first: bool = False,
+    ) -> tuple[int, float, bool]:
+        """Send a collected reply as one contiguous per-group batch."""
+        if not self._can_send_to_group(group_id):
+            _L.info("scheduler | group={} speaking disabled, drop reply batch", group_id)
+            return 0, 0.0, False
+        visible_segments = [
+            f"{reply_prefix}{segment}" if idx == 0 and reply_prefix else segment
+            for idx, segment in enumerate(segments)
+        ]
+        handle = await self._send_queue.enqueue_reply_batch(
+            ReplySegmentBatch(
+                group_id=group_id,
+                segments=visible_segments,
+                first_segment_humanize=self._reply_segmentation.first_segment_humanize,
+                later_segment_humanize=self._reply_segmentation.later_segment_humanize,
+                allow_interleaved_between_segments=True,
+                inter_segment_delay_s=self._reply_segmentation.inter_segment_delay_s,
+            )
+        )
+        queue_wait = await handle.started
+        first_elapsed = await handle.first_segment_sent
+        if release_after_first:
+            self._timeline.mark_assistant_visible_state(group_id, assistant_turn_id, "first_segment_sent")
+            task = asyncio.create_task(
+                self._finish_reply_batch_tail(
+                    group_id=group_id,
+                    handle=handle,
+                    first_elapsed=first_elapsed,
+                    queue_wait=queue_wait,
+                    segment_count=len(visible_segments),
+                    assistant_turn_id=assistant_turn_id,
                 )
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, max_delay)
+            )
+            self._tail_send_tasks.add(task)
+            task.add_done_callback(self._tail_send_tasks.discard)
+            _L.info(
+                "scheduler reply batch first segment sent | group={} segments={} "
+                "reply_batch_queue_wait_s={:.3f} first_segment_elapsed_s={:.3f}",
+                group_id, len(visible_segments), queue_wait, first_elapsed,
+            )
+            return 1, first_elapsed, True
+        elapsed = await handle.done
+        interleave_count = await handle.interleave_count
+        tail_elapsed = max(0.0, elapsed - first_elapsed)
+        _L.info(
+            "scheduler reply batch metrics | group={} segments={} "
+            "reply_batch_queue_wait_s={:.3f} first_segment_elapsed_s={:.3f} "
+            "tail_send_elapsed_s={:.3f} total_send_elapsed_s={:.3f} interleave_count={}",
+            group_id, len(visible_segments), queue_wait, first_elapsed, tail_elapsed, elapsed, interleave_count,
+        )
+        return len(visible_segments), elapsed, False
+
+    async def _finish_reply_batch_tail(
+        self,
+        *,
+        group_id: str,
+        handle: BatchSendHandle,
+        first_elapsed: float,
+        queue_wait: float,
+        segment_count: int,
+        assistant_turn_id: str | None,
+    ) -> None:
+        try:
+            elapsed = await handle.done
+            interleave_count = await handle.interleave_count
+        except Exception:
+            self._timeline.mark_assistant_visible_state(group_id, assistant_turn_id, "failed")
+            _L.exception("scheduler reply batch tail failed | group={} segments={}", group_id, segment_count)
+            return
+        tail_elapsed = max(0.0, elapsed - first_elapsed)
+        self._timeline.mark_assistant_visible_state(group_id, assistant_turn_id, "complete")
+        _L.info(
+            "scheduler reply batch tail complete | group={} segments={} "
+            "reply_batch_queue_wait_s={:.3f} first_segment_elapsed_s={:.3f} "
+            "tail_send_elapsed_s={:.3f} total_send_elapsed_s={:.3f} interleave_count={}",
+            group_id, segment_count, queue_wait, first_elapsed, tail_elapsed, elapsed, interleave_count,
+        )
 
     async def _do_chat(self, group_id: str, *, trigger: TriggerContext | None = None) -> None:
         slot = self._slots.get(group_id)
@@ -362,7 +701,12 @@ class GroupChatScheduler:
                     identity = self._identity_mgr.resolve()
                     session_id = f"group_{group_id}"
                     uid = slot.last_user_id if slot else ""
-                    ctx = ToolContext(bot=self._bot, user_id=uid, group_id=group_id)
+                    ctx = ToolContext(
+                        bot=self._bot,
+                        user_id=uid,
+                        group_id=group_id,
+                        extra={"send_queue": self._send_queue, "group_policy": self._group_config},
+                    )
 
                     # Write trigger reason into the timeline so the LLM sees it
                     # in the pending buffer, not as transient user_content.
@@ -373,61 +717,120 @@ class GroupChatScheduler:
                             target_user_id=trigger.target_user_id,
                         )
 
-                    force_reply = trigger is not None and trigger.mode in ("at_mention", "video_always")
+                    force_reply = trigger is not None and trigger.mode in (
+                        "at_mention", "directed_followup", "video_always",
+                    )
 
-                    # @mention: prepend [CQ:reply] to the first streamed segment only.
+                    # @mention: prepend [CQ:reply] to the first visible segment only.
                     # Quote-reply already identifies the target — no need for [CQ:at].
-                    first_segment = True
                     sent_segments = 0
                     send_total_elapsed = 0.0
                     reply_prefix = ""
-                    if trigger is not None and trigger.mode == "at_mention" and trigger.target_message_id is not None:
+                    if (
+                        trigger is not None
+                        and trigger.mode in ("at_mention", "directed_followup")
+                        and trigger.target_message_id is not None
+                    ):
                         reply_prefix = f"[CQ:reply,id={trigger.target_message_id}]"
-                        _L.info("scheduler | group={} @mention prefix={}", group_id, reply_prefix)
+                        _L.info("scheduler | group={} {} prefix={}", group_id, trigger.mode, reply_prefix)
 
-                    async def on_segment(text: str, _prefix: str = reply_prefix) -> None:
-                        nonlocal first_segment, sent_segments, send_total_elapsed
-                        is_first = first_segment
-                        if first_segment:
-                            if _prefix:
-                                text = _prefix + text
-                            first_segment = False
-                        send_total_elapsed += await self._send_to_group(
+                    async def send_reply_segments(
+                        segments: list[str],
+                        *,
+                        assistant_turn_id: str | None = None,
+                        release_after_first: bool = False,
+                        _prefix: str = reply_prefix,
+                    ) -> bool:
+                        nonlocal sent_segments, send_total_elapsed
+                        count, elapsed, released = await self._send_reply_batch(
                             group_id,
-                            text,
-                            humanize="skip" if is_first else "normal",
+                            segments,
+                            reply_prefix=_prefix,
+                            assistant_turn_id=assistant_turn_id,
+                            release_after_first=release_after_first,
                         )
-                        sent_segments += 1
+                        sent_segments += count
+                        send_total_elapsed += elapsed
+                        return released
 
                     resolved = self._group_config.resolve(int(group_id))
-                    reply = await self._llm.chat(
-                        session_id=session_id,
-                        user_id=uid,
-                        user_content="",
-                        identity=identity,
-                        group_id=group_id,
-                        ctx=ctx,
-                        on_segment=on_segment if self._bot else None,
-                        privacy_mask=resolved.privacy_mask,
-                        force_reply=force_reply,
-                    )
+                    llm_wait_start = time.monotonic()
+                    async with self._llm_semaphore:
+                        llm_wait_elapsed = time.monotonic() - llm_wait_start
+                        if llm_wait_elapsed >= 0.05:
+                            _L.info(
+                                "scheduler llm wait | group={} wait={:.2f}s queued_triggers={}",
+                                group_id, llm_wait_elapsed, slot.pending_trigger_count if slot else 0,
+                            )
+                        llm_call_start = time.monotonic()
+                        reply = await self._llm.chat(
+                            session_id=session_id,
+                            user_id=uid,
+                            user_content=_FORCE_REPLY_FOCUS_DIRECTIVE if force_reply else "",
+                            identity=identity,
+                            group_id=group_id,
+                            ctx=ctx,
+                            privacy_mask=resolved.privacy_mask,
+                            force_reply=force_reply,
+                            allow_empty_fallback=trigger is None or trigger.mode != "directed_followup",
+                            collect_segments=True,
+                        )
+                        llm_elapsed = time.monotonic() - llm_call_start
+                        if llm_elapsed >= 8.0:
+                            _L.warning(
+                                "scheduler llm slow | group={} elapsed={:.1f}s trigger={}",
+                                group_id, llm_elapsed, trigger.mode if trigger else "none",
+                            )
 
-                    if reply:
-                        # Non-streaming fallback: prepend [CQ:reply] if on_segment was never called
-                        is_first = first_segment
-                        if first_segment and reply_prefix:
-                            reply = reply_prefix + reply
-                            first_segment = False
-                        send_total_elapsed += await self._send_to_group(
-                            group_id,
-                            reply,
-                            humanize="skip" if is_first else "normal",
-                        )
-                        sent_segments += 1
-                        _L.info(
-                            "scheduler reply send complete | group={} segments={} send_total={:.1f}s",
-                            group_id, sent_segments, send_total_elapsed,
-                        )
+                    if isinstance(reply, CollectedReply) or reply:
+                        try:
+                            segments_to_send = reply.segments if isinstance(reply, CollectedReply) else [reply]
+                            assistant_turn_id = reply.assistant_turn_id if isinstance(reply, CollectedReply) else None
+                            released = await send_reply_segments(
+                                segments_to_send,
+                                assistant_turn_id=assistant_turn_id,
+                                release_after_first=(
+                                    self._first_segment_release and isinstance(reply, CollectedReply)
+                                ),
+                            )
+                        except Exception:
+                            assistant_turn_id = reply.assistant_turn_id if isinstance(reply, CollectedReply) else None
+                            self._timeline.mark_assistant_visible_state(group_id, assistant_turn_id, "failed")
+                            _L.exception(
+                                "scheduler reply send failed | group={} segments_sent={} send_total={:.1f}s",
+                                group_id, sent_segments, send_total_elapsed,
+                            )
+                            return
+                        if isinstance(reply, CollectedReply):
+                            if released:
+                                _L.info(
+                                    "scheduler reply batch released after first segment | group={} "
+                                    "segments_sent={} send_elapsed={:.1f}s",
+                                    group_id, sent_segments, send_total_elapsed,
+                                )
+                                return
+                            _L.info(
+                                "scheduler reply batch send complete | group={} segments={} "
+                                "send_total={:.1f}s first_release={}",
+                                group_id, sent_segments, send_total_elapsed,
+                                self._first_segment_release,
+                            )
+                            self._timeline.mark_assistant_visible_state(
+                                group_id, reply.assistant_turn_id, "complete"
+                            )
+                        else:
+                            _L.info(
+                                "scheduler reply send complete | group={} segments={} send_total={:.1f}s",
+                                group_id, sent_segments, send_total_elapsed,
+                            )
+                            self._timeline.mark_latest_assistant_visible_state(group_id, "complete")
+                    elif sent_segments == 0:
+                        if slot and slot.pending_at:
+                            self._timeline.deactivate_pending_except_latest_active(group_id, "no_visible_reply")
+                        else:
+                            self._timeline.deactivate_pending(group_id, "no_visible_reply")
+                    else:
+                        self._timeline.mark_latest_assistant_visible_state(group_id, "complete")
                     return
 
                 except RateLimitError:
@@ -451,6 +854,10 @@ class GroupChatScheduler:
         finally:
             if slot:
                 slot.running_task = None
-                if slot.pending_at or slot.msg_count > 0:
-                    slot.pending_at = False
-                    self._fire(group_id)
+                if slot.pending_at:
+                    next_trigger = slot.pop_trigger()
+                    _L.info(
+                        "scheduler | group={} queued trigger -> fire (remaining={})",
+                        group_id, slot.pending_trigger_count,
+                    )
+                    self._fire(group_id, trigger=next_trigger)

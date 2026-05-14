@@ -73,6 +73,12 @@ const router = createRouter({
       component: () => import('../views/slang/SlangView.vue'),
     },
     {
+      path: '/style',
+      name: 'style',
+      meta: { title: '表达学习', keepAlive: true },
+      component: () => import('../views/style/StyleView.vue'),
+    },
+    {
       path: '/memos',
       name: 'memos',
       redirect: () => ({
@@ -121,6 +127,12 @@ const router = createRouter({
       name: 'logs',
       meta: { title: '日志', keepAlive: true },
       component: () => import('../views/logs/LogsView.vue'),
+    },
+    {
+      path: '/design-playground',
+      name: 'design-playground',
+      meta: { title: '设计系统验收', keepAlive: false },
+      component: () => import('../views/playground/DesignPlaygroundView.vue'),
     },
   ],
 })

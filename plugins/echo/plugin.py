@@ -157,6 +157,8 @@ class EchoPlugin(AmadeusPlugin):
             return False
         if ctx.is_private:
             return False
+        if not getattr(ctx, "allow_speaking", True):
+            return False
 
         # Skip command messages (e.g. /debug, /memo) — they're instructions, not chat
         plain_text = str(ctx.raw_message.get("plain_text", ""))

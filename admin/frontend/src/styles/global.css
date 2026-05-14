@@ -124,6 +124,23 @@ body {
   background: transparent;
 }
 
+/* ===========================================================
+ * Naive UI deep-selector overrides (legacy).
+ *
+ * The blocks below duplicate most of `themeOverrides` in
+ * `src/stores/app.ts`. They are kept as a fallback while we
+ * visually verify the refactor. Plan: after human acceptance
+ * on `/admin/design-playground`, delete blocks marked
+ * `@audit redundant` and keep only:
+ *   - `.dark .n-button:not(...)`  — `:not()` chain cannot be
+ *     expressed via themeOverrides
+ *   - `.dark .n-menu` selectors  — NMenu uses deep class selectors
+ *     that themeOverrides does not fully cover
+ *
+ * See docs/tracking/web-refactor.md §阶段1 for audit table.
+ * =========================================================== */
+
+/* @audit keep — :not() chain unreachable via themeOverrides */
 /* Ensure Naive UI default buttons are visible in dark mode */
 .dark .n-button:not(.n-button--primary-type):not(.n-button--info-type):not(.n-button--success-type):not(.n-button--warning-type):not(.n-button--error-type) {
   --n-color: rgba(255, 255, 255, 0.06) !important;
@@ -140,6 +157,7 @@ body {
   --n-border-focus: 1px solid var(--om-border-strong) !important;
 }
 
+/* @audit keep — NMenu deep selectors required for sidebar */
 /* Ensure Naive UI menu items are visible in dark mode */
 .dark .n-menu {
   --n-item-text-color: var(--om-text-1) !important;
@@ -178,6 +196,7 @@ body {
   color: rgb(var(--primary-color)) !important;
 }
 
+/* @audit redundant — themeOverrides.common.cardColor / textColor1 / borderColor already cover this. Remove after playground acceptance. */
 /* Dark mode overrides for other Naive UI components */
 .dark .n-card {
   --n-color: var(--om-surface-solid) !important;

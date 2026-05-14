@@ -383,6 +383,8 @@ class BilibiliPlugin(AmadeusPlugin):
     async def on_message(self, ctx: MessageContext) -> bool:
         if not self._enabled:
             return False
+        if not getattr(ctx, "allow_speaking", True):
+            return False
 
         json_info = self._extract_bilibili_json_info(ctx)
         combined_text = self._collect_segment_text(ctx)

@@ -19,13 +19,30 @@ import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
+import { recordSortOptions } from '../shared/sort'
 
 type SlangStatus = 'candidate' | 'approved' | 'muted' | 'expired'
 type RepeatPolicy = 'understand_only' | 'allow_rephrase' | 'allow_use'
-type SlangQueueMode = 'candidate' | 'ai_review' | 'approved' | 'drift' | 'all'
+type SlangQueueMode =
+  | 'candidate'
+  | 'candidate_ai_approved'
+  | 'candidate_ai_rejected'
+  | 'candidate_ai_unreviewed'
+  | 'observe_more'
+  | 'ai_review'
+  | 'approved'
+  | 'drift'
+  | 'all'
 
 interface SlangSummary {
   candidate_count: number
+  candidate_total_count: number
+  candidate_reviewed_count: number
+  candidate_unreviewed_count: number
+  candidate_review_approved_count: number
+  candidate_review_rejected_count: number
+  candidate_review_kept_count: number
+  candidate_review_failed_count: number
   approved_count: number
   muted_count: number
   expired_count: number
@@ -54,10 +71,44 @@ interface SlangTerm {
   first_seen_at: string
   last_seen_at: string
   last_inferred_at?: string
+  created_at?: string
+  updated_at?: string
   source: string
   repeat_policy: RepeatPolicy
   notes: string
   meta?: Record<string, any>
+  normalization?: NormalizationInfo | null
+}
+
+interface NormalizationInfo {
+  cluster_id: string
+  item_id?: string
+  canonical_text?: string
+  normalized_key?: string
+  method?: string
+  score?: number
+  auto_merged?: boolean
+  features?: Record<string, any>
+}
+
+interface NormalizerItem {
+  item_id: string
+  raw_text: string
+  count: number
+  last_seen_at: string
+}
+
+interface NormalizerRevision {
+  revision_id: string
+  action: string
+  item_id?: string
+  created_at: string
+}
+
+interface NormalizerClusterDetail {
+  cluster?: Record<string, any>
+  items: NormalizerItem[]
+  revisions: NormalizerRevision[]
 }
 
 interface SlangObservation {
@@ -85,13 +136,15 @@ interface SlangPendingCandidate {
   repeat_policy: RepeatPolicy
   first_seen_at: string
   last_seen_at: string
+  meta?: Record<string, any>
+  normalization?: NormalizationInfo | null
 }
 
 interface SlangExtractionRun {
   run_id: string
   started_at: string
   finished_at?: string
-  status: 'running' | 'success' | 'failed'
+  status: 'running' | 'success' | 'failed' | 'abandoned'
   group_count: number
   scanned_messages: number
   extracted_terms: number
@@ -154,6 +207,7 @@ interface SlangSettings {
   extraction_batch_limit: number
   auto_promote_global_enabled: boolean
   global_promote_min_groups: number
+  global_excluded_group_ids: string[]
   bulk_page_size: number
   stats_days: number
   stoplist: string[]
@@ -218,6 +272,13 @@ const message = useMessage()
 
 const summary = ref<SlangSummary>({
   candidate_count: 0,
+  candidate_total_count: 0,
+  candidate_reviewed_count: 0,
+  candidate_unreviewed_count: 0,
+  candidate_review_approved_count: 0,
+  candidate_review_rejected_count: 0,
+  candidate_review_kept_count: 0,
+  candidate_review_failed_count: 0,
   approved_count: 0,
   muted_count: 0,
   expired_count: 0,
@@ -243,6 +304,7 @@ const groups = ref<string[]>([])
 const loading = ref(true)
 const refreshing = ref(false)
 const extracting = ref(false)
+const reviewing = ref(false)
 const scanningGlobal = ref(false)
 const bulkLoading = ref(false)
 const savingSettings = ref(false)
@@ -255,6 +317,7 @@ const page = ref(1)
 const searchText = ref('')
 const groupFilter = ref('')
 const scopeFilter = ref<'group' | 'global' | ''>('')
+const sortMode = ref<'default' | 'time'>('default')
 const queueMode = ref<SlangQueueMode>('candidate')
 const minConfidence = ref('')
 const selectedTermIds = ref<string[]>([])
@@ -271,6 +334,7 @@ const defaultSlangSettings: SlangSettings = {
   extraction_batch_limit: 80,
   auto_promote_global_enabled: false,
   global_promote_min_groups: 3,
+  global_excluded_group_ids: [],
   bulk_page_size: 50,
   stats_days: 14,
   stoplist: [],
@@ -291,6 +355,7 @@ const defaultSlangSettings: SlangSettings = {
 
 const settings = ref<SlangSettings>({ ...defaultSlangSettings })
 const allowlistText = ref('')
+const globalExcludedText = ref('')
 const stoplistText = ref('')
 const pageSize = computed(() => Math.max(10, Math.min(200, Number(settings.value.bulk_page_size || 50))))
 const createDraft = ref<SlangCreateDraft>({
@@ -311,6 +376,7 @@ const detailLoading = ref(false)
 const detailTerm = ref<SlangTerm | null>(null)
 const observations = ref<SlangObservation[]>([])
 const revisions = ref<SlangRevision[]>([])
+const normalizerDetails = ref<Record<string, NormalizerClusterDetail>>({})
 const editAliases = ref('')
 const mergeTargetId = ref('')
 const mergeSearchText = ref('')
@@ -320,7 +386,7 @@ const slangCacheRevision = 'slang-console-v2_5-cache-recovery'
 
 const statusOptions = [
   { label: '全部状态', value: '' },
-  { label: '待审核', value: 'candidate' },
+  { label: '候选池', value: 'candidate' },
   { label: '已批准', value: 'approved' },
   { label: '已静音', value: 'muted' },
   { label: '已过期', value: 'expired' },
@@ -350,16 +416,31 @@ const groupOptions = computed(() => [
   ...groups.value.map(group => ({ label: `群 ${group}`, value: group })),
 ])
 const totalQueueCount = computed(() => (
-  summary.value.candidate_count
+  summary.value.candidate_total_count
   + summary.value.approved_count
   + summary.value.muted_count
   + summary.value.expired_count
 ))
 const queueOptions = computed(() => [
   {
-    label: '待审核',
+    label: '待 AI 复核',
     value: 'candidate' as const,
-    count: summary.value.candidate_count,
+    count: summary.value.candidate_unreviewed_count,
+  },
+  {
+    label: 'AI 建议通过',
+    value: 'candidate_ai_approved' as const,
+    count: summary.value.candidate_review_approved_count,
+  },
+  {
+    label: 'AI 未通过',
+    value: 'candidate_ai_rejected' as const,
+    count: summary.value.candidate_review_rejected_count,
+  },
+  {
+    label: '观察不足',
+    value: 'observe_more' as const,
+    count: summary.value.candidate_review_kept_count,
   },
   {
     label: 'AI 审核',
@@ -403,7 +484,7 @@ onMounted(() => {
   void loadAll()
 })
 
-watch([searchText, groupFilter, scopeFilter, queueMode, minConfidence], () => {
+watch([searchText, groupFilter, scopeFilter, queueMode, minConfidence, sortMode], () => {
   page.value = 1
   selectedTermIds.value = []
   void loadTerms(true)
@@ -421,11 +502,69 @@ watch(page, () => {
 
 function statusLabel(status: SlangStatus) {
   return {
-    candidate: '待审核',
+    candidate: '候选',
     approved: '已批准',
     muted: '已静音',
     expired: '已过期',
   }[status]
+}
+
+function timeValue(value?: string) {
+  if (!value) return 0
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function latestTermTime(term: SlangTerm) {
+  return Math.max(
+    timeValue(term.updated_at),
+    timeValue(term.last_seen_at),
+    timeValue(term.last_inferred_at),
+    timeValue(term.created_at),
+    timeValue(term.first_seen_at),
+  )
+}
+
+function sortLatestTerms(items: SlangTerm[]) {
+  return [...items].sort((left, right) => (
+    latestTermTime(right) - latestTermTime(left)
+    || right.confidence - left.confidence
+    || right.usage_count - left.usage_count
+    || left.term.localeCompare(right.term, 'zh-CN')
+  ))
+}
+
+function sortLatestPending(items: SlangPendingCandidate[]) {
+  return [...items].sort((left, right) => (
+    timeValue(right.last_seen_at) - timeValue(left.last_seen_at)
+    || right.count - left.count
+    || right.confidence - left.confidence
+    || left.term.localeCompare(right.term, 'zh-CN')
+  ))
+}
+
+function sortLatestDrift(items: SlangDriftReview[]) {
+  return [...items].sort((left, right) => (
+    timeValue(right.updated_at) - timeValue(left.updated_at)
+    || timeValue(right.created_at) - timeValue(left.created_at)
+    || right.confidence - left.confidence
+    || left.term.localeCompare(right.term, 'zh-CN')
+  ))
+}
+
+function sortLatestRuns(items: SlangExtractionRun[]) {
+  return [...items].sort((left, right) => (
+    timeValue(right.started_at) - timeValue(left.started_at)
+    || timeValue(right.finished_at) - timeValue(left.finished_at)
+  ))
+}
+
+function sortLatestRevisions(items: SlangRevision[]) {
+  return [...items].sort((left, right) => timeValue(right.created_at) - timeValue(left.created_at))
+}
+
+function sortLatestObservations(items: SlangObservation[]) {
+  return [...items].sort((left, right) => timeValue(right.observed_at) - timeValue(left.observed_at))
 }
 
 function statusType(status: SlangStatus) {
@@ -447,6 +586,34 @@ function driftStatusLabel(status: SlangDriftReview['status']) {
   }[status] || status
 }
 
+function driftSemanticLabel(drift: SlangDriftReview) {
+  const verdict = String(drift.meta?.drift_semantic_verdict || '').trim()
+  return {
+    same_meaning: '同义改写',
+    alias_candidate: '别名候选',
+    real_drift: '确认漂移',
+    unclear: '证据不足',
+  }[verdict] || ''
+}
+
+function driftSemanticType(drift: SlangDriftReview) {
+  const verdict = String(drift.meta?.drift_semantic_verdict || '').trim()
+  return ({
+    same_meaning: 'success',
+    alias_candidate: 'info',
+    real_drift: 'warning',
+    unclear: 'default',
+  }[verdict] || 'default') as 'default' | 'success' | 'warning' | 'error' | 'info'
+}
+
+function driftSemanticReason(drift: SlangDriftReview) {
+  return String(
+    drift.meta?.drift_semantic_reason
+    || drift.meta?.drift_semantic_error
+    || '',
+  ).trim()
+}
+
 function revisionActionLabel(action: string) {
   const labels: Record<string, string> = {
     create_term: '创建词条',
@@ -459,6 +626,8 @@ function revisionActionLabel(action: string) {
     merge_terms: '合并词条',
     merge_source_expired: '合并归档',
     drift_detected: '发现漂移',
+    drift_suppressed: '漂移门控忽略',
+    drift_alias_candidate: '漂移转别名候选',
     drift_accept: '采纳新义',
     drift_reject: '保留旧义',
     drift_alias: '转成别名',
@@ -497,6 +666,7 @@ function mergeSettings(
   return {
     ...merged,
     group_allowlist: Array.isArray(merged.group_allowlist) ? merged.group_allowlist : [],
+    global_excluded_group_ids: Array.isArray(merged.global_excluded_group_ids) ? merged.global_excluded_group_ids : [],
     stoplist: Array.isArray(merged.stoplist) ? merged.stoplist : [],
     daily_ai_review_time: merged.daily_ai_review_time || defaultSlangSettings.daily_ai_review_time,
     max_injected_terms: numberSetting(merged.max_injected_terms, defaultSlangSettings.max_injected_terms),
@@ -526,7 +696,7 @@ function mergeSettings(
 }
 
 function isAiApproved(term?: SlangTerm | null) {
-  return Boolean(term && (term.source === 'ai_auto_review' || term.meta?.ai_approved === true))
+  return Boolean(term?.status === 'approved' && (term.source === 'ai_auto_review' || term.meta?.ai_approved === true))
 }
 
 function isHumanReviewed(term?: SlangTerm | null) {
@@ -537,8 +707,119 @@ function needsHumanReview(term?: SlangTerm | null) {
   return Boolean(isAiApproved(term) && term?.status === 'approved' && !isHumanReviewed(term))
 }
 
+function candidateReviewApproved(term?: SlangTerm | null) {
+  return Boolean(term?.status === 'candidate' && term?.meta?.candidate_review_approved === true)
+}
+
+function candidateReviewRejected(term?: SlangTerm | null) {
+  return Boolean(
+    term?.meta?.ai_rejected === true
+    || term?.meta?.candidate_review_state === 'rejected',
+  )
+}
+
+function candidateReviewObserving(term?: SlangTerm | null) {
+  return Boolean(
+    term?.status === 'candidate'
+    && (term?.meta?.review_decision === 'observe_more'
+      || term?.meta?.candidate_review_state === 'observing'
+      || term?.meta?.candidate_review_state === 'kept'),
+  )
+}
+
+function candidateReviewReason(term?: SlangTerm | null) {
+  if (term?.meta?.revived_from_ai_reject === true) {
+    return '因复现重新审理'
+  }
+  if (term?.meta?.review_decision === 'returned_to_candidate') {
+    return '已退回候选'
+  }
+  if (term?.meta?.review_decision === 'denied') {
+    const reason = String(
+      term?.meta?.candidate_review_reason
+      || term?.meta?.ai_reason
+      || term?.meta?.review_reason
+      || '',
+    ).trim()
+    const progress = rejectedReobserveProgress(term)
+    return `已否决并静音${reason ? `：${reason}` : ''}${progress ? `；${progress}` : ''}`
+  }
+  return String(term?.meta?.candidate_review_reason || '').trim()
+}
+
+function rejectedReobserveProgress(term?: SlangTerm | null) {
+  const meta = term?.meta || {}
+  const count = Number(meta.rejected_reobserve_count || 0)
+  const users = Number(meta.rejected_reobserve_user_count || (Array.isArray(meta.rejected_reobserve_users) ? meta.rejected_reobserve_users.length : 0))
+  if (!count && !users) return ''
+  const countThreshold = Number(meta.rejected_reobserve_threshold_count || 3)
+  const userThreshold = Number(meta.rejected_reobserve_threshold_users || 2)
+  return `复现 ${count}/${countThreshold}，人 ${users}/${userThreshold}`
+}
+
+function normalizationLabel(info?: NormalizationInfo | null) {
+  if (!info?.cluster_id) return ''
+  const method = info.method === 'new_cluster' ? '新簇' : info.method || '归一化'
+  const score = Number(info.score || 0)
+  const scoreText = score > 0 ? ` · ${Math.round(score * 100)}%` : ''
+  return `${method}${scoreText}`
+}
+
+function canReturnToCandidate(term?: SlangTerm | null) {
+  return Boolean(
+    term
+    && (
+      candidateReviewApproved(term)
+      || candidateReviewRejected(term)
+      || term?.meta?.review_decision === 'denied'
+      || term?.status === 'expired'
+    ),
+  )
+}
+
 function runKindLabel(run: SlangExtractionRun) {
   return run.meta?.kind === 'daily_ai_review' ? 'AI 复核' : '抽取'
+}
+
+function runReviewedCount(run: SlangExtractionRun) {
+  const meta = run.meta || {}
+  return Number(meta.candidate_reviewed || 0) + Number(meta.pending_reviewed || 0)
+}
+
+function runApprovedCount(run: SlangExtractionRun) {
+  const meta = run.meta || {}
+  return Number(meta.ai_approved || 0) + Number(meta.pending_approved || 0)
+}
+
+function runRejectedCount(run: SlangExtractionRun) {
+  const meta = run.meta || {}
+  return Number(meta.candidate_rejected || 0) + Number(meta.pending_rejected || 0)
+}
+
+function runKeptCount(run: SlangExtractionRun) {
+  const meta = run.meta || {}
+  return Number(meta.candidate_kept || 0) + Number(meta.semantic_kept || 0) + Number(meta.pending_kept || 0)
+}
+
+function runStatusType(status: SlangExtractionRun['status']) {
+  if (status === 'failed') return 'error'
+  if (status === 'running' || status === 'abandoned') return 'warning'
+  return 'success'
+}
+
+function pendingSemanticLabel(item: SlangPendingCandidate) {
+  const meta = item.meta || {}
+  if (meta.semantic_failed) return 'AI 复核失败'
+  if (meta.semantic_no_info) return meta.semantic_force_review ? '全量已审：信息不足' : '已审：信息不足'
+  if (meta.semantic_review) return meta.semantic_force_review ? '全量已审' : '已审'
+  return '观察中'
+}
+
+function pendingSemanticType(item: SlangPendingCandidate) {
+  const meta = item.meta || {}
+  if (meta.semantic_failed) return 'error'
+  if (meta.semantic_no_info || meta.semantic_review) return 'info'
+  return 'warning'
 }
 
 function formatSearchQueries(term?: SlangTerm | null) {
@@ -551,10 +832,15 @@ function buildParams() {
   const params: Record<string, any> = {
     page: page.value,
     page_size: pageSize.value,
+    sort: sortMode.value,
   }
   if (groupFilter.value) params.group_id = groupFilter.value
   if (scopeFilter.value) params.scope = scopeFilter.value
-  if (queueMode.value === 'candidate') params.status = 'candidate'
+  if (queueMode.value === 'candidate') params.review_filter = 'candidate_ai_unreviewed'
+  if (queueMode.value === 'candidate_ai_approved') params.review_filter = 'candidate_ai_approved'
+  if (queueMode.value === 'candidate_ai_rejected') params.review_filter = 'ai_rejected'
+  if (queueMode.value === 'candidate_ai_unreviewed') params.review_filter = 'candidate_ai_unreviewed'
+  if (queueMode.value === 'observe_more') params.review_filter = 'observe_more'
   if (queueMode.value === 'approved') params.status = 'approved'
   if (queueMode.value === 'ai_review') {
     params.status = 'approved'
@@ -608,7 +894,7 @@ async function loadPending() {
       page_size: 6,
     },
   })
-  pendingCandidates.value = data.pending || []
+  pendingCandidates.value = sortLatestPending(data.pending || [])
   pendingTotal.value = Number(data.total || 0)
 }
 
@@ -622,19 +908,20 @@ async function loadDriftReviews() {
       page_size: queueMode.value === 'drift' ? pageSize.value : 4,
     },
   })
-  driftReviews.value = data.reviews || []
+  driftReviews.value = sortLatestDrift(data.reviews || [])
   driftTotal.value = Number(data.total || 0)
 }
 
 async function loadExtractionRuns() {
   const data = await api('/api/admin/slang/extract/runs', { params: { limit: 5 } })
-  extractionRuns.value = data.runs || []
+  extractionRuns.value = sortLatestRuns(data.runs || [])
 }
 
 async function loadSettings() {
   const data = await api('/api/admin/slang/settings')
   settings.value = mergeSettings(data.settings || {})
   allowlistText.value = settings.value.group_allowlist.join('\n')
+  globalExcludedText.value = settings.value.global_excluded_group_ids.join('\n')
   stoplistText.value = settings.value.stoplist.join('\n')
 }
 
@@ -679,6 +966,52 @@ async function runExtract() {
     message.error('手动抽取失败')
   } finally {
     extracting.value = false
+  }
+}
+
+async function runAiReview(
+  reviewCandidates = false,
+  rerunReviewedCandidates = false,
+  reviewAllPending = reviewCandidates,
+) {
+  const confirmText = rerunReviewedCandidates
+    ? '确认重跑已审候选？这会重新调用模型并按新规则归档旧结果。'
+    : '确认执行全量 AI 复核？这会扫描现有候选词条并调用模型。'
+  if (
+    reviewCandidates
+    && !window.confirm(confirmText)
+  ) return
+  reviewing.value = true
+  try {
+    const data = await api('/api/admin/slang/review/run', {
+      method: 'POST',
+      body: {
+        force: true,
+        review_candidates: reviewCandidates,
+        review_all_pending: reviewAllPending,
+        rerun_reviewed_candidates: rerunReviewedCandidates,
+      },
+    })
+    if (!data.ok) {
+      message.error(data.error || 'AI 复核失败')
+      return
+    }
+    const reviewed = Number(data.candidate_reviewed || 0) + Number(data.pending_reviewed || 0)
+    const approved = Number(data.ai_approved || 0) + Number(data.pending_approved || 0)
+    const rejected = Number(data.candidate_rejected || 0) + Number(data.pending_rejected || 0)
+    const kept = Number(data.candidate_kept || 0) + Number(data.semantic_kept || 0) + Number(data.pending_kept || 0)
+    const prefix = rerunReviewedCandidates
+      ? '重跑已审完成'
+      : reviewCandidates
+        ? '全量 AI 复核完成'
+        : 'AI 复核完成'
+    message.success(`${prefix}：审查 ${reviewed} 条，通过 ${approved} 条，未通过 ${rejected} 条，观察 ${kept} 条`)
+    await loadAll(true)
+  } catch (error) {
+    console.error('Failed to run slang AI review:', error)
+    message.error('AI 复核失败')
+  } finally {
+    reviewing.value = false
   }
 }
 
@@ -832,7 +1165,7 @@ async function openDetail(term: SlangTerm) {
     const data = await api(`/api/admin/slang/terms/${term.term_id}`)
     detailTerm.value = data.term || detailTerm.value
     editAliases.value = detailTerm.value?.aliases.join('\n') || ''
-    observations.value = data.observations || []
+    observations.value = sortLatestObservations(data.observations || [])
     await loadRevisions(term.term_id)
     await loadMergeCandidates()
   } catch (error) {
@@ -846,10 +1179,111 @@ async function openDetail(term: SlangTerm) {
 async function loadRevisions(termId: string) {
   try {
     const data = await api(`/api/admin/slang/terms/${termId}/revisions`)
-    revisions.value = data.revisions || []
+    revisions.value = sortLatestRevisions(data.revisions || [])
   } catch (error) {
     console.error('Failed to load slang revisions:', error)
     revisions.value = []
+  }
+}
+
+async function loadNormalizerDetail(info?: NormalizationInfo | null) {
+  if (!info?.cluster_id || normalizerDetails.value[info.cluster_id]) return
+  try {
+    const data = await api<NormalizerClusterDetail>(
+      `/api/admin/learning-normalizer/clusters/${info.cluster_id}/items`,
+    )
+    normalizerDetails.value = {
+      ...normalizerDetails.value,
+      [info.cluster_id]: data,
+    }
+  } catch (error) {
+    console.error('Failed to load normalizer cluster:', error)
+  }
+}
+
+function normalizerDetail(info?: NormalizationInfo | null) {
+  return info?.cluster_id ? normalizerDetails.value[info.cluster_id] : undefined
+}
+
+function normalizerAutoMergeRevision(term: SlangTerm) {
+  const info = term.normalization
+  const detail = normalizerDetail(info)
+  return detail?.revisions.find(entry => entry.action === 'auto_merge' && entry.item_id === info?.item_id)
+    || detail?.revisions.find(entry => entry.action === 'auto_merge')
+}
+
+function canUndoNormalizerAutoMerge(term: SlangTerm) {
+  if (!term.normalization?.cluster_id) return false
+  const detail = normalizerDetail(term.normalization)
+  return !detail || Boolean(normalizerAutoMergeRevision(term))
+}
+
+async function lockNormalizerCluster(term: SlangTerm) {
+  const info = term.normalization
+  if (!info?.cluster_id) return
+  const canonical = window.prompt('锁定代表写法', info.canonical_text || term.term)
+  if (!canonical) return
+  try {
+    const data = await api(`/api/admin/learning-normalizer/clusters/${info.cluster_id}/lock`, {
+      method: 'POST',
+      body: { canonical_text: canonical, reason: 'slang console lock' },
+    })
+    if (!data.ok) {
+      message.error(data.error || '锁定失败')
+      return
+    }
+    delete normalizerDetails.value[info.cluster_id]
+    message.success('代表写法已锁定')
+    await loadTerms(true)
+    if (detailTerm.value?.term_id === term.term_id) await openDetail(detailTerm.value)
+  } catch (error) {
+    console.error('Failed to lock normalizer cluster:', error)
+    message.error('锁定代表写法失败')
+  }
+}
+
+async function splitNormalizerItem(term: SlangTerm) {
+  const info = term.normalization
+  if (!info?.item_id || !window.confirm('确认把当前写法拆出归一化簇？')) return
+  try {
+    const data = await api(`/api/admin/learning-normalizer/items/${info.item_id}/split`, {
+      method: 'POST',
+      body: { reason: 'slang console split' },
+    })
+    if (!data.ok) {
+      message.error(data.error || '拆分失败')
+      return
+    }
+    if (info.cluster_id) delete normalizerDetails.value[info.cluster_id]
+    message.success('已拆出变体')
+    await loadTerms(true)
+    if (detailTerm.value?.term_id === term.term_id) await openDetail(detailTerm.value)
+  } catch (error) {
+    console.error('Failed to split normalizer item:', error)
+    message.error('拆出变体失败')
+  }
+}
+
+async function undoNormalizerAutoMerge(term: SlangTerm) {
+  const info = term.normalization
+  await loadNormalizerDetail(info)
+  const revision = normalizerAutoMergeRevision(term)
+  if (!info?.cluster_id || !revision || !window.confirm('确认撤销最近一次自动归并？')) return
+  try {
+    const data = await api(`/api/admin/learning-normalizer/revisions/${revision.revision_id}/undo`, {
+      method: 'POST',
+    })
+    if (!data.ok) {
+      message.error(data.error || '撤销失败')
+      return
+    }
+    delete normalizerDetails.value[info.cluster_id]
+    message.success('已撤销自动归并')
+    await loadTerms(true)
+    if (detailTerm.value?.term_id === term.term_id) await openDetail(detailTerm.value)
+  } catch (error) {
+    console.error('Failed to undo normalizer auto merge:', error)
+    message.error('撤销自动归并失败')
   }
 }
 
@@ -955,6 +1389,7 @@ async function saveSettings() {
     const payload = {
       ...settings.value,
       group_allowlist: allowlistText.value.split(/\n|,|，/).map(item => item.trim()).filter(Boolean),
+      global_excluded_group_ids: globalExcludedText.value.split(/\n|,|，/).map(item => item.trim()).filter(Boolean),
       stoplist: stoplistText.value.split(/\n|,|，/).map(item => item.trim()).filter(Boolean),
     }
     const data = await api('/api/admin/slang/settings', {
@@ -967,6 +1402,7 @@ async function saveSettings() {
     }
     settings.value = mergeSettings(data.settings || {}, payload)
     allowlistText.value = settings.value.group_allowlist.join('\n')
+    globalExcludedText.value = settings.value.global_excluded_group_ids.join('\n')
     stoplistText.value = settings.value.stoplist.join('\n')
     message.success('设置已保存')
     await Promise.all([loadStats(), loadTerms(true), loadPending(), loadDriftReviews()])
@@ -1108,21 +1544,46 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
           </template>
           手动抽取
         </NButton>
+        <NButton type="primary" secondary :loading="reviewing" @click="runAiReview(true)">
+          <template #icon>
+            <NIcon :component="FlashOutline" />
+          </template>
+          全量 AI 复核
+        </NButton>
+        <NButton secondary :loading="reviewing" @click="runAiReview(true, true)">
+          <template #icon>
+            <NIcon :component="RefreshOutline" />
+          </template>
+          重跑已审
+        </NButton>
       </NSpace>
     </template>
 
     <div class="slang-metric-grid">
-      <MetricCard title="待审核" :value="summary.candidate_count" hint="候选默认不注入 Prompt" :icon="PricetagsOutline" accent="warning" />
+      <MetricCard
+        title="待 AI 复核"
+        :value="summary.candidate_unreviewed_count"
+        :hint="`候选共 ${summary.candidate_total_count} 条，AI 已审 ${summary.candidate_reviewed_count} 条`"
+        :icon="PricetagsOutline"
+        accent="warning"
+      />
+      <MetricCard
+        title="AI 未通过"
+        :value="summary.candidate_review_rejected_count"
+        hint="已静音归档，可人工恢复"
+        :icon="AlertCircleOutline"
+        accent="warning"
+      />
+      <MetricCard title="观察不足" :value="summary.candidate_review_kept_count" hint="不催人工，等下个阈值再审" :icon="TimeOutline" accent="info" />
       <MetricCard title="AI 通过" :value="summary.ai_review_count" :hint="`${summary.ai_pending_review_count} 条待人工复核`" :icon="SparklesOutline" accent="primary" />
       <MetricCard title="已批准" :value="summary.approved_count" hint="可进入当前群动态语境" :icon="CheckmarkCircleOutline" accent="success" />
       <MetricCard title="观察中" :value="summary.pending_count" hint="未达到最小出现次数，暂不打扰审核" :icon="TimeOutline" accent="info" />
-      <MetricCard title="语义漂移" :value="summary.drift_count" hint="新释义待治理，不会直接进入 Prompt" :icon="AlertCircleOutline" accent="warning" />
     </div>
 
     <AppCard bordered embedded class="slang-advanced-strip">
       <div class="slang-advanced-strip__copy">
         <strong>高级概览</strong>
-        <span>热门排行、抽取运行记录和学习设置默认折叠，避免打断待审核主流程。</span>
+        <span>热门排行和学习设置默认折叠，运行记录保持可见，避免你来回找入口。</span>
       </div>
       <NSpace align="center" :size="8">
         <NTag round size="small">
@@ -1135,6 +1596,34 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
           {{ showAdvancedOverview ? '收起概览' : '展开概览' }}
         </NButton>
       </NSpace>
+    </AppCard>
+
+    <AppCard bordered embedded class="slang-run-panel">
+      <div class="slang-stat-card__head">
+        <span>最近抽取记录</span>
+        <NTag
+          round
+          size="small"
+          :type="summary.latest_run_status === 'failed' ? 'error' : summary.latest_run_status === 'abandoned' ? 'warning' : 'default'"
+        >
+          {{ summary.latest_run_status || '未运行' }}
+        </NTag>
+      </div>
+        <div v-if="extractionRuns.length" class="slang-run-list">
+        <div v-for="run in extractionRuns.slice(0, 4)" :key="run.run_id" class="slang-run-row">
+          <div>
+            <strong>{{ formatTime(run.started_at) }} · {{ runKindLabel(run) }}</strong>
+            <span v-if="run.meta?.kind === 'daily_ai_review'">
+              复核 {{ runReviewedCount(run) }} 条 / 通过 {{ runApprovedCount(run) }} 条 / 未通过 {{ runRejectedCount(run) }} 条 / 观察 {{ runKeptCount(run) }} 条
+            </span>
+            <span v-else>{{ run.scanned_messages }} 条 / {{ run.extracted_terms }} 个抽取 / {{ run.promoted_candidates }} 个入库</span>
+          </div>
+          <NTag :type="runStatusType(run.status)" round size="small">
+            {{ run.status }}
+          </NTag>
+        </div>
+      </div>
+      <EmptyState v-else compact title="暂无抽取记录" description="手动抽取或后台抽取后会记录运行结果。" :icon="SparklesOutline" />
     </AppCard>
 
     <div v-if="showAdvancedOverview" class="slang-stats-grid">
@@ -1170,26 +1659,6 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
         <EmptyState v-else compact title="暂无群活跃数据" description="黑话命中后会自动形成排行。" :icon="FlashOutline" />
       </AppCard>
 
-      <AppCard bordered embedded class="slang-stat-card">
-        <div class="slang-stat-card__head">
-          <span>最近抽取记录</span>
-          <NTag round size="small" :type="summary.latest_run_status === 'failed' ? 'error' : 'default'">
-            {{ summary.latest_run_status || '未运行' }}
-          </NTag>
-        </div>
-        <div v-if="extractionRuns.length" class="slang-run-list">
-          <div v-for="run in extractionRuns.slice(0, 4)" :key="run.run_id" class="slang-run-row">
-            <div>
-              <strong>{{ formatTime(run.started_at) }} · {{ runKindLabel(run) }}</strong>
-              <span>{{ run.scanned_messages }} 条 / {{ run.extracted_terms }} 个抽取 / {{ run.promoted_candidates }} 个入库</span>
-            </div>
-            <NTag :type="run.status === 'failed' ? 'error' : run.status === 'running' ? 'warning' : 'success'" round size="small">
-              {{ run.status }}
-            </NTag>
-          </div>
-        </div>
-        <EmptyState v-else compact title="暂无抽取记录" description="手动抽取或后台抽取后会记录运行结果。" :icon="SparklesOutline" />
-      </AppCard>
     </div>
 
     <div class="slang-control-strip">
@@ -1218,6 +1687,7 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
         <NSelect v-model:value="groupFilter" class="slang-filter-control" :options="groupOptions" />
         <NSelect v-model:value="scopeFilter" class="slang-filter-control slang-filter-control--compact" :options="scopeOptions" />
         <NSelect v-model:value="minConfidence" class="slang-filter-control slang-filter-control--compact" :options="confidenceOptions" />
+        <NSelect v-model:value="sortMode" class="slang-filter-control slang-filter-control--compact" :options="recordSortOptions" />
       </div>
 
       <div class="slang-control-strip__actions">
@@ -1298,9 +1768,14 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
                       <strong>{{ drift.term }}</strong>
                       <span>群 {{ drift.group_id || '全局' }} · {{ confidenceText(drift.confidence) }} · {{ driftStatusLabel(drift.status) }}</span>
                     </div>
-                    <NTag round size="small" type="warning">
-                      语义漂移
-                    </NTag>
+                    <NSpace align="center" size="small">
+                      <NTag v-if="driftSemanticLabel(drift)" round size="small" :type="driftSemanticType(drift)">
+                        {{ driftSemanticLabel(drift) }}
+                      </NTag>
+                      <NTag round size="small" type="warning">
+                        语义漂移
+                      </NTag>
+                    </NSpace>
                   </div>
                   <div class="slang-drift-compare">
                     <div>
@@ -1314,6 +1789,9 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
                   </div>
                   <p class="slang-drift-evidence">
                     {{ drift.evidence || drift.reason || '暂无证据文本' }}
+                  </p>
+                  <p v-if="driftSemanticReason(drift)" class="slang-drift-evidence">
+                    语义门控：{{ driftSemanticReason(drift) }}
                   </p>
                 </div>
                 <div class="slang-term-card__actions">
@@ -1373,6 +1851,15 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
                     <NTag v-if="isAiApproved(term)" round size="small" type="info">
                       AI 通过
                     </NTag>
+                    <NTag v-else-if="candidateReviewApproved(term)" round size="small" type="info">
+                      AI 建议通过
+                    </NTag>
+                    <NTag v-else-if="candidateReviewRejected(term)" round size="small" type="warning">
+                      AI 未通过
+                    </NTag>
+                    <NTag v-else-if="candidateReviewObserving(term)" round size="small" type="info">
+                      观察不足
+                    </NTag>
                     <NTag v-if="needsHumanReview(term)" round size="small" type="warning">
                       待人工复核
                     </NTag>
@@ -1389,7 +1876,18 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
                   <span>命中 {{ term.usage_count }}</span>
                   <span>{{ term.unique_user_count }} 人使用</span>
                   <span>最近 {{ formatTime(term.last_seen_at) }}</span>
+                  <span v-if="term.normalization?.cluster_id">归一化 {{ normalizationLabel(term.normalization) }}</span>
                 </div>
+                <div v-if="term.normalization?.cluster_id" class="slang-normalization-row">
+                  <NTag size="small" round>
+                    簇 {{ term.normalization.cluster_id.slice(-6) }}
+                  </NTag>
+                  <span>代表：{{ term.normalization.canonical_text || term.term }}</span>
+                  <span v-if="term.normalization.auto_merged">自动归并</span>
+                </div>
+                <p v-if="candidateReviewReason(term)" class="slang-term-card__review-note">
+                  AI 复核：{{ candidateReviewReason(term) }}
+                </p>
                 <div v-if="term.aliases.length" class="slang-alias-row">
                   <NTag v-for="alias in term.aliases.slice(0, 5)" :key="alias" size="small" round>
                     {{ alias }}
@@ -1411,6 +1909,9 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
                 </NButton>
                 <NButton v-if="term.status !== 'expired'" size="small" secondary type="error" @click.stop="quickStatus(term, 'expire')">
                   过期
+                </NButton>
+                <NButton v-if="canReturnToCandidate(term)" size="small" secondary @click.stop="reviewAiTerm(term, 'return-candidate')">
+                  退回候选
                 </NButton>
               </div>
             </AppCard>
@@ -1479,9 +1980,17 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
                     <strong>{{ item.term }}</strong>
                     <span>{{ item.meaning || item.evidence || '等待更多出现证据' }}</span>
                   </div>
-                  <NTag round size="small" type="warning">
-                    {{ item.count }} 次
-                  </NTag>
+                  <NSpace align="center" :size="6">
+                    <NTag v-if="item.normalization?.cluster_id" round size="small" type="info">
+                      {{ normalizationLabel(item.normalization) }}
+                    </NTag>
+                    <NTag round size="small" :type="pendingSemanticType(item)">
+                      {{ pendingSemanticLabel(item) }}
+                    </NTag>
+                    <NTag round size="small" type="warning">
+                      {{ item.count }} 次
+                    </NTag>
+                  </NSpace>
                 </div>
               </div>
               <EmptyState
@@ -1638,6 +2147,17 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
                 :autosize="{ minRows: 3, maxRows: 6 }"
                 placeholder="每行一个群号；留空表示所有群可学习"
               />
+            </label>
+
+            <label class="slang-settings-field">
+              <span>封闭全局黑话的群</span>
+              <NInput
+                v-model:value="globalExcludedText"
+                type="textarea"
+                :autosize="{ minRows: 3, maxRows: 6 }"
+                placeholder="每行一个群号；留空表示所有群默认可使用全局黑话"
+              />
+              <small>这些群只使用本群已批准黑话，不注入也不查询 global 黑话。</small>
             </label>
 
             <label class="slang-settings-field">
@@ -1844,15 +2364,86 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
                   <p>{{ detailTerm.meta?.search_evidence || '没有可用搜索证据' }}</p>
                 </div>
               </div>
-              <NSpace v-if="needsHumanReview(detailTerm)" :size="8">
-                <NButton type="success" secondary @click="reviewAiTerm(detailTerm, 'human-approve')">
-                  真实通过
+              <NSpace :size="8">
+                <template v-if="needsHumanReview(detailTerm)">
+                  <NButton type="success" secondary @click="reviewAiTerm(detailTerm, 'human-approve')">
+                    真实通过
+                  </NButton>
+                  <NButton secondary @click="reviewAiTerm(detailTerm, 'return-candidate')">
+                    退回候选
+                  </NButton>
+                  <NButton type="error" secondary @click="reviewAiTerm(detailTerm, 'deny')">
+                    否决并静音
+                  </NButton>
+                </template>
+                <template v-else>
+                  <NButton secondary @click="reviewAiTerm(detailTerm, 'return-candidate')">
+                    退回候选
+                  </NButton>
+                </template>
+              </NSpace>
+            </div>
+          </AppPanelSection>
+
+          <AppPanelSection
+            v-if="detailTerm.normalization?.cluster_id"
+            eyebrow="Normalizer"
+            title="归一化归类"
+            @mouseenter="loadNormalizerDetail(detailTerm.normalization)"
+          >
+            <div class="slang-ai-review-box">
+              <div class="slang-ai-review-box__head">
+                <div>
+                  <strong>{{ normalizationLabel(detailTerm.normalization) }}</strong>
+                  <span>自动归类只影响候选合并和别名/变体提示，不会改写原始证据。</span>
+                </div>
+                <NTag round size="small" type="info">
+                  簇 {{ detailTerm.normalization.cluster_id.slice(-6) }}
+                </NTag>
+              </div>
+              <div class="slang-ai-review-grid">
+                <div>
+                  <span>代表写法</span>
+                  <p>{{ detailTerm.normalization.canonical_text || detailTerm.term }}</p>
+                </div>
+                <div>
+                  <span>归一 Key</span>
+                  <p>{{ detailTerm.normalization.normalized_key || '--' }}</p>
+                </div>
+              </div>
+              <div class="slang-normalization-actions">
+                <NButton size="small" secondary @click="lockNormalizerCluster(detailTerm)">
+                  锁定代表写法
                 </NButton>
+                <NButton size="small" secondary @click="splitNormalizerItem(detailTerm)">
+                  拆出当前变体
+                </NButton>
+                <NButton
+                  size="small"
+                  secondary
+                  :disabled="!canUndoNormalizerAutoMerge(detailTerm)"
+                  @click="undoNormalizerAutoMerge(detailTerm)"
+                >
+                  撤销最近归并
+                </NButton>
+              </div>
+            </div>
+          </AppPanelSection>
+
+          <AppPanelSection v-if="canReturnToCandidate(detailTerm)" eyebrow="Recovery" title="退回候选">
+            <div class="slang-ai-review-box">
+              <div class="slang-ai-review-box__head">
+                <div>
+                  <strong>将该词条恢复到候选池</strong>
+                  <span>会清空当前 AI 复核痕迹，并把词条重新交回候选队列，方便再次观察或人工重审。</span>
+                </div>
+                <NTag round size="small" type="warning">
+                  {{ candidateReviewReason(detailTerm) || '可恢复' }}
+                </NTag>
+              </div>
+              <NSpace :size="8">
                 <NButton secondary @click="reviewAiTerm(detailTerm, 'return-candidate')">
                   退回候选
-                </NButton>
-                <NButton type="error" secondary @click="reviewAiTerm(detailTerm, 'deny')">
-                  否决并静音
                 </NButton>
               </NSpace>
             </div>
@@ -2114,6 +2705,11 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
   margin-bottom: 18px;
 }
 
+.slang-run-panel {
+  margin-bottom: 18px;
+  padding: 16px;
+}
+
 .slang-stat-card {
   min-height: 172px;
   padding: 16px;
@@ -2345,6 +2941,29 @@ async function handleDriftAction(drift: SlangDriftReview, action: 'accept' | 're
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 12px;
+}
+
+.slang-normalization-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--om-text-3);
+  font-size: 12px;
+}
+
+.slang-normalization-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.slang-term-card__review-note {
+  margin: 10px 0 0;
+  color: var(--om-text-2);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .slang-alias-row {

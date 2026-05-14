@@ -107,6 +107,9 @@ def _build_field_schema(
             value = extra.get(display_key)
             if value is not None:
                 schema[display_key] = value
+        custom_options = extra.get("options")
+        if isinstance(custom_options, list):
+            schema["options"] = custom_options
 
     if isinstance(ann, type) and issubclass(ann, BaseModel):
         children: list[dict[str, Any]] = []
@@ -154,7 +157,8 @@ def _build_field_schema(
 
     kind, extras = _base_scalar_kind(ann, path)
     schema["kind"] = kind
-    schema.update(extras)
+    for extra_key, extra_value in extras.items():
+        schema.setdefault(extra_key, extra_value)
     return schema
 
 
@@ -422,7 +426,7 @@ def create_config_router(*, config_path: str = "config/config.json") -> APIRoute
             for err in exc.errors():
                 loc = err.get("loc", ())
                 field_errors.append({
-                    "path": _serialize_error_path(tuple(loc) if isinstance(loc, tuple) else tuple(loc)),
+                    "path": _serialize_error_path(tuple(loc)),
                     "message": err.get("msg", "字段校验失败"),
                 })
             return {"ok": False, "error": "配置校验失败", "field_errors": field_errors}
@@ -454,7 +458,7 @@ def create_config_router(*, config_path: str = "config/config.json") -> APIRoute
             for err in exc.errors():
                 loc = err.get("loc", ())
                 field_errors.append({
-                    "path": _serialize_error_path(tuple(loc) if isinstance(loc, tuple) else tuple(loc)),
+                    "path": _serialize_error_path(tuple(loc)),
                     "message": err.get("msg", "字段校验失败"),
                 })
             return {"ok": False, "error": "配置校验失败", "field_errors": field_errors}

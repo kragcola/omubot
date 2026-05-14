@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import random
+from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from plugins.calendar_context.service import CalendarContextService
 from plugins.schedule.mood import MoodEngine
 from plugins.schedule.types import MoodProfile, Schedule, TimeSlot
 
@@ -112,6 +115,52 @@ class TestMoodEngineEvaluate:
         assert 0.0 <= p_lonely.openness <= 1.0
         assert 0.0 <= p_busy.energy <= 1.0
 
+    def test_birthday_boost_uses_calendar_service(self):
+        service = CalendarContextService()
+        service.load_dataset(
+            birthdays_path=Path("plugins/calendar_context/data/birthdays.json"),
+            special_days_path=Path("plugins/calendar_context/data/special_days.json"),
+            builtin_years_dir=Path("plugins/calendar_context/data/years"),
+        )
+        service.set_self_names("凤笑梦")
+        engine = MoodEngine(
+            anomaly_chance=0.0,
+            day_context_getter=lambda _now: service.get_day_context(datetime(2026, 9, 9, 12, 0, tzinfo=CST)),
+        )
+        profile = engine.evaluate(_make_schedule())
+        assert profile.label
+
+    def test_compute_uses_single_datetime_snapshot(self, monkeypatch):
+        import plugins.schedule.mood as mood_module
+
+        captured: list[datetime] = []
+        calls = 0
+        frozen_now = datetime(2026, 9, 9, 23, 59, 59, tzinfo=CST)
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):  # noqa: ANN001
+                nonlocal calls
+                calls += 1
+                return frozen_now
+
+        class SnapshotSchedule:
+            def current_slot(self, now: datetime):
+                captured.append(now)
+                return None
+
+        def day_context_getter(now: datetime):
+            captured.append(now)
+            return None
+
+        monkeypatch.setattr(mood_module, "datetime", FrozenDateTime)
+        engine = MoodEngine(anomaly_chance=0.0, day_context_getter=day_context_getter)
+
+        engine.evaluate(SnapshotSchedule())  # type: ignore[arg-type]
+
+        assert calls == 1
+        assert captured == [frozen_now, frozen_now]
+
 
 class TestMoodBlock:
     def test_build_mood_block_basic(self):
@@ -131,6 +180,21 @@ class TestMoodBlock:
         engine = MoodEngine(anomaly_chance=0.0)
         block = engine.build_mood_block(_make_schedule())
         assert "不要主动说出来" in block
+
+    def test_self_birthday_hint_present(self):
+        service = CalendarContextService()
+        service.load_dataset(
+            birthdays_path=Path("plugins/calendar_context/data/birthdays.json"),
+            special_days_path=Path("plugins/calendar_context/data/special_days.json"),
+            builtin_years_dir=Path("plugins/calendar_context/data/years"),
+        )
+        service.set_self_names("凤笑梦 (Emu Otori)")
+        engine = MoodEngine(
+            anomaly_chance=0.0,
+            day_context_getter=lambda _now: service.get_day_context(datetime(2026, 9, 9, 12, 0, tzinfo=CST)),
+        )
+        block = engine.build_mood_block(_make_schedule())
+        assert "今天是你的生日" in block
 
 
 class TestClassify:

@@ -31,6 +31,7 @@ class SlangSettings(BaseModel):
     extraction_batch_limit: int = Field(default=80, ge=10, le=500)
     auto_promote_global_enabled: bool = False
     global_promote_min_groups: int = Field(default=3, ge=2, le=20)
+    global_excluded_group_ids: list[str] = Field(default_factory=list)
     bulk_page_size: int = Field(default=50, ge=10, le=200)
     stats_days: int = Field(default=14, ge=1, le=120)
     stoplist: list[str] = Field(default_factory=list)
@@ -90,6 +91,22 @@ class SlangSettings(BaseModel):
         if not group_id:
             return False
         return not self.group_allowlist or str(group_id) in self.group_allowlist
+
+    @field_validator("global_excluded_group_ids", mode="before")
+    @classmethod
+    def _normalize_global_excluded_group_ids(cls, value: Any) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            return [part.strip() for part in value.replace("，", ",").split(",") if part.strip()]
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
+
+    def allows_global_terms(self, group_id: str | None) -> bool:
+        if not group_id:
+            return True
+        return str(group_id) not in set(self.global_excluded_group_ids)
 
 
 @dataclass
