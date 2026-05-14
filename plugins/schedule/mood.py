@@ -155,13 +155,13 @@ class MoodEngine:
                 # No current slot — late night / early morning default
                 hour = now_dt.hour
                 if 2 <= hour < 6:
-                    profile = _MOOD_BASE.get("困倦、迷糊", _DEFAULT_MOOD)
+                    profile = self._copy_base(_MOOD_BASE.get("困倦、迷糊", _DEFAULT_MOOD))
                 elif 6 <= hour < 8:
-                    profile = _MOOD_BASE.get("困倦但必须起", _DEFAULT_MOOD)
+                    profile = self._copy_base(_MOOD_BASE.get("困倦但必须起", _DEFAULT_MOOD))
                 else:
-                    profile = _DEFAULT_MOOD
+                    profile = self._copy_base(_DEFAULT_MOOD)
         else:
-            profile = _DEFAULT_MOOD
+            profile = self._copy_base(_DEFAULT_MOOD)
 
         # 2. Random offset (±0.15 per dimension)
         profile.energy += random.uniform(-0.15, 0.15)
@@ -247,6 +247,11 @@ class MoodEngine:
                     break
         if found is None:
             found = _DEFAULT_MOOD
+        return self._copy_base(found)
+
+    @staticmethod
+    def _copy_base(found: MoodProfile) -> MoodProfile:
+        """Return a fresh MoodProfile so callers can mutate without polluting presets."""
         return MoodProfile(
             energy=found.energy,
             valence=found.valence,

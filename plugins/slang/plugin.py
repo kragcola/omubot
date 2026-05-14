@@ -14,7 +14,13 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext, PromptContext
-from services.slang import SlangDailyReviewer, SlangExtractor, SlangStore, normalize_term
+from services.slang import (
+    SlangDailyReviewer,
+    SlangDatabaseCorruptError,
+    SlangExtractor,
+    SlangStore,
+    normalize_term,
+)
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 
@@ -112,6 +118,7 @@ class SlangPlugin(AmadeusPlugin):
     description = "群内黑话：学习候选、审核后注入当前群语境"
     version = "0.1.0"
     priority = 42
+    silent_safe = True  # on_message 仅写黑话候选库，不发消息、不改 trigger
 
     def __init__(self) -> None:
         super().__init__()
@@ -124,11 +131,29 @@ class SlangPlugin(AmadeusPlugin):
         self._lookup_tool_enabled = True
         self._group_config: Any = None
         self._tick_task: asyncio.Task[None] | None = None
+        self._slang_disabled_reason: str = ""
 
     async def on_startup(self, ctx: PluginContext) -> None:
         db_path = Path(getattr(ctx, "storage_dir", Path("storage"))) / "slang.db"
-        self.store = SlangStore(db_path)
-        await self.store.init()
+        store = SlangStore(db_path)
+        try:
+            await store.init()
+        except SlangDatabaseCorruptError as exc:
+            self.store = None
+            self._slang_disabled_reason = (
+                f"slang database corrupt at {exc.db_path}; "
+                "run scripts/dev/slang_db_repair.py to recover"
+            )
+            ctx.slang_store = None
+            ctx.slang_plugin = self
+            self._group_config = getattr(ctx.config, "group", None) if getattr(ctx, "config", None) else None
+            _L.error(
+                "slang plugin disabled | reason={} db={}",
+                self._slang_disabled_reason,
+                db_path,
+            )
+            return
+        self.store = store
         self._message_log = getattr(ctx, "msg_log", None)
         self._llm_client = getattr(ctx, "llm_client", None)
         self._extractor = SlangExtractor(self._llm_client)

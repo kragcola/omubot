@@ -1,6 +1,7 @@
 """Group slang learning service."""
 
 from services.slang.daily_reviewer import SlangDailyReviewer
+from services.slang.errors import SlangDatabaseCorruptError
 from services.slang.extractor import SlangExtractor
 from services.slang.store import SlangStore, normalize_term
 from services.slang.types import (
@@ -20,6 +21,7 @@ from services.slang.types import (
 __all__ = [
     "RepeatPolicy",
     "SlangDailyReviewer",
+    "SlangDatabaseCorruptError",
     "SlangDriftReview",
     "SlangExtraction",
     "SlangExtractionRun",

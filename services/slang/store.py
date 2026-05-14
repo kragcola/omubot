@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 
 from services.similarity import NgramSimilarityProvider, normalize_text_key
+from services.slang.errors import SlangDatabaseCorruptError
 from services.slang.types import (
     VALID_REPEAT_POLICIES,
     VALID_SCOPES,
@@ -373,17 +374,25 @@ class SlangStore:
         self._db: aiosqlite.Connection | None = None
 
     async def init(self) -> None:
-        self._db = await connect_sqlite(self._db_path)
-        await self._db.execute(_CREATE_TERMS)
-        await self._db.execute(_CREATE_OBSERVATIONS)
-        await self._db.execute(_CREATE_SETTINGS)
-        await self._db.execute(_CREATE_PENDING)
-        await self._db.execute(_CREATE_RUNS)
-        await self._db.execute(_CREATE_REVISIONS)
-        await self._db.execute(_CREATE_DRIFT_REVIEWS)
-        for statement in _INDEXES:
-            await self._db.execute(statement)
-        await self._db.commit()
+        db: aiosqlite.Connection | None = None
+        try:
+            db = await connect_sqlite(self._db_path)
+            await db.execute(_CREATE_TERMS)
+            await db.execute(_CREATE_OBSERVATIONS)
+            await db.execute(_CREATE_SETTINGS)
+            await db.execute(_CREATE_PENDING)
+            await db.execute(_CREATE_RUNS)
+            await db.execute(_CREATE_REVISIONS)
+            await db.execute(_CREATE_DRIFT_REVIEWS)
+            for statement in _INDEXES:
+                await db.execute(statement)
+            await db.commit()
+        except aiosqlite.DatabaseError as exc:
+            if db is not None:
+                with contextlib.suppress(Exception):
+                    await db.close()
+            raise SlangDatabaseCorruptError(self._db_path, original=exc) from exc
+        self._db = db
 
     async def close(self) -> None:
         if self._db:

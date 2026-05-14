@@ -11,6 +11,17 @@ import pytest
 
 from services.media.image_cache import ImageCache
 
+try:
+    import pyvips  # type: ignore[import-untyped]  # noqa: F401
+    _HAS_LIBVIPS = True
+except (ImportError, OSError):
+    _HAS_LIBVIPS = False
+
+_requires_libvips = pytest.mark.skipif(
+    not _HAS_LIBVIPS,
+    reason="libvips not installed (brew install vips); image cache tests need pyvips",
+)
+
 
 @pytest.fixture
 def cache(tmp_path: Path) -> ImageCache:
@@ -41,6 +52,7 @@ _WEBP_BYTES = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 128 + b"webp-payload-a"
 
 
 class TestSaveAndLoad:
+    @_requires_libvips
     async def test_save_downloads_and_caches(self, cache: ImageCache, tmp_path: Path) -> None:
         """save() should download image, resize, and store to disk."""
         buf = _JPEG_BYTES
@@ -61,6 +73,7 @@ class TestSaveAndLoad:
         # Verify two-level directory structure
         assert "/ab/" in ref["path"] or "\\ab\\" in ref["path"]
 
+    @_requires_libvips
     async def test_save_transparent_png_preserves_alpha(self, cache: ImageCache) -> None:
         buf = _PNG_BYTES
 
@@ -77,6 +90,7 @@ class TestSaveAndLoad:
         assert ref["media_type"] == "image/png"
         assert Path(ref["path"]).exists()
 
+    @_requires_libvips
     async def test_save_transparent_webp_preserves_alpha(self, cache: ImageCache) -> None:
         buf = _WEBP_BYTES
 
@@ -147,6 +161,7 @@ class TestSaveAndLoad:
         block = await cache.load_as_base64(ref)
         assert block is None
 
+    @_requires_libvips
     async def test_resize_respects_max_dimension(self, cache: ImageCache, tmp_path: Path) -> None:
         """Images larger than max_dimension should be scaled down."""
         import pyvips  # type: ignore[import-untyped]

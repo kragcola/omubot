@@ -59,9 +59,20 @@ class SaveStickerTool(Tool):
         image_tag: str = kwargs["image_tag"]
         description: str = kwargs["description"]
         usage_hint: str = kwargs["usage_hint"]
+        requested_by: str = str(kwargs.get("requested_by") or "")
 
-        requester = ctx.user_id or kwargs.get("requested_by", "")
-        if requester not in self._superusers:
+        user_is_admin = bool(ctx.user_id) and ctx.user_id in self._superusers
+        requested_is_admin = bool(requested_by) and requested_by in self._superusers
+
+        # Trusted requester:
+        #   - explicit admin caller (user_is_admin)
+        #   - group chat where ctx.user_id is empty but requested_by is admin
+        # Bot proactive: caller is non-admin but requested_by is admin -> "stolen"
+        if user_is_admin or (not ctx.user_id and requested_is_admin):
+            source = "admin"
+        elif requested_is_admin:
+            source = "stolen"
+        else:
             return "只有管理员可以收录表情包"
 
         tag_map: dict[str, str] = ctx.extra.get("image_tags", {})
@@ -76,15 +87,13 @@ class SaveStickerTool(Tool):
         image_data = path.read_bytes()
 
         try:
-            stk_id, is_new = self._store.add(image_data, description, usage_hint, source="admin")
+            stk_id, is_new = self._store.add(image_data, description, usage_hint, source=source)
         except ValueError as e:
             return f"无法收录: {e}"
 
         if not is_new:
             return f"表情包已存在: {stk_id}"
 
-        # Notify timeline so the model can use this sticker in future calls
-        # (system blocks are read-only, rebuilt only on compact)
         timeline = ctx.extra.get("timeline")
         if timeline and ctx.group_id:
             timeline.add(

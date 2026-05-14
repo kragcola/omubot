@@ -4,6 +4,230 @@
 
 ---
 
+## 2026-05-15 清理 7 项预存测试失败 → 全量绿（975 passed / 0 failed）
+
+**触发**：上一会话 silent_learn 修复完成时遗留 7 个测试失败，全部为本任务范围外但影响 CI 信号可信度，授权一次性平掉。
+
+**根因（按测试分组）**：
+
+1. **`tests/test_slang_db_integrity.py`（6 测试 ImportError）**
+   - 测试期望完整的「数据库损坏容灾」契约：损坏库 → store 抛 `SlangDatabaseCorruptError` → plugin 禁用但不 crash → API 返回 503 + `error_code/repair_script/db_path` 结构化错误。
+   - 缺失：错误类、`SlangStore.init` 的损坏抓取、Plugin 容灾路径、API 503 转换。
+   - 修复：
+     - 新增 `services/slang/errors.py` 定义 `SlangDatabaseCorruptError(db_path, original)`。
+     - `SlangStore.init` 用 `try/except aiosqlite.DatabaseError`，损坏时抛特定异常并保证 `_db=None`（`initialized=False`）。
+     - `SlangPlugin.on_startup` 捕获该异常，置 `store=None`、记录 `_slang_disabled_reason`，`register_tools()` 返回空，bot 不 crash。
+     - `admin/routes/api/slang.py` 用 `APIRoute` 子类（`_SlangCorruptGuardRoute`）拦截端点 raise 的 `SlangDatabaseCorruptError`，返回 503 JSON。
+
+2. **`tests/test_image_cache.py`（4 测试 image processing error）**
+   - 根因：本机 macOS 没装 libvips（`brew install vips` 未执行），`pyvips` import 时 `OSError: cannot load library 'libvips.42.dylib'`。Docker 镜像里有 libvips，CI 也应有；本地缺失是开发环境差异，**不是代码 bug**。
+   - 修复：测试模块顶部 `try/except (ImportError, OSError)` 探测 libvips，加 `_requires_libvips` skipif marker 给 4 个真正需要 pyvips 的测试。其余 7 个测试不动，依旧能在缺 libvips 时跑。
+
+3. **`tests/test_segmentation.py::test_debug_split_uses_new_segmenter_and_reports_reasons`**
+   - 根因：`/debug split` handler 还在用旧函数 `_split_naturally`（只输出"分段数:"），但测试期望新切分器 `segment_reply` 的输出（"策略:"、"切分原因:"）。
+   - 修复：`plugins/chat/plugin.py::_handle_debug_split` 改为调 `services.llm.segmentation.segment_reply`，输出策略与各段原因。
+
+4. **`tests/test_sticker_tools.py::test_save_sticker_bot_steal`**
+   - 根因：`SaveStickerTool.execute` 把所有「非管理员发起」一刀切拒绝，但产品语义需要区分三种情况：
+     - admin 自己调 → `source="admin"`
+     - 群聊（无 user_id）但 `requested_by` 是 admin → `source="admin"`
+     - 用户消息触发 bot 主动收（user_id 是普通用户但 `requested_by=admin`）→ `source="stolen"`
+   - 修复：execute 重写授权逻辑，按上述三态分流。
+
+5. **`tests/test_mood.py::test_no_anomaly_has_empty_reason`（全量跑才挂）**
+   - 现象：单独跑 mood 文件通过，全文件按顺序跑则挂。前序测试 `test_anomaly_can_flip_label`(anomaly_chance=1.0) 设了 `profile.anomaly_reason="虽然日程..."`，下一个 `anomaly_chance=0.0` 测试居然继承到了。
+   - **根因（5-Why）**：
+     1. 为什么 anomaly_reason 没清空？→ 因为 `_compute` 拿到的是 `_DEFAULT_MOOD` 的同一引用。
+     2. 为什么是同一引用？→ `if/else: profile = _DEFAULT_MOOD`（`mood.py:162/164`）直接赋值无 copy。
+     3. 为什么 `_lookup_base` 路径就没问题？→ 它末尾 `return MoodProfile(...)` 显式 copy。
+     4. 为什么 fallback 路径没 copy？→ 早期实现遗漏，`_MOOD_BASE` 字典查询路径也是同一引用问题。
+     5. 为什么测试今天才发现？→ 测试运行顺序+当前 hour=0 触发 fallback 分支，恰好 mutate 了模块级单例 `_DEFAULT_MOOD.anomaly_reason`，污染了下一个测试。
+   - 修复：抽 `_copy_base()` static method，所有 `_compute` 取 base 都走 copy。`_lookup_base` 同时改用此方法保持一致。
+
+**改动文件**：
+
+- 新增：`services/slang/errors.py`
+- 修改：`services/slang/__init__.py` `services/slang/store.py` `plugins/slang/plugin.py` `admin/routes/api/slang.py` `services/tools/sticker_tools.py` `plugins/chat/plugin.py` `plugins/schedule/mood.py` `tests/test_image_cache.py`
+
+**验证证据**：
+
+- 修复前：1 errored（collection）+ 6 failed → 修复后 0 failed
+- 全量 pytest：`975 passed, 8 skipped in 9.47s`（8 skipped = 4 image_cache pyvips 缺失 + 4 sticker 预存 skip）
+- ruff：仅 1 个预存 `UP041`（`asyncio.TimeoutError`，本次未引入），其他 86 个预存错误未引入新增
+
+**回滚**：所有修改保留向后兼容（`SlangPlugin` 损坏时静默禁用而非 raise；`SaveStickerTool` 老调用方仍可用）。需要回滚时 `git revert` 单 commit。
+
+---
+
+## 2026-05-14 silent_learn 模式被 element_detector 击穿（紧急修复）
+
+**变更类型**：incident / fix
+
+**故障现象**：群 717096900「烬染无夜」配置 `presence_mode = silent_learn`（仅学习不发言），但 14:57:31 element_detector 命中规则后触发 `element+llm` 路径并实际发送消息：
+
+```text
+2026-05-14 14:57:31 INFO plugins:on_message:142 - element+llm |
+group=717096900 轩(3057089539) reply='阴间死二是这样的，而我们崩坏玩的可就多了'
+```
+
+**根因（5-Why）**：
+
+1. silent_learn 群下 element_detector 仍然主动发了消息 → 它没检查 `ctx.allow_speaking`
+2. 为什么没检查？没有任何插件检查这个字段（echo / food / element_detector 三家全部漏检）
+3. 为什么三家都漏？没有强制约束——`AmadeusPlugin.on_message` 契约里没声明"silent_learn 是否能跑"
+4. 为什么这样设计？bus 不知道哪个 interceptor 会主动 send / 改 trigger
+5. **真根因**：`router.py` 把 `bus.fire_on_message` 放在 `if not allow_speaking: return` **之前**，而 `fire_on_message` 内部对所有 `on_message` 一视同仁——silent_learn 模式下整条 interceptor 链路照样被全量触发
+
+**修复**：内核统一门控（不让插件自查，因为新插件容易再忘）
+
+- [kernel/types.py](kernel/types.py) `AmadeusPlugin` 加类属性 `silent_safe: bool = False` —— 默认 False 是关键，新增 interceptor 默认不被信任，写注释说明：「on_message 仅当满足 *只读、不发消息、不改 ctx.trigger、不触 scheduler.notify* 时才能设 True」
+- [kernel/bus.py](kernel/bus.py) `fire_on_message(ctx, *, silent_mode=False)` 加 `silent_mode` 参数；`silent_mode=True` 时只调用 `silent_safe=True` 的插件
+- [kernel/router.py](kernel/router.py) 把 silent_learn 的早返回路径调整为：先调 `bus.fire_on_message(msg_ctx, silent_mode=True)`（让 slang 之类纯学习插件继续记录），再写日志/timeline，然后 return；active 群仍走原 `fire_on_message(msg_ctx)` 全量链路
+- [plugins/slang/plugin.py](plugins/slang/plugin.py) `SlangPlugin.silent_safe = True` 显式声明（它的 on_message 只 `record_hit` 写库，无副作用）
+- 其他 4 个 interceptor（echo / element_detector / food / bilibili）保留默认 False —— bilibili 虽然只 "return False" 但会改 `ctx.trigger` 触发回复，所以 silent_learn 下也必须跳过
+
+**为什么不是让插件自查**：用户决策走"内核统一门控"。如果让插件自查 `if not ctx.allow_speaking: return False`，每个新写的 interceptor 都得记得加，第六个插件再忘一次就再炸一次。把约束放到契约层，新插件默认 `silent_safe=False` 等于默认安全。
+
+**验证**：
+
+- `uv run pytest --ignore=tests/test_slang_db_integrity.py` 967 通过 / 6 失败（全部是预存与本次无关：image_cache / segmentation / sticker_tools）
+- `tests/test_plugin_bus.py` + `tests/test_slang_plugin.py` 全部 55 通过
+- `docker compose up bot -d --build` 后 bot 正常启动，element detection 规则正常装载（`rules=4`），后续 5 分钟日志中无任何 `element+llm` 或 `element |` 触发记录，silent_learn 群（717096900 / 625618470 / 805836168 / 1092460228 / 477640404 / 963085812）的所有消息均走"收消息 silent_learn"路径
+
+**回滚**：单 PR git revert 即可，无数据库迁移。
+
+**遗留**：`tests/test_slang_db_integrity.py` 预存 ImportError（`SlangDatabaseCorruptError` 未导出）和 6 个失败用例不在本次 scope，独立排查。
+
+---
+
+## 2026-05-14 Admin 前端重构 阶段 3 — LoginView 重构
+
+**变更类型**：refactor / ux / security
+
+LoginView 是阶段 3 的第 4 个视图（计划 §6.1 顺位 7，实际作为剩余视图里"最小先跑通模板"提前到本轮）。完成动作：
+
+**美观（视觉一致性）**：
+
+- 模板继续走"双层构图 + 雾青渐变 + 玻璃磨砂特征卡"骨架，内容沿用 [TheLogo](admin/frontend/src/components/common/TheLogo.vue) + [AppCard](admin/frontend/src/components/common/AppCard.vue) 公共组件
+- 间距全部对齐 token 体系（4 / 8 / 12 / 16 / 24 / 32），删除原来的 14 / 18 / 28 / 34 等异常值；圆角对齐 12 / 16 / 24（24 仅卡片例外）
+- chip 与 feature 卡片背景从 `rgba(255, 255, 255, 0.28/0.34)` 改为 `color-mix(in srgb, var(--om-surface) 70%, transparent)`，浅深主题自适应（旧值在深色下偏白发灰）
+- 删除原 `.dark .login-card` 复式渐变背景兜底（依赖 themeOverrides 自动派生 cardColor）
+
+**易用（交互细节）**：
+
+- 自动 focus 输入框（`onMounted` + `nextTick`），键盘党直接打字
+- Caps Lock 实时检测（`KeyboardEvent.getModifierState('CapsLock')`）→ 输入框下方提示
+- 显示"上次登录时间"（`localStorage.getItem('admin:lastLoginAt')`），登录成功时回写
+- 失败时卡片左右抖动动画（`@keyframes login-card-shake`，0.36s），尊重 `prefers-reduced-motion`
+- 提交按钮 label 三态切换：默认 / 验证中 / 锁定倒计时
+- input `autocomplete="current-password" spellcheck="false"`，配合密码管理器但不提示拼写
+
+**安全（防滥用 + 可见警告）**：
+
+- `auth.login` store 改为返回 `{ ok, error: 'invalid_token' \| 'network_error', status }`，前端区分"Token 无效"和"后端不可达"两类错误（旧版混在 catch 里给一句"网络错误"，掩盖真实原因）
+- 失败计数 → 5 次连续失败锁定 30 秒（`COOLDOWN_THRESHOLD = 5`、`COOLDOWN_SECONDS = 30`），按钮 disabled + label 显示倒计时
+- 非 HTTPS 检测：当 `location.protocol === 'http:'` 且 hostname 不在 localhost / 127.0.0.1 / ::1 白名单内，卡片头部显示警告条"Token 将以明文传输"。本机运维不打扰，外网暴露时立刻可见
+- 错误提示带尝试计数（"Token 无效（已尝试 N/5）"），让用户知道距离锁定还有几次
+
+**规模**：431 行 → 423 行（功能 +5、私写 CSS 节奏对齐 token 后微缩）。`vue-tsc` 0 error，`vite build` 4.83s 通过，新 LoginView 在 entry chunk 内（`AppCard` + `TheLogo` 跟主 bundle 一起加载，无额外 split）。
+
+`docker compose up bot -d --build` 后 `/admin/` HTTP 200、`/api/admin/me` HTTP 401（无 cookie 时正确）。napcat 容器未触碰。
+
+后端 auth 链路（[admin/auth.py](admin/auth.py) 中间件 + [admin/routes/api/auth.py](admin/routes/api/auth.py) `/login` `/logout` `/me`）未改动 — 锁定逻辑只在前端，避免新增服务端状态。这是一个权衡：前端锁定能被绕过（开新标签页就能重置 `failureCount`），但后端 ADMIN_TOKEN 不变下被穷举的风险靠的是 token 本身的熵，前端冷却只是"善意提示"，不是真正的限流。如果未来要做服务端限流，应在 `AdminAuthMiddleware` 加滑动窗口计数（不在本次重构 scope）。
+
+跟踪表 [docs/tracking/web-refactor.md](docs/tracking/web-refactor.md) 同步：阶段 3 LoginView 标记 ✅，剩余 ConfigView / SystemView / SlangView 三项。
+
+---
+
+## 2026-05-14 Admin 前端重构 阶段 1 / 阶段 3 部分收尾
+
+**变更类型**：refactor / chore
+
+用户视觉验收三件套通过：
+
+1. `/admin/design-playground` 浅 / 深主题 — 公共组件（StateBadge / LogPanel / DataToolbar / FieldGroup）渲染正常
+2. DashboardView — 重写后的 Hero + KPI + Sparkline + LogPanel 视觉验收通过
+3. GroupsView — 三 Tab 抽屉 + 概览条 + 门禁分流视觉验收通过
+
+收尾动作：
+
+- **删除 [admin/frontend/src/styles/global.css](admin/frontend/src/styles/global.css) 7 个冗余 `!important` 块**（41 行，含 `.dark .n-card / .n-input / .n-select / .n-tag / .n-drawer / .n-modal / .n-data-table`）。这些规则在 [stores/app.ts](admin/frontend/src/stores/app.ts) 的 `buildThemeOverrides()` common token（cardColor / inputColor / modalColor / tableColor / borderColor / textColor1-3 / placeholderColor）已经全部覆盖，是阶段 1 验收完成前的临时兜底。`!important` 计数 51 → 31，剩余 31 处全部在 keep 区（`.dark .n-button:not(...)` + `.dark .n-menu` 系列 deep 选择器，themeOverrides API 不能表达）
+- `vue-tsc` 0 error，`vite build` 4.70s 通过，bundle 体积无变化
+
+跟踪表 [docs/tracking/web-refactor.md](docs/tracking/web-refactor.md) 同步更新：阶段 1 任务 1.2 标记 ✅、`!important` 审计表所有 redundant 行改"已删除"、阶段 3 三个完成视图（DashboardView / LogsView / GroupsView）的"等用户视觉验收"标记改为"用户视觉验收通过"、补回缺失的 LogsView 完成段、剩余视图编号 3-6 修正为 4-7。下一步进入阶段 3 剩余视图，建议顺序 LoginView → ConfigView → SystemView / SlangView。
+
+---
+
+## 2026-05-14 Admin 静态资源缓存策略分流（修复刷新慢）
+
+**变更类型**：performance
+
+之前 `admin/__init__.py:admin_static_file` 给所有 `/admin/static/*` 一律 `Cache-Control: no-store, max-age=0`，包括 Vite 输出的 `assets/<name>-<hash>.js|css`。这些文件名本身带 8 字符内容 hash，内容变 hash 就变，本来就是 immutable 的资产。结果浏览器每次刷新都重下 ~75 个 chunk / ~1.6MB——慢的不是带宽是 RTT × 请求数。
+
+修复：[admin/\_\_init\_\_.py](admin/__init__.py) 拆头分流——
+
+- `_immutable_asset_headers()` → `public, max-age=31536000, immutable`
+- `_headers_for_asset(path)` → `assets/` 前缀走 immutable，其余（favicon.svg 等根级文件）维持 `no-store`
+- `index.html` 通过 `_spa_index_response()` 仍走 `_spa_headers()`（`no-store` + `clear-site-data: "cache"`），entry 每次都新鲜，所以 hash 变了的 chunk 永远能被新 index.html 引用到
+
+curl 验证：`/admin/` 返回 `no-store, max-age=0`；`/admin/static/assets/*.js` 返回 `public, max-age=31536000, immutable`；`/admin/static/favicon.svg` 仍 `no-store`。第一次访问后刷新只下 index.html（< 1KB）+ 任何变了 hash 的 chunk，其余走 disk cache。
+
+**坑点回填**：第一次 rebuild 后用户反馈"还是慢"。再排查发现 `_spa_headers()` 给 index.html 还挂着 `Clear-Site-Data: "cache"`——浏览器每次访问 `/admin/` 都会把整个 origin 的缓存（包括刚标 immutable 的 hash bundle）一并清空，immutable 头形同虚设。删掉这个指令后才真正生效。Hash 文件名本身就保证 entry 引用变化时旧 chunk 不会被复用，根本不需要 `Clear-Site-Data` 强清。
+
+---
+
+## 2026-05-14 Admin SSE 群活动实时推送 + group access refactor 收尾 + rapidfuzz 依赖补齐
+
+**变更类型**：feature / refactor / dependency / infra
+
+### Admin SSE 群活动实时推送（Q2）
+
+之前 Groups 页 last_message_at / 24h 计数只在 onMounted 拉一次，刷新靠手动。这次把现有 `/api/admin/events` SSE 通道扩成事件驱动：
+
+- 新增 `services/admin_events.py` — 进程内 broker（`publish_group_message` + `subscribe`/`unsubscribe`），bounded queue 防 stall，publisher 永不阻塞。kernel 不能 import admin，所以 broker 落在 services 这个共同依赖层。
+- `kernel/router.py:_collect_group_context` — 自环过滤后立即 `publish_group_message`，覆盖 silent_learn / blocked_users 拦截的群消息也能进 admin。
+- `admin/routes/api/events.py` — 重写：1s tick + drain group queue → `event: group_message`；30s 推一次 `event: group_activity` snapshot 做对账（`MessageLog.group_activity_summary`）。心跳/scheduler 仍 10s 节流。顺手修了 `log_sink_queue` 的 None-guard pyright 报错。
+- `admin/frontend/src/composables/useSSE.ts` — 新增 `onGroupMessage` / `onGroupActivity` 订阅 API（EventTarget 转发，避免 logs 数组膨胀模式被复制）。
+- `admin/frontend/src/views/groups/GroupsView.vue` — `useSSE()` 保活 + `onGroupMessage` 增量更新 last_message_at / 24h 计数 / 用户消息数；`onGroupActivity` 用 server-authoritative snapshot 覆盖防漂移。
+
+**端到端验证**：35s SSE 窗口抓到 `group_message` × 10、`log` × 10、`heartbeat` × 4，活体群消息进入 admin 通道。`event: group_activity` 未在窗口出现是因为 30s 边界未踩上，逻辑上必然推送。
+
+### group access / presence refactor 收尾
+
+启动事故根因：工作区里有未提交的 `kernel/router.py`（652 行 diff）已经按"GroupConfig 加 access/presence 字段、ResolvedGroupConfig 加 presence_mode/access_allowed、MessageContext 加 allow_speaking/group_presence_mode/group_access_allowed"重写，但配套的 `kernel/config.py` + `kernel/types.py` 未同步进工作区——导致 `--build` 烤进半成品镜像，每条群消息都 `AttributeError: 'ResolvedGroupConfig' has no attribute 'presence_mode'` / `'GroupConfig' has no attribute 'allows_learning_group'`。
+
+排查路径：先怀疑是 SSE hook 的 `presence_mode=resolved.presence_mode` 引入的，删掉后第二轮报错指向 `MessageContext` 的 kwarg，再删后第三轮报错指向 `allows_learning_group`——警觉这是一整套未完成的 refactor 而不是单点 bug，停手。在 `git stash@{0}` 里找到了配套的 `kernel/config.py`（含 `GroupAccessConfig` / `GroupPresenceConfig` / `presence_mode` / `access_allowed` / `allows_learning_group` / `allows_active_group` / `presence_mode_for` / `active_access_allowed`）和 `kernel/types.py`（`MessageContext` 加三字段），用 `git checkout stash@{0} -- kernel/config.py kernel/types.py kernel/router.py` 完整恢复 refactor 三件套。容器启动干净，群消息正常处理。
+
+### rapidfuzz 依赖补齐
+
+未提交的 `services/learning_normalizer/normalize.py` 引入 `from rapidfuzz import fuzz`，但 `pyproject.toml` 没声明，导致 build 出来的镜像启动时 `ModuleNotFoundError`。在 `pyproject.toml dependencies` 里加 `rapidfuzz>=3.0.0`，`uv lock` 解到 v3.14.5。
+
+### 上一会话遗留：Q1 set Bot 群名片只改 web 显示
+
+Q1 在前次会话（之前还没 compact）里完成的代码改动这次确认硬盘里都在：
+
+- `admin/routes/api/groups.py` — `_verify_bot_card` / `_verify_group_remark`（`get_group_member_info(no_cache=True)` 回查 Napcat 真值）+ `_build_full_group_payload(inventory_override=...)`（防止 `_discover_groups()` 用 stale `get_group_list()` 覆盖 verified value）+ `set_bot_card` / `set_group_remark_endpoint` 重写为 verify-then-warn。
+- `admin/frontend/src/views/groups/GroupsView.vue` — 收到 `data.warning` 时用 `message.warning(..., {duration: 6000})` 而非 success。
+
+这次重 build 之后 Q1 改动也随容器生效。
+
+### 影响范围
+
+- 所有群消息处理路径（router refactor 收尾）—— `kernel/router.py:_collect_group_context` 现在依赖 `GroupConfig.allows_learning_group/allows_active_group` 两个新方法，`ResolvedGroupConfig` 多了 `presence_mode`/`access_allowed`，`MessageContext` 多了 `allow_speaking`/`group_presence_mode`/`group_access_allowed`。
+- Admin Groups 页：last_message_at / 24h 计数在 1s 内随群消息更新，30s 全量对账。
+- 依赖链：新增 rapidfuzz>=3.0.0（learning_normalizer 模糊匹配）。
+
+### 回滚方案
+
+如果 group access refactor 的逻辑分歧太大要重审：`git stash` + `git checkout HEAD -- kernel/router.py kernel/types.py kernel/config.py`，回到 v1.4.0 baseline。SSE 6 行（`publish_group_message` + `import` + `services/admin_events.py` + `events.py` 重写 + `useSSE.ts` 扩展）独立于 refactor，可单独保留——回滚后只需把 `_collect_group_context` 里的 `publish_group_message` 调用搬到旧版本对应位置即可。
+
+### 事故复盘
+
+- 未提交工作区改动 + `docker compose --build` 是雷区：build 把工作区当时的"瞬时半成品"烤进镜像，跟 git tag 含义脱节。下次 release 应当 `git add` 后 commit 再 build。
+- `git stash` 用于"隔离对照"是反模式——pop 失败一次就把所有改动卷走。要做 baseline 对比，应该用 `git diff HEAD` / `git show` 而不是 stash。
+
+---
+
 ## 2026-05-14 LogsView 二轮重设计 + Docker 磁盘事故恢复
 
 **变更类型**：frontend / UX / infra

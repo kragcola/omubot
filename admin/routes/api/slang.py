@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
-from services.slang import SlangExtractor, SlangSettings, SlangStore, normalize_term
+from services.slang import (
+    SlangDatabaseCorruptError,
+    SlangExtractor,
+    SlangSettings,
+    SlangStore,
+    normalize_term,
+)
 from services.slang.types import (
     SlangDriftReview,
     SlangExtractionRun,
@@ -159,7 +168,28 @@ def create_slang_router(
     llm_client: Any = None,
     store: SlangStore | None = None,
 ) -> APIRouter:
-    router = APIRouter()
+    class _SlangCorruptGuardRoute(APIRoute):
+        def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Any]]:
+            original = super().get_route_handler()
+
+            async def handler(request: Request) -> Any:
+                try:
+                    return await original(request)
+                except SlangDatabaseCorruptError as exc:
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "ok": False,
+                            "error_code": "slang_db_corrupt",
+                            "message": "黑话数据库损坏，请运行恢复脚本后重启 bot。",
+                            "db_path": exc.db_path,
+                            "repair_script": "scripts/dev/slang_db_repair.py",
+                        },
+                    )
+
+            return handler
+
+    router = APIRouter(route_class=_SlangCorruptGuardRoute)
     fallback_store: SlangStore | None = store
 
     def _plugin() -> Any:
@@ -178,8 +208,9 @@ def create_slang_router(
             return ctx_store
         if fallback_store is None:
             storage_dir = Path(getattr(ctx, "storage_dir", Path("storage"))) if ctx is not None else Path("storage")
-            fallback_store = SlangStore(storage_dir / "slang.db")
-            await fallback_store.init()
+            candidate = SlangStore(storage_dir / "slang.db")
+            await candidate.init()
+            fallback_store = candidate
             if ctx is not None:
                 ctx.slang_store = fallback_store
         elif not fallback_store.initialized:

@@ -538,19 +538,28 @@ class ChatPlugin(AmadeusPlugin):
         await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[send_sticker] {result}"))
 
     async def _handle_debug_split(self, cmd_ctx: Any) -> None:
-        """Handle /debug split — test _split_naturally on arbitrary text."""
+        """Handle /debug split — test reply segmentation on arbitrary text."""
         from nonebot.adapters.onebot.v11 import Message
 
-        from services.llm.client import _split_naturally
+        from services.llm.segmentation import ReplySegmentationConfig, segment_reply
 
         text = cmd_ctx.args.strip()
-        segments = _split_naturally(text)
-        output = f"输入: {text}\n分段数: {len(segments)}\n---\n"
-        for i, seg in enumerate(segments, 1):
-            output += f"[{i}] {seg}\n"
+        cfg = getattr(getattr(self._ctx, "config", None), "reply_segmentation", None)
+        if not isinstance(cfg, ReplySegmentationConfig):
+            cfg = ReplySegmentationConfig()
+        result = segment_reply(text, cfg)
+        lines = [
+            f"输入: {text}",
+            f"分段数: {len(result.segments)}",
+            f"策略: {result.strategy}",
+            f"切分原因: {', '.join(result.break_reasons) if result.break_reasons else '无'}",
+            "---",
+        ]
+        for i, seg in enumerate(result.segments, 1):
+            lines.append(f"[{i}] {seg.text}（{seg.reason}）")
 
-        logger.info("debug split | input_len={} segments={}", len(text), len(segments))
-        await cmd_ctx.bot.send(cmd_ctx.event, Message(output.strip()))
+        logger.info("debug split | input_len={} segments={}", len(text), len(result.segments))
+        await cmd_ctx.bot.send(cmd_ctx.event, Message("\n".join(lines).strip()))
 
     async def on_startup(self, ctx: PluginContext) -> None:
         self._ctx = ctx
