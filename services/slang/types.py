@@ -16,6 +16,8 @@ VALID_STATUSES: set[str] = {"candidate", "approved", "muted", "expired"}
 VALID_SCOPES: set[str] = {"group", "global"}
 VALID_REPEAT_POLICIES: set[str] = {"understand_only", "allow_rephrase", "allow_use"}
 
+DEFAULT_DAILY_AI_REVIEW_TIMES: tuple[str, ...] = ("04:00", "16:00")
+
 
 class SlangSettings(BaseModel):
     """Runtime-editable settings for slang learning and injection."""
@@ -24,6 +26,11 @@ class SlangSettings(BaseModel):
     injection_enabled: bool = True
     review_required: bool = True
     max_injected_terms: int = Field(default=8, ge=1, le=30)
+    # Cap how many *non-direct-hit* approved terms can ride along the prompt
+    # block as group background context. Direct-hit terms are not capped here;
+    # they are bounded only by `max_injected_terms` total.  Set to 0 to inject
+    # only terms whose surface form appears in the current conversation.
+    max_indirect_inject_terms: int = Field(default=2, ge=0, le=30)
     extract_interval_minutes: int = Field(default=30, ge=1, le=24 * 60)
     candidate_min_count: int = Field(default=2, ge=1, le=50)
     group_allowlist: list[str] = Field(default_factory=list)
@@ -36,14 +43,26 @@ class SlangSettings(BaseModel):
     stoplist: list[str] = Field(default_factory=list)
     max_prompt_chars: int = Field(default=1200, ge=300, le=6000)
     daily_ai_review_enabled: bool = True
-    daily_ai_review_time: str = Field(default="04:30", pattern=r"^\d{2}:\d{2}$")
+    daily_ai_review_times: list[str] = Field(default_factory=lambda: list(DEFAULT_DAILY_AI_REVIEW_TIMES))
     daily_ai_review_search_enabled: bool = True
     daily_ai_auto_approve_enabled: bool = False
     daily_ai_auto_approve_min_confidence: float = Field(default=0.82, ge=0.0, le=1.0)
     daily_ai_max_terms_per_group: int = Field(default=5, ge=1, le=30)
     daily_ai_recent_message_limit: int = Field(default=200, ge=20, le=1000)
+    backlog_review_enabled: bool = True
+    backlog_review_batch_size: int = Field(default=50, ge=10, le=200)
+    backlog_review_min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    backlog_review_min_usage_count: int = Field(default=3, ge=1, le=20)
+    backlog_review_search_enabled: bool = True
+    backlog_auto_approve_enabled: bool = False
+    backlog_auto_approve_min_confidence: float = Field(default=0.82, ge=0.0, le=1.0)
+    backlog_kept_streak_limit: int = Field(default=2, ge=1, le=10)
+    backlog_local_evidence_count: int = Field(default=5, ge=0, le=20)
+    backlog_threshold_gating_enabled: bool = True
     drift_detection_enabled: bool = True
     drift_min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
+    drift_semantic_gate_enabled: bool = True
+    drift_age_out_days: int = Field(default=14, ge=0, le=180)
     lookup_tool_enabled: bool = True
     min_inject_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     semantic_backend: SemanticBackend = "ngram"
@@ -70,15 +89,43 @@ class SlangSettings(BaseModel):
             return [str(item).strip() for item in value if str(item).strip()]
         return []
 
-    @field_validator("daily_ai_review_time")
+    @field_validator("daily_ai_review_times", mode="before")
     @classmethod
-    def _validate_daily_ai_review_time(cls, value: str) -> str:
-        hour_text, minute_text = str(value or "04:30").split(":", 1)
-        hour = int(hour_text)
-        minute = int(minute_text)
-        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-            raise ValueError("daily_ai_review_time must be HH:MM")
-        return f"{hour:02d}:{minute:02d}"
+    def _normalize_daily_ai_review_times(cls, value: Any) -> list[str]:
+        if value is None or value == "":
+            return list(DEFAULT_DAILY_AI_REVIEW_TIMES)
+        if isinstance(value, str):
+            raw_items: list[str] = [
+                part.strip()
+                for part in value.replace("，", ",").split(",")
+                if part.strip()
+            ]
+        elif isinstance(value, (list, tuple)):
+            raw_items = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            return list(DEFAULT_DAILY_AI_REVIEW_TIMES)
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for item in raw_items:
+            if ":" not in item:
+                raise ValueError(f"daily_ai_review_times entry must be HH:MM, got {item!r}")
+            hour_text, minute_text = item.split(":", 1)
+            try:
+                hour = int(hour_text)
+                minute = int(minute_text)
+            except ValueError as err:
+                raise ValueError(f"daily_ai_review_times entry must be HH:MM, got {item!r}") from err
+            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+                raise ValueError(f"daily_ai_review_times entry out of range: {item!r}")
+            canonical = f"{hour:02d}:{minute:02d}"
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            normalized.append(canonical)
+        if not normalized:
+            return list(DEFAULT_DAILY_AI_REVIEW_TIMES)
+        normalized.sort()
+        return normalized
 
     @field_validator("semantic_backend")
     @classmethod

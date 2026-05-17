@@ -397,3 +397,205 @@ async def test_slang_store_v3_reject_and_alias_drift_review(tmp_path):
         assert rejected[0].term_id == term.term_id
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mark_stale_running_runs_closes_orphan_runs(tmp_path):
+    store = SlangStore(tmp_path / "slang.db")
+    await store.init()
+    try:
+        # Two runs left in 'running' state by a prior crash
+        run_a = await store.start_extraction_run(group_count=3)
+        run_b = await store.start_extraction_run(group_count=2)
+        # Plus one healthy completed run
+        run_c = await store.start_extraction_run(group_count=1)
+        await store.finish_extraction_run(run_c, status="success", scanned_messages=5, extracted_terms=1)
+
+        cleared = await store.mark_stale_running_runs()
+        assert cleared == 2
+
+        runs = await store.list_extraction_runs(limit=10)
+        by_id = {run.run_id: run for run in runs}
+        assert by_id[run_a].status == "abandoned"
+        assert by_id[run_b].status == "abandoned"
+        assert by_id[run_c].status == "success"
+        # Subsequent calls find nothing to do
+        assert await store.mark_stale_running_runs() == 0
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_find_existing_reverse_aliases_block_mirror_collision(tmp_path):
+    """Two candidates that mirror each other (A:[B] vs B:[A]) must not both
+    persist as separate rows.  The second insert should resolve to the first."""
+    store = SlangStore(tmp_path / "slang.db")
+    await store.init()
+    try:
+        first = await store.upsert_candidate(
+            term="ptt",
+            meaning="potential，节奏游戏中的实力分",
+            aliases=["pjsk"],
+            group_id="993",
+            user_id="u1",
+            confidence=0.6,
+            reason="seed",
+        )
+        assert first is not None
+
+        # Mirror collision: same group, primary key swapped with alias.
+        # Without the alias-aware lookup this would create a new row;
+        # with the fix it must resolve to the first term.
+        second = await store.upsert_candidate(
+            term="pjsk",
+            meaning="Project Sekai 节奏游戏",
+            aliases=["ptt"],
+            group_id="993",
+            user_id="u2",
+            confidence=0.7,
+            reason="mirror",
+        )
+        assert second == first, (
+            "mirror collision should resolve to existing term_id, not create a new row"
+        )
+
+        # Different group is *not* a collision: same key in another scope is fine.
+        third = await store.upsert_candidate(
+            term="pjsk",
+            meaning="另一群里的同名词",
+            aliases=["ptt"],
+            group_id="994",
+            user_id="u3",
+            confidence=0.6,
+        )
+        assert third is not None and third != first
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_find_existing_alias_lookup_explicit(tmp_path):
+    """find_existing() called with aliases must reverse-match into a stored
+    term whose primary key equals one of the candidate aliases."""
+    store = SlangStore(tmp_path / "slang.db")
+    await store.init()
+    try:
+        seed = await store.upsert_candidate(
+            term="原神",
+            meaning="米哈游游戏",
+            aliases=["genshin"],
+            group_id="100",
+            user_id="u1",
+        )
+        assert seed is not None
+
+        # Candidate uses 'genshin' as primary; aliases list does NOT include
+        # '原神'.  Without alias-aware lookup the new term has no overlap with
+        # the seed's term_key, but the seed's aliases contain 'genshin'.
+        existing = await store.find_existing(
+            term="genshin", group_id="100", scope="group", aliases=[],
+        )
+        assert existing is not None and existing.term_id == seed
+
+        # Symmetric direction: candidate primary doesn't exist, but its alias
+        # equals the seed's primary key.
+        existing2 = await store.find_existing(
+            term="ys", group_id="100", scope="group", aliases=["原神"],
+        )
+        assert existing2 is not None and existing2.term_id == seed
+
+        # Empty/whitespace-only candidates short-circuit safely.
+        assert await store.find_existing(
+            term="", group_id="100", scope="group", aliases=["", "   "],
+        ) is None
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_get_injectable_terms_caps_indirect_terms(tmp_path):
+    """Approved terms that don't appear in conversation_text must be capped
+    by max_indirect_terms instead of riding the full max_terms budget."""
+    store = SlangStore(tmp_path / "slang.db")
+    await store.init()
+    try:
+        # 5 approved terms, none referenced in conversation_text.
+        seeds = ["梗一", "梗二", "梗三", "梗四", "梗五"]
+        for label in seeds:
+            term_id = await store.upsert_candidate(
+                term=label, meaning=f"{label}的含义",
+                group_id="500", user_id="u1", confidence=0.8,
+            )
+            assert term_id is not None
+            await store.set_status(term_id, "approved")
+
+        # No direct hit, indirect cap = 0 → empty result.
+        zero_cap = await store.get_injectable_terms(
+            group_id="500", conversation_text="完全无关的内容",
+            max_terms=8, max_indirect_terms=0,
+        )
+        assert zero_cap == []
+
+        # Indirect cap = 2 → only top 2 approved terms by rank.
+        two_cap = await store.get_injectable_terms(
+            group_id="500", conversation_text="完全无关的内容",
+            max_terms=8, max_indirect_terms=2,
+        )
+        assert len(two_cap) == 2
+
+        # Direct hit + indirect cap = 1 → 1 direct + 1 indirect = 2 total.
+        mixed = await store.get_injectable_terms(
+            group_id="500", conversation_text="今天又看到梗三了",
+            max_terms=8, max_indirect_terms=1,
+        )
+        assert len(mixed) == 2
+        assert mixed[0].term == "梗三"  # direct hit ranks first
+
+        # Default behavior (None) falls back to max_terms-equivalent unlimited
+        # in this internal API; build_prompt_block applies the settings cap.
+        full = await store.get_injectable_terms(
+            group_id="500", conversation_text="完全无关的内容",
+            max_terms=8, max_indirect_terms=None,
+        )
+        assert len(full) == 5
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_block_respects_max_indirect_setting(tmp_path):
+    """build_prompt_block must read settings.max_indirect_inject_terms when the
+    caller doesn't override it."""
+    store = SlangStore(tmp_path / "slang.db")
+    await store.init()
+    try:
+        for label in ["背景一", "背景二", "背景三", "背景四"]:
+            term_id = await store.upsert_candidate(
+                term=label, meaning=f"{label}解释",
+                group_id="600", user_id="u1", confidence=0.8,
+            )
+            assert term_id is not None
+            await store.set_status(term_id, "approved")
+
+        # Tighten the indirect cap via settings; conversation has no direct hit.
+        settings = await store.load_settings()
+        settings.max_indirect_inject_terms = 1
+        await store.save_settings(settings)
+
+        block = await store.build_prompt_block(
+            group_id="600", conversation_text="毫无相关词的对话",
+            max_terms=8, max_chars=2000,
+        )
+        # Header + exactly one bullet line.
+        bullet_lines = [line for line in block.split("\n") if line.startswith("- ")]
+        assert len(bullet_lines) == 1, f"expected 1 indirect term, got: {block!r}"
+
+        # Caller can still override.
+        block2 = await store.build_prompt_block(
+            group_id="600", conversation_text="毫无相关词的对话",
+            max_terms=8, max_chars=2000, max_indirect_terms=3,
+        )
+        bullet_lines2 = [line for line in block2.split("\n") if line.startswith("- ")]
+        assert len(bullet_lines2) == 3
+    finally:
+        await store.close()

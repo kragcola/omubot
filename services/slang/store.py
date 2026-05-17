@@ -352,10 +352,62 @@ def _term_stats_dict(term: SlangTerm) -> dict[str, Any]:
 
 
 def _ai_review_sql_condition() -> str:
+    """Legacy name — detects AI-approved terms. Use _ai_approved_sql_condition() for new code."""
+    return _ai_approved_sql_condition()
+
+
+def _ai_approved_sql_condition() -> str:
+    """AI conclusion is 'approved'. Covers daily (ai_approved=true) and new contract (ai_review_decision='approved')."""
     return (
         "(source = 'ai_auto_review' "
         "OR meta_json LIKE '%\"ai_approved\": true%' "
-        "OR meta_json LIKE '%\"ai_approved\":true%')"
+        "OR meta_json LIKE '%\"ai_approved\":true%' "
+        "OR meta_json LIKE '%\"ai_review_decision\": \"approved\"%' "
+        "OR meta_json LIKE '%\"ai_review_decision\":\"approved\"%')"
+    )
+
+
+def _ai_reviewed_sql_condition() -> str:
+    """AI has reviewed this term (regardless of conclusion). Detects ai_reviewed_at timestamp."""
+    return (
+        "(source = 'ai_auto_review' "
+        "OR meta_json LIKE '%\"ai_reviewed_at\": \"%' "
+        "OR meta_json LIKE '%\"ai_reviewed_at\":\"%')"
+    )
+
+
+# Frequency-stair gating: a term re-enters the backlog reviewer only when its
+# usage_count crosses one of these thresholds since its last AI review. Reviewed
+# terms that haven't re-crossed a threshold are skipped to save tokens.
+_BACKLOG_THRESHOLD_GATE_SQL = (
+    " AND ("
+    "  (meta_json NOT LIKE '%\"last_inference_count\":%')"
+    "  OR ("
+    "    CAST(json_extract(meta_json, '$.last_inference_count') AS INTEGER) < 3 AND usage_count >= 3"
+    "  ) OR ("
+    "    CAST(json_extract(meta_json, '$.last_inference_count') AS INTEGER) < 8 AND usage_count >= 8"
+    "  ) OR ("
+    "    CAST(json_extract(meta_json, '$.last_inference_count') AS INTEGER) < 30 AND usage_count >= 30"
+    "  ) OR ("
+    "    CAST(json_extract(meta_json, '$.last_inference_count') AS INTEGER) < 100 AND usage_count >= 100"
+    "  )"
+    ")"
+)
+
+
+def _ai_rejected_sql_condition() -> str:
+    """AI conclusion is 'rejected' (explicit deny, not kept/ambiguous)."""
+    return (
+        "(meta_json LIKE '%\"ai_review_decision\": \"rejected\"%' "
+        "OR meta_json LIKE '%\"ai_review_decision\":\"rejected\"%')"
+    )
+
+
+def _ai_kept_sql_condition() -> str:
+    """AI conclusion is 'kept' (ambiguous, under observation)."""
+    return (
+        "(meta_json LIKE '%\"ai_review_decision\": \"kept\"%' "
+        "OR meta_json LIKE '%\"ai_review_decision\":\"kept\"%')"
     )
 
 
@@ -369,9 +421,19 @@ def _human_reviewed_sql_condition() -> str:
 class SlangStore:
     """Manage slang terms, observations, and runtime settings."""
 
-    def __init__(self, db_path: str | Path = "storage/slang.db") -> None:
+    def __init__(
+        self,
+        db_path: str | Path = "storage/slang.db",
+        *,
+        drift_reviewer: Any = None,
+    ) -> None:
         self._db_path = str(db_path)
         self._db: aiosqlite.Connection | None = None
+        self._drift_reviewer: Any = drift_reviewer
+
+    def set_drift_reviewer(self, drift_reviewer: Any) -> None:
+        """Allow late binding once the LLM client is wired into the plugin."""
+        self._drift_reviewer = drift_reviewer
 
     async def init(self) -> None:
         db: aiosqlite.Connection | None = None
@@ -477,7 +539,7 @@ class SlangStore:
             return None
         db = self._require_db()
         cursor = await db.execute(
-            """SELECT drift_id FROM slang_drift_reviews
+            """SELECT drift_id, meta_json FROM slang_drift_reviews
                WHERE term_id = ? AND status = 'open'
                ORDER BY updated_at DESC
                LIMIT 1""",
@@ -492,6 +554,101 @@ class SlangStore:
         }
         if row is not None:
             drift_id = row["drift_id"]
+            existing_drift_meta = _json_loads(row["meta_json"], {})
+            if not isinstance(existing_drift_meta, dict):
+                existing_drift_meta = {}
+            already_reviewed = bool(existing_drift_meta.get("drift_semantic_reviewed"))
+            # Existing open row: run the LLM gate at most once. Subsequent
+            # UPDATEs after the gate has already classified it skip the LLM
+            # call but still refresh new_meaning / evidence on the row so the
+            # admin keeps seeing the latest evidence text.
+            gate_decision: str | None = None
+            if (
+                not already_reviewed
+                and settings.drift_semantic_gate_enabled
+                and self._drift_reviewer is not None
+            ):
+                try:
+                    assessment = await self._drift_reviewer.review_drift(
+                        existing=existing,
+                        new_meaning=new_meaning,
+                        aliases=aliases,
+                        evidence=evidence,
+                        confidence=confidence,
+                        reason=reason,
+                    )
+                except Exception:
+                    assessment = None
+                if assessment is not None and assessment.reviewed and not assessment.error:
+                    drift_meta.update(assessment.to_meta())
+                    if assessment.verdict == "same_meaning":
+                        gate_decision = "auto_dismissed"
+                    elif assessment.verdict == "alias_candidate":
+                        gate_decision = "auto_aliased"
+                    else:
+                        gate_decision = "reviewed_real_drift"
+            merged_drift_meta = {**existing_drift_meta, **drift_meta}
+            if gate_decision == "auto_dismissed":
+                merged_drift_meta["drift_semantic_reviewed"] = True
+                await db.execute(
+                    """UPDATE slang_drift_reviews
+                       SET new_meaning = ?, aliases_json = ?, evidence = ?, confidence = ?,
+                           reason = ?, updated_at = ?, meta_json = ?, status = 'auto_dismissed'
+                       WHERE drift_id = ?""",
+                    (
+                        new_meaning,
+                        json.dumps(_dedupe([*existing.aliases, *aliases]), ensure_ascii=False),
+                        str(evidence or "")[:2000],
+                        max(0.0, min(1.0, confidence)),
+                        str(reason or "")[:800],
+                        now,
+                        json.dumps(merged_drift_meta, ensure_ascii=False),
+                        drift_id,
+                    ),
+                )
+                await db.commit()
+                await self.record_revision(
+                    existing.term_id,
+                    action="drift_dismissed",
+                    after={"drift_id": drift_id, "verdict": "same_meaning"},
+                    reason=str(merged_drift_meta.get("drift_semantic_reason") or "drift_semantic_same_meaning"),
+                    meta=merged_drift_meta,
+                )
+                return None
+            if gate_decision == "auto_aliased":
+                merged_drift_meta["drift_semantic_reviewed"] = True
+                merged_aliases = _dedupe([*existing.aliases, *aliases])
+                if merged_aliases != existing.aliases:
+                    await self.update_term(
+                        existing.term_id,
+                        aliases=merged_aliases,
+                        revision_action="drift_aliased_auto",
+                        revision_reason=str(merged_drift_meta.get("drift_semantic_reason") or "drift_semantic_alias"),
+                        revision_meta=merged_drift_meta,
+                    )
+                await db.execute(
+                    """UPDATE slang_drift_reviews
+                       SET new_meaning = ?, aliases_json = ?, evidence = ?, confidence = ?,
+                           reason = ?, updated_at = ?, meta_json = ?, status = 'auto_aliased'
+                       WHERE drift_id = ?""",
+                    (
+                        new_meaning,
+                        json.dumps(merged_aliases, ensure_ascii=False),
+                        str(evidence or "")[:2000],
+                        max(0.0, min(1.0, confidence)),
+                        str(reason or "")[:800],
+                        now,
+                        json.dumps(merged_drift_meta, ensure_ascii=False),
+                        drift_id,
+                    ),
+                )
+                await db.commit()
+                return None
+            # real_drift / unclear / no gate run: keep status 'open', just UPDATE.
+            # If the gate did run and returned a decisive verdict (real_drift /
+            # unclear), stamp the meta so we don't re-pay LLM next pass.
+            if gate_decision == "reviewed_real_drift":
+                merged_drift_meta["drift_semantic_reviewed"] = True
             await db.execute(
                 """UPDATE slang_drift_reviews
                    SET new_meaning = ?, aliases_json = ?, evidence = ?, confidence = ?,
@@ -504,12 +661,69 @@ class SlangStore:
                     max(0.0, min(1.0, confidence)),
                     str(reason or "")[:800],
                     now,
-                    json.dumps(drift_meta, ensure_ascii=False),
+                    json.dumps(merged_drift_meta, ensure_ascii=False),
                     drift_id,
                 ),
             )
             await db.commit()
             return drift_id
+
+        # First-time drift detection: run LLM semantic gate before creating a row.
+        # Existing open records skip this gate (already reviewed once) so we don't
+        # re-pay LLM cost on every update.
+        if settings.drift_semantic_gate_enabled and self._drift_reviewer is not None:
+            try:
+                assessment = await self._drift_reviewer.review_drift(
+                    existing=existing,
+                    new_meaning=new_meaning,
+                    aliases=aliases,
+                    evidence=evidence,
+                    confidence=confidence,
+                    reason=reason,
+                )
+            except Exception:
+                assessment = None
+            if assessment is not None and assessment.reviewed and not assessment.error:
+                drift_meta.update(assessment.to_meta())
+                if assessment.verdict == "same_meaning":
+                    await self.record_revision(
+                        existing.term_id,
+                        action="drift_dismissed",
+                        before=_term_revision_snapshot(existing),
+                        after={
+                            "new_meaning": new_meaning,
+                            "verdict": assessment.verdict,
+                            "confidence": confidence,
+                        },
+                        reason=assessment.reason or "drift_semantic_same_meaning",
+                        meta=drift_meta,
+                    )
+                    return None
+                if assessment.verdict == "alias_candidate":
+                    merged_aliases = _dedupe([*existing.aliases, *aliases])
+                    if merged_aliases != existing.aliases:
+                        await self.update_term(
+                            existing.term_id,
+                            aliases=merged_aliases,
+                            revision_action="drift_aliased_auto",
+                            revision_reason=assessment.reason or "drift_semantic_alias",
+                            revision_meta=drift_meta,
+                        )
+                    else:
+                        await self.record_revision(
+                            existing.term_id,
+                            action="drift_aliased_auto",
+                            before=_term_revision_snapshot(existing),
+                            after={
+                                "new_meaning": new_meaning,
+                                "verdict": assessment.verdict,
+                                "aliases": merged_aliases,
+                            },
+                            reason=assessment.reason or "drift_semantic_alias",
+                            meta=drift_meta,
+                        )
+                    return None
+                # real_drift / unclear → fall through and create the row.
         drift_id = _new_id("drift")
         await db.execute(
             """INSERT INTO slang_drift_reviews
@@ -604,27 +818,73 @@ class SlangStore:
         )
         await db.commit()
 
-    async def find_existing(self, *, term: str, group_id: str, scope: SlangScope = "group") -> SlangTerm | None:
+    async def find_existing(
+        self,
+        *,
+        term: str,
+        group_id: str,
+        scope: SlangScope = "group",
+        aliases: list[str] | None = None,
+    ) -> SlangTerm | None:
+        """Locate an existing term whose key OR any alias collides with the
+        candidate's key OR any of its aliases.
+
+        Symmetric lookup: the candidate's `term` and every entry in `aliases`
+        are folded into a single set of normalized keys, then we match against
+        both stored `term_key` and stored `aliases_json`.  This prevents the
+        mirror-collision pattern (A:[B] vs B:[A]) where two candidates each
+        list the other's primary key as an alias and neither side detects
+        duplication.
+        """
         key = normalize_term(term)
-        if not key:
+        candidate_keys: set[str] = set()
+        if key:
+            candidate_keys.add(key)
+        for alias in aliases or []:
+            normalized = normalize_term(alias)
+            if normalized:
+                candidate_keys.add(normalized)
+        if not candidate_keys:
             return None
         db = self._require_db()
-        cursor = await db.execute(
-            "SELECT * FROM slang_terms WHERE term_key = ? AND scope = ? AND group_id = ?",
-            (key, scope, "" if scope == "global" else group_id),
-        )
-        row = await cursor.fetchone()
-        if row:
-            return _row_to_term(row)
+        scope_group = "" if scope == "global" else group_id
 
+        # 1. Direct term_key hit, prefer matching the primary key first so the
+        #    return order is deterministic when the candidate's own key already
+        #    exists (most common case).
+        if key:
+            cursor = await db.execute(
+                "SELECT * FROM slang_terms WHERE term_key = ? AND scope = ? AND group_id = ?",
+                (key, scope, scope_group),
+            )
+            row = await cursor.fetchone()
+            if row:
+                return _row_to_term(row)
+
+        # 2. Any alias key matches an existing term_key.
+        alias_keys_only = candidate_keys - ({key} if key else set())
+        if alias_keys_only:
+            placeholders = ",".join("?" for _ in alias_keys_only)
+            cursor = await db.execute(
+                f"SELECT * FROM slang_terms "
+                f"WHERE scope = ? AND group_id = ? AND term_key IN ({placeholders})",
+                (scope, scope_group, *alias_keys_only),
+            )
+            row = await cursor.fetchone()
+            if row:
+                return _row_to_term(row)
+
+        # 3. Any candidate key (term or alias) appears in an existing term's
+        #    alias list. We can't index aliases_json, so scope-bound full scan.
         cursor = await db.execute(
             "SELECT * FROM slang_terms WHERE scope = ? AND group_id = ?",
-            (scope, "" if scope == "global" else group_id),
+            (scope, scope_group),
         )
-        for candidate in await cursor.fetchall():
-            term_obj = _row_to_term(candidate)
-            alias_keys = {normalize_term(alias) for alias in term_obj.aliases}
-            if key in alias_keys:
+        for stored in await cursor.fetchall():
+            term_obj = _row_to_term(stored)
+            stored_alias_keys = {normalize_term(alias) for alias in term_obj.aliases}
+            stored_alias_keys.discard("")
+            if candidate_keys & stored_alias_keys:
                 return term_obj
         return None
 
@@ -739,7 +999,12 @@ class SlangStore:
         if row is None:
             return None
         pending = _row_to_pending(row)
-        existing = await self.find_existing(term=pending.term, group_id=pending.group_id, scope="group")
+        existing = await self.find_existing(
+            term=pending.term,
+            group_id=pending.group_id,
+            scope="group",
+            aliases=pending.aliases,
+        )
         if existing:
             await db.execute("DELETE FROM slang_pending_candidates WHERE pending_id = ?", (pending_id,))
             await db.commit()
@@ -815,7 +1080,9 @@ class SlangStore:
         if repeat_policy not in VALID_REPEAT_POLICIES:
             repeat_policy = "understand_only"
 
-        existing = await self.find_existing(term=term, group_id=group_id, scope="group")
+        existing = await self.find_existing(
+            term=term, group_id=group_id, scope="group", aliases=aliases,
+        )
         if existing and existing.status in {"muted", "expired"}:
             return existing.term_id
         if existing:
@@ -960,7 +1227,12 @@ class SlangStore:
         if scope == "group" and not normalized_group_id:
             raise ValueError("group_id is required for group scope")
 
-        existing = await self.find_existing(term=term_value, group_id=normalized_group_id, scope=scope)
+        existing = await self.find_existing(
+            term=term_value,
+            group_id=normalized_group_id,
+            scope=scope,
+            aliases=aliases or [],
+        )
         if existing is not None:
             raise ValueError("term already exists in this scope")
 
@@ -994,7 +1266,14 @@ class SlangStore:
                 str(source or "manual"),
                 repeat_policy,
                 str(notes or ""),
-                json.dumps({"manual": source == "manual", **(meta or {})}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "manual": source == "manual",
+                        **(meta or {}),
+                        **({"human_reviewed": True, "reviewed_at": now} if source == "manual" else {}),
+                    },
+                    ensure_ascii=False,
+                ),
                 now,
                 now,
             ),
@@ -1061,10 +1340,14 @@ class SlangStore:
             "ai_approved": True,
             "human_reviewed": False,
             "ai_reviewed_at": now,
+            "ai_review_source": "daily",
+            "ai_review_decision": "approved",
             "ai_reason": reason,
             "llm_confidence": confidence_value,
         }
-        existing = await self.find_existing(term=term, group_id=str(group_id), scope="group")
+        existing = await self.find_existing(
+            term=term, group_id=str(group_id), scope="group", aliases=aliases,
+        )
         if existing and existing.status in {"muted", "expired"}:
             return existing.term_id
 
@@ -1357,6 +1640,7 @@ class SlangStore:
         review_filter: str = "",
         limit: int = 50,
         offset: int = 0,
+        sort_by: str = "updated_desc",
     ) -> tuple[list[SlangTerm], int]:
         db = self._require_db()
         where: list[str] = []
@@ -1379,26 +1663,131 @@ class SlangStore:
         if min_confidence is not None:
             where.append("confidence >= ?")
             values.append(float(min_confidence))
+        ai_reviewed_any = _ai_reviewed_sql_condition()
+        ai_rejected = _ai_rejected_sql_condition()
+        ai_kept = _ai_kept_sql_condition()
         if review_filter == "ai_approved":
             where.append(ai_reviewed)
+        elif review_filter == "unreviewed":
+            where.append(f"NOT {ai_reviewed_any}")
+        elif review_filter == "pending_all":
+            where.append(f"status = 'candidate' AND (NOT {ai_reviewed_any} OR {ai_kept})")
         elif review_filter == "needs_human_review":
             where.append(f"status = 'approved' AND {ai_reviewed} AND NOT {human_reviewed}")
         elif review_filter == "human_reviewed":
             where.append(human_reviewed)
+        elif review_filter == "human_reviewed_only":
+            where.append(f"status = 'approved' AND {human_reviewed}")
+        elif review_filter == "under_observation":
+            where.append(f"status = 'candidate' AND {ai_reviewed_any} AND {ai_kept}")
+        elif review_filter == "ai_rejected_only":
+            where.append(f"status = 'muted' AND {ai_rejected} AND NOT {human_reviewed}")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         count_cursor = await db.execute(f"SELECT COUNT(*) AS cnt FROM slang_terms {where_sql}", values)
         total = int((await count_cursor.fetchone())["cnt"])
+        # Sort presets — secondary keys keep ordering stable when the primary key ties.
+        sort_clauses: dict[str, str] = {
+            "updated_desc": "updated_at DESC, confidence DESC, term_id DESC",
+            "updated_asc": "updated_at ASC, confidence DESC, term_id DESC",
+            "confidence_desc": "confidence DESC, usage_count DESC, updated_at DESC, term_id DESC",
+            "usage_desc": "usage_count DESC, confidence DESC, updated_at DESC, term_id DESC",
+        }
+        order_sql = sort_clauses.get(sort_by, sort_clauses["updated_desc"])
         cursor = await db.execute(
             f"""SELECT * FROM slang_terms {where_sql}
-                ORDER BY
-                  CASE status WHEN 'candidate' THEN 0 WHEN 'approved' THEN 1 WHEN 'muted' THEN 2 ELSE 3 END,
-                  confidence DESC,
-                  usage_count DESC,
-                  updated_at DESC
+                ORDER BY {order_sql}
                 LIMIT ? OFFSET ?""",
             [*values, limit, offset],
         )
         return [_row_to_term(row) for row in await cursor.fetchall()], total
+
+    async def count_backlog_candidates(
+        self,
+        *,
+        min_confidence: float = 0.0,
+        min_usage_count: int = 1,
+        gated_by_threshold: bool = False,
+    ) -> int:
+        """Count slang_terms still in candidate state above a confidence floor.
+
+        When ``gated_by_threshold`` is True, also restrict to terms that have
+        either never been reviewed or whose ``usage_count`` has crossed a
+        new threshold in [3, 8, 30, 100] since the last review. This
+        avoids re-reviewing terms whose evidence base hasn't grown.
+        """
+        db = self._require_db()
+        gate_sql, gate_params = (
+            (_BACKLOG_THRESHOLD_GATE_SQL, ())
+            if gated_by_threshold
+            else ("", ())
+        )
+        cursor = await db.execute(
+            "SELECT COUNT(*) AS cnt FROM slang_terms"
+            " WHERE status = 'candidate' AND confidence >= ? AND usage_count >= ?"
+            + gate_sql,
+            (float(min_confidence), int(min_usage_count), *gate_params),
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"] if row else 0)
+
+    async def list_backlog_candidates(
+        self,
+        *,
+        after_term_id: str = "",
+        min_confidence: float = 0.0,
+        min_usage_count: int = 1,
+        limit: int = 50,
+        gated_by_threshold: bool = False,
+    ) -> list[SlangTerm]:
+        """Cursor-paginated fetch of candidate-state terms for the AI backlog reviewer.
+
+        Sort key: confidence DESC, usage_count DESC, term_id DESC. The cursor is the
+        full sort tuple of the last term processed, encoded as ``after_term_id`` —
+        callers pass back the previous batch's last ``term_id`` and we resume from
+        the next row in the same total order. Avoids OFFSET so concurrent mute /
+        approve writes don't shift the window and skip rows.
+        """
+        db = self._require_db()
+        gate_sql = _BACKLOG_THRESHOLD_GATE_SQL if gated_by_threshold else ""
+        if after_term_id:
+            cursor = await db.execute(
+                "SELECT confidence, usage_count, term_id FROM slang_terms WHERE term_id = ?",
+                (after_term_id,),
+            )
+            anchor = await cursor.fetchone()
+        else:
+            anchor = None
+        if anchor is None:
+            cursor = await db.execute(
+                f"""SELECT * FROM slang_terms
+                   WHERE status = 'candidate' AND confidence >= ? AND usage_count >= ?
+                   {gate_sql}
+                   ORDER BY confidence DESC, usage_count DESC, term_id DESC
+                   LIMIT ?""",
+                (float(min_confidence), int(min_usage_count), int(limit)),
+            )
+        else:
+            cursor = await db.execute(
+                f"""SELECT * FROM slang_terms
+                   WHERE status = 'candidate' AND confidence >= ? AND usage_count >= ?
+                     AND (
+                       confidence < ?
+                       OR (confidence = ? AND usage_count < ?)
+                       OR (confidence = ? AND usage_count = ? AND term_id < ?)
+                     )
+                   {gate_sql}
+                   ORDER BY confidence DESC, usage_count DESC, term_id DESC
+                   LIMIT ?""",
+                (
+                    float(min_confidence),
+                    int(min_usage_count),
+                    anchor["confidence"],
+                    anchor["confidence"], anchor["usage_count"],
+                    anchor["confidence"], anchor["usage_count"], anchor["term_id"],
+                    int(limit),
+                ),
+            )
+        return [_row_to_term(row) for row in await cursor.fetchall()]
 
     async def list_observations(self, term_id: str, *, limit: int = 30) -> list[SlangObservation]:
         db = self._require_db()
@@ -1446,6 +1835,171 @@ class SlangStore:
             [*values, max(1, min(int(limit or 50), 200)), max(0, int(offset or 0))],
         )
         return [_row_to_drift(row) for row in await cursor.fetchall()], total
+
+    async def process_open_drift_backlog(
+        self,
+        *,
+        limit: int = 100,
+        force: bool = False,
+    ) -> dict[str, int]:
+        """Run the LLM semantic gate over existing ``open`` drifts.
+
+        For each row that hasn't been gated yet (``meta.drift_semantic_reviewed``
+        absent), call ``SlangDriftReviewer.review_drift`` once and apply:
+        - ``same_meaning`` → status ``auto_dismissed``
+        - ``alias_candidate`` → status ``auto_aliased`` + merge aliases
+        - ``real_drift`` / ``unclear`` → keep ``open`` but stamp meta so we
+          don't re-pay LLM next pass
+
+        ``force=True`` re-gates rows even if previously stamped (for retries
+        after a model upgrade). Returns a counter dict the admin UI can show.
+        """
+        result = {"scanned": 0, "dismissed": 0, "aliased": 0, "kept_real_drift": 0, "skipped": 0, "errors": 0}
+        if self._drift_reviewer is None:
+            result["errors"] = 1
+            return result
+        db = self._require_db()
+        cursor = await db.execute(
+            """SELECT * FROM slang_drift_reviews
+               WHERE status = 'open'
+               ORDER BY updated_at ASC
+               LIMIT ?""",
+            (max(1, min(int(limit or 100), 500)),),
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            result["scanned"] += 1
+            existing_meta = _json_loads(row["meta_json"], {})
+            if not isinstance(existing_meta, dict):
+                existing_meta = {}
+            if existing_meta.get("drift_semantic_reviewed") and not force:
+                result["skipped"] += 1
+                continue
+            term = await self.get_term(row["term_id"])
+            if term is None:
+                # Term gone — close the dangling drift quietly.
+                merged_meta = {**existing_meta, "missing_term": True}
+                now_iso = _now_iso()
+                await db.execute(
+                    """UPDATE slang_drift_reviews
+                       SET status = 'auto_dismissed', updated_at = ?, meta_json = ?
+                       WHERE drift_id = ?""",
+                    (now_iso, json.dumps(merged_meta, ensure_ascii=False), row["drift_id"]),
+                )
+                await db.commit()
+                result["dismissed"] += 1
+                continue
+            try:
+                assessment = await self._drift_reviewer.review_drift(
+                    existing=term,
+                    new_meaning=row["new_meaning"] or "",
+                    aliases=_json_loads(row["aliases_json"], []),
+                    evidence=row["evidence"] or "",
+                    confidence=float(row["confidence"] or 0.0),
+                    reason=row["reason"] or "",
+                )
+            except Exception:
+                assessment = None
+            if assessment is None or not assessment.reviewed or assessment.error:
+                result["errors"] += 1
+                continue
+            merged_meta = {**existing_meta, **assessment.to_meta(), "drift_semantic_reviewed": True}
+            now_iso = _now_iso()
+            if assessment.verdict == "same_meaning":
+                await db.execute(
+                    """UPDATE slang_drift_reviews
+                       SET status = 'auto_dismissed', updated_at = ?, meta_json = ?
+                       WHERE drift_id = ?""",
+                    (now_iso, json.dumps(merged_meta, ensure_ascii=False), row["drift_id"]),
+                )
+                await db.commit()
+                with contextlib.suppress(Exception):
+                    await self.record_revision(
+                        term.term_id,
+                        action="drift_dismissed",
+                        after={"drift_id": row["drift_id"], "verdict": "same_meaning"},
+                        reason=assessment.reason or "drift_semantic_same_meaning",
+                        meta=merged_meta,
+                    )
+                result["dismissed"] += 1
+            elif assessment.verdict == "alias_candidate":
+                merged_aliases = _dedupe([*term.aliases, *_json_loads(row["aliases_json"], [])])
+                if merged_aliases != term.aliases:
+                    with contextlib.suppress(Exception):
+                        await self.update_term(
+                            term.term_id,
+                            aliases=merged_aliases,
+                            revision_action="drift_aliased_auto",
+                            revision_reason=assessment.reason or "drift_semantic_alias",
+                            revision_meta=merged_meta,
+                        )
+                await db.execute(
+                    """UPDATE slang_drift_reviews
+                       SET status = 'auto_aliased', updated_at = ?, meta_json = ?
+                       WHERE drift_id = ?""",
+                    (now_iso, json.dumps(merged_meta, ensure_ascii=False), row["drift_id"]),
+                )
+                await db.commit()
+                result["aliased"] += 1
+            else:
+                # real_drift or unclear: keep open, stamp so we don't re-pay LLM.
+                await db.execute(
+                    """UPDATE slang_drift_reviews
+                       SET updated_at = ?, meta_json = ?
+                       WHERE drift_id = ?""",
+                    (now_iso, json.dumps(merged_meta, ensure_ascii=False), row["drift_id"]),
+                )
+                await db.commit()
+                result["kept_real_drift"] += 1
+        return result
+
+    async def age_out_open_drifts(self, *, days: int) -> int:
+        """Auto-close ``open`` drift rows whose ``updated_at`` is older than ``days``.
+
+        Returns the number of rows transitioned to ``aged_out``. ``days <= 0``
+        is treated as a no-op so the caller can disable the gate without
+        special-casing the call site.
+        """
+        if days <= 0:
+            return 0
+        db = self._require_db()
+        cutoff = (datetime.now(TZ_SHANGHAI) - timedelta(days=int(days))).isoformat(timespec="seconds")
+        cursor = await db.execute(
+            """SELECT drift_id, term_id, term, meta_json
+               FROM slang_drift_reviews
+               WHERE status = 'open' AND updated_at < ?""",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return 0
+        now = _now_iso()
+        aged: list[tuple[str, str, dict[str, Any]]] = []
+        for row in rows:
+            existing_meta = _json_loads(row["meta_json"], {})
+            if not isinstance(existing_meta, dict):
+                existing_meta = {}
+            existing_meta.update(
+                {"aged_out_at": now, "aged_out_after_days": int(days), "aged_out_reason": "stale_no_human_review"},
+            )
+            aged.append((row["drift_id"], row["term_id"], existing_meta))
+        await db.executemany(
+            """UPDATE slang_drift_reviews
+               SET status = 'aged_out', updated_at = ?, meta_json = ?
+               WHERE drift_id = ?""",
+            [(now, json.dumps(meta, ensure_ascii=False), drift_id) for drift_id, _, meta in aged],
+        )
+        await db.commit()
+        for drift_id, term_id, meta in aged:
+            with contextlib.suppress(Exception):
+                await self.record_revision(
+                    term_id,
+                    action="drift_aged_out",
+                    after={"drift_id": drift_id, "days": int(days)},
+                    reason="auto-closed: open drift exceeded age-out window",
+                    meta=meta,
+                )
+        return len(aged)
 
     async def _get_drift_review(self, drift_id: str) -> SlangDriftReview | None:
         db = self._require_db()
@@ -1884,6 +2438,50 @@ class SlangStore:
         )
         return [_row_to_run(row) for row in await cursor.fetchall()]
 
+    async def get_last_extract_run_time(self) -> datetime | None:
+        """Return the started_at of the most recent non-backlog, non-daily extract run."""
+        db = self._require_db()
+        cursor = await db.execute(
+            """SELECT started_at FROM slang_extraction_runs
+               WHERE status IN ('success', 'running')
+                 AND (meta_json NOT LIKE '%"kind": "backlog_%' AND meta_json NOT LIKE '%"kind":"backlog_%')
+                 AND (meta_json NOT LIKE '%"kind": "daily_%' AND meta_json NOT LIKE '%"kind":"daily_%')
+               ORDER BY started_at DESC LIMIT 1"""
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        with contextlib.suppress(Exception):
+            return datetime.fromisoformat(row["started_at"])
+        return None
+
+    async def mark_stale_running_runs(
+        self,
+        *,
+        status: str = "abandoned",
+        reason: str = "process restart while running",
+    ) -> int:
+        """Close any 'running' extraction runs left over from a prior crash/timeout."""
+        db = self._require_db()
+        cursor = await db.execute("SELECT run_id, started_at FROM slang_extraction_runs WHERE status = 'running'")
+        rows = list(await cursor.fetchall())
+        if not rows:
+            return 0
+        finished = datetime.now(TZ_SHANGHAI)
+        for row in rows:
+            started = finished
+            with contextlib.suppress(Exception):
+                started = datetime.fromisoformat(row["started_at"])
+            duration_ms = max(0, int((finished - started).total_seconds() * 1000))
+            await db.execute(
+                """UPDATE slang_extraction_runs
+                   SET status = ?, finished_at = ?, error = ?, duration_ms = ?
+                   WHERE run_id = ?""",
+                (status, finished.isoformat(timespec="seconds"), reason[:1000], duration_ms, row["run_id"]),
+            )
+        await db.commit()
+        return len(rows)
+
     async def scan_global_candidates(self, *, min_groups: int = 3) -> dict[str, Any]:
         db = self._require_db()
         cursor = await db.execute(
@@ -1909,7 +2507,20 @@ class SlangStore:
                 skipped += 1
                 continue
             seen_source_sets.add(source_set)
-            existing_global = await self.find_existing(term=terms[0].term, group_id="", scope="global")
+            # Aggregate aliases from all per-group sources so the candidate
+            # global term collides with any pre-existing global term that
+            # already lists one of these surface forms.
+            aggregated_aliases = _dedupe([
+                alias
+                for term in terms
+                for alias in (term.term, *term.aliases)
+            ])
+            existing_global = await self.find_existing(
+                term=terms[0].term,
+                group_id="",
+                scope="global",
+                aliases=aggregated_aliases,
+            )
             if existing_global:
                 skipped += 1
                 continue
@@ -2001,6 +2612,7 @@ class SlangStore:
         conversation_text: str = "",
         max_terms: int = 8,
         min_confidence: float = 0.0,
+        max_indirect_terms: int | None = None,
     ) -> list[SlangTerm]:
         if not group_id:
             return []
@@ -2015,14 +2627,36 @@ class SlangStore:
         terms = [_row_to_term(row) for row in await cursor.fetchall()]
         normalized_text = normalize_term(conversation_text)
 
-        def score(term: SlangTerm) -> tuple[int, int, float, int, str]:
-            names = [term.term, *term.aliases]
-            direct = any(normalize_term(name) in normalized_text for name in names if len(normalize_term(name)) >= 2)
-            scope_priority = 1 if term.scope == "group" else 0
-            return (1 if direct else 0, scope_priority, term.confidence, term.usage_count, term.last_seen_at)
+        def is_direct_hit(term: SlangTerm) -> bool:
+            for name in (term.term, *term.aliases):
+                key = normalize_term(name)
+                if len(key) >= 2 and key in normalized_text:
+                    return True
+            return False
 
-        terms.sort(key=score, reverse=True)
-        return terms[:max_terms]
+        def rank(term: SlangTerm) -> tuple[int, float, int, str]:
+            scope_priority = 1 if term.scope == "group" else 0
+            return (scope_priority, term.confidence, term.usage_count, term.last_seen_at)
+
+        direct_terms: list[SlangTerm] = []
+        indirect_terms: list[SlangTerm] = []
+        for term in terms:
+            (direct_terms if is_direct_hit(term) else indirect_terms).append(term)
+        direct_terms.sort(key=rank, reverse=True)
+        indirect_terms.sort(key=rank, reverse=True)
+
+        # Direct hits are always preferred and take the full budget. Indirect
+        # ("group background") terms only fill the leftover slots, capped by
+        # `max_indirect_terms` so a busy group's high-confidence dictionary
+        # cannot drown the prompt every turn.
+        max_terms = max(0, int(max_terms or 0))
+        cap = max_indirect_terms if max_indirect_terms is not None else max_terms
+        indirect_cap = max(0, min(int(cap), max_terms))
+        merged = list(direct_terms[:max_terms])
+        if len(merged) < max_terms and indirect_cap > 0:
+            slots_left = max_terms - len(merged)
+            merged.extend(indirect_terms[: min(slots_left, indirect_cap)])
+        return merged
 
     async def lookup_terms(
         self,
@@ -2088,12 +2722,17 @@ class SlangStore:
         conversation_text: str = "",
         max_terms: int = 8,
         max_chars: int = 1200,
+        max_indirect_terms: int | None = None,
     ) -> str:
+        settings = await self.load_settings()
+        if max_indirect_terms is None:
+            max_indirect_terms = settings.max_indirect_inject_terms
         terms = await self.get_injectable_terms(
             group_id=group_id,
             conversation_text=conversation_text,
             max_terms=max_terms,
-            min_confidence=(await self.load_settings()).min_inject_confidence,
+            min_confidence=settings.min_inject_confidence,
+            max_indirect_terms=max_indirect_terms,
         )
         if not terms:
             return ""
@@ -2241,6 +2880,9 @@ class SlangStore:
         latest_run = _row_to_run(run_row) if run_row else None
         ai_reviewed = _ai_review_sql_condition()
         human_reviewed = _human_reviewed_sql_condition()
+        ai_reviewed_any = _ai_reviewed_sql_condition()
+        ai_rejected = _ai_rejected_sql_condition()
+        ai_kept = _ai_kept_sql_condition()
         cursor = await db.execute(
             f"SELECT COUNT(*) AS cnt FROM slang_terms WHERE status = 'approved' AND {ai_reviewed}"
         )
@@ -2250,8 +2892,28 @@ class SlangStore:
                 WHERE status = 'approved' AND {ai_reviewed} AND NOT {human_reviewed}"""
         )
         ai_pending_review_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            f"""SELECT COUNT(*) AS cnt FROM slang_terms
+                WHERE status = 'candidate' AND {ai_reviewed_any} AND {ai_kept}"""
+        )
+        under_observation_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            f"""SELECT COUNT(*) AS cnt FROM slang_terms
+                WHERE status = 'muted' AND {ai_rejected} AND NOT {human_reviewed}"""
+        )
+        ai_rejected_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            f"SELECT COUNT(*) AS cnt FROM slang_terms WHERE status = 'approved' AND {human_reviewed}"
+        )
+        human_reviewed_count = int((await cursor.fetchone())["cnt"] or 0)
+        cursor = await db.execute(
+            "SELECT COUNT(*) AS cnt FROM slang_terms WHERE status = 'candidate' AND usage_count >= 3"
+        )
+        eligible_backlog_count = int((await cursor.fetchone())["cnt"] or 0)
+        candidate_unreviewed_count = counts.get("candidate", 0) - under_observation_count
         return {
             "candidate_count": counts.get("candidate", 0),
+            "candidate_unreviewed_count": candidate_unreviewed_count,
             "approved_count": counts.get("approved", 0),
             "muted_count": counts.get("muted", 0),
             "expired_count": counts.get("expired", 0),
@@ -2259,6 +2921,10 @@ class SlangStore:
             "drift_count": drift_count,
             "ai_review_count": ai_review_count,
             "ai_pending_review_count": ai_pending_review_count,
+            "under_observation_count": under_observation_count,
+            "ai_rejected_count": ai_rejected_count,
+            "human_reviewed_count": human_reviewed_count,
+            "eligible_backlog_count": eligible_backlog_count,
             "today_hits": today_hits,
             "group_count": group_count,
             "last_extracted_at": await self.get_meta("last_extracted_at", ""),
