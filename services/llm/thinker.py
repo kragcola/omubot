@@ -16,6 +16,8 @@ from typing import Any
 
 from loguru import logger
 
+from services.llm.llm_request import LLMRequest
+
 _L = logger.bind(channel="thinking")
 
 _ALLOWED_ACTIONS = {"reply", "wait", "search"}
@@ -251,34 +253,57 @@ async def think(
     mood_text: str = "",
     affection_text: str = "",
     identity_name: str = "Bot",
+    user_id: str = "",
+    group_id: str | None = None,
 ) -> ThinkDecision:
     """Call the thinker LLM to decide the next action.
 
     Args:
-        api_call: The LLM API caller (LLMClient._call or equivalent).
+        api_call: Single-arg callable that accepts an ``LLMRequest`` and
+            returns the provider response dict (typically ``LLMClient._call``).
         recent_messages: Recent conversation messages in Anthropic format.
         max_tokens: Max tokens for the thinker call.
         mood_text: Current mood + schedule context (from MoodEngine).
         affection_text: Per-user relationship context (from AffectionEngine).
         identity_name: The bot's name from its identity config.
+        user_id: User id for usage attribution.
+        group_id: Group id for usage attribution (None for private chat).
 
     Returns:
         ThinkDecision with the chosen action and thought.
         Defaults to reply on parse failure.
+
+    Cache layout (P0-A from prompt-cache-research-2026-05-18.md §11.3):
+      static_blocks  = [identity-formatted system prompt]   ← stable across calls
+      dynamic_blocks = [mood_text, affection_text]          ← per-call, at tail
+    The previous in-place ``mood + system + affection`` concatenation
+    invalidated the system-prompt prefix every call; moving these to the
+    dynamic tail keeps the static prefix cacheable.
     """
     system_text = THINKER_SYSTEM_PROMPT.format(name=identity_name)
-    if mood_text:
-        system_text = mood_text + "\n\n" + system_text
-    if affection_text:
-        system_text = system_text + "\n\n" + affection_text
-
-    system = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
     user_msg = "以下是最近的聊天内容。请决定下一步行动。"
     messages = [*recent_messages, {"role": "user", "content": user_msg}]
 
+    dynamic_blocks: list[str] = []
+    if mood_text:
+        dynamic_blocks.append(mood_text)
+    if affection_text:
+        dynamic_blocks.append(affection_text)
+
+    request = LLMRequest(
+        task="thinker",
+        user_id=user_id,
+        group_id=group_id,
+        static_blocks=[system_text],
+        dynamic_blocks=dynamic_blocks,
+        user_messages=messages,
+        max_tokens=max_tokens,
+        requires_capabilities=("chat",),
+    )
+
     usage: dict[str, int] = {}
     try:
-        result = await api_call(system, messages, tools=None, max_tokens=max_tokens)
+        result = await api_call(request)
         usage = {
             "input_tokens": result.get("input_tokens", 0),
             "cache_read": result.get("cache_read", 0),

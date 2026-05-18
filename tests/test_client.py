@@ -19,6 +19,7 @@ from services.llm.client import (
     resolve_image_refs,
     to_anthropic_message,
 )
+from services.llm.llm_request import LLMRequest
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.usage import UsageTracker
 from services.memory.card_store import CardStore
@@ -181,14 +182,19 @@ async def test_profile_rate_limit_cooldown_is_per_profile(prompt, short_term, to
 
         with patch("services.llm.client.call_api", new_callable=AsyncMock) as mock_api:
             mock_api.side_effect = RateLimitError("HTTP 429")
+            slang_request = LLMRequest(
+                task="slang",
+                static_blocks=["sys"],
+                user_messages=[{"role": "user", "content": "x"}],
+            )
             with pytest.raises(RateLimitError):
-                await client._call_slang([], [])
+                await client._call(slang_request)
             assert mock_api.await_count == 1
 
             # The limited slang profile fails fast during cooldown and does not
             # make another HTTP call.
             with pytest.raises(RateLimitError):
-                await client._call_slang([], [])
+                await client._call(slang_request)
             assert mock_api.await_count == 1
 
             # Main profile remains callable because cooldown is keyed by profile.
@@ -1029,3 +1035,314 @@ class TestSplitNaturally:
         for seg in result:
             # Every segment should feel complete
             assert len(seg) >= 6
+
+
+# ---------------------------------------------------------------------------
+# Stage B — LLMRequest spine path on _call
+# ---------------------------------------------------------------------------
+
+
+_SPINE_RESULT = {
+    "text": "spine reply",
+    "tool_uses": [],
+    "input_tokens": 200,
+    "output_tokens": 80,
+    "cache_read": 120,
+    "cache_create": 0,
+    "prompt_cache_hit_tokens": 120,
+    "prompt_cache_miss_tokens": 80,
+}
+
+
+def _spine_profile(*caps: str) -> SimpleNamespace:
+    """Build a fake task_profile with the given capability set."""
+    return SimpleNamespace(
+        base_url="http://spine",
+        api_key="sk-spine",
+        model="spine-model",
+        api_format="deepseek",
+        capabilities=list(caps),
+    )
+
+
+async def test_spine_call_dispatches_llm_request(prompt, short_term, tools) -> None:
+    """LLMRequest path threads task / system_blocks / messages through call_api."""
+    async for client in _client(prompt, short_term, tools):
+        client._task_profiles = {
+            "main": _spine_profile("chat", "tools"),
+            "thinker": _spine_profile("chat"),
+        }
+        client.set_task_profile_names({"main": "main", "thinker": "thinker"})
+
+        req = LLMRequest(
+            task="thinker",
+            user_id="42",
+            group_id="g1",
+            static_blocks=["identity-prompt"],
+            dynamic_blocks=["mood: happy"],
+            user_messages=[{"role": "user", "content": "hi"}],
+            max_tokens=64,
+        )
+
+        with patch(
+            "services.llm.client.call_api", new_callable=AsyncMock, return_value=_SPINE_RESULT
+        ) as mock_api:
+            result = await client._call(req)
+
+        assert result["text"] == "spine reply"
+        assert mock_api.await_count == 1
+        # call_api receives the segmented system blocks in static→stable→dynamic order
+        kwargs_or_args = mock_api.await_args
+        passed_system = kwargs_or_args.args[4]
+        assert [b["text"] for b in passed_system] == ["identity-prompt", "mood: happy"]
+        # task_profile resolution honored "thinker"
+        passed_model = kwargs_or_args.args[3]
+        assert passed_model == "spine-model"
+
+
+async def test_spine_call_enforces_capabilities(prompt, short_term, tools) -> None:
+    """Profile missing a required capability triggers fail-fast ValueError."""
+    async for client in _client(prompt, short_term, tools):
+        client._task_profiles = {"main": _spine_profile("chat")}
+        client.set_task_profile_names({"main": "main"})
+
+        req = LLMRequest(
+            task="main",
+            static_blocks=["sys"],
+            user_messages=[{"role": "user", "content": "hi"}],
+            requires_capabilities=("vision",),
+        )
+
+        with patch(
+            "services.llm.client.call_api", new_callable=AsyncMock, return_value=_SPINE_RESULT
+        ) as mock_api:
+            with pytest.raises(ValueError, match="missing capability"):
+                await client._call(req)
+            # capability check happens before any HTTP attempt
+            assert mock_api.await_count == 0
+
+
+async def test_spine_call_records_usage_with_task(prompt, short_term, tools, tmp_path) -> None:
+    """LLMRequest path auto-records usage labelled with req.task."""
+    tracker = UsageTracker(db_path=str(tmp_path / "spine_usage.db"))
+    await tracker.init()
+    try:
+        async for client in _client(prompt, short_term, tools):
+            client._usage_tracker = tracker
+            client._task_profiles = {"main": _spine_profile("chat", "tools")}
+            client.set_task_profile_names({"main": "main"})
+
+            req = LLMRequest(
+                task="bilibili_intent",
+                user_id="42",
+                static_blocks=["intent-prompt"],
+                user_messages=[{"role": "user", "content": "?"}],
+                max_tokens=128,
+            )
+
+            with patch(
+                "services.llm.client.call_api", new_callable=AsyncMock, return_value=_SPINE_RESULT
+            ):
+                await client._call(req)
+            await asyncio.sleep(0)
+
+        rows = await tracker.query_raw(
+            "SELECT * FROM llm_calls WHERE call_type = 'bilibili_intent'"
+        )
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["user_id"] == "42"
+        assert row["output_tokens"] == 80
+        assert row["cache_read_tokens"] == 120
+        assert row["prompt_cache_hit_tokens"] == 120
+        assert row["prompt_cache_miss_tokens"] == 80
+    finally:
+        await tracker.close()
+
+
+async def test_spine_call_per_task_cache_hit_pct(prompt, short_term, tools) -> None:
+    """ProfileRateLimitState tracks per-task cache hit pct independently."""
+    async for client in _client(prompt, short_term, tools):
+        client._task_profiles = {"main": _spine_profile("chat", "tools")}
+        client.set_task_profile_names({"main": "main", "thinker": "main"})
+
+        result_high = {**_SPINE_RESULT, "prompt_cache_hit_tokens": 180,
+                       "prompt_cache_miss_tokens": 20}
+        result_low = {**_SPINE_RESULT, "prompt_cache_hit_tokens": 10,
+                      "prompt_cache_miss_tokens": 90}
+
+        async def fake_api(*args, **kwargs):
+            # Flip behaviour based on which task drove the call.
+            return fake_api._result
+
+        fake_api._result = result_high
+        with patch("services.llm.client.call_api", new=fake_api):
+            await client._call(LLMRequest(task="main", static_blocks=["s"],
+                                          user_messages=[{"role": "user", "content": "x"}]))
+            fake_api._result = result_low
+            await client._call(LLMRequest(task="thinker", static_blocks=["s"],
+                                          user_messages=[{"role": "user", "content": "x"}]))
+
+        state = client._profile_rate_state("main")
+        per_task = state.last_cache_hit_pct_by_task
+        assert pytest.approx(per_task["main"], abs=0.5) == 90.0
+        assert pytest.approx(per_task["thinker"], abs=0.5) == 10.0
+
+
+async def test_spine_call_records_cache_diagnostic(prompt, short_term, tools) -> None:
+    """Per-axis cache diagnostic + diff is captured for spine-path calls."""
+    async for client in _client(prompt, short_term, tools):
+        client._task_profiles = {"main": _spine_profile("chat", "tools")}
+        client.set_task_profile_names({"main": "main"})
+
+        with patch(
+            "services.llm.client.call_api", new_callable=AsyncMock, return_value=_SPINE_RESULT
+        ):
+            req1 = LLMRequest(
+                task="main",
+                static_blocks=["identity"],
+                dynamic_blocks=["mood: happy"],
+                user_messages=[{"role": "user", "content": "hi"}],
+            )
+            await client._call(req1)
+            req2 = LLMRequest(
+                task="main",
+                static_blocks=["identity"],
+                dynamic_blocks=["mood: sad"],  # only dynamic block changed
+                user_messages=[{"role": "user", "content": "hi"}],
+            )
+            await client._call(req2)
+
+        history = client.cache_diagnostic_history("main", limit=10)
+        assert len(history) == 2
+        first_snapshot, first_diff = history[0]
+        second_snapshot, second_diff = history[1]
+        assert first_diff is None  # first ever call has no prior snapshot
+        assert second_diff is not None
+        assert second_diff.system_changed is True
+        assert second_diff.tools_changed is False
+        assert second_diff.changed_block_indices == [1]  # the dynamic block
+        # static block still hashes identical
+        assert first_snapshot.per_block_hashes[0] == second_snapshot.per_block_hashes[0]
+
+
+async def test_spine_call_cancel_path_no_partial_record(
+    prompt, short_term, tools, tmp_path
+) -> None:
+    """D2: when _call is cancelled mid-flight, no usage row + no diagnostic entry."""
+    tracker = UsageTracker(db_path=str(tmp_path / "cancel_usage.db"))
+    await tracker.init()
+    try:
+        async for client in _client(prompt, short_term, tools):
+            client._usage_tracker = tracker
+            client._task_profiles = {"main": _spine_profile("chat", "tools")}
+            client.set_task_profile_names({"main": "main"})
+
+            async def hang(*args, **kwargs):
+                await asyncio.sleep(10)
+                return _SPINE_RESULT
+
+            req = LLMRequest(
+                task="main",
+                static_blocks=["s"],
+                user_messages=[{"role": "user", "content": "x"}],
+            )
+
+            with patch("services.llm.client.call_api", new=hang):
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(client._call(req), timeout=0.05)
+            await asyncio.sleep(0)
+
+        rows = await tracker.query_raw("SELECT * FROM llm_calls")
+        assert rows == []
+        assert client.cache_diagnostic_history("main") == []
+    finally:
+        await tracker.close()
+
+
+async def test_spine_call_legacy_signature_still_works(prompt, short_term, tools) -> None:
+    """Legacy 6-positional _call(...) continues to dispatch unchanged."""
+    async for client in _client(prompt, short_term, tools):
+        client._task_profiles = {"main": _spine_profile("chat")}
+        client.set_task_profile_names({"main": "main"})
+
+        with patch(
+            "services.llm.client.call_api", new_callable=AsyncMock, return_value=_SPINE_RESULT
+        ) as mock_api:
+            result = await client._call(
+                [{"type": "text", "text": "legacy-system"}],
+                [{"role": "user", "content": "hi"}],
+                tools=None,
+                max_tokens=32,
+                task="main",
+            )
+
+        assert result["text"] == "spine reply"
+        assert mock_api.await_count == 1
+        # legacy path does NOT auto-record usage (callers do it themselves).
+        # Diagnostic ring stays empty for this path too.
+        assert client.cache_diagnostic_history("main") == []
+
+
+async def test_compact_aggregated_usage_with_per_round_diagnostic(
+    prompt, short_term, tools, tmp_path
+) -> None:
+    """DL.5: compact runs multiple rounds. The aggregated ``len(rows)==1``
+    contract from ``test_compact_records_usage`` must hold (caller writes
+    one row at the end with ``auto_record_usage=False``), AND each round
+    must show up in ``cache_diagnostic_history('compact')`` so admins can
+    see which axis broke between rounds.
+    """
+    tracker = UsageTracker(db_path=str(tmp_path / "compact_aggregated.db"))
+    await tracker.init()
+    try:
+        async for client in _client(prompt, short_term, tools):
+            client._usage_tracker = tracker
+            _fill_messages(short_term, "private_100")
+            mock_result = {**MOCK_RESULT, "output_tokens": 80, "cache_read": 0, "cache_create": 0}
+            with patch(
+                "services.llm.client.call_api", new_callable=AsyncMock, return_value=mock_result
+            ):
+                await client._compact("private_100")
+            await asyncio.sleep(0)
+
+            # Aggregated contract: one row written by the caller, not per round.
+            rows = await tracker.query_raw("SELECT * FROM llm_calls WHERE call_type='compact'")
+            assert len(rows) == 1, f"compact must write exactly one usage row, got {len(rows)}"
+
+            # Diagnostic still records every round so admins can see prefix breaks.
+            history = client.cache_diagnostic_history("compact")
+            assert len(history) >= 1, "compact must record at least one diagnostic snapshot"
+    finally:
+        await tracker.close()
+
+
+async def test_main_chat_aggregated_usage_with_per_round_diagnostic(
+    prompt, short_term, tools, tmp_path
+) -> None:
+    """DL.5: main chat() runs the tool loop. The ``len(rows)==1`` contract
+    from ``test_chat_records_usage`` must hold (caller aggregates), AND
+    cache_diagnostic_history('main') sees each round individually.
+    """
+    tracker = UsageTracker(db_path=str(tmp_path / "main_aggregated.db"))
+    await tracker.init()
+    mock_result = {**MOCK_RESULT, "output_tokens": 200}
+    try:
+        async for client in _client(prompt, short_term, tools):
+            client._usage_tracker = tracker
+            with patch(
+                "services.llm.client.call_api", new_callable=AsyncMock, return_value=mock_result
+            ):
+                await client.chat(
+                    session_id="private_100", user_id="100",
+                    user_content="hello", identity=_IDENTITY,
+                )
+            await asyncio.sleep(0)
+
+            rows = await tracker.query_raw("SELECT * FROM llm_calls WHERE call_type='chat'")
+            assert len(rows) == 1, f"chat must write exactly one usage row, got {len(rows)}"
+
+            history = client.cache_diagnostic_history("main")
+            assert len(history) >= 1, "main chat must record at least one diagnostic snapshot"
+    finally:
+        await tracker.close()

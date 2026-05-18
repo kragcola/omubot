@@ -4,6 +4,937 @@
 
 ---
 
+## 2026-05-18 LLMRequest spine 迁移阶段 D-later 完成（聚合契约重谈 + main/compact 迁移）
+
+**变更类型**：refactor / backend
+
+**变更内容**：
+
+接续同日的 D-now，今天补齐了 D-later 阻塞项——main `chat()` 和 `_compact_with_tools` 的 LLMRequest 迁移。完成后 `_call_thinker` / `_call_compact` / `_call_slang` / `_call_reply_gate` 四个 wrapper **全部清空**，`_call` 成为 `LLMClient` 唯一的 LLM 调用入口。
+
+**契约重谈方案**：选定方案 A（在 LLMRequest 加 `auto_record_usage` 开关）。
+
+- DL.1 `services/llm/llm_request.py`：`LLMRequest` 加 `auto_record_usage: bool = True` 字段。
+- DL.1 `services/llm/client.py:_dispatch_call`：当 `request.auto_record_usage=False` 时跳过自动 `_record_usage`，但仍执行 `_record_cache_diagnostic`。聚合 caller 自己负责 `_record_usage`，per-round break 轴可见性零损失。
+- DL.2 `_compact_with_tools` 两处调用点 → `_call(LLMRequest(task="compact", auto_record_usage=False))`。
+- DL.3 main `chat()` tool_loop + final 两处调用点 → `_call(LLMRequest(task="main", auto_record_usage=False))`。
+- DL.4 删除 `_call_compact` wrapper。
+- DL.5 加 2 个回归测试：`test_compact_aggregated_usage_with_per_round_diagnostic` 和 `test_main_chat_aggregated_usage_with_per_round_diagnostic`，断言 `len(rows)==1` 聚合契约不变 + `cache_diagnostic_history(task)` 仍逐 round 记录。
+
+**为什么不选方案 B / C**：
+
+- 方案 B（接受多行 usage）：需要改 `test_chat_records_usage` / `test_compact_records_usage` 断言，admin/usage 视图也要重写"1 chat = 1 row"的预期。侵入面太大。
+- 方案 C（spine 内部聚合 context manager）：要引入会话状态，spine 复杂度上升一档，但当前只有 chat / compact 两处需要。等以后 reflection consolidator / episode summarizer 真要多 round 时再加。
+- 方案 A：LLMRequest 加一个 bool 字段，2 处 caller 加 `auto_record_usage=False`，1 处 spine 加 if-skip。改动 **最小**，向后兼容（默认 True）。
+
+**额外发现**：DL.2 第一次跑 compact 测试时 4 个失败，原因是我在 `compact_request` 写了 `requires_capabilities=("chat", "tools") if tools else ("chat",)`，而测试 fixture 的 main profile 默认 capabilities 是 `["chat"]`。`tools` 是 provider-side 的支持事项（Anthropic / OpenAI / DeepSeek 都默认支持 function calling），并非要在 capability 列声明的能力。改回 `("chat",)` 后 11 个 compact 测试全部通过。
+
+**验证**：
+
+- 全量 `pytest -q`：1066 passed, 8 skipped（D-now 上线后 1064，+2 来自 DL.5 新增聚合契约回归测试）
+- `grep -rn "_call_thinker\|_call_compact\|_call_slang\b\|_call_reply_gate" services/ plugins/ kernel/ tests/ admin/` → 无匹配
+- `ruff check` 仅剩历史 pre-existing 错误，本次改动无新增
+
+**影响范围**：
+
+- `usage.db` 行为对外不变：1 chat / 1 compact 仍是 1 行，`call_type="main"` / `"compact"`
+- `cache_diagnostic_history(task)` 现在能看到 main / compact 的逐 round 快照（之前 main / compact 不入 spine 路径，diagnostic 是空的）
+- `last_cache_hit_pct_by_task["main"]` / `["compact"]` 字段从今天起开始有值（之前因为不走 spine 都是 None）
+- 4 个 wrapper 删除是纯结构清理，无运行时变化
+
+**后续动作**：
+
+- D-later 已结束，spine 迁移整体收尾
+- staging 灰度 3-7 天后对比 DeepSeek 后台 vs `usage.db` 的 per-task 分布，写灰度报告进 `docs/migrations/spine-2026-05-18.md` 新章节"灰度结果"
+- 真实 per-task 数据出来再用来推 P1（profile 各自 cache_hit_pct 隔离监控）的目标线
+
+---
+
+## 2026-05-18 LLMRequest spine 迁移阶段 C + D-now 完成
+
+**变更类型**：refactor / backend + admin-frontend
+
+**变更内容**：
+
+按 [docs/audits/prompt-cache-research-2026-05-18.md](docs/audits/prompt-cache-research-2026-05-18.md) §12.5 路线推进。共两个阶段：
+
+**阶段 C — 11 处调用点迁移到 LLMRequest spine**：
+
+- C.1 `services/style/extractor.py` → `task="style"`
+- C.2 `plugins/bilibili/plugin.py` → `task="bilibili_intent"`
+- C.3 `plugins/element_detector/plugin.py` → `task="element_detect"`
+- C.4 `plugins/memo/plugin.py` → `task="memo"`
+- C.5 slang ×4：extractor / review_utils / drift / semantic → `task="slang"` / `slang_review` / `slang_drift` / `slang_semantic`，删掉所有 `getattr(client, "_call_slang_*", ...)` 三级 fallback chain
+- C.6 `services/llm/thinker.py` → `task="thinker"` 并实施 **P0-A**：mood/affection 从 system 前缀拼接移到 `dynamic_blocks` 末尾，static prefix 不再每次被污染
+- C.7 / C.9 `compact` / main `chat()` → 推到 D-later。Omubot 的 compact 输入已是预压平的 user message（无历史 tool_result 块），§11.3 P2 audit 描述的 sentinel 替换在 Omubot 上无对象；compact 与 main `chat()` 共享"多 round 聚合为 1 行 usage.db"契约，spine 自动 record 路径会破坏现有断言，需先重谈聚合契约
+- C.8 `plugins/chat/plugin.py /debug` ×2 → `task="chat_private"`；MemoExtractor 注入处由 C.4 已经覆盖
+
+**阶段 D-now — wrapper 清理 + admin 视图 + 守门测试**：
+
+- D.1a 删除 `_call_thinker` wrapper（无调用者）
+- D.1b 迁移 `tests/test_client.py:186/192` 速率限制测试到 `_call(LLMRequest(task="slang"))`，删除 `_call_slang` wrapper
+- D.1c 迁移 `kernel/router.py:884` semantic gate 调用 → 直接传 `ctx.llm_client._call`；`evaluate_semantic_gate` 内部构造 `LLMRequest(task="reply_gate")`；删除 `_call_reply_gate` wrapper；同步更新 `tests/test_reply_workflow.py` 两个 fake
+- D.2 cancel-path 回归测试已存在于阶段 B（`test_spine_call_cancel_path_no_partial_record`），跑通验证
+- D.3 写 [docs/migrations/spine-2026-05-18.md](docs/migrations/spine-2026-05-18.md) 迁移清单（全部调用点 / 旧 wrapper / 新 task / 新代码位置 / D-later 阻塞原因）
+- D.4 admin/system 页 per-task 命中率：`SystemProviders.vue` 每个 task 行加 `命中 X.X%`，数据来自 `provider_rate_limit_payload().profiles[].last_cache_hit_pct_by_task`；后端 `admin/routes/api/providers.py` 在 profile payload 加 `last_cache_hit_pct_by_task` 字段
+- D.5 cache diagnostic 后端 endpoint `GET /api/admin/providers/cache-diagnostic/{task}?limit=20`，返回 N 条 `{snapshot, diff}`；前端 UI 暂未独立面板，运维 curl 即可定位 break 轴
+- D.6 admin task-profile 选择器旁加 capability 兼容性提示：所选 profile 缺少 task 所需 capability 时显示 `缺 chat/tools` warning tag
+- D.7 新增 `tests/test_llm_task_admin_sync.py` 守门测试 ×3：保证 `services/llm/llm_request.py` 的 `LLMTask` Literal、`admin/.../types.ts` 的 `ProviderTaskKey` Literal、`SystemProviders.vue` 的 `providerTaskOrder` 数组与 `providerTaskLabels` 对象四方一致
+
+**验证**：
+
+- 全量 `pytest -q`：1064 passed, 8 skipped（阶段 C 上线前 1061 passed，+3 来自 D.7 守门）
+- `vue-tsc --noEmit` 无错误
+- `ruff check` 仅剩历史 pre-existing 错误，本次改动无新增
+
+**配置面**：
+
+- `last_cache_hit_pct_by_task` 字段对前端无侵入（旧前端会忽略），可灰度上线
+- `/api/admin/providers/cache-diagnostic/{task}` 是新 endpoint，旧客户端不会调用，零风险
+
+**影响范围**：
+
+- usage.db 的 `call_type` 列从今天起开始出现 11 个新 task 名（style / bilibili_intent / element_detect / memo / slang / slang_review / slang_drift / slang_semantic / thinker（P0-A 后 prefix 才稳定）/ chat_private / reply_gate）
+- thinker 调用的 cache prefix 命中率应从今天起改善（P0-A 修复了 mood/affection 拼接污染）
+- `main` / `compact` / `proactive` 仍走 legacy 路径（D-later）
+
+**后续动作**：
+
+- D-later：重谈 `_record_usage` 聚合契约（方案 A: 加 `_omu_skip_auto_record`；方案 B: 接受多行 usage；方案 C: spine 内部聚合），完成 `_call_compact` 删除 + main `chat()` 迁移
+- staging 灰度 3-7 天后对比 DeepSeek 后台 vs `usage.db` 的 per-task 分布，写灰度报告
+- 待 P1-E 后再用真实 per-task 数据给出 cache 命中率验收阈值（不预设 55% / 60%）
+
+---
+
+## 2026-05-18 reply_gate 隐藏 bug 修复
+
+**变更类型**：fix / backend
+
+**变更内容**：
+
+`kernel/router.py:884` 的 semantic gate 调用 `ctx.llm_client._call_reply_gate(...)`，但 `LLMClient` 从未定义此方法。配置 `reply_workflow.mode="semantic"` 已启用，每次实际调用都抛 `AttributeError`，被 `services/reply_workflow.py:394` 的 `except Exception` 静默吞掉，semantic gate 自上线起一直 fail-closed 返回 None，从未真正生效过。
+
+修复（[services/llm/client.py](services/llm/client.py)）：
+
+- 新增 `LLMClient._call_reply_gate` 薄 wrapper，与现有 `_call_thinker` / `_call_compact` / `_call_slang` 同模式（task=`"reply_gate"`，max_tokens 默认 96）
+- `_call` 内部 deepseek thinking 自动禁用列表加入 `"reply_gate"`（避免 96-token 轻量决策被 reasoning 拖慢）
+
+**配置面**：`config/config.json` 的 `task_profiles.reply_gate = "main"` 早就声明过，本次只补足代码侧的 method 实现。
+
+**发现来源**：[docs/audits/prompt-cache-research-2026-05-18.md](docs/audits/prompt-cache-research-2026-05-18.md) §12.1 LLM 调用点盘点过程中发现。
+
+**验证**：
+
+- `.venv/bin/pytest tests/test_reply_workflow.py -q` 通过（20 passed）
+- `.venv/bin/pytest tests/test_client.py -q` 通过（49 passed）
+
+**影响范围**：semantic gate 终于能真正运作；group 路径的 reply 决策从"全部 fail-closed 放行"变为"按 LLM 判定"。运行时行为变化，需观察对群活跃度和误回复率的影响。
+
+**后续动作**：本修复是 [prompt-cache-research-2026-05-18.md](docs/audits/prompt-cache-research-2026-05-18.md) §12.5 Step 0；接下来按 §12.5 路线落地 LLMRequest spine refactor。
+
+---
+
+## 2026-05-17 多层学习记忆研讨报告
+
+**变更类型**：架构研究 / 审计文档
+
+**变更内容**：
+
+新增 [docs/audits/multilayer-memory-learning-report-2026-05-17.md](docs/audits/multilayer-memory-learning-report-2026-05-17.md)，对 Omubot 黑话、表达方式、知识库/记忆/图谱三层学习结构做外部研究与本地实现对照：
+
+- 参考 Generative Agents、MemGPT/Letta、Reflexion、LangMem、Zep、Mem0、SillyTavern 等论文和成熟项目。
+- 明确当前 Omubot 是“多层资料晚融合 + 局部治理耦合”，尚未达到真人式多层记忆。
+- 汇总本地数据快照：knowledge index、slang、style、learning_normalizer、knowledge_graph 的当前沉淀情况。
+- 提出后续路线：修通 style 反馈闭环、PromptBudgetManager、MemoryConsolidator、Episodic Reflection、图谱骨架化。
+- 自审后已补充修复方案：采样说明、逐段来源链接、slang normalizer 接入待复核、style 反馈闭环修复、privacy/scope 硬门槛和 P0/P1 整改清单。
+
+**影响范围**：仅文档，不改运行时代码。
+
+**后续建议**：下一步优先处理 `StylePlugin` 缺 `reply` 权限和 style approved/profile 为空的问题，再讨论统一 prompt 预算层。
+
+---
+
+## 2026-05-17 备份体系服务层实施（Phase 1-4）
+
+**变更类型**：基础设施 / 新功能
+
+**变更内容**：
+
+将外挂 cron 脚本备份方案升级为服务层集成的完整备份体系：
+
+1. **Phase 1 — 最小可交付**：
+   - `services/storage/backup.py`：BackupItem registry（24 项）+ BackupService（create/list/prune/inspect/restore）
+   - `services/storage/backup_scheduler.py`：asyncio 定时调度，bot 启动即自动备份
+   - `kernel/config.py`：新增 BackupConfig（enabled/daily_time/keep_days/default_profile）
+   - `bot.py`：startup hook 启动 scheduler + 60s smoke test
+   - `admin/routes/api/system.py`：替换 shutil.copytree 为 BackupService + 新增 settings/list API
+   - `services/health.py`：registry-based SQLite 检查（8 DB）+ 备份新鲜度 + 磁盘占用
+   - `scripts/backup-databases.sh`：改为 BackupService 薄包装
+   - `tests/test_backup_service.py`：17 个单元测试全通过
+
+2. **Phase 2 — Profile 体系 + Admin 配置面板**：
+   - 4 个 profile：daily / pre-change / migration / diagnostic
+   - Admin 系统页 SystemBackup.vue：profile 选择 + 备份历史 + 调度配置表单
+   - GET/POST `/api/admin/backup/settings` 端点 + scheduler 热加载
+
+3. **Phase 3 — 安全恢复流程**：
+   - CLI `inspect`：漂亮打印 manifest
+   - CLI `restore-plan`：只读恢复计划
+   - CLI `restore --apply`：WAL checkpoint → pre-restore 备份 → 替换 → 清理 WAL/SHM → quick_check
+
+4. **Phase 4 — Slang 专项恢复**：
+   - `scripts/dev/slang_db_repair.py` 扩展：`rebuild-terms-from-revisions` + `validate` 子命令
+
+**关键安全机制**：
+
+- `.backup` API 失败即失败，不降级为 cp
+- fcntl.flock 文件锁防并发
+- 磁盘空间预检（1.5x 安全裕度）
+- 原子 rename（同文件系统校验）
+- WAL pre-checkpoint
+- manifest sha256 + trusted 标记
+
+**影响范围**：备份、健康检查、Admin 系统页、bot 启动流程
+
+**回滚路径**：revert commit + 恢复旧 backup-databases.sh + 移除 bot.py scheduler hook
+
+---
+
+## 2026-05-17 slang.db 损坏修复 + 全库每日备份方案上线
+
+**变更类型**：故障修复 / 运维基础设施
+
+**事件经过**：
+
+1. Phase 13 代码实施完成后，准备在备份 DB 上执行迁移脚本 dry-run。
+2. `cp storage/slang.db /tmp/slang_backup.db` 后执行脚本报 `database disk image is malformed`。
+3. 对源 DB 执行 `PRAGMA integrity_check` 发现大量 B-tree 页损坏（Tree 4/5/8/9/10/11/12/13/14/15/19 等数十个页面 `btreeInitPage() returns error code 11`）。
+4. Docker 容器内 DB 为同一 bind mount，同样损坏。
+5. `sqlite3 .recover` 可恢复 `slang_term_revisions`（2552 行）、`slang_observations`（3015 行）、`slang_settings`（10 行）、`slang_pending_candidate_keys`（275 行），但 `slang_terms` 表数据页全部不可读（0 行恢复）。
+6. 检查 `storage/backups/` 下历史备份：均为 2026-05-11 标记为 corrupt 的旧快照（仅 130 条 term，远少于生产 ~998 条）。
+7. 确认 `strings slang.db | grep term_id` 可见 5034 个片段 — 原始数据仍在磁盘页面上，但 B-tree 索引结构损坏导致 SQLite 无法遍历。
+
+**修复方案**：
+
+从 `slang_term_revisions` 表重建 `slang_terms`：
+- 每个 `term_id` 取 `MAX(created_at)` 对应的 `after_json`（完整 term 快照）
+- 解析 JSON 重建所有字段（term_id, term_key, term, meaning, aliases, scope, group_id, confidence, status, usage_count, unique_users, timestamps, source, repeat_policy, notes, meta）
+- 结果：**747 条 term 重建成功**（approved 71 / candidate 536 / muted 138 / expired 2）
+- 丢失约 250 条：无 revision 记录的早期数据（主要是 Phase 10 之前、revision 机制上线前创建的 term）
+
+**执行步骤**：
+
+```bash
+# 1. recover 可读表到新 DB
+sqlite3 storage/slang.db ".recover" | sqlite3 /tmp/slang_recovered.db
+
+# 2. 从 revisions 重建 slang_terms（自定义 Python 脚本）
+python3 rebuild_from_revisions.py  # → /tmp/slang_rebuilt.db
+
+# 3. 在重建 DB 上执行 Phase 13 迁移
+uv run python scripts/dev/slang_meta_migration_p02.py --db /tmp/slang_rebuilt.db --dry-run
+# Migration 1 (backlog): approved=133, rejected=0, kept=34, total=167
+# Migration 2 (daily): approved=48
+# Migration 3 (human_reviewed): to mark=23
+
+uv run python scripts/dev/slang_meta_migration_p02.py --db /tmp/slang_rebuilt.db
+# Migration 1 (backlog): 167 rows updated
+# Migration 2 (daily):   48 rows updated
+# Migration 3 (human):   22 rows updated
+
+# 4. 替换生产 DB
+docker stop qq-bot
+mv storage/slang.db storage/slang.db.corrupt-20260517
+cp /tmp/slang_rebuilt.db storage/slang.db
+docker start qq-bot
+```
+
+**备份方案上线**：
+
+为防止再次发生不可恢复的数据丢失，新增每日自动备份：
+
+| 项目 | 内容 |
+|------|------|
+| 脚本 | `scripts/backup-databases.sh` |
+| 机制 | SQLite `.backup` API 热备份（不中断 bot、不锁表） |
+| 调度 | crontab 每天 04:30 执行 |
+| 存放 | `storage/backups/daily/YYYY-MM-DD/` |
+| 保留 | 最近 7 天，超期自动清理 |
+| 验证 | 备份后自动 `PRAGMA integrity_check` 验证 slang.db |
+| 日志 | `storage/backups/backup.log` |
+| 覆盖 | slang.db / messages.db / usage.db / style.db / memory_cards.db / knowledge_graph.db / knowledge_index.db / learning_normalizer.db（共 8 个，总计 ~36MB/天） |
+
+恢复方式：
+```bash
+cp storage/backups/daily/2026-05-17/slang.db storage/slang.db
+docker restart qq-bot
+```
+
+**影响**：
+
+- slang_terms 从 ~998 条降至 747 条（丢失 ~250 条无 revision 的早期 term）
+- Phase 13 迁移已在重建 DB 上执行完毕（ai_reviewed_at / ai_review_source / ai_review_decision / human_reviewed 字段已补写）
+- bot 重启后正常运行，slang API 响应 200，消息收发正常
+- 每日备份已生成首份快照并验证通过
+
+**根因分析**：
+
+- slang.db 此前已有多次损坏记录（2026-05-11 三次 corrupt 备份），说明存在持续性的写入异常
+- 可能原因：① Docker bind mount + WAL 模式在 macOS 上的 fsync 语义差异；② bot 异常退出时 WAL checkpoint 未完成；③ 磁盘 I/O 错误
+- 备份方案使用 `.backup` API 而非文件拷贝，可避免拷贝到 WAL 未 checkpoint 的不一致状态
+
+**回滚**：
+
+- 损坏的原始 DB 保留在 `storage/slang.db.corrupt-20260517`
+- 如需回退备份方案：`crontab -r` 删除定时任务，`rm -rf storage/backups/daily/` 清理备份文件
+
+**验证**：
+
+- `sqlite3 storage/slang.db "PRAGMA integrity_check"` → ok
+- `sqlite3 storage/slang.db "SELECT COUNT(*) FROM slang_terms"` → 747
+- `docker logs qq-bot --tail 5` → Bot 就绪，消息正常接收
+- `storage/backups/daily/2026-05-17/slang.db` 存在且 integrity_check=ok
+- `crontab -l` → `30 4 * * * .../scripts/backup-databases.sh >> .../backup.log 2>&1`
+
+---
+
+## 2026-05-16（深夜）黑话治理 Phase 13 方案落入实施追踪
+
+**变更类型**：文档 / 实施追踪同步
+
+**内容**：
+
+- 把六轮审计后定稿的方案写入实施追踪文档 `docs/slang-module-implementation-tracker.md`，开新阶段 Phase 13。
+- 当前状态段更新：Phase 12 已完成；Phase 13 方案已收口（六轮审计完成），实施待 PR；当前阶段 = backlog reviewer 治理与 AI review 契约重构。
+- 实施清单新增 Phase 13 共 16 行：P0-1（频次门槛）/ P0-2（AI review 契约 + SQL helper 拆分 + 历史 meta 迁移 + N7 全仓 grep）/ P0-3（kept streak 自动降级）/ P0-4（前端 tab 重排 + 砍作用域 + human_reviewed 迁移 + 互斥证明）/ O1-O6 第六轮审计实施级条目 / P1-1 / P1-2 / P2-1 / P2-2。
+- 决策记录追加 6 条 2026-05-16 决策：① "AI 是否审过"与"AI 结论"用两个独立字段表达；② 迁移 CASE 直读 `backlog_review.approved` 不依赖最终 status；③ 第二段 daily 迁移 WHERE 用 `NOT LIKE ai_review_source`；④ LIKE 双格式纪律明文化；⑤ backlog mute 与人工 mute 用 revision 表 EXISTS 子查询区分；⑥ 大规模 meta 契约迁移按"自审 2 + 外部审计 2 + 修订后再审计 2 = 六轮"工序。
+- 风险跟踪追加 9 条 Phase 13 风险（高 3 / 中 5 / 低 1），覆盖历史迁移误标、LIKE 单格式漏过滤、43 条 backlog approved 误打 human_reviewed、用户手动 mute 混入 AI 否决、N5 死代码、P1-1 死引用、反向重申误判、默认关 web search、kept streak 误 mute 真黑话。
+- 更新日志追加 2026-05-16 收口条目，列出六轮审计的累计 28 项缺陷数量分布（gpt 5 / deepseek 8 / claude N1-N7 7 / claude O1-O8 8）和 P0 落地顺序（Day 1 = P0-2 契约 + 迁移；Day 2 = P0-1/3/4）。
+- 顺手修了一个既有 lint 警告：line 75 `str | None` 含未转义的 `|` 把表格行变成 5 列，改为 `str \| None`。
+
+**影响**：
+
+- 下次会话或新 agent 接手 Phase 13 实施时，可以直接从 `slang-module-implementation-tracker.md` 看到完整待办、决策依据、风险清单，不需要再读 `slang-governance-research-2026-05-16.md` 的 670+ 行全文。
+- 本次零代码改动，不动数据库、不动配置、不动 Docker；仅文档同步。
+
+**回滚**：直接 `git checkout` 这两个文件即可，无运行时影响。
+
+**验证**：
+
+- 文档变更不需要运行时测试；lint 警告已就地修复。
+- Phase 13 实施前的最低验证清单已落档在追踪文档"当前目标"段。
+
+---
+
+## 2026-05-16（晚）黑话治理方案外部审计落档
+
+**变更类型**：文档 / 架构审计
+
+**内容**：
+- 在 `docs/slang-governance-research-2026-05-16.md` 追加“外部审计记录（2026-05-16）”，审计人标注为 `gpt`。
+- 审计结论覆盖 P0 SQL 契约、AI 否决分桶、tab 计数验收、频次门槛验收指标和新增设置项前端触及范围。
+- 补充建议 P0 顺序：先定义 AI review 契约和历史 meta 迁移，再做频次门槛、kept streak 和前端分桶。
+
+**影响**：
+- 后续实施黑话治理 P0 时，应先处理审计记录里的 High 项，避免 Day 1 验收 SQL 与生产分桶条件不一致。
+- 本次只改 Markdown 文档，不改变运行时代码、配置或数据库。
+
+**验证**：
+- 文档已写入审计人 `gpt`。
+- 未运行 pytest/前端构建，文档变更不需要运行时测试。
+
+---
+
+## 2026-05-16（晚）Wiki 覆盖最新项目状态
+
+**变更类型**：文档 / Wiki / 交接信息更新
+
+**内容**：
+- 更新 `docs/wiki/Home.md`、`Architecture.md`、`Plugins.md`、`Configuration.md`、`Deployment.md`、`Slang.md`、`Knowledge-System.md`、`Commands.md` 与 `_Sidebar.md`，把当前版本、插件清单、配置主路径、Admin 能力和黑话 backlog reviewer 修复写入主 Wiki。
+- 新增 `docs/wiki/Style-Learning.md`，说明表达学习的职责边界、数据模型、Admin/API、配置和验收重点。
+- 新增 `docs/wiki/Conversation-Archive.md`，说明本地对话归档底座、scanner cursor、证据引用和留存 dry-run 策略。
+- 同步刷新根目录 `wiki/` 的框架开发文档，移除 Phase 7 待实施、14 个插件、TOML 优先、单文件插件等旧表述。
+
+**影响**：
+- 后续会话可直接从 Wiki 了解 `v1.4.0` 当前状态：23 个本地包/能力包、manifest v3、JSON 配置契约、ContextPlugin system/locked、Style/ConversationArchive、Slang backlog slot 幂等修复。
+- 本次只改 Markdown 文档，不改变运行时代码、配置或数据库。
+
+**验证**：
+- 已用 `rg` 扫描 Wiki 中的旧版本号、旧插件数和旧 Phase 表述；保留项仅为 legacy/说明性上下文。
+- 未运行 pytest/前端构建，文档变更不需要运行时测试。
+
+---
+
+## 2026-05-16（晚）AI 清池死循环紧急修复 — backlog reviewer 缺 slot 幂等闸门
+
+**故障现象**：
+- 用户截图：清池跑完一轮后进度条立刻从 0/N 重新开始，token 持续消耗不停
+- DB 验证：`backlog_review_state.active=true, processed=128/1020, started_at == last_done_at`
+- 推算单轮成本：1020 条 × 1 LLM + 可选 1 web_search ≈ 70 万 tokens／轮，无任何冷却期
+
+**根因**：
+昨天首次实现 backlog_reviewer 时把 plan 中的"每天定点 2 次"自作主张升级成了"每 60s tick 都跑一批"。后续又在 `run_backlog_review_one_batch_if_due` 里加了"600s 内连跑直到清完"的循环。两个 bug 叠加：
+- 第 N 个 tick 跑完一轮置 `active=False` + `last_done_at`
+- 第 N+1 个 tick 没有"本 slot 已跑过"的闸门 → 看到 `active=False` + count > 0 → 重启新一轮
+- daily_reviewer 同位置有 `last_daily_ai_review_slot` slot_key 幂等检查，backlog_reviewer 复制粘贴时漏掉了这层
+
+**修复**（D1 同模式扫描 — 跟 daily_reviewer slot_key 模式对齐）：
+- `plugins/slang/plugin.py` 的 `run_backlog_review_one_batch_if_due` 加 slot_key 幂等闸门：
+  - 复用 `daily_ai_review_times` 时段配置（用户已有的"每天几点跑"设置）
+  - slot_key = `f"{today}:{current_slot}"`，存到 `meta:last_backlog_review_slot`
+  - 本 slot 已跑过 → `skipped: already_ran`
+  - **关键不变量**：只有 `completed_in_session=True`（backlog 真的清空）才 mark slot；tick 超时半途而退不锁 slot，下个 tick 同 slot 续跑
+- `reset_backlog_review` 同步清 `last_backlog_review_slot`，保证用户点"重置/重新开始"能立刻重跑
+
+**节奏对比**：
+- 修复前：每 60s tick 触发一轮，跑完立即重启 → token 无上限
+- 修复后：每天 2 次（默认 04:00 / 16:00，用户可在 settings 调），单 slot 内连跑批直到清空或 tick 超时
+
+**测试**：
+- 新增 3 个回归测试到 `tests/test_slang_backlog_reviewer.py`：
+  - `test_backlog_if_due_drains_pool_and_locks_slot` — 验证 slot 内能跑多批清空，跑完锁 slot
+  - `test_backlog_if_due_skips_when_slot_already_ran` — 验证本 slot 重复 tick 跳过，新加候选也不重启
+  - `test_backlog_if_due_does_not_lock_slot_on_partial_completion` — 验证半途而退不锁 slot
+- 全部 26/26 backlog + plugin 测试通过
+- 全量 `uv run pytest` 通过
+
+**应急止血动作**（已执行）：
+- 19:30 `docker compose stop bot` 物理切断 token 消耗
+- 19:30 `UPDATE slang_settings SET value_json = json_set(value_json, '$.backlog_review_enabled', json('false'))` 兜底关开关
+
+**部署**：
+- 修复涉及 `plugins/slang/plugin.py`（.py 改动）→ 必须 rebuild bot
+- `dot_clean . && docker compose up bot -d --build`
+- 重启后把 `backlog_review_enabled` 改回 true（前端 settings 表单或直接改 DB）
+
+**回滚**：关 `backlog_review_enabled` 即可
+
+---
+
+## 2026-05-16 AI 复核覆盖存量候选池 — 修复设计漏洞 1075 条永远积压
+
+**背景**：
+- daily_reviewer 只复核今天新抽词，不读 status='candidate' 存量；池子从 5/14 起累计 1075 条不收敛
+- 包括 confidence=1.0 的"超舟"等高质量词，AI 复核日跑 2 次也碰不到
+
+**改动**：
+- 新增 `services/slang/backlog_reviewer.py`（SlangBacklogReviewer）：每批 50 条扫存量 candidate → 搜索 + LLM 判定
+- approved → 升级为 approved；否决 → muted；模糊 → 保留待下轮
+- `meta:backlog_review_state` 持久化游标，崩溃可续跑
+- `on_tick` 接入新分支，每 60s 跑一批，约 22 分钟清完当前 1075 条
+- admin 加 `backlog-review/status` / `run` / `reset` 三个 API
+- 前端新增 `SlangBacklogProgress.vue` 进度条（5s 轮询）
+- settings 加 `backlog_review_enabled` / `batch_size` / `min_confidence` 三项
+- `daily_reviewer.py` 重构：`_assess` / `_search` / `_build_search_queries` 提到模块级 helper，两个 reviewer 共用
+
+**验证**：
+- `tests/test_slang_backlog_reviewer.py` 9/9 passed
+- `tests/test_slang_plugin.py` 14/14 passed（回归无破坏）
+- `vue-tsc --noEmit` 无错误
+- `npm run build` 成功（SlangView-D_6tq28F.js 68.33 kB / gzip 19.10 kB）
+
+**回滚**：关 `backlog_review_enabled` 即可（settings 默认开，但开关受用户控制）
+
+**部署**：前端 bind mount 已生效；后端需 `dot_clean . && docker compose up bot -d --build`
+
+---
+
+## 2026-05-16 项目架构与 Wiki 梳理
+
+**背景**：
+通过阅读工作区 Wiki（`README.md`、`01-architecture.md`、`02-kernel-api.md`等）了解项目当前的架构设计与组件规范。
+
+**核心梳理**：
+1. **三层模型设计**：基于鸿蒙 OS 设计灵感，分层明确（内核层、系统服务层、插件层），内核保持零 I/O 且无外部依赖以维持架构隔离。
+2. **PluginBus 调度机制**：通过统一的 Context 和 8 个钩子（如 `on_message`, `on_pre_prompt`）串联逻辑，内置 `_safe_call` 防崩溃/超时隔离。
+3. **业务优先级控制**：遵循严格的降级执行流程（0为核心级别，向下递流至独立/实验性插件层），确保基础能力与扩展能力的隔离。
+
+**后续**：
+已对齐项目状态，将在后续开发中遵循此设计契约完成各模块的开发和运维工作。
+
+---
+
+## 2026-05-15（深夜 +5）SlangView PR C — panel-head 视觉收敛到 AppPanelSection
+
+继 PR B-3 之后落 **PR C**：把仅剩的两块 `slang-panel-head` markup（SlangTermList 列表面板 + 主视图设置面板）迁到公共 `AppPanelSection`，B-3 多出来的 bundle 开销全部回吐 + 微净降。
+
+**SlangTermList.vue**：339 → **308 行**（-31）
+
+- 外层 `<AppCard bordered elevated>` + 手写 `<div class="slang-panel-head">` 改成 `<AppPanelSection eyebrow="Review Queue" title="黑话候选与词表">`
+- 顶部分页 `<NPagination>` 通过 `<template #aside>` 槽位接到右上角，行为不变
+- 删 4 块 scoped style（`.slang-list-panel / .slang-panel-head / .slang-eyebrow / .slang-title`，共 ~31 行）
+- `AppCard` import 保留（term card / settings cards 仍在用）
+
+**SlangView.vue（主视图）**：845 → **814 行**（-31，累计 2662 → 814，**-69.4%**）
+
+- `<AppCard bordered elevated class="slang-settings-panel">` + 手写 panel-head 改成 `<AppPanelSection eyebrow="Advanced Settings" title="学习与注入">`
+- 折叠按钮通过 `<template #aside>` 接入；折叠态/展开态业务逻辑（`showAdvancedSettings`）完全保留
+- 删 `AppCard` import（已无引用），新增 `AppPanelSection` import
+- 删 4 块 scoped style（`.slang-settings-panel / .slang-panel-head / .slang-eyebrow / .slang-title`，共 ~31 行），保留 `.slang-cache-revision / .slang-layout(--compact) / .slang-settings-collapsed-note` 与 1180px 媒体查询
+
+**外部可观察证据**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → 4.93s
+- `SlangView-*.js`：60.89 KB / gzip 17.34 KB → **60.63 KB / gzip 17.26 KB**（-0.26 / -0.08 gzip，B-3 +5.05 / +1.38 的开销首次出现回吐迹象，且对比起点 53.06 / 14.73 仍是 +7.57 / +2.53——这部分是 9 个子组件 scoped style 的固定成本，不再继续收敛）
+- grep 验证：`slang-panel-head / slang-eyebrow / slang-title / .slang-list-panel / .slang-settings-panel` 五个 class 名在 admin/frontend/src/views/slang/ 下已全部消失
+
+**累计四个 PR 的全景**：
+
+| 阶段 | 主视图行数 | 减量 | 子组件数 | bundle KB / gzip |
+| --- | --- | --- | --- | --- |
+| 起点 | 2662 | 0 | 0 | 53.06 / 14.73 |
+| B-1 helpers | 2320 | -342 (-12.8%) | 0（3 helpers） | 53.24 / 14.86 |
+| B-2 只读 | 1864 | -456 (-19.7%) | 4 | 55.84 / 15.96 |
+| B-3 交互 | 845 | -1019 (-54.7%) | 9（4+5） | 60.89 / 17.34 |
+| **C 视觉收敛** | **814** | **-31 (-3.7%)** | 9 | **60.63 / 17.26** |
+| 累计 | 814 | -1848 (**-69.4%**) | 9 | +7.57 / +2.53（固定成本，B-3 后已止涨） |
+
+**回滚**：
+
+- 仅 PR C 回滚：`git checkout HEAD -- admin/frontend/src/views/slang/SlangView.vue admin/frontend/src/views/slang/components/SlangTermList.vue` + `npm run build`，不动 9 个子组件结构。
+
+**下一步**：SlangView 重构收尾。SystemView 同模板的 4 阶段（B-1 / B-2 / B-3 / C）走完，主视图剩下的 814 行 ≈ 11 API loader + 17 ref + 6 computed + 26 handler 的业务状态机，符合"不可拆的业务复杂度"边界。下一个候选可以挑表达方式 / 知识库 / Memo / 群管理里仍是单文件的视图。
+
+---
+
+## 2026-05-15（深夜 +4）SlangView PR B-3 — 5 个交互子组件抽离
+
+继 [docs/tracking/web-refactor.md](docs/tracking/web-refactor.md) B-2 之后落 **PR B-3**：5 个交互子组件全部归位 `admin/frontend/src/views/slang/components/`，主视图再降 54.7%（累计 -68.3%）。
+
+**新增 5 个 .vue**（行数为含 scoped style 的实际值）：
+
+| 文件 | 角色 | 行数 |
+| --- | --- | --- |
+| `SlangTermList.vue` | 列表面板：drift mode / term list / bulk bar / 双 pagination；嵌 `SlangDriftCard`，emit `open-detail / quick-status / review-ai / drift-action / bulk-action` | 339 |
+| `SlangGovernanceSection.vue` | 漂移治理 + 观察中候选两段 side-section；emit `switch-queue-mode` 跳漂移队列 | 144 |
+| `SlangSettingsForm.vue` | 13 开关 + 14 数字 + 2 select + 2 textarea + 保存按钮；v-model:settings / allowlistText / stoplistText | 237 |
+| `SlangCreateDrawer.vue` | 创建抽屉，词条信息 + 示例与备注两段 AppPanelSection；v-model:visible / draft | 144 |
+| `SlangDetailDrawer.vue` | 详情抽屉五段：Editor / AI Review / Quality / History / Observations；v-model:visible / detailTerm / editAliases / mergeTargetId / mergeSearchText | 435 |
+
+**主视图 SlangView**：1864 → **845 行**（**-1019 / -54.7%**），累计 2662 → 845（**-1817 / -68.3%**）。
+
+- imports：删 `AlertCircleOutline / SearchOutline / TimeOutline` 图标（迁子组件）+ `AppDrawerHeader / AppDrawerLayout / AppPanelSection / EmptyState`（迁抽屉子组件）+ `isAiApproved / isHumanReviewed / needsHumanReview / revisionActionLabel / statusType / formatSearchQueries / formatTime / confidenceText`（迁子组件）+ `STATUS_OPTIONS / REPEAT_POLICY_OPTIONS`（仅子组件用），保留 `statusLabel`（merge options label 用）+ `DEFAULT_SLANG_SETTINGS / mergeSettings`（settings 状态机用）；新增 5 个子组件 import
+- script：删 `selectedCount / pageSelectionChecked / pageSelectionIndeterminate` 三个 computed + `setPageSelection / toggleTermSelection / handleTermSelectionUpdate / termSelectionHandler` 四个函数（全部迁到 SlangTermList，主视图改用 `v-model:selected-term-ids` 直接同步）
+- template：列表面板（含 bulk bar + drift list + term list + 双 pagination）+ 创建抽屉 + 详情抽屉（5 段 AppPanelSection）+ 治理段 + 设置表单 五块旧 markup 全部替换为子组件调用
+- style：删 ~28 块 scoped class，主视图只保留 `.slang-cache-revision` + `.slang-layout(--compact)` + `.slang-settings-panel` + `.slang-panel-head` + `.slang-eyebrow` + `.slang-title` + `.slang-settings-collapsed-note` 七块共 ~70 行（PR C 把 panel-head 迁 `AppPanelSection` 后能再删一半）
+
+**v-model 流向**（主视图 = 单一状态源）：
+
+- `<SlangTermList v-model:page v-model:selectedTermIds>` ← 翻页 + 多选状态
+- `<SlangAdvancedOverview v-model:expanded>` ← 折叠
+- `<SlangQueueToolbar v-model:searchText / groupFilter / scopeFilter / queueMode / minConfidence>`
+- `<SlangCreateDrawer v-model:visible v-model:draft>`
+- `<SlangDetailDrawer v-model:visible / detailTerm / editAliases / mergeTargetId / mergeSearchText>`
+- `<SlangSettingsForm v-model:settings / allowlistText / stoplistText>`
+
+**外部可观察证据**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → 4.91s
+- `SlangView-*.js`：55.84 KB / gzip 15.96 KB → **60.89 KB / gzip 17.34 KB**（+5.05 / +1.38 gzip，5 子组件 scoped style 复制造成的预期开销，与 SystemView B-3 +2.41 / +0.87 同量级；PR C 收敛 AppPanelSection 后会回吐部分）
+- 行数对比与 SystemView B-3（1649 → 590，-1059 / -64%）按比例完全一致——SystemView 累计 3326 → 590 / -82%，SlangView 累计 2662 → 845 / -68%；剩余 845 行里 ~470 行是 11 个 API + 17 ref + 6 computed 业务状态机，这是不可拆的业务复杂度
+
+**累计三个 PR 的全景**：
+
+| 阶段 | 主视图行数 | 减量 | 子组件数 | bundle KB / gzip |
+| --- | --- | --- | --- | --- |
+| 起点 | 2662 | 0 | 0 | 53.06 / 14.73 |
+| B-1 helpers | 2320 | -342 (-12.8%) | 0（3 helpers） | 53.24 / 14.86 |
+| B-2 只读 | 1864 | -456 (-19.7%) | 4 | 55.84 / 15.96 |
+| B-3 交互 | 845 | -1019 (-54.7%) | 9（4+5） | 60.89 / 17.34 |
+| 累计 | 845 | -1817 (-68.3%) | 9 | +7.83 / +2.61（PR C 后回吐） |
+
+**回滚**：
+
+- B-3 完整回滚：`git checkout HEAD -- admin/frontend/src/views/slang/SlangView.vue`，再删除 5 个 B-3 子组件 `rm admin/frontend/src/views/slang/components/{SlangTermList,SlangGovernanceSection,SlangSettingsForm,SlangCreateDrawer,SlangDetailDrawer}.vue`，最后 `npm run build` 即可恢复（不动 B-2 的 4 个只读子组件）。
+
+**下一步**：PR C 视觉收敛——把 4 块 `slang-list-panel` / `slang-settings-panel` 的 panel-head（eyebrow + title + 操作）迁到 `AppPanelSection`，删主视图剩余 7 块样式，bundle 预计回吐 1-2 KB / gzip 0.3-0.5 KB；目标主视图 ~750 行。
+
+---
+
+## 2026-05-15（深夜 +3）SlangView PR B-2 — 4 个只读子组件抽离
+
+继 [docs/tracking/web-refactor.md](docs/tracking/web-refactor.md) B-1 helpers 之后落 **PR B-2**：4 个只读子组件全部归位 `admin/frontend/src/views/slang/components/`，主视图再降 19.7%。
+
+**新增 4 个 .vue**（行数为含 scoped style 的实际值）：
+
+| 文件 | 角色 | 行数 |
+| --- | --- | --- |
+| `SlangMetrics.vue` | 5 张 KPI grid（auto-fit minmax 156px，三段断点） | 83 |
+| `SlangAdvancedOverview.vue` | 高级概览条（折叠开关）+ 3 张 stat 卡（热门/群活跃/抽取） | 200 |
+| `SlangQueueToolbar.vue` | 队列 segment + 4 filter + 跨群扫描/重置/总数 tag，control-strip 装饰带完整保留 | 272 |
+| `SlangDriftCard.vue` | drift 单卡（dual-use 预留：队列 drift 模式现已用，B-3 治理段会复用） | 149 |
+
+**主视图 SlangView**：2320 行 → **1864 行（-456 / -19.7%）**
+
+- imports：删 `MetricCard / CheckmarkCircleOutline / FlashOutline / CONFIDENCE_OPTIONS / SCOPE_OPTIONS / driftStatusLabel / runKindLabel`，新增 4 个子组件 import
+- script：删 3 个 computed（`groupOptions / totalQueueCount / queueOptions`）；setQueueMode 保留（治理段"查看漂移队列"按钮还在用）
+- template：metric grid / advanced strip / advanced cards / queue toolbar / 队列 drift 卡五块旧 markup 全部替换为子组件调用，drift 卡 emit `action(drift, accept|reject|alias|mute)` 给主视图调 `handleDriftAction`
+- style：删 13 块 scoped class，保留治理段共享的 `pending-list / pending-row` 子集（B-3 还要用）
+
+**外部可观察证据**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → 4.76s
+- `SlangView-*.js`：53.24 KB / gzip 14.86 KB → **55.84 KB / gzip 15.96 KB**（+2.60 / +1.10 gzip，4 子组件 scoped style 复制造成的预期开销，与 SystemView B-2 +3.13 / +0.96 同量级；PR C 收敛 AppPanelSection 后会回吐部分）
+- 行数对比与 SystemView B-2（2842 → 1649，-1193 / -42%）按"主视图占比"看在同量级，SlangView 因表单 + 抽屉两块体量大留在 B-3
+
+**回滚**：
+
+- B-2 完整回滚：`git checkout HEAD -- admin/frontend/src/views/slang/SlangView.vue`，再 `rm -rf admin/frontend/src/views/slang/components/`，最后 `npm run build` 即可恢复。
+
+**下一步**：B-3 5 个交互子组件（SlangTermList / SlangGovernanceSection / SlangSettingsForm / SlangCreateDrawer / SlangDetailDrawer），主视图目标 ~600-700 行。
+
+---
+
+## 2026-05-15（深夜 +2）SlangView 拆分启动 — PR B-1 helpers 抽取
+
+按 [docs/tracking/web-refactor.md](docs/tracking/web-refactor.md) SystemView 同模板（B-1 helpers / B-2 只读子组件 / B-3 交互子组件 / C 视觉收敛）启动 SlangView 拆分。本轮交付 **B-1**。
+
+**B-2 / B-3 拆分定稿**（用户确认）：
+
+- B-2 4 个：SlangMetrics / SlangAdvancedOverview / SlangQueueToolbar / SlangDriftCard（drift 单卡，列表 + 治理段双处复用）。
+- B-3 5 个：SlangTermList / SlangGovernanceSection / SlangSettingsForm（治理段和表单单抽）/ SlangCreateDrawer / SlangDetailDrawer。
+
+**B-1 改动**（admin/frontend/src/views/slang/）：
+
+- 新增 `helpers/types.ts`（200 行）：11 interface + 3 type 全部从 SlangView.vue 抽出。
+- 新增 `helpers/formatters.ts`（98 行）：formatTime / confidenceText / numberSetting / formatSearchQueries / DEFAULT_SLANG_SETTINGS / mergeSettings。其中 `mergeSettings` 改成 pure 函数，把 fallback 显式参数化（原版闭包 `settings.value`），主视图两处调用点改为 `mergeSlangSettings(payload, settings.value)`。
+- 新增 `helpers/badges.ts`（114 行）：8 个标签函数（statusLabel/Type / driftStatusLabel / revisionActionLabel / policyLabel / runKindLabel / isAiApproved/isHumanReviewed/needsHumanReview）+ 4 options 常量（大写命名：STATUS_OPTIONS / CONFIDENCE_OPTIONS / SCOPE_OPTIONS / REPEAT_POLICY_OPTIONS）。
+- `SlangView.vue` 主文件：删除 11 interface + 3 type + 13 函数 + 4 options 常量 + defaultSlangSettings；template 里 7 处 options 引用换大写 import 名。**2662 行 → 2320 行（-342 / -12.8%）**。
+
+**外部可观察证据**：
+
+- `vue-tsc --noEmit` → exit 0。
+- `npm run build` → 4.91s。
+- `SlangView-*.js`：53.06 KB / gzip 14.73 KB → **53.24 KB / gzip 14.86 KB**（+0.18 / +0.13 gzip，与 SystemView B-1 同等级的 helpers split 预期开销）。
+- 行数对比与 SystemView B-1（3326 → 2842，-484 / -14.5%）在同量级。
+
+**回滚**：
+
+- B-1 完整回滚：`git checkout HEAD -- admin/frontend/src/views/slang/`，再 `rm -rf admin/frontend/src/views/slang/helpers/`，最后 `npm run build` 即可恢复。
+
+**下一步**：B-2 4 个只读子组件（SlangMetrics / SlangAdvancedOverview / SlangQueueToolbar / SlangDriftCard）。
+
+---
+
+## 2026-05-15（深夜 +1）admin 系统页布局重构 — 删 dashboard 重合内容 + 资源上移 + Policies 加指引 + 低频页面整理
+
+**用户反馈**：
+
+1. 系统页有和 Dashboard 重复的"Bot 状态 / NapCat / 运行时长 / 活跃会话"卡，看着冗余。
+2. "系统资源（CPU / 内存 / 磁盘）"位置过低，要滚一段才能看到，运维快速判断不便。
+3. "运行策略"卡只展示数字，没说"防检测策略在哪里开 / 它的作用是什么"——新手看不懂。
+4. SystemView 里 5 条"低频工具"链接（独立日程页 / 用量统计 / 沙盒 / 调度器 / 插件）要整理：日程已被 Dashboard 右栏完全覆盖、调度器已失效、沙盒和插件应该在一级导航。
+
+**确认**（不可逆动作）：
+
+- /schedule、/scheduler、/usage：**软下线**（只删导航入口和 SystemView 高级工具入口，保留路由 + .vue，便于回滚）。
+- 沙盒：进 SideMenu 「设置与维护」组成为一级导航。
+- Dashboard 同步补 cache 命中率 / 平均延迟 / 错误数 三个 /usage 独有指标（数据源 `usage_tracker.summary_today()` 已包含，无需改后端）。
+
+**改动**（admin/frontend/src/，9 文件）：
+
+- `views/system/components/SystemHero.vue`：删除 NapCat / 运行时长 chips（已在 Dashboard）；aside 两张卡改为「PID + 内存 + 线程」「活跃会话 + 转 Dashboard 提示」。仅保留版本 + 升级提示作为系统页独有信息。
+- `views/system/components/SystemMetrics.vue`：**保留文件**（用户拒绝删除），但从 SystemView 移除 import 和使用——4 张 KPI 已被 Dashboard `statusBadges + dash-hero__kpi` 完整覆盖。
+- `views/system/components/SystemPolicies.vue`：每个子卡增加 `system-stack__hint` 一行说明（版本号来源 / 防检测策略含义 / 发言倍率 config 路径）。防检测卡片新增「去配置·拟人延迟」按钮，跳 `/config?task=rhythm`。
+- `views/system/components/SystemAdvancedEntry.vue`：description 从"这些页面和观测能力仍然保留"改为更准确的"LLM Provider 切换 / 协议探测 / 一键备份"；tools 网格在空数组时不渲染（之前会渲染空网格）。
+- `views/system/SystemView.vue`：
+  - 主区段顺序改为：Hero → **Resources（独占首屏）** → Maintenance → ServiceHealth → RuntimeErrors → **Policies（下沉）** → AdvancedEntry。删除 `.system-main-grid` 双列样式（资源现在独占整宽，Policies 在维护类信息之后单独成段）。
+  - `advancedToolLinks` 从 5 条降为空数组（schedule/scheduler/usage 入口删除，sandbox/plugins 进侧栏一级导航）。
+- `views/config/ConfigView.vue`：onMounted 新增 `applyRouteQueryNav()`，监听 `route.query.task` 变化；接收 `?task=rhythm` 等参数后自动选中对应 NavId。
+- `layouts/components/SideMenu.vue`：「设置与维护」组里加「沙盒 /sandbox」入口（icon=TerminalOutline）；activeKey fallback 中分离 `/sandbox`（高亮自身）和 `/usage,/schedule,/scheduler`（fallback 到 /system）。
+- `views/dashboard/DashboardView.vue`：
+  - `DashboardUsage` interface 加 `cache_read_tokens / avg_elapsed_s / error_count`。
+  - 加 3 个 computed：`todayCacheHitRate / todayAvgLatency / todayErrorCount`。
+  - hero KPI 三联下加一条 `dash-hero__runtime` 紧凑行，展示 Cache 命中 / 平均延迟 / 今日错误。
+
+**外部可观察证据**：
+
+- `vue-tsc --noEmit` → exit 0。
+- `npm run build` → 4.87s 通过。
+- `SystemView-*.js`：53.35 KB / gzip 16.84 KB → **52.52 KB / gzip 16.68 KB**（删 SystemMetrics 引用 + 重排）。
+- `DashboardView-*.js`：26.79 KB / gzip 9.55 KB（含三指标补充）。
+- 路由 `/usage /schedule /scheduler /sandbox` 全部仍可手动访问；只是 schedule/scheduler/usage 不再出现在导航栏，sandbox 进入主导航。
+
+**回滚**：
+
+- 全部前端变更：`git checkout HEAD -- admin/frontend/src/{views/system,views/dashboard,views/config/ConfigView.vue,layouts/components/SideMenu.vue}`。
+- 因为是 bind mount，回滚后 `npm run build` 即可恢复，无需 docker 重建。
+
+**待用户验收**（dev 实测）：
+
+1. /system 首屏：Hero（版本+进程基线）→ 系统资源（CPU/内存/磁盘进度条）→ 运维建议 → 服务健康 → 关键错误 → 运行策略（含防检测跳转按钮）→ 高级工具 toggle。
+2. 防检测卡点「去配置·拟人延迟」：跳 `/config?task=rhythm` 自动选中"拟人延迟"任务。
+3. /：Dashboard hero 下方多一条 Cache 命中 / 平均延迟 / 今日错误。
+4. SideMenu「设置与维护」里有「沙盒」一项（紧跟插件）。
+5. /schedule、/scheduler、/usage 仍能手动访问（软下线，保险起见）。
+
+---
+
+## 2026-05-15（深夜）admin Config 页整页重做 — 卡片错位 + 卡套卡 + list/kv 行错位
+
+**背景**：用户反馈 `/admin/config` 页面"卡片错位、看着乱"。逐项核对后定位到三处实锤：
+
+1. **卡片高度/留白参差**。`.config-section-grid` 用 `repeat(auto-fit, minmax(280px, 1fr))` 等分列，但 `.config-field__control { max-width: 520px }` 锁死控件宽度——同一行 switch 卡左下大片空白、input 卡满宽，观感不齐。
+2. **object 字段卡套卡**。`field.kind === 'object'` 时递归调用 `ConfigFieldEditor.vue`，每层都自带 padding + border + radius + background，二层嵌套就有"盒中盒中盒"。
+3. **list / kv 内部行错位**。`.config-field__list-item` 是 `1fr / auto`、`.config-field__kv-row` 是 `180px / 1fr / auto`，当 item_kind / value_kind 是 `switch` 时 1fr 列里全是空白，删除按钮和上一行控件不在同一垂直线。
+
+附带顺手修的"新手够用度"短板：字段错误只走小红字，缺整张卡描红的强提示；没有"恢复字段到加载值"的动作；推荐值 chip 和当前控件视觉太贴。
+
+**调研**：admin 项目早就有完整的 form-card 语言（`FieldGroup` + `AppPanelSection` + `AppCard` + `PageToolbar`），sibling 视图 GroupsView / MemoryView / PluginsView / SystemView 全部在用，**只有 Config 页自己造了一套**。重做的本质是让它"靠齐站点其它视图"，而不是发明新组件。
+
+**改动**（admin/frontend/src/views/config/，9 文件，1 删 / 7 新建 / 1 重写）：
+
+- `section-labels.ts`（**新建**）：`CONFIG_SECTION_LABELS` 字典 + `bucketForPath` + `bucketFields`。把扁平的 `task.paths` 按 namespace 分桶（llm / group_access / group / anti_detect / thinker / reply_segmentation / scheduler_concurrency / napcat / vision / access），分桶后每桶在视觉上对应一个 `AppPanelSection`。
+- `ConfigField.vue`（**新建**）：基于 `FieldGroup` 的字段 dispatcher。switch/select/number 走 `inline` 模式（label 居左、控件居右），text/list/kv/json 走 stacked 模式。承载错误态（左红边 + helper 红字）、未保存态（左黄边 + 「已修改」标签 + 「撤销」action）、风险标签、重启提示标签。
+- `ConfigListField.vue`（**新建**）：flex 行布局，switch item 不撑满（避免 1fr 列空白），input/number/select 撑满。删除按钮固定贴右。
+- `ConfigKvField.vue`（**新建**）：grid `200px / 1fr / auto`；当 value_kind=switch 切到 `200px / auto / auto`，避免 switch 半行白。
+- `ConfigObjectGroup.vue`（**新建**）：递归对象，**不画卡**，仅左 2px border + inline subhead。深度 ≥ 2 折成 `<details>`，顶层不再卡套卡。
+- `ConfigSecretInput.vue` / `ConfigJsonInput.vue`（**新建**）：原 ConfigFieldEditor 内联的 secret 编辑切换、JSON parse-on-blur 行为抽出，便于单测和复用。
+- `ConfigStatusStrip.vue`（**新建**）：顶部 4 联状态条独立组件。
+- `ConfigView.vue`（**重写**）：rail + stage 布局保留；任务区 `task.paths → bucketFields() → AppPanelSection × N → ConfigField × N`。toolbar 改 `PageToolbar`。diff/backup/audit 都收纳进 `AppPanelSection` 统一 eyebrow/title。新增 `handleFieldRevert` 处理字段级撤销。
+- `ConfigFieldEditor.vue`（**改成空壳**，加 `@deprecated` 注释，保留文件以防 stale import；用户后续可手删）。
+
+**外部可观察证据**：
+
+- `npx vue-tsc --noEmit` → exit 0，无类型错误。
+- `npm run build` → 5.43s 通过；`ConfigView-*.js` 52 KB / gzip 17.5 KB，与原产物持平。
+- 复用的共享组件全部走 `unplugin-vue-components` 自动注册（已确认 `components.d.ts` 包含 `ConfigField` / `ConfigListField` / 等新条目会在下次 dev 启动时刷新）。
+- 关键设计参考的 admin 视觉锚点：FieldGroup（admin/frontend/src/components/common/FieldGroup.vue）的 inline=140px label / control / helper 三段；AppPanelSection 的 eyebrow + title + description + aside 槽。
+
+**影响范围**：
+
+- 仅前端 `/admin/config` 页面渲染层。后端 `/api/admin/config*` 全部不变（schema、values、preview、save、restore、history、backups 全沿用）。
+- `types.ts` 不变，不影响其它使用 ConfigFieldSchema 的位置。
+- `ConfigFieldEditor.vue` 留空壳，外部若仍有手写 import 会拿到一个 display:none 的占位，不会编译失败。
+
+**验证清单**（待用户在 dev 环境复测）：
+
+- "群聊回复"任务里 switch / number / text 三种字段 不再共享一行 grid，AppPanelSection 内单列堆叠，无半张空白。
+- "完整配置"页 `vision.qwen.*` 这种 ≥2 层 object 改为左 border + 折叠，无卡中卡。
+- "权限与私聊" admins kv 的 key 输入、value 输入、删除按钮三列对齐；当 value_kind=switch 时 switch 不再独占一整列。
+- 修改某字段：右上角出现「已修改」+「撤销」，点撤销恢复加载时的值。
+- 故意把 `llm.api_key` 留空预览/保存：FieldGroup 整张卡红左边、helper 红字。
+- 响应式：1440 → 960 → 760，rail 折顶部、status 4→2→1 列、字段不溢出。
+
+**回滚**：`git checkout HEAD -- admin/frontend/src/views/config/`。
+
+---
+
+## 2026-05-15（夜）SessionStart hook 重构 — 外置脚本 + 维护日志索引 + 修 cwd 路径 bug
+
+**背景**：用户反馈"每次更新维护日志要很长时间"，怀疑日志过长。审计后发现：
+
+1. 日志体量：3780 行 / 232 KB / 112 条。
+2. SessionStart hook 已在做"只读最新一条 + 60 行上限"，**会话启动这一头不读全文**，不是瓶颈。
+3. 真正卡的是 `Edit` 工具协议要求先 `Read` 整个文件再 diff——每次追加新条目都要过 3780 行，**改 hook 改不掉**，是工具协议层。
+4. **顺手发现既存 bug**：原 inline hook 路径写的是 `omubot/maintenance-log.md`，但 cwd 实际是 `omubot/` 而不是 `OmubotWorkspace/`，**SessionStart 一直在静默失败**（错误信息 `[Errno 2] No such file or directory: 'omubot/maintenance-log.md'` 注入到上下文，但被旁边的 bot 日志稀释看不出来）。
+
+用户选择"做目录索引"——给 agent 注入"最近 N 条标题 + 行号"清单，让 agent 在需要回顾时按 `Read offset=L` 精准定位，不用 `Read` 全文。
+
+**改动**（2 文件，1 新建 + 1 编辑）：
+
+- `.claude/hooks/session_start_status.py`（**新建**，128 行）：
+  - 把 inline 长 Python 拆成独立脚本（settings.json 里 50 行转义字符串删掉）。
+  - 路径改用 `Path(__file__).resolve().parents[2]` 锚定项目根，**和 cwd 解耦**——修了原 inline 的 cwd bug。
+  - 新增 `_format_index()`：扫描所有 `## 20…` 标题输出 `L<行号>  <标题>` 索引（最近 15 条 / 共 N 条）。
+  - 索引提示：`Read maintenance-log.md offset=N` 查看（路径相对当前 cwd 写）。
+  - 标题超过 110 字符截断，每行宽度自动对齐。
+- `.claude/settings.json` SessionStart 第一段：50 行 inline Python → 1 行 `python3 .claude/hooks/session_start_status.py`，timeout 保持 5s。
+
+**外部可观察证据**：
+
+- 脚本启动耗时：`time python3 .claude/hooks/session_start_status.py > /dev/null` → **0.029s**。
+- 输出体量：9802 字节 / 121 行（含最新条目 75 行 + 索引 16 行 + bot log tail 40 行）。
+- 索引样例：`L7  2026-05-15（晚）三起回溯事件复盘 …` / `L112 2026-05-15 黑话抽取 run 永远卡 running …` ……共 15 条。
+- `python3 -c "import json; json.load(open('.claude/settings.json'))"` → 通过，hooks 键 `['SessionStart', 'PostToolUse']`。
+
+**影响范围**：仅本仓库会话启动行为；运行时代码、构建产物、Docker 镜像不受影响。下一次新 session 启动即生效。
+
+**回滚**：`git checkout .claude/settings.json && git rm .claude/hooks/session_start_status.py`。
+
+**Lessons Learned**：
+
+- 用户说"慢"时先量化瓶颈再动手——这次发现真正的慢在 Edit 工具协议层（强制 Read 全文），不在 SessionStart。
+- 长 inline 脚本（多层转义的 Python in JSON）天然脆弱——拆外置文件时**顺带发现了 cwd 路径 bug**，否则可能再过半年才被注意到。索引功能是用户需求，cwd 修复是顺手收益。
+- 后续如果维护日志继续膨胀（>500 条），再考虑按月归档拆分（方向 A）。
+
+---
+
+## 2026-05-15（晚）三起回溯事件复盘 — 同模式漏修 + SPA 迁移漏接 + 测试环境死锁
+
+**背景**：当天发布了"slang run 卡 running"专项修复后不到 24 小时，
+连续遇到 3 类不同性质的回溯，统一在此复盘。详细工作纪律已沉淀进
+[docs/agent-discipline.md](docs/agent-discipline.md)。
+
+### 事件 A — slang daily AI review 锁全天（同模式第二刀，最严重）
+
+**现象**：00:08 配置的 daily AI review 启动了（sqlite 里有 run row），
+但 status=abandoned、counters 全 0、`finished_at` 是 01:12 重启时被
+stale-sweep 清的。`last_daily_ai_review_date` meta 已被写成 `2026-05-15`，
+导致全天剩余 tick 都撞到 `if last_date == today: skipped="already_ran"`，
+**当天没有第二次重试**。
+
+**5-Why 根因**：
+
+```text
+Why1 status=abandoned + counters 0 → 任务半路死
+Why2 任务半路死           → 旧镜像 _TICK_JOB_TIMEOUT_S=50s 杀掉它
+Why3 50s 杀掉为什么锁全天 → set_meta(last_daily_ai_review_date) 写在 await
+                            run_daily_ai_review() 之前——cancel 一次后 meta
+                            已脏，下次 tick 看到 date==today 就跳过
+Why4 为什么没在专项修复里发现 → 当天只盯"run 卡 running"修，没扫同模式
+                                "await store.set_*(...) 写在长跑 await 之前"
+Why5 为什么没扫           → 缺乏"同模式扫描"纪律，盯报错修表象
+```
+
+**改动**（2 文件）：
+
+- `plugins/slang/plugin.py` `run_daily_ai_review_if_due`：
+  - `set_meta(last_daily_ai_review_date)` 从"调用前"挪到"`result.ok==True` 之后"
+  - 新增 `_daily_review_in_flight` 旗标，防 tick 间并发重入
+  - cancel 路径让 `CancelledError` 自然冒泡（`finally` 释放 in-flight、不写 date）
+- `tests/test_slang_plugin.py`：
+  - `test_run_daily_ai_review_if_due_does_not_lock_day_when_cancelled`
+    （wait_for 0.05s 强制 cancel，断言 meta 未被污染）
+  - `test_run_daily_ai_review_if_due_does_not_lock_day_on_failure`
+    （`_RaisingMessageLog` 模拟上游 raise，断言 ok=False 路径同样不锁全天）
+
+**同模式扫描**（D1 纪律）：
+
+```bash
+rg -n 'await\s+self\.store\.set_meta' plugins/ services/
+# 命中 4 处全部审过：
+# - plugin.py:303 (本次修复点) — 已挪到 ok==True 之后
+# - plugin.py:391 last_extracted_at — 在 try 内 success 路径里，cancel 不污染
+# - daily_reviewer.py:241 last_daily_ai_review_at — finally 之外、success 路径，安全
+# - 其它命中均为白名单（短跑 await，cancel 不影响语义）
+```
+
+**外部可观察证据**：
+
+- pytest 13/13 (slang_plugin) ✅、32/32 (slang 4 文件) ✅
+- 容器内代码校验：`docker compose exec bot grep -c _daily_review_in_flight plugins/slang/plugin.py` → 4 ✅
+- 镜像 ID `omubot-bot:latest @ 3bfa861bb4d7`，bot Up + slang store init 成功
+
+**回滚**：`git checkout plugins/slang/plugin.py tests/test_slang_plugin.py && docker compose up bot -d --build`。
+
+**今天 daily review 不会再跑**：旧代码已经把 `last_daily_ai_review_date='2026-05-15'`
+写进 meta 了，新代码不会重写。下一次自然触发是 **5/16 00:08**。
+如果想立刻验证，需手动抹掉 meta 行（用户已选择不抹）。
+
+### 事件 B — admin 表达方式页面消失（SPA 迁移漏接）
+
+**现象**：用户报告 `/admin/style` 在侧边栏看不到了。
+
+**根因**：`v1.4.0 release: ... admin SPA` 重构（commit `653b7b3`）时，
+`StyleView.vue` 文件被复制到 `admin/frontend/src/views/style/`，但
+`admin/frontend/src/router/index.ts` 没注册 `/style` 路由、
+`admin/frontend/src/layouts/components/SideMenu.vue` 没加菜单项。
+后端 `admin/routes/api/style.py` 一直健在并已 mount。
+**前端文件存在 ≠ 用户能访问**——三件事缺二，三个月没被发现。
+
+**改动**（2 文件）：
+
+- `admin/frontend/src/router/index.ts`：在 `/slang` 之后追加 `/style` 路由。
+- `admin/frontend/src/layouts/components/SideMenu.vue`：在「日常」组里
+  「群内黑话」和「知识库」之间插入「表达方式」（`ChatbubbleEllipsesOutline` 图标）。
+
+**外部可观察证据**：
+
+- `cd admin/frontend && npm run build` 4.88s 通过，`StyleView-sDYX62D5.js (17.32 kB / gz 5.56 kB)` 输出到 `admin/static/assets/`
+- HTTP 验证：`/admin/style` → 200、`/admin/assets/StyleView-sDYX62D5.js` → 200
+- bind mount `./admin/static:/app/admin/static:ro` 让容器内立即生效（无需 rebuild）
+
+**回滚**：`git checkout admin/frontend/src/router/index.ts admin/frontend/src/layouts/components/SideMenu.vue && cd admin/frontend && npm run build`。
+
+### 事件 C — 全量 pytest 卡 5 分钟（环境性，非代码问题）
+
+**现象**：连续两次 `uv run pytest` 卡 5 分钟无输出。
+
+**根因**：`ps -ef | grep pytest | grep -v grep` 显示 11 个 PPID=1 的孤儿
+pytest 进程（最早从凌晨 12:01 起就在内存里），跟 IDE 测试 explorer 启的新
+pytest 抢同一个真实 sqlite 文件锁（`tests/test_slang_db_integrity.py` 用真实
+路径 `Path("storage/slang.db")` 而非 `tmp_path`）导致互锁。
+
+**处理**：`pkill -9 -f pytest` 清干净后，slang 4 文件 32 测试 1.57s 全过。
+
+**Lessons Learned**：
+
+- 跑全量 pytest 前先 `pkill -9 -f pytest`（已沉淀进 D5）。
+- 优先跑 `tmp_path`-only 的测试集（如 slang_plugin/store/drift/semantic）规避真实 DB 锁。
+
+---
+
+## 2026-05-15 黑话抽取 run 永远卡 running、计数全 0 — 修复 CancelledError 收尾漏洞
+
+**现象**：
+admin 控制台 `/api/admin/slang/extract/runs` 看到最近 7 条 `slang_extraction_runs` 全部 `status=running`、`scanned/extracted/promoted` 都是 0，`finished_at` 为 NULL。但 sqlite 总表里历史上还有 488 条 success / 2 条 failed / 93 条 abandoned，说明不是从来没跑过 —— 是某个时间点起开始一律卡住。
+
+**5-Why 根因**：
+
+```text
+Why1  status 卡 running        → finish_extraction_run() 从未调用
+Why2  finish 没调用            → run_manual_extract / SlangDailyReviewer.run 半路退出
+Why3  半路退出                  → asyncio.wait_for(timeout=50s) 触发 CancelledError
+Why4  CancelledError 没被收尾   → 业务层 except Exception 不抓 BaseException 子类
+Why5  50s 超时根本不够          → 12 个群 × LLM 抽取 + 复核根本跑不完
+```
+
+旁证：`storage/logs/bot_2026-05-14*.log` 反复出现 `slang tick job timeout | timeout=50s`，每 30 分钟一次，跟卡死的 7 条 run 时间戳完全吻合。
+
+**改动文件**（5 个改 + 2 个测试新增）：
+
+- `plugins/slang/plugin.py`
+  - `_TICK_JOB_TIMEOUT_S` 50.0s → 600.0s（12 群 × LLM 调用现实预算）
+  - `run_manual_extract`：`except` 拆出 `asyncio.CancelledError` 分支，把 `finish_extraction_run` 移到 `finally` 并用 `asyncio.shield` 保护，防止超时取消 finish 任务本身
+  - `on_startup`：调用新的 `store.mark_stale_running_runs()` 清扫上一次进程崩溃留下的 orphan run
+  - `_run_tick_jobs` 里 `asyncio.TimeoutError` → `TimeoutError`（builtin 别名，UP041）
+- `services/slang/daily_reviewer.py`：同样的 CancelledError 分支 + finally + shield 重写
+- `services/slang/store.py`：新增 `mark_stale_running_runs(status='abandoned')`，给定状态把所有 running 行收尾、写 finished_at 和 duration_ms
+- `admin/routes/api/slang.py`：fallback 路径（plugin 不在线时）也复刻同样的 finally 兜底；顶部 import asyncio
+- `tests/test_slang_store.py`：新增 `test_mark_stale_running_runs_closes_orphan_runs`
+- `tests/test_slang_plugin.py`：新增 `test_run_manual_extract_finishes_run_when_cancelled`（用 `_SlowLLM` + `asyncio.wait_for(timeout=0.05)` 触发 CancelledError，断言 status='cancelled' 且 finished_at 非空）+ `test_on_startup_marks_orphan_running_runs_abandoned`（模拟两次 boot 之间的 leak）
+
+**数据回填**：
+
+```sql
+-- sqlite3 storage/slang.db
+UPDATE slang_extraction_runs
+   SET status='abandoned',
+       finished_at=datetime('now','localtime'),
+       error='process restart while running (backfilled)'
+ WHERE status='running';
+-- 7 rows updated → 100 abandoned / 2 failed / 488 success
+```
+
+旁注：回填后还会出现 1 条 running，那是当前正在运行的旧版 bot 进程的 tick；它要等 bot 重启加载新代码才会被新逻辑收尾。
+
+**验证证据**：
+
+```text
+pytest scoped (slang 全套):  36 passed / 0 failed
+pytest full:                 978 passed / 8 skipped / 0 failed in 9.63s
+ruff (改动文件):              All checks passed
+pyright (改动文件):           0 错误（store.py 剩余 reportOptionalSubscript 全为 pre-existing）
+sqlite 状态:                 abandoned=100 (含 7 条回填) / success=488 / failed=2
+```
+
+**回滚**：
+
+- 代码：`git revert <commit-hash>`
+- 数据：回填只是把 status 从 running → abandoned，无破坏；要还原直接 `UPDATE ... SET status='running', finished_at=NULL, error='' WHERE status='abandoned' AND error LIKE '%backfilled%'`
+
+**部署后行为变化**：
+
+- bot 重启后，旧版进程留下的 1 条 running 会被 `on_startup` 清扫为 abandoned
+- 下一次 tick（默认 30 分钟）抽取超时上限从 50s 提到 600s，12 个群完整跑完一轮的预算够了
+- 即使将来再因为别的原因被 cancel，run 行也会带 `status=cancelled / error='extraction cancelled (timeout or shutdown)' / finished_at` 完整收尾，admin 页面再也不会看到「永远 running、计数全 0」
+
+---
+
 ## 2026-05-15 清理 7 项预存测试失败 → 全量绿（975 passed / 0 failed）
 
 **触发**：上一会话 silent_learn 修复完成时遗留 7 个测试失败，全部为本任务范围外但影响 CI 信号可信度，授权一次性平掉。

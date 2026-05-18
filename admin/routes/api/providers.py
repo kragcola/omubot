@@ -12,8 +12,11 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from kernel.config import BotConfig, LLMCapability
+from services.llm.llm_request import all_llm_tasks
 
-_LLM_TASKS = ("main", "thinker", "compact", "slang", "vision")
+# Single source of truth: services/llm/llm_request.py LLMTask Literal.
+# Tests assert these stay in sync.
+_LLM_TASKS = all_llm_tasks()
 _API_FORMATS = ("anthropic", "openai", "deepseek")
 _PROFILE_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 _CAPABILITY_LABELS = {
@@ -155,6 +158,32 @@ def create_providers_router(
         })
         return response
 
+    @router.get("/providers/cache-diagnostic/{task}")
+    async def cache_diagnostic_history(task: str, limit: int = 20):
+        """Return recent per-axis cache diagnostic snapshots for a single task.
+
+        Each entry is `{snapshot, diff}` where ``snapshot`` is the per-block /
+        per-tool / per-message hash bundle from `cache_diagnostic.py` and
+        ``diff`` is the diff against the previous snapshot for the same task
+        (None for the very first snapshot). Drives the system-page diagnostic
+        panel that answers "最近 break 是哪段变了" — when cache hit % drops we
+        can see which axis (system / tools / messages) and which block
+        invalidated.
+        """
+        if llm_client is None or not hasattr(llm_client, "cache_diagnostic_history"):
+            return {"task": task, "entries": []}
+        try:
+            history = llm_client.cache_diagnostic_history(task, limit=max(1, min(int(limit or 20), 100)))
+        except Exception as exc:
+            return {"task": task, "entries": [], "error": str(exc)[:200]}
+        entries = []
+        for snapshot, diff in history:
+            entries.append({
+                "snapshot": snapshot.to_dict(),
+                "diff": diff.to_dict() if diff is not None else None,
+            })
+        return {"task": task, "entries": entries}
+
     @router.post("/providers/{name}/test")
     async def test_provider(name: str):
         llm = _llm_config()
@@ -252,6 +281,7 @@ def _providers_payload(llm: Any, *, llm_client: Any = None) -> dict[str, Any]:
             "provider_kind": rate_limit_profiles.get(name, {}).get("provider_kind", ""),
             "provider_mode": rate_limit_profiles.get(name, {}).get("provider_mode", ""),
             "last_cache_hit_pct": rate_limit_profiles.get(name, {}).get("last_cache_hit_pct"),
+            "last_cache_hit_pct_by_task": rate_limit_profiles.get(name, {}).get("last_cache_hit_pct_by_task", {}),
             "last_prompt_cache_hit_tokens": rate_limit_profiles.get(name, {}).get("last_prompt_cache_hit_tokens", 0),
             "last_prompt_cache_miss_tokens": rate_limit_profiles.get(name, {}).get("last_prompt_cache_miss_tokens", 0),
             "last_reasoning_replay_tokens": rate_limit_profiles.get(name, {}).get("last_reasoning_replay_tokens", 0),
@@ -550,6 +580,7 @@ def _empty_rate_limit(profile: str) -> dict[str, Any]:
         "last_model": "",
         "last_api_format": "",
         "last_cache_hit_pct": None,
+        "last_cache_hit_pct_by_task": {},
         "last_prompt_cache_hit_tokens": 0,
         "last_prompt_cache_miss_tokens": 0,
         "last_reasoning_replay_tokens": 0,

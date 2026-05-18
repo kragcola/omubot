@@ -13,6 +13,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext
+from services.llm.llm_request import LLMRequest
 
 
 class ElementRule(BaseModel):
@@ -124,11 +125,16 @@ class ElementDetectorPlugin(AmadeusPlugin):
             identity = self._identity
             directive = "直接输出回复内容，禁止括号、禁止内心独白、禁止解释。"
             system_text = f"你是{identity.name}。{directive}\n\n{match.reply_template}"
-            system = [{"type": "text", "text": system_text}]
-            msgs = [{"role": "user", "content": plain_text}]
+            request = LLMRequest(
+                task="element_detect",
+                static_blocks=[system_text],
+                user_messages=[{"role": "user", "content": plain_text}],
+                max_tokens=256,
+                requires_capabilities=("chat",),
+            )
             reply_text = ""
             try:
-                result = await self._llm_client._call(system, msgs, tools=None, max_tokens=256)
+                result = await self._llm_client._call(request)
                 reply_text = (result.get("text") or "").strip()
             except Exception:
                 logger.exception("element llm call failed")

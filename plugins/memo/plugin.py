@@ -19,6 +19,7 @@ from kernel.types import (
     PromptContext,
     ReplyContext,
 )
+from services.llm.llm_request import LLMRequest
 from services.memory.card_store import CardStore, NewCard
 from services.tools.base import Tool
 
@@ -88,11 +89,15 @@ class MemoExtractor:
         )
 
         try:
-            result = await self._call(
-                [{"type": "text", "text": _EXTRACT_SYSTEM}],
-                [{"role": "user", "content": conversation}],
+            request = LLMRequest(
+                task="memo",
+                user_id=str(user_id),
+                static_blocks=[_EXTRACT_SYSTEM],
+                user_messages=[{"role": "user", "content": conversation}],
                 max_tokens=256,
+                requires_capabilities=("chat",),
             )
+            result = await self._call(request)
         except Exception:
             _L.debug("memo extractor LLM call failed | user={}", user_id)
             return

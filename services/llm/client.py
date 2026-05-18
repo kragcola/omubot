@@ -10,7 +10,7 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
@@ -18,6 +18,13 @@ from loguru import logger as _base_logger
 
 from kernel.types import ReplyContext, ThinkerContext
 from services.identity import Identity
+from services.llm.cache_diagnostic import (
+    CacheDiagnostic,
+    CacheDiagnosticDiff,
+    compute_cache_diagnostic,
+    diff_cache_diagnostics,
+)
+from services.llm.llm_request import LLMRequest
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.provider import ToolUse, create_provider, is_deepseek_v4_model, provider_mode
 from services.llm.usage import UsageTracker
@@ -264,6 +271,7 @@ class ProfileRateLimitState:
     last_model: str = ""
     last_api_format: str = ""
     last_cache_hit_pct: float | None = None
+    last_cache_hit_pct_by_task: dict[str, float] = field(default_factory=dict)
     last_prompt_cache_hit_tokens: int = 0
     last_prompt_cache_miss_tokens: int = 0
     last_reasoning_replay_tokens: int = 0
@@ -295,6 +303,7 @@ class ProfileRateLimitState:
             "last_model": self.last_model,
             "last_api_format": self.last_api_format,
             "last_cache_hit_pct": self.last_cache_hit_pct,
+            "last_cache_hit_pct_by_task": dict(self.last_cache_hit_pct_by_task),
             "last_prompt_cache_hit_tokens": self.last_prompt_cache_hit_tokens,
             "last_prompt_cache_miss_tokens": self.last_prompt_cache_miss_tokens,
             "last_reasoning_replay_tokens": self.last_reasoning_replay_tokens,
@@ -1024,6 +1033,12 @@ class LLMClient:
             for task, profile in self._task_profiles.items()
         }
         self._profile_rate_limits: dict[str, ProfileRateLimitState] = {}
+        # Cache-diagnostic ring buffer: per-task list of recent (snapshot, diff) pairs.
+        # Ring depth tuned at 200 per task to bound memory while still letting admin
+        # show last few breaks. Diffs are computed lazily against the previous entry
+        # of the same task on every successful LLMRequest dispatch.
+        self._cache_diag_ring_size: int = 200
+        self._cache_diag_history: dict[str, list[tuple[CacheDiagnostic, CacheDiagnosticDiff | None]]] = {}
 
     async def close(self) -> None:
         await self._session.close()
@@ -1032,14 +1047,136 @@ class LLMClient:
         self._group_config = group_config
 
     async def _call(
-        self, system_blocks: list[dict[str, Any]], messages: list[Any], tools: list[dict[str, Any]] | None = None,
+        self,
+        system_blocks_or_request: list[dict[str, Any]] | LLMRequest,
+        messages: list[Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 1024,
         thinking: dict[str, Any] | None = None,
         task: str = "main",
         user_id: str = "",
         group_id: str | None = None,
     ) -> dict[str, Any]:
+        # Spine path: caller passed LLMRequest. Unwrap into the same kwargs the
+        # legacy 6-positional signature uses, then dispatch through the same
+        # body so the two paths share rate-limit + provider plumbing.
+        if isinstance(system_blocks_or_request, LLMRequest):
+            req = system_blocks_or_request
+            system_blocks_arg, messages_arg, tools_arg = req.to_provider_payload()
+            return await self._dispatch_call(
+                system_blocks=system_blocks_arg,
+                messages=messages_arg,
+                tools=tools_arg,
+                max_tokens=req.max_tokens,
+                thinking=req.thinking,
+                task=str(req.task),
+                user_id=req.user_id,
+                group_id=req.group_id,
+                request=req,
+            )
+        if messages is None:
+            raise TypeError("_call() missing required argument: 'messages'")
+        return await self._dispatch_call(
+            system_blocks=system_blocks_or_request,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            thinking=thinking,
+            task=task,
+            user_id=user_id,
+            group_id=group_id,
+            request=None,
+        )
+
+    def _enforce_capabilities(
+        self,
+        profile_name: str,
+        requires: tuple[str, ...] | None,
+    ) -> None:
+        """Fail-fast if the resolved profile is missing any required capability.
+
+        Profiles that omit ``capabilities`` fall back to ``["chat"]`` so that
+        legacy single-profile setups keep working; only when ``requires``
+        explicitly demands more (e.g. ``("vision",)``) do we enforce.
+        """
+        if not requires:
+            return
+        profile = self._task_profiles.get(profile_name) or self._task_profiles.get("main")
+        if profile is None:
+            available = ("chat",)
+        else:
+            raw = getattr(profile, "capabilities", None) or ["chat"]
+            available = tuple(str(cap) for cap in raw)
+        missing = [cap for cap in requires if str(cap) not in available]
+        if missing:
+            raise ValueError(
+                f"profile {profile_name!r} missing capability {missing!r} "
+                f"(available={list(available)})"
+            )
+
+    def _record_cache_diagnostic(
+        self,
+        *,
+        task: str,
+        profile: str,
+        system_blocks: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        messages: list[Any],
+    ) -> CacheDiagnosticDiff | None:
+        """Compute per-axis snapshot + diff against the previous same-task call.
+
+        Returns the diff (or ``None`` if this is the first snapshot for the
+        task). The snapshot is appended to a per-task ring buffer bounded by
+        ``self._cache_diag_ring_size``.
+        """
+        snapshot = compute_cache_diagnostic(
+            task=task,
+            profile=profile,
+            system_blocks=system_blocks,
+            tools=tools,
+            messages=messages,
+        )
+        history = self._cache_diag_history.setdefault(task, [])
+        diff: CacheDiagnosticDiff | None = None
+        if history:
+            prev_snapshot = history[-1][0]
+            try:
+                diff = diff_cache_diagnostics(prev_snapshot, snapshot)
+            except ValueError:  # pragma: no cover — same-task guarantee broken
+                diff = None
+        history.append((snapshot, diff))
+        if len(history) > self._cache_diag_ring_size:
+            del history[: len(history) - self._cache_diag_ring_size]
+        return diff
+
+    def cache_diagnostic_history(
+        self,
+        task: str,
+        *,
+        limit: int = 20,
+    ) -> list[tuple[CacheDiagnostic, CacheDiagnosticDiff | None]]:
+        """Return up to ``limit`` most recent diagnostic entries for ``task``."""
+        history = self._cache_diag_history.get(task, [])
+        if limit <= 0:
+            return list(history)
+        return list(history[-limit:])
+
+    async def _dispatch_call(
+        self,
+        *,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int,
+        thinking: dict[str, Any] | None,
+        task: str,
+        user_id: str,
+        group_id: str | None,
+        request: LLMRequest | None,
+    ) -> dict[str, Any]:
         profile_name, base_url, api_key, model, api_format = self._profile_for_task(task)
+        if request is not None:
+            self._enforce_capabilities(profile_name, request.requires_capabilities)
         state = self._profile_rate_state(profile_name)
         self._raise_if_profile_cooling_down(state, task=task)
         state.total_calls += 1
@@ -1051,7 +1188,7 @@ class LLMClient:
             user_id=user_id,
             group_id=group_id,
         )
-        if api_format == "deepseek" and task in {"thinker", "compact", "slang"} and thinking is None:
+        if api_format == "deepseek" and task in {"thinker", "compact", "slang", "reply_gate"} and thinking is None:
             thinking = {"type": "disabled"}
         try:
             t_call = time.monotonic()
@@ -1061,7 +1198,8 @@ class LLMClient:
                 thinking=thinking, api_format=api_format,
                 request_options=provider_request_options,
             )
-            result["call_elapsed_s"] = time.monotonic() - t_call
+            elapsed = time.monotonic() - t_call
+            result["call_elapsed_s"] = elapsed
         except RateLimitError as exc:
             self._record_profile_rate_limited(state, task=task, error=str(exc))
             raise
@@ -1081,55 +1219,42 @@ class LLMClient:
             api_format=api_format,
             base_url=base_url,
         )
+        if request is not None:
+            # Spine path: the unified contract carries a task label, so we own
+            # cache diagnostic recording here regardless of who writes the usage
+            # row. ``auto_record_usage=False`` lets aggregating callers (e.g.
+            # ``_compact_with_tools`` and the main ``chat()`` tool loop) keep
+            # the legacy "1 session = 1 usage row" contract — they accumulate
+            # token counts across rounds and call ``_record_usage`` themselves.
+            try:
+                self._record_cache_diagnostic(
+                    task=task,
+                    profile=profile_name,
+                    system_blocks=system_blocks,
+                    tools=tools,
+                    messages=messages,
+                )
+            except Exception:  # pragma: no cover — defensive, never block the call
+                logger.bind(channel="usage").warning("cache diagnostic record failed")
+            if request.auto_record_usage:
+                self._record_usage(
+                    call_type=task,
+                    user_id=user_id,
+                    group_id=group_id,
+                    model=model,
+                    provider_kind=str(result.get("provider_kind", "") or api_format),
+                    input_tokens=int(result.get("input_tokens", 0) or 0),
+                    cache_read_tokens=int(result.get("cache_read", 0) or 0),
+                    cache_create_tokens=int(result.get("cache_create", 0) or 0),
+                    output_tokens=int(result.get("output_tokens", 0) or 0),
+                    prompt_cache_hit_tokens=int(result.get("prompt_cache_hit_tokens", 0) or 0),
+                    prompt_cache_miss_tokens=int(result.get("prompt_cache_miss_tokens", 0) or 0),
+                    reasoning_replay_tokens=int(result.get("reasoning_replay_tokens", 0) or 0),
+                    tool_rounds=0,
+                    elapsed_s=float(result.get("call_elapsed_s", 0.0) or 0.0),
+                    error=None,
+                )
         return result
-
-    async def _call_thinker(
-        self,
-        system_blocks: list[dict[str, Any]],
-        messages: list[Any],
-        tools: list[dict[str, Any]] | None = None,
-        max_tokens: int = 1024,
-        thinking: dict[str, Any] | None = None,
-        user_id: str = "",
-        group_id: str | None = None,
-    ) -> dict[str, Any]:
-        return await self._call(
-            system_blocks, messages, tools=tools,
-            max_tokens=max_tokens, thinking=thinking, task="thinker",
-            user_id=user_id, group_id=group_id,
-        )
-
-    async def _call_compact(
-        self,
-        system_blocks: list[dict[str, Any]],
-        messages: list[Any],
-        tools: list[dict[str, Any]] | None = None,
-        max_tokens: int = 1024,
-        thinking: dict[str, Any] | None = None,
-        user_id: str = "",
-        group_id: str | None = None,
-    ) -> dict[str, Any]:
-        return await self._call(
-            system_blocks, messages, tools=tools,
-            max_tokens=max_tokens, thinking=thinking, task="compact",
-            user_id=user_id, group_id=group_id,
-        )
-
-    async def _call_slang(
-        self,
-        system_blocks: list[dict[str, Any]],
-        messages: list[Any],
-        tools: list[dict[str, Any]] | None = None,
-        max_tokens: int = 1024,
-        thinking: dict[str, Any] | None = None,
-        user_id: str = "",
-        group_id: str | None = None,
-    ) -> dict[str, Any]:
-        return await self._call(
-            system_blocks, messages, tools=tools,
-            max_tokens=max_tokens, thinking=thinking, task="slang",
-            user_id=user_id, group_id=group_id,
-        )
 
     def _profile_for_task(self, task: str) -> tuple[str, str, str, str, str]:
         profile = self._task_profiles.get(task) or self._task_profiles.get("main")
@@ -1365,7 +1490,10 @@ class LLMClient:
             cache_create = int(result.get("cache_create", 0) or 0)
             miss_tokens = max(0, total_input - hit_tokens - cache_create)
         total_prompt = hit_tokens + miss_tokens
-        state.last_cache_hit_pct = (hit_tokens / total_prompt * 100) if total_prompt > 0 else None
+        pct = (hit_tokens / total_prompt * 100) if total_prompt > 0 else None
+        state.last_cache_hit_pct = pct
+        if pct is not None and task:
+            state.last_cache_hit_pct_by_task[task] = pct
         state.last_prompt_cache_hit_tokens = hit_tokens
         state.last_prompt_cache_miss_tokens = miss_tokens
         state.last_reasoning_replay_tokens = int(result.get("reasoning_replay_tokens", 0) or 0)
@@ -1725,20 +1853,14 @@ class LLMClient:
             mood_text = self._build_thinker_mood_text()
             affection_text = self._build_thinker_affection_text(user_id)
             thinker_decision = await think(
-                api_call=lambda system, thinker_messages, tools=None, max_tokens=1024, thinking=None: self._call_thinker(
-                    system,
-                    thinker_messages,
-                    tools=tools,
-                    max_tokens=max_tokens,
-                    thinking=thinking,
-                    user_id=user_id,
-                    group_id=group_id,
-                ),
+                api_call=lambda req: self._call(req),
                 recent_messages=recent_for_thinker,
                 max_tokens=self._thinker_max_tokens,
                 mood_text=mood_text,
                 affection_text=affection_text,
                 identity_name=identity.name,
+                user_id=user_id,
+                group_id=group_id,
             )
             # Persist decision in prompt context so plugins can see it
             thinker_action = thinker_decision.action
@@ -1893,13 +2015,17 @@ class LLMClient:
         tool_call_records: list[dict[str, Any]] = []
 
         for round_i in range(MAX_TOOL_ROUNDS):
-            result = await self._call(
-                system_blocks,
-                messages,
-                tools=tool_defs,
+            main_request = LLMRequest(
+                task="main",
                 user_id=user_id,
                 group_id=group_id,
+                static_blocks=list(system_blocks),
+                user_messages=list(messages),
+                tools=tool_defs,
+                auto_record_usage=False,
+                requires_capabilities=("chat",),
             )
+            result = await self._call(main_request)
             acc_llm_elapsed += float(result.get("call_elapsed_s", 0.0) or 0.0)
             acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
             acc_output += result.get("output_tokens", 0)
@@ -2107,12 +2233,16 @@ class LLMClient:
             messages.append({"role": "user", "content": tool_results})
 
         _log_thinking.warning("tool loop exhausted | session={} rounds={}", session_id, MAX_TOOL_ROUNDS)
-        result = await self._call(
-            system_blocks,
-            messages,
+        final_main_request = LLMRequest(
+            task="main",
             user_id=user_id,
             group_id=group_id,
+            static_blocks=list(system_blocks),
+            user_messages=list(messages),
+            auto_record_usage=False,
+            requires_capabilities=("chat",),
         )
+        result = await self._call(final_main_request)
         acc_llm_elapsed += float(result.get("call_elapsed_s", 0.0) or 0.0)
         acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
         acc_output += result.get("output_tokens", 0)
@@ -2235,14 +2365,18 @@ class LLMClient:
         memo_writes = 0
 
         for round_i in range(_MAX_COMPACT_TOOL_ROUNDS):
-            result = await self._call_compact(
-                system,
-                messages,
-                max_tokens=1024,
-                tools=tools,
+            compact_request = LLMRequest(
+                task="compact",
                 user_id=user_id,
                 group_id=group_id,
+                static_blocks=list(system),
+                user_messages=list(messages),
+                tools=tools,
+                max_tokens=1024,
+                auto_record_usage=False,
+                requires_capabilities=("chat",),
             )
+            result = await self._call(compact_request)
             acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
             acc_output += result.get("output_tokens", 0)
             acc_cache_read += result.get("cache_read", 0)
@@ -2315,13 +2449,17 @@ class LLMClient:
             messages.append({"role": "user", "content": tool_results})
 
         # Exhausted rounds — do a final call without tools to get summary
-        result = await self._call_compact(
-            system,
-            messages,
-            max_tokens=1024,
+        final_request = LLMRequest(
+            task="compact",
             user_id=user_id,
             group_id=group_id,
+            static_blocks=list(system),
+            user_messages=list(messages),
+            max_tokens=1024,
+            auto_record_usage=False,
+            requires_capabilities=("chat",),
         )
+        result = await self._call(final_request)
         acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
         acc_output += result.get("output_tokens", 0)
         acc_cache_read += result.get("cache_read", 0)

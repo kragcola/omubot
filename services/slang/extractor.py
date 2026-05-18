@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from services.llm.llm_request import LLMRequest
 from services.slang.quality import assess_candidate_quality, is_noise_term, normalize_slang_key
 from services.slang.types import (
     VALID_REPEAT_POLICIES,
@@ -77,12 +78,14 @@ class SlangExtractor:
         if not body:
             return []
         try:
-            call = getattr(self._llm_client, "_call_slang", self._llm_client._call)
-            result = await call(
-                [{"type": "text", "text": _SYSTEM_PROMPT}],
-                [{"role": "user", "content": body}],
+            request = LLMRequest(
+                task="slang",
+                static_blocks=[_SYSTEM_PROMPT],
+                user_messages=[{"role": "user", "content": body}],
                 max_tokens=900,
+                requires_capabilities=("chat",),
             )
+            result = await self._llm_client._call(request)
         except Exception:
             return []
 

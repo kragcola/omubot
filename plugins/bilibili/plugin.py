@@ -15,6 +15,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext
+from services.llm.llm_request import LLMRequest
 
 _log = logger.bind(channel="bilibili")
 
@@ -803,11 +804,16 @@ class BilibiliPlugin(AmadeusPlugin):
             _log.debug("bilibili | interest LLM cache HIT title={!r}", title)
             return entry.info
 
-        system = [{"type": "text", "text": _INTEREST_LLM_PROMPT}]
-        messages = [{"role": "user", "content": f"视频标题：{title}\n兴趣分（0-100）："}]
+        request = LLMRequest(
+            task="bilibili_intent",
+            static_blocks=[_INTEREST_LLM_PROMPT],
+            user_messages=[{"role": "user", "content": f"视频标题：{title}\n兴趣分（0-100）："}],
+            max_tokens=512,
+            requires_capabilities=("chat",),
+        )
 
         try:
-            result = await self._llm_client._call(system, messages, tools=None, max_tokens=512)
+            result = await self._llm_client._call(request)
             raw = (result.get("text") or "").strip()
             if not raw:
                 # deepseek-v4-flash may consume all tokens in thinking blocks

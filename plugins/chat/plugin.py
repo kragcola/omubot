@@ -18,6 +18,7 @@ from loguru import logger
 
 from kernel.config import BotConfig, load_plugin_config
 from kernel.types import AmadeusPlugin, PluginContext
+from services.llm.llm_request import LLMRequest
 
 _L = logger.bind(channel="system")
 
@@ -193,8 +194,18 @@ class ChatPlugin(AmadeusPlugin):
             for _round_i in range(MAX_TOOL_ROUNDS):
                 _L.info("debug API call round={}", _round_i)
                 try:
+                    debug_request = LLMRequest(
+                        task="chat_private",
+                        user_id=str(cmd_ctx.user_id or ""),
+                        group_id=None if cmd_ctx.is_private else str(cmd_ctx.group_id or ""),
+                        static_blocks=list(system_blocks),
+                        user_messages=list(messages),
+                        tools=tool_defs,
+                        max_tokens=1024,
+                        requires_capabilities=("chat", "tools"),
+                    )
                     result = await asyncio.wait_for(
-                        ctx.llm_client._call(system_blocks, messages, tools=tool_defs),
+                        ctx.llm_client._call(debug_request),
                         timeout=60.0,
                     )
                 except TimeoutError:
@@ -273,8 +284,17 @@ class ChatPlugin(AmadeusPlugin):
 
             # Tool loop exhausted — final reply
             _L.debug("debug tool loop exhausted, calling final API")
+            final_request = LLMRequest(
+                task="chat_private",
+                user_id=str(cmd_ctx.user_id or ""),
+                group_id=None if cmd_ctx.is_private else str(cmd_ctx.group_id or ""),
+                static_blocks=list(system_blocks),
+                user_messages=list(messages),
+                max_tokens=1024,
+                requires_capabilities=("chat",),
+            )
             result = await asyncio.wait_for(
-                ctx.llm_client._call(system_blocks, messages),
+                ctx.llm_client._call(final_request),
                 timeout=60.0,
             )
             reply_text = _sanitize_debug_reply(
