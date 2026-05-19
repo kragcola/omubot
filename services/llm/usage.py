@@ -372,6 +372,38 @@ class UsageTracker:
         """
         return await self.query_raw(sql, params)
 
+    async def cache_hit_by_call_type(
+        self,
+        *,
+        period: str,
+        date: str | None = None,
+        tz_offset_hours: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Return per-call_type cache-hit token sums for a time period.
+
+        Used by the dashboard cache-pipeline panel. Returns one row per
+        ``call_type`` with the raw token sums; the endpoint layer is
+        responsible for folding aliases (``chat``/``proactive`` →
+        ``main``), grouping into pipelines, and computing ``hit_pct``.
+        Computing the percentage at endpoint layer (instead of here)
+        keeps the divide-by-zero handling in one place.
+        """
+        tz_modifier = f"{tz_offset_hours:+.1f} hours"
+        where_clause, params = self._period_filter(period, date, tz_modifier)
+
+        sql = f"""
+            SELECT call_type,
+                   COUNT(*)                                       AS calls,
+                   COALESCE(SUM(prompt_cache_hit_tokens), 0)      AS hit_tokens,
+                   COALESCE(SUM(prompt_cache_miss_tokens), 0)     AS miss_tokens
+            FROM llm_calls
+            WHERE {where_clause}
+            GROUP BY call_type
+            ORDER BY (COALESCE(SUM(prompt_cache_hit_tokens), 0)
+                      + COALESCE(SUM(prompt_cache_miss_tokens), 0)) DESC
+        """
+        return await self.query_raw(sql, params)
+
     async def timeseries(
         self,
         *,

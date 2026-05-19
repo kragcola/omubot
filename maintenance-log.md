@@ -4,6 +4,288 @@
 
 ---
 
+## 2026-05-19 仪表盘 24h 调用曲线 → 管线命中率视图
+
+**变更类型**：feat / admin-frontend + backend
+
+**变更内容**：
+
+LLMRequest spine 上线后 (commit `53cb7fa`) `LLMClient` 已能逐 task 记录 cache 命中率，但 admin Dashboard 还在显示 spine 之前那套 "24 小时调用曲线"——只画 calls 计数，看不出哪个管线在掉链子。本次替换为按管线分组的命中率视图。
+
+按 LLMTask 的运维职责分 4 个管线：
+
+- `core_chat` 主聊天链路 — `main` / `thinker` / `compact` / `reply_gate`
+- `slang` 黑话治理 — `slang` / `slang_review` / `slang_drift` / `slang_semantic`
+- `learning` 学习与工具 — `style` / `memo` / `chat_private` / `bilibili_intent` / `element_detect` / `vision`
+- `memory_graph` 多层记忆 (预留) — `graph_review` / `graph_edge_classifier` / `reflection_consolidator` / `episode_summarizer`
+
+**后端改动**：
+
+- 新建 [services/llm/llm_pipelines.py](services/llm/llm_pipelines.py)：`LLMPipeline` dataclass + `LLM_PIPELINES` tuple + `pipeline_for_task` / `all_pipeline_tasks` / `resolve_call_type` 工具。`_CALL_TYPE_ALIASES = {"chat": "main", "proactive": "main"}` 处理 spine 之前主链路写入的历史行（标注 "过渡期，spine 全量切换后移除"）。
+- [services/llm/usage.py](services/llm/usage.py)：新增 `cache_hit_by_call_type(*, period, date, tz_offset_hours)`，`GROUP BY call_type` 返回 `calls / hit_tokens / miss_tokens`。
+- [admin/routes/api/dashboard.py](admin/routes/api/dashboard.py)：
+  - 新增 `GET /api/admin/dashboard/cache-pipelines?period=day|week|month`，按管线返回加权命中率
+  - 现有 `/dashboard` 响应里 `usage` 字段加 `cache_hit_pct: float | None`，由后端用 `prompt_cache_hit_tokens / (hit + miss)` 算好直接给——hero "Cache 命中" 与 panel 同分母同口径，两个数字不可能漂移
+
+**前端改动**：
+
+- 新建 [admin/frontend/src/views/dashboard/components/CachePipelinePanel.vue](admin/frontend/src/views/dashboard/components/CachePipelinePanel.vue)：基于 AppPanelSection / NProgress / NTag 不引图表库；每行显示管线名 + 加权命中率 + 颜色分段进度条 + 前 5 名 task chip（按 `hit_pct DESC` 排序，`calls<3` 加 `*` 提示样本不足，`calls=0` 不入 chip 改写"X 个未触发任务"）。整 panel 数据空时 `EmptyState`；`overall.calls < 10` 时顶部加灰字"今日样本数较少…"。
+- [admin/frontend/src/views/system/helpers/formatters.ts](admin/frontend/src/views/system/helpers/formatters.ts)：加 `cacheHitColor(pct)`（与 `meterColor` 反极性，高=好绿、低=差红、null=灰）+ `formatHitPct(pct)`（0..1 → "92%" / "--"）。
+- [admin/frontend/src/views/dashboard/DashboardView.vue](admin/frontend/src/views/dashboard/DashboardView.vue)：
+  - 替换 L677-L692 整段 `<AppPanelSection eyebrow="USAGE" title="24 小时调用曲线">` 为 `<CachePipelinePanel :data="cachePipelines" @navigate="goTo" />`
+  - 删除 `usageHourlyBuckets` computed 与 `SparklineChart` import（dashboard 仅此一处用）
+  - `todayCacheHitRate` 改为读 `data.value?.usage?.cache_hit_pct`（hero 同口径）
+  - `Promise.allSettled` 数组加第 8 项：`api<CachePipelineData>('/api/admin/dashboard/cache-pipelines?period=day')`
+  - **保留** `usageData` fetch + `usageTopGroups` computed（hero 还在用 `total_calls` 等其它字段）
+  - `DashboardUsage` interface 加 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` / `cache_hit_pct` 字段
+
+**测试**：
+
+- 新建 [tests/test_llm_pipelines.py](tests/test_llm_pipelines.py) — 5 个守门：
+  - `test_all_llm_tasks_are_covered_by_pipelines` 强制 `set(all_llm_tasks()) == all_pipeline_tasks()`，新加 LLMTask 没分类就红
+  - `test_pipelines_have_no_overlap`、`test_pipeline_keys_are_unique_and_stable` 保护前端 4 个 key Literal 硬编码
+  - `test_pipeline_for_task_returns_owner` + `test_resolve_call_type_folds_legacy_aliases`
+- 新建 [tests/test_dashboard_cache_pipelines.py](tests/test_dashboard_cache_pipelines.py) — 5 个 endpoint smoke：
+  - 跨 task 多行混合（含 dream 未分类、chat/proactive 别名）断言 overall + per-pipeline + per_task 数字与手算一致
+  - 全 0 数据 `hit_pct is None`；非法 period 返回 error；`/dashboard.usage.cache_hit_pct` 与手算一致
+
+**验证**：
+
+- 全量 `pytest -q`：1077 passed, 8 skipped（基线 1066，本次 +11：5 pipeline guard + 5 endpoint smoke + 1 dashboard 同口径）
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit`：clean
+- `ruff check`：本次新增代码零错误，仅剩历史 pre-existing 错误
+
+**口径选择（用户决策）**：
+
+旧 hero "Cache 命中" 用 `cache_read / total_input`（DeepSeek 风格），新 panel 用 `prompt_cache_hit / (hit + miss)`（spine 统一字段）。两套分母在某些 provider 下数值会差几个点。本次用户选择"本期合并 hero 到同口径"——`/dashboard` 直接吐 `cache_hit_pct` 让前端单读，避免双数字共存的混淆。
+
+**影响范围**：
+
+- Dashboard 首屏可视化彻底换风格——不再有按时间的折线，而是按管线的命中率行
+- hero "Cache 命中" 数值会变化（口径切换）；外部脚本若读 `/dashboard.usage.cache_hit_pct` 是新增字段、不破坏旧字段
+- `memory_graph` 管线今天必然显示一片灰（4 个 task 全是预留），文案 `多层记忆 (预留)` 已说明
+- 旧 `SparklineChart.vue` 暂未删除——其它视图可能在用，本次只解除 dashboard 引用
+
+**后续动作**：
+
+- staging 灰度后用真实 per-task 数据再推 P1（profile 各自 `cache_hit_pct` 隔离监控的目标线）
+- 一旦 spine 之前的 `chat`/`proactive` call_type 历史行被 pruning 清除、所有新行只走 `main`/`compact`，删 `_CALL_TYPE_ALIASES`
+
+---
+
+## 2026-05-19（夜）CPA fixup sidecar 上线 — DeepSeek thinking 多轮 400 修复
+
+**变更类型**：local ops / Codex workflow
+
+**问题来源**：
+
+VS Code Codex 第二轮请求必 400：`{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API."}}`。第一轮工作（"你好" → "你好！"），第二轮就炸。CPA 错误日志：[local/cpa/logs/error-v1-responses-2026-05-19T071355-01473c00.log](local/cpa/logs/error-v1-responses-2026-05-19T071355-01473c00.log)。
+
+**根因**：
+
+CPA 7.1.11 在 OpenAI Responses ⇄ DeepSeek thinking 翻译时丢字段。完整 bug 链：
+
+1. 第一轮 DeepSeek thinking 模式吐出 `reasoning_content`；CPA 转 Responses 协议时把它写成空 stub：`{"type":"reasoning","summary":[{"text":""}],"content":null,"encrypted_content":""}`。
+2. Codex 把这个空 reasoning 存进 history。
+3. 第二轮 Codex 把 history 原样回传给 CPA；CPA 翻译回 DeepSeek chat 时 `reasoning_content` 字段是空的。
+4. DeepSeek thinking 模式硬性要求 history 里上一轮的 `reasoning_content` 必须非空回传 → 400。
+
+上游 CPA 没有针对 thinking 模式 reasoning 翻译的可配置开关；DeepSeek `extra_body.thinking={"type":"disabled"}` CPA 也不支持注入。
+
+**修复**：
+
+新增本机 fixup sidecar（stdlib 单文件 Python，无新增项目依赖）：
+
+- [local/cpa/cpa-fixup-sidecar.py](local/cpa/cpa-fixup-sidecar.py)：监听 `127.0.0.1:8318`，转发到 CPA `127.0.0.1:8317`。仅对 `POST /v1/responses` 且 `model` 以 `ds/` 开头（DeepSeek via CPA `openai-compatibility` prefix）的请求，遍历 `input` 数组剥掉所有 `{"type":"reasoning",...}` item。其它请求和模型透传。SSE 流式响应逐 chunk 转发，不缓冲。
+- [local/cpa/cpa-fixup-sidecar-ctl.sh](local/cpa/cpa-fixup-sidecar-ctl.sh)：start/stop/status/restart 控制脚本，PID 写入 `run/cpa-fixup.pid`，日志 `logs/cpa-fixup.log`。
+- [~/.codex/config.toml](~/.codex/config.toml)：`model_providers.custom.base_url` 从 `:8317/v1` 改到 `:8318/v1`。
+- [local/cpa/run-codex-local.sh](local/cpa/run-codex-local.sh)：CLI launcher 同步切到 `:8318`。
+- [local/cpa/README.md](local/cpa/README.md)：补 sidecar 说明。
+
+**为什么"剥 reasoning history"是正确选项**（用户决策）：
+
+DeepSeek 每轮 thinking 都是从头跑，历史里的 reasoning_content 对当轮回答帮助有限，主要服务于"模型保持思路连贯"。剥掉历史 reasoning 等于让 DeepSeek 每轮独立思考，能力损失可接受；当轮 thinking 仍然完整生成给用户看。
+
+**验证**：
+
+- `python3 -m py_compile local/cpa/cpa-fixup-sidecar.py`：通过。
+- `bash -n local/cpa/cpa-fixup-sidecar-ctl.sh`：通过。
+- 单轮透传：`curl /v1/models` via 8318，看到所有 DeepSeek 模型。
+- 多轮 stale reasoning 烟测（带 1 个 stale reasoning item）：flash + pro 都 200 OK，sidecar 日志 `stripped 1 stale reasoning item(s)`。
+- 极端烟测（2 个连续 stale reasoning items）：pro 仍 200 OK，DeepSeek thinking summary 正常生成，FINAL TEXT `DeepSeek`，sidecar 日志 `stripped 2 stale reasoning item(s)`。
+
+**生效需要重启 VS Code Codex 会话** — Codex 启动时一次性读 `model_providers.custom.base_url`。
+
+**回滚路径**：
+
+```bash
+./local/cpa/cpa-fixup-sidecar-ctl.sh stop
+# 编辑 ~/.codex/config.toml 把 base_url 改回 8317
+# 编辑 local/cpa/run-codex-local.sh 把 base_url 改回 8317
+```
+
+**已知边界**：
+
+- sidecar 不处理 SSE response 内容修复，只处理 request 入站。如果以后 CPA 在 SSE 流里产生 thinking 字段错位（目前还没看到），需要扩展。
+- sidecar 单线程 socket I/O 透传，不限速、不重试。CPA 自身的 `request-retry: 3` 仍然生效。
+
+---
+
+## 2026-05-19（晚）Codex profile 锁着 gpt-5.5 残留修复 + 1M 上下文利用率提升
+
+**变更类型**：local ops / Codex workflow
+
+**问题来源**：
+
+用户报告 ccswitch + CPA 反代接 DeepSeek 后，VS Code Codex 新会话仍显示 / 路由到 `gpt-5.5`。
+
+**根因**：
+
+[~/.codex/config.toml](~/.codex/config.toml) 顶层 `profile = "auto-max"` 已激活，但 `[profiles.auto-max].model = "gpt-5.5"` 没改。VS Code Codex wrapper（`codex-vscode-no-proxy.sh`）虽然把命令行 `-m/-p` 过滤了，但 codex 启动后会读 active profile 的 `model` 字段——profile 内部的覆盖优先级高于顶层默认，wrapper 的 `-m ds/deepseek-v4-pro` 在 profile 解析阶段被覆盖回 `gpt-5.5`。CPA 因此仍能收到 `/v1/responses` 200 OK（被 wrapper 的 `-c model="..."` 强制覆盖了一部分），但模型显示 / 部分代码路径仍按 gpt-5.5 走。维护日志 2026-05-19 早班记录的"wrapper 强制 ds/deepseek-v4-pro"只解决了命令行入口，没解决 profile 自身锁着旧模型的问题。
+
+**变更内容**：
+
+- [~/.codex/config.toml](~/.codex/config.toml)：
+  - `[profiles.auto-max].model` 从 `gpt-5.5` 改为 `ds/deepseek-v4-pro`。
+  - profile 内新增 `model_context_window = 1000000`、`model_auto_compact_token_limit = 950000`，与顶层一致；避免 wrapper 失效场景下 profile 退回默认值。
+  - 顶层同步加 `model_context_window` / `model_auto_compact_token_limit`，让裸 codex 调用也能拿到 1M 窗口。
+- [local/cpa/codex-vscode-no-proxy.sh](local/cpa/codex-vscode-no-proxy.sh)：`CODEX_AUTO_COMPACT_TOKEN_LIMIT` 默认值从 900000 抬到 950000。
+- [local/cpa/run-codex-local.sh](local/cpa/run-codex-local.sh)：同步抬到 950000。
+
+**为什么是 950K 不是 1M**：
+
+DeepSeek V4 默认 thinking，每轮要预留几千 reasoning token；auto-compact 必须留出足够余量给"最后一次 LLM 触发 compact 的那轮 prompt + completion"，否则会撞 max_tokens。950K 给最后一轮留 50K 余量，等于把可用窗口从 90% 抬到 95%，又不冒撑爆风险。
+
+**验证**：
+
+- `bash -n` 两个 shell 脚本：通过。
+- `bash -x codex-vscode-no-proxy.sh -m gpt-5.5 -p auto-max --version`：实际 exec 参数为 `-m ds/deepseek-v4-pro -c model="ds/deepseek-v4-pro" -c model_context_window=1000000 -c model_auto_compact_token_limit=950000`。传入的 GPT-5.5 / auto-max profile 都被过滤；codex 启动后 profile 自身也指向 ds/deepseek-v4-pro，双保险。
+- CPA 进程在跑、`127.0.0.1:8317` 持续收 `/v1/responses` 200 OK。
+
+**影响范围**：
+
+- 已开启的 VS Code Codex 会话需重启才能生效（profile 在进程启动时读一次）。
+- 新会话默认 950K 才触发 auto-compact，比之前多约 50K 可用上下文。如果观察到 max_tokens 撞顶，回退到 920K。
+
+**为什么没动 `profile = "auto-max"` 顶层声明**：
+
+profile 内部除了 model/context 现在也带着 `sandbox_mode = "workspace-write"` 等差异化设置，是用户为 VS Code 工作区刻意保留的，不能直接删；顶层的 `profile =` 也保留，避免显式禁用 profile 后某些代码路径 fallback 到完全的默认。
+
+---
+
+## 2026-05-19 DeepSeek V4 接入本机 CPA/Codex
+
+**变更类型**：local ops / Codex workflow
+
+**变更内容**：
+
+- `local/cpa/apply-deepseek-provider.py`：新增本机同步脚本，从已有 DeepSeek 配置读取 API key（不打印值），写入 ignored 的 CPA native/docker 配置。
+- `local/cpa/config.native.yaml`、`local/cpa/config.yaml`：新增 CPA `openai-compatibility` provider `deepseek`，前缀 `ds`，模型为 `deepseek-v4-flash` / `deepseek-v4-pro`。
+- `local/cpa/run-codex-local.sh`：新增 `--deepseek-flash`、`--deepseek-pro` 快捷参数，默认路由改为 `ds/deepseek-v4-pro`，并显式设置 1M context / 900K auto-compact。
+- `local/cpa/codex-vscode-no-proxy.sh`：VS Code Codex wrapper 过滤传入的 `-m/--model` 与 `-p/--profile`，强制使用 `ds/deepseek-v4-pro`，避免 `~/.codex/config.toml` 的 `auto-max` profile 把新会话带回 `gpt-5.5`。
+- `local/cpa/README.md`：补充 DeepSeek via CPA 的本机使用说明。
+
+**验证**：
+
+- CPA 热重载成功：日志显示 `1 OpenAI-compat`。
+- `/v1/models`：`ds/deepseek-v4-flash`、`ds/deepseek-v4-pro` 均可见。
+- `/v1/responses` 探针：两个模型均返回 `completed`，输出结构包含 `reasoning, message`，最终文本为 `ok`。
+- 确认未配置旧别名：`deepseek-chat` / `deepseek-reasoner` 未出现在本机 CPA 配置与说明中。
+- `bash -n local/cpa/codex-vscode-no-proxy.sh local/cpa/run-codex-local.sh`：通过。
+- `bash -x local/cpa/codex-vscode-no-proxy.sh -m gpt-5.5 -p auto-max --version`：实际 exec 参数为 `-m ds/deepseek-v4-pro`，传入的 GPT/profile 参数已被过滤。
+
+**交接说明**：
+
+DeepSeek V4 默认 thinking，会消耗输出 token；小探针需给足 `max_output_tokens`，否则可能只有 reasoning 没有 final message。当前接入只使用 Flash/Pro 两个正式模型名，不额外伪造 chat/reasoner 别名。
+
+---
+
+## 2026-05-19 全量 pytest 退出挂住修复（aiosqlite 资源收尾）
+
+**变更类型**：test infra / backend reliability
+
+**问题现象**：
+
+Claude Code 运行 `uv run pytest` 时看似“卡住”。实际复现时 pytest 已打印 `1077 passed, 8 skipped`，测试本体约 11 秒完成，但 Python 进程没有退出，直到外层超时。
+
+**根因**：
+
+退出阶段仍残留非 daemon 的 `aiosqlite` `_connection_worker_thread`。faulthandler 现场显示 Python 卡在 `threading._shutdown` 等待这些连接线程结束。逐文件扫描定位到：
+
+- `tests/test_card_store.py`：fixture 和手工 re-init 的 `CardStore` 未完整 close。
+- `tests/test_usage_routes.py`：`UsageTracker` async fixture 未 close，`TestClient` 未用 context 收尾。
+- `tests/test_slang_db_integrity.py`：腐坏 SQLite 触发 `connect_sqlite()` 的 PRAGMA 初始化失败时，底层 aiosqlite 连接已打开但没有关闭。
+
+**变更内容**：
+
+- `services/storage/sqlite.py`：`connect_sqlite()` 在 PRAGMA/初始化失败时 `await db.close()` 后重新抛错，避免失败路径泄漏 worker thread。
+- `tests/test_card_store.py`：`store` fixture 改为 yield-finally close；backfill 测试中 `s/s2/s3` 全部 finally close。
+- `tests/test_usage_routes.py`：`UsageTracker` fixture 改为 yield-finally close；`TestClient` 改为 context fixture。
+
+**验证**：
+
+- 残留线程扫描：`tests/test_card_store.py`、`tests/test_slang_db_integrity.py`、`tests/test_usage_routes.py` 均为 `THREADS 0`。
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_card_store.py tests/test_slang_db_integrity.py tests/test_usage_routes.py -q --tb=short`：56 passed。
+- `source ./scripts/dev/env.sh && uv run ruff check services/storage/sqlite.py tests/test_card_store.py tests/test_usage_routes.py tests/test_slang_db_integrity.py`：通过。
+- `source ./scripts/dev/env.sh && uv run pytest -q --tb=short`：1077 passed, 8 skipped in 10.71s，命令自然退出。
+
+**交接说明**：
+
+本次不是测试断言失败，而是 pytest 通过后的进程退出泄漏。若后续再出现“总结已打印但 Claude Code 不返回”，优先用 `threading.enumerate()` / `faulthandler.dump_traceback_later()` 查未关闭线程。
+
+---
+
+## 2026-05-19 多层学习记忆基石补丁 P1/P2/P3
+
+**变更类型**：docs / backend / frontend
+
+**变更内容**：
+
+按 [docs/audits/multilayer-memory-learning-report-2026-05-17.md](docs/audits/multilayer-memory-learning-report-2026-05-17.md) 顶部"基石达标补丁"执行 Phase A0 前置三项：
+
+- P1：在报告新增 §10 "关键接口契约草案"，补 `ContextProvider` / `BlockTraceBus` / `GraphWriter` 三段 Protocol / dataclass 雏形，并附决议追溯表。
+- P2：`SlangSettings.max_indirect_inject_terms` 后端默认值改为 `0`，前端 `DEFAULT_SLANG_SETTINGS.max_indirect_inject_terms` 同步改为 `0`，恢复"默认只注入当前上下文直命中 approved 黑话"的承诺；新增默认 direct-only 回归测试。
+- P3：grep 与代码阅读确认 `services/slang/` 运行时尚未接入 `LearningNormalizerStore.attach_candidate(domain="slang")`；报告已把 A1.3 从"复核/如果缺失"改为"已确认缺失，本轮补齐 attach 路径"。
+- 同步 [docs/audits/slang-collision-thinker-audit-2026-05-18.md](docs/audits/slang-collision-thinker-audit-2026-05-18.md)，关闭 indirect 默认值"决议待定"旧状态。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_slang_store.py tests/test_slang_plugin.py -q`：22 passed
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit`：通过
+
+**影响范围**：
+
+新建或缺省的黑话设置会默认 `max_indirect_inject_terms=0`；已有 DB 设置如果没有该字段，会经 Pydantic 默认值回落到 0。Admin 仍可手动把该值调到 1-30 做实验。A1.3 的 normalizer 实际补链路仍是后续 Phase A1 数据治理任务。
+
+---
+
+## 2026-05-19 旧追踪与研讨文档清理
+
+**变更类型**：docs / cleanup
+
+**变更内容**：
+
+阅读当前高层文档、wiki、CHANGELOG 和维护日志后，删除一批已经被正式文档、代码实现或维护日志吸收的过程文档，避免后续会话继续把旧路线当作当前待办：
+
+- 删除 2026-05-17 备份体系方案与实施 tracker；当前权威状态已在本日志的“备份体系服务层实施（Phase 1-4）”、`services/storage/backup.py`、`services/storage/backup_scheduler.py` 和 `tests/test_backup_service.py` 中体现。
+- 删除 2026-05-07 生态路线与 QQ bot 对比审计产物；对应能力已收敛到当前 wiki、`docs/project-info.md`、插件/Provider/Admin 实现和维护日志。
+- 删除 2026-05-08 知识库/Context Knowledge System 的旧审计、路线图和进度表；当前权威说明已收敛到 `docs/wiki/Knowledge-System.md`、`docs/knowledge/omubot/*.md` 和相关实现。
+- 删除 2026-05-03 Thinker 多阶段流水线旧方案、2026-05-07 三层架构旧审计，以及已经停在 2026-05-06 的 `docs/session-handoff.md`。
+
+**保留原则**：
+
+保留仍有明确未完成项或人工验收卡点的追踪文档：`docs/tracking/web-refactor.md`、`docs/slang-module-implementation-tracker.md`、`docs/style-learning-implementation-tracker.md`、`docs/reply-workflow-implementation-tracker.md`、`docs/conversation-archive-implementation-tracker.md`、`docs/group-concurrency-implementation-tracker.md` 以及近期黑话/多层记忆/LLMRequest spine 相关审计与迁移文档。
+
+**影响范围**：
+
+仅删除过期文档和旧审计产物，不改变运行时代码、配置、API 或管理端行为。
+
+**交接说明**：
+
+后续理解项目时继续优先读 `docs/project-info.md`、`docs/wiki/`、`wiki/`、`CHANGELOG.md` 和本维护日志；不要再依赖已删除的旧计划文档恢复当前状态。
+
+---
+
 ## 2026-05-18 LLMRequest spine 迁移阶段 D-later 完成（聚合契约重谈 + main/compact 迁移）
 
 **变更类型**：refactor / backend

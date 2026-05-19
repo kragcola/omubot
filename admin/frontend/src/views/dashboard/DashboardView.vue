@@ -22,14 +22,20 @@ import EmptyState from '../../components/common/EmptyState.vue'
 import LogPanel from '../../components/common/LogPanel.vue'
 import type { LogPanelLine } from '../../components/common/LogPanel.vue'
 import RestartBotButton from '../../components/common/RestartBotButton.vue'
-import SparklineChart from '../../components/common/SparklineChart.vue'
 import StateBadge from '../../components/common/StateBadge.vue'
 import { useSSE } from '../../composables/useSSE'
+import CachePipelinePanel, { type CachePipelineData } from './components/CachePipelinePanel.vue'
 
 interface DashboardUsage {
   total_calls?: number
   total_input_tokens?: number
   total_output_tokens?: number
+  cache_read_tokens?: number
+  prompt_cache_hit_tokens?: number
+  prompt_cache_miss_tokens?: number
+  cache_hit_pct?: number | null
+  avg_elapsed_s?: number
+  error_count?: number
 }
 
 interface DashboardMood {
@@ -186,6 +192,7 @@ const slangSummary = ref<DashboardSlangSummary | null>(null)
 const styleSummary = ref<DashboardStyleSummary | null>(null)
 const usageData = ref<UsageDataResponse | null>(null)
 const learningToday = ref<LearningTodayResponse | null>(null)
+const cachePipelines = ref<CachePipelineData | null>(null)
 const loading = ref(true)
 const refreshing = ref(false)
 const loadError = ref('')
@@ -197,6 +204,27 @@ const { logs, connected } = useSSE()
 const compactFormatter = new Intl.NumberFormat('zh-CN', {
   notation: 'compact',
   maximumFractionDigits: 1,
+})
+
+const todayCacheHitRate = computed(() => {
+  // Reads the dashboard-canonical cache_hit_pct field, computed by the
+  // backend as prompt_cache_hit_tokens / (hit + miss). Same numerator/denominator
+  // as the /api/admin/dashboard/cache-pipelines panel — the two cannot drift.
+  const pct = data.value?.usage?.cache_hit_pct
+  if (typeof pct !== 'number' || Number.isNaN(pct)) return '--'
+  return `${Math.round(pct * 100)}%`
+})
+
+const todayAvgLatency = computed(() => {
+  const value = data.value?.usage?.avg_elapsed_s
+  if (typeof value !== 'number' || Number.isNaN(value)) return '--'
+  return `${value.toFixed(1)}s`
+})
+
+const todayErrorCount = computed(() => {
+  const value = data.value?.usage?.error_count
+  if (typeof value !== 'number' || Number.isNaN(value)) return '--'
+  return value.toLocaleString('zh-CN')
 })
 
 const visibleLogs = computed(() =>
@@ -260,22 +288,6 @@ const scheduleTimelineSlots = computed(() => {
 const nextSlot = computed(() => scheduleTimelineSlots.value.find(s => !s.isPast) ?? null)
 const maintenanceWindow = computed(() => servicesHealth.value?.maintenance_window || null)
 const healthAlerts = computed(() => servicesHealth.value?.alerts || [])
-
-const usageHourlyBuckets = computed(() => {
-  const rows = usageData.value?.timeseries ?? []
-  const map = new Map<string, number>()
-  for (const row of rows) {
-    const bucket = String(row.bucket ?? '')
-    const calls = Number(row.calls ?? 0)
-    map.set(bucket, (map.get(bucket) ?? 0) + calls)
-  }
-  const buckets: Array<{ hour: string, calls: number }> = []
-  for (let h = 0; h < 24; h++) {
-    const key = String(h).padStart(2, '0')
-    buckets.push({ hour: key, calls: map.get(key) ?? 0 })
-  }
-  return buckets
-})
 
 const usageTopGroups = computed(() => {
   const rows = usageData.value?.top_groups ?? []
@@ -453,6 +465,7 @@ async function loadDashboard(silent = false) {
       api<DashboardStyleSummary>('/api/admin/style/summary'),
       api<UsageDataResponse>('/admin/usage/data?period=day'),
       api<LearningTodayResponse>('/api/admin/learning/today'),
+      api<CachePipelineData>('/api/admin/dashboard/cache-pipelines?period=day'),
     ])
 
     data.value = results[0].status === 'fulfilled' ? results[0].value : null
@@ -462,6 +475,7 @@ async function loadDashboard(silent = false) {
     styleSummary.value = results[4].status === 'fulfilled' ? results[4].value : null
     usageData.value = results[5].status === 'fulfilled' ? results[5].value : null
     learningToday.value = results[6].status === 'fulfilled' ? results[6].value : null
+    cachePipelines.value = results[7].status === 'fulfilled' ? results[7].value : null
 
     if (results.slice(0, 2).every(result => result.status === 'rejected')) {
       loadError.value = '后端数据暂不可用，请检查服务是否正常启动。'
@@ -635,24 +649,29 @@ function goTo(route: string) {
                 </span>
               </div>
             </div>
+
+            <div class="dash-hero__runtime">
+              <div class="dash-hero-runtime__item">
+                <span>Cache 命中</span>
+                <strong>{{ todayCacheHitRate }}</strong>
+              </div>
+              <div class="dash-hero-runtime__item">
+                <span>平均延迟</span>
+                <strong>{{ todayAvgLatency }}</strong>
+              </div>
+              <div class="dash-hero-runtime__item">
+                <span>今日错误</span>
+                <strong>{{ todayErrorCount }}</strong>
+              </div>
+            </div>
           </AppCard>
 
-          <!-- 24h usage curve -->
-          <AppPanelSection class="mt-16" eyebrow="USAGE" title="24 小时调用曲线">
-            <template #aside>
-              <StateBadge
-                status="default"
-                :label="`共 ${usageHourlyBuckets.reduce((a, b) => a + b.calls, 0)} 次`"
-                compact
-              />
-            </template>
-            <SparklineChart
-              :values="usageHourlyBuckets.map(b => b.calls)"
-              :labels="usageHourlyBuckets.map(b => b.hour)"
-              :height="120"
-              color="rgb(var(--primary-color))"
-            />
-          </AppPanelSection>
+          <!-- Cache pipeline hit rates (replaces former 24h call sparkline) -->
+          <CachePipelinePanel
+            class="mt-16"
+            :data="cachePipelines"
+            @navigate="goTo"
+          />
 
           <!-- Row: top groups + pending -->
           <div class="dash-grid-2 mt-16">
@@ -1082,6 +1101,35 @@ function goTo(route: string) {
   color: var(--om-text-2);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.dash-hero__runtime {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--om-border);
+}
+
+.dash-hero-runtime__item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--om-text-2);
+  font-size: 12px;
+}
+
+.dash-hero-runtime__item span {
+  color: var(--om-text-3);
+  letter-spacing: 0.04em;
+}
+
+.dash-hero-runtime__item strong {
+  color: var(--om-text-1);
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .dash-grid-2 {
