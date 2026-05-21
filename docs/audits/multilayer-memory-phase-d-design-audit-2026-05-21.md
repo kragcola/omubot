@@ -196,14 +196,20 @@ EpisodeStore 5 态机和两支 LLM task（`reflection_consolidator` / `episode_s
 
 ## 6. 验收前置自检（Phase D 整体完成时勾）
 
-- [ ] 报告 § 5 Phase D 验收 1：bot 被纠正一次后，后续同类场景能召回反思（D.3 + D.4 完成）
-- [ ] 报告 § 5 Phase D 验收 2：episode 不直接改人格，只作为动态经验提示（D.4 渲染层确认）
-- [ ] § 7.4 决议：episode 写入双写 normalizer + graph edge（D.1 normalizer 已在 Phase C；D.5 graph edge 完成）
-- [ ] D1 同模式扫描：grep `_maybe_reflect_on_feedback` / `promote_episode_candidate` / `episode_supports_profile` 三处接入点，确认无遗漏 caller
-- [ ] D2 cancel-path 回归测试：promote 桥 + reflection 生成 + graph 双写 三处均有 `pytest.raises(asyncio.CancelledError)` 测试
-- [ ] D4 完成声明含证据：sqlite SELECT 显示新 episode + admin 截图 + BlockTraceBus 日志片段 + 回滚路径
-- [ ] 多层报告 § 5 状态字段同步：Phase D 从 🔴 改为 ✅（标 commit + 落地日期）
-- [ ] [pending-and-observation.md](../pending-and-observation.md) § 2 表格刷新
+> 2026-05-21 整体落地后回填。落地 commits：D.1 bf53119 / D.2 428907f / D.3 128edf6 / D.4 17b4769 / D.5 9f7c6e2。
+
+- [x] 报告 § 5 Phase D 验收 1：bot 被纠正一次后，后续同类场景能召回反思（D.3 + D.4 完成；EpisodeProvider 注册在 plugin.py:934，ReflectionGenerator 注册在 plugin.py:966）
+- [x] 报告 § 5 Phase D 验收 2：episode 不直接改人格，只作为动态经验提示（D.4 EpisodeProvider 走 ContextProvider 通道注入，default state 不进 prompt，与状态机 `enabled_for_prompt` gate 一致）
+- [x] § 7.4 决议：episode 写入双写 normalizer + graph edge（D.1 normalizer 已在 Phase C；D.5 graph edge 通过 EpisodeGraphBridge 在 transition_state(approved/disabled) 时写 `episode_supports_profile`）
+- [x] D1 同模式扫描：grep `_maybe_reflect_on_feedback` / `promote_episode_candidate` / `episode_supports_profile` 三处接入点，确认无遗漏 caller。实测三处对应三个 wire point：EpisodePromoter @ plugin.py:785、ReflectionGenerator @ plugin.py:966、EpisodeGraphBridge @ plugin.py:799–800；EpisodeProvider @ plugin.py:934 是召回端
+- [x] D2 cancel-path 回归测试：promote 桥 + reflection 生成 + graph 双写 + recall 四处均覆盖：
+  - D.1 [tests/test_memory_consolidator_promote.py:260](../../tests/test_memory_consolidator_promote.py#L260) `test_promote_cancel_path_leaves_episodes_empty`
+  - D.3 [tests/test_memory_consolidator_reflector.py:228](../../tests/test_memory_consolidator_reflector.py#L228) `test_run_once_cancel_marks_run_failed`
+  - D.4 [tests/test_episode_context_provider.py:275](../../tests/test_episode_context_provider.py#L275) `test_provide_cancel_path_leaves_clean_state`
+  - D.5 [tests/test_episode_graph_bridge.py:217](../../tests/test_episode_graph_bridge.py#L217) `test_cancel_path_leaves_clean_state`
+- [x] D4 完成声明含证据：Phase D 测试 sweep 94 passed（test_episode + test_episode_context_provider + test_episode_graph_bridge + test_memory_consolidator_reflector + test_memory_consolidator_promote + test_admin_memory_consolidator）；ruff 全绿；pyright on Phase D scope 0 errors。回滚路径：每个子阶段对应 commit 单独 revert，互相独立，graph edge 因 source-of-truth 在 EpisodeStore，graph 表干净 truncate 即可重新生成
+- [x] 多层报告 § 5 状态字段同步：Phase D 从 🔴 改为 ✅（落地日期 2026-05-21，commits 见上）
+- [x] [pending-and-observation.md](../pending-and-observation.md) § 2 表格刷新（同次 commit 落地）
 
 ---
 

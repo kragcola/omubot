@@ -442,6 +442,8 @@ A2 是 Phase A3 / Phase A.5 graph schema 的硬前置。
 
 ### Phase D：Episodic Reflection
 
+> **2026-05-21 落地**：Phase D 整体 ✅。落地 commits：D.1 promote 桥 `bf53119` / D.2 admin UX `428907f` / D.3 反思生成 `128edf6` / D.4 召回路径 `17b4769` / D.5 graph edge 双写 `9f7c6e2`。验收清单见 [docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md § 6](multilayer-memory-phase-d-design-audit-2026-05-21.md#6-验收前置自检phase-d-整体完成时勾)。
+
 目标：补上真人式长期学习最缺的一层。
 
 - 新建 `services/episodic/` 或扩展 `services/style` 的 feedback 为 episode。

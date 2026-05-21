@@ -4,6 +4,84 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase D — 整体验收（D.1→D.5 全部 ✅）
+
+**变更类型**：milestone（无新代码；同次 commit 仅刷文档）
+
+**背景**：
+
+[Phase D Episodic Reflection 设计前置审计（2026-05-21）](docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md) § 1.2 列出 5 个 gap（promote 桥 / reflection caller / 反思素材源 / 召回路径 / graph edge 双写），自当日上午起按 D.1 → D.5 五个独立子阶段推进；今日（同日）全部 ✅ 落地，须按审计 § 6 走整体验收清单 + 同步上层文档状态。
+
+**同次提交涉及的文档刷新**（无代码改动）：
+
+- [docs/pending-and-observation.md § 2](docs/pending-and-observation.md) — Phase D 行从 🟡 改 ✅，列出五个 commit 哈希；Phase E 行从「全未写」修订为「A.5 + D.5 已落 `episode_supports_profile` 写入路径，剩余 4 类边未写」；§ 2.1 C.2 任务标 ✅（被 D.1 EpisodePromoter 闭合）；末尾追加「下一步先观察 ≥ 1 周再决定 Phase E 剩余 edge 写入路径」工程直觉
+- [docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md § 6](docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md) — 8 项验收清单全部 [x]，每项填回证据（commit / 文件:行号 / 测试 case 名）
+- [docs/audits/multilayer-memory-learning-report-2026-05-17.md § 5 Phase D](docs/audits/multilayer-memory-learning-report-2026-05-17.md) — 章首加 2026-05-21 落地标记 + 五个 commit 引用 + 反链审计 § 6 清单
+
+**落地 commits 汇总**（按时间顺序）：
+
+| 子阶段 | Commit | 范围 |
+| --- | --- | --- |
+| D.1 promote 桥 | `bf53119` | EpisodePromoter；`decide_candidate(approved)` + episode-domain 时调 `EpisodeStore.create_episode` |
+| D.2 admin UX | `428907f` | memory consolidator queue 5 域筛选 + episode payload 编辑 + 修订审计 |
+| D.3 反思生成路径 | `128edf6` | ReflectionGenerator；style/slang negative signal → reflection_consolidator → episode candidate |
+| D.4 召回路径 | `17b4769` | EpisodeProvider；`enabled_for_prompt` episode 进 ContextProvider 通道 + `last_used_at` stamp |
+| D.5 graph edge 双写 | `9f7c6e2` | EpisodeGraphBridge；transition_state(approved/disabled) → `episode_supports_profile` upsert/revoke |
+
+**Phase D wire points 现况图**（D1 同模式扫描定档）：
+
+- EpisodePromoter @ [plugins/chat/plugin.py:785](plugins/chat/plugin.py#L785) — D.1 promote 端
+- EpisodeProvider @ [plugins/chat/plugin.py:934](plugins/chat/plugin.py#L934) — D.4 recall 端
+- ReflectionGenerator @ [plugins/chat/plugin.py:966](plugins/chat/plugin.py#L966) — D.3 反思端
+- EpisodeGraphBridge @ [plugins/chat/plugin.py:799](plugins/chat/plugin.py#L799) — D.5 graph 端
+
+四个钩子全部走 try/except 优雅降级；任何一处挂了不会影响 EpisodeStore source-of-truth。
+
+**D2 cancel-path 测试矩阵**（四端全覆盖）：
+
+| 子阶段 | 测试文件 | Test |
+| --- | --- | --- |
+| D.1 | [tests/test_memory_consolidator_promote.py:260](tests/test_memory_consolidator_promote.py#L260) | `test_promote_cancel_path_leaves_episodes_empty` |
+| D.3 | [tests/test_memory_consolidator_reflector.py:228](tests/test_memory_consolidator_reflector.py#L228) | `test_run_once_cancel_marks_run_failed` |
+| D.4 | [tests/test_episode_context_provider.py:275](tests/test_episode_context_provider.py#L275) | `test_provide_cancel_path_leaves_clean_state` |
+| D.5 | [tests/test_episode_graph_bridge.py:217](tests/test_episode_graph_bridge.py#L217) | `test_cancel_path_leaves_clean_state` |
+
+**D4 验证证据**：
+
+- `pkill -9 -f pytest && uv run pytest tests/test_episode.py tests/test_episode_context_provider.py tests/test_episode_graph_bridge.py tests/test_memory_consolidator_reflector.py tests/test_memory_consolidator_promote.py tests/test_admin_memory_consolidator.py -q` → **94 passed in 0.94s**（Phase D scope 全绿）
+- `uv run ruff check services/episodic/ services/memory_consolidator/ services/block_trace/episode_provider.py tests/test_episode*.py tests/test_memory_consolidator_*.py` → **All checks passed**
+- `uv run pyright services/episodic/ services/memory_consolidator/ services/block_trace/episode_provider.py` → **0 errors, 0 warnings, 0 informations**
+
+**报告 § 5 Phase D 验收对照**：
+
+- 验收 1「bot 被纠正一次后，后续同类场景能召回反思」 → ✅ D.3 反思生成 + D.4 召回路径联通；BlockTraceBus 双跑路径已就位（详见 D.4 commit）
+- 验收 2「episode 不直接改人格，只作为动态经验提示」 → ✅ EpisodeProvider 走 ContextProvider 通道，default state 不进 prompt，与状态机 `enabled_for_prompt` gate 一致
+
+**部署影响**：
+
+- 不需要 docker rebuild（D.5 已经 commit `9f7c6e2` 落地，等下次 bot 重启时新 hook 接通）
+- 不需要 schema migration（episodes / consolidator_candidates / graph_nodes / graph_edges 表都是 Phase A.5 / Phase B / Phase C 老 schema）
+- napcat 全程未动（铁律 D6 admin SPA / 部署铁律 napcat 不动 — 本次纯文档更新无部署）
+
+**与历史观察期的关系**：
+
+- 24h Phase 3 named volume 观察（截止 2026-05-22 16:30）— 不受影响，继续走
+- 30 天 corruption 窗口（截止 2026-06-20）— 不受影响，继续走
+
+**下一步（非本次范围）**：
+
+- 观察 ≥ 1 周真实流量看 episode `enabled_for_prompt` 召回命中率与 `episode_supports_profile` edge 增长曲线
+- 若数据健康，启动 Phase E 剩余 4 类 edge（term_used_in_group / style_applies_to_situation / user_corrected_bot_about / doc_supports_fact）写入路径
+- Phase F 仍走 ≥ 3 个月真实数据 + ≥ 200 条 enabled_for_prompt episode 硬前置（报告 § 5 Phase F 前置依赖未变）
+
+**回滚路径**：
+
+- 每个子阶段独立可 revert（commit 间无文件依赖纠缠）
+- 文档刷新本身可纯文本回退；不影响代码运行
+- graph edge 因 source-of-truth 在 EpisodeStore，graph_edges 表 truncate 后再次 transition 可重建
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase D.5 — graph edge 双写（episode_supports_profile）
 
 **变更类型**：feature（services + tests，无 schema migration、无部署改动、无前端改动）

@@ -39,20 +39,20 @@
 ## 2. 多层学习记忆方案（P3）— 跨 Phase 待落地
 
 > 来源：[docs/audits/multilayer-memory-learning-report-2026-05-17.md](audits/multilayer-memory-learning-report-2026-05-17.md)
-> 当前进度（2026-05-21）：A0/A1/A2/A3/A.5/B/C 已落地；D 设计前置审计完成（[multilayer-memory-phase-d-design-audit-2026-05-21.md](audits/multilayer-memory-phase-d-design-audit-2026-05-21.md)），实现未起；E/F 未启动
+> 当前进度（2026-05-21）：A0/A1/A2/A3/A.5/B/C/D 已落地；E 仅 A.5 schema + `episode_supports_profile` edge 写入路径；F 未启动
 
 | Phase | 现状 | 关键缺口 | 报告原文硬前置 |
 | --- | --- | --- | --- |
-| **D Episodic Reflection** | 🟡 设计前置审计完成（2026-05-21），实现未起 | 报告硬要求都已满足；缺 5 个 gap：promote 桥 / reflection caller / 反思素材源 / 召回路径 / graph edge 双写。详见 [multilayer-memory-phase-d-design-audit-2026-05-21.md](audits/multilayer-memory-phase-d-design-audit-2026-05-21.md) | A2 隐私字段（done）+ A3 episode 状态机（done）+ Phase C 能产 candidate（done）。**无观察期**，可立即起 |
-| **E 图谱跨层主索引（远期）** | 🟡 部分提前到 A.5 | A.5 已落 graph schema + 首批 edge 类型；剩余跨层关系（term_used_in_group / style_applies_to_situation / user_corrected_bot_about / episode_supports_profile / doc_supports_fact）未写入路径 | Phase D 落地（含 edge 写入路径）。**无观察期** |
+| **D Episodic Reflection** | ✅ 落地（2026-05-21，commits bf53119 / 428907f / 128edf6 / 17b4769 / 9f7c6e2） | 5 个 gap 全部闭合：D.1 promote 桥（EpisodePromoter）/ D.2 admin UX 5 域筛选 + reflection 编辑 / D.3 反思素材源（style_feedback negative → ReflectionGenerator）/ D.4 召回路径（EpisodeProvider 接进 ContextProvider）/ D.5 graph edge 双写（EpisodeGraphBridge → episode_supports_profile） | A2 隐私字段（done）+ A3 episode 状态机（done）+ Phase C 能产 candidate（done）。**无观察期** |
+| **E 图谱跨层主索引（远期）** | 🟡 部分落地 | A.5 已落 graph schema + 首批 edge 类型；D.5 已写 `episode_supports_profile` edge 写入路径；剩余跨层关系（term_used_in_group / style_applies_to_situation / user_corrected_bot_about / doc_supports_fact）未写入路径 | Phase D 落地（含 edge 写入路径）。**无观察期** |
 | **F Episodic-to-Declarative（远期）** | 🔴 不启动（前置不足） | declarative_facts 表 + 凝练触发器 + 冲突解决 + 5 态状态机 + 回退路径全部未实现 | 报告硬要求：Phase D **跑过 ≥ 3 个月真实数据** + ≥ 1 个群累计 ≥ 200 条 `enabled_for_prompt` episode + BlockTraceBus（done）。**有观察期，90+ 天** |
 
-> **实操建议**（非报告硬要求）：Phase C 才落地（2026-05-21），admin queue 还没真实样本。建议先观察 1-3 天，让真实流量产出几条 candidate 再起 D，避免没素材就铺反思路径。这是工程直觉，不是 gate。
+> **Phase D 已收尾**：D.1→D.5 全部 ✅。下一步开 Phase E 之前，先观察 ≥ 1 周真实流量看 episode `enabled_for_prompt` 的召回命中率与 graph edge 增长曲线，再决定剩余 4 个跨层 edge 写入路径要不要加 promote 闸。这是工程直觉，不是 gate。
 
 ### 2.1 Phase C 自身的后置任务（dry-run 已跑通后）
 
 - **C.1 admin queue 真实使用反馈**：当前 `MemoryConsolidator.run_once` 只在被显式调用时执行；需要确认是否要接 cron / 周期 tick 还是继续保持「人工触发」语义。决策点：等 24h 后看 admin 是否有人为审阅压力
-- **C.2 5 类 typed candidate promote 路径（属于 Phase D 范围）**：当前 `decide_candidate` 只更新 candidate 状态、绝不写生产 store；Phase D 再决定 promote 闸如何挂
+- **C.2 5 类 typed candidate promote 路径**：✅ Phase D.1 落地（EpisodePromoter @ commit bf53119）；episode-domain candidate 已能在 `decide_candidate(approved)` 时自动 promote 到 EpisodeStore
 
 ### 2.2 报告自身仍需更新的地方
 
