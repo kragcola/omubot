@@ -4,6 +4,69 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase D.1 — promote 桥 落地（candidate→episode）
+
+**变更类型**：feature（services + admin + tests，无 schema / 部署改动）
+
+**背景**：
+
+[Phase D 设计前置审计](docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md) 把 G1（promote 桥缺失）列为 D 的最小可验单元。本次按 D.1 拆分实现 — `decide_candidate(state="approved")` 仅改 candidate.state，对 `domain="episode"` 候选不写 EpisodeStore；这条断链补上后 Phase D 后续 4 项（D.2 admin UX / D.3 反思生成 / D.4 召回 / D.5 graph 双写）才有可挂的下游端点。
+
+**改动落点**：
+
+- 新增 [services/memory_consolidator/promoter.py](services/memory_consolidator/promoter.py)（199 行）：`EpisodePromoter` + `PromoteResult`
+  - 仅对 `domain="episode"` + `state="approved"` 候选写入 `EpisodeStore`，其余域 / 状态 silent skip 并返回 `skipped_reason`，让一个 hook 可以挂在所有 `decide(approved)` 之上而不会产生噪音
+  - **幂等性**：用 `meta.consolidator_candidate_id` 在 `list_episodes(state_filter=None, limit=200)` 中扫描，已 promote 过的 candidate 第二次调用返回原 `episode_id` + `skipped_reason="already_promoted"`，不写第二行
+  - **best-effort 失败语义**：candidate 行是真理来源，promote 失败只记 WARN + 返回 `skipped_reason="create_failed:<ExcType>"`，不回滚 candidate.state — admin 决策不能被下游写失败撤销
+  - **审计 meta**：episode `meta_json` 保留 `consolidator_candidate_id` / `consolidator_run_id` / `normalizer_cluster_id` / `source_message_pks` / `promoted_by`，并向 `episode_revisions` 写一条 `action="promote_from_candidate"`
+- [services/memory_consolidator/__init__.py](services/memory_consolidator/__init__.py) 导出 `EpisodePromoter` / `PromoteResult`
+- [kernel/types.py](kernel/types.py) `PluginContext` 新增 `episode_store` / `episode_promoter` 两个字段，供 admin/前端共享同一实例
+- [plugins/chat/plugin.py](plugins/chat/plugin.py) startup 段落把 `EpisodeStore("storage/episodic.db")` 与 `EpisodePromoter` 接到 ctx；shutdown 段落顺序关 episode_store
+- [admin/routes/api/memory_consolidator.py](admin/routes/api/memory_consolidator.py) `decide` 端点：`new_state == "approved"` 且候选 `domain == "episode"` 时调 `promoter.promote()`，并把 `promote_info`（`episode_id` / `promoted` / `skipped_reason`）挂到响应 `data.promote` 下；非 episode 域无 `promote` 字段，旧客户端零回归
+
+**测试覆盖**：
+
+- 新增 [tests/test_memory_consolidator_promote.py](tests/test_memory_consolidator_promote.py)（8 例）：happy path / global scope / 非 episode 域 skip / 非 approved skip + reject 路径 / 候选不存在 / 幂等 / **D2 cancel-path（promote 中段抛 `CancelledError` 后 candidate.state == "approved" 且 episodes 表 SELECT COUNT(*) == 0）** / create_episode 抛 RuntimeError 时 best-effort skip
+- 扩 [tests/test_admin_memory_consolidator.py](tests/test_admin_memory_consolidator.py)（+3 例）：episode-approve 后响应含 `promote.promoted=true` 且 `episodes` 行数 == 1 / 非 episode 域 approve 不带 `promote` 键 / episode reject 不触发 promote
+
+**D1 同模式扫描**（grep `EpisodeStore.*create_episode` services/ admin/ plugins/ — pre 实现状态）：
+
+```text
+services/episodic/store.py:290    # 定义点
+admin/routes/api/episodes.py      # admin CRUD（手动写入路径）
+# 无任何来自 consolidator / reflection 流水的 caller — 与审计文档结论吻合
+```
+
+D.1 把 promoter 装回 admin/decide 路径后，唯一新 caller 路径就是该处 — 没有遗留的"应改未改"调用点。
+
+**D4 完成证据**：
+
+- `uv run pytest tests/test_memory_consolidator_promote.py tests/test_admin_memory_consolidator.py tests/test_episode.py tests/test_memory_consolidator_store.py` → **50 passed**
+- `uv run pytest tests/ --deselect tests/test_admin_api.py::test_system_services_health_endpoint` → **1254 passed, 8 skipped**（被 deselect 的那条是 backup_disk alert pre-existing 失败，stash apply 验证为 baseline 状态，与 D.1 无关）
+- `uv run ruff check` → All checks passed
+- `uv run pyright services/memory_consolidator/promoter.py services/memory_consolidator/__init__.py admin/routes/api/memory_consolidator.py kernel/types.py tests/test_memory_consolidator_promote.py tests/test_admin_memory_consolidator.py` → **0 errors**（项目级 baseline 457 errors 与 D.1 改动文件无重叠）
+
+**冲击范围**：
+
+- 纯代码改动；无 DB schema / docker-compose / 主机脚本调整
+- ChatPlugin 启动多挂一个 SQLite 连接（`storage/episodic.db`，已存在数据库），shutdown 多关一个；启动顺序对依赖未变化（在 `memory_consolidator_normalizer` 之后初始化）
+- napcat / qq-bot / 30 天 corruption 验收窗口（截止 2026-06-20）全部不动；本次未部署，仅准备 commit
+- 不接收旧客户端：admin decide 响应在 episode-approve 时新增 `promote` 子对象，但向后兼容（只新增字段，不改原有结构）
+
+**回滚路径**：
+
+1. `git revert <D.1 commit>` — 单 commit 反推
+2. 数据无副作用：促升过的 episode 行残留在 `storage/episodic.db`，可由后续 admin UI 显式 delete；候选 candidate 行不变（state 已 = approved 是 admin 主动决策）
+3. ctx.episode_store / ctx.episode_promoter 字段反推后即不可访问，调用端会立刻 attribute error；这就是回滚的故意效果
+
+**handoff（给 D.2）**：
+
+- D.1 已让 admin POST `/api/admin/memory_consolidator/candidates/{id}/decide` 在 episode-approve 后自动写 episode 行；前端目前没读这条副作用 — D.2 的 admin UX 工作就是把 `data.promote.episode_id` 链到 `/admin/memory/episodes/{id}` 详情页 + 把 episode 列表上挂 `consolidator_candidate_id` 反查链
+- 验收 SQL（部署后跑）：`docker exec qq-bot sqlite3 storage/episodic.db "SELECT episode_id, source, json_extract(meta_json, '$.consolidator_candidate_id') FROM episodes WHERE source='consolidator' ORDER BY created_at DESC LIMIT 5"`
+- 24h Phase 3 named volume 观察窗口（截止 2026-05-22 16:30）继续走，与本次无交集；30 天 corruption 验收窗口（截止 2026-06-20）继续走
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase D 设计前置审计 — 5 子阶段拆分 + gap 盘点（无代码改动）
 
 **变更类型**：docs（spec / handoff）

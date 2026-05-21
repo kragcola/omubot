@@ -13,8 +13,10 @@ from starlette.testclient import TestClient
 from admin.routes.api.memory_consolidator import (
     create_memory_consolidator_router,
 )
+from services.episodic import EpisodeStore
 from services.memory_consolidator import (
     ConsolidatorCandidatesStore,
+    EpisodePromoter,
     RunReport,
 )
 
@@ -27,13 +29,26 @@ async def store(tmp_path):
     await s.close()
 
 
+@pytest.fixture
+async def episode_store(tmp_path):
+    s = EpisodeStore(str(tmp_path / "episodic.db"))
+    await s.init()
+    yield s
+    await s.close()
+
+
 def _build_client(
-    *, store: Any, consolidator: Any | None = None, storage_dir: Any = None,
+    *,
+    store: Any,
+    consolidator: Any | None = None,
+    storage_dir: Any = None,
+    episode_promoter: Any | None = None,
 ) -> TestClient:
     ctx = SimpleNamespace(
         memory_consolidator_store=store,
         memory_consolidator=consolidator,
         storage_dir=storage_dir,
+        episode_promoter=episode_promoter,
     )
     app = FastAPI()
     app.include_router(
@@ -245,3 +260,105 @@ async def test_decide_candidate_rejects_invalid_state(store):
         json={"state": "weird"},
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_decide_candidate_promotes_episode_on_approve(
+    store, episode_store,
+):
+    run_id = await store.start_run(
+        triggered_by="test", group_id="g1", scope="group",
+    )
+    cid = await store.record_candidate(
+        run_id=run_id, domain="episode", scope="group", group_id="g1",
+        source_message_pks=[7, 8],
+        payload={
+            "situation": "user asked about deploys",
+            "reflection": "explain step by step",
+        },
+        confidence=0.8,
+    )
+    promoter = EpisodePromoter(
+        candidates_store=store, episode_store=episode_store,
+    )
+    client = _build_client(store=store, episode_promoter=promoter)
+
+    resp = client.post(
+        f"/api/admin/memory_consolidator/candidates/{cid}/decide",
+        json={"state": "approved", "decided_by": "alice"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    promote = body["data"].get("promote")
+    assert promote is not None
+    assert promote["promoted"] is True
+    assert promote["episode_id"]
+    assert promote["skipped_reason"] == ""
+
+    episodes = await episode_store.list_episodes(group_id="g1")
+    assert len(episodes) == 1
+    assert episodes[0].episode_id == promote["episode_id"]
+    assert episodes[0].source == "consolidator"
+    assert episodes[0].meta["consolidator_candidate_id"] == cid
+    assert episodes[0].meta["promoted_by"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_decide_candidate_no_promote_for_non_episode(
+    store, episode_store,
+):
+    run_id = await store.start_run(
+        triggered_by="test", group_id="g1", scope="group",
+    )
+    cid = await store.record_candidate(
+        run_id=run_id, domain="slang", scope="group", group_id="g1",
+        source_message_pks=[],
+        payload={"term": "x"}, confidence=0.5,
+    )
+    promoter = EpisodePromoter(
+        candidates_store=store, episode_store=episode_store,
+    )
+    client = _build_client(store=store, episode_promoter=promoter)
+
+    resp = client.post(
+        f"/api/admin/memory_consolidator/candidates/{cid}/decide",
+        json={"state": "approved"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    # Non-episode approval must not invoke promote — no promote key
+    assert "promote" not in body["data"]
+
+    episodes = await episode_store.list_episodes()
+    assert episodes == []
+
+
+@pytest.mark.asyncio
+async def test_decide_candidate_no_promote_when_rejecting_episode(
+    store, episode_store,
+):
+    run_id = await store.start_run(
+        triggered_by="test", group_id="g1", scope="group",
+    )
+    cid = await store.record_candidate(
+        run_id=run_id, domain="episode", scope="group", group_id="g1",
+        source_message_pks=[],
+        payload={"situation": "x"}, confidence=0.5,
+    )
+    promoter = EpisodePromoter(
+        candidates_store=store, episode_store=episode_store,
+    )
+    client = _build_client(store=store, episode_promoter=promoter)
+
+    resp = client.post(
+        f"/api/admin/memory_consolidator/candidates/{cid}/decide",
+        json={"state": "rejected"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "promote" not in body["data"]
+
+    episodes = await episode_store.list_episodes()
+    assert episodes == []

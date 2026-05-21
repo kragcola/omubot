@@ -201,6 +201,8 @@ class PluginContext:
     memory_consolidator_store: Any = None
     memory_consolidator_normalizer: Any = None
     memory_consolidator: Any = None
+    episode_store: Any = None
+    episode_promoter: Any = None
 
 
 @dataclass

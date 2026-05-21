@@ -761,9 +761,11 @@ class ChatPlugin(AmadeusPlugin):
         await ctx.knowledge_graph.init()
 
         # ---- memory consolidator (Phase C dry-run; lazy LLM/normalizer wiring) ----
+        from services.episodic.store import EpisodeStore
         from services.learning_normalizer.store import LearningNormalizerStore
         from services.memory_consolidator import (
             ConsolidatorCandidatesStore,
+            EpisodePromoter,
             MemoryConsolidator,
         )
 
@@ -775,6 +777,14 @@ class ChatPlugin(AmadeusPlugin):
             "storage/consolidator_normalizer.db"
         )
         await ctx.memory_consolidator_normalizer.init()
+
+        # Phase D singleton — episode store + promote bridge.
+        ctx.episode_store = EpisodeStore("storage/episodic.db")
+        await ctx.episode_store.init()
+        ctx.episode_promoter = EpisodePromoter(
+            candidates_store=ctx.memory_consolidator_store,
+            episode_store=ctx.episode_store,
+        )
         ctx.memory_consolidator = None  # set after llm_client is built below
 
         # ---- instruction ----
@@ -984,4 +994,7 @@ class ChatPlugin(AmadeusPlugin):
         consolidator_normalizer = getattr(ctx, "memory_consolidator_normalizer", None)
         if consolidator_normalizer is not None:
             await consolidator_normalizer.close()
+        episode_store = getattr(ctx, "episode_store", None)
+        if episode_store is not None:
+            await episode_store.close()
         _L.info("ChatPlugin shutdown complete")

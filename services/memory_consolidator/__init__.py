@@ -11,6 +11,7 @@ Public surface intentionally narrow:
 from __future__ import annotations
 
 from services.memory_consolidator.consolidator import MemoryConsolidator
+from services.memory_consolidator.promoter import EpisodePromoter, PromoteResult
 from services.memory_consolidator.store import (
     CandidateFilter,
     ConsolidatorCandidatesStore,
@@ -48,9 +49,11 @@ __all__ = [
     "CandidateState",
     "ConsolidatorCandidatesStore",
     "EpisodePayload",
+    "EpisodePromoter",
     "FactPayload",
     "GraphRelationPayload",
     "MemoryConsolidator",
+    "PromoteResult",
     "RunReport",
     "RunStatus",
     "ScanRun",

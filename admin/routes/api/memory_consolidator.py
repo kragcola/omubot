@@ -20,6 +20,7 @@ from services.memory_consolidator import (
     CANDIDATE_STATES,
     Candidate,
     ConsolidatorCandidatesStore,
+    EpisodePromoter,
     MemoryConsolidator,
     ScanRun,
 )
@@ -49,6 +50,11 @@ def create_memory_consolidator_router(*, ctx: Any = None) -> APIRouter:
         if ctx is None:
             return None
         return getattr(ctx, "memory_consolidator", None)
+
+    def _episode_promoter() -> EpisodePromoter | None:
+        if ctx is None:
+            return None
+        return getattr(ctx, "episode_promoter", None)
 
     async def _read_json(request: Request) -> dict[str, Any]:
         try:
@@ -289,7 +295,27 @@ def create_memory_consolidator_router(*, ctx: Any = None) -> APIRouter:
                 status_code=404,
                 content={"ok": False, "error": "candidate not found"},
             )
-        return {
+
+        # D.1 promote bridge — only when admin moves an episode-domain
+        # candidate to ``approved``. Failures here never roll back the
+        # candidate state; the candidate row is the source of truth.
+        promote_info: dict[str, Any] | None = None
+        if new_state == "approved":
+            promoter = _episode_promoter()
+            candidate = await store.get_candidate(candidate_id)
+            if (
+                promoter is not None
+                and candidate is not None
+                and candidate.domain == "episode"
+            ):
+                result = await promoter.promote(candidate_id, actor=decided_by)
+                promote_info = {
+                    "episode_id": result.episode_id,
+                    "promoted": result.promoted,
+                    "skipped_reason": result.skipped_reason,
+                }
+
+        response: dict[str, Any] = {
             "ok": True,
             "data": {
                 "candidate_id": candidate_id,
@@ -297,5 +323,8 @@ def create_memory_consolidator_router(*, ctx: Any = None) -> APIRouter:
                 "decided_by": decided_by,
             },
         }
+        if promote_info is not None:
+            response["data"]["promote"] = promote_info
+        return response
 
     return router
