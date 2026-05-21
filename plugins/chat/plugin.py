@@ -760,6 +760,23 @@ class ChatPlugin(AmadeusPlugin):
         ctx.knowledge_graph = KnowledgeGraphService("storage/knowledge_graph.db")
         await ctx.knowledge_graph.init()
 
+        # ---- memory consolidator (Phase C dry-run; lazy LLM/normalizer wiring) ----
+        from services.learning_normalizer.store import LearningNormalizerStore
+        from services.memory_consolidator import (
+            ConsolidatorCandidatesStore,
+            MemoryConsolidator,
+        )
+
+        ctx.memory_consolidator_store = ConsolidatorCandidatesStore(
+            "storage/consolidator_candidates.db"
+        )
+        await ctx.memory_consolidator_store.init()
+        ctx.memory_consolidator_normalizer = LearningNormalizerStore(
+            "storage/consolidator_normalizer.db"
+        )
+        await ctx.memory_consolidator_normalizer.init()
+        ctx.memory_consolidator = None  # set after llm_client is built below
+
         # ---- instruction ----
         from services.llm.prompt_builder import load_instruction
 
@@ -900,6 +917,14 @@ class ChatPlugin(AmadeusPlugin):
 
         ctx.llm_client = llm
 
+        # Now that llm_client + msg_log are wired, attach MemoryConsolidator.
+        ctx.memory_consolidator = MemoryConsolidator(
+            store=ctx.memory_consolidator_store,
+            archive=ctx.msg_log,
+            normalizer=ctx.memory_consolidator_normalizer,
+            llm_client=llm,
+        )
+
         # ---- usage API routes ----
         if config.llm.usage.enabled:
             from services.llm.usage_routes import create_usage_router
@@ -953,4 +978,10 @@ class ChatPlugin(AmadeusPlugin):
             await block_trace.close()
         if ctx.card_store is not None:
             await ctx.card_store.close()
+        consolidator_store = getattr(ctx, "memory_consolidator_store", None)
+        if consolidator_store is not None:
+            await consolidator_store.close()
+        consolidator_normalizer = getattr(ctx, "memory_consolidator_normalizer", None)
+        if consolidator_normalizer is not None:
+            await consolidator_normalizer.close()
         _L.info("ChatPlugin shutdown complete")

@@ -198,6 +198,9 @@ class PluginContext:
     protocol_connections: Any = None
     runtime_errors: Any = None
     backup_scheduler: Any = None
+    memory_consolidator_store: Any = None
+    memory_consolidator_normalizer: Any = None
+    memory_consolidator: Any = None
 
 
 @dataclass

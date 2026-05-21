@@ -67,6 +67,9 @@ def create_api_router(
     from admin.routes.api.learning_normalizer import create_learning_normalizer_router
     from admin.routes.api.logs import create_logs_router
     from admin.routes.api.memory import create_memory_router
+    from admin.routes.api.memory_consolidator import (
+        create_memory_consolidator_router,
+    )
     from admin.routes.api.memos import create_memos_router
     from admin.routes.api.plugins import create_plugins_router
     from admin.routes.api.protocol import create_protocol_router
@@ -148,6 +151,7 @@ def create_api_router(
     router.include_router(create_learning_router(ctx=ctx))
     router.include_router(create_cross_group_router(ctx=ctx, bus=bus))
     router.include_router(create_episodes_router(ctx=ctx, bus=bus))
+    router.include_router(create_memory_consolidator_router(ctx=ctx))
     router.include_router(create_events_router(
         scheduler=scheduler,
         message_log=message_log,
