@@ -4,6 +4,63 @@
 
 ---
 
+## 2026-05-21 KnowledgeView 简化重构 PR1 — 视觉减负（Hero 收缩 + Sidebar）
+
+**变更类型**：refactor（admin/frontend，仅 .vue + index.html，无后端 / schema / 部署）
+
+**背景**：
+
+KnowledgeView 拆分四阶段（B-1/B-2/B-3/C，主视图 2186 → 754 行）已于今日完成代码层 Calm Ops 对齐，但**信息架构层未治本**。三类痛点：① 顶部 7-tab 把用户高频检索（sources/search/context/metrics）和管理员低频维护（candidates/graph/graph_nodes）平铺同层；② Hero status-grid 6 格 warn 不可点击（看到数字必须再回顶部找 tab）；③ search/context/metrics 三块都是 input → 命中模式但拆三处。
+
+按"层级分离 → 同层合并 → 入口收口 → 视觉收敛"四步，分 PR1/PR2/PR3 推进。本轮 PR1 只做视觉减负 + sidebar 立柱，不动 NTabs（admin tab 仍可用），保持向后兼容；PR2 接管信息架构（AdminDrawer + 删 NTabs + NPopconfirm），PR3 收口用户侧三 tab → 单一 KnowledgeContextWorkspace。
+
+**改动文件**：
+
+- [admin/frontend/src/views/knowledge/components/KnowledgeHero.vue](admin/frontend/src/views/knowledge/components/KnowledgeHero.vue) — 删 status-grid（6 格平铺 KPI），props 从 9 个缩成 2 个（仅保留 `stats` + `sourceSummary`）；padding 20px → 16px 20px、margin-bottom 18px → 14px、h3 font-size 20px → 18px；eyebrow letter-spacing 0.14em → 0.18em（对齐 [AppPanelSection](admin/frontend/src/components/common/AppPanelSection.vue) 已确立的板式头规范）；删 `.knowledge-status*` / `.knowledge-status__icon` / `.hero-progress*` 等 CSS 与 `@media (max-width: 1180px)` 内 status-grid 样式。**净 -101 行**（166 → 65 行）。
+- [admin/frontend/src/views/knowledge/components/KnowledgeSidebar.vue](admin/frontend/src/views/knowledge/components/KnowledgeSidebar.vue)（**新建**）— 260px sticky 立柱，三段式：① Index 块 3 个静态 stat（文档片段 / 文档源 / 图谱事实）；② Backlog 块 3 个 chip-button（跳过源 / 候选待审 / 作用域待查；warn>0 高亮金棕色，点击 emit `open-admin(tab)`，映射 跳过源→graph_nodes / 候选待审→candidates / 作用域待查→graph）；③ Actions 块全局 刷新 + 重建索引（NPopconfirm 包裹 reindex，文案"重建索引会重新读取所有文档源并重新切片，过程中可能短暂占用 CPU。确认继续？"）。`@media (max-width: 1180px) { position: static; }` 与 SlangView 同纪律。**新增 290 行**。
+- [admin/frontend/src/views/knowledge/KnowledgeView.vue](admin/frontend/src/views/knowledge/KnowledgeView.vue) — 主布局改 `display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 16px;`（响应式 < 1180px 退回 1fr）；KnowledgeHero 调用瘦身（仅传 `stats` + `source-summary`）；顶部 PageToolbar 删 刷新 + 重建索引 两个按钮（迁到 sidebar），仅保留 `<NTag>运行中/未启用</NTag>`；新增 `handleOpenAdmin(tab)` 函数（PR1 阶段 fallback 切 NTabs，PR2 改打开 drawer 并定位 tab）；template 包裹 `.knowledge-layout > .knowledge-main > NTabs` + `<KnowledgeSidebar>` 双栏布局。**净 +25 行**（主视图 754 → 779 行；不影响 PR1→C 已达成的"≤ 800 行"目标）。
+- [admin/static/index.html](admin/static/index.html) — vite build 自动重写资源 hash。
+
+**D1 同模式扫描**：
+
+```bash
+$ grep -rn "status-grid\|hero-progress\|knowledge-status__" admin/frontend/src/views/knowledge/
+# 0 hits（KnowledgeHero 删除，KnowledgeView 主体未引用，KnowledgeSidebar 用 .knowledge-sidebar / .knowledge-chip 新命名空间）
+
+$ grep -n "minmax(0, 1fr) 260px" admin/frontend/src/views/{slang,knowledge}/*.vue
+admin/frontend/src/views/slang/SlangView.vue:    grid-template-columns: minmax(0, 1fr) 260px;
+admin/frontend/src/views/knowledge/KnowledgeView.vue:    grid-template-columns: minmax(0, 1fr) 260px;
+# 双栏 sticky sidebar 模板已对齐 SlangView 视觉验收通过版本
+```
+
+**D4 完成证据**：
+
+- `vue-tsc --noEmit` — 0 error
+- `vite build` — 5.41s，clean
+- bundle：`KnowledgeView-*.js` 52.32 KB → **55.86 KB** / gzip 14.79 → **16.13 KB**（+3.54 / +1.34 KB；KnowledgeSidebar 新增 + grid 布局 + handleOpenAdmin handler 的合理增量，PR3 删 KnowledgeSearch.vue 后会回吐一部分）
+- 浏览器侧：`/admin/knowledge` 看到双栏布局；右侧 sidebar `position: sticky; top: 16px;` 正常滚动；窗口宽度 < 1180px 退回单栏，sidebar 沉到底部；现有 7-tab 仍可工作（PR1 不动 NTabs）；warn chip 暂落到 `handleOpenAdmin` fallback 切 NTabs，PR2 接管时改成打开 drawer
+
+**与 PR2 / PR3 边界**：
+
+- PR1 **不**动 NTabs / 不引入 AdminDrawer / 不收口用户侧三 tab → 这三件事推到 PR2 / PR3
+- sidebar warn chip 的"看到数字一键跳"链路 PR1 暂跑 fallback（emit `open-admin` → 切 NTabs），不阻塞 PR2 接 AdminDrawer
+- 高破坏性按钮 NPopconfirm（rollback / supersede / reject）PR1 只在 reindex 上落了一处（sidebar 内），其余 3 处推到 PR2 一并改
+
+**部署**：
+
+不需要 docker rebuild。`./admin/static` 是 bind mount（CLAUDE.md D6），`vite build` 已直接落到 `admin/static/`，刷新浏览器即生效。
+
+**回滚路径**：
+
+`git revert <commit>`。无 schema / API / 后端改动，admin/static 是 bind mount，revert 即生效。子组件 props/emits 仅 KnowledgeHero 收窄（删 6 个未用 prop），KnowledgeSidebar 是新增组件，不影响其他视图。
+
+**关联条目**：
+
+- [docs/tracking/web-refactor.md § KnowledgeView 简化重构](docs/tracking/web-refactor.md) — 同步 ✅；本日 KnowledgeView 拆分 PR C 收官条目之上追加"简化重构 PR1 ✅"
+- KnowledgeView 拆分 PR C 收官条目：见本日另一条维护日志（信息架构层未治本即由本轮 PR1 起接管）
+
+---
+
 ## 2026-05-21 KnowledgeView 拆分 PR C — AppPanelSection 视觉收敛收官
 
 **变更类型**：refactor（admin/frontend，仅 .vue + tracking 文档，无后端 / schema / 部署）

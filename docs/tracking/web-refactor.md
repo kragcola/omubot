@@ -661,6 +661,32 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 
 至此 [admin/frontend/src/views/knowledge/](../../admin/frontend/src/views/knowledge/) 目录达到与 SystemView / SlangView 一致的"主视图 ≤ 800 行 + 子组件每个 ≤ 400 行 + 复用 `AppPanelSection`"分层结构，KnowledgeView 拆分四阶段（B-1 / B-2 / B-3 / C）全部完成。
 
+### 🟡 2026-05-21 KnowledgeView 简化重构（信息架构治本，PR1 ✅ / PR2 待开 / PR3 待开）
+
+拆分四阶段已收官代码层，但**信息架构层未治本**：① 顶部 7-tab 把用户高频检索和管理员低频维护混在同层级；② Hero 6 格 status-grid warn 不可点击；③ search/context/metrics 三块都是"输入 → 命中"模式但拆三处。本轮按"层级分离 → 同层合并 → 入口收口 → 视觉收敛"四步，分 PR1/PR2/PR3 推进，每 PR 独立可验证、独立可回滚。
+
+#### PR1 视觉减负（Hero 收缩 + Sidebar）✅ 2026-05-21
+
+- [admin/frontend/src/views/knowledge/components/KnowledgeHero.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeHero.vue) — 删 status-grid（6 格平铺 KPI），props 9 → 2（仅 `stats / sourceSummary`）；padding 20 → 16/20、margin-bottom 18 → 14、h3 18px、eyebrow letter-spacing 0.14em → 0.18em；删 `.knowledge-status*` / `.hero-progress*` CSS 与媒体查询里的 status-grid 样式。**净 -101 行**（166 → 65）
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeSidebar.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeSidebar.vue) — 260px sticky 立柱，三段式：Index 块 3 stat（文档片段 / 文档源 / 图谱事实）、Backlog 块 3 chip-button（跳过源 / 候选待审 / 作用域待查；warn>0 高亮金棕色，点击 emit `open-admin(tab)`，跳过源→graph_nodes / 候选待审→candidates / 作用域待查→graph）、Actions 块 全局刷新 + 重建索引（NPopconfirm 包裹）。`@media (max-width: 1180px) { position: static; }` 与 SlangView 同纪律。**新增 290 行**
+- [admin/frontend/src/views/knowledge/KnowledgeView.vue](../../admin/frontend/src/views/knowledge/KnowledgeView.vue) — 主布局改 `display: grid; grid-template-columns: minmax(0, 1fr) 260px;`（响应式 < 1180px 退回 1fr）；KnowledgeHero 调用瘦身（仅传 `stats / source-summary`）；顶部 PageToolbar 删 刷新 + 重建索引 两按钮（迁到 sidebar），仅保留 `<NTag>运行中/未启用</NTag>`；新增 `handleOpenAdmin(tab)` handler（PR1 fallback 切 NTabs，PR2 改打开 drawer）；template 包裹 `.knowledge-layout > .knowledge-main > NTabs` + `<KnowledgeSidebar>` 双栏布局。**净 +25 行**（754 → 779；仍 ≤ 800 行目标）
+
+D1 同模式扫描：`grep -rn "status-grid\|hero-progress\|knowledge-status__" admin/frontend/src/views/knowledge/` 0 hits；`grep "minmax(0, 1fr) 260px"` 与 SlangView 视觉验收通过版本对齐。
+
+验证：`vue-tsc --noEmit` 0 error；`vite build` 5.41s；bundle `KnowledgeView-*.js` 52.32 KB / gzip 14.79 → **55.86 KB / gzip 16.13**（+3.54 / +1.34，KnowledgeSidebar 新增 + grid 布局 + handler 的合理增量；PR3 删 KnowledgeSearch.vue 后会回吐）；浏览器侧双栏布局 + sidebar sticky 正常 + 现有 7-tab 仍可工作（PR1 不动 NTabs）。
+
+PR1 不做的事（推到 PR2 / PR3）：① 不动 NTabs / 不引入 AdminDrawer / 不收口用户侧三 tab；② sidebar warn chip 的"看到数字一键跳"链路 PR1 暂走 fallback（emit → 切 NTabs），不阻塞 PR2 接 AdminDrawer；③ 高破坏性按钮 NPopconfirm（rollback / supersede / reject）PR1 只在 reindex 上落了一处（sidebar 内），其余 3 处推到 PR2 一并改。
+
+回滚：`git revert <commit>`，再 `rm admin/frontend/src/views/knowledge/components/KnowledgeSidebar.vue` 即恢复（不动其他 KnowledgeView 拆分阶段成果）。
+
+#### PR2 信息架构（AdminDrawer + 删 NTabs + NPopconfirm）— 待开
+
+按 [/Users/kragcola/.claude/plans/modular-forging-allen.md](/Users/kragcola/.claude/plans/modular-forging-allen.md) PR2 段落执行。
+
+#### PR3 用户侧 Workspace 收口 — 待开
+
+按同 plan PR3 段落执行；PR3 收尾后删除 [KnowledgeSearch.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeSearch.vue)（检索逻辑迁入 KnowledgeContextWorkspace）。
+
 ## 阶段 4 — 长尾页面（不专门跟踪）
 
 按 plan §7 在日常任务里穿插推进。每月跑一次合规扫描脚本，结果记录到 `maintenance-log.md`。

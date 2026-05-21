@@ -12,6 +12,7 @@ import KnowledgeGraphPanel from './components/KnowledgeGraphPanel.vue'
 import KnowledgeHero from './components/KnowledgeHero.vue'
 import KnowledgeMetricsPanel from './components/KnowledgeMetricsPanel.vue'
 import KnowledgeSearch from './components/KnowledgeSearch.vue'
+import KnowledgeSidebar from './components/KnowledgeSidebar.vue'
 import KnowledgeSourcesPanel from './components/KnowledgeSourcesPanel.vue'
 import { isNotFound, topEntry } from './helpers/formatters'
 import type {
@@ -531,6 +532,10 @@ function syncSupersedeDrafts() {
   }
   supersedeDrafts.value = next
 }
+
+function handleOpenAdmin(tab: 'candidates' | 'graph' | 'graph_nodes') {
+  activeTab.value = tab
+}
 </script>
 
 <template>
@@ -544,15 +549,6 @@ function syncSupersedeDrafts() {
         <NTag round size="small" :type="available ? 'success' : 'warning'">
           {{ available ? '运行中' : '未启用' }}
         </NTag>
-        <NButton secondary :loading="refreshing" @click="refreshAll">
-          <template #icon>
-            <NIcon :component="RefreshOutline" />
-          </template>
-          刷新
-        </NButton>
-        <NButton type="primary" secondary :loading="reindexing" @click="reindex">
-          重建索引
-        </NButton>
       </NSpace>
     </template>
 
@@ -571,15 +567,11 @@ function syncSupersedeDrafts() {
       <KnowledgeHero
         :stats="stats"
         :source-summary="sourceSummary"
-        :entry-count="entryCount"
-        :source-count="sourceCount"
-        :skipped-count="skippedCount"
-        :relationship-count="relationshipCount"
-        :pending-count="pendingCount"
-        :scope-risk-count="scopeRiskCount"
       />
 
-      <NTabs v-model:value="activeTab" type="segment" animated class="knowledge-tabs">
+      <div class="knowledge-layout">
+        <div class="knowledge-main">
+          <NTabs v-model:value="activeTab" type="segment" animated class="knowledge-tabs">
         <NTabPane name="sources" tab="文档源">
           <PageToolbar class="mb-16">
             <template #left>
@@ -727,7 +719,23 @@ function syncSupersedeDrafts() {
             @open-detail="openGraphNodeDetail"
           />
         </NTabPane>
-      </NTabs>
+          </NTabs>
+        </div>
+        <KnowledgeSidebar
+          :available="available"
+          :entry-count="entryCount"
+          :source-count="sourceCount"
+          :relationship-count="relationshipCount"
+          :skipped-count="skippedCount"
+          :pending-count="pendingCount"
+          :scope-risk-count="scopeRiskCount"
+          :refreshing="refreshing"
+          :reindexing="reindexing"
+          @refresh="refreshAll"
+          @reindex="reindex"
+          @open-admin="handleOpenAdmin"
+        />
+      </div>
     </template>
   </AppPage>
 </template>
@@ -736,6 +744,17 @@ function syncSupersedeDrafts() {
 .knowledge-compat-alert {
   margin-bottom: 16px;
   border-radius: 14px;
+}
+
+.knowledge-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 16px;
+  align-items: start;
+}
+
+.knowledge-main {
+  min-width: 0;
 }
 
 .knowledge-tabs {
@@ -750,5 +769,11 @@ function syncSupersedeDrafts() {
 .knowledge-toolbar__hint {
   color: var(--om-text-2);
   font-size: 13px;
+}
+
+@media (max-width: 1180px) {
+  .knowledge-layout {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

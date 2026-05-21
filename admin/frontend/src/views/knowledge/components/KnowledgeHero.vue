@@ -5,12 +5,6 @@ import type { KnowledgeStats } from '../helpers/types'
 interface Props {
   stats: KnowledgeStats
   sourceSummary: string
-  entryCount: number
-  sourceCount: number
-  skippedCount: number
-  relationshipCount: number
-  pendingCount: number
-  scopeRiskCount: number
 }
 
 defineProps<Props>()
@@ -19,7 +13,7 @@ defineProps<Props>()
 <template>
   <AppCard bordered elevated class="knowledge-hero">
     <div class="knowledge-hero__main">
-      <div>
+      <div class="knowledge-hero__copy">
         <p class="knowledge-eyebrow">
           Context Knowledge System
         </p>
@@ -40,60 +34,41 @@ defineProps<Props>()
         </NTag>
       </div>
     </div>
-
-    <div class="knowledge-status-grid">
-      <div class="knowledge-status">
-        <span>文档片段</span>
-        <strong>{{ entryCount }}</strong>
-      </div>
-      <div class="knowledge-status">
-        <span>文档源</span>
-        <strong>{{ sourceCount }}</strong>
-      </div>
-      <div class="knowledge-status" :class="{ 'knowledge-status--warn': skippedCount > 0 }">
-        <span>跳过源</span>
-        <strong>{{ skippedCount }}</strong>
-      </div>
-      <div class="knowledge-status">
-        <span>图谱事实</span>
-        <strong>{{ relationshipCount }}</strong>
-      </div>
-      <div class="knowledge-status" :class="{ 'knowledge-status--warn': pendingCount > 0 }">
-        <span>候选待审</span>
-        <strong>{{ pendingCount }}</strong>
-      </div>
-      <div class="knowledge-status" :class="{ 'knowledge-status--warn': scopeRiskCount > 0 }">
-        <span>作用域待查</span>
-        <strong>{{ scopeRiskCount }}</strong>
-      </div>
-    </div>
   </AppCard>
 </template>
 
 <style scoped>
 .knowledge-hero {
-  padding: 20px;
-  margin-bottom: 18px;
+  padding: 16px 20px;
+  margin-bottom: 14px;
 }
 
 .knowledge-hero__main {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
+}
+
+.knowledge-hero__copy {
+  min-width: 0;
+  flex: 1;
 }
 
 .knowledge-hero__main h3 {
   margin: 0;
   color: var(--om-text-1);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
+  line-height: 1.45;
 }
 
 .knowledge-hero__main p {
   max-width: 760px;
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   color: var(--om-text-2);
-  line-height: 1.7;
+  line-height: 1.65;
+  font-size: 13px;
 }
 
 .knowledge-hero__badges {
@@ -104,52 +79,13 @@ defineProps<Props>()
   gap: 8px;
 }
 
-.knowledge-status-grid {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 18px;
-}
-
-.knowledge-status {
-  padding: 12px 14px;
-  border: 1px solid var(--om-border);
-  border-radius: 14px;
-  background: var(--om-surface-2);
-}
-
-.knowledge-status span {
-  display: block;
-  color: var(--om-text-3);
-  font-size: 12px;
-}
-
-.knowledge-status strong {
-  display: block;
-  margin-top: 4px;
-  color: var(--om-text-1);
-  font-size: 24px;
-  line-height: 1;
-}
-
-.knowledge-status--warn {
-  border-color: rgba(197, 138, 43, 0.35);
-  background: rgba(197, 138, 43, 0.08);
-}
-
 .knowledge-eyebrow {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   color: var(--om-text-3);
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-}
-
-@media (max-width: 1180px) {
-  .knowledge-status-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 720px) {
@@ -157,8 +93,8 @@ defineProps<Props>()
     flex-direction: column;
   }
 
-  .knowledge-status-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .knowledge-hero__badges {
+    justify-content: flex-start;
   }
 }
 </style>
