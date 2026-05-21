@@ -90,6 +90,19 @@ CREATE TABLE IF NOT EXISTS consolidator_candidate_revisions (
 )
 """
 
+_CREATE_REFLECTION_LOG = """
+CREATE TABLE IF NOT EXISTS consolidator_reflection_log (
+    log_id          TEXT PRIMARY KEY,
+    source_table    TEXT NOT NULL,
+    source_id       TEXT NOT NULL,
+    candidate_id    TEXT NOT NULL DEFAULT '',
+    group_id        TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL,
+    meta_json       TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_table, source_id)
+)
+"""
+
 _CREATE_INDEXES = [
     (
         "CREATE INDEX IF NOT EXISTS idx_cand_run "
@@ -110,6 +123,14 @@ _CREATE_INDEXES = [
     (
         "CREATE INDEX IF NOT EXISTS idx_cand_revision "
         "ON consolidator_candidate_revisions(candidate_id, created_at DESC)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_reflection_log_source "
+        "ON consolidator_reflection_log(source_table, source_id)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_reflection_log_group "
+        "ON consolidator_reflection_log(group_id, created_at DESC)"
     ),
 ]
 
@@ -265,6 +286,7 @@ class ConsolidatorCandidatesStore:
         await self._db.execute(_CREATE_RUNS)
         await self._db.execute(_CREATE_CANDIDATES)
         await self._db.execute(_CREATE_REVISIONS)
+        await self._db.execute(_CREATE_REFLECTION_LOG)
         for stmt in _CREATE_INDEXES:
             await self._db.execute(stmt)
         await self._db.commit()
@@ -615,3 +637,118 @@ class ConsolidatorCandidatesStore:
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_revision(row) for row in rows]
+
+    # ── reflection (D.3) ─────────────────────────────────────────────
+
+    async def get_reflection_log(
+        self,
+        *,
+        source_table: str,
+        source_id: str,
+    ) -> dict[str, Any] | None:
+        """Return existing reflection log row for a (source_table, source_id) pair.
+
+        D.3 dedup uses the UNIQUE(source_table, source_id) constraint —
+        this getter lets callers decide whether to skip vs touch within a
+        24h window without relying on INSERT failure. Returns ``None`` if
+        no log row exists.
+        """
+        db = self._require_db()
+        async with db.execute(
+            """SELECT log_id, source_table, source_id, candidate_id,
+                      group_id, created_at, meta_json
+                   FROM consolidator_reflection_log
+                   WHERE source_table = ? AND source_id = ?""",
+            (str(source_table), str(source_id)),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        meta_raw = row["meta_json"] or "{}"
+        try:
+            meta = json.loads(meta_raw) if isinstance(meta_raw, str) else {}
+        except json.JSONDecodeError:
+            meta = {}
+        return {
+            "log_id": str(row["log_id"]),
+            "source_table": str(row["source_table"]),
+            "source_id": str(row["source_id"]),
+            "candidate_id": str(row["candidate_id"]),
+            "group_id": str(row["group_id"]),
+            "created_at": float(row["created_at"]),
+            "meta": meta if isinstance(meta, dict) else {},
+        }
+
+    async def record_reflection_candidate(
+        self,
+        *,
+        run_id: str,
+        scope: CandidateScope,
+        group_id: str,
+        source_message_pks: list[int],
+        payload: dict[str, Any],
+        confidence: float,
+        source_table: str,
+        source_id: str,
+        meta: dict[str, Any] | None = None,
+    ) -> str:
+        """Atomic INSERT of an episode-domain candidate + reflection log row.
+
+        D.3 reflection generation must be exactly-once per
+        (source_table, source_id): if the same negative signal is fed
+        twice, the second call must observe ``IntegrityError`` from the
+        UNIQUE constraint and roll back — leaving neither a new
+        candidate row nor a duplicate log row.
+
+        Returns the new ``candidate_id``. Caller should pre-check
+        :meth:`get_reflection_log` and skip if non-None to avoid the
+        IntegrityError path; this method is the safety net.
+        """
+        if scope not in CANDIDATE_SCOPES:
+            raise ValueError(f"invalid scope: {scope!r}")
+        db = self._require_db()
+        candidate_id = _gen_id("cand")
+        log_id = _gen_id("rlog")
+        clamped = max(0.0, min(1.0, float(confidence)))
+        projected = normalize_payload("episode", payload)
+        try:
+            await db.execute(
+                """INSERT INTO consolidator_candidates
+                       (candidate_id, run_id, domain, scope, group_id,
+                        source_message_pks, payload_json, confidence, state,
+                        normalizer_cluster_id, created_at)
+                   VALUES (?, ?, 'episode', ?, ?, ?, ?, ?, 'dry_run', '', ?)""",
+                (
+                    candidate_id,
+                    str(run_id),
+                    str(scope),
+                    str(group_id or ""),
+                    json.dumps(
+                        [int(pk) for pk in source_message_pks],
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(projected, ensure_ascii=False),
+                    clamped,
+                    _now(),
+                ),
+            )
+            await db.execute(
+                """INSERT INTO consolidator_reflection_log
+                       (log_id, source_table, source_id, candidate_id,
+                        group_id, created_at, meta_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    log_id,
+                    str(source_table),
+                    str(source_id),
+                    candidate_id,
+                    str(group_id or ""),
+                    _now(),
+                    json.dumps(meta or {}, ensure_ascii=False),
+                ),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+        return candidate_id

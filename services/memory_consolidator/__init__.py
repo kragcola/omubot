@@ -11,7 +11,18 @@ Public surface intentionally narrow:
 from __future__ import annotations
 
 from services.memory_consolidator.consolidator import MemoryConsolidator
+from services.memory_consolidator.feedback_sources import (
+    NegativeSignal,
+    collect_negative_signals,
+    fetch_slang_rejected_drifts,
+    fetch_style_feedback_signals,
+    fetch_style_rejected_expressions,
+)
 from services.memory_consolidator.promoter import EpisodePromoter, PromoteResult
+from services.memory_consolidator.reflector import (
+    ReflectionGenerator,
+    ReflectionRunReport,
+)
 from services.memory_consolidator.store import (
     CandidateFilter,
     CandidateRevision,
@@ -55,12 +66,19 @@ __all__ = [
     "FactPayload",
     "GraphRelationPayload",
     "MemoryConsolidator",
+    "NegativeSignal",
     "PromoteResult",
+    "ReflectionGenerator",
+    "ReflectionRunReport",
     "RunReport",
     "RunStatus",
     "ScanRun",
     "SlangPayload",
     "StylePayload",
+    "collect_negative_signals",
     "derive_raw_text",
+    "fetch_slang_rejected_drifts",
+    "fetch_style_feedback_signals",
+    "fetch_style_rejected_expressions",
     "normalize_payload",
 ]

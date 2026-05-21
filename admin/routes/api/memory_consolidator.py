@@ -51,6 +51,11 @@ def create_memory_consolidator_router(*, ctx: Any = None) -> APIRouter:
             return None
         return getattr(ctx, "memory_consolidator", None)
 
+    def _reflection_generator() -> Any | None:
+        if ctx is None:
+            return None
+        return getattr(ctx, "reflection_generator", None)
+
     def _episode_promoter() -> EpisodePromoter | None:
         if ctx is None:
             return None
@@ -256,6 +261,65 @@ def create_memory_consolidator_router(*, ctx: Any = None) -> APIRouter:
                 "run_id": report.run_id,
                 "scanned": report.scanned,
                 "candidates": report.candidates,
+                "status": report.status,
+                "error_text": report.error_text,
+            },
+        }
+
+    @router.post("/reflect")
+    async def trigger_reflect(request: Request):
+        body = await _read_json(request)
+        generator = _reflection_generator()
+        if generator is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ok": False,
+                    "error": "reflection generator not wired (ctx.reflection_generator missing)",
+                },
+            )
+        scope_raw = str(body.get("scope", "group") or "group").strip()
+        if scope_raw not in CANDIDATE_SCOPES:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": f"invalid scope: {scope_raw!r}"},
+            )
+        group_id = str(body.get("group_id", "") or "").strip()
+        try:
+            max_signals = int(body.get("max_signals", 10) or 10)
+        except (TypeError, ValueError):
+            max_signals = 10
+        max_signals = max(1, min(max_signals, 50))
+        triggered_by = (
+            str(body.get("triggered_by", "") or "").strip() or "admin"
+        )
+        try:
+            report = await generator.run_once(
+                group_id=group_id,
+                triggered_by=triggered_by,
+                scope=scope_raw,
+                max_signals=max_signals,
+            )
+        except asyncio.CancelledError:
+            raise
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": str(exc)},
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": f"{type(exc).__name__}: {exc}"},
+            )
+        return {
+            "ok": True,
+            "data": {
+                "run_id": report.run_id,
+                "signals_total": report.signals_total,
+                "signals_skipped_dedup": report.signals_skipped_dedup,
+                "candidates": report.candidates,
+                "failures": report.failures,
                 "status": report.status,
                 "error_text": report.error_text,
             },

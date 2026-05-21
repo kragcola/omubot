@@ -4,6 +4,77 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase D.3 — 反思生成路径（style_feedback/expressions/slang_drift 三源 → reflection_consolidator → episode 候选）
+
+**变更类型**：feature（services + admin API + tests，无 schema migration、无部署改动、无前端改动）
+
+**背景**：
+
+[Phase D 设计前置审计](docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md) 把 D.3 列为 D.2 之后的最小可验单元。D.1 让 admin `decide(approved)` 自动 promote episode 候选到 `EpisodeStore`；D.2 给运营提供候选 admin UX；但 episode 候选目前**只能由 D.0 通用 dry-run 流水线生产**——它从 `messages.db` 通用对话片段抽取，并不专门关注「Bot 被纠正」的负反馈信号。D.3 补齐了反思候选的专用入口：把 admin 已经在 style/slang 上的"显式拒绝"信号收集起来，过 `reflection_consolidator` LLM 任务变成 episode 候选，再走 D.2 的 admin UX 决策、D.1 的 promote 桥沉淀到 `EpisodeStore`。
+
+**改动落点**：
+
+- 新表 `consolidator_reflection_log`（同库 `storage/consolidator_candidates.db` 内 idempotent CREATE）：`log_id` / `source_table` / `source_id` / `candidate_id` / `group_id` / `created_at` / `meta_json` + UNIQUE(source_table, source_id) — 跨进程 / 跨重启 exactly-once 保证，外加两个 idx（`idx_reflection_log_source` / `idx_reflection_log_group`）
+- [services/memory_consolidator/store.py](services/memory_consolidator/store.py) 新增两个方法：
+  - `get_reflection_log(source_table, source_id) -> dict | None` — 应用层 dedup 预检，避免一律走 IntegrityError 慢路径
+  - `record_reflection_candidate(...)` — 同 transaction 内 INSERT candidate + INSERT log，UNIQUE 冲突时 rollback 保两表一致；payload 走 `normalize_payload("episode", ...)` 投影
+- 新文件 [services/memory_consolidator/feedback_sources.py](services/memory_consolidator/feedback_sources.py)：
+  - `NegativeSignal` dataclass — `(source_table, source_id, group_id, summary, detail, occurred_at, meta)`，narrow on purpose
+  - `fetch_style_feedback_signals` — 从 `StyleStore.list_feedback` 拉 rating='negative'（rating 是 Python 侧过滤的，因为公开 API 没暴露 rating-only 滤镜）
+  - `fetch_style_rejected_expressions` — `StyleStore.list_expressions(status='rejected')`；老 store 把 `rejected` 当 invalid 抛 ValueError 时，按"零信号"降级
+  - `fetch_slang_rejected_drifts` — `SlangStore.list_drift_reviews(status='rejected')`，handles tuple-vs-list 返回；fetcher 缺失时走 `getattr` 兜底
+  - `collect_negative_signals` 聚合三源；任一源单独抛错只 log warn 不阻断其它源
+- 新文件 [services/memory_consolidator/reflector.py](services/memory_consolidator/reflector.py)：
+  - `_REFLECTION_SYSTEM_PROMPT` — 中文 prompt，强制 JSON 输出 `{situation, observed_context, action_taken, outcome_signal, reflection, confidence}`，confidence 区间锚定 0.3~0.6 conservative
+  - `ReflectionRunReport` dataclass — `run_id / signals_total / signals_skipped_dedup / candidates / failures / status / error_text`
+  - `ReflectionGenerator(store, llm_client, style_store_getter, slang_store_getter)` — getter 模式是 lazy resolve 设计：StylePlugin priority=43 / SlangPlugin priority=42 在 ChatPlugin priority=0 之后才挂 ctx，构造期 snapshot 会拿到 None
+  - `run_once(*, group_id, triggered_by, scope, max_signals)` orchestration：start_run → collect → 逐 signal { dedup 预检 → `_reflect_one` LLM → `record_reflection_candidate` } → finish_run；finally 块用 `asyncio.shield` 兜底标记 `failed`，cancel-path 安全
+  - LLM unparseable / situation+reflection 必填校验失败 → `failures += 1` 但不阻断 run（按审计 §A reflection_* 错误归类）
+- [services/memory_consolidator/__init__.py](services/memory_consolidator/__init__.py) 导出 `ReflectionGenerator` / `ReflectionRunReport` / `NegativeSignal` / `collect_negative_signals` 等
+- [kernel/types.py](kernel/types.py) `PluginContext` 添加 `reflection_generator: Any = None` 字段
+- [plugins/chat/plugin.py](plugins/chat/plugin.py) 在 `MemoryConsolidator` 之后构造 `ReflectionGenerator`，传 `style_store_getter` / `slang_store_getter` 两个 lambda，运行时再 resolve
+- [admin/routes/api/memory_consolidator.py](admin/routes/api/memory_consolidator.py) 新增 `POST /reflect`：scope 白名单 + max_signals 上限 50，未挂 ctx.reflection_generator 时 503，调 `ReflectionGenerator.run_once` 并把 `ReflectionRunReport` 投影回响应
+
+**测试覆盖**（新增 +21 用例）：
+
+- [tests/test_memory_consolidator_feedback_sources.py](tests/test_memory_consolidator_feedback_sources.py)（8 用例）—— 三源独立 mock + tuple 返回 unpack + ValueError 降级 + 空 store 回退
+- [tests/test_memory_consolidator_reflector.py](tests/test_memory_consolidator_reflector.py)（8 用例）—— happy path（candidate + log 同事务建立）/ dedup 第二次 0 LLM 调用 / unparseable JSON 算 failure 不阻断 / missing situation+reflection 拒绝 / LLM 抛异常路径 / **D2 cancel-path（`asyncio.wait_for(timeout=0.05)` → run 标 failed，candidate / reflection_log 表无脏行）** / invalid scope 抛 ValueError / store getter 延迟 resolve（验证 ChatPlugin → StylePlugin 顺序无 race）
+- [tests/test_admin_memory_consolidator.py](tests/test_admin_memory_consolidator.py) 扩展 4 用例 —— `POST /reflect` 503/400/200 + `max_signals` clamp 到上限 50
+
+**D1 同模式扫描**：
+
+- `grep -rn "ReflectionGenerator\|reflection_generator"` services + plugins + admin —— 仅在 [plugins/chat/plugin.py:943](plugins/chat/plugin.py#L943) 一处构造，无重复 wiring
+- `grep -rn "UNIQUE.*source_table"` —— `consolidator_reflection_log` 是唯一一处使用此模式的表，与现有 candidates / revisions 表无重叠
+- D2 cancel-path 测试已覆盖 `run_once` —— 未来若加 batch 路径需同模式补测
+
+**D4 完成证据**：
+
+- 单元：`uv run pytest tests/test_memory_consolidator_feedback_sources.py tests/test_memory_consolidator_reflector.py tests/test_admin_memory_consolidator.py` → 42 passed in 0.53s（含 D.3 新增 21 用例 + D.2 已有 21 用例）
+- 全量：`uv run pytest --deselect tests/test_admin_api.py::test_system_services_health_endpoint` → 1289 passed, 8 skipped, 1 deselected in 14.55s
+- 静态：`uv run ruff check` → All checks passed；`uv run pyright` 在 D.3 触及文件 → 0 errors（仓库基线 457 errors 全部是 D.3 之前就存在的）
+- SQLite schema：`PRAGMA table_info(consolidator_reflection_log)` 8 列 + UNIQUE(source_table,source_id) + 2 idx，与 `_CREATE_REFLECTION_LOG` 字面对齐
+- HTTP：admin `POST /api/admin/memory_consolidator/reflect` 在未挂 generator 时 503、scope=weird 时 400、正常路径 200 返回 `ReflectionRunReport` 投影
+- 无前端改动 —— 当前阶段是 admin API 入口预备，前端 trigger 按钮放到 D.4/D.5 + 验收阶段统一加；`./admin/static` 不动，bind-mount 铁律未触
+
+**冲击范围**：
+
+- 数据：`storage/consolidator_candidates.db` 多一张 `consolidator_reflection_log` 表 + 2 idx，零迁移，老 db 启动时 idempotent CREATE，老 candidates / revisions 数据不受影响
+- 部署：bot 启动时 `ConsolidatorCandidatesStore.init()` 多两条 CREATE TABLE / CREATE INDEX，<10ms 增量；napcat 全程不动；`./admin/static` 不动；`docker compose restart bot` 仍只重启 bot
+- LLM：新 task `reflection_consolidator` 在 [services/llm/llm_request.py:56](services/llm/llm_request.py#L56) 已注册（`system_breakpoints=1`）；max_tokens=900；目前**无任何 cron / scheduler 自动触发**，必须 admin 手动 `POST /reflect` 才会消耗 token
+- 可观测：成功 / 跳过 dedup / LLM 失败 / record 失败均走 `_L.warning`（channel=memory_consolidator），与现有 consolidator 日志同 sink
+
+**回滚路径**：
+
+- 仅回滚代码：`git revert <D.3 commit>` —— 老 schema 多出来的 `consolidator_reflection_log` 表会留在 db 里但不被读写，无副作用；后续可选地 `DROP TABLE` 清理
+- D.3 完全独立于 D.4/D.5，回滚不影响 D.1 的 promote 桥和 D.2 的 admin UX
+
+**Handoff**：
+
+- D.3 完成。下一步 D.4：`EpisodeContextProvider.list_relevant(group_id, situation_query)` 按 `enabled_for_prompt + group_id` 召回 episode，注入 prompt builder 的"相关历史反思"动态块；BlockTraceBus 同步 record（source_ref=episode_id, source_table='episodes'）做归因审计。
+- 反风控状态保持：napcat 全程未动；24h Phase 3 named-volume 观察至 2026-05-22 16:30 不变；30 天 corruption 窗口至 2026-06-20 不变。
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase D.2 — 候选 admin UX（5 域筛选 + episode payload 编辑 + 修订审计）
 
 **变更类型**：feature（services + admin API + admin/frontend + tests，无 schema migration / 部署改动）

@@ -17,6 +17,7 @@ from services.episodic import EpisodeStore
 from services.memory_consolidator import (
     ConsolidatorCandidatesStore,
     EpisodePromoter,
+    ReflectionRunReport,
     RunReport,
 )
 
@@ -43,12 +44,14 @@ def _build_client(
     consolidator: Any | None = None,
     storage_dir: Any = None,
     episode_promoter: Any | None = None,
+    reflection_generator: Any | None = None,
 ) -> TestClient:
     ctx = SimpleNamespace(
         memory_consolidator_store=store,
         memory_consolidator=consolidator,
         storage_dir=storage_dir,
         episode_promoter=episode_promoter,
+        reflection_generator=reflection_generator,
     )
     app = FastAPI()
     app.include_router(
@@ -520,3 +523,87 @@ async def test_get_candidate_revisions_404_for_unknown(store):
         "/api/admin/memory_consolidator/candidates/cand_nope/revisions"
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_post_reflect_returns_503_when_unwired(store):
+    client = _build_client(store=store, reflection_generator=None)
+    resp = client.post(
+        "/api/admin/memory_consolidator/reflect", json={"group_id": "g1"},
+    )
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_post_reflect_rejects_invalid_scope(store):
+    fake_gen = MagicMock()
+    fake_gen.run_once = AsyncMock()
+    client = _build_client(store=store, reflection_generator=fake_gen)
+    resp = client.post(
+        "/api/admin/memory_consolidator/reflect",
+        json={"scope": "weird"},
+    )
+    assert resp.status_code == 400
+    fake_gen.run_once.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_reflect_invokes_generator(store):
+    fake_gen = MagicMock()
+    fake_gen.run_once = AsyncMock(
+        return_value=ReflectionRunReport(
+            run_id="run_xyz",
+            signals_total=3,
+            signals_skipped_dedup=1,
+            candidates=2,
+            failures=0,
+            status="done",
+        )
+    )
+    client = _build_client(store=store, reflection_generator=fake_gen)
+    resp = client.post(
+        "/api/admin/memory_consolidator/reflect",
+        json={
+            "group_id": "g1",
+            "scope": "group",
+            "max_signals": 5,
+            "triggered_by": "alice",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["data"]["run_id"] == "run_xyz"
+    assert body["data"]["candidates"] == 2
+    assert body["data"]["signals_skipped_dedup"] == 1
+    fake_gen.run_once.assert_awaited_once()
+    kwargs = fake_gen.run_once.await_args.kwargs
+    assert kwargs["group_id"] == "g1"
+    assert kwargs["scope"] == "group"
+    assert kwargs["max_signals"] == 5
+    assert kwargs["triggered_by"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_post_reflect_clamps_max_signals(store):
+    fake_gen = MagicMock()
+    fake_gen.run_once = AsyncMock(
+        return_value=ReflectionRunReport(
+            run_id="run_clamped",
+            signals_total=0,
+            signals_skipped_dedup=0,
+            candidates=0,
+            failures=0,
+            status="done",
+        )
+    )
+    client = _build_client(store=store, reflection_generator=fake_gen)
+    resp = client.post(
+        "/api/admin/memory_consolidator/reflect",
+        json={"max_signals": 9999},
+    )
+    assert resp.status_code == 200
+    kwargs = fake_gen.run_once.await_args.kwargs
+    assert kwargs["max_signals"] == 50  # clamped to upper bound

@@ -767,6 +767,7 @@ class ChatPlugin(AmadeusPlugin):
             ConsolidatorCandidatesStore,
             EpisodePromoter,
             MemoryConsolidator,
+            ReflectionGenerator,
         )
 
         ctx.memory_consolidator_store = ConsolidatorCandidatesStore(
@@ -933,6 +934,17 @@ class ChatPlugin(AmadeusPlugin):
             archive=ctx.msg_log,
             normalizer=ctx.memory_consolidator_normalizer,
             llm_client=llm,
+        )
+
+        # D.3 reflection generator — style/slang stores wire late
+        # (StylePlugin priority=43, SlangPlugin priority=42), so we hand
+        # the generator getter callables that defer ctx attribute lookup
+        # until run_once() actually fires.
+        ctx.reflection_generator = ReflectionGenerator(
+            store=ctx.memory_consolidator_store,
+            llm_client=llm,
+            style_store_getter=lambda: getattr(ctx, "style_store", None),
+            slang_store_getter=lambda: getattr(ctx, "slang_store", None),
         )
 
         # ---- usage API routes ----
