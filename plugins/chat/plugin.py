@@ -901,6 +901,8 @@ class ChatPlugin(AmadeusPlugin):
             await ctx.knowledge_graph.close()
         if ctx.msg_log is not None:
             await ctx.msg_log.close()
+        if ctx.card_store is not None:
+            await ctx.card_store.close()
         if ctx.usage_tracker is not None:
             await ctx.usage_tracker.close()
         _L.info("ChatPlugin shutdown complete")

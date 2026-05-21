@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 from loguru import logger
 
-from services.storage import connect_sqlite
+from services.storage import close_with_checkpoint, connect_sqlite
 
 if TYPE_CHECKING:
     pass
@@ -232,8 +232,8 @@ class CardStore:
                 logger.info("CardStore migrated {} cards from {}", n, migrate_from_md)
 
     async def close(self) -> None:
-        if self._db:
-            await self._db.close()
+        if self._db is not None:
+            await close_with_checkpoint(self._db, name="card_store")
             self._db = None
 
     async def _backfill_food_series(self) -> None:

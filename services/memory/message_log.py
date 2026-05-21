@@ -8,7 +8,7 @@ from typing import Any
 import aiosqlite
 from loguru import logger
 
-from services.storage import connect_sqlite
+from services.storage import close_with_checkpoint, connect_sqlite
 
 _L = logger.bind(channel="debug")
 
@@ -58,8 +58,8 @@ class MessageLog:
 
     async def close(self) -> None:
         """Close the database connection."""
-        if self._db:
-            await self._db.close()
+        if self._db is not None:
+            await close_with_checkpoint(self._db, name="message_log")
             self._db = None
 
     async def record(

@@ -7,9 +7,11 @@ consistently without forcing a large storage rewrite.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import aiosqlite
+from loguru import logger
 
 
 async def connect_sqlite(
@@ -32,3 +34,33 @@ async def connect_sqlite(
     await db.execute("PRAGMA foreign_keys=ON")
     await db.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
     return db
+
+
+async def close_with_checkpoint(db: aiosqlite.Connection, *, name: str = "?") -> None:
+    """Best-effort wal_checkpoint(TRUNCATE) before close.
+
+    macOS Docker bind-mount + WAL has a known fsync ordering hazard: a crash
+    between close and next open can replay an out-of-order WAL frame on top of
+    the main database. Running TRUNCATE squashes the WAL into the main file so
+    the next open starts from a single consistent file. The checkpoint is
+    advisory — failures are logged and close still proceeds.
+    """
+    if db is None:
+        return
+    try:
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception as exc:
+        logger.warning("wal_checkpoint truncate failed for {}: {}", name, exc)
+    await db.close()
+
+
+def close_with_checkpoint_sync(db: sqlite3.Connection, *, name: str = "?") -> None:
+    """Sync companion of :func:`close_with_checkpoint` for stores that hold a
+    plain :mod:`sqlite3` connection (e.g. KnowledgeIndexStore)."""
+    if db is None:
+        return
+    try:
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception as exc:
+        logger.warning("wal_checkpoint truncate failed for {}: {}", name, exc)
+    db.close()

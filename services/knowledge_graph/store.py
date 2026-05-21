@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 
 from services.knowledge_graph.types import GraphCandidate, GraphFact
-from services.storage import connect_sqlite
+from services.storage import close_with_checkpoint, connect_sqlite
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -96,7 +96,7 @@ class KnowledgeGraphStore:
 
     async def close(self) -> None:
         if self._db is not None:
-            await self._db.close()
+            await close_with_checkpoint(self._db, name="knowledge_graph")
             self._db = None
 
     async def add_fact(

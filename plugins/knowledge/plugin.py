@@ -75,3 +75,10 @@ class KnowledgePlugin(AmadeusPlugin):
                 label="知识库",
                 position="dynamic",
             )
+
+    async def on_shutdown(self, ctx: PluginContext) -> None:
+        if self._kb is not None:
+            self._kb.close()
+            self._kb = None
+        ctx.knowledge_base = None
+        _L.info("KnowledgePlugin shutdown complete")

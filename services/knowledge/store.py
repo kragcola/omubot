@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from services.knowledge.types import KnowledgeChunk, KnowledgeSourceStatus
+from services.storage import close_with_checkpoint_sync
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -57,7 +58,7 @@ class KnowledgeIndexStore:
         return str(self._db_path)
 
     def close(self) -> None:
-        self._db.close()
+        close_with_checkpoint_sync(self._db, name="knowledge_index")
 
     def load(self) -> tuple[dict[str, KnowledgeChunk], dict[str, KnowledgeSourceStatus]]:
         sources = {

@@ -30,7 +30,7 @@ from services.slang.types import (
     SlangTerm,
     SlangTermRevision,
 )
-from services.storage import connect_sqlite
+from services.storage import close_with_checkpoint, connect_sqlite
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -457,8 +457,8 @@ class SlangStore:
         self._db = db
 
     async def close(self) -> None:
-        if self._db:
-            await self._db.close()
+        if self._db is not None:
+            await close_with_checkpoint(self._db, name="slang")
             self._db = None
 
     @property
