@@ -760,6 +760,20 @@ class ChatPlugin(AmadeusPlugin):
         ctx.knowledge_graph = KnowledgeGraphService("storage/knowledge_graph.db")
         await ctx.knowledge_graph.init()
 
+        # Phase E.4 graph edge double-write — mirror doc-backed facts to
+        # `doc_supports_fact` edges. Best-effort: a graph write failure
+        # must never block the fact governance path (audit § E.4).
+        try:
+            from services.knowledge_graph.fact_graph_bridge import FactGraphBridge
+            from services.knowledge_graph.graph_writer import GraphWriter
+
+            kg_store = getattr(ctx.knowledge_graph, "_store", None)
+            if kg_store is not None and getattr(kg_store, "_db", None) is not None:
+                ctx.fact_graph_bridge = FactGraphBridge(GraphWriter(kg_store))
+                ctx.fact_graph_bridge.attach(ctx.knowledge_graph)
+        except Exception as exc:
+            logger.warning("fact graph bridge attach failed | err={}", exc)
+
         # ---- memory consolidator (Phase C dry-run; lazy LLM/normalizer wiring) ----
         from services.episodic.store import EpisodeStore
         from services.learning_normalizer.store import LearningNormalizerStore

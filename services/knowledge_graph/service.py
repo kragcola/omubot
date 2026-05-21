@@ -2,25 +2,58 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from services.context.types import ContextHit
 from services.knowledge_graph.extractor import KnowledgeGraphExtractor
 from services.knowledge_graph.store import KnowledgeGraphStore
 from services.knowledge_graph.types import GraphCandidate, GraphFact
 
+_L = logger.bind(channel="knowledge_graph")
+
+FactListener = Callable[[GraphFact, dict[str, Any]], Awaitable[None]]
+
 
 class KnowledgeGraphService:
     def __init__(self, db_path: str | Path = "storage/knowledge_graph.db") -> None:
         self._store = KnowledgeGraphStore(db_path)
         self._extractor = KnowledgeGraphExtractor()
+        self._fact_listeners: list[FactListener] = []
 
     async def init(self) -> None:
         await self._store.init()
 
     async def close(self) -> None:
         await self._store.close()
+
+    def add_fact_listener(self, listener: FactListener) -> None:
+        """Register a coroutine fired after every successful ``add_fact``.
+
+        Listener signature: ``async (fact, evidence) -> None``.
+        Used by the Phase E.4 graph bridge to mirror doc-backed facts as
+        ``doc_supports_fact`` edges. Listener exceptions are swallowed
+        and logged WARN — they must NEVER roll back the SQL commit.
+        """
+        self._fact_listeners.append(listener)
+
+    async def _fire_fact_listeners(
+        self, fact: GraphFact, evidence: dict[str, Any],
+    ) -> None:
+        for listener in self._fact_listeners:
+            try:
+                await listener(fact, evidence)
+            except Exception as exc:
+                _L.warning(
+                    "knowledge graph fact listener failed | "
+                    "fact={} listener={} err={}",
+                    fact.fact_id,
+                    getattr(listener, "__qualname__", repr(listener)),
+                    exc,
+                )
 
     async def submit_fact_candidate(
         self,
@@ -56,7 +89,7 @@ class KnowledgeGraphService:
             return existing_fact
 
         if confidence >= 0.85:
-            return await self._store.add_fact(
+            fact = await self._store.add_fact(
                 subject=subject,
                 predicate=predicate,
                 object=object,
@@ -67,6 +100,8 @@ class KnowledgeGraphService:
                 scope=scope,
                 scope_id=scope_id,
             )
+            await self._fire_fact_listeners(fact, evidence)
+            return fact
         if confidence >= 0.60:
             existing_candidate = await self._store.find_candidate(
                 subject=subject,
@@ -135,6 +170,7 @@ class KnowledgeGraphService:
             scope_id=candidate.scope_id,
         )
         await self._store.set_candidate_status(candidate_id, "active", review_note="approved")
+        await self._fire_fact_listeners(fact, candidate.evidence)
         fact.evidence = await self._store.list_evidence(fact.fact_id)
         return fact
 

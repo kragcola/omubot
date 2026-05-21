@@ -4,6 +4,65 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase E.4 — `doc_supports_fact` graph edge 双写
+
+**变更类型**：feat（代码 + 测试，无 schema 变更，无部署）
+
+**背景**：
+
+[Phase E 设计前置审计 § 3.4](docs/audits/multilayer-memory-phase-e-design-audit-2026-05-21.md) 给出 E.4 的设计：`KnowledgeGraphService` 写入新 fact 时，若 evidence 是 `doc_chunk` 类型，就镜像出 `doc_supports_fact` 边（fact node ↔ document_chunk node）。这是 Phase E 收官子阶段。
+
+**核心改动**：
+
+- [services/knowledge_graph/service.py](services/knowledge_graph/service.py) — `KnowledgeGraphService`：
+  - 新增 `add_fact_listener(listener)` + `_fire_fact_listeners`；listener 签名 `async (fact, evidence) -> None`
+  - 在 `submit_fact_candidate` 高 confidence(>=0.85) 直接 `add_fact` 路径触发；在 `approve_candidate`（candidate→active）路径触发
+  - **不在 `add_fact` store 层触发**：service 是 governance 边界，store 不应感知 graph projection
+  - listener 失败仅 WARN，不回滚 SQL（与 D.5/E.1/E.2/E.3 同形态）
+- [services/knowledge_graph/fact_graph_bridge.py](services/knowledge_graph/fact_graph_bridge.py)（新建，~120 行）— `FactGraphBridge`：
+  - `attach(service)` 把 `_on_fact` 绑到 `service.add_fact_listener`
+  - `_on_fact` 仅在 `evidence.get('type') == 'doc_chunk'` 且 `evidence.get('chunk_id')` 非空时写；`memory_card` 类型 evidence 直接 noop（边语义是 *document support*，不是 card support）
+  - upsert fact node `(source_table='graph_facts', source_id=fact_id, node_type='fact')` + chunk node `(source_table='knowledge_chunks', source_id=chunk_id, node_type='document_chunk')`
+  - `scope=fact.scope`，`group_id=fact.scope_id if fact.scope == 'group' else ''`
+  - properties carry `quote`(<=240 字)、`fact_confidence`，evidence_refs=(fact_id,)
+  - **无 revoke 路径**（审计 § E.4）：fact 后续 reject/supersede 时只更新 `graph_facts.status`，consolidator 应通过 source-of-truth 行过滤，而不是镜像层
+- [plugins/chat/plugin.py](plugins/chat/plugin.py) — 紧跟 `ctx.knowledge_graph = KnowledgeGraphService(...)` 之后挂 bridge attach；`try/except` 优雅降级
+- [kernel/types.py](kernel/types.py) `PluginContext` — 新增 `fact_graph_bridge: Any = None`
+- [tests/test_fact_graph_bridge.py](tests/test_fact_graph_bridge.py)（新建）— 10 个测试：
+  - `test_high_confidence_doc_fact_writes_edge` / `test_approve_candidate_fires_listener` — 两条 fact 创建路径都覆盖
+  - `test_memory_card_evidence_skipped` — card_id evidence 不写
+  - `test_missing_chunk_id_is_noop` — `type=doc_chunk` 但 `chunk_id` 缺失走 noop
+  - `test_pending_candidate_does_not_fire` — 0.60≤c<0.85 只产生 candidate，不触发 listener
+  - `test_listener_exception_is_caught` — 兄弟 listener 抛错不影响 bridge
+  - `test_graph_write_failure_does_not_roll_back_fact` — graph 写失败不回滚 fact SQL
+  - `test_cancel_path_leaves_clean_state`（**D2**）— `wait_for(submit_fact_candidate, timeout=0.0)` 取消后 fact_node ↔ source-of-truth 一致
+  - `test_evidence_refs_carry_fact_id` — 锁定 evidence_refs 形状
+  - `test_repeated_facts_upsert_same_edge` — 同 (subject,predicate,object) 第二次提交走 `find_fact` 短路，不会重复写 edge
+
+**D1 同模式扫描**：
+
+- `grep -n "add_fact_listener\|_fire_fact_listeners"` — 仅 `services/knowledge_graph/service.py` + 新 bridge + 新测试，无半套实现
+- `grep -n "doc_supports_fact"` — 仅 `GraphEdgeType` Literal 声明 + 本次 bridge + 测试，没有遗留 stub
+- listener-pattern 形态全 5 处统一：D.5 episode、E.1 slang hit、E.2 style status、E.3 style feedback、E.4 graph fact
+
+**D4 完成证据**：
+
+- `pkill -9 -f pytest && uv run pytest tests/test_fact_graph_bridge.py -q` — `10 passed in 0.14s`
+- `uv run pytest tests/test_fact_graph_bridge.py tests/test_style_graph_bridge.py tests/test_style_feedback_graph_bridge.py tests/test_slang_graph_bridge.py tests/test_episode_graph_bridge.py tests/test_knowledge_graph.py -q` — `59 passed in 0.97s`
+- `uv run ruff check services/knowledge_graph/service.py services/knowledge_graph/fact_graph_bridge.py tests/test_fact_graph_bridge.py kernel/types.py plugins/chat/plugin.py` — `All checks passed!`
+- `uv run pyright ...` — `0 errors, 0 warnings, 0 informations`
+
+**部署 / 回滚**：
+
+- 不动部署。下次 `docker compose up bot -d --build` 自动生效（铁律 D6 + napcat 不重启）
+- 回滚：`git revert <e4 commit>` 即可。无 schema 变更、无 storage 落盘格式变更
+- bridge 失败优雅降级：fact SQL 提交后才 fire listener；listener 内部 try/except WARN；service._fire_fact_listeners 是第二层兜底
+- 与 `graph_facts` / `extraction_candidates` 表完全独立，graph projection 是 *additive*
+
+**Phase E 进度**：E.0 ✅ → E.1 ✅ → E.2 ✅ → E.3 ✅ → **E.4 ✅** → 整体验收 待办
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase E.3 — `user_corrected_bot_about` graph edge 双写
 
 **变更类型**：feat（代码 + 测试，无 schema 变更，无部署）
