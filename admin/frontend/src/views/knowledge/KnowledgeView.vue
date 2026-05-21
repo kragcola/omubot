@@ -13,17 +13,18 @@ import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
-import { hitTypeLabel, hitTypeTag, sourceStatusType } from './helpers/badges'
+import KnowledgeHero from './components/KnowledgeHero.vue'
+import KnowledgeMetricsPanel from './components/KnowledgeMetricsPanel.vue'
+import KnowledgeSourcesPanel from './components/KnowledgeSourcesPanel.vue'
+import { hitTypeLabel, hitTypeTag } from './helpers/badges'
 import {
   evidenceText,
   isNotFound,
-  metricRatioEntries,
   numberText,
   percentText,
   relationshipEvidenceText,
   relationshipScopeText,
   scoreText,
-  shortHash,
   topEntry,
 } from './helpers/formatters'
 import type {
@@ -575,57 +576,16 @@ function syncSupersedeDrafts() {
         {{ compatibilityWarning }}
       </NAlert>
 
-      <AppCard bordered elevated class="knowledge-hero">
-        <div class="knowledge-hero__main">
-          <div>
-            <p class="knowledge-eyebrow">
-              Context Knowledge System
-            </p>
-            <h3>{{ sourceSummary }}</h3>
-            <p>
-              CardStore 仍是生产记忆权威来源；这里负责文档知识、上下文调试和派生图谱治理。
-            </p>
-          </div>
-          <div class="knowledge-hero__badges">
-            <NTag round size="small">
-              目录 {{ stats.docs_dir || 'docs' }}
-            </NTag>
-            <NTag round size="small" :type="stats.recursive === false ? 'warning' : 'info'">
-              {{ stats.recursive === false ? '仅一级目录' : '递归扫描' }}
-            </NTag>
-            <NTag round size="small" :type="stats.index_persisted ? 'success' : 'default'">
-              {{ stats.index_persisted ? 'SQLite 索引' : '内存索引' }}
-            </NTag>
-          </div>
-        </div>
-
-        <div class="knowledge-status-grid">
-          <div class="knowledge-status">
-            <span>文档片段</span>
-            <strong>{{ entryCount }}</strong>
-          </div>
-          <div class="knowledge-status">
-            <span>文档源</span>
-            <strong>{{ sourceCount }}</strong>
-          </div>
-          <div class="knowledge-status" :class="{ 'knowledge-status--warn': skippedCount > 0 }">
-            <span>跳过源</span>
-            <strong>{{ skippedCount }}</strong>
-          </div>
-          <div class="knowledge-status">
-            <span>图谱事实</span>
-            <strong>{{ relationshipCount }}</strong>
-          </div>
-          <div class="knowledge-status" :class="{ 'knowledge-status--warn': pendingCount > 0 }">
-            <span>候选待审</span>
-            <strong>{{ pendingCount }}</strong>
-          </div>
-          <div class="knowledge-status" :class="{ 'knowledge-status--warn': scopeRiskCount > 0 }">
-            <span>作用域待查</span>
-            <strong>{{ scopeRiskCount }}</strong>
-          </div>
-        </div>
-      </AppCard>
+      <KnowledgeHero
+        :stats="stats"
+        :source-summary="sourceSummary"
+        :entry-count="entryCount"
+        :source-count="sourceCount"
+        :skipped-count="skippedCount"
+        :relationship-count="relationshipCount"
+        :pending-count="pendingCount"
+        :scope-risk-count="scopeRiskCount"
+      />
 
       <NTabs v-model:value="activeTab" type="segment" animated class="knowledge-tabs">
         <NTabPane name="sources" tab="文档源">
@@ -641,39 +601,7 @@ function syncSupersedeDrafts() {
             </template>
           </PageToolbar>
 
-          <div v-if="sources.length" class="source-grid">
-            <AppCard
-              v-for="source in sources"
-              :key="source.source"
-              bordered
-              embedded
-              class="source-card"
-            >
-              <div class="source-card__head">
-                <div>
-                  <strong>{{ source.source }}</strong>
-                  <span>{{ source.path }}</span>
-                </div>
-                <NTag round size="small" :type="sourceStatusType(source.status)">
-                  {{ source.status === 'indexed' ? '已索引' : '已跳过' }}
-                </NTag>
-              </div>
-              <div class="source-card__meta">
-                <span>{{ source.chunk_count }} 个片段</span>
-                <span>hash {{ shortHash(source.source_hash) }}</span>
-              </div>
-              <p v-if="source.skipped_reason" class="source-card__reason">
-                跳过原因：{{ source.skipped_reason }}
-              </p>
-            </AppCard>
-          </div>
-
-          <EmptyState
-            v-else
-            title="还没有文档源"
-            description="知识库未启用、目录为空，或当前运行实例还没有完成索引。"
-            :icon="LayersOutline"
-          />
+          <KnowledgeSourcesPanel :sources="sources" />
         </NTabPane>
 
         <NTabPane name="search" tab="搜索核对">
@@ -851,116 +779,9 @@ function syncSupersedeDrafts() {
           </PageToolbar>
 
           <NSpin :show="metricsLoading">
-            <div v-if="contextMetrics" class="metrics-layout">
-              <div class="metrics-grid">
-                <AppCard bordered embedded class="metric-mini-card">
-                  <span>最近查询</span>
-                  <strong>{{ contextMetrics.total_queries }}</strong>
-                </AppCard>
-                <AppCard bordered embedded class="metric-mini-card">
-                  <span>Miss 率</span>
-                  <strong>{{ percentText(contextMetrics.miss_rate) }}</strong>
-                </AppCard>
-                <AppCard bordered embedded class="metric-mini-card">
-                  <span>平均 Pack</span>
-                  <strong>{{ numberText(contextMetrics.avg_pack_chars) }}</strong>
-                </AppCard>
-                <AppCard bordered embedded class="metric-mini-card">
-                  <span>最大 Pack</span>
-                  <strong>{{ numberText(contextMetrics.max_pack_chars) }}</strong>
-                </AppCard>
-                <AppCard bordered embedded class="metric-mini-card">
-                  <span>重复率</span>
-                  <strong>{{ percentText(contextMetrics.duplicate_rate) }}</strong>
-                </AppCard>
-                <AppCard bordered embedded class="metric-mini-card">
-                  <span>省略命中</span>
-                  <strong>{{ contextMetrics.omitted_total }}</strong>
-                </AppCard>
-              </div>
-
-              <div class="metrics-columns">
-                <AppCard bordered elevated class="metrics-panel">
-                  <div class="section-head">
-                    <div>
-                      <p class="knowledge-eyebrow">Sources</p>
-                      <h3>命中来源</h3>
-                    </div>
-                  </div>
-                  <div v-if="metricRatioEntries(contextMetrics.hit_source_counts).length" class="metric-ratio-list">
-                    <div
-                      v-for="[source, count] in metricRatioEntries(contextMetrics.hit_source_counts)"
-                      :key="source"
-                      class="metric-ratio-row"
-                    >
-                      <span>{{ source || 'unknown' }}</span>
-                      <strong>{{ count }}</strong>
-                    </div>
-                  </div>
-                  <EmptyState
-                    v-else
-                    compact
-                    title="暂无来源命中"
-                    description="还没有最近上下文检索记录。"
-                    :icon="FlashOutline"
-                  />
-                </AppCard>
-
-                <AppCard bordered elevated class="metrics-panel">
-                  <div class="section-head">
-                    <div>
-                      <p class="knowledge-eyebrow">Types</p>
-                      <h3>命中类型</h3>
-                    </div>
-                  </div>
-                  <div v-if="metricRatioEntries(contextMetrics.hit_type_counts).length" class="metric-ratio-list">
-                    <div
-                      v-for="[type, count] in metricRatioEntries(contextMetrics.hit_type_counts)"
-                      :key="type"
-                      class="metric-ratio-row"
-                    >
-                      <span>{{ hitTypeLabel(type) }}</span>
-                      <strong>{{ count }}</strong>
-                    </div>
-                  </div>
-                  <EmptyState
-                    v-else
-                    compact
-                    title="暂无类型命中"
-                    description="还没有最近上下文检索记录。"
-                    :icon="FlashOutline"
-                  />
-                </AppCard>
-              </div>
-
-              <div class="recent-context-list">
-                <AppCard
-                  v-for="item in recentMetricItems"
-                  :key="`${item.created_at}-${item.query}`"
-                  bordered
-                  embedded
-                  class="recent-context-card"
-                >
-                  <div class="recent-context-card__main">
-                    <strong>{{ item.query || '空查询' }}</strong>
-                    <span>{{ item.group_id ? `群 ${item.group_id}` : item.user_id ? `用户 ${item.user_id}` : '全局' }}</span>
-                  </div>
-                  <div class="relationship-card__meta">
-                    <NTag round size="small" :type="item.hit_count ? 'success' : 'warning'">
-                      {{ item.hit_count || 0 }} 命中
-                    </NTag>
-                    <span>pack {{ item.pack_chars || 0 }}</span>
-                    <span>重复 {{ item.duplicate_count || 0 }}</span>
-                    <span>省略 {{ item.omitted_count || 0 }}</span>
-                  </div>
-                </AppCard>
-              </div>
-            </div>
-            <EmptyState
-              v-else
-              title="暂无上下文指标"
-              description="先在“上下文调试”输入一条消息，或等待 Bot 真实对话产生检索记录。"
-              :icon="FlashOutline"
+            <KnowledgeMetricsPanel
+              :context-metrics="contextMetrics"
+              :recent-metric-items="recentMetricItems"
             />
           </NSpin>
         </NTabPane>
@@ -1424,75 +1245,9 @@ function syncSupersedeDrafts() {
 </template>
 
 <style scoped>
-.knowledge-hero {
-  padding: 20px;
-  margin-bottom: 18px;
-}
-
 .knowledge-compat-alert {
   margin-bottom: 16px;
   border-radius: 14px;
-}
-
-.knowledge-hero__main {
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-.knowledge-hero__main h3 {
-  margin: 0;
-  color: var(--om-text-1);
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.knowledge-hero__main p {
-  max-width: 760px;
-  margin: 8px 0 0;
-  color: var(--om-text-2);
-  line-height: 1.7;
-}
-
-.knowledge-hero__badges {
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.knowledge-status-grid {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 18px;
-}
-
-.knowledge-status {
-  padding: 12px 14px;
-  border: 1px solid var(--om-border);
-  border-radius: 14px;
-  background: var(--om-surface-2);
-}
-
-.knowledge-status span {
-  display: block;
-  color: var(--om-text-3);
-  font-size: 12px;
-}
-
-.knowledge-status strong {
-  display: block;
-  margin-top: 4px;
-  color: var(--om-text-1);
-  font-size: 24px;
-  line-height: 1;
-}
-
-.knowledge-status--warn {
-  border-color: rgba(197, 138, 43, 0.35);
-  background: rgba(197, 138, 43, 0.08);
 }
 
 .knowledge-tabs {
@@ -1530,13 +1285,6 @@ function syncSupersedeDrafts() {
   width: 160px;
 }
 
-.source-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.source-card,
 .result-card,
 .context-hit,
 .relationship-card,
@@ -1544,7 +1292,6 @@ function syncSupersedeDrafts() {
   padding: 16px;
 }
 
-.source-card__head,
 .result-card__head,
 .context-hit__head,
 .section-head {
@@ -1554,7 +1301,6 @@ function syncSupersedeDrafts() {
   gap: 12px;
 }
 
-.source-card__head strong,
 .result-card__head strong,
 .context-hit__head strong {
   display: block;
@@ -1562,29 +1308,20 @@ function syncSupersedeDrafts() {
   font-size: 15px;
 }
 
-.source-card__head span,
 .result-card__head span,
 .context-hit__head span,
-.source-card__meta,
 .context-hit__meta,
 .relationship-card__meta {
   color: var(--om-text-3);
   font-size: 12px;
 }
 
-.source-card__meta,
 .context-hit__meta,
 .relationship-card__meta {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
-}
-
-.source-card__reason {
-  margin: 10px 0 0;
-  color: var(--om-warning);
-  font-size: 13px;
 }
 
 .knowledge-empty-panel {
@@ -1659,75 +1396,6 @@ function syncSupersedeDrafts() {
   grid-template-columns: minmax(0, 1fr) minmax(340px, 0.72fr);
   gap: 16px;
   align-items: start;
-}
-
-.metrics-layout {
-  display: grid;
-  gap: 16px;
-}
-
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.metric-mini-card {
-  padding: 14px;
-}
-
-.metric-mini-card span {
-  display: block;
-  color: var(--om-text-3);
-  font-size: 12px;
-}
-
-.metric-mini-card strong {
-  display: block;
-  margin-top: 6px;
-  color: var(--om-text-1);
-  font-size: 22px;
-}
-
-.metrics-columns {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-}
-
-.metrics-panel {
-  padding: 18px;
-}
-
-.metric-ratio-list,
-.recent-context-list {
-  display: grid;
-  gap: 10px;
-  margin-top: 14px;
-}
-
-.metric-ratio-row,
-.recent-context-card__main {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--om-text-1);
-}
-
-.metric-ratio-row {
-  padding: 10px 12px;
-  border: 1px solid var(--om-border);
-  border-radius: 12px;
-  background: var(--om-surface-2);
-}
-
-.recent-context-card {
-  padding: 14px;
-}
-
-.recent-context-card__main span {
-  color: var(--om-text-3);
-  font-size: 12px;
 }
 
 .context-pack-card,
@@ -1832,18 +1500,8 @@ function syncSupersedeDrafts() {
 }
 
 @media (max-width: 1180px) {
-  .knowledge-status-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .metrics-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .source-grid,
   .context-layout,
   .graph-layout,
-  .metrics-columns,
   .candidate-card__body,
   .relationship-card__rollback,
   .relationship-card__supersede {
@@ -1852,20 +1510,10 @@ function syncSupersedeDrafts() {
 }
 
 @media (max-width: 720px) {
-  .knowledge-hero__main,
-  .source-card__head,
   .result-card__head,
   .context-hit__head,
   .section-head {
     flex-direction: column;
-  }
-
-  .knowledge-status-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .metrics-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .context-id-input,

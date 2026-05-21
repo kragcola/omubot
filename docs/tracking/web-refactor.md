@@ -568,7 +568,7 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 
 本节落入跟踪文档时**未动任何代码**。由用户审查上述 14 个子任务的拆分粒度、是否漏点、是否需要补 D2 cancel-path 测试（跨群多时段时 wait_for 取消的场景）等。审查通过后按 U-1 → U-14 顺序逐项落地，每一步给出 typecheck/build/test 证据。
 
-### 🟡 2026-05-21 KnowledgeView 拆分启动（B-1 helpers ✅ / B-2 / B-3 / C 待开）
+### 🟡 2026-05-21 KnowledgeView 拆分启动（B-1 helpers ✅ / B-2 只读子组件 ✅ / B-3 / C 待开）
 
 按 SystemView / SlangView 同模板（B-1 helpers → B-2 只读子组件 → B-3 交互子组件 → C AppPanelSection 视觉收敛）推进。
 
@@ -590,19 +590,40 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 - 主视图行数：**2186 → 1974（-212，-9.7%）**
 - bundle：起点未实测；B-1 后 `KnowledgeView-*.js` **44.74 KB / gzip 12.68 KB**（与 SystemView/SlangView B-1 持平的预期 helpers split 开销）
 
-#### B-2 候选拆分
+#### B-2 只读子组件（首批 3 个）✅ 2026-05-21
 
-进入 **PR B-2**（只读子组件）。候选拆分（按 tab 逻辑边界）：
+按 SystemView/SlangView 同纪律，**read-only 子组件不 emit 写动作**——交互按钮（reindex / refresh / search 等）保留在主视图的 `PageToolbar` 内。本次先抽 3 个无交互依赖的子组件：
 
-- `KnowledgeHero` — `knowledge-hero` + `knowledge-status-grid` 6 卡（compatibility alert + sourceSummary + 6 卡数据条）
-- `KnowledgeSourcesPanel` — sources tab 的来源列表 + reindex 入口
-- `KnowledgeContextPanel` — context tab 的 context 调试输入 + hits 列表
-- `KnowledgeMetricsPanel` — metrics tab 的命中率 / 来源分布 / 最近查询
-- `KnowledgeGraphNodesPanel` — graph_nodes tab 的节点筛选 + 列表 + drawer
-- `KnowledgeGraphPanel` — graph tab 的实体 / 关系列表（只读部分；supersede / rollback 进 B-3）
-- `KnowledgeCandidatesPanel` — candidates tab 的列表（approve/reject 进 B-3）
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeHero.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeHero.vue) — `knowledge-hero` 卡（eyebrow + sourceSummary + 3 个 NTag + 6 卡 status grid），165 行；props: `stats / sourceSummary / entryCount / sourceCount / skippedCount / relationshipCount / pendingCount / scopeRiskCount`
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeSourcesPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeSourcesPanel.vue) — sources tab 的源卡列表 + 跳过原因 + 空态，101 行；props: `sources`
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeMetricsPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeMetricsPanel.vue) — metrics tab 的 6 个 mini-card + 命中来源 / 类型 ratio 列表 + 最近查询列表 + 空态，238 行；props: `contextMetrics / recentMetricItems`
 
-每个目标 < 400 行，主视图持 ref 传 props，不 emit 写动作。
+主视图改动：
+
+- import 三个子组件 + 减掉 `metricRatioEntries / sourceStatusType / shortHash`（移到子组件内使用）
+- 模板内联 hero 卡 / sources tab 的源卡列表 / metrics tab 的指标块 → `<KnowledgeHero />` / `<KnowledgeSourcesPanel />` / `<KnowledgeMetricsPanel />`
+- scoped CSS 删除 `knowledge-hero / knowledge-hero__main / knowledge-hero__badges / knowledge-status / knowledge-status--warn / knowledge-status-grid` 6 块、`source-grid / source-card / source-card__head / source-card__head strong/span / source-card__meta / source-card__reason` 8 块、`metrics-layout / metrics-grid / metric-mini-card / metric-mini-card span/strong / metrics-columns / metrics-panel / metric-ratio-list / metric-ratio-row / recent-context-list / recent-context-card / recent-context-card__main / recent-context-card__main span` 12 块；调整 `.result-card / .context-hit / .relationship-card / .candidate-card` 选择器组、移除媒体查询里的 `.knowledge-status-grid / .knowledge-hero__main / .source-grid / .metrics-grid / .metrics-columns / .source-card__head` 共 ~352 行 CSS
+
+验证：
+
+- `vue-tsc --noEmit` — 0 error（`/tmp/vue-tsc-b2.log` 0 行）
+- `vite build` — 5.29s
+- 主视图行数：**1974 → 1622（-352，-17.8%）**；累计 2186 → 1622（-25.8%）
+- bundle：B-1 44.74 KB / gzip 12.68 KB → **B-2 46.02 KB / gzip 13.03 KB**（+1.28 / +0.35 gzip，3 子组件 scoped style 复制的预期开销，与 SystemView/SlangView B-2 同量级；PR C 收敛 AppPanelSection 后会回吐部分）
+
+回滚：`git revert <commit>`，再 `rm admin/frontend/src/views/knowledge/components/{KnowledgeHero,KnowledgeSourcesPanel,KnowledgeMetricsPanel}.vue` 即恢复（不动 B-1 helpers）。
+
+#### B-3 候选拆分（下一步）
+
+剩余四块 tab 都含写动作（emit-up 写回主视图调 API）：
+
+- `KnowledgeSearch` — search tab：搜索输入 + 结果列表（`searchQ / searchResults / searching / hasSearched / lastSearchQ`，emit `search` / `clear`）
+- `KnowledgeContextPanel` — context tab：调试输入 + Prompt pack 输出 + hits 列表（emit `debug`）
+- `KnowledgeGraphPanel` — graph tab：实体 / 关系 + scope risk + supersede / rollback drafts（emit `rollback` / `supersede`）
+- `KnowledgeCandidatesPanel` — candidates tab：候选列表 + approve/reject（emit `approve` / `reject`）
+- `KnowledgeGraphNodesPanel` — graph_nodes tab：节点筛选 + 列表 + drawer（含 `loadEdges` 回调）
+
+每个目标 < 400 行，主视图持业务状态机，子组件 `emit('action', payload)` 触发主视图内 handler。
 
 ## 阶段 4 — 长尾页面（不专门跟踪）
 
