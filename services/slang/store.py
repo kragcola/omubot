@@ -439,6 +439,13 @@ class SlangStore:
         db: aiosqlite.Connection | None = None
         try:
             db = await connect_sqlite(self._db_path)
+            # slang.db is write-light, read-heavy. macOS Docker bind-mount + WAL has
+            # a known fsync ordering hazard that has caused recurring corruption
+            # every 5–10 days. Switching to DELETE journal + synchronous=FULL drops
+            # the WAL surface entirely; cost is acceptable at slang's write volume.
+            await db.execute("PRAGMA journal_mode=DELETE")
+            await db.execute("PRAGMA synchronous=FULL")
+            await db.commit()
             await db.execute(_CREATE_TERMS)
             await db.execute(_CREATE_OBSERVATIONS)
             await db.execute(_CREATE_SETTINGS)
