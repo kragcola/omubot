@@ -170,3 +170,53 @@ uv run pytest tests/test_slang_plugin.py tests/test_slang_store.py -q
 **反例**：
 - ❌ 改了 .vue 没 build，只 docker rebuild——容器里跑的还是旧 JS。
 - ❌ 改了 .py 只 build 前端没 rebuild bot——后端逻辑没更新。
+
+---
+
+## D7 — 部署 / build 前必跑 git hygiene
+
+**起源**：[2026-05-21 stash 全量恢复 incident](../maintenance-log.md)。
+Phase 2 部署当天没人查 stash，5 天 in-progress 工作（admin 重构 + knowledge_graph store +
+slang 子组件化 + CachePipelinePanel 重写）就这么被静默回溯到 2 天前的状态。根因有两条：
+
+1. `git stash apply` 遇到 tracked-file 上下文冲突时**静默跳过 hunks，不报错也不 reject**。
+   stash@{0} 自 b41631a 起累计经过 12 次手动 push/restart 与 Phase 1+2 在 close_with_checkpoint /
+   journal_mode=DELETE 等关键文件冲突，apply 跑过去之后看似无事，实际整段 frontend 改动
+   完全没落盘。
+2. 恢复期间 `git add -A` 把 3 个 `storage/slang.db.bak-pre-a1-merge*` 备份文件自动 stage，
+   靠人眼在 git status 里看到才 `git reset HEAD` 捞回来——只动 spec 没护栏会复发。
+
+**规则**：
+
+- 任何 deploy / build / merge 之前，必跑 `git stash list && git status -uno`，确认没有
+  未恢复 stash、没有未提交修改被遗漏。
+- `storage/*.db*` / `storage/*.bak*` / `*.db-shm` / `*.db-wal` 永不进 commit——靠 .gitignore
+  物理护栏，不靠"我记得避开"。
+- 恢复 stash 后必须 `git diff` 抽查关键文件，确认 hunks 真的应用上了；不要相信 stash apply
+  的 exit code 0。
+
+**动作**：
+
+```bash
+# 1. 部署 / build / merge 前
+git stash list                        # 期望：empty 或解释清楚每条 stash 用途
+git status -uno                       # uno = 不显示 untracked，专看追踪文件改动
+git diff --cached HEAD                # 确认 staged 改动是预期的
+
+# 2. stash apply / pop 后必抽查
+git stash apply stash@{0}
+git status                            # 看到 modified 文件
+git diff -- <key-file>                # 抽 1-2 个关键文件确认 hunks 真落地
+# 如果 stash 跨多次 commit 冲突严重：用 git apply --3way 逐文件应用，不要靠 stash apply
+
+# 3. commit 前
+git status                            # untracked 里看到 storage/*.bak* / *.db-* 立即停手
+git diff --cached --stat              # 检查 staged 文件清单符合预期
+```
+
+**反例**：
+
+- ❌ 部署前跳过 `git stash list`，假设"stash 早就 pop 过了"——5 天工作消失。
+- ❌ `git stash apply` exit 0 就当成功，不抽查 diff——hunks 静默跳过没察觉。
+- ❌ 用 `git add -A` / `git add .` 而不审 staged 列表——把 storage 备份带进 commit。
+- ❌ `.gitignore` 没覆盖 `*.bak*` / `*.db-shm`，靠每次提醒自己别 add。

@@ -60,6 +60,7 @@ storage/affection/
 storage/schedule/
 storage/groups/
 storage/*.db.corrupt-*
+storage/*.bak*
 omubot.code-workspace
 napcat/config/napcat.json
 napcat/config/onebot11.json

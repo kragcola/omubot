@@ -4,6 +4,67 @@
 
 ---
 
+## 2026-05-21 多层学习记忆方案状态对账 — A1.3 校正为 green + Phase C handoff 待执行
+
+**变更类型**：audit / handoff（仅文档；代码 0 diff）
+
+**背景**：
+
+stash 全量恢复（commit `3477163`）顺手把 A1.3（slang normalizer attach）也一起带回了主线，但
+`docs/audits/multilayer-memory-learning-report-2026-05-17.md` § 5 Phase A1 状态字段没同步，
+仍写 `pending（A1.3 已确认缺失，待补齐后转 green）`。本次顺着 D1 同模式扫描思路把 A0 / A1 / A2 /
+A3 / A.5 / Phase B 的状态全核对了一遍，校正报告并把真正的下一关 Phase C MemoryConsolidator
+dry-run 写成可交付 handoff。
+
+**对账结果（grep + 阅读双确认）**：
+
+| 项 | 状态 | 证据 |
+| --- | --- | --- |
+| A1.3 slang normalizer attach | ✅ green（commit `3477163`） | `services/slang/store.py:1253` `_attach_normalizer`，5 路径接入：create_term:1393 / upsert_ai update:1494 / create:1565 / update_term:2351 / merge_terms:2572；回归测试 `tests/test_slang_normalizer_attach.py` 5 case 全绿（5 passed in 0.21s） |
+| A.5 graph schema | ✅ green | `services/knowledge_graph/` 已落地 |
+| A3 episode 5 态状态机 | ✅ green | `services/episodic/store.py:246` `EpisodeStore` 完整 CRUD |
+| Phase B BlockTraceBus + PromptBudgetManager + provider_bus active | ✅ green | `plugins/chat/plugin.py:802-890`，`provider_bus.mode = "active"`，SlangProvider + StyleProvider 已注册 |
+| Phase C MemoryConsolidator dry-run | 🔴 待落地 | grep 全仓 `MemoryConsolidator` / `memory_consolidator` 0 命中；`reflection_consolidator` / `episode_summarizer` LLMTask 已注册（`services/llm/llm_request.py:56-57,284-285`、`services/llm/llm_pipelines.py:77`、`kernel/config.py:182-183`）但 0 caller |
+| Phase D Episodic Reflection | 🔴 待落地（依赖 C） | — |
+
+**改动文件**：
+
+- `docs/audits/multilayer-memory-learning-report-2026-05-17.md`：第 339 / 347 行 A1.3 状态字段
+  改写为 ✅ green，标注落地 commit + 测试覆盖
+- `.claude/handoff/TASK-20260521-03-memory-consolidator-dryrun.md`（新建）：Phase C dry-run
+  完整交付 spec — 新建 `services/memory_consolidator/` 模块（store + consolidator + types）+
+  `admin/routes/api/memory_consolidator.py` + 3 个测试文件；候选写到独立
+  `storage/consolidator_candidates.db`，**绝不动**生产 slang/style/episodic/knowledge_graph
+  store；走已注册的 `reflection_consolidator` / `episode_summarizer` LLMTask（首位 caller）；
+  normalizer attach 用 `domain="general"`、独立 `consolidator_normalizer.db`，与生产 cluster
+  物理隔离
+
+**同模式扫描**（D1）：grep `reflection_consolidator|episode_summarizer` 全仓命中 4 处 — 全部
+是注册表 / cache profile / 元测试，无业务调用；确认本批 spec 是首位 caller 这个判断准确。
+
+**外部可观察证据**（D4）：
+
+```text
+$ uv run pytest tests/test_slang_normalizer_attach.py -q
+.....                                                     [100%]
+5 passed in 0.21s
+```
+
+**回滚路径**：报告状态字段误改可 `git checkout HEAD~1 -- docs/audits/multilayer-memory-learning-report-2026-05-17.md`；
+handoff spec 本质是文档，删除 `.claude/handoff/TASK-20260521-03-*.md` 即可。
+
+**当前 handoff 队列（按优先级）**：
+
+| handoff | 范围 | 当前阶段 |
+| --- | --- | --- |
+| `TASK-20260521-01-slang-db-phase3-named-volume.md` | infra-hard：bot storage 切 Docker named volume | A 段代码可交付，B 段需人手低峰部署窗口 |
+| `TASK-20260521-02-cleanup-pre-existing-e501.md` | tech debt：26 条 pre-existing E501 长行清理 | 待 codex 执行 |
+| `TASK-20260521-03-memory-consolidator-dryrun.md` | Phase C MemoryConsolidator dry-run | 待 codex 执行 |
+
+**部署影响**：0（仅 docs + handoff，runtime 与 schema 全无改动）。
+
+---
+
 ## 2026-05-21 stash 全量恢复 — 5 天 in-progress 工作 3-way merge 回 Phase 1+2 主线
 
 **变更类型**：recovery / merge（前端 + 后端 + tests）

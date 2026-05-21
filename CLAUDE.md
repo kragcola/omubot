@@ -69,6 +69,7 @@ Fix any errors discovered during testing, even if they were pre-existing and not
 - **D4 完成声明含证据**：声明"fix 完成"时必须在日志里给出：① 同模式扫描结果；② 外部可观察证据（sqlite SELECT、HTTP 状态码、日志片段）；③ 回滚路径。
 - **D5 pytest 防孤儿**：跑全量 pytest 前先 `pkill -9 -f pytest`，否则可能跟 IDE 抢 sqlite 文件锁导致死锁。
 - **D6 admin SPA 同步路径**：`admin/static` 是 bind mount——只改前端 `npm run build` 即生效，无需 docker rebuild；改了 .py 才需要 rebuild bot。
+- **D7 部署前 git hygiene**：deploy / build / merge 前必跑 `git stash list && git status -uno`；`stash apply` exit 0 不等于成功，必抽查 `git diff` 确认 hunks 真落地；`storage/*.db*` / `*.bak*` 走 .gitignore 物理护栏，不用 `git add -A`。
 
 ## Release
 
