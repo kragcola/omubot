@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-05-21 知识图谱抽取治本 PR1 — 切流 + 清污
+
+**变更类型**：fix（plugins/context 3 文件配置变更 + sqlite 数据清理；零代码逻辑改动）
+
+**背景**：
+
+PR4 视觉打磨完成后用户进入候选队列复查，发现 75 条 pending 候选 100% 是垃圾——subject 全是「而不 / 也就 / 通常 / 核心仍然」这类**中文连词副词的尾缀**，predicate 100% 是「是」，全部来自 `context:doc_chunk` 的 markdown 章节抽取（实测：`SELECT predicate, COUNT(*) FROM extraction_candidates WHERE status='pending' GROUP BY predicate` → `('是', 75)`）。**蓝军自检**沿调用链反向追到病根有四个：① [extractor.py:90-116](services/knowledge_graph/extractor.py#L90) 的 5 条 regex 没有句首/分句首锚点，喂给"前 1-28 汉字 + 是 + ..."这种裸 pattern 必然吞跨子句尾缀；② [extractor.py:118](services/knowledge_graph/extractor.py#L118) 的 `_GENERIC_SUBJECTS` 黑名单只挡了 7 个代词/泛指，**没挡连词副词**；③ [chunking.py:30](services/knowledge/chunking.py#L30) 一个 markdown 二级标题 = 一个 chunk，**整段（可达数千字、十数句）一次性喂 extractor**，章节越长 regex 撞墙越频繁；④ [service.py:91](services/knowledge_graph/service.py#L91) `if confidence >= 0.85` 是写死的快车道，memory_card 路径 `base_confidence=0.86` 直接跳过候选审核进 `graph_facts.active`——抽取手段对不对它不管，只看置信度数字。**当前 PR1 不修代码，只先关阀门 + 清存量**：阀门关掉防止再产新垃圾，存量清掉让队列归零，PR2 再做治本主菜（替换 LLM 抽取 + 拆 0.85 快车道 + 子句切分）。
+
+**改动文件**：
+
+- [plugins/context/config.default.json](plugins/context/config.default.json) — `graph_auto_extract: true` → `false`
+- [plugins/context/config.schema.json](plugins/context/config.schema.json) — 字段 description 改为 "当前 regex 抽取器对中文复合连词（如\"而不/也就/通常\"）误抽率高，默认关闭；上线 LLM 抽取器并验收准确率后再开"
+- [plugins/context/plugin.py](plugins/context/plugin.py) — `ContextConfig.graph_auto_extract: bool = True` → `False`，`__init__` 默认值同步
+
+**数据清理**（容器内执行）：
+
+```python
+# 1. 备份 75 条 pending doc_chunk 候选到 /app/storage/logs/extraction_candidates_purge_20260521-151451.json (86KB)
+# 2. DELETE FROM extraction_candidates WHERE status='pending' AND source LIKE 'context:doc_chunk%' → 75 行
+# 3. 验证残余：candidates total=0 / graph_facts active=1
+```
+
+**保留 1 条 active 事实**：「用户1416930401 是 学生」`gf_8b62f67e583f`——核查 `memory_cards.card_755866d9` 来源是 dream agent 生成的真实笔记 "用户是学生"（user scope，scope_id=1416930401，工丿囗 = 超级管理员），事实**本身正确**，regex 这次刚好抽对了。**注意此条是 0.85 快车道历史产物**，PR2 拆完快车道后即使是 memory_card 来源的新事实也必须走候选审核，确保不再有任何抽取手段绕过人工。
+
+**下游污染检查**（D1 同模式扫描）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `extraction_candidates` 残余 | 0 ✅ |
+| `graph_facts` 来源 `context:doc_chunk` 的 active 事实 | 0 ✅（regex 文档抽取从未达到 0.85 直进门槛） |
+| `graph_nodes` source_table=`graph_facts` 节点 | 0 ✅ |
+| `graph_nodes` node_type=`document_chunk` 节点 | 0 ✅ |
+| `graph_edges` edge_type=`doc_supports_fact` | 0 ✅ |
+| 其他 Chinese-regex 抽取器（grep `compile.*[一-鿿]`） | services/slang/quality.py / services/memory/state_board.py 仅做白名单和字符过滤，非抽取链路；SlangExtractor/StyleExtractor 已是 LLM 链路 ([admin/routes/api/style.py:364](admin/routes/api/style.py#L364) / [slang.py:650](admin/routes/api/slang.py#L650))，无同模式 |
+
+**爆炸半径**：仅 admin/knowledge 候选队列页面（已空），无运行时回归——`graph_auto_extract=false` 后 `_schedule_graph_extract` 不再被触发，[plugins/context/plugin.py:110](plugins/context/plugin.py#L110) 上下文注入主路径完全不受影响。
+
+**回滚**：`git revert <PR1>`；如需恢复 75 条候选 → `python -c "import json; ..."` 把 backup JSON 灌回 sqlite。
+
+**验证**（D4 完成声明含证据）：
+
+- 三处配置 `grep -n "graph_auto_extract" plugins/context/config.default.json plugins/context/config.schema.json plugins/context/plugin.py` 全部 false / 描述更新
+- `docker exec qq-bot ls -lh /app/storage/logs/extraction_candidates_purge_20260521-151451.json` → 86K
+- `docker exec qq-bot /app/.venv/bin/python -c "...COUNT(*) FROM extraction_candidates"` → 0
+- `docker exec qq-bot /app/.venv/bin/python -c "...COUNT(*) FROM graph_facts WHERE status='active'"` → 1（仅 memory_card 历史事实）
+
+**部署**：仅 .json/.py 配置默认值变更——`graph_auto_extract` 没有容器内运行时覆盖（确认 `/app/storage/plugins/config/context.json` 不存在），`docker compose restart bot` 即可生效；不需要 rebuild。
+
+**Handoff to PR2（治本主菜）**：
+
+| 任务 | 文件/位置 | 估时 |
+| --- | --- | --- |
+| 调研 LLM 抽取范式 | services/slang/extractor.py / services/style/extractor.py / services/llm/provider.py | 30 min |
+| 子句切分 + prompt 强约束设计 | 新 services/knowledge_graph/llm_extractor.py | 30 min |
+| 实施 LLM 抽取器 | 同上 | 1.5 hr |
+| 拆 0.85 直进 active 快车道 | services/knowledge_graph/service.py:91-104 | 15 min |
+| 单元测试矩阵 | tests/test_knowledge_graph_llm_extractor.py | 1 hr |
+| 离线评测：LLM vs regex 准确率对比 | scripts/eval_graph_extractor.py（新） | 1 hr |
+| 灰度开 graph_auto_extract → true | 配置 + maintenance-log 复盘 | 5 min |
+
+---
+
 ## 2026-05-21 KnowledgeView 简化重构 PR4 — 视觉收尾 4 项 UI 打磨
 
 **变更类型**：polish（admin/frontend 4 .vue + 1 .ts + 后端 1 .py + .dockerignore；含一次 `docker compose up bot -d --build`）

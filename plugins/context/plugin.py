@@ -21,7 +21,7 @@ class ContextConfig(BaseModel):
     max_hits: int = 5
     max_doc_hits: int = 3
     max_chars: int = 2400
-    graph_auto_extract: bool = True
+    graph_auto_extract: bool = False
 
 
 class ContextPlugin(AmadeusPlugin):
@@ -37,7 +37,7 @@ class ContextPlugin(AmadeusPlugin):
         self._max_hits = 5
         self._max_doc_hits = 3
         self._max_chars = 2400
-        self._graph_auto_extract = True
+        self._graph_auto_extract = False
         self._service = None
         self._graph = None
         self._pending_graph_tasks: set[asyncio.Task[dict[str, int]]] = set()

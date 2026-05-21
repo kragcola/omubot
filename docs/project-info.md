@@ -154,6 +154,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | 模拟日程 | `plugins/schedule/config.default.json` → `enabled` | `true`（每日凌晨 2:00 生成） |
 | 好感度系统 | `plugins/affection/config.default.json` → `enabled` | `true`（每次互动 +0.8，日上限 10.0） |
 | 要素察觉 | `plugins/element_detector/config.default.json` → `enabled` | `true`（2 条规则） |
+| 知识图谱自动抽取 | `plugins/context/config.default.json` → `graph_auto_extract` | `false`（regex 抽取器对中文连词副词误抽率高，2026-05-21 关闭，待 LLM 抽取器上线后开） |
 | 群聊隐私遮掩 | `[group].privacy_mask` | `true` |
 | 预回复思考 | thinker（内置） | `true`（轻量 LLM 判断 reply/wait/search） |
 | 日志频道 | `[log.channels]` | 6 个默认开启，其余关闭 |
