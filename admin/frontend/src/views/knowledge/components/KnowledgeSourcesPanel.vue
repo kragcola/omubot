@@ -23,14 +23,20 @@ defineProps<Props>()
       class="source-card"
     >
       <div class="source-card__head">
-        <div>
+        <div class="source-card__title">
           <strong>{{ source.source }}</strong>
-          <span>{{ source.path }}</span>
+          <span class="source-card__path">{{ source.path }}</span>
         </div>
         <NTag round size="small" :type="sourceStatusType(source.status)">
           {{ source.status === 'indexed' ? '已索引' : '已跳过' }}
         </NTag>
       </div>
+      <p v-if="source.preview" class="source-card__preview">
+        {{ source.preview }}
+      </p>
+      <p v-else-if="source.status === 'indexed'" class="source-card__preview source-card__preview--muted">
+        暂无可预览内容（首段为空白或仅包含元信息）。
+      </p>
       <div class="source-card__meta">
         <span>{{ source.chunk_count }} 个片段</span>
         <span>hash {{ shortHash(source.source_hash) }}</span>
@@ -58,6 +64,8 @@ defineProps<Props>()
 
 .source-card {
   padding: 16px;
+  display: grid;
+  gap: 10px;
 }
 
 .source-card__head {
@@ -67,27 +75,63 @@ defineProps<Props>()
   gap: 12px;
 }
 
-.source-card__head strong {
+.source-card__title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.source-card__title strong {
   display: block;
   color: var(--om-text-1);
   font-size: 15px;
+  font-weight: 600;
+  word-break: break-word;
 }
 
-.source-card__head span,
-.source-card__meta {
+.source-card__path {
   color: var(--om-text-3);
   font-size: 12px;
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  word-break: break-all;
+}
+
+.source-card__preview {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--om-primary) 35%, var(--om-border));
+  background: var(--om-surface-2);
+  border-radius: 0 8px 8px 0;
+  color: var(--om-text-2);
+  font-size: 12.5px;
+  line-height: 1.7;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.source-card__preview--muted {
+  color: var(--om-text-3);
+  font-style: italic;
 }
 
 .source-card__meta {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
+  color: var(--om-text-3);
+  font-size: 12px;
 }
 
 .source-card__reason {
-  margin: 10px 0 0;
+  margin: 0;
   color: var(--om-warning);
   font-size: 13px;
 }

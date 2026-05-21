@@ -1,9 +1,7 @@
 <script setup lang="ts">
-import { LayersOutline } from '@vicons/ionicons5'
+import { LayersOutline, SearchOutline } from '@vicons/ionicons5'
 import AppCard from '../../../components/common/AppCard.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
-import MetricCard from '../../../components/common/MetricCard.vue'
-import PageToolbar from '../../../components/common/PageToolbar.vue'
 import type { GraphEdgeRow, GraphNodeRow } from '../helpers/types'
 
 interface Props {
@@ -35,39 +33,40 @@ const emit = defineEmits<{
 
 <template>
   <div class="graph-node-metrics">
-    <MetricCard
-      title="节点总数"
-      :value="graphNodeTotalCount"
-      hint="active 节点（不含已撤销）"
-    />
-    <MetricCard
-      title="边总数"
-      :value="graphEdgeTotalCount"
-      hint="active 边（不含已撤销）"
-      accent="info"
-    />
-    <MetricCard
-      title="主要节点类型"
-      :value="graphNodeTopType"
-      hint="按 node_type 分布的最大类目"
-      accent="success"
-    />
-    <MetricCard
-      title="主要边类型"
-      :value="graphEdgeTopType"
-      hint="按 edge_type 分布的最大类目"
-      accent="warning"
-    />
+    <div class="graph-node-metric graph-node-metric--primary">
+      <span class="graph-node-metric__label">节点总数</span>
+      <strong class="graph-node-metric__value">{{ graphNodeTotalCount }}</strong>
+      <span class="graph-node-metric__hint">active 节点（不含已撤销）</span>
+    </div>
+    <div class="graph-node-metric graph-node-metric--info">
+      <span class="graph-node-metric__label">边总数</span>
+      <strong class="graph-node-metric__value">{{ graphEdgeTotalCount }}</strong>
+      <span class="graph-node-metric__hint">active 边（不含已撤销）</span>
+    </div>
+    <div class="graph-node-metric graph-node-metric--success">
+      <span class="graph-node-metric__label">主要节点类型</span>
+      <strong class="graph-node-metric__value graph-node-metric__value--text">
+        {{ graphNodeTopType }}
+      </strong>
+      <span class="graph-node-metric__hint">按 node_type 分布</span>
+    </div>
+    <div class="graph-node-metric graph-node-metric--warning">
+      <span class="graph-node-metric__label">主要边类型</span>
+      <strong class="graph-node-metric__value graph-node-metric__value--text">
+        {{ graphEdgeTopType }}
+      </strong>
+      <span class="graph-node-metric__hint">按 edge_type 分布</span>
+    </div>
   </div>
 
-  <PageToolbar class="mb-16">
-    <template #left>
+  <section class="graph-node-filters">
+    <div class="graph-node-filters__row">
       <NInput
         v-model:value="graphNodeFilterType"
         placeholder="按 node_type 过滤（如 term / fact）"
         clearable
         size="small"
-        style="width: 220px"
+        class="graph-node-filters__input"
         @keyup.enter="emit('reload')"
         @clear="emit('reload')"
       />
@@ -76,7 +75,7 @@ const emit = defineEmits<{
         placeholder="按群 ID 过滤"
         clearable
         size="small"
-        style="width: 180px"
+        class="graph-node-filters__input"
         @keyup.enter="emit('reload')"
         @clear="emit('reload')"
       />
@@ -85,20 +84,24 @@ const emit = defineEmits<{
         placeholder="搜索 label / source_id"
         clearable
         size="small"
-        style="width: 220px"
+        class="graph-node-filters__input"
         @keyup.enter="emit('reload')"
         @clear="emit('reload')"
-      />
-    </template>
-    <template #right>
-      <NButton size="small" type="primary" secondary @click="emit('reload')">
-        应用筛选
-      </NButton>
+      >
+        <template #prefix>
+          <NIcon :component="SearchOutline" />
+        </template>
+      </NInput>
+    </div>
+    <div class="graph-node-filters__actions">
       <NButton size="small" quaternary @click="emit('clear-filters')">
         清空
       </NButton>
-    </template>
-  </PageToolbar>
+      <NButton size="small" type="primary" secondary @click="emit('reload')">
+        应用筛选
+      </NButton>
+    </div>
+  </section>
 
   <NSpin :show="graphNodeLoading">
     <div v-if="graphNodes.length" class="node-list">
@@ -247,13 +250,133 @@ const emit = defineEmits<{
 .graph-node-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.graph-node-metric {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: var(--om-surface);
+  overflow: hidden;
+}
+
+.graph-node-metric::before {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 3px;
+  background: var(--metric-accent, var(--om-primary));
+  content: '';
+  opacity: 0.85;
+}
+
+.graph-node-metric--primary {
+  --metric-accent: var(--om-primary);
+}
+
+.graph-node-metric--info {
+  --metric-accent: var(--om-info);
+}
+
+.graph-node-metric--success {
+  --metric-accent: var(--om-success);
+}
+
+.graph-node-metric--warning {
+  --metric-accent: var(--om-warning);
+}
+
+.graph-node-metric__label {
+  color: var(--om-text-3);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.graph-node-metric__value {
+  display: block;
+  color: var(--om-text-1);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.graph-node-metric__value--text {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0;
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+}
+
+.graph-node-metric__hint {
+  color: var(--om-text-3);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 @media (max-width: 960px) {
   .graph-node-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.graph-node-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: var(--om-surface);
+}
+
+.graph-node-filters__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.3fr);
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.graph-node-filters__input {
+  width: 100%;
+}
+
+.graph-node-filters__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 720px) {
+  .graph-node-filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .graph-node-filters__row {
+    grid-template-columns: 1fr;
+  }
+
+  .graph-node-filters__actions {
+    justify-content: flex-end;
   }
 }
 

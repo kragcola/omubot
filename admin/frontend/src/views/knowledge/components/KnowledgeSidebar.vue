@@ -4,6 +4,7 @@ import {
   DocumentTextOutline,
   FlashOutline,
   FolderOpenOutline,
+  GitNetworkOutline,
   HourglassOutline,
   RefreshOutline,
   SparklesOutline,
@@ -69,42 +70,57 @@ const emit = defineEmits<{
       <p class="knowledge-sidebar__eyebrow">
         Backlog
       </p>
-      <button
-        type="button"
-        class="knowledge-chip"
-        :class="{ 'knowledge-chip--warn': skippedCount > 0 }"
-        @click="emit('open-admin', 'graph_nodes')"
-      >
-        <span class="knowledge-chip__icon">
-          <NIcon :component="HourglassOutline" />
-        </span>
-        <span class="knowledge-chip__label">跳过源</span>
-        <strong class="knowledge-chip__value">{{ skippedCount }}</strong>
-      </button>
-      <button
-        type="button"
-        class="knowledge-chip"
-        :class="{ 'knowledge-chip--warn': pendingCount > 0 }"
-        @click="emit('open-admin', 'candidates')"
-      >
-        <span class="knowledge-chip__icon">
-          <NIcon :component="AlertCircleOutline" />
-        </span>
-        <span class="knowledge-chip__label">候选待审</span>
-        <strong class="knowledge-chip__value">{{ pendingCount }}</strong>
-      </button>
-      <button
-        type="button"
-        class="knowledge-chip"
-        :class="{ 'knowledge-chip--warn': scopeRiskCount > 0 }"
-        @click="emit('open-admin', 'graph')"
-      >
-        <span class="knowledge-chip__icon">
-          <NIcon :component="AlertCircleOutline" />
-        </span>
-        <span class="knowledge-chip__label">作用域待查</span>
-        <strong class="knowledge-chip__value">{{ scopeRiskCount }}</strong>
-      </button>
+      <NTooltip placement="left" :style="{ maxWidth: '260px' }">
+        <template #trigger>
+          <button
+            type="button"
+            class="knowledge-chip"
+            :class="{ 'knowledge-chip--warn': pendingCount > 0 }"
+            @click="emit('open-admin', 'candidates')"
+          >
+            <span class="knowledge-chip__icon">
+              <NIcon :component="AlertCircleOutline" />
+            </span>
+            <span class="knowledge-chip__label">候选待审</span>
+            <strong class="knowledge-chip__value">{{ pendingCount }}</strong>
+          </button>
+        </template>
+        中置信度的图谱候选事实，等待人工审核入图谱。点击打开「候选队列」管理抽屉。
+      </NTooltip>
+      <NTooltip placement="left" :style="{ maxWidth: '260px' }">
+        <template #trigger>
+          <button
+            type="button"
+            class="knowledge-chip"
+            :class="{ 'knowledge-chip--warn': scopeRiskCount > 0 }"
+            @click="emit('open-admin', 'graph')"
+          >
+            <span class="knowledge-chip__icon">
+              <NIcon :component="GitNetworkOutline" />
+            </span>
+            <span class="knowledge-chip__label">作用域待查</span>
+            <strong class="knowledge-chip__value">{{ scopeRiskCount }}</strong>
+          </button>
+        </template>
+        图谱事实存在跨群可见性 / 作用域风险，需要人工治理。点击打开「图谱关系」管理抽屉。
+      </NTooltip>
+      <NTooltip placement="left" :style="{ maxWidth: '260px' }">
+        <template #trigger>
+          <button
+            type="button"
+            class="knowledge-chip"
+            :class="{ 'knowledge-chip--warn': skippedCount > 0 }"
+            @click="emit('open-admin', 'graph_nodes')"
+          >
+            <span class="knowledge-chip__icon">
+              <NIcon :component="HourglassOutline" />
+            </span>
+            <span class="knowledge-chip__label">跳过源</span>
+            <strong class="knowledge-chip__value">{{ skippedCount }}</strong>
+          </button>
+        </template>
+        未进入索引的文档源 / 节点状态。点击打开「图谱节点」管理抽屉查看明细。
+      </NTooltip>
     </div>
 
     <div class="knowledge-sidebar__group">

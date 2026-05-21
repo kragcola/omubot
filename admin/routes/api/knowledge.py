@@ -149,10 +149,23 @@ def create_knowledge_router(
             kb.reload()
         sources = []
         if hasattr(kb, "sources"):
-            sources = [
-                source.to_dict() if hasattr(source, "to_dict") else dict(source)
-                for source in kb.sources()
-            ]
+            for source in kb.sources():
+                row = source.to_dict() if hasattr(source, "to_dict") else dict(source)
+                preview = ""
+                source_name = row.get("source") if isinstance(row, dict) else None
+                if source_name and hasattr(kb, "_chunks_for_source"):
+                    try:
+                        chunks = kb._chunks_for_source(source_name)
+                    except Exception:
+                        chunks = []
+                    if chunks:
+                        first = chunks[0]
+                        text = (getattr(first, "content", "") or "").strip()
+                        if text:
+                            collapsed = " ".join(text.split())
+                            preview = collapsed[:160]
+                row["preview"] = preview
+                sources.append(row)
         return {"available": True, "sources": sources}
 
     @router.get("/knowledge/search")

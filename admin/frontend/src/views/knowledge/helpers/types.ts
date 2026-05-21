@@ -41,6 +41,7 @@ export interface KnowledgeSource {
   chunk_count: number
   source_hash?: string
   skipped_reason?: string
+  preview?: string
 }
 
 export interface KnowledgeResult {
