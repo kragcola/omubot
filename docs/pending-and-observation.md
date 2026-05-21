@@ -39,11 +39,11 @@
 ## 2. 多层学习记忆方案（P3）— 跨 Phase 待落地
 
 > 来源：[docs/audits/multilayer-memory-learning-report-2026-05-17.md](audits/multilayer-memory-learning-report-2026-05-17.md)
-> 当前进度（2026-05-21）：A0/A1/A2/A3/A.5/B/C 已落地；D/E/F 未启动
+> 当前进度（2026-05-21）：A0/A1/A2/A3/A.5/B/C 已落地；D 设计前置审计完成（[multilayer-memory-phase-d-design-audit-2026-05-21.md](audits/multilayer-memory-phase-d-design-audit-2026-05-21.md)），实现未起；E/F 未启动
 
 | Phase | 现状 | 关键缺口 | 报告原文硬前置 |
 | --- | --- | --- | --- |
-| **D Episodic Reflection** | 🔴 待启动 | episode 状态机已就绪但无 reflection 生成路径；admin 反馈/用户纠正不会回写为 episode | A2 隐私字段（done）+ A3 episode 状态机（done）+ Phase C 能产 candidate（done）。**无观察期**，可立即起 |
+| **D Episodic Reflection** | 🟡 设计前置审计完成（2026-05-21），实现未起 | 报告硬要求都已满足；缺 5 个 gap：promote 桥 / reflection caller / 反思素材源 / 召回路径 / graph edge 双写。详见 [multilayer-memory-phase-d-design-audit-2026-05-21.md](audits/multilayer-memory-phase-d-design-audit-2026-05-21.md) | A2 隐私字段（done）+ A3 episode 状态机（done）+ Phase C 能产 candidate（done）。**无观察期**，可立即起 |
 | **E 图谱跨层主索引（远期）** | 🟡 部分提前到 A.5 | A.5 已落 graph schema + 首批 edge 类型；剩余跨层关系（term_used_in_group / style_applies_to_situation / user_corrected_bot_about / episode_supports_profile / doc_supports_fact）未写入路径 | Phase D 落地（含 edge 写入路径）。**无观察期** |
 | **F Episodic-to-Declarative（远期）** | 🔴 不启动（前置不足） | declarative_facts 表 + 凝练触发器 + 冲突解决 + 5 态状态机 + 回退路径全部未实现 | 报告硬要求：Phase D **跑过 ≥ 3 个月真实数据** + ≥ 1 个群累计 ≥ 200 条 `enabled_for_prompt` episode + BlockTraceBus（done）。**有观察期，90+ 天** |
 

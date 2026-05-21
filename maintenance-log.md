@@ -4,6 +4,70 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase D 设计前置审计 — 5 子阶段拆分 + gap 盘点（无代码改动）
+
+**变更类型**：docs（spec / handoff）
+
+**背景**：
+
+[pending-and-observation.md](docs/pending-and-observation.md) § 2 把 30 天 corruption 观察窗口与 Phase D 启动条件混为一谈后用户提出疑问。复核报告原文 § 5 Phase D 与 § 7.4：D 的硬前置（A2 / A3 / Phase C / BlockTraceBus）已全部满足，**无任何观察期要求**；只 Phase F 有 90+ 天硬要求。pending 表格已修正，但没把"D 实际还差什么"摊开 — 直接动手实现容易撞死角。
+
+按用户要求"commit 之后继续该方案"，本次先做设计前置审计，**不动任何代码**。
+
+**审计产出**：[docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md](docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md)（287 行）
+
+**关键结论**：
+
+1. **现状已就绪 8 项**：EpisodeStore 5 态机 + Phase B gate + Episode CRUD/revision + EpisodePayload schema + consolidator_candidates(domain="episode") + decide_candidate admin 接线 + reflection_consolidator/episode_summarizer LLM task 注册 + style_feedback 反思素材源
+2. **Phase D 真正缺口 5 个**（G1-G5）：
+   - **G1 promote 桥** — `decide_candidate(approved)` 只改 candidate.state，不调 `EpisodeStore.create_episode`
+   - **G2 reflection_consolidator 无 caller** — LLM task 已注册但 grep 全仓零调用
+   - **G3 反思素材源未接入** — `style_feedback(rating='negative')` / slang reject / style reject 三种纠正信号都不进 reflection 流水
+   - **G4 召回路径未接 ContextProvider** — 即便推进到 `enabled_for_prompt` 也不会进 prompt
+   - **G5 graph edge 未双写** — `episode_supports_profile` 在 schema 里声明但无写入路径
+3. **5 子阶段拆分（D.1-D.5）独立可验**：
+   - D.1 promote 桥 ~ 4h；D.2 admin UX ~ 6h；D.3 反思生成 ~ 1 天；D.4 召回路径 ~ 1-2 天；D.5 graph 双写 ~ 4h
+   - 总规模 ≈ 1-2 周，与报告 § 5 Phase D 预估一致
+4. **不做项明确登记**：自动晋升 enabled_for_prompt / 引入新 LLM 做语义召回 / Phase E 其余 4 类 edge / Phase F declarative_facts / 直接接 user_correction 自动触发反思
+
+**关键证据**（D4，盘点用）：
+
+```text
+$ grep -rn "EpisodeStore.*create_episode\|create_episode" services/ admin/ | grep -v "test_\|__pycache__"
+services/episodic/store.py:290:    async def create_episode(   # 定义点
+admin/routes/api/episodes.py:...                                # admin CRUD（手动写入）
+# 无任何来自 consolidator / reflection 流水的 caller — G1 实锤
+
+$ grep -rn "reflection_consolidator" services/ plugins/ admin/ | grep -v "test_\|__pycache__"
+services/llm/llm_request.py:56,284  # 只有注册点
+# 零 caller — G2 实锤
+```
+
+**docs 联动**：
+
+- [pending-and-observation.md](docs/pending-and-observation.md) § 2 表格 "Phase D" 行从 🔴 改为 🟡 + 加链接到本审计
+- 报告 § 5 待 D.1 落地后再刷新到 ✅
+
+**冲击范围**：
+
+- 仅文档；零代码改动；无部署影响
+- napcat / qq-bot / 24h Phase 3 观察窗口（截止 2026-05-22 16:30）全部不动
+- 30 天 corruption 验收窗口（截止 2026-06-20）继续走
+
+**handoff 给下次 session**：
+
+下一步可直接开 D.1 — promote 桥（最小可验单元）：
+
+1. grep 一周内 `style_feedback(rating='negative')` 行数确认有素材
+2. 单测先行：`tests/test_memory_consolidator_promote.py` 用 in-memory candidate fixture 跑 promote 桥
+3. admin POST decide(state="approved", domain="episode") 时附加调 `EpisodeStore.create_episode`
+4. D2 cancel-path 测试同步加：promote 中段被取消时 candidate.state 已回写但 EpisodeStore 行数 = 0
+5. 验收 SQL：`docker exec qq-bot sqlite3 storage/episodic.db "SELECT episode_id, source, json_extract(meta_json, '$.consolidator_candidate_id') FROM episodes WHERE source='consolidator' ORDER BY created_at DESC LIMIT 5"`
+
+**未起代码 / 未起测试**：本次仅 audit + 文档，主线 main 不需要 verification 命令。
+
+---
+
 ## 2026-05-21 slang.db 反复损坏全栈治本 Phase 3 B 段 — 数据迁移与切换完成 + 中途 `external: true` 修复 — TASK-20260521-01 收尾
 
 **变更类型**：infra-hard（B 段实际部署；含一处 docker compose 项目作用域 volume 命名陷阱的修复）
