@@ -381,6 +381,53 @@ class EpisodeStore:
             rows = await cur.fetchall()
         return [_row_to_episode(r) for r in rows]
 
+    async def list_for_recall(
+        self,
+        *,
+        group_id: str,
+        limit: int = 3,
+    ) -> list[Episode]:
+        """Episodes eligible for prompt injection (D.4 recall path).
+
+        Only returns ``episode_state='enabled_for_prompt'`` rows scoped to
+        ``group_id`` — invariant from the Phase D audit § D.4: states other
+        than ``enabled_for_prompt`` must never reach the prompt builder.
+
+        Order: ``confidence DESC, updated_at DESC`` so the most-trusted
+        recently-promoted reflections surface first; ``last_used_at`` is
+        deliberately not in the ORDER BY (it's an audit field, not a
+        ranking signal — see ``update_last_used``).
+        """
+        if not group_id:
+            return []
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM episodes "
+            "WHERE episode_state = 'enabled_for_prompt' AND group_id = ? "
+            "ORDER BY confidence DESC, updated_at DESC LIMIT ?",
+            (group_id, max(0, int(limit))),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_episode(r) for r in rows]
+
+    async def update_last_used(self, episode_id: str) -> bool:
+        """Stamp ``last_used_at`` for an episode that was just recalled.
+
+        Best-effort: returns ``False`` when the episode does not exist or
+        has been deleted between recall and stamp; never raises so a slow
+        UPDATE on the recall path can't mask the prompt injection itself.
+        """
+        if not episode_id:
+            return False
+        db = self._require_db()
+        now = _now_iso()
+        cursor = await db.execute(
+            "UPDATE episodes SET last_used_at = ? WHERE episode_id = ?",
+            (now, episode_id),
+        )
+        await db.commit()
+        return (cursor.rowcount or 0) > 0
+
     # ------------------------------------------------------------------
     # State machine
     # ------------------------------------------------------------------

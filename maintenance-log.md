@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase D.4 — 召回路径（EpisodeStore.list_for_recall → EpisodeProvider → BlockTraceBus 双写）
+
+**变更类型**：feature（services + tests，无 schema migration、无部署改动、无前端改动）
+
+**背景**：
+
+[Phase D 设计前置审计](docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md) § D.4 是 Phase D 的最后一公里：D.1（promote 桥）让 admin approve 后 episode 候选沉淀到 `EpisodeStore`；D.2（admin UX）让运营人为 review 候选；D.3（反思生成）让"被纠正"信号自动产候选。但前面三步沉淀下来的 `enabled_for_prompt` episode **从未真正进过 LLM prompt**——D.4 把这条召回路径补全：群消息进来时按 `enabled_for_prompt + group_id` 拉 ≤3 条历史反思，注入 prompt 系统块，同时通过 BlockTraceBus 留 trace 让 admin 能 trace「这条回复用了哪条反思」。
+
+**改动落点**：
+
+- [services/episodic/store.py](services/episodic/store.py) 新增两个方法：
+  - `list_for_recall(group_id, limit=3)` — 严格 `episode_state='enabled_for_prompt'` 过滤 + `confidence DESC, updated_at DESC` 排序；`group_id=""` 直接返回 `[]`（recall 必须群范围，审计 § D.4 不变量），不接受跨群泄漏
+  - `update_last_used(episode_id)` — 召回时盖时间戳，best-effort 不抛错；`rowcount > 0` 表示落地成功，episode 不存在或刚被 GC 时返回 False
+- 新文件 [services/block_trace/episode_provider.py](services/block_trace/episode_provider.py)：
+  - `EpisodeProvider(store_getter, top_k=3, enabled=True)` — 用 lazy `store_getter` 模式与 `SlangProvider`/`StyleProvider` 对齐，避免 ChatPlugin priority=0 启动时 `episode_store` 还没 attach 到 ctx 的竞态
+  - `_render_episode_line` — 严格按审计 § D.4 verbatim 模板渲染：「曾经在 {situation} 时 {action_taken}，结果 {outcome_signal}，下次：{reflection}」；任一字段空时跳过该 segment 保语法完整；硬截 280 字符防长 reflection 撑爆 prompt
+  - 单 `PromptBlockCandidate` 包多条反思（≤ top_k 行），`source="episode"` / `provider="episode_provider"` / `priority=50`（slang=40 / style profile=42 / style expressions=45 都低于此值，budget manager 按 priority DESC 裁剪时 episode 第一个被砍——审计 § 4 风险表"episode 召回过多导致 prompt 膨胀"明确要求）
+  - `evidence_refs=tuple(episode_ids)` — BlockTraceStore 自动持久化，`find_by_source_ref(source='episode', source_id=ep_id)` 即可定位「哪次回复用了这条反思」（审计验收 1：bot 被纠正一次后，后续同类场景能召回反思）
+  - `last_used_at` 通过 `asyncio.gather(return_exceptions=True)` 并发 stamp，stamp 失败不阻断 prompt 注入
+- [services/block_trace/\_\_init\_\_.py](services/block_trace/__init__.py) export `EpisodeProvider`
+- [plugins/chat/plugin.py](plugins/chat/plugin.py) `provider_bus.register(EpisodeProvider(...))` 接在 SlangProvider/StyleProvider 之后；getter 走 `lambda: getattr(ctx, "episode_store", None)` 与现有模式对齐
+
+**约束遵守**：
+
+- D2 cancel-path：`tests/test_episode_context_provider.py::test_provide_cancel_path_leaves_clean_state` 用 `pytest.raises(asyncio.TimeoutError) + asyncio.wait_for(timeout=0.0)` 模拟取消，断言后续 `list_for_recall` 仍能正常拿到原始 episode、DB 无脏数据
+- D1 同模式扫描：grep `provider_bus.register` 找到 SlangProvider/StyleProvider 两处既有同模式注册点；本次 EpisodeProvider 与之对齐——同样 lazy getter、同样 PromptBlockCandidate 字段集合、同样 char_count = len(text)；唯一区别是 priority=50 是有意的（更低优先，先被裁剪）
+- D4 完成证据：① 同模式扫描结果（slang_provider.py:27 + style_provider.py:17 → episode_provider.py 三件套）；② pytest 1313 通过（test_admin_api 一处 backup_disk 报警断言失败属预存在，与 D.4 无关）；③ ruff/pyright 在 D.4 文件上 0 错；回滚路径：纯 git revert 当次 commit，不动 schema 不动数据
+- D6 admin SPA：本次改动不涉及前端
+
+**审计 § D.4 验收 checklist**（自检）：
+
+- [x] `list_for_recall` 只返 `enabled_for_prompt`：`test_list_for_recall_only_enabled_for_prompt` 验证 dry_run/approved/candidate 三状态都被过滤
+- [x] 群范围隔离：`test_list_for_recall_filters_by_group` + `test_list_for_recall_empty_group_returns_empty`
+- [x] top_k 上限：`test_list_for_recall_respects_limit` + `test_provide_respects_top_k`
+- [x] 渲染格式：`test_provide_renders_audit_format` 验证「曾经在 ... 时 ...，结果 ...，下次：...」四 segment 全在
+- [x] BlockTrace 双写契约：`test_evidence_refs_format_for_blocktrace_lookup` 锁死 evidence_refs 是 raw episode_id 而不是 packed JSON
+- [x] last_used_at 更新：`test_provide_stamps_last_used_at` + `test_update_last_used_stamps_episode`
+- [x] 无新 LLM 调用：provider 全程纯 SQL+字符串，cluster_id 语义匹配留 D.6 备选
+- [x] D2 cancel-path：`test_provide_cancel_path_leaves_clean_state`
+
+**Phase D 整体进度**：
+
+| 子任务 | 状态 | commit |
+| --- | --- | --- |
+| D.1 promote 桥 | ✅ | bf53119 |
+| D.2 admin UX | ✅ | 428907f |
+| D.3 反思生成 | ✅ | 128edf6 |
+| D.4 召回路径 | ✅ | 待 commit |
+| D.5 graph edge 双写 | 🔜 | 下一步 |
+| Phase D 整体验收 | 🔜 | D.5 完成后 |
+
+D.4 完成意味着「学习闭环」首次贯通：admin 在群里收到 negative 反馈 → D.3 生成反思候选 → D.2 admin approve → D.1 自动 promote 到 `EpisodeStore` → admin 手动推 enabled_for_prompt → D.4 在下一次同群对话时召回该反思进 prompt → BlockTrace 留痕审计。
+
+**部署注记**：
+
+- 不涉及 schema migration，重启 bot 即生效
+- 不动 napcat（设备指纹反风控铁律）
+- 不动前端，不需要 vue-tsc/npm run build
+- 24 小时观察期约定（Phase 3 named volume，截至 2026-05-22 16:30）+ 30 天 corruption 观察窗（截至 2026-06-20）继续执行，本变更不重置任何观察期
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase D.3 — 反思生成路径（style_feedback/expressions/slang_drift 三源 → reflection_consolidator → episode 候选）
 
 **变更类型**：feature（services + admin API + tests，无 schema migration、无部署改动、无前端改动）

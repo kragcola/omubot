@@ -886,6 +886,7 @@ class ChatPlugin(AmadeusPlugin):
 
         # ---- prompt provider bus (active mode — providers are sole injection path) ----
         from plugins.style.plugin import StyleConfig as _StyleConfig
+        from services.block_trace.episode_provider import EpisodeProvider
         from services.block_trace.provider_bus import PromptProviderBus
         from services.block_trace.slang_provider import SlangProvider
         from services.block_trace.style_provider import StyleProvider
@@ -912,6 +913,14 @@ class ChatPlugin(AmadeusPlugin):
             max_chars=style_cfg.max_chars,
             min_confidence=style_cfg.min_confidence,
             global_enabled_groups=style_global_groups,
+        ))
+        # D.4 episode recall — only ``enabled_for_prompt`` reflections
+        # surface, ranked below slang/style so the budget manager trims
+        # them first under pressure.
+        provider_bus.register(EpisodeProvider(
+            store_getter=lambda: getattr(ctx, "episode_store", None),
+            top_k=3,
+            enabled=True,
         ))
         llm.set_provider_bus(provider_bus)
         ctx.provider_bus = provider_bus

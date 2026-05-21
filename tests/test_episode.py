@@ -228,3 +228,103 @@ async def test_count_by_state_all_groups(store: EpisodeStore):
     await store.create_episode(situation="b", group_id="g2")
     stats = await store.count_by_state(group_id="")
     assert stats["dry_run"] == 2
+
+
+# ----------------------------------------------------------------------
+# D.4 recall path
+# ----------------------------------------------------------------------
+
+
+async def _seed_enabled(
+    store: EpisodeStore,
+    *,
+    group_id: str = "g1",
+    situation: str = "scene",
+    confidence: float = 0.6,
+) -> str:
+    ep = await store.create_episode(
+        situation=situation, group_id=group_id, confidence=confidence,
+    )
+    await store.transition_state(ep.episode_id, new_state="candidate")
+    await store.transition_state(ep.episode_id, new_state="approved")
+    await store.transition_state(ep.episode_id, new_state="enabled_for_prompt")
+    return ep.episode_id
+
+
+@pytest.mark.asyncio
+async def test_list_for_recall_only_enabled_for_prompt(store: EpisodeStore):
+    visible = await _seed_enabled(store, situation="visible")
+    # plain dry_run — must NOT surface
+    await store.create_episode(situation="hidden_dryrun", group_id="g1")
+    # approved-but-not-enabled — must NOT surface
+    ep_approved = await store.create_episode(
+        situation="hidden_approved", group_id="g1", confidence=0.7,
+    )
+    await store.transition_state(ep_approved.episode_id, new_state="candidate")
+    await store.transition_state(ep_approved.episode_id, new_state="approved")
+
+    out = await store.list_for_recall(group_id="g1", limit=5)
+    assert [e.episode_id for e in out] == [visible]
+
+
+@pytest.mark.asyncio
+async def test_list_for_recall_orders_by_confidence(store: EpisodeStore):
+    low = await _seed_enabled(store, situation="low", confidence=0.55)
+    high = await _seed_enabled(store, situation="high", confidence=0.85)
+
+    out = await store.list_for_recall(group_id="g1", limit=5)
+    assert [e.episode_id for e in out] == [high, low]
+
+
+@pytest.mark.asyncio
+async def test_list_for_recall_filters_by_group(store: EpisodeStore):
+    await _seed_enabled(store, group_id="g1", situation="g1ep")
+    await _seed_enabled(store, group_id="g2", situation="g2ep")
+
+    g1_only = await store.list_for_recall(group_id="g1", limit=5)
+    assert len(g1_only) == 1
+    assert g1_only[0].situation == "g1ep"
+
+
+@pytest.mark.asyncio
+async def test_list_for_recall_empty_group_returns_empty(store: EpisodeStore):
+    await _seed_enabled(store, group_id="g1")
+    # passing empty group must NOT leak to "all groups" — recall is
+    # always group-scoped, audit § D.4
+    out = await store.list_for_recall(group_id="", limit=5)
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_list_for_recall_respects_limit(store: EpisodeStore):
+    for i in range(4):
+        await _seed_enabled(store, situation=f"s{i}", confidence=0.6 + i * 0.05)
+    out = await store.list_for_recall(group_id="g1", limit=2)
+    assert len(out) == 2
+
+
+@pytest.mark.asyncio
+async def test_update_last_used_stamps_episode(store: EpisodeStore):
+    ep_id = await _seed_enabled(store)
+    before = await store.get_episode(ep_id)
+    assert before is not None
+    assert before.last_used_at == ""
+
+    ok = await store.update_last_used(ep_id)
+    assert ok is True
+
+    after = await store.get_episode(ep_id)
+    assert after is not None
+    assert after.last_used_at != ""
+
+
+@pytest.mark.asyncio
+async def test_update_last_used_returns_false_for_unknown(store: EpisodeStore):
+    ok = await store.update_last_used("ep_does_not_exist")
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_update_last_used_handles_empty_id(store: EpisodeStore):
+    ok = await store.update_last_used("")
+    assert ok is False

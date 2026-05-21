@@ -1,6 +1,7 @@
 """BlockTraceBus — prompt-block tracing and budget management."""
 
 from services.block_trace.budget_manager import PromptBudgetManager
+from services.block_trace.episode_provider import EpisodeProvider
 from services.block_trace.providers import ContextProvider, QueryContext
 from services.block_trace.slang_provider import SlangProvider
 from services.block_trace.store import BlockTraceStore
@@ -25,6 +26,7 @@ __all__ = [
     "BlockTraceStore",
     "BudgetDecision",
     "ContextProvider",
+    "EpisodeProvider",
     "PromptBlockCandidate",
     "PromptBlockTrace",
     "PromptBudgetManager",
