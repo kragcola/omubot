@@ -4,6 +4,135 @@
 
 ---
 
+## 2026-05-21 slang.db 反复损坏全栈治本 Phase 3 A 段 — storage 切 docker named volume（仅代码合入，B 段未部署）— TASK-20260521-01 执行完毕
+
+**变更类型**：infra-hard（A 段代码改动；B 段数据迁移待人手部署窗口）
+
+**背景**：
+
+`storage/slang.db` 在 5/11（3 次）、5/17（1 次）、5/20（1 次）反复物理损坏。全栈治本计划已在 Phase 1（commit `100c7d1`，`close_with_checkpoint` + 主机脚本守卫）+ Phase 2（commit `bc41331`/`fc7e591`，slang `journal_mode=DELETE` + hourly quick_check）落下两层，但都是治表——**真正根因是 macOS Docker bind mount 在 fsync ordering 上的漏洞**。Phase 3 把 bot 服务 storage 从 `./storage:/app/storage` 切到 Docker named volume `omubot-storage`（走 Docker VM 内部 ext4），fsync 语义和 Linux 原生一致。
+
+本次（TASK-20260521-01）只落 A 段代码改动，B 段的 5min bot 停机 + volume 创建 + 数据迁移留给人手部署窗口（spec § 用户复制命令段 6），24 小时观察期 + 30 天 corruption 验证才是这条路径的真成功标准。
+
+**A 段改动文件清单**：
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `docker-compose.yml` | 改动 | bot 服务 `./storage:/app/storage` → `omubot-storage:/app/storage`；末尾新增顶级 `volumes: omubot-storage: {driver: local}`；`./config:/app/config:rw` + `./admin/static:/app/admin/static:ro` 保留 bind mount（铁律 D6 + 热重载需要）；napcat 区段 0 diff |
+| `scripts/backup-databases.sh` | 改动 | 切 `docker exec qq-bot uv run python -m services.storage.backup create --host-mode` 模式，前置 `docker ps` 容器存活检查；不再依赖主机 PATH 里有 uv |
+| `scripts/dev/_bot_guard.py` | 改动 | 新增 `storage_is_named_volume()` 通过 `docker compose config --format json` 解析 + `docker volume inspect omubot-storage` 双信号确认；`assert_bot_stopped` 增加 named volume 分支：检测到时即使 bot 已停也拒绝主机 `sqlite3.connect`，提示走 `docker exec` 或 `storage_export.sh` |
+| `scripts/dev/storage_export.sh` | 新建（chmod +x） | 封装 `docker run --rm -v omubot-storage:/src:ro -v ./storage-export:/dst alpine cp -a`；用于回滚导出、人手 db 检查、off-volume 一次性备份 |
+| `maintenance-log.md` | 改动 | 顶部追加本条目 |
+
+**约束遵守**：
+
+- **napcat 全程 0 diff**（铁律 D6）：napcat 服务区段、`./napcat/config` / `./napcat/data` bind mount 完全不动；data volume 切换只针对 bot 服务
+- **services / kernel / plugins / admin / tests / pyproject.toml / uv.lock / docs 0 diff**：只动 docker-compose + 2 个 host 脚本 + 1 个新 host 脚本 + maintenance-log
+- **未引入新 Python 依赖**
+
+**外部可观察证据**（D4）：
+
+```text
+$ grep -q '^  omubot-storage:' docker-compose.yml && echo OK-volume-declared
+$ grep -q 'omubot-storage:/app/storage' docker-compose.yml && echo OK-bot-uses-named-volume
+$ ! grep -q '\./storage:/app/storage' docker-compose.yml && echo OK-bind-mount-removed
+$ grep -q '\./config:/app/config' docker-compose.yml && echo OK-config-still-bindmount
+$ grep -q '\./admin/static:/app/admin/static' docker-compose.yml && echo OK-static-still-bindmount
+$ grep -q 'docker exec' scripts/backup-databases.sh && echo OK-backup-script-uses-exec
+$ grep -q 'omubot-storage\|storage_is_named_volume' scripts/dev/_bot_guard.py && echo OK-guard-volume-aware
+$ test -x scripts/dev/storage_export.sh && echo OK-export-script-exists
+# 全部输出 OK-*
+
+$ uv run ruff check  →  All checks passed
+$ uv run pyright     →  457 errors, 1 warning  (== baseline, 0 退步)
+$ uv run pytest -q   →  1244 passed, 8 skipped in 12.73s
+```
+
+**B 段部署步骤**（人手，未执行，spec § 6 已就绪）：
+
+```bash
+docker compose stop bot                               # napcat 不停
+cp -a storage "storage.bind-mount-snapshot-$(date +%Y%m%d-%H%M%S)"
+docker volume create omubot-storage
+docker run --rm -v "$PWD/storage":/src -v omubot-storage:/dst \
+  alpine sh -c "cp -a /src/. /dst/"
+dot_clean . && docker compose up bot -d --build
+docker exec qq-bot sqlite3 storage/slang.db \
+  "PRAGMA quick_check; PRAGMA journal_mode;"          # 期望 ok / delete
+```
+
+**回滚路径**（人手，spec § 8）：
+
+```bash
+docker compose stop bot
+git revert <Phase3-commit>                            # 反向 patch docker-compose.yml
+./scripts/dev/storage_export.sh
+rm -rf storage && mv storage-export storage
+docker compose up bot -d --build
+docker volume rm omubot-storage
+```
+
+**24 小时观察期约定**：
+
+- B 段部署后 24h 内每小时 quick_check tick 全绿（admin 「运行时错误」面板无新红条）、backup_scheduler 正常滚动、无 `database disk image is malformed` 即视为通过；spec § 状态勾掉 `[ ] 24h 观察期通过`
+- 30 天后再删除 `storage.bind-mount-snapshot-*`
+
+**与 Phase 1 / Phase 2 的关系**：
+
+| Phase | 修复层级 | 防御对象 |
+|---|---|---|
+| Phase 1 (`100c7d1`) | 代码层 | close 时 `wal_checkpoint(TRUNCATE)` 把 WAL 帧塞回 main db |
+| Phase 2 (`fc7e591`+`bc41331`) | 数据层 | slang `journal_mode=DELETE` + `synchronous=FULL` 完全规避 WAL；hourly quick_check 早发现 |
+| Phase 3 A 段（本条目） | 基础设施层 | bind mount → named volume，从根本消除 macOS Docker fsync 排序漏洞 |
+
+三层叠加；任一 Phase 单独存在都不足以根治反复损坏。
+
+[维护日志索引 — 最近 15 条 / 共 145 条；按需 `Read maintenance-log.md offset=N` 查看]
+
+---
+
+## 2026-05-21 codex 切回原生 — 弃用 CPA / codeseeq DeepSeek 路径
+
+**变更类型**：local ops / Codex workflow
+
+**背景**：
+
+5/19 一晚上把 codex 三次往 DeepSeek 上接（CPA → CPA + fixup sidecar → codeseeq bridge），现在用户要换接官方 GPT，需要把 codex 路径回到官方默认（直连 OpenAI / 用户后续填写的官方 base_url），停掉所有本机代理与 wrapper。
+
+**变更内容**：
+
+- [~/.codex/config.toml](~/.codex/config.toml)：备份为 `config.toml.pre-revert-2026-05-21` 后重写——删除 `model_provider = "custom"` / `model = "ds/deepseek-v4-pro"` / `model_reasoning_effort` / `model_context_window` / `model_auto_compact_token_limit` / 顶层 `profile = "auto-max"` / `[model_providers]`+`[model_providers.custom]` / `[profiles.auto-max]` / `[profiles.review]`。保留 sandbox / approval / file_opener / web_search / [history] / [tui] / [shell_environment_policy] / [sandbox_workspace_write] / [features] / [notice] / [projects.*]。codex 启动后走 OpenAI 官方默认 model（用户接入官方 GPT 时再按需填 model 与 base_url）
+- [~/Library/Application Support/Code/User/settings.json](~/Library/Application Support/Code/User/settings.json)：备份为同名 `.pre-revert-2026-05-21` 后删除 `chatgpt.cliExecutable`（原指向 `local/cpa/codeseeq-vscode.sh`）。VS Code Codex 扩展回到默认 codex CLI 解析
+- 进程清理（kill -TERM 全部成功收尾）：
+  - `node /Users/kragcola/.npm-global/bin/codex` PID 8984 + 子进程 codex app-server PID 8997（之前连着 `deepseek@deepseek-v4-pro`）
+  - `cpa-helper` PID 36485（10h uptime）
+  - `cli-proxy-api -config config.native.yaml` PID 49388（CPA 本体，监听 :8317）
+  - `codeseeq-bridge.py` PID 69988
+- 端口确认：`:8317` / `:8318` / `:8080` 全部无监听
+- 不动文件：[local/cpa/](local/cpa/) 目录原样保留（cpa-fixup-sidecar / codeseeq-vscode.sh / config.native.yaml 等），只是不再被任何活跃进程或配置引用；如需彻底移除可后续单独清理
+
+**回滚路径**：
+
+```bash
+cp ~/.codex/config.toml.pre-revert-2026-05-21 ~/.codex/config.toml
+cp "/Users/kragcola/Library/Application Support/Code/User/settings.json.pre-revert-2026-05-21" \
+   "/Users/kragcola/Library/Application Support/Code/User/settings.json"
+# 重启 CPA + sidecar：
+cd /Users/kragcola/OmubotWorkspace/omubot/local/cpa
+./bin/cli-proxy-api -config config.native.yaml &   # :8317
+./cpa-fixup-sidecar-ctl.sh start                   # :8318
+```
+
+**生效条件**：
+
+VS Code Codex 扩展需重启窗口/会话才会丢掉对 `codeseeq-vscode.sh` 的引用并重读官方 codex CLI；裸 codex CLI 立刻生效。
+
+**待用户操作**：
+
+接入官方 GPT 时按 OpenAI 官方文档在 `~/.codex/config.toml` 顶层加 `model_provider` / `model` 与 `[model_providers.<name>]`（含 `base_url`）；当前 `auth.json` 已存在 OpenAI 凭据（81 字节）。
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase C — MemoryConsolidator dry-run + admin 队列 — TASK-20260521-03 执行完毕
 
 **变更类型**：feature / dry-run（runtime 0 副作用，不入生产 store）

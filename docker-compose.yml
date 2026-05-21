@@ -29,8 +29,12 @@ services:
     depends_on:
       - napcat
     volumes:
-      - ./storage:/app/storage
+      - omubot-storage:/app/storage
       - ./config:/app/config:rw
       - ./admin/static:/app/admin/static:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+volumes:
+  omubot-storage:
+    driver: local

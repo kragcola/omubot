@@ -8,6 +8,13 @@ host inode while the container holds WAL/shm locks via the Docker bind
 mount, and the two do not see each other's lock state. This is one of the
 contributing factors to slang.db corruption.
 
+After Phase 3 (TASK-20260521-01) the storage volume becomes a Docker
+named volume (`omubot-storage`); the host has no direct path to the live
+db files at all. Any host-side `sqlite3.connect("storage/...")` would
+either touch a stale leftover file or fail outright. So the guard also
+refuses to proceed when a named volume is detected, regardless of whether
+the bot container is running.
+
 Usage:
     from scripts.dev._bot_guard import assert_bot_stopped
 
@@ -27,6 +34,7 @@ import sys
 from typing import Any
 
 BOT_SERVICE_NAME = "bot"
+NAMED_VOLUME_NAME = "omubot-storage"
 
 
 def _docker_compose_json() -> list[dict[str, Any]]:
@@ -83,8 +91,59 @@ def is_bot_running() -> bool:
     return False
 
 
+def storage_is_named_volume() -> bool:
+    """Detect whether the bot service mounts storage as the named volume.
+
+    Two signals must agree, and both are best-effort:
+      - `docker compose config --format json` lists service `bot` with a
+        named-volume entry whose source/name is `omubot-storage`
+      - `docker volume inspect omubot-storage` exits 0
+
+    Returns False on any tooling failure — callers must treat unknown as
+    "still bind mount" so we don't accidentally lock out the legacy path.
+    """
+    if shutil.which("docker") is None:
+        return False
+    config_signal = False
+    try:
+        proc = subprocess.run(
+            ["docker", "compose", "config", "--format", "json"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout or "{}")
+            services = data.get("services") if isinstance(data, dict) else None
+            bot_svc = (services or {}).get(BOT_SERVICE_NAME) or {}
+            for vol in bot_svc.get("volumes") or []:
+                if not isinstance(vol, dict):
+                    continue
+                if vol.get("type") != "volume":
+                    continue
+                if vol.get("target") != "/app/storage":
+                    continue
+                source = str(vol.get("source") or "")
+                if source == NAMED_VOLUME_NAME:
+                    config_signal = True
+                    break
+    except Exception:
+        return False
+    if not config_signal:
+        return False
+    try:
+        proc = subprocess.run(
+            ["docker", "volume", "inspect", NAMED_VOLUME_NAME],
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return False
+    return proc.returncode == 0
+
+
 def assert_bot_stopped(*, action: str, force: bool = False) -> None:
-    """Refuse to proceed when the bot container is still running.
+    """Refuse to proceed when the bot container is still running, or when
+    storage has migrated to a named volume.
 
     Exits the process with status 2 unless `force=True`. Prints a loud
     warning when forced — running write paths against a live SQLite file
@@ -95,6 +154,26 @@ def assert_bot_stopped(*, action: str, force: bool = False) -> None:
         # We cannot tell either way; let the script continue and rely on
         # the operator knowing what they're doing.
         return
+    named_volume = storage_is_named_volume()
+    if named_volume:
+        if force:
+            print(
+                f"[guard] WARNING: storage is now a docker named volume "
+                f"({NAMED_VOLUME_NAME}); host-side {action!r} cannot reach "
+                f"the live db files. --force will proceed but writes will "
+                f"land on a stale or empty path. Use "
+                f"`docker exec qq-bot ...` instead.",
+                file=sys.stderr,
+            )
+            return
+        print(
+            f"[guard] storage is a docker named volume ({NAMED_VOLUME_NAME}); "
+            f"refusing to {action} from the host. The live db lives inside "
+            f"the bot container. Use `docker exec qq-bot uv run python -m ...` "
+            f"or `scripts/dev/storage_export.sh` to export a working copy.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if not is_bot_running():
         return
     if force:
