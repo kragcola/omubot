@@ -4,6 +4,81 @@
 
 ---
 
+## 2026-05-21 slang.db 反复损坏全栈治本 Phase 1 — close_with_checkpoint + 主机脚本守卫
+
+**变更类型**：fix / storage + scripts（纯代码层、零 infra）
+
+**背景**：
+
+`storage/slang.db` 在 2026-05-11（3 次）、2026-05-17（1 次）、2026-05-20（最近一次）反复物理损坏，每 5–10 天一次。根因分析（plan：`/Users/kragcola/.claude/plans/modular-forging-allen.md`）：
+
+- macOS Docker bind mount + SQLite WAL + `synchronous=NORMAL` 在重启 / checkpoint 时存在 fsync 排序漏洞——崩溃可能在 close 与 next-open 之间重放乱序 WAL frame，叠加在 main db 上，导致多棵 b-tree 页号失效（典型形态：`invalid page number 7xxx`）
+- `scripts/dev/slang_*.py` 共 6 个写路径脚本默认 `--db storage/slang.db` 直指 live DB，其中只有 `slang_db_repair.py` 在 `default/recover --apply` 路径有 `_is_bot_running()` 守卫；其余 5 个脚本绕过守卫——主机 `sqlite3.connect` 与容器 bot WAL 锁的跨进程锁定域不互见，是损坏的另一来源
+- `slang_db_repair.py` 的 `_sqlite_recover` 用 `text=True` 把 sqlite3 `.recover` stdout 当 UTF-8 解码，corrupt b-tree 页可能含非 UTF-8 字节，修复脚本本身会 `UnicodeDecodeError` 拒绝运行
+
+用户决定：**3 阶段全治本**——同时修代码、PRAGMA、运维三层。本次仅 Phase 1（纯 .py 改动，零 infra）。
+
+**Phase 1 改动**：
+
+**\#3 优雅关闭时 `wal_checkpoint(TRUNCATE)`**：
+
+- 新增 [services/storage/sqlite.py](services/storage/sqlite.py) 工具函数 `close_with_checkpoint` / `close_with_checkpoint_sync`：在 `await db.close()` 前 best-effort 执行 `PRAGMA wal_checkpoint(TRUNCATE)`，把 WAL 内容压回 main db 文件。失败仅记 warn 日志、close 仍继续。两个版本都 None-guard，cancel-path 安全。
+- 6 个 store close 路径全部接入：
+  - [services/slang/store.py](services/slang/store.py) `SlangStore.close`
+  - [services/memory/message_log.py](services/memory/message_log.py) `MessageLog.close`
+  - [services/memory/card_store.py](services/memory/card_store.py) `CardStore.close`
+  - [services/knowledge_graph/store.py](services/knowledge_graph/store.py) `KnowledgeGraphStore.close`
+  - [services/knowledge/store.py](services/knowledge/store.py) `KnowledgeIndexStore.close`（sync 版）
+  - [services/block_trace/store.py](services/block_trace/store.py) `BlockTraceStore.close`（已 untracked，本次随 commit-1 不动；后续会随 block_trace 整体落地）
+- 补齐缺失的 close 调用：
+  - [plugins/chat/plugin.py](plugins/chat/plugin.py) `on_shutdown` 新增 `await ctx.card_store.close()`（之前漏关 → CardStore WAL 留在 fsync 不确定状态）
+  - [plugins/knowledge/plugin.py](plugins/knowledge/plugin.py) **没有 on_shutdown** —— 新增一个，负责关 `KnowledgeIndexStore`（sync close）
+
+**\#5 主机 slang 脚本统一 bot-running 守卫**：
+
+- 新建 [scripts/dev/_bot_guard.py](scripts/dev/_bot_guard.py)：`assert_bot_stopped(action, force)` 共享模块。`docker compose ps --format json` 检测 bot 容器 `State == "running"` 时退出码 2；`--force` 路径打印警告继续。`docker` CLI 不可用时回退到"当作 stopped"——开发机操作员自负责。
+- 5 个写路径脚本接入守卫：
+  - `slang_batch_merge_collisions.py` / `slang_collision_auto_merge.py` / `slang_meta_migration_p02.py` / `style_seed_approved.py` / `slang_db_repair.py` 的 rebuild + recover --apply 路径
+- 3 个只读脚本（`slang_acceptance_check.py` / `slang_alias_collision_report.py` / `slang_semantic_smoke.py`）不加守卫，与写路径区分
+
+**\#6 修 `_sqlite_recover` UTF-8 解码 bug**：
+
+- [scripts/dev/slang_db_repair.py](scripts/dev/slang_db_repair.py) `_sqlite_recover` 两处 `subprocess.run` 都改 `text=False`，stdout/stdin 在两个 sqlite3 进程之间走 raw bytes，Python 层不解码。仅在错误路径用 `errors="replace"` 把 stderr 拼成可读消息。
+
+**验证**：
+
+- 新增 [tests/test_storage_sqlite.py](tests/test_storage_sqlite.py)：5 个 case，包含 D2 cancel-path 回归（`asyncio.wait_for(close_with_checkpoint, timeout=0.0001)` + `pytest.raises(asyncio.TimeoutError)`），断言外部状态干净；happy + None guard + sync 全覆盖。`pytest tests/test_storage_sqlite.py`：5 passed in 0.05s。
+- 新增 [tests/test_slang_db_integrity.py](tests/test_slang_db_integrity.py)：6 case，corrupt-DB 整体性合约——断言 `SlangDatabaseCorruptError` 容错 init 路径在 admin API 层兼容（不会让 admin 整站 500）。6 passed。
+- 全 store close 类测试套件复跑：98 passed in 0.92s。
+- `ruff check` 触及文件零错误；`pyright` 没有引入新错误（116 个全部 pre-existing，与 stash 前对比一致）。
+
+**Commit 拆分**：
+
+- `40656a0` fix(storage): wal_checkpoint(TRUNCATE) on graceful close — 9 modified tracked + 2 新测试
+- `227bc7f` fix(scripts): host slang dev scripts — bot-running guard + .recover UTF-8 fix — `_bot_guard.py` + `slang_db_repair.py` UTF-8 + 4 脚本守卫 + 3 只读脚本（同批落地）
+
+**影响范围**：
+
+- 重启 bot 时每个 store 多一次 `wal_checkpoint(TRUNCATE)` SQL（WAL 大小决定耗时；本机典型 < 50ms），可承受
+- 主机侧任何写路径脚本必须先 `docker compose stop bot` 才能跑，否则被守卫拒绝（这是预期行为）
+- 修复后 `slang_db_repair.py recover` 在 corrupt 文件含非 UTF-8 字节时不再误报
+
+**与 2026-05-17 BackupScheduler 上线的关系**：
+
+那次是 RPO（"我们最多丢多少时间窗"），本次是 prevention（"少损坏一次")。两者互补——backup 是兜底，close_with_checkpoint 是消除 WAL 漂移源；Phase 2 会加 hourly quick_check 让 BackupScheduler 在损坏发生时立即报警 + 紧急备份干净状态。
+
+**后续动作**：
+
+- 部署窗口：今天/明天选低峰时段 `dot_clean . && docker compose up bot -d --build`（**铁律：napcat 不动**）；shutdown 日志预期 6 个 store 都打 `wal_checkpoint truncate ok`，重启后 `storage/*.db-wal` 都应是 0 字节
+- 24h 观察期后启动 Phase 2：slang journal_mode=DELETE + BackupScheduler hourly quick_check + admin 告警
+- 30 天观察窗口：判断 close_with_checkpoint + DELETE 模式（Phase 2 后）能否完全消除 corruption；如能，Phase 3 storage → named volume 仍按计划做（彻底消除根因），但优先级可降为 nice-to-have
+
+**回滚**：
+
+纯 `git revert 227bc7f 40656a0` 即可，不涉及数据迁移；DB 文件格式向前兼容。
+
+---
+
 ## 2026-05-19 仪表盘 24h 调用曲线 → 管线命中率视图
 
 **变更类型**：feat / admin-frontend + backend
