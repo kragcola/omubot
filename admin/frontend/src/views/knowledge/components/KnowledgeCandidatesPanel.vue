@@ -55,14 +55,22 @@ const emit = defineEmits<{
               placeholder="拒绝备注，可选"
             />
             <NSpace justify="end" :size="8">
-              <NButton
-                secondary
-                type="error"
-                :loading="candidateBusy === candidate.candidate_id"
-                @click="emit('reject', candidate)"
+              <NPopconfirm
+                :positive-text="'确认拒绝'"
+                :negative-text="'取消'"
+                @positive-click="emit('reject', candidate)"
               >
-                拒绝
-              </NButton>
+                <template #trigger>
+                  <NButton
+                    secondary
+                    type="error"
+                    :loading="candidateBusy === candidate.candidate_id"
+                  >
+                    拒绝
+                  </NButton>
+                </template>
+                拒绝后该候选不再进入图谱，确认？
+              </NPopconfirm>
               <NButton
                 type="primary"
                 :loading="candidateBusy === candidate.candidate_id"

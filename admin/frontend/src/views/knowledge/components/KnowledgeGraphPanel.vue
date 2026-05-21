@@ -76,15 +76,23 @@ const emit = defineEmits<{
               class="graph-scope-risk__item"
             >
               <span>{{ rel.subject }} {{ rel.predicate }} {{ rel.object }}</span>
-              <NButton
-                size="tiny"
-                secondary
-                type="warning"
-                :loading="factBusy === rel.fact_id"
-                @click="emit('rollback', rel)"
+              <NPopconfirm
+                :positive-text="'确认回滚'"
+                :negative-text="'取消'"
+                @positive-click="emit('rollback', rel)"
               >
-                回滚
-              </NButton>
+                <template #trigger>
+                  <NButton
+                    size="tiny"
+                    secondary
+                    type="warning"
+                    :loading="factBusy === rel.fact_id"
+                  >
+                    回滚
+                  </NButton>
+                </template>
+                回滚后该事实从图谱移除，确认？
+              </NPopconfirm>
             </div>
           </div>
         </NAlert>
@@ -122,14 +130,22 @@ const emit = defineEmits<{
                 clearable
                 placeholder="回滚备注，可选"
               />
-              <NButton
-                secondary
-                type="warning"
-                :loading="factBusy === rel.fact_id"
-                @click="emit('rollback', rel)"
+              <NPopconfirm
+                :positive-text="'确认回滚'"
+                :negative-text="'取消'"
+                @positive-click="emit('rollback', rel)"
               >
-                回滚事实
-              </NButton>
+                <template #trigger>
+                  <NButton
+                    secondary
+                    type="warning"
+                    :loading="factBusy === rel.fact_id"
+                  >
+                    回滚事实
+                  </NButton>
+                </template>
+                回滚后该事实从图谱移除，确认？
+              </NPopconfirm>
             </div>
             <div class="relationship-card__supersede">
               <NInput
@@ -148,14 +164,22 @@ const emit = defineEmits<{
                 v-model:value="supersedeDrafts[rel.fact_id].note"
                 placeholder="取代说明，可选"
               />
-              <NButton
-                type="primary"
-                secondary
-                :loading="factBusy === rel.fact_id"
-                @click="emit('supersede', rel)"
+              <NPopconfirm
+                :positive-text="'确认取代'"
+                :negative-text="'取消'"
+                @positive-click="emit('supersede', rel)"
               >
-                取代事实
-              </NButton>
+                <template #trigger>
+                  <NButton
+                    type="primary"
+                    secondary
+                    :loading="factBusy === rel.fact_id"
+                  >
+                    取代事实
+                  </NButton>
+                </template>
+                新事实将取代旧事实，确认？
+              </NPopconfirm>
             </div>
           </div>
         </AppCard>

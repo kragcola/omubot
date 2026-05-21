@@ -679,9 +679,21 @@ PR1 不做的事（推到 PR2 / PR3）：① 不动 NTabs / 不引入 AdminDrawe
 
 回滚：`git revert <commit>`，再 `rm admin/frontend/src/views/knowledge/components/KnowledgeSidebar.vue` 即恢复（不动其他 KnowledgeView 拆分阶段成果）。
 
-#### PR2 信息架构（AdminDrawer + 删 NTabs + NPopconfirm）— 待开
+#### PR2 信息架构（AdminDrawer + 删 NTabs admin 三 tab + NPopconfirm）— ✅ 2026-05-21
 
-按 [/Users/kragcola/.claude/plans/modular-forging-allen.md](/Users/kragcola/.claude/plans/modular-forging-allen.md) PR2 段落执行。
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeAdminDrawer.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeAdminDrawer.vue) — `<NDrawer width="720" placement="right">` + `<NDrawerContent title="知识库管理" closable>` + 顶部 hint + 内置 `<NTabs type="line">` 三 tab（候选 / 图谱 / 节点），每个 tab 顶部一行 toolbar（标题 + 简介 + 刷新按钮）+ 透明 wrap 现有 [KnowledgeCandidatesPanel](../../admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue) / [KnowledgeGraphPanel](../../admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue) / [KnowledgeGraphNodesPanel](../../admin/frontend/src/views/knowledge/components/KnowledgeGraphNodesPanel.vue)。9 v-model + 9 emit。**新增 192 行**
+- [admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue) — 拒绝按钮包 NPopconfirm（"拒绝后该候选不再进入图谱，确认？"）
+- [admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue) — 3 处包 NPopconfirm：scope-risk 回滚、事实回滚、事实取代
+- [admin/frontend/src/views/knowledge/helpers/types.ts](../../admin/frontend/src/views/knowledge/helpers/types.ts) — `KnowledgeTab` 拆分为 `KnowledgeTab`（用户侧 4：sources/search/context/metrics）+ `KnowledgeAdminTab`（管理员 3：candidates/graph/graph_nodes）
+- [admin/frontend/src/views/knowledge/KnowledgeView.vue](../../admin/frontend/src/views/knowledge/KnowledgeView.vue) — 删 3 个 admin NTabPane（共 ~80 行）；删 KnowledgeCandidatesPanel / KnowledgeGraphNodesPanel / KnowledgeGraphPanel / RefreshOutline 直接 import；新增 `adminDrawerOpen` + `adminActiveTab` ref；`handleOpenAdmin` 从"切 NTabs"改成"打开 drawer + 定位 tab"；`#action` slot 加 `<NButton quaternary>管理</NButton>`；template 末尾追加 `<KnowledgeAdminDrawer>` 实例（9 v-model + 9 prop + 9 emit handler）。**净 -39 行**（779 → 740）
+
+D1 同模式扫描：5 处 NPopconfirm（PR1 sidebar reindex + PR2 reject + 2×rollback + supersede）覆盖全部高破坏性按钮，与 SlangView 纪律对齐。
+
+验证：`vue-tsc --noEmit` 0 error；`vite build` 5.36s；bundle `KnowledgeView-*.js` 55.86 → **61.60 KB / gzip 16.13 → 17.20**（+5.74 / +1.07，drawer + 4 NPopconfirm 的合理增量；PR3 删 KnowledgeSearch.vue 后部分回吐）。
+
+浏览器侧（待用户验收）：① KnowledgeView 顶部 NTabs 仅剩用户侧 4 tab；② 点击"管理"按钮打开右侧 720px drawer，3 admin tab 切换工作；③ sidebar warn chip 点击自动打开 drawer 并定位（跳过源 → graph_nodes / 候选待审 → candidates / 作用域待查 → graph）；④ 4 个 NPopconfirm 触发顺畅；⑤ 候选 / 图谱 / 节点行为与原 NTab 完全一致（透明 wrap）。
+
+回滚：`git revert <commit>`，再 `rm admin/frontend/src/views/knowledge/components/KnowledgeAdminDrawer.vue` 即恢复（透明 wrap 纪律下子组件 props/emits 不变，回滚自动还原 7-tab）。
 
 #### PR3 用户侧 Workspace 收口 — 待开
 

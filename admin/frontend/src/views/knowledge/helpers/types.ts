@@ -11,9 +11,11 @@ export type KnowledgeTab =
   | 'search'
   | 'context'
   | 'metrics'
+
+export type KnowledgeAdminTab =
+  | 'candidates'
   | 'graph'
   | 'graph_nodes'
-  | 'candidates'
 
 export interface KnowledgeStats {
   loaded?: boolean

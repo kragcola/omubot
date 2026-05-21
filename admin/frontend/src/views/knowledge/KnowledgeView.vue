@@ -1,14 +1,11 @@
 <script setup lang="ts">
-import { RefreshOutline } from '@vicons/ionicons5'
 import { useMessage } from 'naive-ui'
 
 import { api } from '../../api/client'
 import AppPage from '../../components/common/AppPage.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
-import KnowledgeCandidatesPanel from './components/KnowledgeCandidatesPanel.vue'
+import KnowledgeAdminDrawer from './components/KnowledgeAdminDrawer.vue'
 import KnowledgeContextPanel from './components/KnowledgeContextPanel.vue'
-import KnowledgeGraphNodesPanel from './components/KnowledgeGraphNodesPanel.vue'
-import KnowledgeGraphPanel from './components/KnowledgeGraphPanel.vue'
 import KnowledgeHero from './components/KnowledgeHero.vue'
 import KnowledgeMetricsPanel from './components/KnowledgeMetricsPanel.vue'
 import KnowledgeSearch from './components/KnowledgeSearch.vue'
@@ -24,6 +21,7 @@ import type {
   GraphNodeRow,
   GraphNodeStats,
   GraphRelationship,
+  KnowledgeAdminTab,
   KnowledgeResult,
   KnowledgeSource,
   KnowledgeStats,
@@ -34,6 +32,8 @@ import type {
 const message = useMessage()
 
 const activeTab = ref<KnowledgeTab>('sources')
+const adminDrawerOpen = ref(false)
+const adminActiveTab = ref<KnowledgeAdminTab>('candidates')
 const loading = ref(true)
 const refreshing = ref(false)
 const reindexing = ref(false)
@@ -534,7 +534,8 @@ function syncSupersedeDrafts() {
 }
 
 function handleOpenAdmin(tab: 'candidates' | 'graph' | 'graph_nodes') {
-  activeTab.value = tab
+  adminActiveTab.value = tab
+  adminDrawerOpen.value = true
 }
 </script>
 
@@ -549,6 +550,13 @@ function handleOpenAdmin(tab: 'candidates' | 'graph' | 'graph_nodes') {
         <NTag round size="small" :type="available ? 'success' : 'warning'">
           {{ available ? '运行中' : '未启用' }}
         </NTag>
+        <NButton
+          quaternary
+          size="small"
+          @click="adminDrawerOpen = true"
+        >
+          管理
+        </NButton>
       </NSpace>
     </template>
 
@@ -634,91 +642,6 @@ function handleOpenAdmin(tab: 'candidates' | 'graph' | 'graph_nodes') {
             />
           </NSpin>
         </NTabPane>
-
-        <NTabPane name="graph" tab="图谱关系">
-          <PageToolbar class="mb-16">
-            <template #left>
-              <span class="knowledge-toolbar__title">已生效事实</span>
-              <span class="knowledge-toolbar__hint">图谱是派生事实层，可重建、可回滚，不替代记忆卡片。</span>
-            </template>
-            <template #right>
-              <NButton secondary :loading="graphLoading" @click="loadGraph">
-                刷新图谱
-              </NButton>
-            </template>
-          </PageToolbar>
-
-          <KnowledgeGraphPanel
-            v-model:fact-rollback-notes="factRollbackNotes"
-            v-model:supersede-drafts="supersedeDrafts"
-            :graph-entities="graphEntities"
-            :graph-relationships="graphRelationships"
-            :graph-scope-risks="graphScopeRisks"
-            :graph-loading="graphLoading"
-            :graph-unsupported="graphUnsupported"
-            :fact-busy="factBusy"
-            @rollback="rollbackRelationship"
-            @supersede="supersedeRelationship"
-          />
-        </NTabPane>
-
-        <NTabPane name="candidates" tab="候选队列">
-          <PageToolbar class="mb-16">
-            <template #left>
-              <span class="knowledge-toolbar__title">待审核候选</span>
-              <span class="knowledge-toolbar__hint">中置信事实进入这里，人工通过后才写入图谱。</span>
-            </template>
-            <template #right>
-              <NButton secondary :loading="candidateLoading" @click="loadCandidates">
-                刷新候选
-              </NButton>
-            </template>
-          </PageToolbar>
-
-          <KnowledgeCandidatesPanel
-            v-model:reject-notes="rejectNotes"
-            :candidates="candidates"
-            :candidate-loading="candidateLoading"
-            :candidate-busy="candidateBusy"
-            :graph-unsupported="graphUnsupported"
-            @approve="approveCandidate"
-            @reject="rejectCandidate"
-          />
-        </NTabPane>
-
-        <NTabPane name="graph_nodes" tab="图谱节点">
-          <PageToolbar class="mb-16">
-            <template #left>
-              <span class="knowledge-toolbar__title">图谱节点 / 边</span>
-              <span class="knowledge-toolbar__hint">通用图层：术语、风格、片段、事实统一以节点+边形式投影。Phase D Consolidator 会自动写入。</span>
-            </template>
-            <template #right>
-              <NButton secondary :loading="graphNodeLoading" @click="loadGraphNodes">
-                刷新节点
-              </NButton>
-            </template>
-          </PageToolbar>
-
-          <KnowledgeGraphNodesPanel
-            v-model:graph-node-filter-type="graphNodeFilterType"
-            v-model:graph-node-filter-group="graphNodeFilterGroup"
-            v-model:graph-node-search="graphNodeSearch"
-            v-model:graph-node-drawer-open="graphNodeDrawerOpen"
-            :graph-nodes="graphNodes"
-            :graph-node-total-count="graphNodeTotalCount"
-            :graph-edge-total-count="graphEdgeTotalCount"
-            :graph-node-top-type="graphNodeTopType"
-            :graph-edge-top-type="graphEdgeTopType"
-            :graph-node-loading="graphNodeLoading"
-            :graph-nodes-unsupported="graphNodesUnsupported"
-            :graph-node-drawer-node="graphNodeDrawerNode"
-            :graph-node-drawer-edges="graphNodeDrawerEdges"
-            :graph-node-drawer-loading="graphNodeDrawerLoading"
-            @reload="loadGraphNodes"
-            @clear-filters="clearGraphNodeFilters"
-            @open-detail="openGraphNodeDetail"
-          />
-        </NTabPane>
           </NTabs>
         </div>
         <KnowledgeSidebar
@@ -736,6 +659,46 @@ function handleOpenAdmin(tab: 'candidates' | 'graph' | 'graph_nodes') {
           @open-admin="handleOpenAdmin"
         />
       </div>
+
+      <KnowledgeAdminDrawer
+        v-model:visible="adminDrawerOpen"
+        v-model:active-tab="adminActiveTab"
+        v-model:fact-rollback-notes="factRollbackNotes"
+        v-model:supersede-drafts="supersedeDrafts"
+        v-model:reject-notes="rejectNotes"
+        v-model:graph-node-filter-type="graphNodeFilterType"
+        v-model:graph-node-filter-group="graphNodeFilterGroup"
+        v-model:graph-node-search="graphNodeSearch"
+        v-model:graph-node-drawer-open="graphNodeDrawerOpen"
+        :graph-entities="graphEntities"
+        :graph-relationships="graphRelationships"
+        :graph-scope-risks="graphScopeRisks"
+        :graph-loading="graphLoading"
+        :graph-unsupported="graphUnsupported"
+        :fact-busy="factBusy"
+        :candidates="candidates"
+        :candidate-loading="candidateLoading"
+        :candidate-busy="candidateBusy"
+        :graph-nodes="graphNodes"
+        :graph-node-total-count="graphNodeTotalCount"
+        :graph-edge-total-count="graphEdgeTotalCount"
+        :graph-node-top-type="graphNodeTopType"
+        :graph-edge-top-type="graphEdgeTopType"
+        :graph-node-loading="graphNodeLoading"
+        :graph-nodes-unsupported="graphNodesUnsupported"
+        :graph-node-drawer-node="graphNodeDrawerNode"
+        :graph-node-drawer-edges="graphNodeDrawerEdges"
+        :graph-node-drawer-loading="graphNodeDrawerLoading"
+        @reload-graph="loadGraph"
+        @reload-candidates="loadCandidates"
+        @reload-graph-nodes="loadGraphNodes"
+        @rollback="rollbackRelationship"
+        @supersede="supersedeRelationship"
+        @approve="approveCandidate"
+        @reject="rejectCandidate"
+        @clear-graph-node-filters="clearGraphNodeFilters"
+        @open-graph-node-detail="openGraphNodeDetail"
+      />
     </template>
   </AppPage>
 </template>

@@ -4,6 +4,67 @@
 
 ---
 
+## 2026-05-21 KnowledgeView 简化重构 PR2 — AdminDrawer + 删 NTabs admin 三 tab + NPopconfirm
+
+**变更类型**：refactor（admin/frontend，仅 .vue + index.html，无后端 / schema / 部署）
+
+**背景**：
+
+PR1 把 sidebar warn chip 的"看到数字一键跳"链路落了 fallback（emit → 切 NTabs）；PR2 治本：① 顶部 NTabs 7 → 4（删 candidates / graph / graph_nodes 三个管理员 tab），新增"管理"按钮 + 右侧 KnowledgeAdminDrawer（width 720，内置 NTabs 三 tab）；② sidebar warn chip 接通"打开 drawer 并定位到对应 tab"；③ 4 个高破坏性按钮全部包 NPopconfirm（拒绝候选 / scope-risk 回滚 / 事实回滚 / 事实取代），与 PR1 sidebar reindex 的 NPopconfirm 形成统一治理纪律。
+
+**改动文件**：
+
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeAdminDrawer.vue](admin/frontend/src/views/knowledge/components/KnowledgeAdminDrawer.vue) — `<NDrawer width="720" placement="right">` + `<NDrawerContent title="知识库管理" closable>` + 顶部 hint + 内置 `<NTabs type="line">` 三 tab（候选队列 / 图谱关系 / 图谱节点）；每个 tab 顶部一行 toolbar（标题 + 简介 + 刷新按钮）+ 透明 wrap 现有 [KnowledgeCandidatesPanel](admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue) / [KnowledgeGraphPanel](admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue) / [KnowledgeGraphNodesPanel](admin/frontend/src/views/knowledge/components/KnowledgeGraphNodesPanel.vue)；9 个 v-model（visible / activeTab / factRollbackNotes / supersedeDrafts / rejectNotes / 4 个 graph-node filter / drawer-open）+ 9 个 emit（reload-graph / reload-candidates / reload-graph-nodes / rollback / supersede / approve / reject / clear-graph-node-filters / open-graph-node-detail），子组件外部 props/emits 完全不变（透明 wrap 纪律）。**新增 192 行**
+- [admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue](admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue) — "拒绝"按钮包 NPopconfirm（"拒绝后该候选不再进入图谱，确认？"）。**+11 行**
+- [admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue](admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue) — 3 处包 NPopconfirm：scope-risk 列表的"回滚"按钮、relationship-card 的"回滚事实"、"取代事实"。文案分别"回滚后该事实从图谱移除，确认？"×2 与"新事实将取代旧事实，确认？"。**+39 行**
+- [admin/frontend/src/views/knowledge/helpers/types.ts](admin/frontend/src/views/knowledge/helpers/types.ts) — `KnowledgeTab` 拆分为两个 union：`KnowledgeTab` 仅留 `'sources' | 'search' | 'context' | 'metrics'`（用户侧 4 tab），新增 `KnowledgeAdminTab = 'candidates' | 'graph' | 'graph_nodes'`（管理员 3 tab）。**+5 行**
+- [admin/frontend/src/views/knowledge/KnowledgeView.vue](admin/frontend/src/views/knowledge/KnowledgeView.vue) — ① 删 3 个 admin NTabPane（graph / candidates / graph_nodes）共 ~80 行；② import 改：删 KnowledgeCandidatesPanel / KnowledgeGraphNodesPanel / KnowledgeGraphPanel / RefreshOutline，加 KnowledgeAdminDrawer + KnowledgeAdminTab type；③ 新增 `adminDrawerOpen` + `adminActiveTab` 两个 ref；④ `handleOpenAdmin(tab)` 改成"设置 adminActiveTab + 打开 drawer"（PR1 fallback 的"切 NTabs"已废弃）；⑤ template `#action` slot 加 `<NButton quaternary>管理</NButton>` 触发 `adminDrawerOpen = true`；⑥ template 末尾追加 `<KnowledgeAdminDrawer>` 实例（9 个 v-model + 9 个 prop + 9 个 @event handler）。**净 -39 行**（779 → 740；继续 ≤ 800 行目标）
+
+**D1 同模式扫描**：
+
+```bash
+$ grep -n "NPopconfirm" admin/frontend/src/views/knowledge/components/*.vue
+admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue:58:              <NPopconfirm
+admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue:79:              <NPopconfirm
+admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue:122:              <NPopconfirm
+admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue:151:              <NPopconfirm
+admin/frontend/src/views/knowledge/components/KnowledgeSidebar.vue:126:      <NPopconfirm
+# 5 处全部包 NPopconfirm（PR1 sidebar reindex + PR2 reject + 2×rollback + supersede），与 SlangView 的"高破坏性按钮 NPopconfirm"纪律对齐
+```
+
+**D4 完成证据**：
+
+- `vue-tsc --noEmit` — 0 error
+- `vite build` — 5.36s，clean
+- 主视图行数：779 → **740**（PR2 净 -39，删 3 admin tab 80 行 + 加 drawer 实例 41 行）；累计 754（PR C 收官）→ 740（PR2 收官，-1.9%；KnowledgeView 拆分 + 简化重构累计 2186 → 740，-66.1%）
+- bundle：`KnowledgeView-*.js` 55.86 → **61.60 KB / gzip 16.13 → 17.20 KB**（+5.74 / +1.07，AdminDrawer + 4 NPopconfirm 包裹的合理增量；PR3 删 KnowledgeSearch.vue 后会回吐部分）
+- 浏览器侧（待用户验收）：
+  - KnowledgeView 顶部 NTabs 4 tab（sources / search / context / metrics），"管理"按钮在 PageToolbar #action slot
+  - 点击"管理"打开右侧 NDrawer（720px），3 tab 候选 / 图谱 / 节点 切换工作
+  - 点击 sidebar warn chip 自动打开 drawer 并定位（跳过源 → graph_nodes / 候选待审 → candidates / 作用域待查 → graph）
+  - 4 个 NPopconfirm 触发顺畅（确认 / 取消都能正常关闭）
+  - candidates / graph / graph_nodes 三块在 drawer 内行为与原 NTab 完全一致（透明 wrap，props / emits / v-model 一一对齐）
+
+**与 PR3 边界**：
+
+- PR2 不动用户侧 4 tab（sources / search / context / metrics）—— PR3 将合并 search / context / metrics 为单一 KnowledgeContextWorkspace，最终留 sources + workspace 双 tab 或单一 workspace（视用户验收）
+- PR3 删 [KnowledgeSearch.vue](admin/frontend/src/views/knowledge/components/KnowledgeSearch.vue)（检索逻辑迁入 Workspace），bundle 会回吐 ~1-2 KB
+
+**部署**：
+
+不需要 docker rebuild。`./admin/static` 是 bind mount（CLAUDE.md D6），`vite build` 已直接落到 `admin/static/`，刷新浏览器即生效。
+
+**回滚路径**：
+
+`git revert <commit>`。无 schema / API / 后端改动；admin 子组件 props/emits 仅在 KnowledgeView 中重新接线，drawer 删掉就回到 PR1 末态（顶部 7-tab + sidebar warn chip 走 fallback）。
+
+**关联条目**：
+
+- [docs/tracking/web-refactor.md § KnowledgeView 简化重构](docs/tracking/web-refactor.md) — 同步 PR2 ✅；PR3 待开
+- KnowledgeView 简化重构 PR1：见本日另一条 PR1 维护日志
+
+---
+
 ## 2026-05-21 KnowledgeView 简化重构 PR1 — 视觉减负（Hero 收缩 + Sidebar）
 
 **变更类型**：refactor（admin/frontend，仅 .vue + index.html，无后端 / schema / 部署）
