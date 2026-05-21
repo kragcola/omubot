@@ -261,6 +261,78 @@ def create_memory_consolidator_router(*, ctx: Any = None) -> APIRouter:
             },
         }
 
+    @router.get("/candidates/{candidate_id}/revisions")
+    async def list_candidate_revisions(candidate_id: str, request: Request):
+        store = await _store()
+        existing = await store.get_candidate(candidate_id)
+        if existing is None:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "candidate not found"},
+            )
+        params = request.query_params
+        limit = _clamp_int(params.get("limit"), 50, lo=1, hi=200)
+        revisions = await store.list_candidate_revisions(
+            candidate_id, limit=limit,
+        )
+        return {
+            "ok": True,
+            "data": [
+                {
+                    "revision_id": r.revision_id,
+                    "candidate_id": r.candidate_id,
+                    "action": r.action,
+                    "actor": r.actor,
+                    "before": r.before,
+                    "after": r.after,
+                    "reason": r.reason,
+                    "created_at": r.created_at,
+                    "meta": r.meta,
+                }
+                for r in revisions
+            ],
+            "count": len(revisions),
+        }
+
+    @router.patch("/candidates/{candidate_id}/payload")
+    async def patch_candidate_payload(candidate_id: str, request: Request):
+        store = await _store()
+        body = await _read_json(request)
+        if not candidate_id:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "candidate_id required"},
+            )
+        raw_payload = body.get("payload")
+        if not isinstance(raw_payload, dict):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "payload (object) required"},
+            )
+        actor = str(body.get("actor", "") or "admin").strip() or "admin"
+        reason = str(body.get("reason", "") or "").strip()
+        try:
+            updated = await store.update_candidate_payload(
+                candidate_id,
+                payload=raw_payload,
+                actor=actor,
+                reason=reason,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": str(exc)},
+            )
+        if updated is None:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "candidate not found"},
+            )
+        return {
+            "ok": True,
+            "data": _candidate_to_dict(updated),
+        }
+
     @router.post("/candidates/{candidate_id}/decide")
     async def decide(candidate_id: str, request: Request):
         store = await _store()

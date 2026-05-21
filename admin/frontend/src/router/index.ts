@@ -91,6 +91,13 @@ const router = createRouter({
       component: () => import('../views/episodes/EpisodesView.vue'),
     },
     {
+      path: '/memory-consolidator',
+      name: 'memory-consolidator',
+      meta: { title: '记忆候选', keepAlive: true },
+      component: () =>
+        import('../views/memory-consolidator/MemoryConsolidatorView.vue'),
+    },
+    {
       path: '/block-trace',
       name: 'block-trace',
       meta: { title: 'BlockTrace', keepAlive: true },

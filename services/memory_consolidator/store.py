@@ -31,6 +31,7 @@ from services.memory_consolidator.types import (
     CandidateState,
     RunStatus,
     ScanRun,
+    normalize_payload,
 )
 from services.storage import close_with_checkpoint, connect_sqlite
 
@@ -74,6 +75,21 @@ CREATE TABLE IF NOT EXISTS consolidator_candidates (
 )
 """
 
+_CREATE_REVISIONS = """
+CREATE TABLE IF NOT EXISTS consolidator_candidate_revisions (
+    revision_id     TEXT PRIMARY KEY,
+    candidate_id    TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    actor           TEXT NOT NULL DEFAULT '',
+    before_json     TEXT NOT NULL DEFAULT '{}',
+    after_json      TEXT NOT NULL DEFAULT '{}',
+    reason          TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL,
+    meta_json       TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (candidate_id) REFERENCES consolidator_candidates(candidate_id)
+)
+"""
+
 _CREATE_INDEXES = [
     (
         "CREATE INDEX IF NOT EXISTS idx_cand_run "
@@ -90,6 +106,10 @@ _CREATE_INDEXES = [
     (
         "CREATE INDEX IF NOT EXISTS idx_run_started "
         "ON consolidator_runs(started_at DESC)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_cand_revision "
+        "ON consolidator_candidate_revisions(candidate_id, created_at DESC)"
     ),
 ]
 
@@ -173,6 +193,51 @@ class CandidateFilter:
     group_id: str = ""
 
 
+@dataclass(slots=True)
+class CandidateRevision:
+    """Append-only audit trail for admin-side payload edits.
+
+    ``action`` is free-form (currently only ``"payload_edit"``); future
+    actions can land here without a schema migration. ``before`` /
+    ``after`` capture the projected payload on each side of the edit so
+    admin can diff exactly what changed.
+    """
+
+    revision_id: str
+    candidate_id: str
+    action: str
+    actor: str
+    before: dict[str, Any]
+    after: dict[str, Any]
+    reason: str
+    created_at: float
+    meta: dict[str, Any]
+
+
+def _row_to_revision(row: aiosqlite.Row) -> CandidateRevision:
+    d = dict(row)
+
+    def _parse(field_name: str) -> dict[str, Any]:
+        raw = d.get(field_name) or "{}"
+        try:
+            value = json.loads(raw) if isinstance(raw, str) else {}
+        except json.JSONDecodeError:
+            value = {}
+        return value if isinstance(value, dict) else {}
+
+    return CandidateRevision(
+        revision_id=str(d["revision_id"]),
+        candidate_id=str(d["candidate_id"]),
+        action=str(d.get("action", "")),
+        actor=str(d.get("actor", "")),
+        before=_parse("before_json"),
+        after=_parse("after_json"),
+        reason=str(d.get("reason", "")),
+        created_at=float(d.get("created_at", 0)),
+        meta=_parse("meta_json"),
+    )
+
+
 class ConsolidatorCandidatesStore:
     """Independent SQLite store for typed dry-run candidates."""
 
@@ -199,6 +264,7 @@ class ConsolidatorCandidatesStore:
         await self._db.execute("PRAGMA synchronous=FULL")
         await self._db.execute(_CREATE_RUNS)
         await self._db.execute(_CREATE_CANDIDATES)
+        await self._db.execute(_CREATE_REVISIONS)
         for stmt in _CREATE_INDEXES:
             await self._db.execute(stmt)
         await self._db.commit()
@@ -437,3 +503,115 @@ class ConsolidatorCandidatesStore:
         )
         await db.commit()
         return True
+
+    _PAYLOAD_EDIT_ALLOWED_STATES: tuple[str, ...] = ("dry_run", "queued")
+
+    async def update_candidate_payload(
+        self,
+        candidate_id: str,
+        *,
+        payload: dict[str, Any],
+        actor: str,
+        reason: str = "",
+    ) -> Candidate | None:
+        """Admin-only payload edit; gated on candidate ``state`` and
+        normalized through :func:`normalize_payload`.
+
+        Only ``state="dry_run"`` and ``state="queued"`` candidates may be
+        edited. Post-decision (``approved`` / ``rejected``) edits are
+        rejected with ``ValueError`` so the audit trail stays clean —
+        admin must re-run consolidator for new candidates.
+
+        The submitted ``payload`` is projected via
+        :func:`normalize_payload` (``domain`` looked up from candidate)
+        so unknown keys are silently dropped; the projected dict is what
+        gets persisted and what gets logged into
+        ``consolidator_candidate_revisions``.
+
+        Returns the refreshed :class:`Candidate` or ``None`` if the row
+        does not exist.
+        """
+        existing = await self.get_candidate(candidate_id)
+        if existing is None:
+            return None
+        if existing.state not in self._PAYLOAD_EDIT_ALLOWED_STATES:
+            raise ValueError(
+                f"payload edit forbidden in state={existing.state!r}; "
+                f"allowed={list(self._PAYLOAD_EDIT_ALLOWED_STATES)}"
+            )
+        try:
+            projected = normalize_payload(existing.domain, payload)
+        except ValueError:
+            raise
+        before_payload = dict(existing.payload)
+        db = self._require_db()
+        await db.execute(
+            """UPDATE consolidator_candidates
+                   SET payload_json = ?
+                   WHERE candidate_id = ?""",
+            (
+                json.dumps(projected, ensure_ascii=False),
+                str(candidate_id),
+            ),
+        )
+        await self._record_revision(
+            db=db,
+            candidate_id=candidate_id,
+            action="payload_edit",
+            actor=actor,
+            before={"payload": before_payload},
+            after={"payload": projected},
+            reason=reason,
+            meta={"domain": existing.domain},
+        )
+        await db.commit()
+        return await self.get_candidate(candidate_id)
+
+    async def _record_revision(
+        self,
+        *,
+        db: aiosqlite.Connection,
+        candidate_id: str,
+        action: str,
+        actor: str,
+        before: dict[str, Any] | None = None,
+        after: dict[str, Any] | None = None,
+        reason: str = "",
+        meta: dict[str, Any] | None = None,
+    ) -> str:
+        revision_id = _gen_id("crev")
+        await db.execute(
+            """INSERT INTO consolidator_candidate_revisions
+                   (revision_id, candidate_id, action, actor, before_json,
+                    after_json, reason, created_at, meta_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                revision_id,
+                str(candidate_id),
+                str(action),
+                str(actor or ""),
+                json.dumps(before or {}, ensure_ascii=False),
+                json.dumps(after or {}, ensure_ascii=False),
+                str(reason or ""),
+                _now(),
+                json.dumps(meta or {}, ensure_ascii=False),
+            ),
+        )
+        return revision_id
+
+    async def list_candidate_revisions(
+        self,
+        candidate_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[CandidateRevision]:
+        db = self._require_db()
+        clamped = max(1, min(int(limit), 200))
+        async with db.execute(
+            """SELECT * FROM consolidator_candidate_revisions
+                   WHERE candidate_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+            (str(candidate_id), clamped),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_revision(row) for row in rows]

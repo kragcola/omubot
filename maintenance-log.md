@@ -4,6 +4,95 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase D.2 — 候选 admin UX（5 域筛选 + episode payload 编辑 + 修订审计）
+
+**变更类型**：feature（services + admin API + admin/frontend + tests，无 schema migration / 部署改动）
+
+**背景**：
+
+[Phase D 设计前置审计](docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md) 把 D.2 列为 D.1 之后的最小可验单元。D.1 已让 admin `decide(approved)` 自动 promote episode 候选到 `EpisodeStore`，但前端没有任何入口让运营看到 / 决策这条副作用 — 候选只能从 SQL CLI 看，promote 链路无 UI 反向跳转，episode 域候选漏写 reflection 时无补改路径。本次按 D.2 拆分实现：5 域筛选 + 详情抽屉 + episode payload 内联补改 + 决策前 promote 提示 + 修订审计表。
+
+**改动落点**：
+
+- 新 schema 表 `consolidator_candidate_revisions`（同库 `storage/consolidator_candidates.db` 内 idempotent CREATE）：`revision_id` / `candidate_id` FK / `action` / `actor` / `before_json` / `after_json` / `reason` / `created_at` / `meta_json` + `idx_cand_revision_candidate`
+- [services/memory_consolidator/store.py](services/memory_consolidator/store.py)
+  - `_PAYLOAD_EDIT_ALLOWED_STATES = ("dry_run", "queued")` — post-decision (approved/rejected) 编辑抛 `ValueError("payload edit forbidden in state=...")`
+  - `update_candidate_payload(candidate_id, *, payload, actor, reason="")` — `normalize_payload(domain, payload)` 投影 → UPDATE candidates + INSERT revision **同 transaction**（一次 commit），失败 / cancel 必须保两表一致
+  - `list_candidate_revisions(candidate_id, *, limit=50)` 按 created_at DESC 返回
+  - 新 dataclass `CandidateRevision` + `_row_to_revision` JSON 解码 helper
+- [services/memory_consolidator/__init__.py](services/memory_consolidator/__init__.py) 导出 `CandidateRevision`
+- [admin/routes/api/memory_consolidator.py](admin/routes/api/memory_consolidator.py) 加两端点：
+  - `PATCH /api/admin/memory_consolidator/candidates/{id}/payload` — body `{actor, reason, payload}`；候选不在 `dry_run/queued` 返回 400 `forbidden`，未知候选 404，payload 非 dict 400
+  - `GET /api/admin/memory_consolidator/candidates/{id}/revisions?limit=` — 返回审计列表
+- [admin/frontend/src/views/memory-consolidator/MemoryConsolidatorView.vue](admin/frontend/src/views/memory-consolidator/MemoryConsolidatorView.vue)（新 ~800 行）
+  - 按 [docs/admin-ui-style-guide.md](docs/admin-ui-style-guide.md) 套 `AppPage` / `AppCard` / `MetricCard` / `PageToolbar` / `EmptyState`，沿用 SoulView / EpisodesView 的 Calm Ops 调性
+  - 顶部 4 个 MetricCard（总数 / 5 域分布 / 待审 / 已批）+ 5 域 chip 筛选 + 状态 select + group_id 文本筛选
+  - DataTable：摘要 anchor（`situation` / `term` / `expression` / `subject` 5 域差异化）+ domain tag + state tag + group + confidence% + created_at + 操作按钮
+  - 决策模态：approved / rejected + 可填 reason + episode 域显式提示"批准后将写入 EpisodeStore"
+  - 详情抽屉：基本信息 grid / Payload 区 / 源消息 PK tags / 修订历史 table；episode 域且 `state in {dry_run, queued}` 时显示 5-field 内联编辑表单（situation / observed_context / action_taken / outcome_signal / reflection），其他域只读
+  - 提交编辑后并发刷新候选 + 修订表
+- [admin/frontend/src/router/index.ts](admin/frontend/src/router/index.ts) 注册 `/memory-consolidator`
+- [admin/frontend/src/layouts/components/SideMenu.vue](admin/frontend/src/layouts/components/SideMenu.vue) 在 日常 → 经验反思 与 知识库 之间挂"记忆候选"（FunnelOutline 图标）
+
+**测试覆盖**：
+
+- 新 [tests/test_memory_consolidator_payload_edit.py](tests/test_memory_consolidator_payload_edit.py)（8 例）：
+  - dry_run happy path（`rogue_unknown_field` 必须被 normalize 投影丢弃）
+  - queued 允许编辑
+  - approved / rejected 抛 `ValueError("forbidden")`
+  - 候选不存在返回 None
+  - 修订写入 before/after diff
+  - 未编辑候选 revisions 列表为空
+  - **D2 cancel-path**：`asyncio.wait_for(update_candidate_payload(...), timeout=0.0)` → 候选行与 revision 行必须保持一致（要么"原 payload + 0 revision"，要么"新 payload + 1 revision"，杜绝半态）
+- 扩 [tests/test_admin_memory_consolidator.py](tests/test_admin_memory_consolidator.py)（+7 例）：
+  - PATCH dry_run 成功 + rogue field 被丢弃 / refresh 后落地
+  - PATCH approved 候选返回 400 `forbidden`
+  - PATCH 未知候选 404
+  - PATCH 缺 payload / payload 非 dict 都 400
+  - GET revisions 空候选返回空列表
+  - GET revisions 编辑后返回一行（`action="payload_edit"` / actor / before / after / `meta.domain`）
+  - GET revisions 未知候选 404
+
+**D1 同模式扫描**（grep `decide_candidate.*approved\|update_candidate_payload\|consolidator_candidate_revisions` services/ admin/ — pre 实现状态）：
+
+```text
+services/memory_consolidator/store.py     # 定义 + 唯一 caller
+admin/routes/api/memory_consolidator.py   # admin PATCH 端点（D.2 新写入路径）
+# decide_candidate 路径自 D.1 起无变动（payload edit 是独立 mutation，不复用 decide transaction）
+# 无遗留 candidate.payload 修改路径 — 与 store mutator 唯一性吻合
+```
+
+**D4 完成证据**：
+
+- `uv run pytest tests/test_memory_consolidator_payload_edit.py tests/test_admin_memory_consolidator.py` → **30 passed**
+- `uv run pytest --deselect tests/test_admin_api.py::test_system_services_health_endpoint` → **1269 passed, 8 skipped**（baseline backup_disk alert pre-existing 失败仍 deselect）
+- `uv run ruff check` → All checks passed
+- `uv run pyright services/memory_consolidator/ admin/routes/api/memory_consolidator.py tests/test_memory_consolidator_payload_edit.py tests/test_admin_memory_consolidator.py` → **0 errors**
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 errors
+- `cd admin/frontend && npm run build` → built in 5.57s，`MemoryConsolidatorView-*.js` 18.25 kB / gzip 6.71 kB
+- D6 验证：admin/static 是 bind mount，本次只 `npm run build` 即生效，未 rebuild bot
+
+**冲击范围**：
+
+- 纯代码 + idempotent schema CREATE；无 docker-compose / 主机脚本调整
+- `consolidator_candidates.db` 多一张表（启动时 CREATE IF NOT EXISTS，老库自动加，零迁移）
+- napcat / qq-bot / 24h Phase 3 观察窗口（截止 2026-05-22 16:30）/ 30 天 corruption 验收窗口（截止 2026-06-20）全部不动
+- 不接收旧客户端：admin 候选页 GET 无字段调整；新增 PATCH / GET revisions 端点是新 surface
+
+**回滚路径**：
+
+1. `git revert <D.2 commit>` — 单 commit 反推
+2. 数据无副作用：已写 revision 行残留在 `consolidator_candidate_revisions` 表，回滚后表无 caller，可任由其留存或后续 `DROP TABLE` 清理
+3. 前端 SideMenu / router 反推后 `/memory-consolidator` 路径 404；其他页面不受影响
+
+**handoff（给 D.3）**：
+
+- D.2 已让 admin 能补改 episode 候选 reflection（处理 LLM 漏写）+ 在决策前一眼看到所有 5 域候选；D.3 的 反思生成路径 工作就是把 G2/G3 落地：让 `style_feedback(rating='negative')` / slang reject / style reject 三类纠正信号触发 `reflection_consolidator` LLM → 写一条 `domain="episode"` 候选回 ConsolidatorCandidatesStore，让本次 D.2 UI 能消化
+- D.3 完成后，episode 候选数量会显著上升 — 要监控 admin 候选页 dry_run 数量 + reflection_consolidator LLM usage cost
+- 24h Phase 3 named volume 观察窗口（截止 2026-05-22 16:30）继续走，与本次无交集；30 天 corruption 验收窗口（截止 2026-06-20）继续走
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase D.1 — promote 桥 落地（candidate→episode）
 
 **变更类型**：feature（services + admin + tests，无 schema / 部署改动）

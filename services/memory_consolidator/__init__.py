@@ -14,6 +14,7 @@ from services.memory_consolidator.consolidator import MemoryConsolidator
 from services.memory_consolidator.promoter import EpisodePromoter, PromoteResult
 from services.memory_consolidator.store import (
     CandidateFilter,
+    CandidateRevision,
     ConsolidatorCandidatesStore,
 )
 from services.memory_consolidator.types import (
@@ -45,6 +46,7 @@ __all__ = [
     "Candidate",
     "CandidateDomain",
     "CandidateFilter",
+    "CandidateRevision",
     "CandidateScope",
     "CandidateState",
     "ConsolidatorCandidatesStore",

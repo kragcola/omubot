@@ -362,3 +362,161 @@ async def test_decide_candidate_no_promote_when_rejecting_episode(
 
     episodes = await episode_store.list_episodes()
     assert episodes == []
+
+
+@pytest.mark.asyncio
+async def test_patch_payload_dry_run_succeeds(store):
+    run_id = await store.start_run(
+        triggered_by="test", group_id="g1", scope="group",
+    )
+    cid = await store.record_candidate(
+        run_id=run_id, domain="episode", scope="group", group_id="g1",
+        source_message_pks=[],
+        payload={
+            "situation": "old",
+            "observed_context": "",
+            "action_taken": "",
+            "outcome_signal": "",
+            "reflection": "",
+        },
+        confidence=0.5,
+    )
+    client = _build_client(store=store)
+    resp = client.patch(
+        f"/api/admin/memory_consolidator/candidates/{cid}/payload",
+        json={
+            "actor": "alice",
+            "reason": "补 reflection",
+            "payload": {
+                "situation": "new",
+                "reflection": "edited reflection",
+                "rogue_unknown_field": "dropped",
+            },
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["data"]["payload"]["situation"] == "new"
+    assert body["data"]["payload"]["reflection"] == "edited reflection"
+    assert "rogue_unknown_field" not in body["data"]["payload"]
+
+    refreshed = await store.get_candidate(cid)
+    assert refreshed is not None
+    assert refreshed.payload["situation"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_patch_payload_post_decision_400(store):
+    run_id = await store.start_run(
+        triggered_by="test", group_id="g1", scope="group",
+    )
+    cid = await store.record_candidate(
+        run_id=run_id, domain="episode", scope="group", group_id="g1",
+        source_message_pks=[],
+        payload={"situation": "x"}, confidence=0.5,
+    )
+    await store.decide_candidate(
+        cid, state="approved", decided_by="alice", reason="",
+    )
+    client = _build_client(store=store)
+    resp = client.patch(
+        f"/api/admin/memory_consolidator/candidates/{cid}/payload",
+        json={"payload": {"situation": "post-decision-edit"}},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["ok"] is False
+    assert "forbidden" in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_patch_payload_404_for_unknown(store):
+    client = _build_client(store=store)
+    resp = client.patch(
+        "/api/admin/memory_consolidator/candidates/cand_nope/payload",
+        json={"payload": {"situation": "x"}},
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_patch_payload_requires_payload_object(store):
+    run_id = await store.start_run(
+        triggered_by="test", group_id="g1", scope="group",
+    )
+    cid = await store.record_candidate(
+        run_id=run_id, domain="episode", scope="group", group_id="g1",
+        source_message_pks=[],
+        payload={"situation": "x"}, confidence=0.5,
+    )
+    client = _build_client(store=store)
+    # missing payload
+    resp = client.patch(
+        f"/api/admin/memory_consolidator/candidates/{cid}/payload",
+        json={"actor": "alice"},
+    )
+    assert resp.status_code == 400
+    # payload is wrong type
+    resp = client.patch(
+        f"/api/admin/memory_consolidator/candidates/{cid}/payload",
+        json={"payload": "not-a-dict"},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_get_candidate_revisions_empty(store):
+    run_id = await store.start_run(
+        triggered_by="test", group_id="g1", scope="group",
+    )
+    cid = await store.record_candidate(
+        run_id=run_id, domain="episode", scope="group", group_id="g1",
+        source_message_pks=[],
+        payload={"situation": "x"}, confidence=0.5,
+    )
+    client = _build_client(store=store)
+    resp = client.get(
+        f"/api/admin/memory_consolidator/candidates/{cid}/revisions"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["count"] == 0
+    assert body["data"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_candidate_revisions_after_edit(store):
+    run_id = await store.start_run(
+        triggered_by="test", group_id="g1", scope="group",
+    )
+    cid = await store.record_candidate(
+        run_id=run_id, domain="episode", scope="group", group_id="g1",
+        source_message_pks=[],
+        payload={"situation": "before"}, confidence=0.5,
+    )
+    await store.update_candidate_payload(
+        cid, payload={"situation": "after"}, actor="alice", reason="补",
+    )
+    client = _build_client(store=store)
+    resp = client.get(
+        f"/api/admin/memory_consolidator/candidates/{cid}/revisions"
+    )
+    body = resp.json()
+    assert body["count"] == 1
+    rev = body["data"][0]
+    assert rev["action"] == "payload_edit"
+    assert rev["actor"] == "alice"
+    assert rev["before"]["payload"]["situation"] == "before"
+    assert rev["after"]["payload"]["situation"] == "after"
+    assert rev["meta"]["domain"] == "episode"
+
+
+@pytest.mark.asyncio
+async def test_get_candidate_revisions_404_for_unknown(store):
+    client = _build_client(store=store)
+    resp = client.get(
+        "/api/admin/memory_consolidator/candidates/cand_nope/revisions"
+    )
+    assert resp.status_code == 404
