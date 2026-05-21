@@ -4,6 +4,48 @@
 
 ---
 
+## 2026-05-21 KnowledgeView 简化重构 PR4 — 视觉收尾 4 项 UI 打磨
+
+**变更类型**：polish（admin/frontend 4 .vue + 1 .ts + 后端 1 .py + .dockerignore；含一次 `docker compose up bot -d --build`）
+
+**背景**：
+
+PR1/PR2/PR3 完成后用户审计后台截图发现 4 类视觉/可用性瑕疵：① 文档源卡片只有文件名 + 路径，看不到内容引子；② 图谱节点 4 个 metric card 用 30px 大字数字 + "term · 34" 字符串混排，文本类目被强制换行成两行卡片高度爆掉；下方筛选条用 PageToolbar inline-style 220/180/220 写死宽度排版丑；③ 候选队列卡片用 `minmax(0,1fr) minmax(280px,360px)` 双栏导致右侧 reject input + 两按钮拥挤，黄色 72% 置信度 tag 位置突兀；④ Sidebar Backlog 三个 chip 顺序（跳过源 / 候选待审 / 作用域待查）和 AdminDrawer 内 NTabs 顺序（候选 / 图谱 / 节点）不对应、点错跳转，且 chip 没有 hover 解释。PR4 治本：四项一次性修，前端为主，唯一一处后端是为了解决①需要在 sources API 里塞 preview 字段。
+
+**改动文件**：
+
+- [admin/frontend/src/views/knowledge/components/KnowledgeSidebar.vue](admin/frontend/src/views/knowledge/components/KnowledgeSidebar.vue) — Backlog 三 chip 顺序重排为 `候选待审 → 作用域待查 → 跳过源`，与 AdminDrawer NTabs `[candidates, graph, graph_nodes]` 顺序一致；每个 chip 包 `<NTooltip placement="left">` 加 hover 解释（候选事实待审 / 跨作用域风险 / 跳过源明细）；icon 调整：作用域待查改用 GitNetworkOutline 与功能相称
+- [admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue](admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue) — 165 → 257 行，整张卡片重设计：① 顶部 head 行 — `subject (primary tint)` + ArrowForward + `predicate (pill)` + ArrowForward + `object (浅 primary tint)` 三段式，置信度 NTag 拉到右侧分级显示（≥0.75 success / ≥0.5 warning / 其余 error）；② evidence 改 left-border 引文（`border-left: 2px solid color-mix(...primary 40%...)` + `--om-surface-2` 背景 + `border-radius: 0 8px 8px 0`）；③ footer dashed top-border + 左 meta（来源 / ID monospace 小字）+ 右 actions（小尺寸 reject input 220px + Reject NPopconfirm + Approve），删旧 `minmax(0,1fr) minmax(280px,360px)` 双栏 grid
+- [admin/frontend/src/views/knowledge/components/KnowledgeGraphNodesPanel.vue](admin/frontend/src/views/knowledge/components/KnowledgeGraphNodesPanel.vue) — 382 → 502 行（+120）：① MetricCard 替换为 inline `.graph-node-metric` tile（节点总数/边总数走 22px 数字 + nowrap ellipsis；主要节点类型/主要边类型走 15px monospace 文本，避免大字两行换行）；4 tile 仍然 4 列 grid，每个左上角 3px 顶部 accent stripe 区分四色（primary/info/success/warning）；② 筛选条从 PageToolbar inline-style 重构为 `.graph-node-filters` 容器（panel 边框 + 圆角）+ 内部 `grid-template-columns: 1.3fr 1fr 1.3fr` 三 input 等比 + 右侧 actions（清空 / 应用筛选）；搜索框带 SearchOutline 前缀图标
+- [admin/frontend/src/views/knowledge/components/KnowledgeSourcesPanel.vue](admin/frontend/src/views/knowledge/components/KnowledgeSourcesPanel.vue) — 107 → 144 行：卡片 head 下方加 preview 段（`-webkit-line-clamp: 3` 三行截断 + left-border 引文样式 + `--om-surface-2` 背景），indexed 但首段空白时显示 muted "暂无可预览内容" 占位；path 改 monospace 小字独立行
+- [admin/frontend/src/views/knowledge/helpers/types.ts](admin/frontend/src/views/knowledge/helpers/types.ts) — `KnowledgeSource` 加 `preview?: string`
+- [admin/routes/api/knowledge.py](admin/routes/api/knowledge.py) — `/knowledge/sources` 响应改造：每个 source 调用 `kb._chunks_for_source(name)` 取首 chunk 的 content，空白折叠后取前 160 字符塞 `preview` 字段；try/except 包住，老 KB 没该方法时退化为空字符串
+
+**附带**：
+
+- [.dockerignore](.dockerignore) 加 `storage.bind-mount-snapshot-*/` 规则。原因：Phase 3 named-volume 迁移在 repo 根留了 `storage.bind-mount-snapshot-20260521-161720/` 本地快照目录（含 corrupted `slang.db.corrupt-20260520-213619`），上次 build 时 buildkit COPY 步骤撞上 input/output error 导致整个 docker daemon hung、需要 `pkill -9 -f com.docker` + `open -a Docker` 强制重启才恢复。规则补完后再 build 正常通过
+
+**验证**（D4 完成声明含证据）：
+
+- `vue-tsc --noEmit` 0 error
+- `npm run build` 5.48s 通过；`KnowledgeView-*.js` 63.55 → 66.84 KB / gzip 17.66 → 18.38 KB（+3.29 KB / +0.72 KB gzip，4 项视觉打磨开销）
+- `docker compose up bot -d --build` 成功（rebuild 后容器内 `/app/admin/routes/api/knowledge.py` `grep -c preview` = 3，与 host 一致）
+- 后端 API 抽样：`POST /api/admin/login {"token":"admin"} → 200 + cookie`；`GET /api/admin/knowledge/sources` 返回 `available=true count=7`，全部 7 个 source preview_len=160，例如 `music-games/arcaea.md` 预览为 `"## Arcaea 是什么 Arcaea 是一款以立体感读谱和高表现力曲目见长的音游..."`
+- admin/static bind mount 已自动更新 `index.html` 入口 hash（`index-BJHMY68p` → `index-CMXSaMsa`）
+
+**D1 同模式扫描**：
+
+- 候选/图谱节点之外的其它管理面板卡片（GraphPanel、SourcesPanel、CandidatesPanel）已逐个过；MemoryView / SlangView / GroupsView 已在前序重构中验过，无相同 metric-card 大字两行问题
+- `grep -rn "PageToolbar.*template #left" admin/frontend/src` 命中 3 处页面（含 GraphNodesPanel 已修），其它两处（PluginsView / SystemView）走的是 button 集合而非宽度敏感的 input 集合，目前仍合适
+
+**回滚**：`git revert 06c06c3`；前端 bundle 自动回退（admin/static bind mount 即时生效）；后端不重新 build 也不影响（旧前端忽略 preview 字段）。
+
+**事故记录（运维侧）**：
+
+PR4 后端 build 阶段触发 docker daemon hang 一次，原因如上 storage.bind-mount-snapshot 目录 buildkit COPY input/output error。处置：`pkill -9 -f com.docker`（PID 231 vmnetd 系 root 留下不影响）+ `open -a Docker`，daemon ~10s 内恢复。`.dockerignore` 已加规则避免复发，但 `storage.bind-mount-snapshot-20260521-161720/` 目录本身（约 1.1k items 含 corrupted slang.db）仍在 repo 根，未删除。后续如确认 Phase 3 迁移已稳态可由用户决定移除或归档。
+
+---
+
 ## 2026-05-21 KnowledgeView 简化重构 PR3 — Workspace 收口（用户侧 4 tab → 2 tab，单一 query 同时驱动 details/pack/metrics）
 
 **变更类型**：refactor（admin/frontend，仅 .vue + 1 .ts，无后端 / schema / 部署）
