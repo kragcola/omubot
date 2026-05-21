@@ -178,7 +178,12 @@ class DeepSeekProvider(LLMProvider):
         prompt_tokens = int(usage_raw.get("prompt_tokens", 0) or 0)
         completion_tokens = int(usage_raw.get("completion_tokens", 0) or 0)
         cached_tokens = int(
-            (((usage_raw.get("prompt_tokens_details") or {}) if isinstance(usage_raw, dict) else {}).get("cached_tokens", 0)) or 0
+            (
+                (usage_raw.get("prompt_tokens_details") or {})
+                if isinstance(usage_raw, dict)
+                else {}
+            ).get("cached_tokens", 0)
+            or 0
         )
         prompt_cache_hit_tokens = int(usage_raw.get("prompt_cache_hit_tokens", cached_tokens) or 0)
         prompt_cache_miss_tokens = int(
@@ -188,7 +193,12 @@ class DeepSeekProvider(LLMProvider):
             ) or 0
         )
         reasoning_tokens = int(
-            (((usage_raw.get("completion_tokens_details") or {}) if isinstance(usage_raw, dict) else {}).get("reasoning_tokens", 0)) or 0
+            (
+                (usage_raw.get("completion_tokens_details") or {})
+                if isinstance(usage_raw, dict)
+                else {}
+            ).get("reasoning_tokens", 0)
+            or 0
         )
         total_input = prompt_tokens or (prompt_cache_hit_tokens + prompt_cache_miss_tokens)
         output_tokens = completion_tokens or reasoning_tokens
