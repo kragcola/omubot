@@ -24,6 +24,8 @@ storage/backups/
 storage/image_cache/
 storage/stickers/
 storage/plugins/
+storage.bind-mount-snapshot-*/
+storage-export/
 !storage/.gitkeep
 !storage/plugins/.gitkeep
 !storage/memories/.example.qmd

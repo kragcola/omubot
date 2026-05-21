@@ -4,6 +4,116 @@
 
 ---
 
+## 2026-05-21 slang.db 反复损坏全栈治本 Phase 3 B 段 — 数据迁移与切换完成 + 中途 `external: true` 修复 — TASK-20260521-01 收尾
+
+**变更类型**：infra-hard（B 段实际部署；含一处 docker compose 项目作用域 volume 命名陷阱的修复）
+
+**背景**：
+
+A 段（同日上午）已合入 docker-compose 改动 + 主机脚本守卫 + storage_export.sh，B 段留待人手部署窗口。本次按用户授权（"现在 bot 不需要回复，确认备份后自动进行"）执行 spec § 6 完整流程。napcat 全程未停（46h+ uptime 维持），qq-bot 单服务停机约 5 分钟完成数据迁移。
+
+**部署执行步骤**（B 段实跑流水）：
+
+1. `docker compose stop bot` —— qq-bot 停机；napcat 不动
+2. `cp -a storage storage.bind-mount-snapshot-20260521-161720` —— 主机侧 2.6 GB 完整快照（30 天后清理）
+3. `docker volume create omubot-storage`
+4. `docker run --rm -v "$PWD/storage":/src -v omubot-storage:/dst alpine sh -c "cp -a /src/. /dst/"` —— 字节级灌入
+5. `dot_clean . && docker compose up bot -d --build` —— 按计划启动
+6. **【发现陷阱】** `docker exec qq-bot du -sh /app/storage` 仅 1.3 MB：bot 没有挂上灌好的 `omubot-storage`，而是落到了 compose 自动生成的 `omubot_omubot-storage`（项目名前缀），volume 内容只有 Phase C 启动时 init 的 consolidator_*.db，**生产数据完全没接上**
+
+**中途修复（关键）**：
+
+docker compose 看到顶级 `volumes:` 段里声明的 `omubot-storage` 与 compose project name 同前缀冲突，按默认行为自动加 `omubot_` 前缀，把 service 里写的 `omubot-storage:/app/storage` 解析成 `omubot_omubot-storage`，即另起一个新 volume。修复办法是把顶级声明改成 `external: true` + 显式 `name:`，强制 compose 用主机上已存在的同名 volume：
+
+```yaml
+# docker-compose.yml (修复后)
+volumes:
+  omubot-storage:
+    external: true
+    name: omubot-storage
+```
+
+清理污染步骤：
+
+```bash
+docker rm qq-bot                       # 旧容器持有 omubot_omubot-storage 的引用
+docker volume rm omubot_omubot-storage # 移除 1.3 MB 污染 volume
+docker compose up bot -d               # 不带 --build，复用镜像，加载正确 volume
+```
+
+**外部可观察证据**（D4，B 段最终切换后）：
+
+```text
+$ docker volume ls | grep omubot
+local     omubot-storage              # 唯一存在
+$ docker exec qq-bot du -sh /app/storage
+2.7G    /app/storage                  # 切前 2.6G（snapshot 一致），+0.1G 是 Phase C init dbs
+
+$ docker exec qq-bot python -c "import sqlite3; ..."
+slang.db          quick_check=ok  freelist=0  journal_mode=delete   # Phase 2 DELETE 模式保留
+messages.db       quick_check=ok  journal_mode=wal
+style.db          quick_check=ok  journal_mode=delete
+cards.db          quick_check=ok  journal_mode=wal
+knowledge.db      quick_check=ok  journal_mode=wal
+learning_normalizer.db   quick_check=ok  journal_mode=delete
+usage.db          quick_check=ok  journal_mode=delete
+consolidator_candidates.db   quick_check=ok  journal_mode=wal
+# 8 个 db 全部 ok
+
+$ docker exec qq-bot python -c "import sqlite3; c=sqlite3.connect('storage/slang.db'); print(c.execute('SELECT count(*) FROM slang_terms').fetchone())"
+(1980,)                                # 主表行数与迁移前一致
+
+$ docker exec qq-bot python -c "import sqlite3; c=sqlite3.connect('storage/messages.db'); print(c.execute('SELECT count(*) FROM group_messages').fetchone(), c.execute('SELECT count(*) FROM conversation_messages').fetchone())"
+(134641,) (28055,)                     # 消息表完整
+
+$ ls /Users/kragcola/OmubotWorkspace/omubot/storage.bind-mount-snapshot-20260521-161720
+# 主机快照 2.6G 保留，作为 30 天回滚兜底
+
+$ docker ps --format '{{.Names}}\t{{.Status}}'
+qq-bot    Up X minutes
+napcat    Up 46 hours                  # 全程 0 重启，符合铁律 D6
+```
+
+bot 启动后日志看到 `silent_learn` 消息正常入库，admin 路径返回 200。
+
+**docker-compose.yml 最终改动**（A 段 + 中途修复合并视图）：
+
+```diff
+   bot:
+     volumes:
+-      - ./storage:/app/storage
++      - omubot-storage:/app/storage
+       - ./config:/app/config:rw
+       - ./admin/static:/app/admin/static:ro
+
+ volumes:
++  omubot-storage:
++    external: true
++    name: omubot-storage
+```
+
+**遗留观察项**：
+
+- bot 启动日志中可见 `slang extraction failed | error=Could not decode to UTF-8 column 'meta_json' with text '{...}'`：经判断**不是 Phase 3 引入**——`cp -a` 字节级复制不会改 db 内容；这是 pending 候选 `meta_json` 字段中已存在的非 UTF-8 数据（与 Phase 1 修过的 repair 脚本 UTF-8 bug 同族但触发点在 slang_extractor）。当前不影响主流程，遗留至独立 task 处理
+- 24h 观察期开始时间：2026-05-21 16:30 起算；期间监控 admin「运行时错误」面板 + hourly quick_check tick + backup_scheduler 滚动
+- 30 天 corruption 窗口：2026-06-20 前若无新 `database disk image is malformed`，视 Phase 3 真成功
+
+**回滚路径**（保持 spec § 8 不变，已验证可达）：
+
+```bash
+docker compose stop bot
+git revert <Phase3-A段-commit> <Phase3-B段-commit>
+rm -rf storage && cp -a storage.bind-mount-snapshot-20260521-161720 storage
+docker compose up bot -d --build
+docker volume rm omubot-storage
+```
+
+**经验固化（D1 同模式扫描）**：
+
+`external: true` + `name:` 模式应作为后续任何"主机 volume 与 compose 项目同前缀"场景的默认写法。本仓库目前仅 `omubot-storage` 一个外部 volume，无其他同模式位点；napcat 的 `./napcat/config` / `./napcat/data` 是 bind mount 不受影响。
+
+---
+
 ## 2026-05-21 slang.db 反复损坏全栈治本 Phase 3 A 段 — storage 切 docker named volume（仅代码合入，B 段未部署）— TASK-20260521-01 执行完毕
 
 **变更类型**：infra-hard（A 段代码改动；B 段数据迁移待人手部署窗口）
