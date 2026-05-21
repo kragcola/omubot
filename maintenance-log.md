@@ -4,6 +4,74 @@
 
 ---
 
+## 2026-05-21 ruff E501 pre-existing 26 条清理 — TASK-20260521-02 执行完毕
+
+**变更类型**：tech debt / lint cleanup（runtime 0 行为变化）
+
+**背景**：
+
+Phase 2（slang.db 全栈治本）合入后跑 `uv run ruff check` 发现 26 条 E501 (line too long
+> 120) 长行，全部是 pre-existing 历史欠债，不是 Phase 2 引入。这批欠债和 D1 同模式扫描
+原则冲突——若不清掉，未来真正引入回归时容易被噪声淹没。本次按 handoff
+`TASK-20260521-02-cleanup-pre-existing-e501.md` 把 26 条清干净，让 ruff 回到 0 errors
+基线。
+
+**改动策略**：
+
+- **走 per-file-ignore（13 条）**：`services/plugin_index.py` 的长中文 hint 文案与
+  `services/slang/shared_prefix.py` / `plugins/schedule/generator.py` 同性质——长中文
+  字符串是产品文案不是代码风格问题。新增一行 `[tool.ruff.lint.per-file-ignores]` 配置：
+  `"services/plugin_index.py" = ["E501"]  # 插件治理面板长中文 hint 文案`
+- **手工换行（13 条 / 8 个文件）**：剩余 13 条都是 Python 代码本身（条件表达式、字典
+  访问、字符串拼接），按 ruff 推荐的"括号折行"模式拆。`services/health.py` 是 2 条相邻
+  的 summary_text 拼接，把 f-string 拆成相邻字面量；`services/llm/providers/deepseek.py`
+  cached_tokens / reasoning_tokens 嵌套字典访问 7 行拆开；`admin/routes/api/providers.py`
+  payload_sanitized + reasoning_replay_tokens + sorted_profile_names + previous_default
+  4 处都按"条件 / 列表 / 字符串拼接 → 多行括号"模式重写。
+
+**改动文件清单**（9 个）：
+
+| 文件 | 类型 | 条数 |
+| --- | --- | --- |
+| `pyproject.toml` | per-file-ignore | +1 行配置 |
+| `admin/routes/api/plugins.py:293` | 条件折行 | 1 |
+| `admin/routes/api/providers.py` | 条件 / 列表 / 字符串折行 | 4 |
+| `kernel/bus.py:148` | 多参数 log 折行 | 1 |
+| `plugins/context/plugin.py:91` | f-string 拆相邻字面量 | 1 |
+| `services/health.py:323,327` | f-string 拆相邻字面量 | 2 |
+| `services/llm/providers/deepseek.py:181,191` | 嵌套字典访问折行 | 2 |
+| `services/llm/usage.py:220` | f-string 拆相邻字面量 | 1 |
+| `services/tools/web_fetch.py:98` | kwargs 折行 | 1 |
+
+**外部可观察证据**（D4）：
+
+```text
+# 改前
+$ uv run ruff check
+Found 26 errors.
+
+# 改后
+$ uv run ruff check
+All checks passed!
+
+$ uv run pytest -q
+1216 passed, 8 skipped in 12.41s
+
+$ uv run pyright
+457 errors, 0 warnings, 0 informations
+# baseline 不退步：stash 之后等量比对 = 改动前后 pyright 计数完全一致
+```
+
+**同模式扫描**（D1）：grep 整仓 `# noqa: E501` / 长行模式，没有"未声明的长中文行"漏网；
+新增的 `services/plugin_index.py` ignore 与 shared_prefix / generator 一致，未引入新模式。
+
+**回滚路径**：`git revert 1f73d5d`（task-20260521-02 commit）即可，9 个文件全是 lint
+风格调整，无 runtime 行为绑定。
+
+**部署影响**：0（无 .py 业务逻辑改动，无前端、无 docker、无 schema 改动）。
+
+---
+
 ## 2026-05-21 多层学习记忆方案状态对账 — A1.3 校正为 green + Phase C handoff 待执行
 
 **变更类型**：audit / handoff（仅文档；代码 0 diff）
