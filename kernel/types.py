@@ -206,6 +206,7 @@ class PluginContext:
     episode_graph_bridge: Any = None
     reflection_generator: Any = None
     slang_graph_bridge: Any = None
+    style_graph_bridge: Any = None
 
 
 @dataclass

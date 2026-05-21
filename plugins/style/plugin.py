@@ -87,6 +87,26 @@ class StylePlugin(AmadeusPlugin):
             self._provider_superseded = True
             _L.info("style prompt injection delegated to provider bus")
 
+        # Phase E.2 graph edge double-write — mirror approve/mute/reject
+        # status flips to knowledge_graph as `style_applies_to_situation`
+        # edges. Best-effort: a graph write failure must never block
+        # `update_expression` (audit § E.2).
+        try:
+            from services.knowledge_graph.graph_writer import GraphWriter
+            from services.style.graph_bridge import StyleGraphBridge
+
+            kg_service = getattr(ctx, "knowledge_graph", None)
+            kg_store = getattr(kg_service, "_store", None) if kg_service else None
+            if (
+                kg_store is not None
+                and getattr(kg_store, "_db", None) is not None
+                and self._store is not None
+            ):
+                ctx.style_graph_bridge = StyleGraphBridge(GraphWriter(kg_store))
+                ctx.style_graph_bridge.attach(self._store)
+        except Exception as exc:
+            _L.warning("style graph bridge attach failed | err={}", exc)
+
     async def on_shutdown(self, ctx: PluginContext) -> None:
         del ctx
         if self._owns_store and self._store is not None:

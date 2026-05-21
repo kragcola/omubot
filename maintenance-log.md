@@ -4,6 +4,82 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase E.2 — `style_applies_to_situation` graph edge 双写
+
+**变更类型**：feat（代码 + 测试，无 schema 变更，无部署）
+
+**背景**：
+
+[Phase E 设计前置审计 § 3.2](docs/audits/multilayer-memory-phase-e-design-audit-2026-05-21.md) 给出 E.2 的设计：StyleStore.update_expression 状态翻转 → 镜像出 `style_applies_to_situation` 边（style_expression node ↔ situation node）。本子阶段同时把 E.3 用到的 `add_feedback_listener` 机制提前埋进 StyleStore（一份 listener 基础设施服务两个 bridge）。
+
+**核心改动**：
+
+- [services/style/store.py](services/style/store.py) — `StyleStore`：
+  - 加 `add_status_listener(listener)` + `_fire_status_listeners`（仿 D.5/E.1 listener-pattern）；listener 签名 `async (expression, prev_status, new_status, actor) -> None`
+  - 加 `add_feedback_listener(listener)` + `_fire_feedback_listeners`（为 E.3 预埋）；listener 签名 `async (feedback) -> None`
+  - `update_expression` 末尾仅在 `'status' in updates AND existing.status != updated.status` 时 fire（避免重复 approve 触发；非 status 字段更新静默）
+  - `record_feedback` 末尾 fire feedback listener，listener 失败仅 WARN，不影响 SQL 提交
+- [services/style/graph_bridge.py](services/style/graph_bridge.py)（新建，~165 行）— `StyleGraphBridge`：
+  - `attach(store)` 把 `_on_status` 绑到 `store.add_status_listener`
+  - `_on_status` 三态分支：
+    - `new_status == 'approved'` → upsert expression node + situation node + edge，并主动 `set_edge_status('active')` 处理 disabled→approved 复活路径
+    - `new_status in {'muted', 'rejected'}` → `set_edge_status('disabled')`；如果对应 node 还不存在（approve 从未发生过）则直接 noop
+  - **situation node 设计选择 method A**（审计 § E.2）：复用 `node_type='fact'` + `source_table='style_situations'`（仅作 dedup key，不对应 SQL 表）+ `source_id=SHA1(situation)[:16]`；避免动 `GraphNodeType` Literal，避免长中文文本作主键
+  - properties carry `persona_fit` / `mood_fit`，evidence_refs=(expression_id,)
+- [plugins/style/plugin.py](plugins/style/plugin.py) — 在 StylePlugin.on_startup 末尾挂 bridge attach（StylePlugin priority=43 > ChatPlugin priority=0，所以 `ctx.knowledge_graph` 此时已就绪）；`try/except` 优雅降级
+- [kernel/types.py](kernel/types.py) `PluginContext` — 新增 `style_graph_bridge: Any = None` 字段
+
+**关于 listener 触发条件的工程权衡**：
+
+只在 `'status' in updates AND existing.status != updated.status` 时 fire，意味着：
+- pending→pending 的 idempotent 更新不重复打事件（admin 反复点同一 status 不污染 graph 写入路径）
+- 单纯改 `style` / `confidence` / `risk_tags` / `output_policy` 等不触发 graph 写（这些字段对 `style_applies_to_situation` 边的语义无影响——situation 与 expression 的"挂靠关系"由 status='approved' 锁定）
+- `set_status` 是 `update_expression` 的 thin wrapper，自动继承相同语义
+
+**D 条款落地证据**：
+
+- D1 同模式扫描：grep `add_status_listener` 当前一处（StyleStore），`add_feedback_listener` 一处；listener-pattern 三家齐活（D.5 EpisodeStore.add_transition_listener / E.1 SlangStore.add_hit_listener / E.2 StyleStore.add_status_listener + add_feedback_listener）
+- D2 cancel-path 测试：[tests/test_style_graph_bridge.py:227](tests/test_style_graph_bridge.py#L227) `test_cancel_path_leaves_clean_state`，断言「若 expression node 已落，则 SQL status 必已 advance」一致性
+- D4 完成声明含证据：
+  - `pkill -9 -f pytest && uv run pytest tests/test_style_graph_bridge.py -q` → **12 passed in 0.47s**
+  - `uv run pytest tests/test_style_store.py tests/test_style_graph_bridge.py tests/test_style_plugin.py tests/test_style_extractor.py tests/test_slang_graph_bridge.py tests/test_episode_graph_bridge.py -q` → **57 passed in 0.93s**（style + slang + episode bridge scope 全绿）
+  - `uv run ruff check services/style/ tests/test_style_graph_bridge.py kernel/types.py plugins/style/plugin.py` → **All checks passed**
+  - `uv run pyright services/style/graph_bridge.py tests/test_style_graph_bridge.py services/style/store.py` → **0 errors**
+
+**测试矩阵（[tests/test_style_graph_bridge.py](tests/test_style_graph_bridge.py)，12 个测试）**：
+
+| 测试 | 验证目标 |
+| --- | --- |
+| `test_approve_writes_style_applies_to_situation_edge` | approved 后 expression node + situation node + edge 全部就位，confidence/persona_fit/mood_fit 正确 |
+| `test_muted_revokes_edge` | muted → edge.status = 'disabled' |
+| `test_rejected_revokes_edge` | rejected → edge.status = 'disabled' |
+| `test_muted_then_reapproved_reactivates_edge` | disabled→approved 复活到 active |
+| `test_non_status_change_does_not_fire` | 改 style 文本不触发 listener，graph 路径 noop |
+| `test_status_unchanged_is_noop` | pending→pending 不触发 listener |
+| `test_listener_exception_is_caught` | 注入 broken sibling listener，bridge 仍正常 |
+| `test_graph_write_failure_does_not_roll_back_status` | monkeypatch 失败下 status 仍 approved |
+| `test_cancel_path_leaves_clean_state` | D2 cancel-path |
+| `test_evidence_refs_carry_expression_id` | 锁定 evidence_refs 契约 |
+| `test_disable_before_approve_is_noop` | muted 在 approve 前发生时 graph 仍空 |
+| `test_situation_source_id_is_stable` | SHA1 hash 稳定 + 不同 situation 不冲突 |
+
+**频次预估**（沿用审计 § E.2）：style approve/mute/reject 是低频事件（admin 手动 + 偶发），每周几十次。
+
+**部署影响**：
+
+- 不需要 docker rebuild——E.2 仅 .py 改动，下次 bot 重启时 listener 自动接通
+- 不需要 schema migration——`graph_nodes`/`graph_edges` schema 已就位；situation 节点借用 `node_type='fact'` 不改 Literal
+- 不需要 admin 前端改动——admin `/api/admin/knowledge/graph/edges?edge_type=style_applies_to_situation` 现有路由可直接查
+- napcat 全程未动（铁律）
+
+**回滚路径**：撤回本次 commit 即可。`graph_edges` 表里的 `style_applies_to_situation` 行无清理需求（不被读路径使用）。
+
+**与后续子阶段的衔接**：
+
+E.3 user_corrected_bot_about bridge 直接消费已埋好的 `add_feedback_listener` API，无需再改 StyleStore；下一步只新建 `services/style/feedback_graph_bridge.py` + 在 StylePlugin 挂 attach 即可。
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase E.1 — `term_used_in_group` graph edge 双写
 
 **变更类型**：feat（代码 + 测试，无 schema 变更，无部署）

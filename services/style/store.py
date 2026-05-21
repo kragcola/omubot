@@ -6,6 +6,7 @@ import contextlib
 import json
 import re
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -467,6 +468,73 @@ class StyleStore:
         self._db_path = str(db_path)
         self._db: aiosqlite.Connection | None = None
         self.initialized = False
+        self._status_listeners: list[
+            Callable[[StyleExpression, str, str, str], Awaitable[None]]
+        ] = []
+        self._feedback_listeners: list[
+            Callable[[StyleFeedback], Awaitable[None]]
+        ] = []
+
+    def add_status_listener(
+        self,
+        listener: Callable[[StyleExpression, str, str, str], Awaitable[None]],
+    ) -> None:
+        """Register a coroutine called after ``update_expression`` flips status.
+
+        Listener signature:
+        ``async (expression, prev_status, new_status, actor) -> None``.
+        Failures inside listeners are caught by ``_fire_status_listeners``
+        and logged as warnings — they MUST never break the source-of-truth
+        path. Used by the Phase E.2 graph bridge to mirror approve/mute/
+        reject transitions as ``style_applies_to_situation`` edges.
+        """
+        self._status_listeners.append(listener)
+
+    async def _fire_status_listeners(
+        self,
+        expression: StyleExpression,
+        prev_status: str,
+        new_status: str,
+        actor: str,
+    ) -> None:
+        for listener in self._status_listeners:
+            try:
+                await listener(expression, prev_status, new_status, actor)
+            except Exception as exc:
+                logger.warning(
+                    "style status listener failed | expression={} "
+                    "prev={} new={} listener={} err={}",
+                    expression.expression_id,
+                    prev_status,
+                    new_status,
+                    getattr(listener, "__qualname__", repr(listener)),
+                    exc,
+                )
+
+    def add_feedback_listener(
+        self,
+        listener: Callable[[StyleFeedback], Awaitable[None]],
+    ) -> None:
+        """Register a coroutine called after every successful ``record_feedback``.
+
+        Listener signature: ``async (feedback) -> None``.
+        Used by the Phase E.3 graph bridge to mirror negative ratings as
+        ``user_corrected_bot_about`` edges.
+        """
+        self._feedback_listeners.append(listener)
+
+    async def _fire_feedback_listeners(self, feedback: StyleFeedback) -> None:
+        for listener in self._feedback_listeners:
+            try:
+                await listener(feedback)
+            except Exception as exc:
+                logger.warning(
+                    "style feedback listener failed | feedback={} "
+                    "listener={} err={}",
+                    feedback.feedback_id,
+                    getattr(listener, "__qualname__", repr(listener)),
+                    exc,
+                )
 
     @property
     def db_path(self) -> str:
@@ -877,7 +945,9 @@ class StyleStore:
         row = await cursor.fetchone()
         if row is None:
             raise RuntimeError("created style feedback disappeared")
-        return _row_to_feedback(row)
+        feedback = _row_to_feedback(row)
+        await self._fire_feedback_listeners(feedback)
+        return feedback
 
     async def list_feedback(
         self,
@@ -1231,6 +1301,14 @@ class StyleStore:
             after=self.expression_to_dict(updated) if updated else {},
             reason=reason,
         )
+        if (
+            updated is not None
+            and "status" in updates
+            and updated.status != existing.status
+        ):
+            await self._fire_status_listeners(
+                updated, existing.status, updated.status, actor
+            )
         return True
 
     async def set_status(
