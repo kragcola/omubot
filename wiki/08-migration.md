@@ -10,13 +10,14 @@
 | Phase 2 | 配置系统重组 | ✅ 完成 |
 | Phase 3 | 系统服务迁移 | ✅ 完成 |
 | Phase 4 | ChatPlugin 拆分 | ✅ 完成 |
-| Phase 5 | 全部 14 个插件切出 | ✅ 完成 |
+| Phase 5 | 早期插件切出 | ✅ 完成 |
 | Phase 6 | src/ 耦合清理 + 垫片删除 | ✅ 完成 (2026-05-01) |
 | Phase 6a | 人格硬编码解耦（凤笑梦 → identity.name） | ✅ 完成 (2026-05-01) |
 | Phase 6b | config/ 目录隔离 + 开源准备 | ✅ 完成 (2026-05-01) |
-| Phase 7 | 单文件插件 + plugin.json + 依赖解析 | ✅ 完成 (2026-05-01) |
-| Phase 7b | .omu 打包 | 远期 |
-| Phase 8 | 热重载 + 第三方生态 | 远期 |
+| Phase 7 | 目录插件 + manifest v3 + JSON 配置契约 | ✅ 完成 |
+| Phase 7b | 本地插件索引、治理队列、签名校验预留 | ✅ 完成 |
+| Phase 8 | 统一上下文、黑话治理、表达学习、对话归档底座 | ✅ 进行中 |
+| Phase 9 | 第三方生态 / 打包 / 热重载 | 远期 |
 
 ## 通用迁移模式
 
@@ -62,7 +63,7 @@ class LookupCardsTool(Tool):
 tools = [LookupCardsTool(), ...]
 ```
 
-新模式：
+当前模式：
 ```python
 class MemoToolsPlugin(AmadeusPlugin):
     def register_tools(self) -> list[Tool]:
@@ -118,15 +119,16 @@ uv run pyright                    # type check
 3. 将旧好感度文件移到插件的子模块：`plugins/affection/engine.py`
 4. 在 `bot.py` 中注册插件替代旧调用
 5. 确认 `register_tools()` 返回好感度相关工具
-6. 运行测试确认无回归
-7. 删除旧文件
+6. 补齐 `plugin.json`、`config.default.json`、`config.schema.json`
+7. 运行测试确认无回归
+8. 删除旧文件或让本地索引标记 legacy，不再运行时加载
 
 ## 回归检查清单
 
 每个阶段完成后：
 
 - [ ] `uv run pytest` 全部通过
-- [ ] `uv run ruff check src/` 无错误
+- [ ] `uv run ruff check` 无错误
 - [ ] `uv run pyright` 无新增类型错误
 - [ ] Docker 构建成功
 - [ ] 部署后 bot 正常启动（日志无异常）

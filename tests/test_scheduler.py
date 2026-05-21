@@ -510,7 +510,10 @@ class TestVideoHint:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
-        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_always",
+            extra={"bilibili_talk_value": 0.8, "video_title": "test"},
+        ))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         await scheduler.close()
@@ -523,7 +526,10 @@ class TestVideoHint:
             group_config=_make_config(),
         )
         scheduler.mute("111")
-        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_always",
+            extra={"bilibili_talk_value": 0.8, "video_title": "test"},
+        ))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 0
         await scheduler.close()
@@ -536,7 +542,10 @@ class TestVideoHint:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(identity),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
-        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_always",
+            extra={"bilibili_talk_value": 0.8, "video_title": "test"},
+        ))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         await scheduler.close()
@@ -548,11 +557,17 @@ class TestVideoHint:
             llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(planner_smooth=999.0),
         )
-        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_always",
+            extra={"bilibili_talk_value": 0.8, "video_title": "test"},
+        ))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
         # Second call also fires (planner_smooth ignored for always mode)
-        scheduler.notify("111", trigger=TriggerContext(reason="视频分享:《test》", mode="video_always", extra={"bilibili_talk_value": 0.8, "video_title": "test"}))
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_always",
+            extra={"bilibili_talk_value": 0.8, "video_title": "test"},
+        ))
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 2
         await scheduler.close()
@@ -611,7 +626,7 @@ class TestVideoHint:
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
         # First 5 calls may or may not fire (low interest), but 6th is guaranteed
-        for i in range(5):
+        for _ in range(5):
             scheduler.notify("111", trigger=TriggerContext(
                 reason="视频分享:《test》", mode="video_autonomous",
                 extra={"bilibili_talk_value": 0.5, "interest_score": 0.05, "video_title": "test"},

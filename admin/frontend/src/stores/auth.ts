@@ -26,9 +26,13 @@ export const useAuthStore = defineStore('auth', () => {
         authenticated.value = true
       }
       return resp
-    } catch (e) {
+    } catch (e: unknown) {
+      const status = (e as { response?: { status?: number } })?.response?.status
+      if (status === 401) {
+        return { ok: false, error: 'invalid_token', status }
+      }
       console.error('Login failed:', e)
-      return { ok: false, error: '网络错误' }
+      return { ok: false, error: 'network_error', status }
     }
   }
 

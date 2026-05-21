@@ -1,6 +1,5 @@
 """Image cache module tests."""
 
-import base64
 import time
 from datetime import timedelta
 from pathlib import Path

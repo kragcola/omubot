@@ -297,9 +297,9 @@ async def test_group_profile_injects_prompt_and_filters_tools(prompt, short_term
     ):
         captured: dict[str, object] = {}
 
-        async def _fake_call_api(*args, **kwargs):
-            captured["system_blocks"] = args[4]
-            captured["tools"] = kwargs.get("tools")
+        async def _fake_call_api(*args, _captured=captured, **kwargs):
+            _captured["system_blocks"] = args[4]
+            _captured["tools"] = kwargs.get("tools")
             return MOCK_RESULT_FULL
 
         with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=_fake_call_api):
@@ -361,10 +361,10 @@ async def test_deepseek_main_moves_dynamic_prompt_blocks_to_tail_metadata(
 
         captured: dict[str, object] = {}
 
-        async def _fake_call_api(*args, **kwargs):
-            captured["system_blocks"] = args[4]
-            captured["messages"] = args[5]
-            captured["request_options"] = kwargs.get("request_options")
+        async def _fake_call_api(*args, _captured=captured, **kwargs):
+            _captured["system_blocks"] = args[4]
+            _captured["messages"] = args[5]
+            _captured["request_options"] = kwargs.get("request_options")
             return MOCK_RESULT_FULL | {
                 "provider_kind": "deepseek",
                 "provider_mode": "native",
@@ -618,7 +618,9 @@ class TestPassTurn:
                 )
             assert result is None
 
-    async def test_textual_pass_turn_is_suppressed_in_group(self, prompt, short_term, tools, timeline, card_store) -> None:
+    async def test_textual_pass_turn_is_suppressed_in_group(
+        self, prompt, short_term, tools, timeline, card_store,
+    ) -> None:
         async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
             bus = _Bus()
             client._bus = bus
@@ -1248,9 +1250,8 @@ async def test_spine_call_cancel_path_no_partial_record(
                 user_messages=[{"role": "user", "content": "x"}],
             )
 
-            with patch("services.llm.client.call_api", new=hang):
-                with pytest.raises(asyncio.TimeoutError):
-                    await asyncio.wait_for(client._call(req), timeout=0.05)
+            with patch("services.llm.client.call_api", new=hang), pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(client._call(req), timeout=0.05)
             await asyncio.sleep(0)
 
         rows = await tracker.query_raw("SELECT * FROM llm_calls")
@@ -1346,3 +1347,88 @@ async def test_main_chat_aggregated_usage_with_per_round_diagnostic(
             assert len(history) >= 1, "main chat must record at least one diagnostic snapshot"
     finally:
         await tracker.close()
+
+
+# ---------------------------------------------------------------------------
+# Spine cache_control injection (apply_cache_breakpoints) — integration:
+# verify _dispatch_call stamps cache_control on the system blocks handed
+# to call_api, even for paths that previously bypassed prompt_builder.
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_stamps_cache_control_on_plugin_direct_path(
+    prompt: PromptBuilder, short_term: ShortTermMemory, tools: ToolRegistry,
+) -> None:
+    """Plugin-direct LLMRequest (e.g. ``memo``) must reach call_api with
+    a cache_control marker on its tail system block — even though the
+    caller passed only bare strings into ``static_blocks``.
+    """
+    captured: dict[str, list[dict]] = {}
+
+    async def _capture(
+        session, base_url, api_key, model,
+        system_blocks, messages,
+        *, max_tokens, tools=None, thinking=None, api_format=None,
+        request_options=None,
+    ):
+        captured["system_blocks"] = list(system_blocks)
+        return MOCK_RESULT
+
+    async for client in _client(prompt, short_term, tools):
+        with patch("services.llm.client.call_api", new=_capture):
+            req = LLMRequest(
+                task="memo",
+                static_blocks=["plugin-system-prompt"],
+                user_messages=[{"role": "user", "content": "x"}],
+            )
+            await client._call(req)
+
+        blocks = captured["system_blocks"]
+        assert blocks, "spine must hand at least one system block to call_api"
+        cache_count = sum(1 for b in blocks if b.get("cache_control"))
+        assert cache_count == 1, (
+            f"memo (default profile) should land exactly 1 system "
+            f"breakpoint, got {cache_count}"
+        )
+        assert blocks[0].get("cache_control") == {"type": "ephemeral"}
+
+
+async def test_dispatch_strips_caller_cache_control_then_re_stamps(
+    prompt: PromptBuilder, short_term: ShortTermMemory, tools: ToolRegistry,
+) -> None:
+    """Even when the caller pre-stamps ``cache_control`` on a dict block,
+    spine strips it (via ``_normalize_block``) and re-applies according
+    to the per-task profile. Single source of truth = spine."""
+    captured: dict[str, list[dict]] = {}
+
+    async def _capture(
+        session, base_url, api_key, model,
+        system_blocks, messages,
+        *, max_tokens, tools=None, thinking=None, api_format=None,
+        request_options=None,
+    ):
+        captured["system_blocks"] = list(system_blocks)
+        return MOCK_RESULT
+
+    async for client in _client(prompt, short_term, tools):
+        with patch("services.llm.client.call_api", new=_capture):
+            req = LLMRequest(
+                task="slang",
+                static_blocks=[
+                    {"type": "text", "text": "shared-prefix", "cache_control": {"type": "ephemeral"}},
+                ],
+                stable_blocks=[
+                    {"type": "text", "text": "task-prompt", "cache_control": {"type": "ephemeral"}},
+                ],
+                user_messages=[{"role": "user", "content": "x"}],
+            )
+            await client._call(req)
+
+        blocks = captured["system_blocks"]
+        cache_count = sum(1 for b in blocks if b.get("cache_control"))
+        # slang profile = 2 system breakpoints. Caller pre-stamped
+        # cache_control on both; spine strips then re-applies per profile.
+        # Two segments (static + stable) → 2 markers on segment tails.
+        assert cache_count == 2
+        assert blocks[0].get("cache_control") == {"type": "ephemeral"}
+        assert blocks[1].get("cache_control") == {"type": "ephemeral"}

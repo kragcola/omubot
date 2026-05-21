@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // \"\"' 2>/dev/null); if echo \"$f\" | grep -qE '(maintenance-log|project-info)\\.md$'; then echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"你刚编辑了项目文档（'\"$f\"'）。请确保 omubot/maintenance-log.md 和 docs/project-info.md 之间的信息保持一致，不要出现矛盾数据。\"}}'; fi",
+            "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // \"\"' 2>/dev/null); if echo \"$f\" | grep -qE '(config/(config\\.toml|soul/|\\.env)|bot\\.py|Dockerfile|docker-compose|^services/|^plugins/|^kernel/|^admin/|^tests/|pyproject\\.toml|\\.claude/)'; then echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"你刚修改了代码或配置（'\"$f\"'）。请考虑是否需要在 omubot/maintenance-log.md 中追加一条维护记录：日期、变更类型、变更内容、影响范围。\"}}'; fi",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport json, os, glob\nctx = []\n# maintenance log — latest entry\ntry:\n    with open('omubot/maintenance-log.md') as f:\n        capture = False\n        count = 0\n        for line in f:\n            if line.startswith('## 202'):\n                if capture:\n                    break\n                capture = True\n            if capture:\n                ctx.append(line)\n                count += 1\n                if count > 60:\n                    break\nexcept Exception as e:\n    ctx.append(f'(读取维护日志失败: {e})')\n# latest bot log\ntry:\n    logs = sorted(glob.glob('storage/logs/bot_*.log'), reverse=True)\n    if logs:\n        with open(logs[0]) as f:\n            lines = f.readlines()\n        ctx.append(f'\\n--- 最新日志 ({os.path.basename(logs[0])}, 最后40行) ---\\n')\n        ctx.extend(lines[-40:])\n    else:\n        ctx.append('\\n(暂无 bot 日志文件)')\nexcept Exception as e:\n    ctx.append(f'\\n(读取日志失败: {e})')\n# project info summary\ntry:\n    with open('omubot/docs/project-info.md') as f:\n        lines = f.readlines()\n    # extract bot QQ status\n    for line in lines:\n        if 'Bot QQ 号' in line and '待填写' in line:\n            ctx.append('\\n⚠️ Bot QQ 号尚未填写，需要扫码登录后更新 omubot/docs/project-info.md')\n            break\nexcept:\n    pass\nif ctx:\n    print(json.dumps({'hookSpecificOutput':{'hookEventName':'SessionStart','additionalContext':'项目状态快照 — 请先了解当前状态再开始工作:\\n\\n'+''.join(ctx)}}))\n\"",
+            "timeout": 5,
+            "statusMessage": "读取项目状态..."
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import json; print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': '项目内 Skill 可用：$omubot-admin-console（路径 .claude/skills/omubot-admin-console/）。当任务涉及 admin/frontend 重构、旧 wiki/代码审计、或 Omubot 增量修改时优先使用；执行规则见 docs/agent-ui-guidelines.md 与 docs/admin-ui-style-guide.md。'}}))\"",
+            "timeout": 3,
+            "statusMessage": "加载项目技能..."
+          }
+        ]
+      }
+    ]
+  }
+}

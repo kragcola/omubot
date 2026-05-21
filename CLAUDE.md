@@ -61,6 +61,15 @@ Deep dives → [omubot/docs/architecture.md](omubot/docs/architecture.md) | Dock
 All tests must pass (`uv run pytest`) before committing. Same for lint and type checks.
 Fix any errors discovered during testing, even if they were pre-existing and not introduced by your changes.
 
+### Agent discipline (条款详情见 [docs/agent-discipline.md](docs/agent-discipline.md))
+
+- **D1 同模式扫描**：修 bug 时必须 grep 同代码库找"同模式位点"，维护日志列出扫了哪些点。盯着报错信号修表象 = 24 小时内同模式第二刀。
+- **D2 cancel-path 测试**：被 `wait_for` 包裹或会被 shutdown 取消的协程，必须有 `pytest.raises(TimeoutError)` 模拟 cancel 的回归测试，断言外部可观察状态（DB row、in-flight 旗标、meta 标记）不污染下一次执行。
+- **D3 重构带迁移清单**：批量重构（框架迁移、kernel 重构）必须带"旧→新文件/路由/菜单/API"四列回归清单，存入 `docs/migrations/`，与 PR 一起提交。
+- **D4 完成声明含证据**：声明"fix 完成"时必须在日志里给出：① 同模式扫描结果；② 外部可观察证据（sqlite SELECT、HTTP 状态码、日志片段）；③ 回滚路径。
+- **D5 pytest 防孤儿**：跑全量 pytest 前先 `pkill -9 -f pytest`，否则可能跟 IDE 抢 sqlite 文件锁导致死锁。
+- **D6 admin SPA 同步路径**：`admin/static` 是 bind mount——只改前端 `npm run build` 即生效，无需 docker rebuild；改了 .py 才需要 rebuild bot。
+
 ## Release
 
 发布新版本时，Docker 镜像版本必须和 git tag 对齐。无正式 tag 时使用 `vYYYYMMDD-<short hash>` 格式（如 `v20260404-cd328d2`）。

@@ -58,7 +58,7 @@ class KnowledgeIndexStore:
         return str(self._db_path)
 
     def close(self) -> None:
-        close_with_checkpoint_sync(self._db, name="knowledge_index")
+        close_with_checkpoint_sync(self._db, name="knowledge")
 
     def load(self) -> tuple[dict[str, KnowledgeChunk], dict[str, KnowledgeSourceStatus]]:
         sources = {

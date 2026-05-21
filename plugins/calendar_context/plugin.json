@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "calendar_context",
+  "display_name": {
+    "zh": "日期上下文",
+    "en": "Calendar Context"
+  },
+  "description": "统一管理节假日、调休日、特殊日与生日上下文",
+  "version": "1.0.0",
+  "priority": -5,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "memory",
+  "permissions": [
+    "prompt",
+    "storage"
+  ],
+  "capabilities": [
+    "calendar_context",
+    "birthday"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "timezone",
+      "match_identity_aliases",
+      "builtin_birthdays_file",
+      "builtin_special_days_file",
+      "builtin_years_dir",
+      "extra_birthdays_files",
+      "extra_special_days_files",
+      "extra_year_files",
+      "auto_fetch_missing_year",
+      "auto_refresh_future_years",
+      "official_source_enabled",
+      "fallback_local_holiday_lib",
+      "cache_dir",
+      "write_back_plugin_data",
+      "official_fetch_timeout_s",
+      "official_url_template"
+    ]
+  },
+  "store": {
+    "visibility": "marketplace_ready",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

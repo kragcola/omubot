@@ -15,8 +15,9 @@ from loguru import logger
 
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext, PromptContext
 from services.slang import (
-    SlangDailyReviewer,
+    SlangBacklogReviewer,
     SlangDatabaseCorruptError,
+    SlangDriftReviewer,
     SlangExtractor,
     SlangStore,
     normalize_term,
@@ -26,7 +27,7 @@ from services.tools.context import ToolContext
 
 _L = logger.bind(channel="system")
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
-_TICK_JOB_TIMEOUT_S = 50.0
+_TICK_JOB_TIMEOUT_S = 600.0
 
 
 def _content_to_text(content: Any) -> str:
@@ -126,12 +127,17 @@ class SlangPlugin(AmadeusPlugin):
         self._message_log: Any = None
         self._llm_client: Any = None
         self._extractor: SlangExtractor | None = None
-        self._daily_reviewer: SlangDailyReviewer | None = None
+        self._backlog_reviewer: SlangBacklogReviewer | None = None
+        self._drift_reviewer: SlangDriftReviewer | None = None
         self._last_extract_monotonic = 0.0
+        self._last_drift_age_out_date: str = ""
         self._lookup_tool_enabled = True
         self._group_config: Any = None
         self._tick_task: asyncio.Task[None] | None = None
         self._slang_disabled_reason: str = ""
+        self._backlog_review_in_flight: bool = False
+        self._provider_superseded: bool = False
+        self._tool_registry: Any = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
         db_path = Path(getattr(ctx, "storage_dir", Path("storage"))) / "slang.db"
@@ -156,12 +162,30 @@ class SlangPlugin(AmadeusPlugin):
         self.store = store
         self._message_log = getattr(ctx, "msg_log", None)
         self._llm_client = getattr(ctx, "llm_client", None)
+        self._tool_registry = getattr(ctx, "tool_registry", None)
         self._extractor = SlangExtractor(self._llm_client)
-        self._daily_reviewer = SlangDailyReviewer(self._llm_client)
+        self._backlog_reviewer = SlangBacklogReviewer(self._llm_client)
+        self._drift_reviewer = SlangDriftReviewer(self._llm_client)
+        self.store.set_drift_reviewer(self._drift_reviewer)
         self._lookup_tool_enabled = (await self.store.load_settings()).lookup_tool_enabled
         self._group_config = getattr(ctx.config, "group", None)
         ctx.slang_store = self.store
         ctx.slang_plugin = self
+        # Mark superseded if SlangProvider is already registered on the
+        # provider bus — provider becomes the sole prompt-injection path.
+        provider_bus = getattr(ctx, "provider_bus", None)
+        if provider_bus is not None and provider_bus.has_provider("slang"):
+            self._provider_superseded = True
+            _L.info("slang prompt injection delegated to provider bus")
+        # Clear stale "running" runs left from previous crash/timeout — keeps the
+        # admin dashboard truthful instead of permanently parking on running.
+        try:
+            stale = await self.store.mark_stale_running_runs()
+        except Exception as exc:
+            _L.warning("slang stale run cleanup failed | error={}", exc)
+        else:
+            if stale:
+                _L.warning("slang stale runs marked abandoned | count={}", stale)
         _L.info("slang store initialized | db={}", db_path)
 
     async def on_shutdown(self, ctx: PluginContext) -> None:
@@ -221,7 +245,7 @@ class SlangPlugin(AmadeusPlugin):
                 self._run_tick_jobs_inner(ctx, settings),
                 timeout=_TICK_JOB_TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _L.warning("slang tick job timeout | timeout={:.0f}s", _TICK_JOB_TIMEOUT_S)
         except asyncio.CancelledError:
             raise
@@ -229,11 +253,26 @@ class SlangPlugin(AmadeusPlugin):
             _L.warning("slang tick job failed | error={}", exc)
 
     async def _run_tick_jobs_inner(self, ctx: PluginContext, settings: Any) -> None:
-        await self.run_daily_ai_review_if_due(ctx, settings=settings)
+        await self._maybe_age_out_drifts(settings)
+        await self.run_backlog_review_one_batch_if_due(ctx, settings=settings)
         interval_s = settings.extract_interval_minutes * 60
         now = time.monotonic()
         if now - self._last_extract_monotonic < interval_s:
+            # Fast path: in-memory timer says not yet.
             return
+        # Cold start guard: if monotonic timer was never set (container just
+        # restarted), check DB for the last successful extract run time to avoid
+        # duplicate extraction within the configured interval.
+        if self._last_extract_monotonic == 0.0 and self.store is not None:
+            last_run_at = await self.store.get_last_extract_run_time()
+            if last_run_at:
+                from datetime import UTC, datetime
+
+                elapsed = datetime.now(UTC) - last_run_at
+                if elapsed.total_seconds() < interval_s:
+                    # Not enough time since last run — skip and align monotonic.
+                    self._last_extract_monotonic = now - elapsed.total_seconds()
+                    return
         self._last_extract_monotonic = now
         await self.run_manual_extract(limit=settings.extraction_batch_limit)
 
@@ -245,43 +284,120 @@ class SlangPlugin(AmadeusPlugin):
         with contextlib.suppress(Exception):
             task.result()
 
-    async def run_daily_ai_review_if_due(
+    async def _maybe_age_out_drifts(self, settings: Any) -> None:
+        """Run the drift age-out gate at most once per local day."""
+        if self.store is None:
+            return
+        days = int(getattr(settings, "drift_age_out_days", 0) or 0)
+        if days <= 0:
+            return
+        today = datetime.now(TZ_SHANGHAI).date().isoformat()
+        if self._last_drift_age_out_date == today:
+            return
+        last_run = await self.store.get_meta("last_drift_age_out_date", "")
+        if last_run == today:
+            self._last_drift_age_out_date = today
+            return
+        try:
+            aged = await self.store.age_out_open_drifts(days=days)
+        except Exception as exc:
+            _L.warning("drift age-out failed | error={}", exc)
+            return
+        self._last_drift_age_out_date = today
+        await self.store.set_meta("last_drift_age_out_date", today)
+        if aged > 0:
+            _L.info("drift age-out completed | aged={} days={}", aged, days)
+
+    async def run_backlog_review_one_batch_if_due(
         self,
-        ctx: PluginContext,
+        ctx: PluginContext | None = None,
         *,
         settings: Any | None = None,
     ) -> dict[str, Any]:
         if self.store is None:
             return {"ok": False, "error": "SlangStore not available"}
         settings = settings or await self.store.load_settings()
-        if not settings.daily_ai_review_enabled:
+        if not settings.backlog_review_enabled:
             return {"ok": True, "skipped": "disabled"}
-        now = datetime.now(TZ_SHANGHAI)
-        if now.strftime("%H:%M") < str(settings.daily_ai_review_time):
-            return {"ok": True, "skipped": "not_due"}
-        today = now.date().isoformat()
-        last_date = await self.store.get_meta("last_daily_ai_review_date", "")
-        if last_date == today:
-            return {"ok": True, "skipped": "already_ran"}
-        await self.store.set_meta("last_daily_ai_review_date", today)
-        result = await self.run_daily_ai_review(ctx, settings=settings)
-        if result.get("ok"):
-            _L.info(
-                "daily slang AI review finished | groups={} ai_approved={} candidates={}",
-                len(result.get("groups", [])),
-                result.get("ai_approved", 0),
-                result.get("candidates", 0),
-            )
-        else:
-            _L.warning("daily slang AI review failed | error={}", result.get("error"))
-        return result
 
-    async def run_daily_ai_review(
+        times: list[str] = list(settings.daily_ai_review_times or [])
+        if not times:
+            return {"ok": True, "skipped": "no_slots"}
+        now = datetime.now(TZ_SHANGHAI)
+        current_hm = now.strftime("%H:%M")
+        due_slots = [slot for slot in times if slot <= current_hm]
+        if not due_slots:
+            return {"ok": True, "skipped": "not_due"}
+        current_slot = max(due_slots)
+        today = now.date().isoformat()
+        slot_key = f"{today}:{current_slot}"
+        last_slot_key = await self.store.get_meta("last_backlog_review_slot", "")
+        if last_slot_key == slot_key:
+            return {"ok": True, "skipped": "already_ran"}
+
+        if self._backlog_review_in_flight:
+            return {"ok": True, "skipped": "in_flight"}
+        self._backlog_review_in_flight = True
+        try:
+            total_approved = 0
+            total_muted = 0
+            total_kept = 0
+            total_processed = 0
+            batches = 0
+            completed_in_session = False
+            deadline = time.monotonic() + _TICK_JOB_TIMEOUT_S * 0.85
+            while time.monotonic() < deadline:
+                result = await self.run_backlog_review_now(ctx, settings=settings, _caller_holds_lock=True)
+                if not result.get("ok"):
+                    if batches == 0:
+                        _L.warning("backlog AI review failed | slot={} error={}", slot_key, result.get("error"))
+                    return result
+                if result.get("skipped"):
+                    break
+                batches += 1
+                total_approved += result.get("approved_in_batch", 0)
+                total_muted += result.get("muted_in_batch", 0)
+                total_kept += result.get("kept_in_batch", 0)
+                total_processed += result.get("batch_size", 0)
+                if result.get("completed") or result.get("remaining", 1) == 0:
+                    completed_in_session = True
+                    break
+            if completed_in_session:
+                # Only lock the slot out once the backlog is fully drained. If we
+                # ran out of tick budget mid-pool, leave the slot unlocked so the
+                # next tick can resume — state.active stays True and the next
+                # call will pick up the cursor without re-counting from zero.
+                await self.store.set_meta("last_backlog_review_slot", slot_key)
+            if batches > 0:
+                _L.info(
+                    "backlog AI review session done | slot={} batches={} processed={} "
+                    "approved={} muted={} kept={} completed={}",
+                    slot_key,
+                    batches,
+                    total_processed,
+                    total_approved,
+                    total_muted,
+                    total_kept,
+                    completed_in_session,
+                )
+        finally:
+            self._backlog_review_in_flight = False
+        return {
+            "ok": True,
+            "slot": slot_key,
+            "batches": batches,
+            "processed": total_processed,
+            "completed": completed_in_session,
+        }
+
+    async def run_backlog_review_now(
         self,
-        ctx: PluginContext,
+        ctx: PluginContext | None = None,
         *,
         settings: Any | None = None,
-        group_id: str | None = None,
+        batch_size: int | None = None,
+        min_confidence: float | None = None,
+        _caller_holds_lock: bool = False,
     ) -> dict[str, Any]:
         if self.store is None:
             return {"ok": False, "error": "SlangStore not available"}
@@ -289,19 +405,143 @@ class SlangPlugin(AmadeusPlugin):
             return {"ok": False, "error": "MessageLog not available"}
         if self._llm_client is None:
             return {"ok": False, "error": "LLMClient not available"}
-        if self._daily_reviewer is None:
-            self._daily_reviewer = SlangDailyReviewer(self._llm_client)
-        settings = settings or await self.store.load_settings()
-        return await self._daily_reviewer.run(
-            store=self.store,
-            message_log=self._message_log,
-            settings=settings,
-            tool_registry=getattr(ctx, "tool_registry", None),
-            group_id=group_id,
-            group_filter=self._is_group_enabled,
-        )
+        if not _caller_holds_lock and self._backlog_review_in_flight:
+            return {"ok": False, "error": "AI 清池正在进行中，请等待完成"}
+        if not _caller_holds_lock:
+            self._backlog_review_in_flight = True
+        try:
+            if self._backlog_reviewer is None:
+                self._backlog_reviewer = SlangBacklogReviewer(self._llm_client)
+            settings = settings or await self.store.load_settings()
+            tool_registry = (
+                getattr(ctx, "tool_registry", None) if ctx is not None else None
+            ) or self._tool_registry
+            return await self._backlog_reviewer.run_one_batch(
+                store=self.store,
+                message_log=self._message_log,
+                settings=settings,
+                tool_registry=tool_registry,
+                group_filter=self._is_group_enabled,
+                batch_size_override=batch_size,
+                min_confidence_override=min_confidence,
+            )
+        finally:
+            if not _caller_holds_lock:
+                self._backlog_review_in_flight = False
+
+    async def run_backlog_review_continuous(
+        self,
+        ctx: PluginContext | None = None,
+        *,
+        per_batch_timeout_s: float = 600.0,
+        max_batches: int = 200,
+    ) -> dict[str, Any]:
+        """Run backlog review batches in a loop until the pool is drained.
+
+        Unlike the tick scheduler (which has to leave headroom for the next
+        tick), this is a manual trigger and runs to completion. Each batch
+        is wrapped with ``per_batch_timeout_s`` so a stuck LLM call can't
+        hang the loop forever; ``max_batches`` is a hard safety cap.
+        """
+        if self.store is None:
+            return {"ok": False, "error": "SlangStore not available"}
+        if self._message_log is None:
+            return {"ok": False, "error": "MessageLog not available"}
+        if self._llm_client is None:
+            return {"ok": False, "error": "LLMClient not available"}
+        if self._backlog_review_in_flight:
+            return {"ok": False, "error": "AI 清池正在进行中，请等待完成"}
+        self._backlog_review_in_flight = True
+        try:
+            settings = await self.store.load_settings()
+            total_approved = 0
+            total_muted = 0
+            total_kept = 0
+            total_processed = 0
+            batches = 0
+            completed = False
+            timed_out = False
+            for _ in range(max_batches):
+                try:
+                    result = await asyncio.wait_for(
+                        self.run_backlog_review_now(
+                            ctx, settings=settings, _caller_holds_lock=True,
+                        ),
+                        timeout=per_batch_timeout_s,
+                    )
+                except TimeoutError:
+                    _L.error(
+                        "manual backlog AI review batch timed out after {:.0f}s | batches_done={}",
+                        per_batch_timeout_s, batches,
+                    )
+                    timed_out = True
+                    break
+                if not result.get("ok"):
+                    if batches == 0:
+                        _L.warning("manual backlog AI review failed | error={}", result.get("error"))
+                    return {
+                        "ok": False,
+                        "error": result.get("error", "batch failed"),
+                        "batches": batches,
+                        "processed": total_processed,
+                        "approved": total_approved,
+                        "muted": total_muted,
+                        "kept": total_kept,
+                    }
+                if result.get("skipped"):
+                    break
+                batches += 1
+                approved_in = result.get("approved_in_batch", 0)
+                muted_in = result.get("muted_in_batch", 0)
+                kept_in = result.get("kept_in_batch", 0)
+                total_approved += approved_in
+                total_muted += muted_in
+                total_kept += kept_in
+                total_processed += (approved_in + muted_in + kept_in)
+                if result.get("completed") or result.get("remaining", 1) == 0:
+                    completed = True
+                    break
+            if batches > 0:
+                _L.info(
+                    "manual backlog AI review done | batches={} processed={} "
+                    "approved={} muted={} kept={} completed={} timed_out={}",
+                    batches, total_processed, total_approved, total_muted,
+                    total_kept, completed, timed_out,
+                )
+            return {
+                "ok": True,
+                "batches": batches,
+                "processed": total_processed,
+                "approved": total_approved,
+                "muted": total_muted,
+                "kept": total_kept,
+                "completed": completed,
+                "timed_out": timed_out,
+            }
+        finally:
+            self._backlog_review_in_flight = False
+
+    async def get_backlog_review_status(self) -> dict[str, Any]:
+        if self.store is None:
+            return {"ok": False, "error": "SlangStore not available"}
+        if self._backlog_reviewer is None:
+            self._backlog_reviewer = SlangBacklogReviewer(self._llm_client)
+        settings = await self.store.load_settings()
+        status = await self._backlog_reviewer.status(self.store, settings=settings)
+        return {"ok": True, **status}
+
+    async def reset_backlog_review(self) -> dict[str, Any]:
+        if self.store is None:
+            return {"ok": False, "error": "SlangStore not available"}
+        if self._backlog_reviewer is None:
+            self._backlog_reviewer = SlangBacklogReviewer(self._llm_client)
+        cleared = await self._backlog_reviewer.reset(self.store)
+        await self.store.set_meta("last_backlog_review_slot", "")
+        return {"ok": True, "state": cleared}
 
     async def on_pre_prompt(self, ctx: PromptContext) -> None:
+        if self._provider_superseded:
+            return
         if self.store is None or not ctx.group_id:
             return
         if not self._is_group_enabled(ctx.group_id):
@@ -316,7 +556,7 @@ class SlangPlugin(AmadeusPlugin):
             max_chars=settings.max_prompt_chars,
         )
         if block:
-            ctx.add_block(text=block, label="群内黑话", position="dynamic")
+            ctx.add_block(text=block, label="群内黑话", position="dynamic", priority=40, source="slang")
 
     def register_tools(self) -> list[Tool]:
         if self.store is None or not self._lookup_tool_enabled:
@@ -340,6 +580,10 @@ class SlangPlugin(AmadeusPlugin):
         promoted = 0
         extracted = 0
         scanned = 0
+        status: str = "success"
+        error_text: str = ""
+        result_meta: dict[str, Any] | None = None
+        result_payload: dict[str, Any] = {}
         try:
             for gid in groups:
                 rows = await self._message_log.query_recent(gid, limit=limit)
@@ -375,16 +619,8 @@ class SlangPlugin(AmadeusPlugin):
             if settings.auto_promote_global_enabled:
                 global_scan = await self.store.scan_global_candidates(min_groups=settings.global_promote_min_groups)
             await self.store.set_meta("last_extracted_at", time.strftime("%Y-%m-%d %H:%M:%S"))
-            await self.store.finish_extraction_run(
-                run_id,
-                status="success",
-                group_count=len(groups),
-                scanned_messages=scanned,
-                extracted_terms=extracted,
-                promoted_candidates=promoted,
-                meta={"global_scan": global_scan},
-            )
-            return {
+            result_meta = {"global_scan": global_scan}
+            result_payload = {
                 "ok": True,
                 "run_id": run_id,
                 "groups": groups,
@@ -392,18 +628,36 @@ class SlangPlugin(AmadeusPlugin):
                 "extracted": extracted,
                 "candidates": promoted,
             }
+            return result_payload
+        except asyncio.CancelledError:
+            status = "cancelled"
+            error_text = "extraction cancelled (timeout or shutdown)"
+            result_meta = {"cancelled": True}
+            result_payload = {"ok": False, "run_id": run_id, "error": error_text}
+            raise
         except Exception as exc:
-            await self.store.finish_extraction_run(
-                run_id,
-                status="failed",
-                group_count=len(groups),
-                scanned_messages=scanned,
-                extracted_terms=extracted,
-                promoted_candidates=promoted,
-                error=str(exc),
-            )
+            status = "failed"
+            error_text = str(exc)
+            result_payload = {"ok": False, "run_id": run_id, "error": error_text}
             _L.warning("slang extraction failed | run={} error={}", run_id, exc)
-            return {"ok": False, "run_id": run_id, "error": str(exc)}
+            return result_payload
+        finally:
+            # Always close the run row — otherwise the dashboard sees it stuck on
+            # 'running' forever (the original bug). Use shielded await so a
+            # CancelledError doesn't abort the cleanup itself.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(
+                    self.store.finish_extraction_run(
+                        run_id,
+                        status=status,
+                        group_count=len(groups),
+                        scanned_messages=scanned,
+                        extracted_terms=extracted,
+                        promoted_candidates=promoted,
+                        error=error_text,
+                        meta=result_meta,
+                    )
+                )
 
     @staticmethod
     def _pick_source_row(evidence: str, rows: list[dict[str, Any]]) -> dict[str, Any]:

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用日期上下文"
+    },
+    "timezone": {
+      "type": "string",
+      "title": "时区"
+    },
+    "match_identity_aliases": {
+      "type": "boolean",
+      "title": "启用身份别名匹配"
+    },
+    "builtin_birthdays_file": {
+      "type": "string",
+      "title": "内置生日文件"
+    },
+    "builtin_special_days_file": {
+      "type": "string",
+      "title": "内置固定纪念日文件"
+    },
+    "builtin_years_dir": {
+      "type": "string",
+      "title": "内置年份目录"
+    },
+    "extra_birthdays_files": {
+      "type": "array",
+      "title": "追加生日文件",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extra_special_days_files": {
+      "type": "array",
+      "title": "追加固定纪念日文件",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extra_year_files": {
+      "type": "array",
+      "title": "追加年份文件",
+      "items": {
+        "type": "string"
+      }
+    },
+    "auto_fetch_missing_year": {
+      "type": "boolean",
+      "title": "缺年份时自动联网补全"
+    },
+    "auto_refresh_future_years": {
+      "type": "boolean",
+      "title": "允许预抓未来年份"
+    },
+    "official_source_enabled": {
+      "type": "boolean",
+      "title": "启用官方源抓取"
+    },
+    "fallback_local_holiday_lib": {
+      "type": "boolean",
+      "title": "启用本地节假日库兜底"
+    },
+    "cache_dir": {
+      "type": "string",
+      "title": "运行时缓存目录"
+    },
+    "write_back_plugin_data": {
+      "type": "boolean",
+      "title": "回写插件数据目录"
+    },
+    "official_fetch_timeout_s": {
+      "type": "number",
+      "title": "官方抓取超时秒数"
+    },
+    "official_url_template": {
+      "type": "string",
+      "title": "官方公告 URL 模板"
+    }
+  }
+}

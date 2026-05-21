@@ -15,7 +15,7 @@ never 500s the whole endpoint.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -114,7 +114,7 @@ async def _collect_slang(db_path: str) -> dict[str, Any]:
                 }
                 for r in rows
             ]
-    except Exception as exc:  # noqa: BLE001 — best-effort reporting
+    except Exception as exc:
         payload["error"] = str(exc)
     return payload
 
@@ -179,7 +179,7 @@ async def _collect_style(db_path: str) -> dict[str, Any]:
                 }
                 for r in rows
             ]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         payload["error"] = str(exc)
     return payload
 
@@ -205,7 +205,7 @@ def _collect_stickers(storage_dir: Path) -> dict[str, Any]:
     try:
         with index_path.open("r", encoding="utf-8") as fh:
             raw = json.load(fh)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         payload["error"] = str(exc)
         return payload
 
@@ -231,7 +231,7 @@ def _collect_stickers(storage_dir: Path) -> dict[str, Any]:
         try:
             created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
             if created_dt.tzinfo is None:
-                created_dt = created_dt.replace(tzinfo=timezone.utc)
+                created_dt = created_dt.replace(tzinfo=UTC)
             created_local = created_dt.astimezone(TZ_SHANGHAI)
         except Exception:
             continue
@@ -264,7 +264,7 @@ def _format_time(ts: str) -> str:
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         dt = dt.astimezone(TZ_SHANGHAI)
         return dt.strftime("%H:%M")
     except Exception:

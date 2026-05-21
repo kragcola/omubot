@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -9,9 +10,8 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from services.llm.llm_pipelines import (
-    LLM_PIPELINES,
-    pipeline_for_task,
-    resolve_call_type,
+    build_cache_pipelines_payload,
+    fold_recent_into_pipelines,
 )
 
 
@@ -41,10 +41,8 @@ def create_dashboard_router(
         usage_summary: dict[str, Any] = {}
         tracker = _usage()
         if tracker is not None:
-            try:
+            with contextlib.suppress(Exception):
                 usage_summary = await tracker.summary_today()
-            except Exception:
-                pass
 
         # Compute the dashboard-canonical cache-hit ratio using the same
         # numerator/denominator the new ``/dashboard/cache-pipelines``
@@ -107,14 +105,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/cache-pipelines")
     async def cache_pipelines(period: str = Query("day")):
-        """Per-pipeline cache hit rate for the dashboard panel.
-
-        Folds the 18 ``LLMTask`` values into the 4 pipelines defined in
-        ``services/llm/llm_pipelines.py`` and returns weighted hit
-        percentages by token sum. Replaces the old 24h call-count
-        sparkline with a diagnostic view that surfaces *which* pipeline
-        is dragging the cache hit rate down.
-        """
+        """Per-pipeline cache hit rate for the dashboard panel."""
         if period not in {"day", "week", "month"}:
             return {"error": f"unsupported period: {period}"}
 
@@ -124,83 +115,24 @@ def create_dashboard_router(
 
         try:
             rows = await tracker.cache_hit_by_call_type(period=period)
+            recent_per_call_type = await tracker.recent_calls_per_pipeline(
+                period=period, limit=5,
+            )
+            recent_overall = await tracker.recent_calls_overall(
+                period=period, limit=5,
+            )
         except Exception as exc:
             return {"error": str(exc)[:200]}
 
-        # Aggregate per pipeline. Unknown call_type values still count
-        # toward overall (so the dashboard hero KPI matches), but they
-        # don't pollute any pipeline's per_task list.
-        pipeline_buckets: dict[str, dict[str, dict[str, int]]] = {}
-        for pipeline in LLM_PIPELINES:
-            pipeline_buckets[pipeline.key] = {
-                task: {"calls": 0, "hit_tokens": 0, "miss_tokens": 0}
-                for task in pipeline.tasks
-            }
-
-        overall = {"calls": 0, "hit_tokens": 0, "miss_tokens": 0}
-
-        for row in rows:
-            raw_call_type = str(row.get("call_type", "") or "")
-            if not raw_call_type:
-                continue
-            calls = int(row.get("calls", 0) or 0)
-            hit_tokens = int(row.get("hit_tokens", 0) or 0)
-            miss_tokens = int(row.get("miss_tokens", 0) or 0)
-
-            overall["calls"] += calls
-            overall["hit_tokens"] += hit_tokens
-            overall["miss_tokens"] += miss_tokens
-
-            task = resolve_call_type(raw_call_type)
-            pipeline = pipeline_for_task(task)
-            if pipeline is None:
-                continue
-
-            bucket = pipeline_buckets[pipeline.key][task]
-            bucket["calls"] += calls
-            bucket["hit_tokens"] += hit_tokens
-            bucket["miss_tokens"] += miss_tokens
-
-        def _pct(hit: int, miss: int) -> float | None:
-            denom = hit + miss
-            return (hit / denom) if denom > 0 else None
-
-        pipelines_payload: list[dict[str, Any]] = []
-        for pipeline in LLM_PIPELINES:
-            per_task: list[dict[str, Any]] = []
-            p_calls = p_hit = p_miss = 0
-            for task in pipeline.tasks:
-                bucket = pipeline_buckets[pipeline.key][task]
-                per_task.append({
-                    "task": task,
-                    "calls": bucket["calls"],
-                    "hit_tokens": bucket["hit_tokens"],
-                    "miss_tokens": bucket["miss_tokens"],
-                    "hit_pct": _pct(bucket["hit_tokens"], bucket["miss_tokens"]),
-                })
-                p_calls += bucket["calls"]
-                p_hit += bucket["hit_tokens"]
-                p_miss += bucket["miss_tokens"]
-
-            pipelines_payload.append({
-                "key": pipeline.key,
-                "label": pipeline.label,
-                "tasks": list(pipeline.tasks),
-                "calls": p_calls,
-                "hit_tokens": p_hit,
-                "miss_tokens": p_miss,
-                "hit_pct": _pct(p_hit, p_miss),
-                "per_task": per_task,
-            })
+        payload = build_cache_pipelines_payload(rows)
+        payload = fold_recent_into_pipelines(
+            payload, recent_per_call_type, recent_overall, limit=5,
+        )
 
         return {
             "period": period,
             "generated_at": datetime.now(UTC).isoformat(),
-            "overall": {
-                **overall,
-                "hit_pct": _pct(overall["hit_tokens"], overall["miss_tokens"]),
-            },
-            "pipelines": pipelines_payload,
+            **payload,
         }
 
     return router

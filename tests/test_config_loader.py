@@ -449,7 +449,10 @@ class TestGroupConfigResolve:
             debounce_seconds=5.0, batch_size=10, blocked_users=[100], allowed_tools=["lookup_cards", "web_search"],
             overrides={
                 123: GroupOverride(
-                    blocked_users=[200], allowed_tools=["lookup_cards", "send_sticker"], blocked_tools=["lookup_cards"], at_only=True,
+                    blocked_users=[200],
+                    allowed_tools=["lookup_cards", "send_sticker"],
+                    blocked_tools=["lookup_cards"],
+                    at_only=True,
                     debounce_seconds=10.0, batch_size=20, history_load_count=50,
                     reply_style="playful", custom_prompt="多接梗。",
                     tools_enabled=False, sticker_mode="off", slang_enabled=False,

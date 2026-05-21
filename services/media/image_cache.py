@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import time
 from datetime import timedelta
 from pathlib import Path

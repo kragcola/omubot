@@ -184,14 +184,14 @@ def test_health_check_reads_backup_registry(backup_env):
     from services.health import _check_sqlite
     result = _check_sqlite(storage_dir=storage)
     assert result["id"] == "sqlite"
-    # _check_sqlite probes the 3 DBs that have live runtime stores (messages/cards/slang).
+    # _check_sqlite probes every sqlite item in BACKUP_REGISTRY (8 dbs).
     # Total = ok + missing + error.
     total = (
         result["meta"]["ok_count"]
         + result["meta"]["missing_count"]
         + result["meta"]["error_count"]
     )
-    assert total == 3
+    assert total == 8
 
 
 def test_health_check_warns_stale_backup(backup_env):

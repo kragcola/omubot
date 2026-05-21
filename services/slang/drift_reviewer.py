@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from services.llm.llm_request import LLMRequest
+from services.slang.shared_prefix import get_shared_slang_prefix
 from services.slang.types import SlangTerm
 
 SlangDriftVerdict = Literal["same_meaning", "alias_candidate", "real_drift", "unclear"]
@@ -127,7 +128,8 @@ class SlangDriftReviewer:
         try:
             request = LLMRequest(
                 task="slang_drift",
-                static_blocks=[_SYSTEM_PROMPT],
+                static_blocks=[get_shared_slang_prefix()],
+                stable_blocks=[_SYSTEM_PROMPT],
                 user_messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
                 max_tokens=240,
                 requires_capabilities=("chat",),

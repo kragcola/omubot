@@ -20,6 +20,7 @@ storage/logs/
 storage/*.db
 storage/*.db-shm
 storage/*.db-wal
+storage/backups/
 storage/image_cache/
 storage/stickers/
 storage/plugins/
@@ -34,6 +35,7 @@ napcat/config/webui.json
 napcat/config/plugins/
 .pytest_cache/
 .worktrees/
+local/cpa/
 .claude/*
 !.claude/skills/
 .claude/skills/*
@@ -53,3 +55,11 @@ codex-skills/
 maintenance-log.md
 rewrite-plan.md
 docs/project-info.md
+# === 隐私 / 运行时 / 本地配置（绝不提交） ===
+storage/affection/
+storage/schedule/
+storage/groups/
+storage/*.db.corrupt-*
+omubot.code-workspace
+napcat/config/napcat.json
+napcat/config/onebot11.json

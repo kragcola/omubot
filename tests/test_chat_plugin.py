@@ -42,7 +42,13 @@ async def test_debug_pass_turn_reply_is_user_facing() -> None:
             _call=_fake_debug_call(
                 {
                     "text": "",
-                    "tool_uses": [SimpleNamespace(name="pass_turn", input={"reason": "结束本轮。内部原因：无法匹配任何工具"}, id="tu_1")],
+                    "tool_uses": [
+                        SimpleNamespace(
+                            name="pass_turn",
+                            input={"reason": "结束本轮。内部原因：无法匹配任何工具"},
+                            id="tu_1",
+                        ),
+                    ],
                     "thinking_blocks": [],
                 }
             )

@@ -2,6 +2,8 @@
 - [架构](Architecture)
 - [插件](Plugins)
 - [群内黑话](Slang)
+- [表达学习](Style-Learning)
+- [对话归档](Conversation-Archive)
 - [知识库](Knowledge-System)
 - [配置](Configuration)
 - [轻量语义检索](Semantic-Retrieval)

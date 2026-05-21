@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "plugin": "calendar_context",
+  "values": {
+    "enabled": true,
+    "timezone": "Asia/Shanghai",
+    "match_identity_aliases": true,
+    "builtin_birthdays_file": "birthdays.json",
+    "builtin_special_days_file": "special_days.json",
+    "builtin_years_dir": "years",
+    "extra_birthdays_files": [],
+    "extra_special_days_files": [],
+    "extra_year_files": [],
+    "auto_fetch_missing_year": true,
+    "auto_refresh_future_years": false,
+    "official_source_enabled": true,
+    "fallback_local_holiday_lib": true,
+    "cache_dir": "storage/plugins/calendar_context",
+    "write_back_plugin_data": false,
+    "official_fetch_timeout_s": 10.0,
+    "official_url_template": "https://www.gov.cn/zhengce/zhengceku/{year}-11/12/content_holidays.htm"
+  }
+}

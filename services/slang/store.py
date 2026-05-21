@@ -13,8 +13,13 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
+from services.cross_group import cross_group_where
 from services.similarity import NgramSimilarityProvider, normalize_text_key
-from services.slang.errors import SlangDatabaseCorruptError
+from services.slang.errors import (
+    SlangCollisionError,
+    SlangCrossScopeMergeError,
+    SlangDatabaseCorruptError,
+)
 from services.slang.types import (
     VALID_REPEAT_POLICIES,
     VALID_SCOPES,
@@ -160,6 +165,13 @@ _INDEXES = [
 ]
 
 
+async def _ensure_column(db: aiosqlite.Connection, table: str, column: str, definition: str) -> None:
+    cursor = await db.execute(f"PRAGMA table_info({table})")
+    names = {str(row["name"]) for row in await cursor.fetchall()}
+    if column not in names:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def _now_iso() -> str:
     return datetime.now(TZ_SHANGHAI).isoformat(timespec="seconds")
 
@@ -223,6 +235,15 @@ def _row_to_term(row: aiosqlite.Row) -> SlangTerm:
         meta=meta if isinstance(meta, dict) else {},
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        cross_group_visible=bool(row["cross_group_visible"]),
+        cross_group_enabled_by=row["cross_group_enabled_by"] or "",
+        cross_group_enabled_at=row["cross_group_enabled_at"] or "",
+        cross_group_enabled_for_groups=[
+            str(item)
+            for item in (_json_loads(row["cross_group_enabled_for_groups"], []) or [])
+            if str(item).strip()
+        ],
+        cross_group_enabled_reason=row["cross_group_enabled_reason"] or "",
     )
 
 
@@ -455,6 +476,21 @@ class SlangStore:
             await db.execute(_CREATE_DRIFT_REVIEWS)
             for statement in _INDEXES:
                 await db.execute(statement)
+            # Cross-group visibility migration (A2)
+            await _ensure_column(db, "slang_terms", "cross_group_visible", "INTEGER NOT NULL DEFAULT 0")
+            await _ensure_column(db, "slang_terms", "cross_group_enabled_by", "TEXT NOT NULL DEFAULT ''")
+            await _ensure_column(db, "slang_terms", "cross_group_enabled_at", "TEXT NOT NULL DEFAULT ''")
+            await _ensure_column(
+                db, "slang_terms", "cross_group_enabled_for_groups", "TEXT NOT NULL DEFAULT '[]'"
+            )
+            await _ensure_column(
+                db, "slang_terms", "cross_group_enabled_reason", "TEXT NOT NULL DEFAULT ''"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_slang_cross_group "
+                "ON slang_terms(cross_group_visible, status) "
+                "WHERE cross_group_visible = 1"
+            )
             await db.commit()
         except aiosqlite.DatabaseError as exc:
             if db is not None:
@@ -832,6 +868,7 @@ class SlangStore:
         group_id: str,
         scope: SlangScope = "group",
         aliases: list[str] | None = None,
+        exclude_term_ids: list[str] | None = None,
     ) -> SlangTerm | None:
         """Locate an existing term whose key OR any alias collides with the
         candidate's key OR any of its aliases.
@@ -842,6 +879,10 @@ class SlangStore:
         mirror-collision pattern (A:[B] vs B:[A]) where two candidates each
         list the other's primary key as an alias and neither side detects
         duplication.
+
+        When ``exclude_term_ids`` is provided, any match whose ``term_id`` is
+        in the exclusion set is skipped — used by ``update_term`` /
+        ``merge_terms`` to avoid self-collision.
         """
         key = normalize_term(term)
         candidate_keys: set[str] = set()
@@ -855,6 +896,7 @@ class SlangStore:
             return None
         db = self._require_db()
         scope_group = "" if scope == "global" else group_id
+        excluded = set(exclude_term_ids or ())
 
         # 1. Direct term_key hit, prefer matching the primary key first so the
         #    return order is deterministic when the candidate's own key already
@@ -866,7 +908,9 @@ class SlangStore:
             )
             row = await cursor.fetchone()
             if row:
-                return _row_to_term(row)
+                hit = _row_to_term(row)
+                if hit.term_id not in excluded:
+                    return hit
 
         # 2. Any alias key matches an existing term_key.
         alias_keys_only = candidate_keys - ({key} if key else set())
@@ -877,9 +921,10 @@ class SlangStore:
                 f"WHERE scope = ? AND group_id = ? AND term_key IN ({placeholders})",
                 (scope, scope_group, *alias_keys_only),
             )
-            row = await cursor.fetchone()
-            if row:
-                return _row_to_term(row)
+            for row in await cursor.fetchall():
+                hit = _row_to_term(row)
+                if hit.term_id not in excluded:
+                    return hit
 
         # 3. Any candidate key (term or alias) appears in an existing term's
         #    alias list. We can't index aliases_json, so scope-bound full scan.
@@ -889,6 +934,8 @@ class SlangStore:
         )
         for stored in await cursor.fetchall():
             term_obj = _row_to_term(stored)
+            if term_obj.term_id in excluded:
+                continue
             stored_alias_keys = {normalize_term(alias) for alias in term_obj.aliases}
             stored_alias_keys.discard("")
             if candidate_keys & stored_alias_keys:
@@ -1203,6 +1250,43 @@ class SlangStore:
         )
         return term_id
 
+    async def _attach_normalizer(
+        self,
+        *,
+        term_id: str,
+        raw_text: str,
+        scope: SlangScope,
+        group_id: str,
+        user_id: str = "",
+        message_id: int | None = None,
+    ) -> None:
+        """Attach a slang term to the learning normalizer for dedup clustering."""
+        from services.learning_normalizer import LearningNormalizerStore
+
+        normalizer: LearningNormalizerStore | None = None
+        try:
+            db_dir = Path(self._db_path).parent
+            normalizer_path = str(db_dir / "learning_normalizer.db")
+            normalizer = LearningNormalizerStore(normalizer_path)
+            await normalizer.init()
+            await normalizer.attach_candidate(
+                domain="slang",
+                scope=scope,
+                group_id=group_id,
+                raw_text=raw_text,
+                source_table="slang_terms",
+                source_id=term_id,
+                message_id=message_id,
+                user_id=user_id,
+                profile="slang",
+            )
+        except Exception:
+            pass
+        finally:
+            if normalizer is not None:
+                with contextlib.suppress(Exception):
+                    await normalizer.close()
+
     async def create_term(
         self,
         *,
@@ -1306,6 +1390,12 @@ class SlangStore:
             reason="manual term created" if source == "manual" else "term created",
             meta={"source": source},
         )
+        await self._attach_normalizer(
+            term_id=term_id,
+            raw_text=f"{term_value} {meaning}",
+            scope=scope,
+            group_id=normalized_group_id,
+        )
         return created
 
     async def upsert_ai_approved_term(
@@ -1401,6 +1491,14 @@ class SlangStore:
             if meaning and (not existing.meaning or confidence_value >= existing.confidence):
                 updates["meaning"] = meaning.strip()
             await self.update_term(existing.term_id, **updates)
+            await self._attach_normalizer(
+                term_id=existing.term_id,
+                raw_text=f"{existing.term} {updates.get('meaning', existing.meaning)}",
+                scope="group",
+                group_id=str(group_id),
+                user_id=user_id,
+                message_id=message_id,
+            )
             await self.record_hit(
                 existing.term_id,
                 group_id=str(group_id),
@@ -1463,6 +1561,14 @@ class SlangStore:
             after=_term_revision_snapshot(created),
             reason=reason or "daily_ai_review",
             meta=ai_meta,
+        )
+        await self._attach_normalizer(
+            term_id=term_id,
+            raw_text=f"{term} {meaning}",
+            scope="group",
+            group_id=str(group_id),
+            user_id=user_id,
+            message_id=message_id,
         )
         return term_id
 
@@ -2138,6 +2244,10 @@ class SlangStore:
             "source", "repeat_policy", "notes", "meta", "last_inferred_at",
         }
         updates = {key: value for key, value in fields.items() if key in allowed}
+        if "cross_group_visible" in fields:
+            raise ValueError(
+                "cross_group_visible can only be set via set_cross_group_visibility()"
+            )
         if not updates:
             return False
         term = await self.get_term(term_id)
@@ -2190,6 +2300,29 @@ class SlangStore:
         if "last_inferred_at" in updates:
             normalized["last_inferred_at"] = updates["last_inferred_at"]
 
+        # Collision detection: when term or aliases change, verify no overlap
+        # with other entries in the same scope+group.
+        if "term" in updates or "aliases" in updates:
+            check_term = str(updates["term"]).strip() if "term" in updates else term.term
+            if "aliases" in updates:
+                check_aliases = updates["aliases"]
+                if isinstance(check_aliases, str):
+                    check_aliases = [p.strip() for p in re.split(r"[,，\n]", check_aliases) if p.strip()]
+                check_aliases = list(check_aliases or [])
+            else:
+                check_aliases = list(term.aliases)
+            check_scope = str(updates.get("scope", term.scope))
+            check_group = str(updates.get("group_id", term.group_id)) if check_scope != "global" else ""
+            collision = await self.find_existing(
+                term=check_term,
+                group_id=check_group,
+                scope=check_scope,
+                aliases=check_aliases,
+                exclude_term_ids=[term_id],
+            )
+            if collision is not None:
+                raise SlangCollisionError(term_id, collision.term_id, collision.term)
+
         normalized["updated_at"] = _now_iso()
         set_clause = ", ".join(f"{key} = ?" for key in normalized)
         db = self._require_db()
@@ -2212,7 +2345,72 @@ class SlangStore:
                     reason=revision_reason,
                     meta=revision_meta if isinstance(revision_meta, dict) else {},
                 )
+        if changed and ("term" in updates or "meaning" in updates):
+            updated = await self.get_term(term_id)
+            if updated is not None:
+                await self._attach_normalizer(
+                    term_id=term_id,
+                    raw_text=f"{updated.term} {updated.meaning}",
+                    scope=updated.scope,
+                    group_id=updated.group_id,
+                )
         return changed
+
+    async def set_cross_group_visibility(
+        self,
+        term_id: str,
+        *,
+        visible: bool,
+        actor: str,
+        reason: str = "",
+        enabled_for_groups: list[str] | None = None,
+    ) -> bool:
+        """Toggle cross-group visibility. Only callable by admin."""
+        db = self._require_db()
+        term = await self.get_term(term_id)
+        if term is None:
+            return False
+        before_snapshot = _term_revision_snapshot(term)
+        now = _now_iso()
+        enabled_by = actor if visible else ""
+        enabled_at = now if visible else ""
+        groups_payload = (
+            [str(g).strip() for g in (enabled_for_groups or []) if str(g).strip()]
+            if visible
+            else []
+        )
+        reason_payload = reason if visible else ""
+        cursor = await db.execute(
+            """UPDATE slang_terms
+               SET cross_group_visible = ?, cross_group_enabled_by = ?,
+                   cross_group_enabled_at = ?,
+                   cross_group_enabled_for_groups = ?,
+                   cross_group_enabled_reason = ?,
+                   updated_at = ?
+               WHERE term_id = ?""",
+            (
+                int(visible),
+                enabled_by,
+                enabled_at,
+                json.dumps(groups_payload, ensure_ascii=False),
+                reason_payload,
+                now,
+                term_id,
+            ),
+        )
+        await db.commit()
+        if cursor.rowcount > 0:
+            after = await self.get_term(term_id)
+            await self.record_revision(
+                term_id,
+                action="cross_group_enable" if visible else "cross_group_disable",
+                actor=actor,
+                before=before_snapshot,
+                after=_term_revision_snapshot(after),
+                reason=reason or f"cross_group_visible={'true' if visible else 'false'}",
+            )
+            return True
+        return False
 
     async def set_status(
         self,
@@ -2287,8 +2485,18 @@ class SlangStore:
             if term_id == target_id:
                 continue
             source = await self.get_term(term_id)
-            if source is not None:
-                sources.append(source)
+            if source is None:
+                continue
+            if source.scope != target.scope or source.group_id != target.group_id:
+                raise SlangCrossScopeMergeError(
+                    target_id=target_id,
+                    source_id=source.term_id,
+                    target_scope=target.scope,
+                    target_group_id=target.group_id,
+                    source_scope=source.scope,
+                    source_group_id=source.group_id,
+                )
+            sources.append(source)
         if not sources:
             return target
         aliases = _dedupe([
@@ -2296,6 +2504,18 @@ class SlangStore:
             *(source.term for source in sources),
             *(alias for source in sources for alias in source.aliases),
         ])
+        # Collision detection: merged alias set must not overlap with any
+        # third-party term in the same scope+group.
+        all_involved_ids = [target_id, *(s.term_id for s in sources)]
+        collision = await self.find_existing(
+            term=target.term,
+            group_id=target.group_id,
+            scope=target.scope,
+            aliases=aliases,
+            exclude_term_ids=all_involved_ids,
+        )
+        if collision is not None:
+            raise SlangCollisionError(target_id, collision.term_id, collision.term)
         users = set(target.unique_users)
         usage_count = target.usage_count
         confidence = target.confidence
@@ -2348,6 +2568,13 @@ class SlangStore:
             reason="merged duplicate slang terms",
             meta={"source_ids": [source.term_id for source in sources]},
         )
+        if merged is not None:
+            await self._attach_normalizer(
+                term_id=target_id,
+                raw_text=f"{merged.term} {merged.meaning}",
+                scope=merged.scope,
+                group_id=merged.group_id,
+            )
         return merged
 
     async def list_pending(
@@ -2597,7 +2824,7 @@ class SlangStore:
         cursor = await db.execute(
             f"""SELECT * FROM slang_terms
                 WHERE status IN ({placeholders})
-                  AND (scope = 'global' OR (scope = 'group' AND group_id = ?))""",
+                  AND {cross_group_where()}""",
             [*statuses, group_id],
         )
         normalized_text = normalize_term(text)
@@ -2625,10 +2852,10 @@ class SlangStore:
             return []
         db = self._require_db()
         cursor = await db.execute(
-            """SELECT * FROM slang_terms
+            f"""SELECT * FROM slang_terms
                WHERE status = 'approved'
                  AND confidence >= ?
-                 AND (scope = 'global' OR (scope = 'group' AND group_id = ?))""",
+                 AND {cross_group_where()}""",
             (max(0.0, min(1.0, float(min_confidence or 0.0))), group_id),
         )
         terms = [_row_to_term(row) for row in await cursor.fetchall()]
@@ -2680,7 +2907,7 @@ class SlangStore:
         where = ["status = 'approved'", "confidence >= ?"]
         values: list[Any] = [min_conf]
         if group_id:
-            where.append("(scope = 'global' OR (scope = 'group' AND group_id = ?))")
+            where.append(cross_group_where())
             values.append(str(group_id))
         else:
             where.append("scope = 'global'")
@@ -2698,7 +2925,7 @@ class SlangStore:
         terms = [_row_to_term(row) for row in await cursor.fetchall()]
         if terms or not key:
             return terms
-        scope_sql = "scope = 'global'" if not group_id else "(scope = 'global' OR (scope = 'group' AND group_id = ?))"
+        scope_sql = "scope = 'global'" if not group_id else cross_group_where()
         scope_values: list[Any] = [] if not group_id else [str(group_id)]
         cursor = await db.execute(
             f"""SELECT * FROM slang_terms

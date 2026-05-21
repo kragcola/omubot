@@ -5,11 +5,11 @@
 ```
 ┌─────────────────────────────────────────────┐
 │  插件层 (Plugins)                            │
-│  affection, schedule, echo, sticker, chat   │
+│  chat, context, memo, slang, style, ...     │
 │  可插拔、可替换、可第三方开发                    │
 ├─────────────────────────────────────────────┤
 │  系统服务层 (System Services)                  │
-│  LLM, Memory, Image, Sticker, Tools         │
+│  LLM, Memory, Knowledge, Slang, Style, Archive│
 │  可复用能力，对插件暴露接口                      │
 ├─────────────────────────────────────────────┤
 │  内核层 (Kernel)                              │
@@ -43,7 +43,7 @@
 
 ### 插件层
 
-可插拔的功能模块。每个插件是一个继承 `AmadeusPlugin` 的类，通过 8 个钩子与框架交互。
+可插拔的功能模块。当前只加载 `plugins/<name>/plugin.py` 目录插件；manifest v3 描述层级、启停策略、类别、配置 schema 和本地治理信息。当前本地共有 23 个包/能力包，其中 19 个用户运行时插件，4 个系统锁定能力包（`chat`、`context`、`history_loader`、`vision`）。
 
 ## 数据流
 
@@ -104,4 +104,4 @@ NoneBot2 (事件分发)
 2. **插件通过 Context 通信**：插件之间不直接引用，通过共享服务通信
 3. **单个插件不阻塞全局**：异常隔离，hook 出错只打日志
 4. **约定优于配置**：插件是 `plugin.py` 中的 `AmadeusPlugin` 子类
-5. **渐进式迁移**：新旧代码可共存，Phase 1 的 kernel 包零侵入
+5. **本地治理优先**：插件生态当前只识别本地包，不允许 Web 远程下载安装未知代码

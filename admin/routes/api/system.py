@@ -149,7 +149,10 @@ def create_system_router(
         return {
             "supported": True,
             "title": "在线重启说明",
-            "summary": "这个按钮只会重启当前 Bot 进程，让配置与运行态重新收敛；它不会重建 Docker 镜像，也不会把新的 Python 代码装进容器。",
+            "summary": (
+                "这个按钮只会重启当前 Bot 进程，让配置与运行态重新收敛；"
+                "它不会重建 Docker 镜像，也不会把新的 Python 代码装进容器。"
+            ),
             "window_hint": "改配置时可直接在线重启；改代码、依赖或 Dockerfile 时，请先重建 bot 镜像。",
             "impact": [
                 "QQ 连接会短暂中断，这段时间内群消息与事件不会被当前进程处理。",
@@ -318,33 +321,110 @@ def create_system_router(
             return {"time_multiplier": 1.0}
 
     @router.post("/backup")
-    async def backup():
-        import shutil
-        import tempfile
-        from datetime import datetime
+    async def backup(profile: str = "daily"):
+        from pathlib import Path
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        from services.storage.backup import BackupLockedError, BackupService
 
-        dirs_to_backup = ["config", "storage"]
-        existing = [d for d in dirs_to_backup if os.path.isdir(d)]
-
-        base = tempfile.mkdtemp()
+        svc = BackupService(storage_dir=Path("storage"), repo_root=Path.cwd())
         try:
-            for d in existing:
-                shutil.copytree(d, os.path.join(base, d))
-            archive_path = f"backup_{timestamp}.tar.gz"
-            shutil.make_archive(archive_path.rsplit(".", 2)[0], "gztar", base)
-            return {
-                "ok": True,
-                "archive": archive_path,
-                "dirs_included": existing,
-                "message": f"备份已创建: {archive_path}",
-            }
+            manifest = svc.create(profile=profile, host_mode=False)
+        except BackupLockedError:
+            return {"ok": False, "error": "另一个备份正在进行中"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
-        finally:
-            if os.path.exists(base):
-                shutil.rmtree(base, ignore_errors=True)
+
+        if manifest.get("status") == "no_space":
+            return {"ok": False, "error": "磁盘空间不足"}
+
+        summary = manifest.get("summary", {})
+        return {
+            "ok": summary.get("trusted", False),
+            "backup_id": manifest.get("backup_id"),
+            "summary": summary,
+            "complete": manifest.get("complete", True),
+            "skipped_host_only": manifest.get("skipped_host_only", []),
+            "message": f"备份已创建: {manifest.get('backup_id')}",
+        }
+
+    @router.get("/backup/list")
+    async def backup_list(profile: str = "daily", all_profiles: bool = False):
+        from pathlib import Path
+
+        from services.storage.backup import BackupService
+
+        svc = BackupService(storage_dir=Path("storage"), repo_root=Path.cwd())
+        if all_profiles:
+            all_backups = []
+            for p in ("daily", "pre-change", "migration"):
+                all_backups.extend(svc.list_backups(profile=p))
+            all_backups.sort(
+                key=lambda b: b.get("created_at", ""), reverse=True
+            )
+            return {"backups": all_backups}
+        return {"backups": svc.list_backups(profile=profile)}
+
+    @router.get("/backup/settings")
+    async def get_backup_settings():
+        return {
+            "enabled": config.backup.enabled,
+            "daily_time": config.backup.daily_time,
+            "keep_days": config.backup.keep_days,
+            "default_profile": config.backup.default_profile,
+            "pre_change_enabled": config.backup.pre_change_enabled,
+            "pre_change_keep_count": config.backup.pre_change_keep_count,
+        }
+
+    @router.post("/backup/settings")
+    async def update_backup_settings(payload: dict):
+        import json
+        from pathlib import Path
+
+        from kernel.config import BackupConfig
+
+        try:
+            new_config = BackupConfig.model_validate(payload)
+        except Exception as e:
+            return {"ok": False, "error": f"校验失败: {e}"}
+
+        config_path = Path("config/config.json")
+        if not config_path.exists():
+            return {"ok": False, "error": "config.json 不存在"}
+
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        new_values = new_config.model_dump()
+        raw["backup"] = new_values
+
+        serialized = json.dumps(raw, ensure_ascii=False, indent=2)
+        tmp = config_path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(serialized)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, config_path)
+
+        reload_ok = True
+        reload_error = None
+        try:
+            from bot import get_backup_scheduler
+            sched = get_backup_scheduler()
+            if sched is not None:
+                sched.reload(
+                    daily_time=new_config.daily_time,
+                    keep_days=new_config.keep_days,
+                    default_profile=new_config.default_profile,
+                    enabled=new_config.enabled,
+                )
+        except Exception as e:
+            reload_ok = False
+            reload_error = str(e)
+
+        return {
+            "ok": True,
+            "settings": new_values,
+            "reload_ok": reload_ok,
+            "reload_error": reload_error,
+        }
 
     @router.post("/system/restart")
     async def restart():

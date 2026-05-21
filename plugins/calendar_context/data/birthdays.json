@@ -1,0 +1,30 @@
+{
+  "birthdays": [
+    {"date_mmdd": "01-08", "name_cn": "日野森志步", "name_jp": "日野森志歩", "group": "Leo/need", "is_wxs_member": false},
+    {"date_mmdd": "01-27", "name_cn": "朝比奈真冬", "name_jp": "朝比奈まふゆ", "group": "25点，Nightcord见。", "is_wxs_member": false},
+    {"date_mmdd": "01-30", "name_cn": "巡音流歌", "name_jp": "巡音ルカ", "group": "VIRTUAL SINGER", "is_wxs_member": false},
+    {"date_mmdd": "02-10", "name_cn": "宵崎奏", "name_jp": "宵崎奏", "group": "25点，Nightcord见。", "is_wxs_member": false},
+    {"date_mmdd": "02-17", "name_cn": "KAITO", "name_jp": "KAITO", "group": "VIRTUAL SINGER", "is_wxs_member": false},
+    {"date_mmdd": "03-02", "name_cn": "小豆泽心羽", "name_jp": "小豆沢こはね", "group": "Vivid BAD SQUAD", "is_wxs_member": false},
+    {"date_mmdd": "03-19", "name_cn": "桃井爱莉", "name_jp": "桃井愛莉", "group": "MORE MORE JUMP!", "is_wxs_member": false},
+    {"date_mmdd": "04-14", "name_cn": "花里实乃理", "name_jp": "花里みのり", "group": "MORE MORE JUMP!", "is_wxs_member": false},
+    {"date_mmdd": "04-30", "name_cn": "东云绘名", "name_jp": "東雲絵名", "group": "25点，Nightcord见。", "is_wxs_member": false},
+    {"date_mmdd": "05-09", "name_cn": "天马咲希", "name_jp": "天馬咲希", "group": "Leo/need", "is_wxs_member": false},
+    {"date_mmdd": "05-17", "name_cn": "天马司", "name_jp": "天馬司", "group": "Wonderlands×Showtime", "is_wxs_member": true},
+    {"date_mmdd": "05-25", "name_cn": "青柳冬弥", "name_jp": "青柳冬弥", "group": "Vivid BAD SQUAD", "is_wxs_member": false},
+    {"date_mmdd": "06-24", "name_cn": "神代类", "name_jp": "神代類", "group": "Wonderlands×Showtime", "is_wxs_member": true},
+    {"date_mmdd": "07-20", "name_cn": "草薙宁宁", "name_jp": "草薙寧々", "group": "Wonderlands×Showtime", "is_wxs_member": true},
+    {"date_mmdd": "07-26", "name_cn": "白石杏", "name_jp": "白石杏", "group": "Vivid BAD SQUAD", "is_wxs_member": false},
+    {"date_mmdd": "08-11", "name_cn": "星乃一歌", "name_jp": "星乃一歌", "group": "Leo/need", "is_wxs_member": false},
+    {"date_mmdd": "08-27", "name_cn": "晓山瑞希", "name_jp": "暁山瑞希", "group": "25点，Nightcord见。", "is_wxs_member": false},
+    {"date_mmdd": "08-31", "name_cn": "初音未来", "name_jp": "初音ミク", "group": "VIRTUAL SINGER", "is_wxs_member": false},
+    {"date_mmdd": "09-09", "name_cn": "凤笑梦", "name_jp": "鳳笑夢", "group": "Wonderlands×Showtime", "is_wxs_member": true, "aliases": ["凤笑梦 (Emu Otori)", "Emu Otori"]},
+    {"date_mmdd": "10-05", "name_cn": "桐谷遥", "name_jp": "桐谷遥", "group": "MORE MORE JUMP!", "is_wxs_member": false},
+    {"date_mmdd": "10-27", "name_cn": "望月穗波", "name_jp": "望月穂波", "group": "Leo/need", "is_wxs_member": false},
+    {"date_mmdd": "11-05", "name_cn": "MEIKO", "name_jp": "MEIKO", "group": "VIRTUAL SINGER", "is_wxs_member": false},
+    {"date_mmdd": "11-12", "name_cn": "东云彰人", "name_jp": "東雲彰人", "group": "Vivid BAD SQUAD", "is_wxs_member": false},
+    {"date_mmdd": "12-06", "name_cn": "日野森雫", "name_jp": "日野森雫", "group": "MORE MORE JUMP!", "is_wxs_member": false},
+    {"date_mmdd": "12-27", "name_cn": "镜音铃", "name_jp": "鏡音リン", "group": "VIRTUAL SINGER", "is_wxs_member": false},
+    {"date_mmdd": "12-27", "name_cn": "镜音连", "name_jp": "鏡音レン", "group": "VIRTUAL SINGER", "is_wxs_member": false}
+  ]
+}

@@ -255,6 +255,7 @@ async def think(
     identity_name: str = "Bot",
     user_id: str = "",
     group_id: str | None = None,
+    slang_hint: str = "",
 ) -> ThinkDecision:
     """Call the thinker LLM to decide the next action.
 
@@ -289,6 +290,8 @@ async def think(
         dynamic_blocks.append(mood_text)
     if affection_text:
         dynamic_blocks.append(affection_text)
+    if slang_hint:
+        dynamic_blocks.append(slang_hint)
 
     request = LLMRequest(
         task="thinker",

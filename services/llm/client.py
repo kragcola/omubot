@@ -24,7 +24,7 @@ from services.llm.cache_diagnostic import (
     compute_cache_diagnostic,
     diff_cache_diagnostics,
 )
-from services.llm.llm_request import LLMRequest
+from services.llm.llm_request import LLMRequest, apply_cache_breakpoints
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.provider import ToolUse, create_provider, is_deepseek_v4_model, provider_mode
 from services.llm.usage import UsageTracker
@@ -57,6 +57,7 @@ _SEGMENT_DELAY = 0.8  # seconds between segment sends (human-like pacing)
 _MAX_SEND_SEGMENTS = 4
 _BLANK_LINE_RE = re.compile(r"\n{2,}")
 _CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
+_CQ_BROKEN_RE = re.compile(r"\[CQ:[^\]]*\]", re.DOTALL)
 _CQ_KV_FIX_RE = re.compile(r",(\w+):")
 _GROUP_REPLY_STYLE_HINTS: dict[str, str] = {
     "gentle": "回复风格偏柔和、耐心、安抚感更强，避免过硬或过冲的表达。",
@@ -317,8 +318,14 @@ def _clean_text(text: str) -> str:
     return _BLANK_LINE_RE.sub("\n", text).strip()
 
 
+def _fix_broken_cq_codes(text: str) -> str:
+    """Remove embedded newlines/whitespace inside CQ codes that the LLM may insert."""
+    return _CQ_BROKEN_RE.sub(lambda m: re.sub(r"\s+", "", m.group(0)) if "\n" in m.group(0) else m.group(0), text)
+
+
 def fix_cq_codes(text: str) -> str:
     """Normalize CQ code params: [CQ:reply,id:123] → [CQ:reply,id=123]."""
+    text = _fix_broken_cq_codes(text)
     return _CQ_CODE_RE.sub(lambda m: _CQ_KV_FIX_RE.sub(r",\1=", m.group(0)), text)
 
 
@@ -348,16 +355,27 @@ _MIN_CHUNK = 6
 _MAX_CHUNK = 20
 
 
+def _inside_cq_code(text: str, index: int) -> bool:
+    """Return True if index falls inside a [CQ:...] span."""
+    for m in _CQ_CODE_RE.finditer(text):
+        if m.start() < index < m.end():
+            return True
+        if m.start() >= index:
+            break
+    return False
+
+
 def _smart_chunk(text: str, max_len: int = _MAX_CHUNK) -> list[str]:
     """Split text into segments ≤ max_len, preferring natural punctuation breaks.
 
     Scans backward from max_len to find the best split point:
     1. After sentence-ending punctuation (。！？～…) — delimiter stays with preceding text
     2. After clause punctuation (，；：、)
-    3. At a character boundary that doesn't break an English word
+    3. At a character boundary that doesn't break an English word or CQ code
     4. Hard split at max_len (last resort, should rarely fire)
 
     A trailing segment shorter than _MIN_CHUNK is merged into the previous one.
+    CQ codes are never split across segments.
     """
     segments: list[str] = []
     t = text
@@ -366,35 +384,50 @@ def _smart_chunk(text: str, max_len: int = _MAX_CHUNK) -> list[str]:
             segments.append(t)
             break
 
+        # If a CQ code straddles max_len, extend to include it fully.
+        effective_max = max_len
+        for m in _CQ_CODE_RE.finditer(t):
+            if m.start() < max_len <= m.end():
+                effective_max = m.end()
+                break
+            if m.start() >= max_len:
+                break
+
+        if len(t) <= effective_max:
+            segments.append(t)
+            break
+
         best = 0
         half = max_len // 2
 
         # Priority 1: sentence-ending break
-        for i in range(max_len - 1, half - 1, -1):
-            if t[i] in _SENTENCE_BREAK:
+        for i in range(effective_max - 1, half - 1, -1):
+            if t[i] in _SENTENCE_BREAK and not _inside_cq_code(t, i):
                 best = i + 1
                 break
 
         # Priority 2: clause break
         if best == 0:
-            for i in range(max_len - 1, half - 1, -1):
-                if t[i] in _CLAUSE_BREAK:
+            for i in range(effective_max - 1, half - 1, -1):
+                if t[i] in _CLAUSE_BREAK and not _inside_cq_code(t, i):
                     best = i + 1
                     break
 
-        # Priority 3: character boundary (don't break English words)
+        # Priority 3: character boundary (don't break English words or CQ codes)
         if best == 0:
-            for i in range(max_len, half - 1, -1):
+            for i in range(effective_max, half - 1, -1):
                 if i >= len(t):
+                    continue
+                if _inside_cq_code(t, i):
                     continue
                 if i > 0 and t[i - 1].isalpha() and (i < len(t) and t[i].isalpha()):
                     continue
                 best = i
                 break
 
-        # Priority 4: hard split
+        # Priority 4: hard split (after CQ code if possible)
         if best == 0:
-            best = max_len
+            best = effective_max
 
         segments.append(t[:best])
         t = t[best:].lstrip()
@@ -474,7 +507,7 @@ def _coalesce_segments(segments: list[str], max_segments: int = _MAX_SEND_SEGMEN
 
 
 def _reply_segments(reply: str) -> tuple[list[str], int]:
-    raw_segments = _split_naturally(reply)
+    raw_segments = _split_naturally(fix_cq_codes(reply))
     return _coalesce_segments(raw_segments), len(raw_segments)
 
 
@@ -509,7 +542,7 @@ def _pending_conversation_text(timeline: GroupTimeline | None, group_id: str | N
 
 
 def _hash_scope_id(scope: str, raw_id: str, salt: str) -> str:
-    digest = hashlib.sha256(f"{scope}:{salt}:{raw_id}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{scope}:{salt}:{raw_id}".encode()).hexdigest()[:16]
     return f"{scope}_{digest}"
 
 
@@ -992,6 +1025,8 @@ class LLMClient:
         bus: object | None = None,
         task_profiles: dict[str, Any] | None = None,
         group_config: Any | None = None,
+        slang_store_getter: Callable[[], Any] | None = None,
+        budget_manager: object | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
             enable_cleanup_closed=True,
@@ -1027,6 +1062,9 @@ class LLMClient:
         self._mood_getter = mood_getter
         self._bus = bus
         self._group_config = group_config
+        self._slang_store_getter = slang_store_getter
+        self._budget_manager = budget_manager
+        self._provider_bus: object | None = None
         self._task_profiles = task_profiles or {}
         self._task_profile_names = {
             task: str(getattr(profile, "name", "") or task)
@@ -1045,6 +1083,9 @@ class LLMClient:
 
     def set_group_config(self, group_config: Any | None) -> None:
         self._group_config = group_config
+
+    def set_provider_bus(self, bus: object | None) -> None:
+        self._provider_bus = bus
 
     async def _call(
         self,
@@ -1190,6 +1231,16 @@ class LLMClient:
         )
         if api_format == "deepseek" and task in {"thinker", "compact", "slang", "reply_gate"} and thinking is None:
             thinking = {"type": "disabled"}
+        # Spine is the single source of truth for prompt-cache breakpoints.
+        # ``apply_cache_breakpoints`` strips any caller-supplied
+        # ``cache_control`` and re-stamps according to the per-task profile,
+        # capped at Anthropic's ≤4-marker request limit (counting the
+        # provider tool tail and message-side breakpoint).
+        system_blocks = apply_cache_breakpoints(
+            system_blocks,
+            task=task,
+            has_tools=bool(tools),
+        )
         try:
             t_call = time.monotonic()
             result = await call_api(
@@ -1324,7 +1375,6 @@ class LLMClient:
         return {
             "type": "text",
             "text": "【群聊回复偏好】\n" + "\n".join(lines),
-            "cache_control": {"type": "ephemeral"},
         }
 
     def _deepseek_hash_salt(self) -> str:
@@ -1752,6 +1802,27 @@ class LLMClient:
         except Exception:
             return ""
 
+    async def _build_thinker_slang_hint(self, group_id: str | None, conversation_text: str) -> str:
+        """Build a short slang-hit summary for the pre-reply thinker."""
+        if not group_id or not self._slang_store_getter:
+            return ""
+        try:
+            store = self._slang_store_getter()
+            if store is None:
+                return ""
+            terms = await store.get_injectable_terms(
+                group_id=group_id,
+                conversation_text=conversation_text,
+                max_terms=3,
+                max_indirect_terms=0,
+            )
+            if not terms:
+                return ""
+            items = "; ".join(f"{t.term}={t.meaning}" for t in terms[:3])
+            return f"[黑话命中] 对话中出现了以下群内黑话：{items}"
+        except Exception:
+            return ""
+
     # ------------------------------------------------------------------
     # Main chat entry point
     # ------------------------------------------------------------------
@@ -1852,6 +1923,7 @@ class LLMClient:
             recent_for_thinker = [m for m in recent_for_thinker if m.get("content")]
             mood_text = self._build_thinker_mood_text()
             affection_text = self._build_thinker_affection_text(user_id)
+            slang_hint = await self._build_thinker_slang_hint(group_id, conversation_text)
             thinker_decision = await think(
                 api_call=lambda req: self._call(req),
                 recent_messages=recent_for_thinker,
@@ -1861,6 +1933,7 @@ class LLMClient:
                 identity_name=identity.name,
                 user_id=user_id,
                 group_id=group_id,
+                slang_hint=slang_hint,
             )
             # Persist decision in prompt context so plugins can see it
             thinker_action = thinker_decision.action
@@ -1925,14 +1998,40 @@ class LLMClient:
                         privacy_mask=privacy_mask,
                     )
                     await self._bus.fire_on_pre_prompt(prompt_ctx)
+                    # --- Provider + Budget management + trace ---
+                    req_id = f"{session_id}_{int(time.monotonic() * 1000)}"
+                    if self._provider_bus is not None and getattr(self._provider_bus, "mode", "off") != "off":
+                        from services.block_trace.providers import QueryContext as QCtx
+                        qctx = QCtx(
+                            request_id=req_id,
+                            session_id=session_id,
+                            user_id=user_id,
+                            group_id=group_id,
+                            conversation_text=conversation_text,
+                        )
+                        bus = self._provider_bus
+                        if bus.mode == "active":
+                            provider_blocks = await bus.run_active(qctx)
+                            prompt_ctx.blocks.extend(provider_blocks)
+                        elif bus.mode == "shadow":
+                            asyncio.create_task(bus.run_shadow(qctx))  # noqa: RUF006
+                    if self._budget_manager is not None:
+                        prompt_ctx.blocks = self._budget_manager.process(
+                            prompt_ctx.blocks,
+                            request_id=req_id,
+                            task="main",
+                            session_id=session_id,
+                            group_id=group_id,
+                        )
                     for pb in prompt_ctx.blocks:
                         block_dict: dict[str, Any] = {
                             "type": "text",
                             "text": f"【{pb.label}】\n{pb.text}" if pb.label else pb.text,
                         }
-                        # static/stable blocks get cache_control for prompt caching
-                        if pb.position in ("static", "stable"):
-                            block_dict["cache_control"] = {"type": "ephemeral"}
+                        # Spine (apply_cache_breakpoints in _dispatch_call) is
+                        # the single source of truth for cache_control. Plugin
+                        # blocks are bucketed by segment so spine can place
+                        # markers on segment tails.
                         if pb.position == "static":
                             plugin_static.append(block_dict)
                         elif pb.position == "stable":
@@ -2064,7 +2163,7 @@ class LLMClient:
                 return None
 
             if not tool_uses:
-                reply, reply_state = self._finalize_visible_reply(
+                reply, _reply_state = self._finalize_visible_reply(
                     reply=text or "...",
                     session_id=session_id,
                     force_reply=force_reply,
@@ -2140,7 +2239,7 @@ class LLMClient:
                 total_elapsed = time.monotonic() - t0
                 preview = full_reply[:120] + "…" if len(full_reply) > 120 else full_reply
                 _log_msg_out.info(
-                    "{!r} | sticker={} len={} segments={} raw_segments={} llm={:.1f}s send_partial={:.1f}s total={:.1f}s",
+                    "{!r} | sticker={} len={} segments={} raw={} llm={:.1f}s send={:.1f}s total={:.1f}s",
                     preview, "sent" if _sticker_sent else "none",
                     len(full_reply), len(segments), raw_segment_count,
                     acc_llm_elapsed, send_elapsed, total_elapsed,
@@ -2252,7 +2351,7 @@ class LLMClient:
         acc_prompt_cache_hit += round_cache_hit
         acc_prompt_cache_miss += round_cache_miss
         acc_reasoning_replay += round_reasoning_replay
-        reply, reply_state = self._finalize_visible_reply(
+        reply, _reply_state = self._finalize_visible_reply(
             reply=result["text"] or "...",
             session_id=session_id,
             force_reply=force_reply,
@@ -2307,7 +2406,7 @@ class LLMClient:
                 )
         elapsed = time.monotonic() - t0
         _log_msg_out.info(
-            "tool_exhausted_reply | session={} segments={} raw_segments={} llm={:.1f}s send_partial={:.1f}s total={:.1f}s",
+            "tool_exhausted_reply | session={} segments={} raw={} llm={:.1f}s send={:.1f}s total={:.1f}s",
             session_id, len(segments), raw_segment_count, acc_llm_elapsed, send_elapsed, elapsed,
         )
         self._record_usage(

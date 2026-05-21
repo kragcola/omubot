@@ -16,6 +16,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
+
 from services.similarity import SimilarityBackend, SimilarityProvider, create_similarity_provider
 
 if TYPE_CHECKING:

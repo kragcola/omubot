@@ -74,6 +74,8 @@ class KnowledgePlugin(AmadeusPlugin):
                 text="\n---\n".join(chunks),
                 label="知识库",
                 position="dynamic",
+                priority=55,
+                source="knowledge",
             )
 
     async def on_shutdown(self, ctx: PluginContext) -> None:

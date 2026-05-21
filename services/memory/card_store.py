@@ -233,7 +233,7 @@ class CardStore:
 
     async def close(self) -> None:
         if self._db is not None:
-            await close_with_checkpoint(self._db, name="card_store")
+            await close_with_checkpoint(self._db, name="cards")
             self._db = None
 
     async def _backfill_food_series(self) -> None:

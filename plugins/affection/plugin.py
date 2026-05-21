@@ -62,7 +62,7 @@ class AffectionPlugin(AmadeusPlugin):
             profile = self._engine._store.get(ctx.user_id)
             tier = profile.tier
             _L.info("user={} tier={} score={:.0f} in_group={}", ctx.user_id, tier, profile.score, in_group)
-            ctx.add_block(text=text, label="与当前用户的关系", position="dynamic")
+            ctx.add_block(text=text, label="与当前用户的关系", position="dynamic", priority=20, source="affection")
 
     async def on_post_reply(self, ctx: ReplyContext) -> None:
         if self._engine is None or not ctx.user_id or ctx.user_id == "0":

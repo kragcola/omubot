@@ -4,6 +4,77 @@
 
 ---
 
+## 2026-05-21 stash 全量恢复 — 5 天 in-progress 工作 3-way merge 回 Phase 1+2 主线
+
+**变更类型**：recovery / merge（前端 + 后端 + tests）
+
+**背景**：
+
+Phase 2 部署（bc41331）后发现 web 后台被回溯到 2 天前——5 天内的 stash@{0} 大量 in-progress
+改动（admin/frontend 重构、knowledge_graph 落地、CachePipelinePanel 重写、SlangView 子组件
+化、SystemView 拆分等）从未进入 Phase 1+2 的提交链。stash 自 b41631a 起，分别经过 12 次手
+动 push/restart 后才与 Phase 1+2 在 close_with_checkpoint / journal_mode=DELETE 等关键文
+件冲突——`git stash apply` 静默跳过 tracked-file hunks，必须逐文件手工恢复。
+
+**恢复策略**：
+
+- **frontend 全量**：13 个 `M` 文件 + 59 个 untracked 子组件直接 `git checkout stash@{0} --` 拉回，
+  npm run build 重新生成 `admin/static/`（74 个旧 hash 文件被新构建产物替换）
+- **backend 与 stash 不冲突**：admin/routes/api/* 中除 `__init__.py` / `events.py` 之外按
+  `git checkout stash@{0} --` 直接覆盖
+- **17 个 BOTH 文件 3-way merge**：用 `git apply --3way` 落地 stash 改动，5 个含真冲突的
+  （services/storage/sqlite.py、services/slang/store.py、services/memory/card_store.py、
+  services/memory/message_log.py、services/knowledge/store.py）保留 stash 端的更完整实现
+  （channel binding、显式 None 检查、cursor close、独立 try/except）
+- **79 个 stash-only 文件**：xargs 批量 checkout，排除 `admin/static/`（npm 重建）和
+  `storage/affection/`（live data）
+- **tests 同步修订**：`tests/test_backup_service.py` `_check_sqlite` 探针从 3 库扩到 8 库；
+  `tests/test_admin_api.py` 把 `maintenance_window.recommended is False` 放宽为 `severity != error`
+  （`backup_disk` 在测试机磁盘 87% 时会 flip 这个字段）
+- **删除 services/slang/daily_reviewer.py**：stash 已用 `services/slang/backlog_reviewer.py`（untracked）
+  替代
+
+**清理 ruff 杂项**：
+
+- `tests/test_slang_collision.py:66` 删除未用 `id_a` 赋值（F841）
+- `tests/test_scheduler.py:614` `for i` → `for _`（B007）
+- `tests/test_client.py` 5 处 closure 用默认参数捕获 `captured` dict（B023）
+- `tests/test_thinker.py` 把 mid-file import 提到顶部（E402×3）
+- `plugins/knowledge/plugin.py` 删除重复的 `on_shutdown`（F811，stash 端两个实现合并）
+- `admin/routes/api/{config,dashboard,dream,schedule}.py` 修 RUF034 / SIM105 / RUF006
+- `services/slang/quality.py` 修 SIM103
+- `plugins/calendar_context/service.py` 4 处 log/warn 长行手工拆开（E501）
+- `pyproject.toml` 给 `services/slang/shared_prefix.py` 加 per-file E501 ignore（同
+  `plugins/schedule/generator.py` 的"系统提示词含长中文行"先例）
+
+**验证**：
+
+- `uv run pytest`：1216 passed, 8 skipped, 0 failed（12.59s）
+- `uv run ruff check`：78 → 26 errors（剩余 26 全部是 HEAD 主线 pre-existing 的 E501 长行，
+  净改善 52 项）
+- `vue-tsc --noEmit`：EXIT=0
+- `npm run build`：5.22s，输出 `SystemView=51.67kB`、`SlangView=76.16kB`（确认 stash 端的
+  子组件化版本生效）
+- `dot_clean . && docker compose up bot -d --build`：仅 bot 重建，napcat 41h uptime
+  保留（铁律 D6）。容器启动后：history loaded（2 群）、OneBot V11 Bot 384801062 connected、
+  schedule generator started、`PRAGMA journal_mode=delete`、`PRAGMA synchronous=2`（FULL）
+  ——Phase 2 配置生效
+
+**部署影响**：
+
+- 黑话治理、CachePipelinePanel、SlangView 子组件化、System 监控页拆分、knowledge_graph
+  store 全部回到主线
+- Phase 1（close_with_checkpoint）和 Phase 2（journal_mode=DELETE + 小时级 quick_check）
+  保留不变
+- 188 文件改动 / 7785 行加 6887 行减（不含 admin/static/ 重建、wiki/、docs/）
+- napcat 容器全程未重启，QQ 连接未掉线
+
+**未提交**：
+
+按用户指令"merge 完不提交，你 review 后才 commit" 保持工作区状态待审。
+
+---
+
 ## 2026-05-21 deploy fix — pyproject 补 rapidfuzz 依赖
 
 **变更类型**：deps / build（pyproject + uv.lock）

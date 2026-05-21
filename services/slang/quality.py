@@ -70,9 +70,7 @@ def is_low_signal_meaning(term: str, meaning: str) -> bool:
         return True
     if term_key and term_key in meaning_key and len(meaning_key) <= len(term_key) + 2:
         return True
-    if is_generic_meaning(raw_meaning):
-        return True
-    return False
+    return bool(is_generic_meaning(raw_meaning))
 
 
 def clean_aliases(term: str, aliases: list[str]) -> list[str]:

@@ -21,29 +21,46 @@ class MyPlugin(AmadeusPlugin):
         ctx.add_block("当前天气：晴", label="weather", position="dynamic")
 ```
 
-清单文件 `plugins/my_plugin/plugin.json`：
+清单文件 `plugins/my_plugin/plugin.json`（manifest v3）：
 
 ```json
 {
+  "manifest_version": 3,
   "name": "my_plugin",
+  "display_name": { "zh": "示例插件", "en": "Example Plugin" },
+  "description": "一个示例插件",
   "version": "0.1.0",
   "priority": 50,
-  "dependencies": {
-    "vision": ">=1.0.0"
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "tool",
+  "permissions": [],
+  "capabilities": [],
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": []
+  },
+  "store": {
+    "visibility": "local",
+    "marketplace_id": ""
   }
 }
 ```
 
-目录插件（多文件或需要子模块时）：
+目录插件结构：
 
 ```
 plugins/my_plugin/
 ├── plugin.py          # 必须有此文件 + AmadeusPlugin 子类
-├── plugin.json        # 可选：覆盖元数据、声明依赖
+├── plugin.json        # manifest v3
+├── config.default.json
+├── config.schema.json
 └── helper.py          # 额外的子模块
 ```
 
-两种形态完全等价，PluginBus 在发现时统一处理。
+根目录单文件插件不再运行时加载；旧文件只会出现在本地插件索引的治理队列里。
 
 ## 选择优先级
 

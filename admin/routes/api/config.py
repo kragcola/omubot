@@ -422,7 +422,7 @@ def create_config_router(*, config_path: str = "config/config.json") -> APIRoute
             for err in exc.errors():
                 loc = err.get("loc", ())
                 field_errors.append({
-                    "path": _serialize_error_path(tuple(loc) if isinstance(loc, tuple) else tuple(loc)),
+                    "path": _serialize_error_path(tuple(loc)),
                     "message": err.get("msg", "字段校验失败"),
                 })
             return {"ok": False, "error": "配置校验失败", "field_errors": field_errors}
@@ -454,7 +454,7 @@ def create_config_router(*, config_path: str = "config/config.json") -> APIRoute
             for err in exc.errors():
                 loc = err.get("loc", ())
                 field_errors.append({
-                    "path": _serialize_error_path(tuple(loc) if isinstance(loc, tuple) else tuple(loc)),
+                    "path": _serialize_error_path(tuple(loc)),
                     "message": err.get("msg", "字段校验失败"),
                 })
             return {"ok": False, "error": "配置校验失败", "field_errors": field_errors}

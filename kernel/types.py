@@ -127,6 +127,9 @@ class PromptBlock:
     text: str
     label: str = ""  # 日志/调试用标签
     position: Literal["static", "stable", "dynamic"] = "dynamic"
+    priority: int = 100  # 越小越优先，BudgetManager 用于裁剪决策
+    source: str = ""  # "slang" / "style" / "context" 等
+    provider: str = ""  # provider 名称（如 "slang_provider"），插件原生注入留空
 
 
 # ============================================================================
@@ -172,6 +175,7 @@ class PluginContext:
     llm_client: Any = None
     prompt_builder: Any = None
     thinker: Any = None
+    calendar_service: Any = None
 
     # 工具与调度 —— ToolRegistry / GroupChatScheduler
     tool_registry: Any = None
@@ -186,6 +190,10 @@ class PluginContext:
     bus: Any = None
     plugin_state_store: Any = None
     plugin_config_store: Any = None
+    bot: Any = None  # 当前连接的 OneBot bot；断线时置空，供 admin/API 做运行期查询
+    group_inventory: dict[str, dict[str, Any]] = field(default_factory=dict)  # 未经过群策略过滤的在线群清单
+    slang_store: Any = None
+    slang_plugin: Any = None
     protocol_trace: Any = None
     protocol_connections: Any = None
     runtime_errors: Any = None
@@ -224,6 +232,9 @@ class MessageContext:
     bot: Any = None  # nonebot Bot 实例（供拦截器发送消息）
     nickname: str = ""  # 发送者昵称
     trigger: TriggerContext | None = None  # 由拦截器（如 BilibiliPlugin）设置的触发上下文
+    allow_speaking: bool = True  # False 时插件只能做静默学习/记录，不能发消息或设置回复触发
+    group_presence_mode: str = "active"  # active | silent_learn | off，供插件做轻量判断
+    group_access_allowed: bool = True  # 当前群是否通过主动发言访问策略
 
     @property
     def is_group(self) -> bool:
@@ -254,9 +265,15 @@ class PromptContext:
         *,
         label: str = "",
         position: Literal["static", "stable", "dynamic"] = "dynamic",
+        priority: int = 100,
+        source: str = "",
+        provider: str = "",
     ) -> None:
         """插件调用此方法向 system prompt 追加一个 block。"""
-        self.blocks.append(PromptBlock(text=text, label=label, position=position))
+        self.blocks.append(PromptBlock(
+            text=text, label=label, position=position,
+            priority=priority, source=source, provider=provider,
+        ))
 
 
 @dataclass
@@ -430,6 +447,15 @@ class AmadeusPlugin:
     toggle_policy: PluginTogglePolicy = "runtime"
     config_spec: dict[str, Any] = {}  # noqa: RUF012 — manifest v3 config contract
     store: dict[str, Any] = {}  # noqa: RUF012 — local/marketplace metadata
+    silent_safe: bool = False
+    """Silent-learn safety flag for the on_message hook.
+
+    When the host group is in `silent_learn` presence mode (only learning, no
+    speaking), the message bus skips on_message calls for plugins where this is
+    False. Set True only when the plugin's on_message is read-only —
+    no `bot.send_*`, no `ctx.trigger` mutation, no scheduler.notify. New
+    interceptors default to False so the silent contract can't regress.
+    """
 
     # ---- 生命周期 ----
 

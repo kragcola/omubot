@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import logging
 import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -51,6 +53,9 @@ def _term_to_dict(term: SlangTerm) -> dict[str, Any]:
         "meta": term.meta,
         "created_at": term.created_at,
         "updated_at": term.updated_at,
+        "cross_group_visible": term.cross_group_visible,
+        "cross_group_enabled_by": term.cross_group_enabled_by,
+        "cross_group_enabled_at": term.cross_group_enabled_at,
     }
 
 
@@ -255,6 +260,7 @@ def create_slang_router(
         review_filter: str = Query(""),
         page: int = Query(1, ge=1),
         page_size: int = Query(30, ge=1, le=200),
+        sort_by: str = Query("updated_desc"),
     ):
         slang_store = await _store()
         terms, total = await slang_store.list_terms(
@@ -266,6 +272,7 @@ def create_slang_router(
             review_filter=review_filter,
             limit=page_size,
             offset=(page - 1) * page_size,
+            sort_by=sort_by,
         )
         return {
             "terms": [_term_to_dict(term) for term in terms],
@@ -396,6 +403,15 @@ def create_slang_router(
         if term is None:
             return {"ok": False, "error": "Drift review not found"}
         return {"ok": True, "term": _term_to_dict(term)}
+
+    @router.post("/slang/drift/process-backlog")
+    async def process_drift_backlog(request: Request):
+        slang_store = await _store()
+        body = await _read_json(request)
+        limit = int(body.get("limit") or 100)
+        force = bool(body.get("force") or False)
+        result = await slang_store.process_open_drift_backlog(limit=limit, force=force)
+        return {"ok": True, "result": result}
 
     @router.get("/slang/terms/{term_id}")
     async def get_term(term_id: str):
@@ -532,6 +548,89 @@ def create_slang_router(
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "settings": settings.model_dump()}
 
+    _bg_tasks: set[asyncio.Task[Any]] = set()
+    _L = logging.getLogger(__name__)
+
+    async def _bg_run_with_timeout(plugin: Any, batch_size: int | None) -> None:
+        try:
+            _L.info("background AI 清池 started")
+            result = await plugin.run_backlog_review_continuous()
+            _L.info(
+                "background AI 清池 done | batches=%s processed=%s "
+                "approved=%s muted=%s kept=%s completed=%s timed_out=%s",
+                result.get("batches", 0),
+                result.get("processed", 0),
+                result.get("approved", 0),
+                result.get("muted", 0),
+                result.get("kept", 0),
+                result.get("completed", False),
+                result.get("timed_out", False),
+            )
+        except Exception:
+            _L.exception("background AI 清池 failed")
+
+    @router.post("/slang/ai-review/run")
+    async def run_ai_review(request: Request):
+        plugin = _plugin()
+        if plugin is None or not hasattr(plugin, "run_backlog_review_now"):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "SlangPlugin not available"},
+            )
+        if plugin._backlog_review_in_flight:
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "AI 清池正在进行中，请等待完成"},
+            )
+        task = asyncio.create_task(_bg_run_with_timeout(plugin, None))
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
+        return {"ok": True, "started": True}
+
+    @router.get("/slang/backlog-review/status")
+    async def get_backlog_review_status():
+        plugin = _plugin()
+        if plugin is None or not hasattr(plugin, "get_backlog_review_status"):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "SlangPlugin not available"},
+            )
+        return await plugin.get_backlog_review_status()
+
+    @router.post("/slang/backlog-review/run")
+    async def run_backlog_review(request: Request):
+        body = await _read_json(request)
+        plugin = _plugin()
+        if plugin is None or not hasattr(plugin, "run_backlog_review_now"):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "SlangPlugin not available"},
+            )
+        batch_size = body.get("batch_size")
+        min_confidence = body.get("min_confidence")
+        kwargs: dict[str, Any] = {}
+        if batch_size is not None:
+            try:
+                kwargs["batch_size"] = int(batch_size)
+            except (TypeError, ValueError):
+                return JSONResponse(status_code=400, content={"ok": False, "error": "batch_size must be int"})
+        if min_confidence is not None:
+            try:
+                kwargs["min_confidence"] = float(min_confidence)
+            except (TypeError, ValueError):
+                return JSONResponse(status_code=400, content={"ok": False, "error": "min_confidence must be float"})
+        return await plugin.run_backlog_review_now(**kwargs)
+
+    @router.post("/slang/backlog-review/reset")
+    async def reset_backlog_review():
+        plugin = _plugin()
+        if plugin is None or not hasattr(plugin, "reset_backlog_review"):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "SlangPlugin not available"},
+            )
+        return await plugin.reset_backlog_review()
+
     @router.post("/slang/extract/run")
     async def run_extract(request: Request):
         body = await _read_json(request)
@@ -559,6 +658,9 @@ def create_slang_router(
         promoted = 0
         extracted = 0
         scanned = 0
+        status = "success"
+        error_text = ""
+        result_payload: dict[str, Any] = {}
         try:
             for gid in groups:
                 rows = await log.query_recent(str(gid), limit=limit)
@@ -588,15 +690,7 @@ def create_slang_router(
                     if term_id:
                         promoted += 1
             await slang_store.set_meta("last_extracted_at", time.strftime("%Y-%m-%d %H:%M:%S"))
-            await slang_store.finish_extraction_run(
-                run_id,
-                status="success",
-                group_count=len(groups),
-                scanned_messages=scanned,
-                extracted_terms=extracted,
-                promoted_candidates=promoted,
-            )
-            return {
+            result_payload = {
                 "ok": True,
                 "run_id": run_id,
                 "groups": groups,
@@ -604,16 +698,29 @@ def create_slang_router(
                 "extracted": extracted,
                 "candidates": promoted,
             }
+            return result_payload
+        except asyncio.CancelledError:
+            status = "cancelled"
+            error_text = "extraction cancelled (timeout or shutdown)"
+            result_payload = {"ok": False, "run_id": run_id, "error": error_text}
+            raise
         except Exception as exc:
-            await slang_store.finish_extraction_run(
-                run_id,
-                status="failed",
-                group_count=len(groups),
-                scanned_messages=scanned,
-                extracted_terms=extracted,
-                promoted_candidates=promoted,
-                error=str(exc),
-            )
-            return {"ok": False, "run_id": run_id, "error": str(exc)}
+            status = "failed"
+            error_text = str(exc)
+            result_payload = {"ok": False, "run_id": run_id, "error": error_text}
+            return result_payload
+        finally:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(
+                    slang_store.finish_extraction_run(
+                        run_id,
+                        status=status,
+                        group_count=len(groups),
+                        scanned_messages=scanned,
+                        extracted_terms=extracted,
+                        promoted_candidates=promoted,
+                        error=error_text,
+                    )
+                )
 
     return router

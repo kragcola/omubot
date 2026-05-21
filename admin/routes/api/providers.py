@@ -500,7 +500,7 @@ def _apply_persisted_llm(config: Any, persisted_model: BotConfig) -> Any:
     llm = persisted_model.llm
     if config is not None:
         try:
-            setattr(config, "llm", llm)
+            config.llm = llm
             candidate = getattr(config, "llm", None)
             if candidate is not None:
                 llm = candidate

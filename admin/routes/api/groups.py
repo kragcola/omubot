@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import copy
 import json
@@ -10,15 +11,23 @@ import tomllib
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query
+from loguru import logger as _base_logger
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from kernel.config import BotConfig, GroupOverride, GroupReplyStyle, GroupStickerMode
+from kernel.config import (
+    BotConfig,
+    GroupAccessConfig,
+    GroupOverride,
+    GroupReplyStyle,
+    GroupStickerMode,
+)
 from services.group_profile_audit import GroupProfileAuditStore
 
 _SPEAKER_QQ_RE = re.compile(r"\((\d+)\)$")
+_log_admin = _base_logger.bind(channel="admin")
 _EDITABLE_OVERRIDE_FIELDS = (
     "allowed_tools",
     "at_only",
@@ -33,6 +42,7 @@ _EDITABLE_OVERRIDE_FIELDS = (
     "tools_enabled",
     "sticker_mode",
     "slang_enabled",
+    "presence_mode",
 )
 _AUDIT_LABELS = {
     "blocked_users": "群内屏蔽用户",
@@ -49,6 +59,7 @@ _AUDIT_LABELS = {
     "tools_enabled": "工具总开关",
     "sticker_mode": "贴纸策略",
     "slang_enabled": "黑话系统",
+    "presence_mode": "群参与模式",
 }
 
 
@@ -67,6 +78,7 @@ class GroupProfilePayload(BaseModel):
     tools_enabled: bool = True
     sticker_mode: GroupStickerMode = "inherit"
     slang_enabled: bool = True
+    presence_mode: Literal["active", "silent_learn", "off"] | None = None
 
     @field_validator("custom_prompt")
     @classmethod
@@ -103,7 +115,7 @@ class GroupProfilePayload(BaseModel):
         return sorted(names)
 
     @model_validator(mode="after")
-    def _remove_tool_overlaps(self) -> "GroupProfilePayload":
+    def _remove_tool_overlaps(self) -> GroupProfilePayload:
         blocked = set(self.blocked_tools)
         if blocked:
             self.allowed_tools = [name for name in self.allowed_tools if name not in blocked]
@@ -143,6 +155,45 @@ def _read_config_base(target_json_path: Path, fallback_config: Any) -> dict[str,
     if fallback_config is not None and hasattr(fallback_config, "model_dump"):
         return fallback_config.model_dump(mode="python")
     return {}
+
+
+def _normalize_group_policy_path(config_path: str | None, fallback_base: Path) -> Path:
+    if config_path:
+        configured = Path(config_path)
+        if configured.suffix.lower() in {".json", ".toml"}:
+            return configured.parent / "group-policy.json"
+        return configured / "group-policy.json"
+    return fallback_base / "group-policy.json"
+
+
+def _read_group_policy(path: Path, fallback_config: Any) -> GroupAccessConfig:
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                payload = data.get("access", data)
+                if isinstance(payload, dict):
+                    return GroupAccessConfig.model_validate(payload)
+        except Exception:
+            pass
+    cfg = getattr(fallback_config, "group", fallback_config)
+    if cfg is not None and hasattr(cfg, "access"):
+        access = cfg.access
+        if hasattr(access, "model_dump"):
+            return GroupAccessConfig.model_validate(access.model_dump(mode="python"))
+        if isinstance(access, dict):
+            return GroupAccessConfig.model_validate(access)
+    return GroupAccessConfig()
+
+
+def _write_group_policy(path: Path, access: GroupAccessConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(access.model_dump(mode="python"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
 
 
 def _write_model(target_json_path: Path, model: BotConfig) -> None:
@@ -189,17 +240,25 @@ def _sorted_str_list(values: Any) -> list[str]:
     return sorted(names)
 
 
-def _normalized_override_values(payload: GroupProfilePayload, base: Any) -> dict[str, Any]:
+def _normalized_override_values(
+    payload: GroupProfilePayload,
+    base: Any,
+    *,
+    effective_base: Any | None = None,
+) -> dict[str, Any]:
     values = payload.model_dump(mode="python")
+    compare_base = effective_base or base
     normalized: dict[str, Any] = {}
     for field, value in values.items():
-        base_value = getattr(base, field, None)
+        base_value = getattr(compare_base, field, None)
         if field in {"allowed_tools", "blocked_tools"}:
             value = _sorted_str_list(value)
             base_value = _sorted_str_list(base_value)
         elif field == "blocked_users":
             value = sorted({int(item) for item in (value or [])})
             base_value = sorted({int(item) for item in (base_value or [])})
+            normalized[field] = value  # never None — GroupOverride.blocked_users is list[int]
+            continue
         normalized[field] = None if value == base_value else value
     return normalized
 
@@ -231,6 +290,7 @@ def _profile_audit_snapshot(group: dict[str, Any]) -> dict[str, Any]:
         "tools_enabled": bool(group.get("tools_enabled", True)),
         "sticker_mode": str(group.get("sticker_mode", "inherit") or "inherit"),
         "slang_enabled": bool(group.get("slang_enabled", True)),
+        "presence_mode": str(group.get("presence_mode", "active") or "active"),
     }
 
 
@@ -262,10 +322,12 @@ def create_groups_router(
     bot: Any = None,
     ctx: Any = None,
     config_path: str = "config/config.json",
+    group_policy_path: str | None = None,
     profile_audit_store: GroupProfileAuditStore | None = None,
 ) -> APIRouter:
     router = APIRouter()
     target_json_path = _normalize_json_path(config_path)
+    target_policy_path = _normalize_group_policy_path(group_policy_path, target_json_path.parent)
     default_storage_root = target_json_path.parent / "storage"
     storage_root = Path(getattr(ctx, "storage_dir", default_storage_root)) if ctx is not None else default_storage_root
     audit_store = profile_audit_store or GroupProfileAuditStore(storage_root / "groups" / "group-profile-audit.json")
@@ -303,6 +365,7 @@ def create_groups_router(
         cfg = _cfg()
         if cfg is None:
             return SimpleNamespace(
+                access_allowed=True,
                 allowed_tools=set(),
                 at_only=False,
                 blocked_tools=set(),
@@ -318,6 +381,7 @@ def create_groups_router(
                 tools_enabled=True,
                 sticker_mode="inherit",
                 slang_enabled=True,
+                presence_mode="active",
             )
         return cfg.resolve(int(gid))
 
@@ -327,13 +391,35 @@ def create_groups_router(
             return None
         return getattr(cfg, "overrides", {}).get(int(gid))
 
-    def _group_payload(gid: str, *, group_name: str = "") -> dict[str, Any]:
+    def _group_payload(
+        gid: str,
+        *,
+        group_name: str = "",
+        inventory: dict[str, Any] | None = None,
+        activity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         resolved = _resolve_config(gid)
         override = _override_for(gid)
         cfg = _cfg()
+        item = inventory or {}
+        member_count = item.get("member_count")
+        max_member_count = item.get("max_member_count")
+        group_remark = str(item.get("group_remark", "") or "")
+        bot_card = str(item.get("self_card", "") or "")
+        if not group_name:
+            group_name = str(item.get("group_name", "") or "")
+        act = activity or {}
+        last_at = float(act.get("last_at") or 0.0)
         return {
             "group_id": gid,
             "group_name": group_name,
+            "member_count": int(member_count) if isinstance(member_count, int | float) else None,
+            "max_member_count": int(max_member_count) if isinstance(max_member_count, int | float) else None,
+            "group_remark": group_remark,
+            "bot_card": bot_card,
+            "last_message_at": last_at if last_at > 0 else None,
+            "message_count_window": int(act.get("count_window") or 0),
+            "user_message_count_window": int(act.get("user_count_window") or 0),
             "at_only": resolved.at_only,
             "talk_value": resolved.talk_value,
             "planner_smooth": resolved.planner_smooth,
@@ -341,6 +427,8 @@ def create_groups_router(
             "batch_size": resolved.batch_size,
             "history_load_count": resolved.history_load_count,
             "privacy_mask": resolved.privacy_mask,
+            "access_allowed": bool(getattr(resolved, "access_allowed", True)),
+            "presence_mode": str(getattr(resolved, "presence_mode", "active") or "active"),
             "blocked_users": sorted(int(item) for item in resolved.blocked_users),
             "global_blocked_users": sorted(int(item) for item in getattr(cfg, "blocked_users", []) or []),
             "allowed_tools": _sorted_str_list(getattr(resolved, "allowed_tools", set())),
@@ -403,14 +491,19 @@ def create_groups_router(
                 seen.add(name)
         return sorted(entries, key=lambda item: (item["plugin"], item["name"]))
 
-    async def _discover_groups() -> tuple[list[str], dict[str, str]]:
+    async def _discover_groups() -> tuple[list[str], dict[str, str], dict[str, dict[str, Any]]]:
         group_ids: set[str] = set()
         group_names: dict[str, str] = {}
+        inventory_acc: dict[str, dict[str, Any]] = {}
 
         cfg = _cfg()
         if cfg is not None:
             group_ids.update(str(gid) for gid in getattr(cfg, "overrides", {}))
             group_ids.update(str(gid) for gid in getattr(cfg, "allowed_groups", []) or [])
+            access_cfg = getattr(cfg, "access", None)
+            if access_cfg is not None:
+                group_ids.update(str(gid) for gid in getattr(access_cfg, "whitelist", []) or [])
+                group_ids.update(str(gid) for gid in getattr(access_cfg, "blacklist", []) or [])
 
         sched = _scheduler()
         if sched is not None and hasattr(sched, "get_all_slots"):
@@ -422,19 +515,56 @@ def create_groups_router(
             with contextlib.suppress(Exception):
                 group_ids.update(await log.list_group_ids())
 
+        cached_inventory = getattr(ctx, "group_inventory", None) if ctx is not None else None
+        if isinstance(cached_inventory, dict):
+            for raw_gid, entry in cached_inventory.items():
+                gid = str(raw_gid or "").strip()
+                if not gid:
+                    continue
+                group_ids.add(gid)
+                if isinstance(entry, dict):
+                    inventory_acc[gid] = dict(entry)
+                    group_name = str(entry.get("group_name", "") or "").strip()
+                    if group_name:
+                        group_names[gid] = group_name
+
         current_bot = _bot()
         if current_bot is not None and hasattr(current_bot, "get_group_list"):
             try:
-                for item in await current_bot.get_group_list():
-                    gid = str(item.get("group_id", ""))
+                live_inventory: dict[str, dict[str, Any]] = {}
+                for entry in await current_bot.get_group_list():
+                    if not isinstance(entry, dict):
+                        continue
+                    gid = str(entry.get("group_id", "") or "").strip()
                     if not gid:
                         continue
                     group_ids.add(gid)
-                    group_names[gid] = str(item.get("group_name", ""))
-            except Exception:
-                pass
+                    live_inventory[gid] = dict(entry)
+                    inventory_acc[gid] = dict(entry)
+                    group_name = str(entry.get("group_name", "") or "").strip()
+                    if group_name:
+                        group_names[gid] = group_name
+                if ctx is not None:
+                    ctx.group_inventory = live_inventory
+            except Exception as exc:
+                _log_admin.warning("failed to refresh live group list | error={}", exc)
 
-        return sorted(group_ids, key=lambda gid: int(gid)), group_names
+        sorted_ids = sorted(
+            group_ids,
+            key=lambda gid: (0, int(gid)) if gid.isdigit() else (1, gid),
+        )
+        return sorted_ids, group_names, inventory_acc
+
+    async def _load_activity_summary(window_seconds: int = 24 * 3600) -> dict[str, dict[str, Any]]:
+        log = _msg_log()
+        if log is None or not hasattr(log, "group_activity_summary"):
+            return {}
+        since = datetime.now().timestamp() - max(60, int(window_seconds))
+        try:
+            return await log.group_activity_summary(since=since)
+        except Exception as exc:
+            _log_admin.warning("failed to load group activity summary | error={}", exc)
+            return {}
 
     def _normalize_message(row: dict[str, Any]) -> dict[str, Any]:
         speaker = row.get("speaker") or ""
@@ -459,10 +589,66 @@ def create_groups_router(
     @router.get("/groups")
     async def list_groups():
         groups: list[dict[str, Any]] = []
-        group_ids, group_names = await _discover_groups()
+        group_ids, group_names, inventory = await _discover_groups()
+        activity = await _load_activity_summary()
         for gid in group_ids:
-            groups.append(_group_payload(gid, group_name=group_names.get(gid, "")))
+            groups.append(
+                _group_payload(
+                    gid,
+                    group_name=group_names.get(gid, ""),
+                    inventory=inventory.get(gid),
+                    activity=activity.get(gid),
+                )
+            )
         return {"groups": groups}
+
+    @router.get("/groups/policy")
+    async def get_group_policy():
+        runtime_cfg = _cfg()
+        policy = _read_group_policy(target_policy_path, runtime_cfg)
+        return {
+            "ok": True,
+            "path": str(target_policy_path),
+            "policy": policy.model_dump(mode="python"),
+        }
+
+    @router.post("/groups/policy")
+    async def save_group_policy(payload: GroupAccessConfig):
+        runtime_cfg = _cfg()
+        policy = payload.model_copy(deep=True)
+        try:
+            _write_group_policy(target_policy_path, policy)
+        except Exception as exc:
+            return {"ok": False, "error": f"保存群门禁失败: {exc}"}
+
+        if runtime_cfg is not None and hasattr(runtime_cfg, "access"):
+            runtime_cfg.access = policy
+            if hasattr(runtime_cfg, "_legacy_allowed_groups_as_active"):
+                runtime_cfg._legacy_allowed_groups_as_active = False
+        if ctx is not None and hasattr(ctx, "config") and getattr(ctx.config, "group", None) is not None:
+            runtime_group = getattr(ctx.config, "group", None)
+            runtime_group.access = policy
+            if hasattr(runtime_group, "_legacy_allowed_groups_as_active"):
+                runtime_group._legacy_allowed_groups_as_active = False
+
+        group_ids, group_names, inventory = await _discover_groups()
+        activity = await _load_activity_summary()
+        groups = [
+            _group_payload(
+                gid,
+                group_name=group_names.get(gid, ""),
+                inventory=inventory.get(gid),
+                activity=activity.get(gid),
+            )
+            for gid in group_ids
+        ]
+        return {
+            "ok": True,
+            "path": str(target_policy_path),
+            "policy": policy.model_dump(mode="python"),
+            "groups": groups,
+            "message": "群门禁已保存并立即生效。",
+        }
 
     @router.get("/groups/{group_id}/profile")
     async def get_group_profile(group_id: str):
@@ -471,13 +657,19 @@ def create_groups_router(
         except ValueError:
             return {"ok": False, "error": "group_id 必须是数字"}
 
-        group_ids, group_names = await _discover_groups()
+        group_ids, group_names, inventory = await _discover_groups()
+        activity = await _load_activity_summary()
         group_name = group_names.get(group_id, "")
         if group_id not in group_ids:
             group_ids.append(group_id)
         return {
             "ok": True,
-            "group": _group_payload(group_id, group_name=group_name),
+            "group": _group_payload(
+                group_id,
+                group_name=group_name,
+                inventory=inventory.get(group_id),
+                activity=activity.get(group_id),
+            ),
             "tool_catalog": _tool_catalog(),
             "audit": audit_store.as_payload(group_id=group_id, limit=10),
         }
@@ -495,10 +687,25 @@ def create_groups_router(
             return {"ok": False, "error": "GroupConfig not available"}
 
         before = _profile_audit_snapshot(_group_payload(group_id))
+        baseline_group = runtime_group
+        if hasattr(runtime_group, "model_copy"):
+            baseline_group = runtime_group.model_copy(deep=True)
+            with contextlib.suppress(Exception):
+                baseline_group.overrides.pop(gid, None)
+        baseline_resolved = baseline_group.resolve(gid)
+        payload_to_save = payload
+        if not bool(getattr(baseline_resolved, "access_allowed", True)):
+            learning_requested = payload.slang_enabled or payload.presence_mode in {"silent_learn", "active"}
+            if learning_requested:
+                payload_to_save = payload.model_copy(update={"presence_mode": "silent_learn", "slang_enabled": True})
 
         data = _read_config_base(target_json_path, runtime_root)
         model = BotConfig.model_validate(data)
-        normalized = _normalized_override_values(payload, model.group)
+        normalized = _normalized_override_values(
+            payload_to_save,
+            model.group,
+            effective_base=baseline_resolved,
+        )
         existing_override = model.group.overrides.get(gid, GroupOverride())
         merged_override = existing_override.model_copy(update=normalized)
         if _override_has_values(merged_override):
@@ -513,7 +720,7 @@ def create_groups_router(
 
         _apply_runtime_group_config(runtime_group, model.group)
         _apply_runtime_group_config(getattr(runtime_root, "group", None), model.group)
-        current_group = _group_payload(group_id)
+        current_group = await _build_full_group_payload(group_id)
         changes = _build_profile_audit_changes(before, _profile_audit_snapshot(current_group))
         audit_entry = audit_store.append(
             group_id=group_id,
@@ -559,7 +766,7 @@ def create_groups_router(
 
         _apply_runtime_group_config(runtime_group, model.group)
         _apply_runtime_group_config(getattr(runtime_root, "group", None), model.group)
-        current_group = _group_payload(group_id)
+        current_group = await _build_full_group_payload(group_id)
         changes = _build_profile_audit_changes(before, _profile_audit_snapshot(current_group))
         audit_entry = audit_store.append(
             group_id=group_id,
@@ -612,5 +819,248 @@ def create_groups_router(
             return {"messages": [_normalize_message(msg) for msg in msgs]}
         except Exception as exc:
             return {"messages": [], "error": str(exc)}
+
+    def _ensure_gid(group_id: str) -> int | None:
+        try:
+            return int(group_id)
+        except ValueError:
+            return None
+
+    async def _refresh_group_inventory(gid: int) -> dict[str, Any] | None:
+        """Refresh cached inventory for a single group after a mutation."""
+        current_bot = _bot()
+        if current_bot is None:
+            return None
+        try:
+            info = await current_bot.get_group_info(group_id=int(gid), no_cache=True)
+        except Exception as exc:
+            _log_admin.warning("get_group_info failed | gid={} error={}", gid, exc)
+            return None
+        if not isinstance(info, dict):
+            return None
+        if ctx is not None:
+            inventory = getattr(ctx, "group_inventory", None)
+            if isinstance(inventory, dict):
+                merged = dict(inventory.get(str(gid), {}))
+                merged.update(info)
+                inventory[str(gid)] = merged
+                ctx.group_inventory = inventory
+            else:
+                ctx.group_inventory = {str(gid): dict(info)}
+        return info
+
+    async def _verify_bot_card(gid: int) -> str | None:
+        """Re-query Napcat for the bot's actual in-group card (no_cache=True)."""
+        current_bot = _bot()
+        if current_bot is None:
+            return None
+        try:
+            info = await current_bot.call_api(
+                "get_group_member_info",
+                group_id=int(gid),
+                user_id=int(current_bot.self_id),
+                no_cache=True,
+            )
+        except Exception as exc:
+            _log_admin.warning("get_group_member_info failed | gid={} error={}", gid, exc)
+            return None
+        if not isinstance(info, dict):
+            return None
+        return str(info.get("card", "") or "")
+
+    async def _verify_group_remark(gid: int) -> str | None:
+        """Re-query Napcat for the bot-side group remark (no_cache=True)."""
+        info = await _refresh_group_inventory(gid)
+        if not isinstance(info, dict):
+            return None
+        return str(info.get("group_remark", "") or "")
+
+    def _patch_inventory(gid: int, **patch: Any) -> None:
+        if ctx is None:
+            return
+        inventory = getattr(ctx, "group_inventory", None)
+        if not isinstance(inventory, dict):
+            inventory = {}
+        merged = dict(inventory.get(str(gid), {}))
+        merged.update({key: value for key, value in patch.items() if value is not None})
+        inventory[str(gid)] = merged
+        ctx.group_inventory = inventory
+
+    async def _build_full_group_payload(
+        group_id: str,
+        *,
+        inventory_override: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Re-discover groups + activity so the response carries the full payload.
+
+        ``inventory_override`` lets a mutation endpoint pass freshly verified
+        fields (e.g. self_card from get_group_member_info(no_cache=True)) that
+        should win over whatever ``_discover_groups`` reads back from the
+        cached ``get_group_list`` response.
+        """
+        group_ids, group_names, inventory_map = await _discover_groups()
+        if group_id not in group_ids:
+            group_ids.append(group_id)
+        activity = await _load_activity_summary()
+        merged_inventory = dict(inventory_map.get(group_id, {}))
+        if inventory_override:
+            merged_inventory.update(
+                {key: value for key, value in inventory_override.items() if value is not None}
+            )
+        return _group_payload(
+            group_id,
+            group_name=group_names.get(group_id, ""),
+            inventory=merged_inventory,
+            activity=activity.get(group_id),
+        )
+
+    @router.post("/groups/{group_id}/group-remark")
+    async def set_group_remark_endpoint(group_id: str, payload: dict[str, Any]):
+        gid = _ensure_gid(group_id)
+        if gid is None:
+            return {"ok": False, "error": "group_id 必须是数字"}
+        new_remark = str(payload.get("group_remark", "") or "").strip()
+        if len(new_remark) > 60:
+            return {"ok": False, "error": "群备注过长"}
+        current_bot = _bot()
+        if current_bot is None:
+            return {"ok": False, "error": "Bot 未连接"}
+        try:
+            await current_bot.call_api(
+                "set_group_remark",
+                group_id=gid,
+                remark=new_remark,
+            )
+        except Exception as exc:
+            _log_admin.warning("set_group_remark failed | gid={} error={}", gid, exc)
+            return {"ok": False, "error": f"设置群备注失败: {exc}"}
+
+        # Verify the mutation actually took effect by re-querying Napcat.
+        # set_group_remark is bot-side only, so this should normally succeed
+        # immediately, but we still want to detect silent failures.
+        verified: str | None = None
+        with contextlib.suppress(Exception):
+            await asyncio.sleep(0.4)
+            verified = await _verify_group_remark(gid)
+
+        warning: str | None = None
+        if verified is None:
+            # Couldn't verify — patch with the requested value as a best effort
+            # but warn the caller that we don't actually know what stuck.
+            _patch_inventory(gid, group_remark=new_remark)
+            warning = "已下发请求，但未能从 Napcat 确认备注是否生效。"
+            override = {"group_remark": new_remark}
+        else:
+            _patch_inventory(gid, group_remark=verified)
+            override = {"group_remark": verified}
+            if verified != new_remark:
+                warning = (
+                    f"Bot 已接受请求，但 Napcat 实际备注是 “{verified or '空'}”，"
+                    "可能被风控或长度限制截断。"
+                )
+
+        group_payload = await _build_full_group_payload(group_id, inventory_override=override)
+        message = "已更新 Bot 端群备注。" if warning is None else warning
+        return {
+            "ok": True,
+            "group": group_payload,
+            "verified_value": verified,
+            "warning": warning,
+            "message": message,
+        }
+
+    @router.post("/groups/{group_id}/bot-card")
+    async def set_bot_card(group_id: str, payload: dict[str, Any]):
+        gid = _ensure_gid(group_id)
+        if gid is None:
+            return {"ok": False, "error": "group_id 必须是数字"}
+        card = str(payload.get("card", "") or "").strip()
+        if len(card) > 60:
+            return {"ok": False, "error": "群名片过长"}
+        current_bot = _bot()
+        if current_bot is None:
+            return {"ok": False, "error": "Bot 未连接"}
+        try:
+            await current_bot.call_api(
+                "set_group_card",
+                group_id=gid,
+                user_id=int(current_bot.self_id),
+                card=card,
+            )
+        except Exception as exc:
+            _log_admin.warning("set_group_card failed | gid={} error={}", gid, exc)
+            return {"ok": False, "error": f"设置群名片失败: {exc}"}
+
+        # Verify the mutation actually took effect on QQ. set_group_card returns
+        # success as long as Napcat accepts the request, but QQ may silently
+        # reject it (account risk control, length limits, banned characters).
+        # Re-query get_group_member_info with no_cache to read the truth.
+        verified: str | None = None
+        with contextlib.suppress(Exception):
+            # Give Napcat / QQ a brief moment to apply the change. 0.4s is
+            # enough for the common case without making the user wait.
+            await asyncio.sleep(0.4)
+            verified = await _verify_bot_card(gid)
+
+        warning: str | None = None
+        if verified is None:
+            _patch_inventory(gid, self_card=card)
+            warning = "已下发请求，但未能从 Napcat 确认群名片是否生效。"
+            override = {"self_card": card}
+        else:
+            _patch_inventory(gid, self_card=verified)
+            override = {"self_card": verified}
+            if verified != card:
+                warning = (
+                    f"QQ 实际显示的群名片是 “{verified or '空'}”，"
+                    "可能被风控、长度或字符限制拒绝。"
+                )
+
+        group_payload = await _build_full_group_payload(group_id, inventory_override=override)
+        message = "已更新机器人的群名片。" if warning is None else warning
+        return {
+            "ok": True,
+            "group": group_payload,
+            "verified_value": verified,
+            "warning": warning,
+            "message": message,
+        }
+
+    @router.post("/groups/{group_id}/leave")
+    async def leave_group(group_id: str, payload: dict[str, Any] | None = None):
+        gid = _ensure_gid(group_id)
+        if gid is None:
+            return {"ok": False, "error": "group_id 必须是数字"}
+        body = payload or {}
+        if not bool(body.get("confirm", False)):
+            return {"ok": False, "error": "缺少确认标记 confirm=true"}
+        dismiss = bool(body.get("dismiss", False))
+        current_bot = _bot()
+        if current_bot is None:
+            return {"ok": False, "error": "Bot 未连接"}
+        try:
+            await current_bot.call_api(
+                "set_group_leave",
+                group_id=gid,
+                is_dismiss=dismiss,
+            )
+        except Exception as exc:
+            _log_admin.warning(
+                "set_group_leave failed | gid={} dismiss={} error={}", gid, dismiss, exc
+            )
+            return {"ok": False, "error": f"退群失败: {exc}"}
+
+        if ctx is not None:
+            inventory = getattr(ctx, "group_inventory", None)
+            if isinstance(inventory, dict):
+                inventory.pop(str(gid), None)
+                ctx.group_inventory = inventory
+
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "dismissed": dismiss,
+            "message": "已解散该群。" if dismiss else "已退出该群。",
+        }
 
     return router

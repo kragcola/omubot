@@ -12,6 +12,8 @@ Usage:
     uv run python scripts/dev/slang_alias_collision_report.py --json > collisions.json
     uv run python scripts/dev/slang_alias_collision_report.py --status approved
 
+--status filters to pairs where AT LEAST ONE term has the given status.
+
 The report is read-only.  It emits a suggested merge plan but never writes;
 use `/admin/slang` merge UI or admin API to apply it after review.
 """
@@ -55,21 +57,15 @@ class TermView:
     keys: set[str] = field(default_factory=set)
 
 
-def _load_terms(db_path: Path, status_filter: str | None) -> list[TermView]:
+def _load_terms(db_path: Path) -> list[TermView]:
     if not db_path.exists():
         raise SystemExit(f"slang.db not found at {db_path}")
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    where = ""
-    params: list[object] = []
-    if status_filter:
-        where = "WHERE status = ?"
-        params.append(status_filter)
     rows = conn.execute(
-        f"""SELECT term_id, term, term_key, aliases_json, status, scope,
-                   group_id, confidence, usage_count
-            FROM slang_terms {where}""",
-        params,
+        """SELECT term_id, term, term_key, aliases_json, status, scope,
+                  group_id, confidence, usage_count
+           FROM slang_terms""",
     ).fetchall()
     conn.close()
 
@@ -214,13 +210,18 @@ def main() -> int:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB,
                         help=f"path to slang.db (default: {DEFAULT_DB})")
     parser.add_argument("--status", default="",
-                        help="optional filter, e.g. approved/candidate/muted")
+                        help="filter: show pairs where at least one term has this status")
     parser.add_argument("--json", action="store_true",
                         help="emit JSON instead of human report")
     args = parser.parse_args()
 
-    terms = _load_terms(args.db, args.status or None)
+    terms = _load_terms(args.db)
     collisions = _detect_collisions(terms)
+    if args.status:
+        collisions = [
+            (a, b, shared) for a, b, shared in collisions
+            if a.status == args.status or b.status == args.status
+        ]
     output = _format_json(collisions) if args.json else _format_text(collisions)
     print(output)
     return 0

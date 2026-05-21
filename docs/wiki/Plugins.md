@@ -1,8 +1,8 @@
 # 插件
 
-## 插件规范化 Phase 0
+## 插件规范化状态
 
-当前插件体系已经进入 manifest v3 + JSON 配置契约：
+当前插件体系已经进入 manifest v3 + 目录插件 + JSON 配置契约阶段：
 
 ```text
 plugins/<name>/
@@ -13,7 +13,7 @@ plugins/<name>/
   config.schema.json
 ```
 
-根目录单文件插件已取消支持。运行时发现只加载 `plugins/<name>/plugin.py` 目录插件；若本地索引发现旧 `plugins/<name>.py` 或根目录 `<name>.json`，会标记为 `blocked: legacy_single_file_unsupported`，不会作为可加载插件。
+根目录单文件插件已取消运行时加载。`PluginBus.discover_plugins()` 只加载 `plugins/<name>/plugin.py`；若本地索引发现旧 `plugins/<name>.py` 或根目录 `<name>.json`，会标记为 `blocked: legacy_single_file_unsupported`，不会进入运行时。
 
 运行时配置固定从 JSON 合并：
 
@@ -52,6 +52,7 @@ storage/plugins/config/<name>.json
   "category": "core|memory|expression|tool|pipeline|ops",
   "permissions": [],
   "capabilities": [],
+  "min_omubot_version": "",
   "config": {
     "defaults": "config.default.json",
     "schema": "config.schema.json",
@@ -65,42 +66,51 @@ storage/plugins/config/<name>.json
 }
 ```
 
-系统级插件会被运行时锁定，Web 端和 API 都不能关闭。首批系统级为 `chat`、`history_loader`，`vision` 作为系统能力卡展示但不进入普通插件启停流。插件中心默认隐藏系统级能力，需要通过“显示系统插件”高级入口查看。
+系统级插件会被运行时锁定，Web 端和 API 都不能关闭。当前系统锁定能力包为 `chat`、`context`、`history_loader`、`vision`。插件中心默认隐藏系统能力，需要通过“显示系统插件”高级入口查看。
 
-## 已加载插件（19 个）
+## 当前本地包清单（23 个）
 
-| 插件 | 版本 | 优先级 | 形态 | 功能 |
-|------|------|--------|------|------|
-| ChatPlugin | 1.1.6 | 0 | 目录 / 系统级 | 核心聊天：消息路由、LLM 调用、tool loop |
-| DateTimePlugin | 1.1.0 | 1 | 目录 | 时间日期查询工具 |
-| WebSearchPlugin | 1.1.0 | 1 | 目录 | DuckDuckGo / Bing 网页搜索 |
-| WebFetchPlugin | 1.1.0 | 1 | 目录 | 网页内容抓取 |
-| HttpApiPlugin | 1.1.0 | 1 | 目录 | 通用 HTTP API 调用 |
-| GroupAdminPlugin | 1.1.0 | 1 | 目录 | 群管理（禁言、头衔、发消息） |
-| HistoryLoaderPlugin | 1.1.0 | 5 | 目录 / 系统级 | 启动时加载群历史消息 |
-| KnowledgePlugin | 0.1.0 | 8 | 目录 | 知识库能力；可按配置关闭 |
-| StickerPlugin | 1.1.3 | 40 | 目录 | 表情包：保存、发送、管理 |
-| MemoPlugin | 1.1.2 | 30 | 目录 | 记忆卡片：7 类 3 作用域，检索门控 |
-| FoodPlugin | 0.1.5 | 25 | 目录 | 饮食/点餐相关指令 |
-| AffectionPlugin | 1.1.1 | 10 | 目录 | 好感度系统：分数、昵称、态度调节 |
-| SchedulePlugin | 1.1.1 | 20 | 目录 | 模拟日程：每日 LLM 生成 |
-| SlangPlugin | 0.1.0 | 42 | 目录 | 群内黑话：学习、审核、AI 复核、漂移治理、Prompt 注入 |
-| DreamPlugin | 1.1.2 | 150 | 目录 | 梦境整合：定期整理记忆、清理表情包 |
-| BilibiliPlugin | 1.1.2 | 190 | 目录 | B 站链接解析与封面摘要 |
-| EchoPlugin | 1.1.1 | 200 | 目录 | 复读检测：5 分钟内同消息 3 次触发 |
-| ElementDetectorPlugin | 1.1.1 | 210 | 目录 | 特殊消息元素检测 |
-| DebugCommandPlugin | 1.3.0 | 300 | 目录 | 调试指令：/plugins、/version |
+| 插件包 | 版本 | 层级 | 启停策略 | 类别 | 功能 |
+| --- | --- | --- | --- | --- | --- |
+| `chat` | 1.1.7 | system | locked | core | 核心聊天：消息路由、LLM 调用、tool loop |
+| `context` | 0.1.0 | system | locked | core | 统一上下文：memory/doc/graph 检索与动态 Prompt 打包 |
+| `history_loader` | 1.1.1 | system | locked | core | 启动时加载群历史消息 |
+| `vision` | 1.1.1 | system | locked | core | 图片理解能力包，作为系统能力展示 |
+| `memo` | 1.1.3 | user | runtime | memory | 记忆卡片：7 类 3 作用域，检索门控与工具 |
+| `knowledge` | 0.1.1 | user | runtime | memory | 文档知识库：Markdown 扫描、持久索引、检索调试 |
+| `calendar_context` | 1.0.0 | user | runtime | memory | 日期上下文：节日/日历等时间语境 |
+| `affection` | 1.1.2 | user | runtime | memory | 好感度系统：分数、昵称、态度调节 |
+| `schedule` | 1.1.2 | user | runtime | memory | 模拟日程与心情状态 |
+| `slang` | 0.1.0 | user | runtime | expression | 群内黑话：候选、审核、AI 复核、backlog、漂移治理 |
+| `style` | 0.1.0 | user | runtime | expression | 表达学习：表达样本、动态风格档案、Prompt 注入 |
+| `sticker` | 1.1.4 | user | runtime | expression | 表情包：保存、发送、管理 |
+| `echo` | 1.1.2 | user | runtime | expression | 复读检测：5 分钟内同消息 3 次触发 |
+| `web_search` | 1.1.1 | user | runtime | tool | 网页搜索，用于实时信息和 AI 复核 |
+| `web_fetch` | 1.1.1 | user | runtime | tool | 网页内容抓取 |
+| `datetime` | 1.1.1 | user | runtime | tool | 时间日期查询工具 |
+| `http_api` | 1.1.1 | user | runtime | tool | 通用 HTTP API 调用 |
+| `group_admin` | 1.1.1 | user | runtime | tool | 群管理工具（禁言、头衔、发消息） |
+| `food` | 0.1.6 | user | runtime | tool | 饮食/点餐相关指令 |
+| `bilibili` | 1.1.3 | user | runtime | tool | B 站链接解析与封面摘要 |
+| `element_detector` | 1.1.2 | user | runtime | pipeline | 特殊消息元素检测 |
+| `dream` | 1.1.3 | user | runtime | ops | 梦境整合：定期整理记忆、清理表情包 |
+| `debug_commands` | 1.3.1 | user | runtime | ops | `/plugins`、`/version` 等调试指令 |
 
-所有运行时插件都已目录化，并补齐 `plugin.json`、`config.default.json`、`config.schema.json`。`vision` 不是运行时插件，而是 `plugins/vision/plugin.json` 系统能力包。
+说明：
+
+- “23 个”指本地 `plugins/*/plugin.json` 包/能力包数量。
+- 日常可启停的是 19 个 user/runtime 插件。
+- `vision` 与 `context` 属于系统能力包，不进入普通启停流。
 
 ## 本地插件索引与治理
 
-Admin 插件页现在不只看“已加载插件”，还会额外扫描本地 `plugins/` 目录，生成一份仅本地可见的插件包索引，用来排查：
+Admin 插件页不只看“已加载插件”，还会额外扫描本地 `plugins/` 目录，生成一份仅本地可见的插件包索引，用来排查：
 
-- 本地目录里有插件包，但没有被加载进运行时
-- `plugin.json` 缺失或损坏
-- 插件最低版本要求与当前 Omubot 版本不兼容
-- 插件入口来自符号链接或仓库外路径，需要人工确认来源
+- 本地目录里有插件包，但没有被加载进运行时。
+- `plugin.json` 缺失或损坏。
+- 插件最低版本要求与当前 Omubot 版本不兼容。
+- 插件入口来自符号链接或仓库外路径，需要人工确认来源。
+- `plugin.sig` 声明与当前入口或 manifest hash 不一致。
 
 索引接口：
 
@@ -109,9 +119,9 @@ Admin 插件页现在不只看“已加载插件”，还会额外扫描本地 `
 
 返回内容包含：
 
-- `summary`：本地包总数、已加载数、未加载数、阻塞数、待确认数、可接入数
-- `entries[]`：每个本地包的入口路径、清单路径、`plugin.sig` 路径、SHA256 指纹、来源状态、签名状态、版本兼容状态、治理状态和行动建议
-- `install_policy`：明确当前策略是 `local_only`
+- `summary`：本地包总数、已加载数、未加载数、阻塞数、待确认数、可接入数。
+- `entries[]`：入口路径、清单路径、`plugin.sig` 路径、SHA256 指纹、来源状态、签名状态、版本兼容状态、治理状态和行动建议。
+- `install_policy`：明确当前策略是 `local_only`。
 
 可选的 `plugin.sig` 是本地 detached attestation 预留，不是远程安装机制。当前先支持：
 
@@ -122,21 +132,17 @@ Admin 插件页现在不只看“已加载插件”，还会额外扫描本地 `
 - `source.origin`
 - `source.entry_path`
 
-当前索引会校验：
-
-- `plugin.py` 目录入口的 SHA256 是否与 `plugin.sig` 声明一致
-- `plugin.json` 的 SHA256 是否一致
-- `source.origin` 与 `source.entry_path` 是否和当前实际来源、路径一致
-
 治理状态固定为：
 
-- `healthy`：已加载且没有额外治理告警
-- `attention`：已加载，但仍需要补清单、确认来源或处理版本告警
-- `ready`：本地包可读，尚未接入运行时
-- `review`：本地包来源需要人工确认
-- `blocked`：入口缺失、清单损坏或版本不兼容，当前不应接入运行时
+| 状态 | 含义 |
+| --- | --- |
+| `healthy` | 已加载且没有额外治理告警 |
+| `attention` | 已加载，但仍需要补清单、确认来源或处理版本告警 |
+| `ready` | 本地包可读，尚未接入运行时 |
+| `review` | 本地包来源需要人工确认 |
+| `blocked` | 入口缺失、清单损坏或版本不兼容，当前不应接入运行时 |
 
-当前策略明确为“只识别本地插件包，不允许 Web 端远程下载安装并执行未知代码”。这也是 Omubot Phase 7 插件生态的安全边界。
+当前策略明确为“只识别本地插件包，不允许 Web 端远程下载安装并执行未知代码”。这是 Omubot 插件生态的安全边界。
 
 ## Admin 插件中心
 
@@ -151,7 +157,7 @@ Admin 插件页现在不只看“已加载插件”，还会额外扫描本地 `
 
 ## 钩子生命周期
 
-```
+```text
 on_startup → 加载配置，注册工具
      ↓
 on_message → 每个消息（可拦截返回 True）
@@ -160,9 +166,9 @@ on_pre_prompt → 注入 system prompt 块（dynamic / stable / static）
      ↓
 LLM 工具循环 → 插件注册的工具可被 LLM 调用
      ↓
-on_post_reply → 回复后的副作用（记录好感度等）
+on_post_reply → 回复后的副作用（记录好感度、表达反馈等）
      ↓
-on_tick → 定时触发（Dream Agent 等）
+on_tick → 定时触发（Dream、Slang reviewer 等）
 ```
 
 ## 工具注册
@@ -179,19 +185,17 @@ class MyPlugin(AmadeusPlugin):
 
 | 工具 | 来源插件 | 用途 |
 |------|----------|------|
-| `web_search` | WebSearchPlugin | 搜索互联网，用于实时信息和黑话每日 AI 复核 |
-| `web_fetch` | WebFetchPlugin | 抓取网页内容 |
-| `send_sticker` | StickerPlugin | 按场景发送表情包 |
-| `lookup_cards` / `append_memo` | MemoPlugin | 查询和写入长期记忆卡片 |
-| `slang_lookup` | SlangPlugin | 按需查询当前群与全局已批准黑话 |
+| `web_search` | `web_search` | 搜索互联网，用于实时信息和黑话 AI 复核 |
+| `web_fetch` | `web_fetch` | 抓取网页内容 |
+| `send_sticker` | `sticker` | 按场景发送表情包 |
+| `lookup_cards` / `append_memo` | `memo` | 查询和写入长期记忆卡片 |
+| `slang_lookup` | `slang` | 按需查询当前群与全局已批准黑话 |
 
 `slang_lookup` 只返回当前群和 global 作用域的 `approved` 词条；无群上下文时只返回 global。
 
 ## 命令注册
 
 插件通过 `register_commands()` 声明式注册命令。`CommandDispatcher` 自动处理权限门禁、参数校验、未知子命令检测和帮助文本生成。
-
-### 基础示例
 
 ```python
 from kernel.types import Command
@@ -204,75 +208,19 @@ def register_commands(self) -> list:
             description="我的命令",
             usage="/mycmd <参数>",
             aliases=["mc"],
-            require_args=True,   # 无参数时自动回复 usage
+            require_args=True,
         ),
     ]
 ```
 
-### 带子命令
-
-```python
-Command(
-    name="mgr",
-    handler=self._handle_mgr,      # /mgr（无参数）→ 显示帮助
-    description="管理工具",
-    hidden=True,                    # 父命令不显示在自身 help 中
-    sub_commands=[
-        Command(
-            name="list",
-            handler=self._handle_list,
-            description="列出所有项目",
-        ),
-        Command(
-            name="delete",
-            handler=self._handle_delete,
-            description="删除项目",
-            usage="/mgr delete <id>",
-            require_args=True,
-            admin_only=True,         # 管理员专属
-        ),
-    ],
-)
-```
-
-### 门禁字段
-
-所有门禁由 `CommandDispatcher` 在调用 handler 前统一检查，handler 不需要写任何权限代码：
+门禁字段：
 
 | 字段 | 效果 |
 |------|------|
-| `admin_only=True` | 非管理员自动回复"无权限" |
-| `private_only=True` | 群聊自动回复"请在私聊中使用此指令" |
+| `admin_only=True` | 非管理员自动回复“无权限” |
+| `private_only=True` | 群聊自动回复“请在私聊中使用此指令” |
 | `require_args=True` | 无参数时自动回复 `usage` |
 | `hidden=True` | 在 `format_help()` 中隐藏 |
 | `passthrough_unknown=True` | 未知子命令不报错，透传给父 handler |
 
-门禁从父命令继承：父命令设 `admin_only=True`，所有子命令自动受保护。
-
-### Handler 签名
-
-Handler 接收 `RichCommandContext`，包含消息信息 + 全部系统服务：
-
-```python
-async def _handle_mycmd(self, ctx: RichCommandContext) -> None:
-    # ctx.bot, ctx.event, ctx.args, ctx.user_id, ctx.group_id, ctx.is_private
-    # ctx.plugin_ctx.card_store, ctx.plugin_ctx.llm_client, ...
-    # ctx.command (当前匹配的 Command), ctx.root_command (顶层父命令)
-    await ctx.bot.send(ctx.event, Message(f"参数: {ctx.args}"))
-```
-
-### 自动帮助
-
-`format_help()` 从命令元数据递归生成帮助文本，自动标注门禁：
-
-```python
-help_text = parent_cmd.format_help()
-# 输出：
-# 管理工具：
-# /mgr list — 列出所有项目
-# /mgr delete <参数> — 删除项目（仅管理员）
-```
-
-### 完整示例参见
-
-[FoodPlugin](../../plugins/food/plugin.py) — 带门禁字段、子命令、自动帮助的生产级示例
+完整示例参见 [FoodPlugin](../../plugins/food/plugin.py)。

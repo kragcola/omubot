@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from services.llm.llm_request import LLMRequest
+from services.slang.shared_prefix import get_shared_slang_prefix
 from services.slang.store import normalize_term
 from services.slang.types import SlangPendingCandidate
 
@@ -339,7 +340,8 @@ class SlangSemanticReviewer:
             return {}
         request = LLMRequest(
             task="slang_semantic",
-            static_blocks=[system_prompt],
+            static_blocks=[get_shared_slang_prefix()],
+            stable_blocks=[system_prompt],
             user_messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             max_tokens=max_tokens,
             requires_capabilities=("chat",),

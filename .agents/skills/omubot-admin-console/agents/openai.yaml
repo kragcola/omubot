@@ -1,0 +1,6 @@
+interface:
+  display_name: "Omubot Admin Console"
+  short_description: "Omubot 管理端 Web 重构、审计与增量修改工作流"
+  default_prompt: "Use $omubot-admin-console to audit Omubot docs/code or refactor admin/frontend pages in Calm Ops style."
+policy:
+  allow_implicit_invocation: true

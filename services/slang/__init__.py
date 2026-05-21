@@ -1,7 +1,12 @@
 """Group slang learning service."""
 
-from services.slang.daily_reviewer import SlangDailyReviewer
-from services.slang.errors import SlangDatabaseCorruptError
+from services.slang.backlog_reviewer import SlangBacklogReviewer
+from services.slang.drift_reviewer import SlangDriftReviewer
+from services.slang.errors import (
+    SlangCollisionError,
+    SlangCrossScopeMergeError,
+    SlangDatabaseCorruptError,
+)
 from services.slang.extractor import SlangExtractor
 from services.slang.store import SlangStore, normalize_term
 from services.slang.types import (
@@ -20,9 +25,12 @@ from services.slang.types import (
 
 __all__ = [
     "RepeatPolicy",
-    "SlangDailyReviewer",
+    "SlangBacklogReviewer",
+    "SlangCollisionError",
+    "SlangCrossScopeMergeError",
     "SlangDatabaseCorruptError",
     "SlangDriftReview",
+    "SlangDriftReviewer",
     "SlangExtraction",
     "SlangExtractionRun",
     "SlangExtractor",

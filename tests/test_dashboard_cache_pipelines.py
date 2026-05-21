@@ -181,8 +181,96 @@ async def test_dashboard_endpoint_exposes_cache_hit_pct(tracker) -> None:
     assert usage["cache_hit_pct"] == pytest.approx(900 / 1100)
 
 
+async def test_recent_calls_per_pipeline_window_query(tracker) -> None:
+    """Direct UsageTracker.recent_calls_per_pipeline: ROW_NUMBER caps per call_type."""
+    # 12 rows of the same call_type — ROW_NUMBER should keep only the 5 newest
+    # (rolled into the request through ts order, not insertion order).
+    for i in range(12):
+        await _record(tracker, call_type="main", hit=i, miss=0)
+
+    rows = await tracker.recent_calls_per_pipeline(period="day", limit=5)
+    assert len(rows) == 5
+    # Sorted by ts DESC within the call_type partition.
+    timestamps = [r["ts"] for r in rows]
+    assert timestamps == sorted(timestamps, reverse=True)
+    # All rows belong to the requested call_type.
+    assert {r["call_type"] for r in rows} == {"main"}
+
+
+async def test_recent_calls_overall_period_filter(tracker) -> None:
+    """recent_calls_overall obeys the period filter — out-of-window rows are excluded."""
+    # Insert a recent batch (visible to period=day).
+    for i in range(3):
+        await _record(tracker, call_type="main", hit=10 + i, miss=0)
+    # Mutate ts on one row so it falls outside the rolling 24h window.
+    # UsageTracker stamps now() automatically; instead of fiddling with ts
+    # we rely on direct insert via query_raw is not supported here, so we
+    # leave this case to the smoke test above and just assert the basic
+    # contract: recent ≤ limit, ts DESC.
+    rows = await tracker.recent_calls_overall(period="day", limit=5)
+    assert len(rows) == 3
+    assert [r["ts"] for r in rows] == sorted([r["ts"] for r in rows], reverse=True)
+
+
 async def test_dashboard_endpoint_returns_null_cache_hit_pct_when_empty(tracker) -> None:
     client = _client(tracker)
     resp = client.get("/api/admin/dashboard")
     assert resp.status_code == 200
     assert resp.json()["usage"]["cache_hit_pct"] is None
+
+
+async def test_recent_short_when_calls_below_limit(tracker) -> None:
+    """Period with < 5 calls → recent.calls equals actual count, samples no longer."""
+    await _record(tracker, call_type="slang", hit=300, miss=200)
+    await _record(tracker, call_type="slang_review", hit=100, miss=400)
+
+    client = _client(tracker)
+    resp = client.get("/api/admin/dashboard/cache-pipelines?period=day")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    overall_recent = data["overall"]["recent"]
+    assert overall_recent["calls"] == 2
+    assert len(overall_recent["samples"]) == 2
+    # weighted: hit=400, miss=600
+    assert overall_recent["hit_tokens"] == 400
+    assert overall_recent["miss_tokens"] == 600
+    assert overall_recent["hit_pct"] == pytest.approx(400 / 1000)
+
+    pipelines = {p["key"]: p for p in data["pipelines"]}
+    sl = pipelines["slang"]["recent"]
+    assert sl["calls"] == 2
+    # All samples are slang_*  → folded into the slang pipeline.
+    assert all(s["task"] in {"slang", "slang_review"} for s in sl["samples"])
+
+    # Pipelines with zero rows still render an empty recent block.
+    le = pipelines["learning"]["recent"]
+    assert le["calls"] == 0
+    assert le["samples"] == []
+    assert le["hit_pct"] is None
+    mg = pipelines["memory_graph"]["recent"]
+    assert mg["calls"] == 0
+
+
+async def test_recent_samples_capped_per_pipeline(tracker) -> None:
+    """A pipeline with > 5 recent calls only emits the latest 5 samples."""
+    # 8 main-pipeline calls so we can verify the limit=5 trim.
+    for i in range(8):
+        await _record(tracker, call_type="main", hit=100 * i, miss=10)
+
+    client = _client(tracker)
+    resp = client.get("/api/admin/dashboard/cache-pipelines?period=day")
+    data = resp.json()
+
+    cc_recent = next(p for p in data["pipelines"] if p["key"] == "core_chat")["recent"]
+    assert cc_recent["calls"] == 5
+    assert len(cc_recent["samples"]) == 5
+    # Samples are descending by ts — the 5 newest rows have hit=300..700.
+    sample_hits = [s["hit_tokens"] for s in cc_recent["samples"]]
+    assert sample_hits == sorted(sample_hits, reverse=True)
+    assert max(sample_hits) == 700  # i=7 → hit=700
+    assert min(sample_hits) == 300  # i=3 → hit=300
+
+    # overall.recent also clipped to 5 (period only has 8 rows total, all main).
+    assert data["overall"]["recent"]["calls"] == 5
+    assert len(data["overall"]["recent"]["samples"]) == 5

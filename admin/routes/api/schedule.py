@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -56,10 +57,8 @@ def create_schedule_router(
             schedule = None
             ss = _sched_store()
             if ss is not None:
-                try:
+                with contextlib.suppress(Exception):
                     schedule = ss.load(today)
-                except Exception:
-                    pass
 
             profile = me.evaluate(schedule=schedule)
             return {
@@ -105,13 +104,11 @@ def create_schedule_router(
 
         dream = _dream()
         if dream is not None:
-            try:
+            with contextlib.suppress(Exception):
                 result["dream"] = {
                     "running": getattr(dream, "_running", False),
                     "interval_hours": getattr(dream, "_interval_hours", 0),
                 }
-            except Exception:
-                pass
 
         return result
 

@@ -35,7 +35,7 @@ def create_dream_router(
             # We pass None to signal a one-shot manual trigger
             if hasattr(dream_agent, "_do_cycle"):
                 import asyncio
-                asyncio.create_task(dream_agent._do_cycle())
+                asyncio.create_task(dream_agent._do_cycle())  # noqa: RUF006
             elif hasattr(dream_agent, "start"):
                 return {"ok": False, "error": "DreamAgent already has a running loop"}
             else:

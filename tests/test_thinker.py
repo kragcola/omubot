@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from services.llm.thinker import parse_think_output
+import pytest
+
+from services.llm.llm_request import LLMRequest
+from services.llm.thinker import parse_think_output, think
 
 
 def test_parse_think_output_accepts_plain_json() -> None:
@@ -58,3 +61,47 @@ def test_parse_think_output_uses_heuristic_wait_fallback() -> None:
 
 def test_parse_think_output_empty_text_returns_none() -> None:
     assert parse_think_output("   ") is None
+
+
+@pytest.mark.asyncio
+async def test_think_with_slang_hint_includes_hint_in_dynamic_blocks() -> None:
+    captured_request: list[LLMRequest] = []
+
+    async def mock_api_call(req: LLMRequest) -> dict:
+        captured_request.append(req)
+        return {
+            "content": [{"type": "text", "text": '{"action":"reply","thought":"test","sticker":false,"tone":"日常"}'}],
+            "usage": {"input_tokens": 10, "output_tokens": 10},
+        }
+
+    hint = "[黑话命中] 对话中出现了以下群内黑话：摸鱼=偷懒不干活"
+    await think(
+        api_call=mock_api_call,
+        recent_messages=[{"role": "user", "content": "今天又摸鱼了"}],
+        slang_hint=hint,
+    )
+
+    assert len(captured_request) == 1
+    assert hint in captured_request[0].dynamic_blocks
+
+
+@pytest.mark.asyncio
+async def test_think_without_slang_hint_has_no_extra_dynamic_block() -> None:
+    captured_request: list[LLMRequest] = []
+
+    async def mock_api_call(req: LLMRequest) -> dict:
+        captured_request.append(req)
+        return {
+            "content": [{"type": "text", "text": '{"action":"reply","thought":"test","sticker":false,"tone":"日常"}'}],
+            "usage": {"input_tokens": 10, "output_tokens": 10},
+        }
+
+    await think(
+        api_call=mock_api_call,
+        recent_messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert len(captured_request) == 1
+    for block in captured_request[0].dynamic_blocks:
+        text = block if isinstance(block, str) else block.get("text", "")
+        assert "黑话命中" not in text

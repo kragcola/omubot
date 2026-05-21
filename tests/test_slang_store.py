@@ -599,3 +599,34 @@ async def test_build_prompt_block_respects_max_indirect_setting(tmp_path):
         assert len(bullet_lines2) == 3
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_block_default_indirect_cap_is_direct_only(tmp_path):
+    """Default prompt injection should only include direct-hit approved slang."""
+    store = SlangStore(tmp_path / "slang.db")
+    await store.init()
+    try:
+        for label in ["直击词", "背景词"]:
+            term_id = await store.upsert_candidate(
+                term=label, meaning=f"{label}解释",
+                group_id="601", user_id="u1", confidence=0.8,
+            )
+            assert term_id is not None
+            await store.set_status(term_id, "approved")
+
+        assert (await store.load_settings()).max_indirect_inject_terms == 0
+
+        block = await store.build_prompt_block(
+            group_id="601", conversation_text="刚才说到直击词",
+            max_terms=8, max_chars=2000,
+        )
+        assert "直击词" in block
+        assert "背景词" not in block
+
+        assert await store.build_prompt_block(
+            group_id="601", conversation_text="完全无关的对话",
+            max_terms=8, max_chars=2000,
+        ) == ""
+    finally:
+        await store.close()

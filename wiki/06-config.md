@@ -2,7 +2,7 @@
 
 ## 位置
 
-所有配置模型和加载逻辑位于 `kernel/config.py`（~370 行）。这是框架的配置中枢。
+所有配置模型和加载逻辑位于 `kernel/config.py`。这是框架的配置中枢，当前 JSON 主配置优先，TOML 仅作为 legacy 兼容源。
 
 ```python
 from kernel.config import BotConfig, KernelConfig, load_config
@@ -13,12 +13,15 @@ from kernel.config import BotConfig, GroupConfig, LLMConfig, VisionConfig  # 子
 ## 三层优先级
 
 ```
-TOML 文件  <  环境变量  <  CLI 参数
-   ↓              ↓           ↓
- config.toml    APP_XXX    --xxx=value
+配置文件  <  环境变量 / _CLI_*  <  CLI 参数
+   ↓                ↓              ↓
+config.json      LLM_MODEL       --llm-model=...
+config.toml
 ```
 
-## 配置模型清单（23 个类）
+配置文件读取规则：`config/config.json` 优先；不存在时兼容读取 `config/config.toml`。Admin 配置页保存时会写出 JSON。
+
+## 配置模型概览
 
 ### 内核
 
@@ -30,7 +33,7 @@ TOML 文件  <  环境变量  <  CLI 参数
 
 | 模型 | 说明 |
 |------|------|
-| `LLMConfig` | `base_url`, `api_key`, `model`, `max_tokens` |
+| `LLMConfig` | `base_url`, `api_key`, `model`, `max_tokens`, `api_format`, `profiles`, `task_profiles` |
 | `ContextConfig` | `max_context_tokens` (默认 1M) |
 | `UsageConfig` | `enabled`, `slow_threshold_s` |
 
@@ -38,8 +41,10 @@ TOML 文件  <  环境变量  <  CLI 参数
 
 | 模型 | 说明 |
 |------|------|
-| `GroupConfig` | `history_load_count`, `allowed_groups`, `debounce_seconds`, `batch_size`, `at_only`, `blocked_users`, `privacy_mask`, `overrides` |
-| `GroupOverride` | 单群覆盖（`at_only`, `debounce_seconds`, `batch_size`, `history_load_count`, `blocked_users`），`None` = 使用全局值 |
+| `GroupAccessConfig` | 群白名单/黑名单访问策略 |
+| `GroupPresenceConfig` | 默认参与模式：`active` / `silent_learn` / `off` |
+| `GroupConfig` | `access`, `presence`, `history_load_count`, `debounce_seconds`, `batch_size`, `at_only`, `blocked_users`, `allowed_tools`, `blocked_tools`, `privacy_mask`, `overrides` |
+| `GroupOverride` | 单群覆盖（参与模式、工具 allow/block、回复风格、表情模式、黑话学习等），`None` = 使用全局值 |
 | `ResolvedGroupConfig` | `resolve(group_id)` 返回的扁平配置（set 类型 blocked_users） |
 
 ### 记忆 / 压缩 / Dream
@@ -77,20 +82,24 @@ TOML 文件  <  环境变量  <  CLI 参数
 ```python
 class BotConfig(BaseModel):
     kernel: KernelConfig = KernelConfig()
-    anti_detect: AntiDetectConfig = AntiDetectConfig()
     llm: LLMConfig = LLMConfig()
+    group: GroupConfig = GroupConfig()
+    scheduler: SchedulerConfig = SchedulerConfig()
+    reply_workflow: ReplyWorkflowConfig = ReplyWorkflowConfig()
+    memory: MemoryConfig = MemoryConfig()
     log: LogConfig = LogConfig()
     memo: MemoConfig = MemoConfig()
     compact: CompactConfig = CompactConfig()
     dream: DreamConfig = DreamConfig()
     soul: SoulConfig = SoulConfig()
-    group: GroupConfig = GroupConfig()
     napcat: NapcatConfig = NapcatConfig()
     vision: VisionConfig = VisionConfig()
     sticker: StickerConfig = StickerConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     affection: AffectionConfig = AffectionConfig()
     thinker: ThinkerConfig = ThinkerConfig()
+    anti_detect: AntiDetectConfig = AntiDetectConfig()
+    reply_segmentation: ReplySegmentationConfig = ReplySegmentationConfig()
     element_detection: ElementDetectionConfig = ElementDetectionConfig()
     admins: dict[str, str] = {}
     allowed_private_users: list[int] = []
@@ -102,10 +111,20 @@ class BotConfig(BaseModel):
 ```python
 class GroupOverride(BaseModel):
     blocked_users: list[int] = []
+    allowed_tools: list[str] | None = None
+    blocked_tools: list[str] | None = None
     at_only: bool | None = None         # None = 使用全局值
+    talk_value: float | None = None
+    planner_smooth: float | None = None
     debounce_seconds: float | None = None
     batch_size: int | None = None
     history_load_count: int | None = None
+    reply_style: str | None = None
+    custom_prompt: str | None = None
+    tools_enabled: bool | None = None
+    sticker_mode: str | None = None
+    slang_enabled: bool | None = None
+    presence_mode: str | None = None
 
 class GroupConfig(BaseModel):
     ...
@@ -113,13 +132,22 @@ class GroupConfig(BaseModel):
         """合并全局默认值与单群覆盖，返回扁平配置。"""
 ```
 
-在 `config.toml` 中覆盖：
+在 `config/config.json` 中覆盖：
 
-```toml
-[group.overrides."100001"]
-at_only = true
-debounce_seconds = 10.0
-blocked_users = [123456]
+```json
+{
+  "group": {
+    "overrides": {
+      "100001": {
+        "presence_mode": "active",
+        "at_only": true,
+        "debounce_seconds": 10.0,
+        "blocked_users": [123456],
+        "blocked_tools": ["web_search"]
+      }
+    }
+  }
+}
 ```
 
 ## 环境变量映射
@@ -154,7 +182,7 @@ def load_config(
 
 合并顺序：
 1. Pydantic 默认值
-2. TOML 文件（默认 `config/config.toml`，或通过 `BOT_CONFIG_PATH` 环境变量指定）
+2. 配置文件（默认 `config/config.json`；不存在时读取 `config/config.toml`，也可通过 `BOT_CONFIG_PATH` 指定）
 3. 环境变量（`_ENV_MAP`）
 4. `_CLI_*` 环境变量（bot.py argparse 写入）
 5. `cli_overrides` 参数

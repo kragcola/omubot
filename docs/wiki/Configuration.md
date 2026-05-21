@@ -43,13 +43,24 @@ JSON 主配置示例：
     "api_key": "sk-xxx",
     "base_url": "https://api.deepseek.com/anthropic",
     "model": "deepseek-v4-flash",
-    "max_tokens": 1024
+    "max_tokens": 1024,
+    "api_format": "anthropic",
+    "default_profile": "main"
   },
   "group": {
-    "allowed_groups": [984198159, 993065015],
+    "access": {
+      "mode": "whitelist",
+      "whitelist": [984198159, 993065015],
+      "blacklist": [],
+      "log_dropped": true
+    },
+    "presence": {
+      "default_mode": "active"
+    },
     "at_only": false,
     "debounce_seconds": 5.0,
     "batch_size": 10,
+    "tools_enabled": true,
     "privacy_mask": true
   },
   "vision": {
@@ -97,7 +108,7 @@ Omubot 现在支持“定义”和“任务映射”分离的 Provider 管理：
 
 - `llm.profiles`：保存各个 provider profile 的定义
 - `llm.default_profile`：主聊天任务默认使用哪个 profile
-- `llm.task_profiles`：`main / thinker / compact / slang / vision` 分别映射到哪个 profile
+- `llm.task_profiles`：`main / thinker / compact / slang / slang_review / slang_drift / vision / reply_gate` 分别映射到哪个 profile
 - `/admin/system` → `LLM Provider`：可热切换任务映射，也可在“定义管理”抽屉里结构化编辑 profile
 
 示例：
@@ -134,6 +145,9 @@ Omubot 现在支持“定义”和“任务映射”分离的 Provider 管理：
       "thinker": "main",
       "compact": "main",
       "slang": "slang",
+      "slang_review": "slang",
+      "slang_drift": "slang",
+      "reply_gate": "main",
       "vision": "main"
     }
   }
@@ -144,24 +158,78 @@ Omubot 现在支持“定义”和“任务映射”分离的 Provider 管理：
 
 - `main` profile 会同步 legacy `llm.api_format / base_url / api_key / model / max_tokens` 根字段，保证旧配置和新 profile 体系兼容
 - 删除某个非 `main` profile 后，引用它的任务映射会自动回退到当前 `default_profile`
+- `slang_review` 和 `slang_drift` 如果没有单独 profile，会回退到 `slang` 或 `default_profile`
+- `reply_gate` 如果没有单独 profile，会回退到 `thinker`
 - API Key 在 Web 端默认只显示遮罩值；替换或清空需要在“定义管理”里显式操作
 
-## 单群覆盖
+## 群访问与单群画像
+
+群配置现在分两层：
+
+- `group.access`：控制哪些群可以主动发言和调用工具。
+- `group.presence` / `group.overrides`：控制默认参与模式和单群 profile。
+
+参与模式：
+
+| 模式 | 含义 |
+| --- | --- |
+| `active` | 可主动回复，可按配置调用工具 |
+| `silent_learn` | 不主动回复；只允许显式开启的学习能力读取 |
+| `off` | 完全忽略群聊 |
+
+访问策略示例：
+
+```json
+{
+  "group": {
+    "access": {
+      "mode": "whitelist",
+      "whitelist": [984198159, 993065015],
+      "blacklist": [],
+      "log_dropped": true
+    },
+    "presence": {
+      "default_mode": "active"
+    }
+  }
+}
+```
+
+单群覆盖示例：
 
 ```json
 {
   "group": {
     "overrides": {
       "123456789": {
+        "presence_mode": "active",
         "at_only": true,
+        "talk_value": 0.25,
+        "planner_smooth": 4.0,
         "debounce_seconds": 10.0,
         "batch_size": 20,
-        "blocked_users": [123456]
+        "blocked_users": [123456],
+        "allowed_tools": ["lookup_cards", "slang_lookup"],
+        "blocked_tools": ["web_search"],
+        "tools_enabled": true,
+        "reply_style": "default",
+        "custom_prompt": "",
+        "sticker_mode": "inherit",
+        "slang_enabled": true
       }
     }
   }
 }
 ```
+
+`allowed_tools` 和 `blocked_tools` 最终会相减，blocked 优先生效。被访问策略拦截的群默认 `tools_enabled=false`；如果单群显式开启 `slang_enabled` 且 presence 不是 `off`，可用于 `silent_learn`。
+
+相关 Admin 能力：
+
+- `/admin/groups` 可查看群运行态、recent messages 和 profile 自定义状态。
+- `GET/POST /api/admin/groups/{group_id}/profile` 读写单群 profile。
+- `DELETE /api/admin/groups/{group_id}/profile` 重置单群覆盖。
+- profile 保存会写入审计记录，便于回溯群策略变更。
 
 ## 人设文件
 
@@ -187,8 +255,30 @@ Omubot 现在支持“定义”和“任务映射”分离的 Provider 管理：
 | `stoplist` | 永不学习词 |
 | `daily_ai_review_enabled` | 每日 AI 识别 |
 | `daily_ai_auto_approve_enabled` | 是否允许 AI 自动通过 |
+| `backlog_review_enabled` | 是否复核存量 `candidate` 候选池 |
+| `backlog_review_batch_size` | backlog reviewer 每批处理数量 |
+| `backlog_review_min_confidence` | backlog reviewer 处理候选的最低置信度 |
 | `drift_detection_enabled` | v3 语义漂移检测 |
 | `lookup_tool_enabled` | 是否注册 `slang_lookup` 工具 |
+
+`backlog_review_enabled` 用于处理历史积压 candidate。2026-05-16 修复后，backlog reviewer 受每日 slot 幂等闸门控制：同一个 `daily_ai_review_times` slot 清空后不会在下一个 tick 立刻重启；重置 backlog review 会同时清掉 `last_backlog_review_slot`。
+
+## 表达学习设置
+
+表达学习由 `plugins/style/config.default.json` 和 `storage/plugins/config/style.json` 合并控制：
+
+| 设置 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 是否启用表达学习 Prompt 注入 |
+| `max_items` | `3` | 每轮最多注入表达参考条数 |
+| `max_chars` | `800` | 表达参考块最大字符数 |
+| `min_confidence` | `0.45` | 注入表达样本最低置信度 |
+| `profile_enabled` | `true` | 是否启用动态风格档案 |
+| `profile_max_chars` | `900` | 风格档案 Prompt 最大字符数 |
+| `collect_bot_replies` | `true` | 是否采集 bot 回复弱信号 |
+| `global_enabled_group_ids` | `[]` | 参与 global 表达池的群 ID |
+
+表达学习只保存动态表达档案和样本，不会自动修改 `config/soul/identity.md` 或 `config/soul/instruction.md`。
 
 ## 管理员
 

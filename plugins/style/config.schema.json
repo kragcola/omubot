@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用表达学习注入",
+      "description": "仅注入已审核 approved 的表达习惯；不会自动抽取或改写 soul。"
+    },
+    "max_items": {
+      "type": "integer",
+      "title": "每轮最多表达条数",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "max_chars": {
+      "type": "integer",
+      "title": "表达块最大字符数",
+      "minimum": 160,
+      "maximum": 2000
+    },
+    "min_confidence": {
+      "type": "number",
+      "title": "最低置信度",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "profile_enabled": {
+      "type": "boolean",
+      "title": "注入动态风格档案",
+      "description": "只读取已启用的风格档案；档案可通过 Admin API 生成、禁用和回滚。"
+    },
+    "profile_max_chars": {
+      "type": "integer",
+      "title": "风格档案最大字符数",
+      "minimum": 160,
+      "maximum": 2400
+    },
+    "collect_bot_replies": {
+      "type": "boolean",
+      "title": "记录 bot 回复弱信号",
+      "description": "只记录中性反馈样本，不会自动学习或改变回复。"
+    },
+    "global_enabled_group_ids": {
+      "type": "array",
+      "title": "启用全局表达的群",
+      "description": "默认空数组表示不串群。填入群号后，这些群会读取 scope=global 的共享表达池。",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    }
+  }
+}

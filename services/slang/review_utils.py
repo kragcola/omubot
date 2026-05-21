@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from services.llm.llm_request import LLMRequest
+from services.slang.shared_prefix import get_shared_slang_prefix
 from services.slang.store import normalize_term
 from services.slang.types import (
     VALID_REPEAT_POLICIES,
@@ -167,7 +168,8 @@ async def assess_with_llm(
     try:
         request = LLMRequest(
             task="slang_review",
-            static_blocks=[_REVIEW_SYSTEM_PROMPT],
+            static_blocks=[get_shared_slang_prefix()],
+            stable_blocks=[_REVIEW_SYSTEM_PROMPT],
             user_messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             max_tokens=700,
             requires_capabilities=("chat",),

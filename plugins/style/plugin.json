@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "style",
+  "display_name": {
+    "zh": "表达学习",
+    "en": "Style Learning"
+  },
+  "description": "表达学习：注入已审核的表达习惯参考",
+  "version": "0.1.0",
+  "priority": 43,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "expression",
+  "permissions": [
+    "prompt",
+    "storage",
+    "reply"
+  ],
+  "capabilities": [
+    "style_prompt_injection"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "max_items",
+      "max_chars",
+      "min_confidence",
+      "profile_enabled",
+      "profile_max_chars",
+      "collect_bot_replies",
+      "global_enabled_group_ids"
+    ]
+  },
+  "store": {
+    "visibility": "marketplace_ready",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}
