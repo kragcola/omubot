@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { FlashOutline } from '@vicons/ionicons5'
 import AppCard from '../../../components/common/AppCard.vue'
+import AppPanelSection from '../../../components/common/AppPanelSection.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import { hitTypeLabel } from '../helpers/badges'
 import { metricRatioEntries, numberText, percentText } from '../helpers/formatters'
@@ -44,15 +45,7 @@ defineProps<Props>()
     </div>
 
     <div class="metrics-columns">
-      <AppCard bordered elevated class="metrics-panel">
-        <div class="section-head">
-          <div>
-            <p class="knowledge-eyebrow">
-              Sources
-            </p>
-            <h3>命中来源</h3>
-          </div>
-        </div>
+      <AppPanelSection eyebrow="Sources" title="命中来源">
         <div v-if="metricRatioEntries(contextMetrics.hit_source_counts).length" class="metric-ratio-list">
           <div
             v-for="[source, count] in metricRatioEntries(contextMetrics.hit_source_counts)"
@@ -70,17 +63,9 @@ defineProps<Props>()
           description="还没有最近上下文检索记录。"
           :icon="FlashOutline"
         />
-      </AppCard>
+      </AppPanelSection>
 
-      <AppCard bordered elevated class="metrics-panel">
-        <div class="section-head">
-          <div>
-            <p class="knowledge-eyebrow">
-              Types
-            </p>
-            <h3>命中类型</h3>
-          </div>
-        </div>
+      <AppPanelSection eyebrow="Types" title="命中类型">
         <div v-if="metricRatioEntries(contextMetrics.hit_type_counts).length" class="metric-ratio-list">
           <div
             v-for="[type, count] in metricRatioEntries(contextMetrics.hit_type_counts)"
@@ -98,7 +83,7 @@ defineProps<Props>()
           description="还没有最近上下文检索记录。"
           :icon="FlashOutline"
         />
-      </AppCard>
+      </AppPanelSection>
     </div>
 
     <div class="recent-context-list">
@@ -169,10 +154,6 @@ defineProps<Props>()
   gap: 16px;
 }
 
-.metrics-panel {
-  padding: 16px;
-}
-
 .metric-ratio-list,
 .recent-context-list {
   display: flex;
@@ -212,22 +193,6 @@ defineProps<Props>()
   font-size: 12px;
 }
 
-.section-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.knowledge-eyebrow {
-  margin: 0 0 8px;
-  color: var(--om-text-3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
 @media (max-width: 1180px) {
   .metrics-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -241,10 +206,6 @@ defineProps<Props>()
 @media (max-width: 720px) {
   .metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .section-head {
-    flex-direction: column;
   }
 }
 </style>

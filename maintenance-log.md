@@ -4,6 +4,66 @@
 
 ---
 
+## 2026-05-21 KnowledgeView 拆分 PR C — AppPanelSection 视觉收敛收官
+
+**变更类型**：refactor（admin/frontend，仅 .vue + tracking 文档，无后端 / schema / 部署）
+
+**背景**：
+
+KnowledgeView 拆分四阶段的最后一关。B-2 / B-3 在主视图删了 ~660 行 scoped CSS，但 5 个子组件里仍各自带着一份 `.section-head + .knowledge-eyebrow + h3` 三件套——这是从主视图复制下来的板式头，与 SystemView / SlangView C 阶段后已经下沉到 `AppPanelSection` 的写法不一致。本轮把这三件套全部收敛到 `AppPanelSection`，关闭分层差异。
+
+**改动文件**：
+
+- [admin/frontend/src/views/knowledge/components/KnowledgeMetricsPanel.vue](admin/frontend/src/views/knowledge/components/KnowledgeMetricsPanel.vue) — 2 个面板（`Sources / 命中来源` + `Types / 命中类型`）从 `<AppCard bordered elevated class="metrics-panel">` + `section-head + knowledge-eyebrow + h3` 改为 `<AppPanelSection eyebrow title>`；删 `.metrics-panel / .section-head / .section-head h3 / .knowledge-eyebrow` 与媒体查询里的 `.section-head` 收尾，**净 -32 行**
+- [admin/frontend/src/views/knowledge/components/KnowledgeContextPanel.vue](admin/frontend/src/views/knowledge/components/KnowledgeContextPanel.vue) — `Prompt Pack / 最终打包文本` 面板同样改造，trailing `<NTag>` 走 `#aside` slot；`.context-pack { margin: 14px 0 0 }` 收成 `0`（`AppPanelSection` 自带 head→body 间距），**净 -32 行**
+- [admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue](admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue) — `Entities / 实体` 面板改造，trailing `<NTag>{{ length }} 个</NTag>` 走 `#aside`；`.entity-list { margin-top: 14px }` 收成 `0`，**净 -45 行**
+
+三处都补 `import AppPanelSection from '../../../components/common/AppPanelSection.vue'`，`AppCard` 因仍用于 `metric-mini-card / recent-context-card / context-hit / relationship-card / candidate-card` 等子卡保留。主视图 `KnowledgeView.vue` 本轮不动——B-3 之后主视图只剩 4 块壳级 scoped CSS（`knowledge-compat-alert / knowledge-tabs / knowledge-toolbar__title / knowledge-toolbar__hint`），没有 `section-head` 残留。
+
+**D1 同模式扫描**：
+
+```bash
+$ grep -rn "section-head\|knowledge-eyebrow" admin/frontend/src/views/knowledge/
+# 0 hits（B-2/B-3 在主视图清掉的那批 + 本轮在子组件清掉的这批，全目录已清零）
+```
+
+`KnowledgeHero.vue` 的 `<p class="hero-eyebrow">` 与 `<p class="om-eyebrow">` 是 hero 顶层 layout 自带的 eyebrow，不是面板头三件套，按 SlangView 同纪律保留不动。
+
+**D4 完成证据**：
+
+- `vue-tsc --noEmit` — 0 error
+- `vite build` — 5.37s，clean
+- 三个子组件行数：B-3 末（238 + 254 + 350）= 842 → C 末（211 + 222 + 312）= 745，**净 -97 行**（git diff `--stat` 报 `+17 -126`，差额是空行 / 缩进重排）
+- bundle：`KnowledgeView-*.js` B-3 52.82 KB / gzip 14.87 KB → **C 52.32 KB / gzip 14.79 KB**（-0.50 / -0.08 gzip，与 SystemView / SlangView C 阶段同量级回吐）
+- 浏览器侧无回归：`AppPanelSection` 是无破坏性的纯模板替换，子组件外部 props/emits / 父子契约完全不变
+
+**KnowledgeView 拆分四阶段累计**：
+
+| 阶段 | 主视图行数 | 主视图 KB / gzip |
+| --- | --- | --- |
+| 起点 | 2186 | 待测 |
+| B-1 helpers | 1974 (-9.7%) | 44.74 / 12.68 |
+| B-2 只读子组件 | 1622 (-25.8%) | 46.02 / 13.03 |
+| B-3 交互子组件 | 754 (-65.5%) | 52.82 / 14.87 |
+| C AppPanelSection | 754（不变） | **52.32 / 14.79** |
+
+至此 [admin/frontend/src/views/knowledge/](admin/frontend/src/views/knowledge/) 与 SystemView / SlangView 一致：主视图 ≤ 800 行 + 子组件每个 ≤ 400 行 + 复用 `AppPanelSection` 取代 `section-head + eyebrow + h3` 三件套。
+
+**部署**：
+
+不需要 docker rebuild。`./admin/static` 是 bind mount（CLAUDE.md D6），`vite build` 已直接落到 `admin/static/`，刷新浏览器即生效。
+
+**回滚路径**：
+
+`git revert <commit>`。`AppPanelSection` 这层是无破坏性纯模板替换，无 schema / API / props 变更，无须配合改动。
+
+**关联条目**：
+
+- [docs/tracking/web-refactor.md § KnowledgeView 拆分](docs/tracking/web-refactor.md) — 同步 ✅；标题从 "拆分启动 / C 待开" 改为 "拆分完成 / C ✅"
+- KnowledgeView B-3 收口条目：见本日另一条 PR B-3 维护日志
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase E — 整体验收（5 条 graph edge 写入路径全闭合）
 
 **变更类型**：docs / acceptance（无代码变更，仅文档同步 + 收尾声明）

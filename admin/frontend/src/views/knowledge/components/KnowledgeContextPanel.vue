@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { FlashOutline, LayersOutline } from '@vicons/ionicons5'
 import AppCard from '../../../components/common/AppCard.vue'
+import AppPanelSection from '../../../components/common/AppPanelSection.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import PageToolbar from '../../../components/common/PageToolbar.vue'
 import { hitTypeLabel, hitTypeTag } from '../helpers/badges'
@@ -74,18 +75,12 @@ const emit = defineEmits<{
     </div>
 
     <div v-else class="context-layout">
-      <AppCard bordered elevated class="context-pack-card">
-        <div class="section-head">
-          <div>
-            <p class="knowledge-eyebrow">
-              Prompt Pack
-            </p>
-            <h3>最终打包文本</h3>
-          </div>
+      <AppPanelSection eyebrow="Prompt Pack" title="最终打包文本">
+        <template #aside>
           <NTag round size="small">
             省略 {{ contextPack?.omitted_count || 0 }} 条
           </NTag>
-        </div>
+        </template>
         <pre v-if="contextPack?.text" class="context-pack">{{ contextPack.text }}</pre>
         <EmptyState
           v-else
@@ -94,7 +89,7 @@ const emit = defineEmits<{
           description="这次查询没有命中可打包内容。"
           :icon="FlashOutline"
         />
-      </AppCard>
+      </AppPanelSection>
 
       <div class="context-hit-list">
         <AppCard
@@ -150,35 +145,9 @@ const emit = defineEmits<{
   align-items: start;
 }
 
-.context-pack-card {
-  padding: 20px;
-}
-
-.section-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.section-head h3 {
-  margin: 0;
-  color: var(--om-text-1);
-  font-size: 18px;
-}
-
-.knowledge-eyebrow {
-  margin: 0 0 8px;
-  color: var(--om-text-3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
 .context-pack {
   max-height: 520px;
-  margin: 14px 0 0;
+  margin: 0;
   padding: 16px;
   overflow: auto;
   border: 1px solid var(--om-border);
@@ -241,8 +210,7 @@ const emit = defineEmits<{
 }
 
 @media (max-width: 720px) {
-  .context-hit__head,
-  .section-head {
+  .context-hit__head {
     flex-direction: column;
   }
 

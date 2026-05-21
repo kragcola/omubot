@@ -568,7 +568,7 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 
 本节落入跟踪文档时**未动任何代码**。由用户审查上述 14 个子任务的拆分粒度、是否漏点、是否需要补 D2 cancel-path 测试（跨群多时段时 wait_for 取消的场景）等。审查通过后按 U-1 → U-14 顺序逐项落地，每一步给出 typecheck/build/test 证据。
 
-### 🟡 2026-05-21 KnowledgeView 拆分启动（B-1 helpers ✅ / B-2 只读子组件 ✅ / B-3 交互子组件 ✅ / C 待开）
+### ✅ 2026-05-21 KnowledgeView 拆分完成（B-1 helpers ✅ / B-2 只读子组件 ✅ / B-3 交互子组件 ✅ / C AppPanelSection ✅）
 
 按 SystemView / SlangView 同模板（B-1 helpers → B-2 只读子组件 → B-3 交互子组件 → C AppPanelSection 视觉收敛）推进。
 
@@ -639,9 +639,27 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 
 回滚：`git revert <commit>`，再 `rm admin/frontend/src/views/knowledge/components/{KnowledgeSearch,KnowledgeContextPanel,KnowledgeGraphPanel,KnowledgeCandidatesPanel,KnowledgeGraphNodesPanel}.vue` 即恢复（不动 B-1 helpers / B-2 只读子组件）。
 
-#### C AppPanelSection 视觉收敛（下一步）
+#### C AppPanelSection 视觉收敛 ✅ 2026-05-21
 
-主视图保留的 5 个 `PageToolbar`（sources / metrics / graph / candidates / graph_nodes）+ 子组件内剩余的 `section-head / knowledge-eyebrow` 用法都可以收敛到 `AppPanelSection`，与 SystemView / SlangView 对齐。预计删除 ~80 行重复 scoped CSS、bundle gzip 回吐 ~0.3 KB。
+把 B-2 / B-3 子组件里复制出来的 `section-head / knowledge-eyebrow / h3` 三件套全部收敛到 `AppPanelSection`，与 SystemView / SlangView 对齐：
+
+- [admin/frontend/src/views/knowledge/components/KnowledgeMetricsPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeMetricsPanel.vue) — 2 个面板（`Sources / 命中来源` + `Types / 命中类型`）从 `<AppCard bordered elevated class="metrics-panel">` + `section-head + knowledge-eyebrow + h3` 改为 `<AppPanelSection eyebrow title>`；删 `.metrics-panel / .section-head / .section-head h3 / .knowledge-eyebrow` 共 4 块 + 媒体查询里的 `.section-head` 收尾，**净 -32 行**
+- [admin/frontend/src/views/knowledge/components/KnowledgeContextPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeContextPanel.vue) — `Prompt Pack / 最终打包文本` 面板同样改造，trailing `<NTag>` 走 `#aside` slot；删 `.context-pack-card / .section-head / .section-head h3 / .knowledge-eyebrow` + 媒体查询里的 `.section-head`；`.context-pack { margin: 14px 0 0 }` 收成 `0`（`AppPanelSection` 自带 head→body 间距），**净 -32 行**
+- [admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue) — `Entities / 实体` 面板改造，trailing `<NTag>{{ length }} 个</NTag>` 走 `#aside`；删 `.graph-entities padding / .section-head / .section-head h3 / .knowledge-eyebrow` + 媒体查询里的 `.section-head`；`.entity-list { margin-top: 14px }` 收成 `0`，**净 -45 行**
+- 三处都补 `import AppPanelSection from '../../../components/common/AppPanelSection.vue'`，`AppCard` 因仍用于 `metric-mini-card / recent-context-card / context-hit / relationship-card / candidate-card` 等子卡保留
+
+主视图（[KnowledgeView.vue](../../admin/frontend/src/views/knowledge/KnowledgeView.vue)）本轮不动——B-3 之后主视图只剩 4 块壳级 scoped CSS（`knowledge-compat-alert / knowledge-tabs / knowledge-toolbar__title / knowledge-toolbar__hint`），没有 `section-head` 残留。
+
+验证：
+
+- `vue-tsc --noEmit` — 0 error
+- `vite build` — 5.37s
+- 三个子组件行数累计：B-3 末（238 + 254 + 350）= 842 → C 末（211 + 222 + 312）= 745，**净 -97 行**（git diff 报 -109，差额是空行 / 缩进重排）
+- bundle：B-3 52.82 KB / gzip 14.87 KB → **C 52.32 KB / gzip 14.79 KB**（-0.50 / -0.08 gzip，与 SystemView / SlangView C 同量级回吐 ~0.1 KB gzip 量级）
+
+回滚：`git revert <commit>`；`AppPanelSection` 这层是无破坏性的纯模板替换，子组件外部 props/emits 完全不变，主视图无须配合改动。
+
+至此 [admin/frontend/src/views/knowledge/](../../admin/frontend/src/views/knowledge/) 目录达到与 SystemView / SlangView 一致的"主视图 ≤ 800 行 + 子组件每个 ≤ 400 行 + 复用 `AppPanelSection`"分层结构，KnowledgeView 拆分四阶段（B-1 / B-2 / B-3 / C）全部完成。
 
 ## 阶段 4 — 长尾页面（不专门跟踪）
 

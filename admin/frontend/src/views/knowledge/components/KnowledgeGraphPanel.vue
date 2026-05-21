@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { DocumentTextOutline, FlashOutline, LayersOutline } from '@vicons/ionicons5'
 import AppCard from '../../../components/common/AppCard.vue'
+import AppPanelSection from '../../../components/common/AppPanelSection.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import { percentText, relationshipEvidenceText, relationshipScopeText } from '../helpers/formatters'
 import type { GraphEntity, GraphRelationship, SupersedeDraft } from '../helpers/types'
@@ -28,18 +29,12 @@ const emit = defineEmits<{
 <template>
   <NSpin :show="graphLoading">
     <div class="graph-layout">
-      <AppCard bordered elevated class="graph-entities">
-        <div class="section-head">
-          <div>
-            <p class="knowledge-eyebrow">
-              Entities
-            </p>
-            <h3>实体</h3>
-          </div>
+      <AppPanelSection eyebrow="Entities" title="实体" class="graph-entities">
+        <template #aside>
           <NTag round size="small">
             {{ graphEntities.length }} 个
           </NTag>
-        </div>
+        </template>
         <div v-if="graphEntities.length" class="entity-list">
           <div v-for="entity in graphEntities" :key="entity.name" class="entity-row">
             <span>{{ entity.name }}</span>
@@ -55,7 +50,7 @@ const emit = defineEmits<{
           description="通过候选审核或后续自动抽取后会出现实体。"
           :icon="LayersOutline"
         />
-      </AppCard>
+      </AppPanelSection>
 
       <div class="relationship-list">
         <EmptyState
@@ -183,37 +178,10 @@ const emit = defineEmits<{
   align-items: start;
 }
 
-.graph-entities {
-  padding: 20px;
-}
-
-.section-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.section-head h3 {
-  margin: 0;
-  color: var(--om-text-1);
-  font-size: 18px;
-}
-
-.knowledge-eyebrow {
-  margin: 0 0 8px;
-  color: var(--om-text-3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
 .entity-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 14px;
 }
 
 .entity-row {
@@ -339,12 +307,6 @@ const emit = defineEmits<{
   .relationship-card__rollback,
   .relationship-card__supersede {
     grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 720px) {
-  .section-head {
-    flex-direction: column;
   }
 }
 </style>
