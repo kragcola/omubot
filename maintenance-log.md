@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-05-21 deploy fix — pyproject 补 rapidfuzz 依赖
+
+**变更类型**：deps / build（pyproject + uv.lock）
+
+**背景**：
+
+部署 Phase 2（bc41331）时 `docker compose up bot -d --build` 启动崩在
+`ModuleNotFoundError: No module named 'rapidfuzz'`。
+
+根因与 Phase 2 无关：`services/learning_normalizer/normalize.py`（untracked 工作） 顶部
+`from rapidfuzz import fuzz`，但 `pyproject.toml` 从未声明该依赖。`admin/routes/api/__init__.py`
+早在 `2d62484`（5 月 14 日）就 import 了 `learning_normalizer` 路由，旧镜像（12 小时前那次 build）
+构建时这一 import 链还没成型，所以一直没爆；本次 `--build` 把 untracked 模块烧进新镜像，
+import 链一闭合就炸。
+
+**改动**：
+
+- [pyproject.toml](pyproject.toml) `dependencies` 末尾追加 `"rapidfuzz>=3.10.0"`
+- `uv lock` 解析为 rapidfuzz 3.14.5
+
+**部署影响**：
+
+- 必须接着 `dot_clean . && docker compose up bot -d --build` 重新打镜像（napcat 不动）
+- 不影响其他服务：rapidfuzz 是 learning_normalizer 局部依赖，没人扩散使用
+
+---
+
 ## 2026-05-21 slang.db 反复损坏全栈治本 Phase 2 — DELETE journal + 完整性巡检 + admin 接线
 
 **变更类型**：infra-soft / storage + admin（PRAGMA 调整 + 运行时巡检 + 全套 admin UI）
