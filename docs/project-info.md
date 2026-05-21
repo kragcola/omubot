@@ -104,8 +104,10 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 
 ## 存储路径
 
+容器内挂载点：`/app/storage`。2026-05-21 起改为 Docker named volume `omubot-storage`（`external: true`），主机不再直接持有 `./storage`；如需检查或备份请走 `scripts/dev/storage_export.sh` 或 `docker exec qq-bot ...`，详见 [maintenance-log.md](../maintenance-log.md) Phase 3 条目。
+
 ```
-storage/
+/app/storage/         # named volume omubot-storage
 ├── usage.db          # LLM 用量追踪（SQLite）
 ├── messages.db       # 群消息持久化（SQLite）
 ├── memory_cards.db   # 类型化记忆卡片（CardStore，7 类 3 作用域）
@@ -117,7 +119,7 @@ storage/
 ├── stickers/         # 表情包库（SHA256 去重）
 ├── affection/        # 好感度数据
 ├── schedule/         # 模拟日程（每日 JSON）
-└── plugins/          # 插件私有数据（日志、缓存等，gitignored）
+└── plugins/          # 插件私有数据（日志、缓存等）
 ```
 
 ## 关键端口
