@@ -290,7 +290,11 @@ def create_plugins_router(
             "defaults": defaults,
             "effective_values": effective_values if isinstance(effective_values, dict) else {},
             "updated_at": entry.get("updated_at", 0.0),
-            "path": str(entry.get("path") or getattr(plugin_config_store, "path", "")) if plugin_config_store is not None else "",
+            "path": (
+                str(entry.get("path") or getattr(plugin_config_store, "path", ""))
+                if plugin_config_store is not None
+                else ""
+            ),
             "default_path": str(entry.get("default_path") or ""),
             "schema_path": str(entry.get("schema_path") or ""),
             "has_saved_values": bool(values),

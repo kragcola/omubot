@@ -145,7 +145,12 @@ class PluginBus:
         if plugin is None:
             return False
         if not enabled and self.is_plugin_locked(plugin):
-            _L.warning("locked plugin disable refused | name={} tier={} policy={}", name, getattr(plugin, "tier", ""), getattr(plugin, "toggle_policy", ""))
+            _L.warning(
+                "locked plugin disable refused | name={} tier={} policy={}",
+                name,
+                getattr(plugin, "tier", ""),
+                getattr(plugin, "toggle_policy", ""),
+            )
             return False
         plugin.enabled = enabled
         health = self._ensure_health(name)

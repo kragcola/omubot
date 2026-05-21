@@ -223,8 +223,16 @@ def create_providers_router(
                 "text_preview": text[:120],
                 "provider_kind": result.get("provider_kind", "") if isinstance(result, dict) else "",
                 "provider_mode": result.get("provider_mode", "") if isinstance(result, dict) else "",
-                "payload_sanitized": bool(result.get("payload_sanitized", False)) if isinstance(result, dict) else False,
-                "reasoning_replay_tokens": int(result.get("reasoning_replay_tokens", 0) or 0) if isinstance(result, dict) else 0,
+                "payload_sanitized": (
+                    bool(result.get("payload_sanitized", False))
+                    if isinstance(result, dict)
+                    else False
+                ),
+                "reasoning_replay_tokens": (
+                    int(result.get("reasoning_replay_tokens", 0) or 0)
+                    if isinstance(result, dict)
+                    else 0
+                ),
                 "usage_summary": result.get("usage", {}) if isinstance(result, dict) else {},
             }
         except Exception as exc:
@@ -255,7 +263,10 @@ def _selectable_profile_names(llm: Any) -> set[str]:
 
 
 def _sorted_profile_names(names: set[str] | list[str]) -> list[str]:
-    return sorted({str(name or "").strip() for name in names if str(name or "").strip()}, key=lambda item: (item != "main", item))
+    return sorted(
+        {str(name or "").strip() for name in names if str(name or "").strip()},
+        key=lambda item: (item != "main", item),
+    )
 
 
 def _providers_payload(llm: Any, *, llm_client: Any = None) -> dict[str, Any]:
@@ -404,7 +415,11 @@ def _persist_provider_definitions(
     llm_data["profiles"] = profiles_data
 
     available_profiles = set(profiles_data.keys())
-    previous_default = str(llm_data.get("default_profile") or getattr(getattr(fallback_config, "llm", None), "default_profile", "main") or "main")
+    previous_default = str(
+        llm_data.get("default_profile")
+        or getattr(getattr(fallback_config, "llm", None), "default_profile", "main")
+        or "main"
+    )
     default_profile = previous_default if previous_default in available_profiles else "main"
     llm_data["default_profile"] = default_profile
 

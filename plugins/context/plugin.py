@@ -88,7 +88,8 @@ class ContextPlugin(AmadeusPlugin):
         )
         elapsed_ms = (asyncio.get_running_loop().time() - t0) * 1000
         _L.debug(
-            "context prompt pack | query={!r} hits={} types={} doc_chunks={} pack_chars={} omitted={} elapsed={:.1f}ms sources={}",
+            "context prompt pack | query={!r} hits={} types={} doc_chunks={} "
+            "pack_chars={} omitted={} elapsed={:.1f}ms sources={}",
             _safe_query(query),
             len(pack.hits),
             dict(Counter(str(getattr(hit, "type", "")) for hit in pack.hits)),

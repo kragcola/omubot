@@ -320,11 +320,17 @@ def _build_maintenance_window(
         summary_text = f"当前存在 {alert_error_count} 项高优先级异常，建议在群聊低峰期集中处理，并在完成后复查系统页。"
     elif alert_warning_count > 0:
         title = "建议安排低峰维护"
-        summary_text = f"当前存在 {alert_warning_count} 项达到阈值的留意项，虽然不一定阻断运行，但更适合放到维护窗口内统一处理。"
+        summary_text = (
+            f"当前存在 {alert_warning_count} 项达到阈值的留意项，"
+            "虽然不一定阻断运行，但更适合放到维护窗口内统一处理。"
+        )
     else:
         title = "当前运行面整体稳定"
         if service_warning_count > 0 or service_error_count > 0:
-            summary_text = f"当前没有达到阈值的顶部告警，但仍有 {service_warning_count + service_error_count} 项轻量提醒保留在服务级健康卡中。"
+            count = service_warning_count + service_error_count
+            summary_text = (
+                f"当前没有达到阈值的顶部告警，但仍有 {count} 项轻量提醒保留在服务级健康卡中。"
+            )
         else:
             summary_text = "当前没有明显服务告警。常规配置调整仍建议先创建备份，再按需重启验证。"
 

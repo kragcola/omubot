@@ -95,7 +95,10 @@ class WebFetchTool(Tool):
             return "拒绝访问: 不允许访问内网地址"
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout_seconds, follow_redirects=self._follow_redirects) as client:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                follow_redirects=self._follow_redirects,
+            ) as client:
                 resp = await client.get(url, headers={"User-Agent": self._user_agent})
         except httpx.TimeoutException:
             return f"请求超时: 网页在 {self._timeout_seconds:g} 秒内未响应 ({url})"

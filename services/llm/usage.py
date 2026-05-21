@@ -217,7 +217,8 @@ class UsageTracker:
             total_in = input_tokens + cache_read_tokens + cache_create_tokens
             hit_pct = f"{cache_read_tokens / total_in * 100:.0f}%" if total_in > 0 else "n/a"
             _L.info(
-                "usage | type={} provider={} user={} group={} in={} out={} cache_r={} cache_w={} hit={} rounds={} {:.1f}s{}",
+                "usage | type={} provider={} user={} group={} in={} out={} "
+                "cache_r={} cache_w={} hit={} rounds={} {:.1f}s{}",
                 call_type,
                 provider_kind or "unknown",
                 user_id,
