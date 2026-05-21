@@ -1,9 +1,9 @@
 """FactGraphBridge — Phase E.4 graph edge double-write.
 
 Listens to ``KnowledgeGraphService`` fact creations (both the
-``submit_fact_candidate`` direct-active branch and the
-``approve_candidate`` branch) and mirrors **doc-backed** facts into
-the knowledge graph as ``doc_supports_fact`` edges
+``submit_fact_candidate(..., promote_directly=True)`` privileged path
+and the ``approve_candidate`` branch) and mirrors **doc-backed** facts
+into the knowledge graph as ``doc_supports_fact`` edges
 (audit ``docs/audits/multilayer-memory-phase-e-design-audit-2026-05-21.md``
 § E.4).
 

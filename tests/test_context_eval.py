@@ -63,6 +63,7 @@ async def test_context_eval_fixture_passes_with_memory_doc_and_graph_sources(tmp
             confidence=0.9,
             source="test",
             evidence={"card_id": "card_1"},
+            promote_directly=True,
         )
 
         service = ContextService([
@@ -172,6 +173,7 @@ async def test_owner_context_eval_scenarios_guard_scope_and_noise(tmp_path) -> N
             confidence=0.9,
             source="test",
             evidence={"chunk_id": "docs/admin.md::style"},
+            promote_directly=True,
         )
 
         service = ContextService([
@@ -213,6 +215,7 @@ async def test_owner_realistic_context_eval_fixture_passes(tmp_path) -> None:
             confidence=0.9,
             source="test",
             evidence={"chunk_id": "docs/admin.md::style"},
+            promote_directly=True,
         )
 
         service = ContextService([

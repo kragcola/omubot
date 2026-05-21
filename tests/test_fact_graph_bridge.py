@@ -9,15 +9,20 @@ Covers the audit § E.4 contract:
 - Memory-card-backed fact (``evidence['type']='memory_card'``) is a
   no-op — the edge type is *document support* specifically.
 - Empty / missing ``chunk_id`` is a no-op.
-- ``submit_fact_candidate`` direct-active branch (confidence >= 0.85)
-  fires the listener.
+- ``submit_fact_candidate`` with ``promote_directly=True`` (privileged
+  admin-only path) fires the listener.
 - ``approve_candidate`` (candidate → active) also fires the listener.
-- Pending candidate (0.60 <= confidence < 0.85) does NOT fire the
-  listener — only ``GraphFact`` instantiation should.
+- Pending candidate (≥0.60 without ``promote_directly``) does NOT fire
+  the listener — only ``GraphFact`` instantiation should.
 - Listener exception in a sibling listener doesn't break the bridge.
 - Graph write failure does NOT roll back the fact SQL commit.
 - D2 cancel-path leaves both stores in a consistent state.
 - ``evidence_refs`` carries the bare ``fact_id``.
+
+PR2 (2026-05-21): the legacy ``confidence >= 0.85`` direct-active fast
+path was removed. Tests that previously relied on it now pass
+``promote_directly=True`` to assert the privileged-admin path remains
+intact.
 """
 
 from __future__ import annotations
@@ -64,6 +69,7 @@ async def test_high_confidence_doc_fact_writes_edge(stack):
         confidence=0.9,
         source="extractor",
         evidence=_doc_evidence("chunk_1", "她说她很喜欢奶茶"),
+        promote_directly=True,
     )
     assert fact is not None
     fact_node = await writer.get_node_by_source(FACT_SOURCE_TABLE, fact.fact_id)
@@ -93,6 +99,7 @@ async def test_memory_card_evidence_skipped(stack):
         confidence=0.9,
         source="extractor",
         evidence={"type": "memory_card", "card_id": "card_1", "id": "card_1", "quote": "..."},
+        promote_directly=True,
     )
     _edges, count = await writer.list_edges(edge_type=EDGE_TYPE)
     assert count == 0
@@ -109,6 +116,7 @@ async def test_missing_chunk_id_is_noop(stack):
         source="extractor",
         # type=doc_chunk but no chunk_id field — bridge should skip
         evidence={"type": "doc_chunk", "id": "fallback_id", "quote": ""},
+        promote_directly=True,
     )
     _edges, count = await writer.list_edges(edge_type=EDGE_TYPE)
     assert count == 0
@@ -170,6 +178,7 @@ async def test_listener_exception_is_caught(stack):
         confidence=0.9,
         source="extractor",
         evidence=_doc_evidence("chunk_safe"),
+        promote_directly=True,
     )
     assert fact is not None
     fact_node = await writer.get_node_by_source(FACT_SOURCE_TABLE, fact.fact_id)
@@ -191,6 +200,7 @@ async def test_graph_write_failure_does_not_roll_back_fact(stack, monkeypatch):
         confidence=0.9,
         source="extractor",
         evidence=_doc_evidence("chunk_corrupt"),
+        promote_directly=True,
     )
     assert fact is not None
     # Source-of-truth fact row must still be queryable
@@ -210,6 +220,7 @@ async def test_cancel_path_leaves_clean_state(stack):
                 confidence=0.9,
                 source="extractor",
                 evidence=_doc_evidence("chunk_cancel"),
+                promote_directly=True,
             ),
             timeout=0.0,
         )
@@ -237,6 +248,7 @@ async def test_evidence_refs_carry_fact_id(stack):
         confidence=0.9,
         source="extractor",
         evidence=_doc_evidence("chunk_refs"),
+        promote_directly=True,
     )
     assert fact is not None
     fact_node = await writer.get_node_by_source(FACT_SOURCE_TABLE, fact.fact_id)
@@ -263,6 +275,7 @@ async def test_repeated_facts_upsert_same_edge(stack):
         confidence=0.9,
         source="extractor",
         evidence=_doc_evidence("chunk_idem", "Q1"),
+        promote_directly=True,
     )
     assert fact is not None
     # Same triple → submit returns the existing fact (no new fact_id)
@@ -271,6 +284,7 @@ async def test_repeated_facts_upsert_same_edge(stack):
         confidence=0.95,
         source="extractor",
         evidence=_doc_evidence("chunk_idem", "Q2"),
+        promote_directly=True,
     )
     assert same is not None
     assert same.fact_id == fact.fact_id

@@ -4,6 +4,84 @@
 
 ---
 
+## 2026-05-21 知识图谱抽取治本 PR2 — LLM 抽取器 + 拆 0.85 快车道 + 重开 graph_auto_extract
+
+**变更类型**：refactor（services/knowledge_graph 治本主菜：1 个新模块 + 2 个文件改动 + 6 个测试文件迁移 + 3 个配置默认值翻转）
+
+**背景**：
+
+PR1 切流清污后队列归零，但 4 条根因还在代码里挂着，开 `graph_auto_extract` 必再产垃圾。**蓝军自检**沿调用链反向追到 4 个治本点：① [extractor.py:90-116](services/knowledge_graph/extractor.py#L90) 的 5 条 regex 没有句首/分句首锚点，喂给"前 1-28 汉字 + 是 + ..."这种裸 pattern 必然吞跨子句尾缀；② [extractor.py:118](services/knowledge_graph/extractor.py#L118) 的 `_GENERIC_SUBJECTS` 黑名单只挡 7 个代词/泛指，**没挡连词副词**；③ [chunking.py:30](services/knowledge/chunking.py#L30) 一个 markdown 二级标题 = 一个 chunk，整段（可达数千字）一次性喂 extractor，章节越长 regex 撞墙越频繁；④ [service.py:91](services/knowledge_graph/service.py#L91) `if confidence >= 0.85` 写死的快车道直接进 `graph_facts.active`，抽取手段对不对它不管，只看置信度数字。**PR2 一次性把 4 条根因全焊死**：换 LLM 抽取范式 + 按句拆分 + 70 词级黑名单 + 命名实体门控 + 0.85 置信度封顶 + 拆掉快车道改 `promote_directly=True` 管理员特权。
+
+**改动文件**：
+
+| 文件 | 改动 |
+| --- | --- |
+| [services/knowledge_graph/llm_extractor.py](services/knowledge_graph/llm_extractor.py) | **新增** 308 行。`LLMGraphExtractor` 按句拆分 → LLM 调用 → 4 层防线（system prompt 硬约束 / 70 词 `_BANNED_ENTITIES` 后处理黑名单 / `_GENERIC_BARE_PREDICATES` 命名实体门控 / `[0.0, 0.85]` 置信度封顶 / `ate_sentence` 防 LLM 把整句塞一个槽位）；走 `LLMRequest(task='graph_review')` 拼项目既有 `task_profiles` fallback；无 LLM client 时直接返空，**不退化到 regex** |
+| [services/knowledge_graph/service.py](services/knowledge_graph/service.py) | `KnowledgeGraphService.__init__(*, llm_client=None)` + 新方法 `attach_llm_client(llm)` 用于 ChatPlugin 后期注入；`_extractor` 重命名 `_regex_baseline`（仅作离线对比基线保留）；`extract_from_context_hits` 切走 `LLMGraphExtractor`；**拆掉 `if confidence >= 0.85` 快车道**，改 `submit_fact_candidate(*, promote_directly: bool = False)`——管理员显式特权才能跳过候选审核，自动抽取一律走 pending |
+| [plugins/chat/plugin.py](plugins/chat/plugin.py) | `LLMClient` 创建后调用 `ctx.knowledge_graph.attach_llm_client(llm)` 完成晚绑定（`KnowledgeGraphService` 在 line 760 创建，`LLMClient` 要到 line 880 才有） |
+| [plugins/context/config.default.json](plugins/context/config.default.json) | `graph_auto_extract`: `false` → **`true`**（PR1 关阀，PR2 重开） |
+| [plugins/context/config.schema.json](plugins/context/config.schema.json) | description 改为 "LLM 抽取器（按句拆分 + 命名实体门控 + 0.85 置信度封顶），所有自动抽取一律进候选审核队列" |
+| [plugins/context/plugin.py](plugins/context/plugin.py) | `ContextConfig.graph_auto_extract` 默认 `False` → `True`，`__init__` 同步 |
+| [services/knowledge_graph/fact_graph_bridge.py](services/knowledge_graph/fact_graph_bridge.py) | docstring 更新："promote_directly=True 特权路径" 替换原 "direct-active branch" |
+| [tests/test_knowledge_graph.py](tests/test_knowledge_graph.py) | 全量重写：新增 `_MockLLMClient` 注入脚本化响应；新增治本测试 `test_high_confidence_extraction_now_requires_review`（0.9 置信度也只能进候选）+ `test_promote_directly_bypasses_review_for_admin_paths`（特权路径仍工作）+ `test_extract_from_context_hits_creates_pending_candidates`（accepted=0 / pending=2）+ `test_extract_from_context_hits_rejects_banned_subjects`（"而不"被拦） |
+| [tests/test_knowledge_graph_llm_extractor.py](tests/test_knowledge_graph_llm_extractor.py) | **新增** 14 个单元测试覆盖每条防线：banned 连词主语 / banned 副词主语 / 裸 copula 无命名实体 / 裸 copula 有命名实体 / 置信度超 0.85 / 句子拆分 / 短片段跳过 / markdown code fence / LLM 调用失败 / 无 LLM client 返空 / `_validate_fact` 直接调用 |
+| [tests/test_fact_graph_bridge.py](tests/test_fact_graph_bridge.py) | 8 处 `submit_fact_candidate(confidence=0.9)` 全部加 `promote_directly=True` 显式断言特权路径 E.4 contract 不变 |
+| [tests/test_context_eval.py](tests/test_context_eval.py) | 3 处种子数据加 `promote_directly=True` |
+| [tests/test_context_service.py](tests/test_context_service.py) | 4 处图谱命中种子加 `promote_directly=True` |
+
+**爆炸半径**：
+
+- 自动抽取调用链：plugins/context/plugin.py:_schedule_graph_extract → KnowledgeGraphService.extract_from_context_hits → **LLMGraphExtractor.extract_from_hits**（PR2 新路径）→ submit_fact_candidate（一律 pending，无快车道）→ admin/knowledge 候选审核 → approve_candidate / reject_candidate
+- 管理员手工路径：admin/routes/api/graph.py 已用 promote_directly=True 显式声明（test_knowledge_graph.py:test_promote_directly_bypasses_review_for_admin_paths 锁住）
+- LLM 任务：复用现有 `graph_review` LLMTask + `TaskCacheProfile(system_breakpoints=1)`，未引入新 task；`task_profiles` fallback 自动落到 main 兜底 → 无需改 chat plugin task_profiles 配置
+- 后端运行时：bot 容器（rebuild 完成）；napcat 不动（CLAUDE.md 反风控约束）
+- admin/frontend：无改动（候选审核界面 PR4 已就位）
+
+**D1 同模式扫描**（治本必须的"端到端"扫）：
+
+| 检查 | 命令 | 结果 |
+| --- | --- | --- |
+| 其他中文 regex 抽取器 | `grep -rn "compile.*[一-鿿]" services/` | services/slang/quality.py / services/memory/state_board.py 仅做白名单/字符过滤，非抽取链路 ✅ |
+| SlangExtractor 是 LLM 路径 | [admin/routes/api/slang.py:650](admin/routes/api/slang.py#L650) | ✅ 已是 LLM |
+| StyleExtractor 是 LLM 路径 | [admin/routes/api/style.py:364](admin/routes/api/style.py#L364) | ✅ 已是 LLM |
+| 其他 0.85 直进 active 的硬编码快车道 | `grep -rn ">= 0.85\|>= 0\\.85" services/` | 仅 services/knowledge_graph/service.py 一处（已拆） ✅ |
+| 其他 `submit_fact_candidate` 调用点未传 `promote_directly` | `grep -rn "submit_fact_candidate" --include='*.py'` | admin 路由 + dream agent 已是显式 `promote_directly=True`（管理员/系统种子）；测试已迁移；自动抽取链路一律走 default `False` ✅ |
+
+**验证**（D4 完成声明含证据）：
+
+- **目标测试**：`uv run pytest tests/test_knowledge_graph.py tests/test_knowledge_graph_llm_extractor.py tests/test_fact_graph_bridge.py tests/test_context_eval.py tests/test_context_service.py` → **49 passed in 0.39s** ✅
+- **全量 pytest**：`uv run pytest` → **1383 passed, 8 skipped, 1 failed**；唯一失败是 `tests/test_admin_api.py::test_system_services_health_endpoint`（macOS 主机磁盘占用 99% 触发 backup_disk warning，**和 PR2 无关——已 git stash 复现 main 同样失败**）
+- **ruff**：`uv run ruff check services/knowledge_graph/ tests/test_knowledge_graph*.py tests/test_fact_graph_bridge.py tests/test_context_*.py plugins/chat/plugin.py` → **All checks passed** ✅
+- **pyright**：`uv run pyright services/knowledge_graph/llm_extractor.py services/knowledge_graph/service.py` → **0 errors** ✅；plugins/chat/plugin.py 49 个 PluginContext 动态属性错误是历史遗留（git stash 验证 main 同样 49 个），PR2 7 行新增**未引入新错误**
+- **离线毒针验证**（容器内 deepseek-v4-flash 实跑，3 fixture）：
+  - ✅ memory_card "用户1416930401 喜欢音游和爵士。" → 2 干净三元组（subject="用户1416930401" QQ id，object="音游"/"爵士"）
+  - ✅ doc_chunk 多句 "Omubot 采用 Docker Compose..."→3 干净三元组（按句拆分生效，subject 全是命名实体）
+  - ✅ 蓝军毒针 "而不是核心仍然学习辅助功能，通常我们会避免直接修改主分支。" → **No facts extracted**（4 层防线全部生效，治本验证通过）
+- **DB 状态**：`extraction_candidates` 0 行 / `graph_facts` 1 active（PR1 audit 保留的合法历史事实）
+
+**部署**：`dot_clean . && docker compose up bot -d --build` 完成；napcat 不动；`storage/plugins/config/context.json` 不存在 → 配置默认值变更立即生效。
+
+**回滚**：
+
+```bash
+git revert <PR2_hash>          # 回滚代码
+docker compose up bot -d --build  # 重新部署
+# graph_auto_extract 自动回到 false（PR1 状态），无候选产生
+```
+
+PR2 不引入新 sqlite 表/列；如出现回归只需 git revert + 重新部署。
+
+**Handoff（PR2 之后的进一步工作，**已**不阻塞 graph_auto_extract 重开**）：
+
+| 任务 | 文件 | 优先级 |
+| --- | --- | --- |
+| ChatPlugin pyright 49 错（PluginContext 动态属性）治理 | plugins/chat/plugin.py | 低（不影响运行时） |
+| test_system_services_health_endpoint 跨主机磁盘容差 | tests/test_admin_api.py:1697 | 低（不影响 PR2） |
+| chunking 长 markdown 二级章节切分（根因 ③ 已被按句拆分覆盖，但治本可考虑 chunk 层也拆） | services/knowledge/chunking.py:30 | 中 |
+| 离线评测脚本固化（LLM vs regex 准确率） | scripts/eval_graph_extractor.py | 中（PR3 阶段） |
+
+---
+
 ## 2026-05-21 知识图谱抽取治本 PR1 — 切流 + 清污
 
 **变更类型**：fix（plugins/context 3 文件配置变更 + sqlite 数据清理；零代码逻辑改动）

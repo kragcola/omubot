@@ -168,6 +168,7 @@ async def test_context_service_can_return_graph_hits(tmp_path) -> None:
             confidence=0.9,
             source="test",
             evidence={"card_id": "card_1"},
+            promote_directly=True,
         )
 
         service = ContextService([GraphContextSource(graph)])
@@ -192,6 +193,7 @@ async def test_graph_context_source_respects_memory_scope(tmp_path) -> None:
             confidence=0.9,
             source="test",
             evidence={"card_id": "card_user", "scope": "user", "scope_id": "123"},
+            promote_directly=True,
         )
         await graph.submit_fact_candidate(
             subject="群456",
@@ -200,6 +202,7 @@ async def test_graph_context_source_respects_memory_scope(tmp_path) -> None:
             confidence=0.9,
             source="test",
             evidence={"card_id": "card_group", "scope": "group", "scope_id": "456"},
+            promote_directly=True,
         )
         await graph.submit_fact_candidate(
             subject="Omubot",
@@ -208,6 +211,7 @@ async def test_graph_context_source_respects_memory_scope(tmp_path) -> None:
             confidence=0.9,
             source="test",
             evidence={"chunk_id": "docs/music.md::音游"},
+            promote_directly=True,
         )
 
         service = ContextService([GraphContextSource(graph)])

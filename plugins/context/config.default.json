@@ -7,6 +7,6 @@
     "max_hits": 5,
     "max_doc_hits": 3,
     "max_chars": 2400,
-    "graph_auto_extract": false
+    "graph_auto_extract": true
   }
 }

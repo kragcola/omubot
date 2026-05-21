@@ -10,6 +10,7 @@ from loguru import logger
 
 from services.context.types import ContextHit
 from services.knowledge_graph.extractor import KnowledgeGraphExtractor
+from services.knowledge_graph.llm_extractor import LLMGraphExtractor
 from services.knowledge_graph.store import KnowledgeGraphStore
 from services.knowledge_graph.types import GraphCandidate, GraphFact
 
@@ -19,10 +20,22 @@ FactListener = Callable[[GraphFact, dict[str, Any]], Awaitable[None]]
 
 
 class KnowledgeGraphService:
-    def __init__(self, db_path: str | Path = "storage/knowledge_graph.db") -> None:
+    def __init__(
+        self,
+        db_path: str | Path = "storage/knowledge_graph.db",
+        *,
+        llm_client: Any = None,
+    ) -> None:
         self._store = KnowledgeGraphStore(db_path)
-        self._extractor = KnowledgeGraphExtractor()
+        # Regex baseline retained only for offline evaluation; never invoked
+        # by the production extract path after PR2 (2026-05-21).
+        self._regex_baseline = KnowledgeGraphExtractor()
+        self._llm_extractor = LLMGraphExtractor(llm_client=llm_client)
         self._fact_listeners: list[FactListener] = []
+
+    def attach_llm_client(self, llm_client: Any) -> None:
+        """Late-bind LLM client when ChatPlugin builds it after kg init."""
+        self._llm_extractor = LLMGraphExtractor(llm_client=llm_client)
 
     async def init(self) -> None:
         await self._store.init()
@@ -66,8 +79,20 @@ class KnowledgeGraphService:
         evidence: dict[str, Any],
         scope: str | None = None,
         scope_id: str | None = None,
+        promote_directly: bool = False,
     ) -> GraphFact | GraphCandidate | None:
-        """Apply first-version governance thresholds."""
+        """Apply governance thresholds.
+
+        After PR2 (2026-05-21) extracted facts always require human review:
+        any confidence in [0.60, 1.0] enters the pending candidate queue,
+        below 0.60 is discarded. The legacy ``confidence >= 0.85`` direct
+        active fast-path is gone — it bypassed candidate audit and let
+        regex misextractions land in ``graph_facts.active`` undetected.
+
+        ``promote_directly`` is a privileged override for admin-driven
+        flows (manual ``approve_candidate``, supersede). Auto-extraction
+        callers MUST leave it False.
+        """
         subject = _clean_field(subject)
         predicate = _clean_field(predicate)
         object = _clean_field(object)
@@ -88,7 +113,7 @@ class KnowledgeGraphService:
             existing_fact.evidence = await self._store.list_evidence(existing_fact.fact_id)
             return existing_fact
 
-        if confidence >= 0.85:
+        if promote_directly:
             fact = await self._store.add_fact(
                 subject=subject,
                 predicate=predicate,
@@ -128,7 +153,7 @@ class KnowledgeGraphService:
 
     async def extract_from_context_hits(self, hits: list[ContextHit]) -> dict[str, Any]:
         """Extract graph candidates from context hits without affecting this prompt turn."""
-        extracted = await self._extractor.extract_from_hits(hits)
+        extracted = await self._llm_extractor.extract_from_hits(hits)
         accepted = 0
         pending = 0
         ignored = 0

@@ -965,6 +965,14 @@ class ChatPlugin(AmadeusPlugin):
 
         ctx.llm_client = llm
 
+        # PR2 (2026-05-21): wire LLMClient into KnowledgeGraphService for the
+        # LLM-driven graph extractor. Prior to this, the regex MVP extractor
+        # leaked Chinese conjunctions/adverbs into the candidate queue. The
+        # service was constructed earlier (before LLMClient existed); we
+        # late-bind here so on_pre_prompt extraction routes through LLM.
+        if getattr(ctx, "knowledge_graph", None) is not None:
+            ctx.knowledge_graph.attach_llm_client(llm)
+
         # Now that llm_client + msg_log are wired, attach MemoryConsolidator.
         ctx.memory_consolidator = MemoryConsolidator(
             store=ctx.memory_consolidator_store,
