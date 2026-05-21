@@ -203,6 +203,7 @@ class PluginContext:
     memory_consolidator: Any = None
     episode_store: Any = None
     episode_promoter: Any = None
+    episode_graph_bridge: Any = None
     reflection_generator: Any = None
 
 

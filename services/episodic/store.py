@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -249,6 +250,30 @@ class EpisodeStore:
     def __init__(self, db_path: str = "storage/episodic.db") -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        # Transition listeners — subscribed by side-channel writers (D.5
+        # graph edge bridge, future declarative_facts). Each listener is
+        # awaited inside try/except: graph mirroring must never roll back
+        # a state transition (audit § D.5 "写 graph 失败不回滚").
+        self._transition_listeners: list[
+            Callable[[Episode, str, str, str], Awaitable[None]]
+        ] = []
+
+    def add_transition_listener(
+        self,
+        listener: Callable[[Episode, str, str, str], Awaitable[None]],
+    ) -> None:
+        """Register a coroutine to fire after every successful transition.
+
+        Listener signature: ``async (episode, prev_state, new_state, actor)``.
+        The ``episode`` snapshot is the row **before** the transition (so
+        ``episode.episode_state == prev_state``); listeners that need the
+        post-transition row should re-fetch via ``get_episode``.
+
+        Listener exceptions are swallowed and logged at WARN — the graph
+        bridge is an auxiliary index, never a blocker on the source-of-
+        truth state machine.
+        """
+        self._transition_listeners.append(listener)
 
     def _require_db(self) -> aiosqlite.Connection:
         if self._db is None:
@@ -482,7 +507,27 @@ class EpisodeStore:
             after={"episode_state": new_state},
             reason=reason,
         )
+        await self._fire_transition_listeners(ep, current, new_state, actor)
         return True
+
+    async def _fire_transition_listeners(
+        self,
+        episode: Episode,
+        prev_state: str,
+        new_state: str,
+        actor: str,
+    ) -> None:
+        for listener in self._transition_listeners:
+            try:
+                await listener(episode, prev_state, new_state, actor)
+            except Exception as exc:
+                logger.warning(
+                    "episode transition listener failed | "
+                    "episode={} {}->{} listener={} err={}",
+                    episode.episode_id, prev_state, new_state,
+                    getattr(listener, "__qualname__", repr(listener)),
+                    exc,
+                )
 
     async def auto_promote_dry_runs(self, *, group_id: str = "") -> int:
         db = self._require_db()

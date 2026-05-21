@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase D.5 — graph edge 双写（episode_supports_profile）
+
+**变更类型**：feature（services + tests，无 schema migration、无部署改动、无前端改动）
+
+**背景**：
+
+[Phase D 设计前置审计](docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md) § D.5 是 Phase D 的最后一块拼图。前面 D.1 ~ D.4 跑通了"学习闭环"在 EpisodeStore 这一条主链，但 § 7.4 决议 episode 写入要**双写 normalizer + graph edge** —— normalizer 部分已在 Phase C/D.1 走完，graph edge 部分（A.5 早就备好的 `episode_supports_profile` edge type）此前**从无 caller**。D.5 补上这条侧链：episode `transition_state(approved)` 时 GraphWriter 写一条 `episode_supports_profile` edge，`transition_state(disabled)` 时把 edge 翻到 `status='disabled'`；graph 是辅助索引，写失败永远不回滚 state 迁移。
+
+**改动落点**：
+
+- [services/episodic/store.py](services/episodic/store.py) 引入轻量监听器机制：
+  - `add_transition_listener(listener)` — 注册 `async (episode, prev_state, new_state, actor)` coroutine，在每次成功 `transition_state` 后 fan-out 触发
+  - `_fire_transition_listeners` 用 try/except 包每个 listener，异常仅 WARN log，不向调用方传播——确保 graph 写挂不影响 EpisodeStore source-of-truth（审计 § D.5 硬要求）
+- 新文件 [services/episodic/graph_bridge.py](services/episodic/graph_bridge.py) `EpisodeGraphBridge`：
+  - `attach(store)` 把 `_on_transition` 绑到 EpisodeStore listener 列表
+  - `approved` → 通过 `ensure_graph_node` upsert episode node（`source_table='episodes'`, `node_type='episode'`） + group node（`source_table='groups'`, `node_type='group'`），再 `write_edge` upsert `episode_supports_profile` edge；`evidence_refs=(episode_id,)` 给 admin 知识库图谱页提供反查锚点；如果是 `disabled→approved` 复活路径，额外调 `set_edge_status(status='active')` 把先前撤销的 edge 翻回来
+  - `disabled` → 通过 `set_edge_status(status='disabled')` 撤销；node 不删（保留历史索引），edge 仅状态翻转
+  - `enabled_for_prompt` 不写新 edge（前面 approve 已经写过；防止重复 upsert 浪费 IO）；空 `group_id` 直接 skip（to-node 无歧义）
+- [services/knowledge_graph/graph_writer.py](services/knowledge_graph/graph_writer.py) 新增两个 helper：
+  - `set_edge_status(edge_type, from_node_id, to_node_id, status)` — 按三元组定位 edge 翻状态；rowcount 0 时返 False（用于 disable_before_approved 等边界）
+  - `find_edge(edge_type, from_node_id, to_node_id)` — 给 bridge 在 disabled 路径查 edge 现状用，也给 D.5 测试断言用
+- [services/episodic/\_\_init\_\_.py](services/episodic/__init__.py) export `EpisodeGraphBridge`
+- [plugins/chat/plugin.py](plugins/chat/plugin.py) 在 `EpisodeStore.init()` 之后立刻 attach bridge —— 整段包在 try/except 里，attach 失败仅 warn log，不阻断 ChatPlugin 启动
+- [kernel/types.py](kernel/types.py) 新增 `episode_graph_bridge: Any` ctx 字段
+
+**约束遵守**：
+
+- D2 cancel-path：`tests/test_episode_graph_bridge.py::test_cancel_path_leaves_clean_state` 用 `pytest.raises(asyncio.TimeoutError) + asyncio.wait_for(timeout=0.0)` 断言 cancel 后 EpisodeStore 与 GraphStore 互相一致——episode 状态与 graph node 存在性同步（要么都更新要么都没更新，无半成品）
+- D1 同模式扫描：grep `_maybe_reflect_on_feedback` / `EpisodePromoter` / `episode_supports_profile` 三个 Phase D 接入点，确认所有 hook 都在 ChatPlugin startup wired：D.1 EpisodePromoter @ plugin.py:785、D.3 ReflectionGenerator @ plugin.py:966、D.5 EpisodeGraphBridge @ plugin.py:799——三处都用 try/except 兜住实例化失败，符合"侧链失败不阻塞主链"原则
+- D4 完成证据：① 同模式扫描结果（D.1/D.3/D.5 三 hook 全 wired）；② pytest 1324 passed / 1 pre-existing 失败（test_admin_api `backup_disk` 与 D.4 同根，与 D.5 无关）；③ ruff 在所有 D.5 文件上 0 错；④ pyright 全项目 460 错（baseline 461，D.5 净降 1）；⑤ 11 个 D.5 专项测试覆盖 approved 写入 / disabled 撤销 / disabled→approved 复活 / enabled_for_prompt 不重复写 / 空 group_id skip / graph 写失败不回滚 state / listener 异常被吞 / cancel-path / evidence_refs 契约 / set_edge_status 边界
+- D6 admin SPA：本次改动不涉及前端，无需 vue-tsc/npm run build
+
+**审计 § D.5 验收 checklist**（自检）：
+
+- [x] 仅在 `approved` 触发 edge 写入：`test_approve_writes_episode_supports_profile_edge` + `test_disabled_before_approved_is_noop`
+- [x] `disabled` 撤销 edge（`status='disabled'`，row 不删）：`test_disable_revokes_edge`
+- [x] 写 graph 失败不回滚 state 迁移：`test_graph_write_failure_does_not_roll_back_state` 用 monkeypatch 把 `write_node` 替成 raises 看 transition 仍 succeed
+- [x] 与 § Phase E 五类 edge 一一对应：仅写 `episode_supports_profile`，其余 4 类 (term_used_in_group / style_applies_to_situation / user_corrected_bot_about / doc_supports_fact) 留 Phase E
+- [x] D2 cancel-path：`test_cancel_path_leaves_clean_state`
+- [x] 验收：`pytest tests/test_episode_graph_bridge.py` 11/11 通过，`graph_edges` 表会有 `episode_supports_profile` row（admin 知识库图谱页可见）
+
+**Phase D 整体进度**：
+
+| 子任务 | 状态 | commit |
+| --- | --- | --- |
+| D.1 promote 桥 | ✅ | bf53119 |
+| D.2 admin UX | ✅ | 428907f |
+| D.3 反思生成 | ✅ | 128edf6 |
+| D.4 召回路径 | ✅ | 17b4769 |
+| D.5 graph edge 双写 | ✅ | 待 commit |
+| Phase D 整体验收 | 🔜 | 本次后做 |
+
+**部署注记**：
+
+- 不涉及 schema migration（`graph_nodes` / `graph_edges` 表 A.5 已建好），重启 bot 即生效
+- 不动 napcat（设备指纹反风控铁律）
+- 不动前端，不需要 vue-tsc/npm run build
+- 24 小时观察期约定（Phase 3 named volume，截至 2026-05-22 16:30）+ 30 天 corruption 观察窗（截至 2026-06-20）继续执行，本变更不重置任何观察期
+- 回滚路径：纯 `git revert` 当次 commit；现存 `graph_edges` 中 `episode_supports_profile` 类型 row 留下也无害——其他模块不依赖它，仅 admin 图谱页会展示
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase D.4 — 召回路径（EpisodeStore.list_for_recall → EpisodeProvider → BlockTraceBus 双写）
 
 **变更类型**：feature（services + tests，无 schema migration、无部署改动、无前端改动）

@@ -175,6 +175,45 @@ class GraphWriter:
         await db.commit()
         return edge_id
 
+    async def set_edge_status(
+        self,
+        *,
+        edge_type: str,
+        from_node_id: str,
+        to_node_id: str,
+        status: str,
+    ) -> bool:
+        """Update the status of the unique edge identified by the triple.
+
+        Returns True when a row was matched and updated, False otherwise.
+        Used by Phase D.5 episode_supports_profile bridge to revoke an
+        edge (status='disabled') when the underlying episode is disabled
+        and re-activate (status='active') after a disabled→approved cycle.
+        """
+        now = _now_iso()
+        cursor = await self._db.execute(
+            "UPDATE graph_edges SET status = ?, updated_at = ? "
+            "WHERE edge_type = ? AND from_node_id = ? AND to_node_id = ?",
+            (status, now, edge_type, from_node_id, to_node_id),
+        )
+        await self._db.commit()
+        return (cursor.rowcount or 0) > 0
+
+    async def find_edge(
+        self,
+        *,
+        edge_type: str,
+        from_node_id: str,
+        to_node_id: str,
+    ) -> GraphEdge | None:
+        cursor = await self._db.execute(
+            "SELECT * FROM graph_edges WHERE edge_type = ? "
+            "AND from_node_id = ? AND to_node_id = ?",
+            (edge_type, from_node_id, to_node_id),
+        )
+        row = await cursor.fetchone()
+        return _row_to_edge(row) if row else None
+
     async def get_node(self, node_id: str) -> GraphNode | None:
         db = self._db
         cursor = await db.execute("SELECT * FROM graph_nodes WHERE node_id = ?", (node_id,))

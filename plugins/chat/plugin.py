@@ -786,6 +786,20 @@ class ChatPlugin(AmadeusPlugin):
             candidates_store=ctx.memory_consolidator_store,
             episode_store=ctx.episode_store,
         )
+        # D.5 graph edge double-write: approved/disabled episodes mirror
+        # into knowledge_graph.db as episode_supports_profile edges.
+        # Best-effort — graph mirroring failure must never block the
+        # episode state machine (audit § D.5).
+        try:
+            from services.episodic import EpisodeGraphBridge
+            from services.knowledge_graph.graph_writer import GraphWriter
+
+            kg_store = getattr(ctx.knowledge_graph, "_store", None)
+            if kg_store is not None and getattr(kg_store, "_db", None) is not None:
+                ctx.episode_graph_bridge = EpisodeGraphBridge(GraphWriter(kg_store))
+                ctx.episode_graph_bridge.attach(ctx.episode_store)
+        except Exception as exc:
+            logger.warning("episode graph bridge attach failed | err={}", exc)
         ctx.memory_consolidator = None  # set after llm_client is built below
 
         # ---- instruction ----
