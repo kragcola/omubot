@@ -107,6 +107,28 @@ class StylePlugin(AmadeusPlugin):
         except Exception as exc:
             _L.warning("style graph bridge attach failed | err={}", exc)
 
+        # Phase E.3 graph edge double-write — mirror negative feedback to
+        # `user_corrected_bot_about` edges. Same best-effort discipline.
+        try:
+            from services.knowledge_graph.graph_writer import GraphWriter
+            from services.style.feedback_graph_bridge import (
+                StyleFeedbackGraphBridge,
+            )
+
+            kg_service = getattr(ctx, "knowledge_graph", None)
+            kg_store = getattr(kg_service, "_store", None) if kg_service else None
+            if (
+                kg_store is not None
+                and getattr(kg_store, "_db", None) is not None
+                and self._store is not None
+            ):
+                ctx.style_feedback_graph_bridge = StyleFeedbackGraphBridge(
+                    GraphWriter(kg_store),
+                )
+                ctx.style_feedback_graph_bridge.attach(self._store)
+        except Exception as exc:
+            _L.warning("style feedback graph bridge attach failed | err={}", exc)
+
     async def on_shutdown(self, ctx: PluginContext) -> None:
         del ctx
         if self._owns_store and self._store is not None:

@@ -4,6 +4,61 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase E.3 — `user_corrected_bot_about` graph edge 双写
+
+**变更类型**：feat（代码 + 测试，无 schema 变更，无部署）
+
+**背景**：
+
+[Phase E 设计前置审计 § 3.3](docs/audits/multilayer-memory-phase-e-design-audit-2026-05-21.md) 给出 E.3 的设计：用户/管理员对 style expression / profile 的 *negative* feedback → 镜像出 `user_corrected_bot_about` 边（user node ↔ style_expression / style_profile node）。E.2 阶段已经把 `add_feedback_listener` 基础设施埋进 StyleStore，这一阶段只需要写 bridge + plugin 挂接 + 测试。
+
+**核心改动**：
+
+- [services/style/feedback_graph_bridge.py](services/style/feedback_graph_bridge.py)（新建，~140 行）— `StyleFeedbackGraphBridge`：
+  - `attach(store)` 把 `_on_feedback` 绑到 `store.add_feedback_listener`
+  - `_on_feedback` 仅在 `rating == 'negative'` 触发；positive / neutral 直接 return（neutral 主要由 weak_signal 通道生成的 bot 回复采集，对 user_correction 语义是噪声）
+  - **target_type 真实集合**：审计原文写的是 `expression`/`reply`/`persona`，实际代码里只有 `expression`（[services/style/store.py:1010](services/style/store.py#L1010)）和 `profile`（[services/style/store.py:1095-1096](services/style/store.py#L1095-L1096), [1194-1195](services/style/store.py#L1194-L1195)）。Bridge 通过 `_TARGET_MAP` 把 `expression` / `profile` 映射到 source_table；其它 target_type（包括将来可能加的 `reply`）默认 noop，不会因为陌生类型炸掉
+  - **匿名 actor 折叠**：`actor` 为空时统一落到 `users:anonymous`，让多次匿名 correction 聚合到一个 user node
+  - **target node 容错**：feedback row 可能在 expression / profile 删除前到达，bridge 找不到对应 node 时会用 `placeholder=True` 占位 ensure 一份；正常路径下 `target_node is not None`
+  - **confidence=1.0**：admin 显式负反馈是 ground truth，无需聚合
+  - **无 revoke 路径**：审计 § E.3 — feedback 是单事件，正面再来一条是另一行 `feedback_id`；不试图反向撤销之前的 edge
+  - properties carry `target_type` / `rating` / `feedback_at` / `note`（`note = (context or raw_text)[:240]`），evidence_refs=(feedback_id,)
+- [plugins/style/plugin.py](plugins/style/plugin.py) — 在 E.2 attach 块之后再挂 E.3 bridge；同一个 `kg_store` 引用，独立 `try/except` 不互相影响
+- [kernel/types.py](kernel/types.py) `PluginContext` — 新增 `style_feedback_graph_bridge: Any = None` 字段
+- [tests/test_style_feedback_graph_bridge.py](tests/test_style_feedback_graph_bridge.py)（新建）— 11 个测试覆盖：
+  - `test_negative_expression_feedback_writes_edge` / `test_negative_profile_feedback_writes_edge` — 主路径
+  - `test_positive_feedback_is_skipped` / `test_neutral_feedback_is_skipped` — rating 过滤
+  - `test_unknown_target_type_is_noop` — `target_type='reply'` 不会 crash
+  - `test_empty_target_id_is_noop` — empty target_id 跳过
+  - `test_empty_actor_collapses_to_anonymous` — 匿名 actor 折叠
+  - `test_listener_exception_is_caught` — 兄弟 listener 抛错不影响 bridge
+  - `test_graph_write_failure_does_not_roll_back_record` — graph mirror 失败不回滚 SQL
+  - `test_cancel_path_leaves_clean_state`（**D2**）— `wait_for(..., timeout=0.0)` 取消后两边状态一致
+  - `test_evidence_refs_carry_feedback_id` — 锁定 evidence_refs 形状
+
+**D1 同模式扫描**：
+
+- `grep -n "add_feedback_listener\|_fire_feedback"` — 只有 [services/style/store.py:474,514,524,526,949](services/style/store.py)（E.2 预埋）+ 新 bridge + 新测试。listener-pattern 在 D.5 episode、E.1 slang、E.2 style status、E.3 style feedback 四处统一形态，不存在散落的"半套"实现
+- `grep -n "user_corrected_bot_about"` — 仅 GraphEdgeType Literal 声明 + 本次 bridge + 测试，没有遗留 stub
+
+**D4 完成证据**：
+
+- `pkill -9 -f pytest && uv run pytest tests/test_style_feedback_graph_bridge.py -q` — `11 passed in 0.29s`
+- `uv run pytest tests/test_style_graph_bridge.py tests/test_style_feedback_graph_bridge.py tests/test_slang_graph_bridge.py tests/test_episode_graph_bridge.py tests/test_style_store.py -q` — `56 passed in 1.08s`
+- `uv run ruff check services/style/feedback_graph_bridge.py tests/test_style_feedback_graph_bridge.py kernel/types.py plugins/style/plugin.py` — `All checks passed!`
+- `uv run pyright services/style/feedback_graph_bridge.py tests/test_style_feedback_graph_bridge.py` — `0 errors, 0 warnings, 0 informations`
+
+**部署 / 回滚**：
+
+- 不动部署。下次 `docker compose up bot -d --build` 自动生效（铁律 D6 + napcat 不重启）
+- 回滚：`git revert <e3 commit>` 即可。无 schema 变更、无 storage 落盘格式变更
+- StyleFeedbackGraphBridge 失败优雅降级：`record_feedback` SQL 提交后才 fire listener；listener 内部 try/except WARN；StyleStore._fire_feedback_listeners 是第二层兜底
+- 与现有 `style_feedback` SQL 表完全独立，graph 层只是 *additive projection*
+
+**Phase E 进度**：E.0 ✅ → E.1 ✅ → E.2 ✅ → E.3 ✅ → E.4 待办 → 整体验收 待办
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase E.2 — `style_applies_to_situation` graph edge 双写
 
 **变更类型**：feat（代码 + 测试，无 schema 变更，无部署）

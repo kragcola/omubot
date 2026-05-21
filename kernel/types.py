@@ -207,6 +207,7 @@ class PluginContext:
     reflection_generator: Any = None
     slang_graph_bridge: Any = None
     style_graph_bridge: Any = None
+    style_feedback_graph_bridge: Any = None
 
 
 @dataclass
