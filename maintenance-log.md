@@ -4,6 +4,69 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase E.1 — `term_used_in_group` graph edge 双写
+
+**变更类型**：feat（代码 + 测试，无 schema 变更，无部署）
+
+**背景**：
+
+[Phase E 设计前置审计（2026-05-21）](docs/audits/multilayer-memory-phase-e-design-audit-2026-05-21.md) § 3.1 把剩余 4 条 graph edge 拆成 E.1～E.4 四个独立可验子阶段，按风险递增 + 流量频次递增排列。E.1 是 D.5 listener-pattern 模板的第一次机械化复用：每条群消息黑话命中（`SlangStore.record_hit`）镜像出一条 `term_used_in_group` 边，term node ↔ group node 二元结构。
+
+**核心改动**：
+
+- [services/slang/store.py](services/slang/store.py) — `SlangStore` 加 `add_hit_listener(listener)` + `_fire_hit_listeners`（仿 D.5 `EpisodeStore.add_transition_listener` 模式）；listener 签名 `async (term_id, group_id, user_id, usage_count) -> None`；`record_hit` 末尾（`record_observation` 之后）调 `_fire_hit_listeners(term_id, group_id, user_id, term.usage_count + 1)`，listener 失败仅 WARN，不影响 SQL 提交
+- [services/slang/graph_bridge.py](services/slang/graph_bridge.py)（新建，~130 行）— `SlangGraphBridge`：
+  - `attach(store)` 把 `_on_hit` 绑到 `store.add_hit_listener`，并 stash store 引用以便 listener 回查 `term` snapshot（payload 保持最小化，bridge 自己负责 lookup）
+  - `_on_hit` upsert：term node `(source_table='slang_terms', node_type='term', scope='group', label=term.term[:80])` + group node `(source_table='groups', node_type='group')` → `term_used_in_group` edge `(confidence=term.confidence, evidence_refs=(term_id,), properties={'usage_count': N, 'last_seen_at': ISO})`
+  - 无 revoke 路径——`record_hit` 对 `muted/expired` term 早返回 False，hit 信号本身是单调的（Phase E.1 范围是「term 在此群被用过」；过期 term 的 edge 清理留给 Phase F）
+  - 空 group_id 直接 skip（私聊命中无 to-node）
+- [plugins/slang/plugin.py:172](plugins/slang/plugin.py#L172) — 在 `ctx.slang_store = self.store` 之后挂 bridge attach，复用 `ctx.knowledge_graph._store` 拿到 `KnowledgeGraphStore` 实例；`try/except` 优雅降级（attach 失败仅 WARN，不影响 SlangPlugin 启动）
+- [kernel/types.py:208](kernel/types.py#L208) `PluginContext` — 新增 `slang_graph_bridge: Any = None` 字段（紧跟 `episode_graph_bridge`）
+
+**关于 attach 落点的工程权衡**：
+
+ChatPlugin priority=0 在 SlangPlugin priority=42 之前启动，所以 attach 不能放 ChatPlugin（那时 `ctx.slang_store` 还是 None）。直接放 `SlangPlugin.on_startup` 末尾——此时 `ctx.knowledge_graph` 已就绪（ChatPlugin 已设过），`self.store` 也已 init。这与 D.5 把 `EpisodeGraphBridge` attach 在 ChatPlugin 内的位置不同（episode_store 由 ChatPlugin 自己创建），但语义一致：所有 attach 都在 source-of-truth store init 之后立即挂。
+
+**D 条款落地证据**：
+
+- D1 同模式扫描：grep `term_used_in_group` caller 1 处（[services/slang/graph_bridge.py:48](services/slang/graph_bridge.py#L48)）；listener-pattern grep `add_*_listener` 当前两处（`EpisodeStore.add_transition_listener` D.5 / `SlangStore.add_hit_listener` E.1），契约一致
+- D2 cancel-path 测试：[tests/test_slang_graph_bridge.py:175](tests/test_slang_graph_bridge.py#L175) `test_cancel_path_leaves_clean_state`，`asyncio.wait_for(timeout=0.0)` 模拟 cancel，断言 `usage_count ∈ {0,1}` + 「若 term node 已落，则 SQL 路径必已 advance」一致性
+- D4 完成声明含证据：
+  - `pkill -9 -f pytest && uv run pytest tests/test_slang_graph_bridge.py -q` → **8 passed in 0.37s**
+  - `uv run pytest tests/test_slang_store.py tests/test_slang_graph_bridge.py tests/test_episode.py tests/test_episode_graph_bridge.py tests/test_episode_context_provider.py tests/test_memory_consolidator_promote.py -q` → **82 passed in 0.83s**（Phase D + E.1 联动 scope 全绿）
+  - `uv run ruff check services/slang/ tests/test_slang_graph_bridge.py kernel/types.py plugins/slang/plugin.py` → **All checks passed**
+  - `uv run pyright services/slang/graph_bridge.py tests/test_slang_graph_bridge.py` → **0 errors**（`services/slang/store.py` 19 条 pyright 错误均为 pre-existing，集中在 lines 2641/3096+，不在 E.1 改动范围）
+
+**测试矩阵（[tests/test_slang_graph_bridge.py](tests/test_slang_graph_bridge.py)，8 个测试）**：
+
+| 测试 | 验证目标 |
+| --- | --- |
+| `test_record_hit_writes_term_used_in_group_edge` | 命中后 term node + group node + edge 全部就位，`evidence_refs` 含 term_id，`properties.usage_count == 1` |
+| `test_repeated_hits_upsert_same_edge` | 3 次连续命中后只一行 edge，`usage_count` 推进到 3 |
+| `test_empty_group_id_is_skipped` | 空 group_id 时 SQL 路径仍提交，graph 路径 noop |
+| `test_listener_exception_is_caught` | 注入 broken sibling listener，bridge 仍正常运行（fan-out 隔离） |
+| `test_graph_write_failure_does_not_block_record_hit` | monkeypatch `writer.write_node` 抛异常，`record_hit` 仍返回 True，term `usage_count` 仍推进 |
+| `test_cancel_path_leaves_clean_state` | D2 cancel-path |
+| `test_evidence_refs_carry_term_id` | 锁定 evidence_refs 契约 |
+| `test_muted_term_record_hit_skips_listener` | muted term 命中早返回 False，bridge 不被触发 |
+
+**频次预估**（沿用审计 § E.1）：每条群消息平均匹配 0.3–1 个已知 term，日均增量约几百条 edge；upsert 语义保证同 (term, group) 不会重复落行。
+
+**部署影响**：
+
+- 不需要 docker rebuild 部署——E.1 仅 .py 改动，下次 bot 重启时 listener 自动接通
+- 不需要 schema migration——`graph_nodes`/`graph_edges` Phase A.5 schema 已就位，term/group node_type 已在 Literal 内
+- 不需要 admin 前端改动——admin `/api/admin/knowledge/graph/edges?edge_type=term_used_in_group` 现有路由可直接查
+- napcat 全程未动（铁律）
+
+**回滚路径**：撤回本次 commit 即可。`graph_edges` 表里已写入的 `term_used_in_group` 行无清理需求（不被读路径使用，下次 attach 走通后会继续 upsert 维护）。
+
+**与 Phase E 整体的关系**：
+
+E.1 是 listener-pattern 第二次实战（D.5 是第一次）；E.2/E.3/E.4 各自的 source store 不同但模板一致。Phase E.0 设计审计 § 4 列出的跨子阶段共性约束（listener 失败不影响 SoT、`(source_table, source_id)` upsert、cancel-path 测试、bridge 不写 GraphFact 表、文件落点 `services/{源 store}/[*_]graph_bridge.py`）E.1 全部遵守。
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase D — 整体验收（D.1→D.5 全部 ✅）
 
 **变更类型**：milestone（无新代码；同次 commit 仅刷文档）

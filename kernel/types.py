@@ -205,6 +205,7 @@ class PluginContext:
     episode_promoter: Any = None
     episode_graph_bridge: Any = None
     reflection_generator: Any = None
+    slang_graph_bridge: Any = None
 
 
 @dataclass

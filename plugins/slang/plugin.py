@@ -171,6 +171,20 @@ class SlangPlugin(AmadeusPlugin):
         self._group_config = getattr(ctx.config, "group", None)
         ctx.slang_store = self.store
         ctx.slang_plugin = self
+        # Phase E.1 graph edge double-write — mirror term-group hits into
+        # knowledge_graph.db as `term_used_in_group` edges. Best-effort: a
+        # graph write failure must never block `record_hit` (audit § E.1).
+        try:
+            from services.knowledge_graph.graph_writer import GraphWriter
+            from services.slang.graph_bridge import SlangGraphBridge
+
+            kg_service = getattr(ctx, "knowledge_graph", None)
+            kg_store = getattr(kg_service, "_store", None) if kg_service else None
+            if kg_store is not None and getattr(kg_store, "_db", None) is not None:
+                ctx.slang_graph_bridge = SlangGraphBridge(GraphWriter(kg_store))
+                ctx.slang_graph_bridge.attach(self.store)
+        except Exception as exc:
+            _L.warning("slang graph bridge attach failed | err={}", exc)
         # Mark superseded if SlangProvider is already registered on the
         # provider bus — provider becomes the sole prompt-injection path.
         provider_bus = getattr(ctx, "provider_bus", None)

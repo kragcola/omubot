@@ -6,12 +6,14 @@ import contextlib
 import json
 import re
 import secrets
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import aiosqlite
+from loguru import logger
 
 from services.cross_group import cross_group_where
 from services.similarity import NgramSimilarityProvider, normalize_text_key
@@ -451,6 +453,42 @@ class SlangStore:
         self._db_path = str(db_path)
         self._db: aiosqlite.Connection | None = None
         self._drift_reviewer: Any = drift_reviewer
+        self._hit_listeners: list[
+            Callable[[str, str, str, int], Awaitable[None]]
+        ] = []
+
+    def add_hit_listener(
+        self,
+        listener: Callable[[str, str, str, int], Awaitable[None]],
+    ) -> None:
+        """Register a coroutine called after each successful ``record_hit``.
+
+        Listener signature: ``async (term_id, group_id, user_id, usage_count) -> None``.
+        Failures inside listeners are caught by ``_fire_hit_listeners`` and
+        logged as warnings — they MUST never break the source-of-truth path.
+        Used by the Phase E.1 graph bridge to mirror term-group hits as
+        ``term_used_in_group`` edges.
+        """
+        self._hit_listeners.append(listener)
+
+    async def _fire_hit_listeners(
+        self,
+        term_id: str,
+        group_id: str,
+        user_id: str,
+        usage_count: int,
+    ) -> None:
+        for listener in self._hit_listeners:
+            try:
+                await listener(term_id, group_id, user_id, usage_count)
+            except Exception as exc:
+                logger.warning(
+                    "slang hit listener failed | term={} group={} listener={} err={}",
+                    term_id,
+                    group_id,
+                    getattr(listener, "__qualname__", repr(listener)),
+                    exc,
+                )
 
     def set_drift_reviewer(self, drift_reviewer: Any) -> None:
         """Allow late binding once the LLM client is wired into the plugin."""
@@ -1693,6 +1731,9 @@ class SlangStore:
             raw_text=raw_text,
             context=context,
             reason=reason,
+        )
+        await self._fire_hit_listeners(
+            term_id, group_id, user_id, term.usage_count + 1
         )
         return True
 
