@@ -186,6 +186,7 @@ from services.command import CommandDispatcher  # noqa: E402
 from services.errors import RuntimeErrorStore  # noqa: E402
 from services.media.vision import VisionClient  # noqa: E402
 from services.protocol_trace import ProtocolConnectionHistory, ProtocolTraceStore  # noqa: E402
+from services.storage.backup_scheduler import BackupScheduler  # noqa: E402
 
 _storage_dir = _Path("storage")
 _plugin_data_dir = _storage_dir / "plugins"
@@ -199,6 +200,19 @@ _plugin_ctx = PluginContext(
 _plugin_ctx.protocol_trace = ProtocolTraceStore(max_items=120)
 _plugin_ctx.protocol_connections = ProtocolConnectionHistory(max_items=80)
 _plugin_ctx.runtime_errors = RuntimeErrorStore(max_events=300, max_groups=120)
+
+# Backup scheduler — daily backup loop + Phase 2 hourly quick_check probe.
+# Started/stopped via driver.on_startup / on_shutdown registered in kernel/router.py.
+_plugin_ctx.backup_scheduler = BackupScheduler(
+    storage_dir=_storage_dir,
+    repo_root=_Path(".").resolve(),
+    daily_time=_bot_config.backup.daily_time,
+    keep_days=_bot_config.backup.keep_days,
+    default_profile=_bot_config.backup.default_profile,
+    enabled=_bot_config.backup.enabled,
+    quick_check_enabled=_bot_config.backup.quick_check_enabled,
+    quick_check_interval_minutes=_bot_config.backup.quick_check_interval_minutes,
+)
 
 # Set bot start time early — used by admin dashboard and ChatPlugin
 _plugin_ctx.bot_start_time = time.time()

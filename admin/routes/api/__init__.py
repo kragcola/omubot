@@ -52,6 +52,7 @@ def create_api_router(
 
     from admin.routes.api.affection import create_affection_router
     from admin.routes.api.auth import create_auth_router
+    from admin.routes.api.backup import create_backup_router
     from admin.routes.api.config import create_config_router
     from admin.routes.api.context import create_context_router
     from admin.routes.api.dashboard import create_dashboard_router
@@ -143,5 +144,9 @@ def create_api_router(
     router.include_router(create_learning_normalizer_router(ctx=ctx))
     router.include_router(create_learning_router(ctx=ctx))
     router.include_router(create_events_router(scheduler=scheduler))
+    router.include_router(create_backup_router(
+        backup_scheduler=getattr(ctx, "backup_scheduler", None),
+        config_path=config_path,
+    ))
 
     return router

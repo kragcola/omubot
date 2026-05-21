@@ -4,6 +4,72 @@
 
 ---
 
+## 2026-05-21 slang.db 反复损坏全栈治本 Phase 2 — DELETE journal + 完整性巡检 + admin 接线
+
+**变更类型**：infra-soft / storage + admin（PRAGMA 调整 + 运行时巡检 + 全套 admin UI）
+
+**背景**：
+
+承接 Phase 1（fc7e591 之前的 3 个 commit：`close_with_checkpoint`、主机脚本守卫、UTF-8 修复），按 plan（`/Users/kragcola/.claude/plans/modular-forging-allen.md`）治本路径推进 Phase 2。
+
+Phase 1 关闭路径已加 `wal_checkpoint(TRUNCATE)`，但 macOS Docker bind mount 上的 fsync 排序漏洞依然存在——只要 WAL 文件还在，崩溃就有机会重放乱序帧。Phase 2 用两条线把这个攻击面收掉：
+
+1. **从根本上规避 WAL** — slang.db 是写少读多（每天数百次写、数千次读），切到 `journal_mode=DELETE` + `synchronous=FULL` 没有 WAL 文件就没有这个 fsync 排序问题
+2. **巡检+紧急备份** — 每小时 `PRAGMA quick_check` 巡检所有关键 SQLite 库，发现 `quick_check != "ok"` 立即触发 `pre-change` profile 紧急备份（留下损坏前最后一份干净状态）+ 通过 loguru `channel="backup"` 自动落到 admin SSE 红条
+
+**Phase 2 改动**：
+
+**\#2 slang.db 切换 journal_mode=DELETE**（已于 fc7e591 单独入库）：
+
+- [services/slang/store.py](services/slang/store.py) `init()`：`connect_sqlite` 之后立即 `PRAGMA journal_mode=DELETE` + `PRAGMA synchronous=FULL`，再 commit
+- 不动 [services/storage/sqlite.py](services/storage/sqlite.py) 全局默认（其他 store 仍是 WAL+NORMAL）——slang 是已知反复损坏者，定向治理；其他 store 由 Phase 1 的 `close_with_checkpoint` 兜底，未来视情况推到 Phase 3 named volume
+- 19 个 slang 测试全绿；DELETE 模式下产生的 db 完全兼容 WAL 模式，可随时回滚
+
+**\#4 BackupConfig + BackupScheduler quick_check 回路 + admin 接线**：
+
+- [kernel/config.py](kernel/config.py) 新增 `BackupConfig`（Pydantic）：`enabled` / `daily_time` / `keep_days` / `default_profile` / `quick_check_enabled` / `quick_check_interval_minutes`（15–1440 min）；`@model_validator` 校验 `daily_time` 为合法 `HH:MM`。挂到 `BotConfig.backup`
+- [services/storage/backup.py](services/storage/backup.py) stdlib `logging` → loguru `_L = logger.bind(channel="backup")`；备份失败、紧急触发都进 admin SSE
+- [services/storage/backup_scheduler.py](services/storage/backup_scheduler.py) 重写：
+  - 新增 `QuickCheckResult` dataclass（db_id / path / ok / quick_check / journal_mode / error）
+  - 两条并发 asyncio loop——`_daily_loop()`（沿用）+ `_quick_check_loop()`（新增）
+  - quick_check 失败：`_L.error(...)` 直入 admin 红条 + 立即跑 `pre-change` profile 紧急备份；备份本身也损坏时记 `emergency pre-change backup rejected`
+  - 新方法：`run_now(profile)` / `run_quick_check_now()` / `last_quick_check` / `settings` / `reload(quick_check_*)`
+- [bot.py](bot.py) 第一次接线：从 `_bot_config.backup` 实例化 `BackupScheduler` 挂到 `_plugin_ctx.backup_scheduler`，[kernel/router.py](kernel/router.py) `on_startup`/`on_shutdown` 启停。这是 BackupScheduler 自上线以来第一次真的进 lifespan
+- [admin/routes/api/backup.py](admin/routes/api/backup.py)（新增）+ [admin/routes/api/__init__.py](admin/routes/api/__init__.py)：6 条 `/api/admin/backup/*` 路由——`GET/POST /settings`、`GET /list?profile=`、`POST /create`、`GET/POST /quick-check`。`POST /settings` Pydantic 校验后 hot-reload scheduler + patch `config.json` 的 `backup` 块
+- [admin/frontend/src/views/system/components/SystemBackup.vue](admin/frontend/src/views/system/components/SystemBackup.vue) + [admin/frontend/src/views/config/components/ConfigSystemBackup.vue](admin/frontend/src/views/config/components/ConfigSystemBackup.vue) 重写：
+  - 切到新 `/api/admin/backup/create`（旧版调的是不存在的 `?profile=` form-style 接口，stub 状态）
+  - 新增「SQLite 完整性巡检」面板：实时显示每个 db 的 `quick_check` / `journal_mode` 状态、上次巡检时间、立即巡检按钮
+  - settings 表单加 `quick_check_enabled` / `quick_check_interval_minutes`
+  - 全部 TypeScript 化（BackupListItem / BackupSettings / QuickCheckSnapshot 接口）
+
+**测试覆盖**：
+
+- [tests/test_backup_service.py](tests/test_backup_service.py) 23 个测试全绿（16 旧 + 4 修正过时断言 + 3 新 quick_check：`probe_passes_for_clean_db` / `detects_corruption` / `handles_missing_db`）
+- 修正过时测试：`test_health_check_reads_backup_registry` 期望 8 个 db 但 `_check_sqlite` 只跑 3 个 → 改成 3；`test_health_check_warns_stale_backup` / `test_disk_usage_warning_threshold` 引用从未实现的 `_check_backup_freshness` / `_check_backup_disk_usage` → 改为校验 manifest mtime / `_free_disk_bytes(path)`
+- Phase 1+2 影响范围全测：`test_backup_service.py` + `test_storage_sqlite.py` + `test_slang_store.py` + `test_message_log.py` + `test_card_store.py` + `test_knowledge.py` + `test_knowledge_graph.py` 共 115 通过 0 失败
+- vue-tsc：backup 相关 0 错误（block-trace 1 个无关错误是 untracked 文件导入 `useSSE.onBlockTrace`）；npm run build 4.92s 通过，SystemView/ConfigView bundle 含本次 backup 改动
+- 注意：`uv run pytest` 整体跑有 4 个 collection error（`test_graph_writer` / `test_reply_workflow` / `test_segmentation` / `test_slang_collision`）+ 48 个 fail，都是其他未提交工作的 untracked 测试，与 Phase 2 无关
+
+**部署影响**：
+
+- 重启 bot：`docker compose restart bot`（**napcat 全程不动**——CLAUDE.md 铁律 + 设备指纹反风控）。重启后第一条 backup 日志会输出 `backup scheduler started, daily_time=04:30:00` + `quick_check loop started, interval=3600s`
+- slang.db journal_mode 切换是首次 startup 时自动完成的（`PRAGMA journal_mode=DELETE` 会把现有 WAL 文件 checkpoint+删除）。验证：`sqlite3 storage/slang.db "PRAGMA journal_mode"` 应返回 `delete`，`storage/slang.db-wal` 应不再存在
+- 前端 `./admin/static` 是 bind mount，`npm run build` 产物已即时生效，无需 rebuild docker 镜像
+- 第一次 quick_check 默认 60 分钟后触发；想立即验证可在 admin 备份面板按「立即巡检」
+
+**回滚路径**：
+
+- \#2 slang DELETE：fc7e591 单独 commit，`git revert fc7e591` 即回 WAL 模式；下次 init 时 `PRAGMA journal_mode=WAL` 自动迁回
+- \#4 quick_check：`backup.quick_check_enabled = false`（admin UI 或 config.json）即关掉巡检 loop；reload 立即生效不需重启
+- 新增的 `/api/admin/backup/*` 路由不调用就不触发，向后兼容旧 `POST /api/admin/backup`（system.py 的原 tar.gz 接口保留）
+
+**与 Phase 1 / Phase 3 的衔接**：
+
+- Phase 1 的 `close_with_checkpoint` 仍然是其他 5 个 WAL store 的兜底——slang 切 DELETE 后 WAL 文件不存在，对它来说 checkpoint 是 no-op
+- Phase 2 的 quick_check 是早期预警；它**不能**预防损坏，只是把 RPO（最大可丢窗口）压到 1 小时。彻底消除 fsync 排序漏洞还得靠 Phase 3 named volume——但 Phase 3 风险更高需要 5 分钟服务停机，本次先跑 Phase 1+2 观察 24h+ 再决定是否推 Phase 3
+
+---
+
 ## 2026-05-21 slang.db 反复损坏全栈治本 Phase 1 — close_with_checkpoint + 主机脚本守卫
 
 **变更类型**：fix / storage + scripts（纯代码层、零 infra）

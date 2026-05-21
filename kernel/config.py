@@ -482,6 +482,39 @@ class AntiDetectConfig(BaseModel):
     char_delay: float = 0.02
 
 
+class BackupConfig(BaseModel):
+    """备份调度配置。
+
+    BackupScheduler 用这套字段决定何时跑日常备份、保留多少天、是否开启
+    quick_check 巡检。`quick_check_*` 是 Phase 2 治理的核心：每小时巡检
+    所有 SQLite 关键库，发现 quick_check != "ok" 立即打 admin 红条 + 触发
+    `pre-change` profile 紧急备份，留下损坏前最后一份干净状态。
+    """
+
+    enabled: bool = True
+    daily_time: str = "04:30"
+    keep_days: int = Field(default=7, ge=1, le=90)
+    default_profile: str = "daily"
+
+    # Phase 2 — hourly SQLite quick_check probe + emergency backup + admin alarm
+    quick_check_enabled: bool = True
+    quick_check_interval_minutes: int = Field(default=60, ge=15, le=1440)
+
+    @model_validator(mode="after")
+    def _check_daily_time(self) -> Self:
+        parts = self.daily_time.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"daily_time must be 'HH:MM', got {self.daily_time!r}")
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(f"daily_time must be numeric HH:MM, got {self.daily_time!r}") from exc
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"daily_time out of range, got {self.daily_time!r}")
+        return self
+
+
 # ============================================================================
 # 根配置
 # ============================================================================
@@ -504,6 +537,7 @@ class BotConfig(BaseModel):
     napcat: NapcatConfig = NapcatConfig()
     vision: VisionConfig = VisionConfig()
     thinker: ThinkerConfig = ThinkerConfig()
+    backup: BackupConfig = BackupConfig()
 
     # 管理员 & 白名单
     admins: dict[str, str] = {}

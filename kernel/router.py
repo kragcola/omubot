@@ -326,9 +326,16 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         if hasattr(ctx, "tool_registry") and ctx.tool_registry is not None:
             for tool in bus.collect_tools():
                 ctx.tool_registry.register(tool)
+        # Backup scheduler: daily backup loop + hourly quick_check probe.
+        backup_scheduler = getattr(ctx, "backup_scheduler", None)
+        if backup_scheduler is not None:
+            await backup_scheduler.start()
 
     @driver.on_shutdown
     async def _shutdown() -> None:
+        backup_scheduler = getattr(ctx, "backup_scheduler", None)
+        if backup_scheduler is not None:
+            await backup_scheduler.stop()
         await bus.fire_on_shutdown(ctx)
 
     # ---- bot connect ----

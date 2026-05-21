@@ -189,6 +189,7 @@ class PluginContext:
     protocol_trace: Any = None
     protocol_connections: Any = None
     runtime_errors: Any = None
+    backup_scheduler: Any = None
 
 
 @dataclass
