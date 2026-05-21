@@ -13,161 +13,36 @@ import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
-
-type KnowledgeTab = 'sources' | 'search' | 'context' | 'metrics' | 'graph' | 'graph_nodes' | 'candidates'
-
-interface KnowledgeStats {
-  loaded?: boolean
-  chunk_count?: number
-  source_count?: number
-  indexed_sources?: number
-  skipped_sources?: number
-  docs_dir?: string
-  recursive?: boolean
-  include?: string[]
-  exclude?: string[]
-  index_persisted?: boolean
-  index_db_path?: string
-}
-
-interface KnowledgeSource {
-  source: string
-  path: string
-  status: string
-  chunk_count: number
-  source_hash?: string
-  skipped_reason?: string
-}
-
-interface KnowledgeResult {
-  id?: string
-  chunk_id?: string
-  content: string
-  source?: string
-  title?: string
-  score?: number
-  metadata?: Record<string, unknown>
-}
-
-interface ContextHit {
-  id: string
-  type: 'memory_card' | 'doc_chunk' | 'graph_fact'
-  content: string
-  score: number
-  source: string
-  title?: string
-  scope?: string
-  scope_id?: string
-  status?: string
-  retriever?: string
-  metadata?: Record<string, unknown>
-}
-
-interface ContextPack {
-  text: string
-  hits: ContextHit[]
-  omitted_count: number
-}
-
-interface ContextMetricRecent {
-  created_at?: number
-  query?: string
-  user_id?: string
-  group_id?: string
-  hit_count?: number
-  pack_chars?: number
-  duplicate_count?: number
-  omitted_count?: number
-  error?: string
-}
-
-interface ContextMetrics {
-  total_queries: number
-  miss_count: number
-  miss_rate: number
-  hit_count: number
-  duplicate_hits: number
-  duplicate_rate: number
-  avg_pack_chars: number
-  max_pack_chars: number
-  omitted_total: number
-  hit_type_counts: Record<string, number>
-  hit_source_counts: Record<string, number>
-  recent: ContextMetricRecent[]
-}
-
-interface GraphEntity {
-  name: string
-  fact_count: number
-}
-
-interface GraphRelationship {
-  fact_id: string
-  subject: string
-  predicate: string
-  object: string
-  confidence: number
-  status: string
-  source: string
-  scope?: string
-  scope_id?: string
-  supersedes?: string
-  metadata?: Record<string, unknown>
-  evidence?: Array<Record<string, unknown>>
-  created_at?: string
-  updated_at?: string
-}
-
-interface GraphCandidate {
-  candidate_id: string
-  subject: string
-  predicate: string
-  object: string
-  confidence: number
-  status: string
-  source: string
-  evidence?: Record<string, unknown>
-  created_at?: string
-  updated_at?: string
-  review_note?: string
-}
-
-interface GraphNodeRow {
-  node_id: string
-  node_type: string
-  source_table: string
-  source_id: string
-  scope: string
-  group_id: string
-  label: string
-  status: string
-  properties?: Record<string, unknown>
-  created_at: string
-  updated_at: string
-  cross_group_visible?: boolean
-}
-
-interface GraphEdgeRow {
-  edge_id: string
-  edge_type: string
-  from_node_id: string
-  to_node_id: string
-  scope: string
-  group_id: string
-  confidence: number
-  status: string
-  evidence_refs?: string[]
-  properties?: Record<string, unknown>
-  created_at: string
-  updated_at: string
-}
-
-interface GraphNodeStats {
-  total_nodes: number
-  total_edges: number
-  by_node_type: Record<string, number>
-  by_edge_type: Record<string, number>
-}
+import { hitTypeLabel, hitTypeTag, sourceStatusType } from './helpers/badges'
+import {
+  evidenceText,
+  isNotFound,
+  metricRatioEntries,
+  numberText,
+  percentText,
+  relationshipEvidenceText,
+  relationshipScopeText,
+  scoreText,
+  shortHash,
+  topEntry,
+} from './helpers/formatters'
+import type {
+  ContextHit,
+  ContextMetricRecent,
+  ContextMetrics,
+  ContextPack,
+  GraphCandidate,
+  GraphEdgeRow,
+  GraphEntity,
+  GraphNodeRow,
+  GraphNodeStats,
+  GraphRelationship,
+  KnowledgeResult,
+  KnowledgeSource,
+  KnowledgeStats,
+  KnowledgeTab,
+  SupersedeDraft,
+} from './helpers/types'
 
 const message = useMessage()
 
@@ -204,12 +79,7 @@ const graphScopeRisks = ref<GraphRelationship[]>([])
 const graphLoading = ref(false)
 const factBusy = ref('')
 const factRollbackNotes = ref<Record<string, string>>({})
-const supersedeDrafts = ref<Record<string, {
-  subject: string
-  predicate: string
-  object: string
-  note: string
-}>>({})
+const supersedeDrafts = ref<Record<string, SupersedeDraft>>({})
 
 const candidates = ref<GraphCandidate[]>([])
 const candidateLoading = ref(false)
@@ -655,84 +525,6 @@ async function rejectCandidate(candidate: GraphCandidate) {
   }
 }
 
-function scoreText(value?: number) {
-  if (typeof value !== 'number') return '--'
-  return value.toFixed(value >= 10 ? 1 : 3)
-}
-
-function percentText(value?: number) {
-  if (typeof value !== 'number') return '--'
-  return `${Math.round(value * 100)}%`
-}
-
-function numberText(value?: number) {
-  if (typeof value !== 'number') return '--'
-  return Math.round(value).toLocaleString()
-}
-
-function sourceStatusType(status: string) {
-  return status === 'indexed' ? 'success' : 'warning'
-}
-
-function hitTypeLabel(type: string) {
-  if (type === 'memory_card') return '记忆卡片'
-  if (type === 'doc_chunk') return '文档片段'
-  return '图谱事实'
-}
-
-function hitTypeTag(type: ContextHit['type']) {
-  if (type === 'memory_card') return 'success'
-  if (type === 'doc_chunk') return 'info'
-  return 'warning'
-}
-
-function shortHash(value?: string) {
-  if (!value) return '--'
-  return value.slice(0, 12)
-}
-
-function evidenceText(candidate: GraphCandidate) {
-  const evidence = candidate.evidence || {}
-  const id = evidence.id || evidence.card_id || evidence.chunk_id || ''
-  const quote = evidence.quote ? ` · ${String(evidence.quote).slice(0, 80)}` : ''
-  return id ? `${String(id)}${quote}` : '未记录证据'
-}
-
-function relationshipEvidenceText(rel: GraphRelationship) {
-  const evidence = rel.evidence || []
-  if (!evidence.length) return '未记录证据'
-  return evidence
-    .map((item) => {
-      const id = item.id || item.card_id || item.chunk_id || ''
-      const quote = item.quote ? ` · ${String(item.quote).slice(0, 90)}` : ''
-      return id ? `${String(id)}${quote}` : quote.replace(/^ · /, '')
-    })
-    .filter(Boolean)
-    .join(' / ') || '未记录证据'
-}
-
-function relationshipScopeText(rel: GraphRelationship) {
-  const scope = rel.scope || 'global'
-  const scopeId = rel.scope_id || 'global'
-  if (scope === 'user') return `用户 ${scopeId}`
-  if (scope === 'group') return `群 ${scopeId}`
-  return '全局'
-}
-
-function metricRatioEntries(data?: Record<string, number>) {
-  return Object.entries(data || {})
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 8)
-}
-
-function topEntry(data?: Record<string, number>): string {
-  const entries = Object.entries(data || {})
-  if (!entries.length) return '—'
-  entries.sort((a, b) => b[1] - a[1])
-  const [name, count] = entries[0]
-  return `${name} · ${count}`
-}
-
 function syncSupersedeDrafts() {
   const next: typeof supersedeDrafts.value = {}
   for (const rel of graphRelationships.value) {
@@ -745,10 +537,6 @@ function syncSupersedeDrafts() {
     }
   }
   supersedeDrafts.value = next
-}
-
-function isNotFound(error: unknown) {
-  return (error as { response?: { status?: number } })?.response?.status === 404
 }
 </script>
 

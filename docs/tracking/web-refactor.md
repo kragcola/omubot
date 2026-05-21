@@ -568,6 +568,42 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 
 本节落入跟踪文档时**未动任何代码**。由用户审查上述 14 个子任务的拆分粒度、是否漏点、是否需要补 D2 cancel-path 测试（跨群多时段时 wait_for 取消的场景）等。审查通过后按 U-1 → U-14 顺序逐项落地，每一步给出 typecheck/build/test 证据。
 
+### 🟡 2026-05-21 KnowledgeView 拆分启动（B-1 helpers ✅ / B-2 / B-3 / C 待开）
+
+按 SystemView / SlangView 同模板（B-1 helpers → B-2 只读子组件 → B-3 交互子组件 → C AppPanelSection 视觉收敛）推进。
+
+#### 现状盘点
+
+- 主视图 [admin/frontend/src/views/knowledge/KnowledgeView.vue](../../admin/frontend/src/views/knowledge/KnowledgeView.vue) 起点 **2186 行**（plan §6 写的 1766 是旧值——经过几轮 graph nodes / context metrics / candidates 增补后已涨到 2186）
+- 7 个 tab：sources / search / context / metrics / graph / graph_nodes / candidates
+- 13 个 TypeScript interface（`KnowledgeStats / KnowledgeSource / KnowledgeResult / ContextHit / ContextPack / ContextMetricRecent / ContextMetrics / GraphEntity / GraphRelationship / GraphCandidate / GraphNodeRow / GraphEdgeRow / GraphNodeStats`）+ `SupersedeDraft` 起点为内联匿名 `Record<string, { subject; predicate; object; note }>`
+- 13 个工具函数：`scoreText / percentText / numberText / sourceStatusType / hitTypeLabel / hitTypeTag / shortHash / evidenceText / relationshipEvidenceText / relationshipScopeText / metricRatioEntries / topEntry / isNotFound`
+- bundle 起点：`KnowledgeView-*.js` 待测（B-1 完成后实测 44.74 KB / gzip 12.68 KB）
+
+#### B-1 helpers 抽取（2026-05-21 完成）
+
+- 新建 [admin/frontend/src/views/knowledge/helpers/types.ts](../../admin/frontend/src/views/knowledge/helpers/types.ts) — 13 个 interface + `KnowledgeTab` + `SupersedeDraft`，176 行
+- 新建 [admin/frontend/src/views/knowledge/helpers/formatters.ts](../../admin/frontend/src/views/knowledge/helpers/formatters.ts) — 10 个纯函数（`scoreText / percentText / numberText / shortHash / evidenceText / relationshipEvidenceText / relationshipScopeText / metricRatioEntries / topEntry / isNotFound`），78 行
+- 新建 [admin/frontend/src/views/knowledge/helpers/badges.ts](../../admin/frontend/src/views/knowledge/helpers/badges.ts) — 3 个 tag/label 助手（`sourceStatusType / hitTypeLabel / hitTypeTag`），25 行
+- 主视图：删除内联 13 interface + 13 function，改 import 自新 helpers；`SupersedeDraft` 类型用具名替代匿名；保留 `syncSupersedeDrafts` 因依赖局部 `supersedeDrafts.value` 与 `graphRelationships.value`
+- 验证：`vue-tsc --noEmit` 0 error；`vite build` 5.30s
+- 主视图行数：**2186 → 1974（-212，-9.7%）**
+- bundle：起点未实测；B-1 后 `KnowledgeView-*.js` **44.74 KB / gzip 12.68 KB**（与 SystemView/SlangView B-1 持平的预期 helpers split 开销）
+
+#### B-2 候选拆分
+
+进入 **PR B-2**（只读子组件）。候选拆分（按 tab 逻辑边界）：
+
+- `KnowledgeHero` — `knowledge-hero` + `knowledge-status-grid` 6 卡（compatibility alert + sourceSummary + 6 卡数据条）
+- `KnowledgeSourcesPanel` — sources tab 的来源列表 + reindex 入口
+- `KnowledgeContextPanel` — context tab 的 context 调试输入 + hits 列表
+- `KnowledgeMetricsPanel` — metrics tab 的命中率 / 来源分布 / 最近查询
+- `KnowledgeGraphNodesPanel` — graph_nodes tab 的节点筛选 + 列表 + drawer
+- `KnowledgeGraphPanel` — graph tab 的实体 / 关系列表（只读部分；supersede / rollback 进 B-3）
+- `KnowledgeCandidatesPanel` — candidates tab 的列表（approve/reject 进 B-3）
+
+每个目标 < 400 行，主视图持 ref 传 props，不 emit 写动作。
+
 ## 阶段 4 — 长尾页面（不专门跟踪）
 
 按 plan §7 在日常任务里穿插推进。每月跑一次合规扫描脚本，结果记录到 `maintenance-log.md`。
