@@ -1,35 +1,20 @@
 <script setup lang="ts">
-import {
-  DocumentTextOutline,
-  FlashOutline,
-  LayersOutline,
-  RefreshOutline,
-} from '@vicons/ionicons5'
+import { RefreshOutline } from '@vicons/ionicons5'
 import { useMessage } from 'naive-ui'
 
 import { api } from '../../api/client'
-import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
-import EmptyState from '../../components/common/EmptyState.vue'
-import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
+import KnowledgeCandidatesPanel from './components/KnowledgeCandidatesPanel.vue'
+import KnowledgeContextPanel from './components/KnowledgeContextPanel.vue'
+import KnowledgeGraphNodesPanel from './components/KnowledgeGraphNodesPanel.vue'
+import KnowledgeGraphPanel from './components/KnowledgeGraphPanel.vue'
 import KnowledgeHero from './components/KnowledgeHero.vue'
 import KnowledgeMetricsPanel from './components/KnowledgeMetricsPanel.vue'
+import KnowledgeSearch from './components/KnowledgeSearch.vue'
 import KnowledgeSourcesPanel from './components/KnowledgeSourcesPanel.vue'
-import { hitTypeLabel, hitTypeTag } from './helpers/badges'
-import {
-  evidenceText,
-  isNotFound,
-  numberText,
-  percentText,
-  relationshipEvidenceText,
-  relationshipScopeText,
-  scoreText,
-  topEntry,
-} from './helpers/formatters'
+import { isNotFound, topEntry } from './helpers/formatters'
 import type {
-  ContextHit,
-  ContextMetricRecent,
   ContextMetrics,
   ContextPack,
   GraphCandidate,
@@ -263,6 +248,13 @@ async function searchKnowledge() {
   } finally {
     searching.value = false
   }
+}
+
+function clearSearch() {
+  searchQ.value = ''
+  searchResults.value = []
+  hasSearched.value = false
+  lastSearchQ.value = ''
 }
 
 async function debugContext() {
@@ -605,164 +597,29 @@ function syncSupersedeDrafts() {
         </NTabPane>
 
         <NTabPane name="search" tab="搜索核对">
-          <PageToolbar class="mb-16">
-            <template #left>
-              <NInput
-                v-model:value="searchQ"
-                clearable
-                placeholder="输入关键词或问题，核对文档 chunk 命中"
-                class="knowledge-query-input"
-                @keyup.enter="searchKnowledge"
-              />
-            </template>
-            <template #right>
-              <NButton v-if="hasSearched" secondary @click="searchQ = ''; searchResults = []; hasSearched = false">
-                清除
-              </NButton>
-              <NButton type="primary" :loading="searching" @click="searchKnowledge">
-                搜索文档
-              </NButton>
-            </template>
-          </PageToolbar>
-
-          <NSpin :show="searching">
-            <div v-if="!hasSearched" class="knowledge-empty-panel">
-              <EmptyState
-                title="输入一句话开始核对"
-                description="这里只检查文档知识库命中，不包含记忆卡片或图谱事实。"
-                :icon="DocumentTextOutline"
-              />
-            </div>
-            <div v-else-if="searchResults.length === 0" class="knowledge-empty-panel">
-              <EmptyState
-                title="没有命中文档片段"
-                :description="`“${lastSearchQ}” 没有命中知识库，可以换更短的词或检查文档源。`"
-                :icon="FlashOutline"
-              />
-            </div>
-            <div v-else class="result-list">
-              <AppCard
-                v-for="(result, index) in searchResults"
-                :key="result.chunk_id || result.id || `${result.source}-${index}`"
-                bordered
-                embedded
-                class="result-card"
-              >
-                <div class="result-card__head">
-                  <div>
-                    <strong>{{ result.title || result.source || `结果 ${index + 1}` }}</strong>
-                    <span>{{ result.chunk_id || result.id || result.source }}</span>
-                  </div>
-                  <NTag round size="small" type="info">
-                    score {{ scoreText(result.score) }}
-                  </NTag>
-                </div>
-                <p>{{ result.content }}</p>
-              </AppCard>
-            </div>
-          </NSpin>
+          <KnowledgeSearch
+            v-model:search-q="searchQ"
+            :search-results="searchResults"
+            :searching="searching"
+            :has-searched="hasSearched"
+            :last-search-q="lastSearchQ"
+            @search="searchKnowledge"
+            @clear="clearSearch"
+          />
         </NTabPane>
 
         <NTabPane name="context" tab="上下文调试">
-          <PageToolbar class="mb-16">
-            <template #left>
-              <NInput
-                v-model:value="contextQ"
-                clearable
-                placeholder="输入本轮用户消息，查看 memory/doc/graph 最终命中"
-                class="context-query-input"
-                @keyup.enter="debugContext"
-              />
-              <NInput
-                v-model:value="contextUserId"
-                clearable
-                placeholder="用户 ID，可选"
-                class="context-id-input"
-              />
-              <NInput
-                v-model:value="contextGroupId"
-                clearable
-                placeholder="群 ID，可选"
-                class="context-id-input"
-              />
-            </template>
-            <template #right>
-              <NButton type="primary" :loading="contextSearching" @click="debugContext">
-                调试上下文
-              </NButton>
-            </template>
-          </PageToolbar>
-
-          <NSpin :show="contextSearching">
-            <div v-if="!hasContextSearched" class="knowledge-empty-panel">
-              <EmptyState
-                title="还没有调试上下文"
-                description="输入一句真实聊天内容，可以看到统一上下文会引用哪些记忆卡片、文档片段和图谱事实。"
-                :icon="LayersOutline"
-              />
-            </div>
-
-            <div v-else-if="contextUnsupported" class="knowledge-empty-panel">
-              <EmptyState
-                title="当前后端还没有上下文调试接口"
-                description="请重建/重启 Bot，让后端 API 与新版前端保持一致。"
-                :icon="FlashOutline"
-              />
-            </div>
-
-            <div v-else class="context-layout">
-              <AppCard bordered elevated class="context-pack-card">
-                <div class="section-head">
-                  <div>
-                    <p class="knowledge-eyebrow">Prompt Pack</p>
-                    <h3>最终打包文本</h3>
-                  </div>
-                  <NTag round size="small">
-                    省略 {{ contextPack?.omitted_count || 0 }} 条
-                  </NTag>
-                </div>
-                <pre v-if="contextPack?.text" class="context-pack">{{ contextPack.text }}</pre>
-                <EmptyState
-                  v-else
-                  compact
-                  title="没有可注入上下文"
-                  description="这次查询没有命中可打包内容。"
-                  :icon="FlashOutline"
-                />
-              </AppCard>
-
-              <div class="context-hit-list">
-                <AppCard
-                  v-for="hit in contextHits"
-                  :key="`${hit.type}-${hit.id}`"
-                  bordered
-                  embedded
-                  class="context-hit"
-                >
-                  <div class="context-hit__head">
-                    <div>
-                      <strong>{{ hit.title || hit.source || hit.id }}</strong>
-                      <span>{{ hit.id }}</span>
-                    </div>
-                    <NSpace :size="6">
-                      <NTag round size="small" :type="hitTypeTag(hit.type)">
-                        {{ hitTypeLabel(hit.type) }}
-                      </NTag>
-                      <NTag round size="small">
-                        {{ scoreText(hit.score) }}
-                      </NTag>
-                    </NSpace>
-                  </div>
-                  <p>{{ hit.content }}</p>
-                  <div class="context-hit__meta">
-                    <span>{{ hit.scope || 'global' }}/{{ hit.scope_id || 'global' }}</span>
-                    <span>{{ hit.retriever || 'retriever' }}</span>
-                    <span>{{ hit.source }}</span>
-                  </div>
-                </AppCard>
-              </div>
-            </div>
-          </NSpin>
+          <KnowledgeContextPanel
+            v-model:context-q="contextQ"
+            v-model:context-user-id="contextUserId"
+            v-model:context-group-id="contextGroupId"
+            :context-pack="contextPack"
+            :context-hits="contextHits"
+            :context-searching="contextSearching"
+            :has-context-searched="hasContextSearched"
+            :context-unsupported="contextUnsupported"
+            @debug="debugContext"
+          />
         </NTabPane>
 
         <NTabPane name="metrics" tab="评测指标">
@@ -799,151 +656,18 @@ function syncSupersedeDrafts() {
             </template>
           </PageToolbar>
 
-          <NSpin :show="graphLoading">
-            <div class="graph-layout">
-              <AppCard bordered elevated class="graph-entities">
-                <div class="section-head">
-                  <div>
-                    <p class="knowledge-eyebrow">Entities</p>
-                    <h3>实体</h3>
-                  </div>
-                  <NTag round size="small">
-                    {{ graphEntities.length }} 个
-                  </NTag>
-                </div>
-                <div v-if="graphEntities.length" class="entity-list">
-                  <div v-for="entity in graphEntities" :key="entity.name" class="entity-row">
-                    <span>{{ entity.name }}</span>
-                    <NTag round size="small">
-                      {{ entity.fact_count }} 条
-                    </NTag>
-                  </div>
-                </div>
-                <EmptyState
-                  v-else
-                  compact
-                  title="暂无实体"
-                  description="通过候选审核或后续自动抽取后会出现实体。"
-                  :icon="LayersOutline"
-                />
-              </AppCard>
-
-              <div class="relationship-list">
-                <EmptyState
-                  v-if="graphUnsupported"
-                  title="当前后端还没有图谱接口"
-                  description="新版前端已经加载，但运行容器仍是旧后端。请重建/重启 Bot 后再查看图谱关系。"
-                  :icon="FlashOutline"
-                />
-                <NAlert
-                  v-if="!graphUnsupported && graphScopeRisks.length"
-                  type="warning"
-                  :show-icon="false"
-                  class="graph-scope-risk"
-                >
-                  <div class="graph-scope-risk__head">
-                    <strong>发现 {{ graphScopeRisks.length }} 条历史全局事实需要复核</strong>
-                    <span>这些事实带有记忆卡片证据，但缺少用户/群作用域，可能来自旧版本迁移。确认不该全局可见时，请回滚事实。</span>
-                  </div>
-                  <div class="graph-scope-risk__list">
-                    <div
-                      v-for="rel in graphScopeRisks.slice(0, 5)"
-                      :key="`risk-${rel.fact_id}`"
-                      class="graph-scope-risk__item"
-                    >
-                      <span>{{ rel.subject }} {{ rel.predicate }} {{ rel.object }}</span>
-                      <NButton
-                        size="tiny"
-                        secondary
-                        type="warning"
-                        :loading="factBusy === rel.fact_id"
-                        @click="rollbackRelationship(rel)"
-                      >
-                        回滚
-                      </NButton>
-                    </div>
-                  </div>
-                </NAlert>
-                <AppCard
-                  v-for="rel in graphRelationships"
-                  :key="rel.fact_id"
-                  bordered
-                  embedded
-                  class="relationship-card"
-                >
-                  <div class="relationship-card__triple">
-                    <strong>{{ rel.subject }}</strong>
-                    <span>{{ rel.predicate }}</span>
-                    <strong>{{ rel.object }}</strong>
-                  </div>
-                  <p class="relationship-card__evidence">
-                    {{ relationshipEvidenceText(rel) }}
-                  </p>
-                  <div class="relationship-card__meta">
-                    <NTag round size="small" type="success">
-                      {{ percentText(rel.confidence) }}
-                    </NTag>
-                    <span>{{ rel.source }}</span>
-                    <span>{{ relationshipScopeText(rel) }}</span>
-                    <span>{{ rel.fact_id }}</span>
-                    <span v-if="rel.supersedes">取代 {{ rel.supersedes }}</span>
-                  </div>
-                  <div
-                    v-if="supersedeDrafts[rel.fact_id]"
-                    class="relationship-card__governance"
-                  >
-                    <div class="relationship-card__rollback">
-                      <NInput
-                        v-model:value="factRollbackNotes[rel.fact_id]"
-                        clearable
-                        placeholder="回滚备注，可选"
-                      />
-                      <NButton
-                        secondary
-                        type="warning"
-                        :loading="factBusy === rel.fact_id"
-                        @click="rollbackRelationship(rel)"
-                      >
-                        回滚事实
-                      </NButton>
-                    </div>
-                    <div class="relationship-card__supersede">
-                      <NInput
-                        v-model:value="supersedeDrafts[rel.fact_id].subject"
-                        placeholder="主体"
-                      />
-                      <NInput
-                        v-model:value="supersedeDrafts[rel.fact_id].predicate"
-                        placeholder="关系"
-                      />
-                      <NInput
-                        v-model:value="supersedeDrafts[rel.fact_id].object"
-                        placeholder="客体"
-                      />
-                      <NInput
-                        v-model:value="supersedeDrafts[rel.fact_id].note"
-                        placeholder="取代说明，可选"
-                      />
-                      <NButton
-                        type="primary"
-                        secondary
-                        :loading="factBusy === rel.fact_id"
-                        @click="supersedeRelationship(rel)"
-                      >
-                        取代事实
-                      </NButton>
-                    </div>
-                  </div>
-                </AppCard>
-                <EmptyState
-                  v-if="!graphUnsupported && graphRelationships.length === 0"
-                  title="暂无图谱事实"
-                  description="当前图谱底座已就绪，但还没有 active fact。"
-                  :icon="DocumentTextOutline"
-                />
-              </div>
-            </div>
-          </NSpin>
+          <KnowledgeGraphPanel
+            v-model:fact-rollback-notes="factRollbackNotes"
+            v-model:supersede-drafts="supersedeDrafts"
+            :graph-entities="graphEntities"
+            :graph-relationships="graphRelationships"
+            :graph-scope-risks="graphScopeRisks"
+            :graph-loading="graphLoading"
+            :graph-unsupported="graphUnsupported"
+            :fact-busy="factBusy"
+            @rollback="rollbackRelationship"
+            @supersede="supersedeRelationship"
+          />
         </NTabPane>
 
         <NTabPane name="candidates" tab="候选队列">
@@ -959,71 +683,15 @@ function syncSupersedeDrafts() {
             </template>
           </PageToolbar>
 
-          <NSpin :show="candidateLoading">
-            <div v-if="candidates.length" class="candidate-list">
-              <AppCard
-                v-for="candidate in candidates"
-                :key="candidate.candidate_id"
-                bordered
-                embedded
-                class="candidate-card"
-              >
-                <div class="candidate-card__body">
-                  <div>
-                    <div class="relationship-card__triple">
-                      <strong>{{ candidate.subject }}</strong>
-                      <span>{{ candidate.predicate }}</span>
-                      <strong>{{ candidate.object }}</strong>
-                    </div>
-                    <p>{{ evidenceText(candidate) }}</p>
-                    <div class="relationship-card__meta">
-                      <NTag round size="small" type="warning">
-                        {{ percentText(candidate.confidence) }}
-                      </NTag>
-                      <span>{{ candidate.source }}</span>
-                      <span>{{ candidate.candidate_id }}</span>
-                    </div>
-                  </div>
-                  <div class="candidate-card__actions">
-                    <NInput
-                      v-model:value="rejectNotes[candidate.candidate_id]"
-                      clearable
-                      placeholder="拒绝备注，可选"
-                    />
-                    <NSpace justify="end" :size="8">
-                      <NButton
-                        secondary
-                        type="error"
-                        :loading="candidateBusy === candidate.candidate_id"
-                        @click="rejectCandidate(candidate)"
-                      >
-                        拒绝
-                      </NButton>
-                      <NButton
-                        type="primary"
-                        :loading="candidateBusy === candidate.candidate_id"
-                        @click="approveCandidate(candidate)"
-                      >
-                        通过
-                      </NButton>
-                    </NSpace>
-                  </div>
-                </div>
-              </AppCard>
-            </div>
-            <EmptyState
-              v-else-if="graphUnsupported"
-              title="当前后端还没有图谱候选接口"
-              description="请重建/重启 Bot，让后端 API 与新版前端保持一致。"
-              :icon="FlashOutline"
-            />
-            <EmptyState
-              v-else
-              title="没有待审核候选"
-              description="当前没有中置信图谱候选。后续接入自动抽取后，这里会成为治理入口。"
-              :icon="FlashOutline"
-            />
-          </NSpin>
+          <KnowledgeCandidatesPanel
+            v-model:reject-notes="rejectNotes"
+            :candidates="candidates"
+            :candidate-loading="candidateLoading"
+            :candidate-busy="candidateBusy"
+            :graph-unsupported="graphUnsupported"
+            @approve="approveCandidate"
+            @reject="rejectCandidate"
+          />
         </NTabPane>
 
         <NTabPane name="graph_nodes" tab="图谱节点">
@@ -1039,205 +707,25 @@ function syncSupersedeDrafts() {
             </template>
           </PageToolbar>
 
-          <div class="graph-node-metrics">
-            <MetricCard
-              title="节点总数"
-              :value="graphNodeTotalCount"
-              hint="active 节点（不含已撤销）"
-            />
-            <MetricCard
-              title="边总数"
-              :value="graphEdgeTotalCount"
-              hint="active 边（不含已撤销）"
-              accent="info"
-            />
-            <MetricCard
-              title="主要节点类型"
-              :value="graphNodeTopType"
-              hint="按 node_type 分布的最大类目"
-              accent="success"
-            />
-            <MetricCard
-              title="主要边类型"
-              :value="graphEdgeTopType"
-              hint="按 edge_type 分布的最大类目"
-              accent="warning"
-            />
-          </div>
-
-          <PageToolbar class="mb-16">
-            <template #left>
-              <NInput
-                v-model:value="graphNodeFilterType"
-                placeholder="按 node_type 过滤（如 term / fact）"
-                clearable
-                size="small"
-                style="width: 220px"
-                @keyup.enter="loadGraphNodes"
-                @clear="loadGraphNodes"
-              />
-              <NInput
-                v-model:value="graphNodeFilterGroup"
-                placeholder="按群 ID 过滤"
-                clearable
-                size="small"
-                style="width: 180px"
-                @keyup.enter="loadGraphNodes"
-                @clear="loadGraphNodes"
-              />
-              <NInput
-                v-model:value="graphNodeSearch"
-                placeholder="搜索 label / source_id"
-                clearable
-                size="small"
-                style="width: 220px"
-                @keyup.enter="loadGraphNodes"
-                @clear="loadGraphNodes"
-              />
-            </template>
-            <template #right>
-              <NButton size="small" type="primary" secondary @click="loadGraphNodes">
-                应用筛选
-              </NButton>
-              <NButton size="small" quaternary @click="clearGraphNodeFilters">
-                清空
-              </NButton>
-            </template>
-          </PageToolbar>
-
-          <NSpin :show="graphNodeLoading">
-            <div v-if="graphNodes.length" class="candidate-list">
-              <AppCard
-                v-for="node in graphNodes"
-                :key="node.node_id"
-                bordered
-                embedded
-                class="relationship-card graph-node-card"
-              >
-                <div class="section-head">
-                  <div>
-                    <strong>{{ node.label || node.source_id || node.node_id }}</strong>
-                    <p class="graph-node-card__sub">
-                      {{ node.source_table || '—' }} · {{ node.source_id || '—' }}
-                    </p>
-                  </div>
-                  <NSpace :size="6">
-                    <NTag round size="small" type="info">{{ node.node_type }}</NTag>
-                    <NTag round size="small" :type="node.status === 'active' ? 'success' : 'default'">
-                      {{ node.status }}
-                    </NTag>
-                  </NSpace>
-                </div>
-                <div class="relationship-card__meta">
-                  <span>scope {{ node.scope }}</span>
-                  <span>group {{ node.group_id || '—' }}</span>
-                  <span>node_id {{ node.node_id }}</span>
-                  <span>updated {{ node.updated_at }}</span>
-                </div>
-                <div class="graph-node-card__action">
-                  <NButton size="small" quaternary @click="openGraphNodeDetail(node)">
-                    查看属性 / 边
-                  </NButton>
-                </div>
-              </AppCard>
-            </div>
-            <EmptyState
-              v-else-if="graphNodesUnsupported"
-              title="当前后端还没有图谱节点 API"
-              description="请重建/重启 Bot，让后端 API 与新版前端保持一致。"
-              :icon="LayersOutline"
-            />
-            <EmptyState
-              v-else
-              title="尚无图谱节点"
-              description="Phase D Consolidator 会把术语、风格、片段、事实写入图谱底座。当前节点表为空。"
-              :icon="LayersOutline"
-            />
-          </NSpin>
-
-          <NDrawer
-            v-model:show="graphNodeDrawerOpen"
-            :width="640"
-            placement="right"
-          >
-            <NDrawerContent
-              :title="graphNodeDrawerNode ? (graphNodeDrawerNode.label || graphNodeDrawerNode.node_id) : '节点详情'"
-              :native-scrollbar="false"
-              closable
-            >
-              <NSpin :show="graphNodeDrawerLoading">
-                <div v-if="graphNodeDrawerNode" class="graph-node-detail">
-                  <NDescriptions
-                    :column="2"
-                    label-placement="left"
-                    bordered
-                    size="small"
-                    class="graph-node-detail__desc"
-                  >
-                    <NDescriptionsItem label="node_id">
-                      {{ graphNodeDrawerNode.node_id }}
-                    </NDescriptionsItem>
-                    <NDescriptionsItem label="node_type">
-                      {{ graphNodeDrawerNode.node_type }}
-                    </NDescriptionsItem>
-                    <NDescriptionsItem label="source_table">
-                      {{ graphNodeDrawerNode.source_table || '—' }}
-                    </NDescriptionsItem>
-                    <NDescriptionsItem label="source_id">
-                      {{ graphNodeDrawerNode.source_id || '—' }}
-                    </NDescriptionsItem>
-                    <NDescriptionsItem label="scope">
-                      {{ graphNodeDrawerNode.scope }}
-                    </NDescriptionsItem>
-                    <NDescriptionsItem label="group_id">
-                      {{ graphNodeDrawerNode.group_id || '—' }}
-                    </NDescriptionsItem>
-                    <NDescriptionsItem label="status">
-                      {{ graphNodeDrawerNode.status }}
-                    </NDescriptionsItem>
-                    <NDescriptionsItem label="updated_at">
-                      {{ graphNodeDrawerNode.updated_at }}
-                    </NDescriptionsItem>
-                  </NDescriptions>
-
-                  <h4 class="graph-node-detail__heading">properties</h4>
-                  <pre class="graph-node-detail__json">{{ JSON.stringify(graphNodeDrawerNode.properties || {}, null, 2) }}</pre>
-
-                  <h4 class="graph-node-detail__heading">关联边（{{ graphNodeDrawerEdges.length }}）</h4>
-                  <div v-if="graphNodeDrawerEdges.length" class="graph-node-detail__edges">
-                    <div
-                      v-for="edge in graphNodeDrawerEdges"
-                      :key="edge.edge_id"
-                      class="graph-node-edge"
-                    >
-                      <div class="graph-node-edge__head">
-                        <NTag size="small" round type="info">{{ edge.edge_type }}</NTag>
-                        <NTag size="small" round :type="edge.status === 'active' ? 'success' : 'default'">
-                          {{ edge.status }}
-                        </NTag>
-                        <span class="graph-node-edge__conf">{{ Math.round((edge.confidence || 0) * 100) }}%</span>
-                      </div>
-                      <div class="graph-node-edge__body">
-                        <span>{{ edge.from_node_id }}</span>
-                        <span class="graph-node-edge__arrow">→</span>
-                        <span>{{ edge.to_node_id }}</span>
-                      </div>
-                      <div class="graph-node-edge__meta">
-                        <span>edge_id {{ edge.edge_id }}</span>
-                        <span>scope {{ edge.scope }} · group {{ edge.group_id || '—' }}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <EmptyState
-                    v-else
-                    title="尚无关联边"
-                    description="该节点暂无 active 边。Phase D Consolidator 会随事实写入而补齐。"
-                    :icon="LayersOutline"
-                  />
-                </div>
-              </NSpin>
-            </NDrawerContent>
-          </NDrawer>
+          <KnowledgeGraphNodesPanel
+            v-model:graph-node-filter-type="graphNodeFilterType"
+            v-model:graph-node-filter-group="graphNodeFilterGroup"
+            v-model:graph-node-search="graphNodeSearch"
+            v-model:graph-node-drawer-open="graphNodeDrawerOpen"
+            :graph-nodes="graphNodes"
+            :graph-node-total-count="graphNodeTotalCount"
+            :graph-edge-total-count="graphEdgeTotalCount"
+            :graph-node-top-type="graphNodeTopType"
+            :graph-edge-top-type="graphEdgeTopType"
+            :graph-node-loading="graphNodeLoading"
+            :graph-nodes-unsupported="graphNodesUnsupported"
+            :graph-node-drawer-node="graphNodeDrawerNode"
+            :graph-node-drawer-edges="graphNodeDrawerEdges"
+            :graph-node-drawer-loading="graphNodeDrawerLoading"
+            @reload="loadGraphNodes"
+            @clear-filters="clearGraphNodeFilters"
+            @open-detail="openGraphNodeDetail"
+          />
         </NTabPane>
       </NTabs>
     </template>
@@ -1254,15 +742,6 @@ function syncSupersedeDrafts() {
   margin-top: 4px;
 }
 
-.knowledge-eyebrow {
-  margin: 0 0 8px;
-  color: var(--om-text-3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
 .knowledge-toolbar__title {
   color: var(--om-text-1);
   font-weight: 700;
@@ -1271,352 +750,5 @@ function syncSupersedeDrafts() {
 .knowledge-toolbar__hint {
   color: var(--om-text-2);
   font-size: 13px;
-}
-
-.knowledge-query-input {
-  width: min(520px, 100%);
-}
-
-.context-query-input {
-  width: min(460px, 100%);
-}
-
-.context-id-input {
-  width: 160px;
-}
-
-.result-card,
-.context-hit,
-.relationship-card,
-.candidate-card {
-  padding: 16px;
-}
-
-.result-card__head,
-.context-hit__head,
-.section-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.result-card__head strong,
-.context-hit__head strong {
-  display: block;
-  color: var(--om-text-1);
-  font-size: 15px;
-}
-
-.result-card__head span,
-.context-hit__head span,
-.context-hit__meta,
-.relationship-card__meta {
-  color: var(--om-text-3);
-  font-size: 12px;
-}
-
-.context-hit__meta,
-.relationship-card__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.knowledge-empty-panel {
-  min-height: 280px;
-}
-
-.result-list,
-.context-hit-list,
-.relationship-list,
-.candidate-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.graph-scope-risk {
-  border-radius: 14px;
-}
-
-.graph-scope-risk__head {
-  display: grid;
-  gap: 4px;
-}
-
-.graph-scope-risk__head strong {
-  color: var(--om-text-1);
-}
-
-.graph-scope-risk__head span {
-  color: var(--om-text-2);
-  line-height: 1.6;
-}
-
-.graph-scope-risk__list {
-  display: grid;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.graph-scope-risk__item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
-  border: 1px solid rgba(197, 138, 43, 0.22);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.45);
-}
-
-.graph-scope-risk__item span {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--om-text-1);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.result-card p,
-.context-hit p,
-.candidate-card p {
-  margin: 12px 0 0;
-  color: var(--om-text-1);
-  line-height: 1.75;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.context-layout,
-.graph-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(340px, 0.72fr);
-  gap: 16px;
-  align-items: start;
-}
-
-.context-pack-card,
-.graph-entities {
-  padding: 20px;
-}
-
-.section-head h3 {
-  margin: 0;
-  color: var(--om-text-1);
-  font-size: 18px;
-}
-
-.context-pack {
-  max-height: 520px;
-  margin: 14px 0 0;
-  padding: 16px;
-  overflow: auto;
-  border: 1px solid var(--om-border);
-  border-radius: 14px;
-  background: var(--om-surface-2);
-  color: var(--om-text-1);
-  font-size: 13px;
-  line-height: 1.7;
-  white-space: pre-wrap;
-}
-
-.entity-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.entity-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--om-border);
-  border-radius: 12px;
-  background: var(--om-surface-2);
-}
-
-.relationship-card__triple {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  color: var(--om-text-1);
-}
-
-.relationship-card__triple span {
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(49, 108, 114, 0.1);
-  color: var(--om-primary);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.relationship-card__evidence {
-  margin: 10px 0 0;
-  color: var(--om-text-2);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.relationship-card__governance {
-  display: grid;
-  gap: 10px;
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px dashed var(--om-border);
-}
-
-.relationship-card__rollback {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-}
-
-.relationship-card__supersede {
-  display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(90px, 0.6fr) minmax(120px, 1fr) minmax(150px, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-}
-
-.candidate-card__body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
-  gap: 16px;
-  align-items: start;
-}
-
-.candidate-card__actions {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-@media (max-width: 1180px) {
-  .context-layout,
-  .graph-layout,
-  .candidate-card__body,
-  .relationship-card__rollback,
-  .relationship-card__supersede {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 720px) {
-  .result-card__head,
-  .context-hit__head,
-  .section-head {
-    flex-direction: column;
-  }
-
-  .context-id-input,
-  .context-query-input,
-  .knowledge-query-input {
-    width: 100%;
-  }
-}
-
-.graph-node-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-@media (max-width: 960px) {
-  .graph-node-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-.graph-node-card__sub {
-  margin: 4px 0 0;
-  color: var(--om-text-3);
-  font-size: 12px;
-}
-
-.graph-node-card__action {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-
-.graph-node-detail {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.graph-node-detail__heading {
-  margin: 6px 0 -4px;
-  color: var(--om-text-1);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.graph-node-detail__json {
-  margin: 0;
-  padding: 12px;
-  background: var(--om-surface-2);
-  border-radius: 8px;
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.graph-node-detail__edges {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.graph-node-edge {
-  padding: 12px;
-  border: 1px solid var(--om-border);
-  border-radius: 8px;
-  background: var(--om-surface-1);
-}
-
-.graph-node-edge__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.graph-node-edge__conf {
-  margin-left: auto;
-  color: var(--om-text-3);
-  font-size: 12px;
-}
-
-.graph-node-edge__body {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--om-text-1);
-  word-break: break-all;
-}
-
-.graph-node-edge__arrow {
-  color: var(--om-text-3);
-}
-
-.graph-node-edge__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 6px;
-  color: var(--om-text-3);
-  font-size: 12px;
 }
 </style>

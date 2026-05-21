@@ -568,7 +568,7 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 
 本节落入跟踪文档时**未动任何代码**。由用户审查上述 14 个子任务的拆分粒度、是否漏点、是否需要补 D2 cancel-path 测试（跨群多时段时 wait_for 取消的场景）等。审查通过后按 U-1 → U-14 顺序逐项落地，每一步给出 typecheck/build/test 证据。
 
-### 🟡 2026-05-21 KnowledgeView 拆分启动（B-1 helpers ✅ / B-2 只读子组件 ✅ / B-3 / C 待开）
+### 🟡 2026-05-21 KnowledgeView 拆分启动（B-1 helpers ✅ / B-2 只读子组件 ✅ / B-3 交互子组件 ✅ / C 待开）
 
 按 SystemView / SlangView 同模板（B-1 helpers → B-2 只读子组件 → B-3 交互子组件 → C AppPanelSection 视觉收敛）推进。
 
@@ -613,17 +613,35 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 
 回滚：`git revert <commit>`，再 `rm admin/frontend/src/views/knowledge/components/{KnowledgeHero,KnowledgeSourcesPanel,KnowledgeMetricsPanel}.vue` 即恢复（不动 B-1 helpers）。
 
-#### B-3 候选拆分（下一步）
+#### B-3 交互子组件（5 个）✅ 2026-05-21
 
-剩余四块 tab 都含写动作（emit-up 写回主视图调 API）：
+剩余四块 tab 都含写动作，`defineModel` 双向绑定输入框 / 草稿，emit 写动作回主视图执行 API。同时把 graph_nodes tab 的 NDrawer 也下沉到子组件以保持封闭：
 
-- `KnowledgeSearch` — search tab：搜索输入 + 结果列表（`searchQ / searchResults / searching / hasSearched / lastSearchQ`，emit `search` / `clear`）
-- `KnowledgeContextPanel` — context tab：调试输入 + Prompt pack 输出 + hits 列表（emit `debug`）
-- `KnowledgeGraphPanel` — graph tab：实体 / 关系 + scope risk + supersede / rollback drafts（emit `rollback` / `supersede`）
-- `KnowledgeCandidatesPanel` — candidates tab：候选列表 + approve/reject（emit `approve` / `reject`）
-- `KnowledgeGraphNodesPanel` — graph_nodes tab：节点筛选 + 列表 + drawer（含 `loadEdges` 回调）
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeSearch.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeSearch.vue) — search tab 输入 + 结果列表 + 空态，140 行；`v-model:searchQ` + props `searchResults / searching / hasSearched / lastSearchQ`，emit `search` / `clear`
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeContextPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeContextPanel.vue) — context tab 三输入 + Prompt pack 输出 + hits 列表，254 行；`v-model:contextQ / contextUserId / contextGroupId` + props `contextPack / contextHits / contextSearching / hasContextSearched / contextUnsupported`，emit `debug`
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeGraphPanel.vue) — graph tab 实体侧栏 + 关系列表 + scope risk + supersede / rollback drafts，350 行；`v-model:factRollbackNotes / supersedeDrafts` + props `graphEntities / graphRelationships / graphScopeRisks / graphLoading / graphUnsupported / factBusy`，emit `rollback(rel)` / `supersede(rel)`
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeCandidatesPanel.vue) — candidates tab 候选卡列表 + approve/reject 备注，156 行；`v-model:rejectNotes` + props `candidates / candidateLoading / candidateBusy / graphUnsupported`，emit `approve(c)` / `reject(c)`
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeGraphNodesPanel.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeGraphNodesPanel.vue) — graph_nodes tab 4 MetricCards + 3 筛选输入 + 节点卡列表 + NDrawer 详情，345 行；`v-model:graphNodeFilterType / graphNodeFilterGroup / graphNodeSearch / graphNodeDrawerOpen` + props `graphNodes / graphNodeTotalCount / graphEdgeTotalCount / graphNodeTopType / graphEdgeTopType / graphNodeLoading / graphNodesUnsupported / graphNodeDrawerNode / graphNodeDrawerEdges / graphNodeDrawerLoading`，emit `reload` / `clear-filters` / `open-detail(node)`
 
-每个目标 < 400 行，主视图持业务状态机，子组件 `emit('action', payload)` 触发主视图内 handler。
+主视图改动：
+
+- import 5 个子组件；删除 `DocumentTextOutline / FlashOutline / LayersOutline` 图标 + `AppCard / EmptyState / MetricCard` 公共组件 + `hitTypeLabel / hitTypeTag` badges + `evidenceText / numberText / percentText / relationshipEvidenceText / relationshipScopeText / scoreText` formatters（全部下沉到子组件内使用），保留 `isNotFound / topEntry`；`ContextHit / ContextMetricRecent` 类型也下沉，保留 `ContextMetrics / ContextPack` 因主视图持有引用
+- 5 块 tab body 替换为子组件实例：search → `<KnowledgeSearch>`、context → `<KnowledgeContextPanel>`、graph → toolbar + `<KnowledgeGraphPanel>`、candidates → toolbar + `<KnowledgeCandidatesPanel>`、graph_nodes → toolbar + `<KnowledgeGraphNodesPanel>`
+- 新增 `clearSearch()` handler 替代原 inline `searchQ = ''; ...`，避免子组件 emit 出去后主视图还在维护内联清理逻辑
+- scoped CSS 砍到只剩 `knowledge-compat-alert / knowledge-tabs / knowledge-toolbar__title / knowledge-toolbar__hint` 4 块共 18 行，其余 ~330 行（result-card / context-hit / relationship-card / candidate-card / graph-scope-risk / graph-layout / context-layout / entity-list / relationship-card__triple|evidence|governance|rollback|supersede / candidate-card__body / graph-node-metrics / graph-node-card / graph-node-detail / graph-node-edge 全套）全部下沉到对应子组件
+
+验证：
+
+- `vue-tsc --noEmit` — 0 error（`/tmp/vue-tsc-b3.log` 0 行）
+- `vite build` — 5.47s
+- 主视图行数：**1622 → 754（-868，-53.5%）**；累计 2186 → 754（-65.5%）
+- bundle：B-2 46.02 KB / gzip 13.03 KB → **B-3 52.82 KB / gzip 14.87 KB**（+6.80 / +1.84 gzip，5 子组件 scoped style 复制的预期开销，与 SystemView/SlangView B-3 同量级；PR C 收敛 AppPanelSection 后会回吐部分）
+
+回滚：`git revert <commit>`，再 `rm admin/frontend/src/views/knowledge/components/{KnowledgeSearch,KnowledgeContextPanel,KnowledgeGraphPanel,KnowledgeCandidatesPanel,KnowledgeGraphNodesPanel}.vue` 即恢复（不动 B-1 helpers / B-2 只读子组件）。
+
+#### C AppPanelSection 视觉收敛（下一步）
+
+主视图保留的 5 个 `PageToolbar`（sources / metrics / graph / candidates / graph_nodes）+ 子组件内剩余的 `section-head / knowledge-eyebrow` 用法都可以收敛到 `AppPanelSection`，与 SystemView / SlangView 对齐。预计删除 ~80 行重复 scoped CSS、bundle gzip 回吐 ~0.3 KB。
 
 ## 阶段 4 — 长尾页面（不专门跟踪）
 
