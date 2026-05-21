@@ -465,21 +465,23 @@ A2 是 Phase A3 / Phase A.5 graph schema 的硬前置。
 ### Phase E：图谱成为长期记忆骨架
 
 > **2026-05-18 拍板调整**：因 § 6 Q4 选定"graph 为跨层主索引"+ § 7.4 决议，**Phase E 已部分提前到 Phase A.5**（graph schema + 首批 edge 类型）。本节保留作为 graph 完整能力的远期目标，但 schema 设计 + 写入路径双写在 Phase A.5 即落地，不再等到所有其它 Phase 完成。
+>
+> **2026-05-21 完成**：Phase E 全部 5 条 edge 类型双写路径接通 — `episode_supports_profile`(D.5 ✅) / `term_used_in_group`(E.1 ✅) / `style_applies_to_situation`(E.2 ✅) / `user_corrected_bot_about`(E.3 ✅) / `doc_supports_fact`(E.4 ✅)。详见 [Phase E 设计前置审计](multilayer-memory-phase-e-design-audit-2026-05-21.md) 与 [maintenance-log.md](../../maintenance-log.md) 2026-05-21 五条目。
 
 目标：让知识图谱承载跨层关系，而不是只有少量派生事实。
 
-- graph fact 来源扩展到 slang/style/evidence/episode。
+- graph fact 来源扩展到 slang/style/evidence/episode。**✅ 已接通**
 - 新增边类型：
-  - term_used_in_group
-  - style_applies_to_situation
-  - user_corrected_bot_about
-  - episode_supports_profile
-  - doc_supports_fact
-- 检索时图谱可补充相关实体、群、用户、事件链。
+  - term_used_in_group **✅ E.1 (68e3294)**
+  - style_applies_to_situation **✅ E.2 (afa3054)**
+  - user_corrected_bot_about **✅ E.3 (0b0eb5f)**
+  - episode_supports_profile **✅ D.5 (9f7c6e2)**
+  - doc_supports_fact **✅ E.4 (b9642e5)**
+- 检索时图谱可补充相关实体、群、用户、事件链。**🟡 写入路径已通；检索路径在后续 phase 接管**
 
 验收：
 
-- 问一个词、一个人、一个群内事件时，系统能组合 slang + memory + episode + graph。
+- 问一个词、一个人、一个群内事件时，系统能组合 slang + memory + episode + graph。**🟡 写入侧已就绪，召回侧需 ContextService 进一步接通 graph 索引（属于 Phase F 起点）**
 
 ### Phase F：Episodic-to-Declarative 沉淀（长期记忆，远期）
 

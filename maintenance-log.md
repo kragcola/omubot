@@ -4,6 +4,79 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase E — 整体验收（5 条 graph edge 写入路径全闭合）
+
+**变更类型**：docs / acceptance（无代码变更，仅文档同步 + 收尾声明）
+
+**背景**：
+
+[多层学习记忆方案 § 5 Phase E](docs/audits/multilayer-memory-learning-report-2026-05-17.md) 与 [Phase E 设计前置审计](docs/audits/multilayer-memory-phase-e-design-audit-2026-05-21.md) 共要求 5 条跨层 edge 写入路径。本日之前 D.5 / E.1 / E.2 已完成；今日交付 E.3 + E.4，至此全部闭合。
+
+**5 条 edge 写入路径与对应 commit**：
+
+| edge_type | bridge | source 触发 | commit |
+| --- | --- | --- | --- |
+| `episode_supports_profile` | `EpisodeGraphBridge` | `EpisodeStore.add_*_listener`（Phase D.5） | 9f7c6e2 |
+| `term_used_in_group` | `SlangGraphBridge` | `SlangStore.add_hit_listener`（Phase E.1） | 68e3294 |
+| `style_applies_to_situation` | `StyleApplyGraphBridge` | `StyleStore.add_status_listener`（Phase E.2） | afa3054 |
+| `user_corrected_bot_about` | `StyleFeedbackGraphBridge` | `StyleStore.add_feedback_listener`（Phase E.3） | 0b0eb5f |
+| `doc_supports_fact` | `FactGraphBridge` | `KnowledgeGraphService.add_fact_listener`（Phase E.4） | b9642e5 |
+
+**listener-pattern 一致性（D1 同模式扫描）**：
+
+5 个 bridge 的形态完全一致：
+
+- source 侧：`add_<event>_listener(listener)` + `_fire_<event>_listeners(...)` + per-listener try/except WARN
+- bridge 侧：`__init__(writer)` + `attach(source)` + `_on_<event>(...)` + try/except WARN
+- 失败语义：graph 写失败仅 WARN，**不回滚** source-of-truth SQL
+- 上挂点：plugin `on_startup` 在 source store 初始化后立刻 attach，挂载失败优雅降级
+- 测试形态：每个 bridge 都有 D2 cancel-path 回归（`pytest.raises(asyncio.TimeoutError) + wait_for(timeout=0.0)`）+ graph 写失败不回滚 source 测试 + listener 异常不连坐测试
+
+5 个 GraphEdgeType Literal 全部有真实 caller（不是 stub）：
+
+```bash
+$ grep -rn "edge_type=\"episode_supports_profile\"\|edge_type=\"term_used_in_group\"\|edge_type=\"style_applies_to_situation\"\|edge_type=\"user_corrected_bot_about\"\|edge_type=\"doc_supports_fact\"" services/
+services/knowledge_graph/episode_graph_bridge.py
+services/slang/graph_bridge.py
+services/style/apply_graph_bridge.py
+services/style/feedback_graph_bridge.py
+services/knowledge_graph/fact_graph_bridge.py
+```
+
+**D4 完成证据**：
+
+- 全量 pytest（`pkill -9 -f pytest && uv run pytest -q`）— `1 failed, 1365 passed, 8 skipped`
+  - 唯一失败：`tests/test_admin_api.py::test_system_services_health_endpoint` — `error_alerts` 期望为空，实际含 `backup_disk_usage_high` 一项；`df -h` 显示宿主磁盘 92%，触发 `services/health.py:631` 的 ≥90% 阈值
+  - 与 Phase E 无关，纯环境依赖；测试自身代码已承认部分项受磁盘环境影响（lines 1767-1769）
+- `uv run ruff check` — `All checks passed!`
+- `uv run pyright` — `0 errors, 0 warnings, 0 informations`
+- 5 条 bridge 单测累计 `59 passed in 0.97s`
+
+**召回侧（graph 读路径）状态**：
+
+🟡 不在 Phase E 范围内。Phase F 计划落 declarative_facts 表 + 凝练触发器，届时再决定是否把 graph traversal 接入 ContextProvider。当前 5 条 edge 只 *写入* 不 *查询*，对热路径零影响（仅在事件触发时多一次 sqlite UPSERT）。
+
+**回滚路径**：
+
+5 个 commit 各自独立可 `git revert`，互无依赖：
+
+- 撤 E.4 不影响 E.1/E.2/E.3/D.5
+- 撤 listener pattern 不动 source store schema、不动 graph_*.db schema
+- bridge attach 失败时 plugin 已优雅降级，撤回不会让 plugin startup 失败
+
+**遗留**：
+
+- 报告 § 8.3 三步迁移仍卡在步骤 1（ContextProvider 并存阶段）— 与 graph 写入路径无关，等 Phase B 双跑流量再推
+- 召回侧（query graph for context enrichment）属 Phase F；当前只完成 *write side*
+
+**文档同步**：
+
+- [docs/audits/multilayer-memory-learning-report-2026-05-17.md](docs/audits/multilayer-memory-learning-report-2026-05-17.md) § 5 Phase E — 5 条 edge 全部翻 ✅ + 注上 commit hash
+- [docs/pending-and-observation.md](docs/pending-and-observation.md) § 2 Phase E 行 — 🟡 → ✅；最后更新时间戳刷到 Phase E 整体验收完成
+- 本条目自身（顶部）
+
+---
+
 ## 2026-05-21 多层学习记忆 Phase E.4 — `doc_supports_fact` graph edge 双写
 
 **变更类型**：feat（代码 + 测试，无 schema 变更，无部署）
