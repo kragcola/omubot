@@ -4,6 +4,81 @@
 
 ---
 
+## 2026-05-21 多层学习记忆 Phase C — MemoryConsolidator dry-run + admin 队列 — TASK-20260521-03 执行完毕
+
+**变更类型**：feature / dry-run（runtime 0 副作用，不入生产 store）
+
+**背景**：
+
+LLMTask spine 已有 `reflection_consolidator` 与 `episode_summarizer` 两条任务注册（spine 迁移阶段 D-later 落地），但**没有任何 caller**——这是死代码风险，也是 P3 多层学习记忆方案推进的最大缺口。Phase C 的目标是把 ConversationArchive 的群聊片段串到这两条 spine 任务上，输出 5 类 typed candidates 落到独立 db，admin 端可查看 + decide，但**绝不动生产 slang/style/episodic/knowledge_graph store**——promotion 到生产库是后续 Phase D 的范围。
+
+**改动概览**：
+
+新建 `services/memory_consolidator/` 包，4 个文件 + 1 个 admin 路由 + 3 个测试文件，覆盖：
+
+- **types.py**（202 行）：`Candidate` / `ScanRun` / `RunReport` dataclasses；5 类 `CandidateDomain` Literal（`fact` / `slang` / `style` / `episode` / `graph_relation`）；4 类 `CandidateState` + `VALID_DECISION_TRANSITIONS` 转移闸（`dry_run` → `{queued, approved, rejected}`）；`normalize_payload` / `derive_raw_text` 把 LLM JSON 折成域内规范字段（slang→term, style→expression, fact→subject+predicate+object, graph_relation→subject_node+predicate+object_node, episode→situation）
+- **store.py**（439 行）：`ConsolidatorCandidatesStore` 双表 schema（`consolidator_runs` + `consolidator_candidates`），独立 db `storage/consolidator_candidates.db`；强制 `journal_mode=DELETE` + `synchronous=FULL`（与 Phase 2 slang.db 同保护策略，避免 macOS Docker bind mount 的 fsync 排序漏洞）；`decide_candidate` 走转移闸，sticky 决定（approved 不能再变 rejected）
+- **consolidator.py**（435 行）：`MemoryConsolidator.run_once` 编排器——`ConversationArchive.read_scan_batch`（cursor scanner v1）→ `LLMRequest(task="reflection_consolidator")` → JSON 解析 → 5 域 `record_candidate` + `LearningNormalizerStore.attach_candidate(domain="general", source_table="consolidator_candidates")` 去重 → 每批再发一次 `LLMRequest(task="episode_summarizer")` 保证两条 spine 任务都有 caller → `finish_scan_batch(advance_cursor=True only on status=success)`。**cancel-safe**：try/finally 用 `asyncio.shield(self._store.finish_run(..., status="failed"))` 包裹清理路径，被 `wait_for` 取消时 run 行也能落地为 `failed`、不留孤儿 candidate
+- **admin/routes/api/memory_consolidator.py**（301 行）：5 个端点
+  - `GET /api/admin/memory_consolidator/runs`
+  - `GET /api/admin/memory_consolidator/runs/{run_id}/candidates`
+  - `GET /api/admin/memory_consolidator/candidates`
+  - `POST /api/admin/memory_consolidator/runs`（consolidator 未接 503）
+  - `POST /api/admin/memory_consolidator/candidates/{id}/decide`
+- **plugins/chat/plugin.py**：在 `knowledge_graph` 之后初始化 `consolidator_store` + 独立 `LearningNormalizerStore`（`storage/consolidator_normalizer.db`，与生产 normalizer **不共享 cluster id 命名空间**），在 `llm_client` 建好后构造 `MemoryConsolidator(store=..., archive=ctx.msg_log, normalizer=..., llm_client=llm)`，`on_shutdown` 关 2 个新 store
+- **kernel/types.py**：`PluginContext` 加 3 字段（`memory_consolidator_store` / `_normalizer` / `memory_consolidator`）
+- **tests**（28 个新测试）：store 10 / orchestrator 6（含 D2 cancel-path with `asyncio.wait_for(..., timeout=0.1)` 断言 run 行 `status="failed"` 且无孤儿候选） / admin api 12（含 503 unwired / 404 unknown / 400 invalid state）
+
+**约束遵守**：
+
+- **生产 store 0 diff**：`services/{slang,style,episodic,knowledge_graph,conversation_archive,learning_normalizer}` 全部未改
+- **LLM spine 0 diff**：`services/llm/{llm_request,llm_pipelines}.py` + `kernel/config.py` 未改
+- **scope clean**：未碰 admin/frontend、docker-compose、napcat/、scripts/、pyproject.toml、uv.lock
+- **D2 cancel-path 测试**：`test_run_once_cancel_marks_run_failed` 模拟 SlowStubLLM + `asyncio.wait_for(timeout=0.1)`，断言 run 行 `status="failed"` + `candidates_count=0` + `list_candidates(run_id=...)==[]`
+- **D7 git hygiene**：staged 11 个文件无 `git add -A`，`storage/consolidator_candidates.db` 与 `storage/consolidator_normalizer.db` 走 `storage/*.db` .gitignore 物理拦截
+
+**外部可观察证据**（D4）：
+
+```text
+$ uv run ruff check
+All checks passed!
+
+$ uv run pyright
+457 errors, 1 warning, 0 informations
+# baseline 不退步：与 TASK-02 合入后 baseline 完全一致
+
+$ uv run pytest -q
+1244 passed, 8 skipped in 13.05s
+# 比 TASK-02 baseline (1216) 多 28 个新测试
+
+$ uv run pytest tests/test_memory_consolidator_store.py \
+                 tests/test_memory_consolidator.py \
+                 tests/test_admin_memory_consolidator.py -q
+28 passed in 0.55s
+
+$ git check-ignore -v storage/consolidator_candidates.db
+.gitignore:N:storage/*.db   storage/consolidator_candidates.db
+```
+
+**与 spec 的两点偏差**（已记录在 review 节里）：
+
+- spec § 5 staging 列表里有 `bot.py`，但实际 ctx 接入在 `plugins/chat/plugin.py`（与现有 `slang_store` / `knowledge_graph` 同位）——bot.py 未改
+- 新增 `kernel/types.py` 到 staging（spec 没列但必须，PluginContext 加 3 字段）
+
+**回滚路径**：
+
+```bash
+git revert -m 1 2bb8f7f   # merge commit
+# storage/consolidator_*.db 是独立 db，删除文件即可，不污染任何生产 store
+rm -f storage/consolidator_candidates.db* storage/consolidator_normalizer.db*
+```
+
+**与 P3 方案对账**：原方案 § Phase C 标记 `🔴 待开始`，本次执行后状态：`🟢 已落地（dry-run only，promotion 推到 Phase D）`
+
+[维护日志索引 — 最近 15 条 / 共 143 条；按需 `Read maintenance-log.md offset=N` 查看]
+
+---
+
 ## 2026-05-21 ruff E501 pre-existing 26 条清理 — TASK-20260521-02 执行完毕
 
 **变更类型**：tech debt / lint cleanup（runtime 0 行为变化）
