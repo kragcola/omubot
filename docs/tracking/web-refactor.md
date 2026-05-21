@@ -661,7 +661,7 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 
 至此 [admin/frontend/src/views/knowledge/](../../admin/frontend/src/views/knowledge/) 目录达到与 SystemView / SlangView 一致的"主视图 ≤ 800 行 + 子组件每个 ≤ 400 行 + 复用 `AppPanelSection`"分层结构，KnowledgeView 拆分四阶段（B-1 / B-2 / B-3 / C）全部完成。
 
-### 🟡 2026-05-21 KnowledgeView 简化重构（信息架构治本，PR1 ✅ / PR2 待开 / PR3 待开）
+### ✅ 2026-05-21 KnowledgeView 简化重构（信息架构治本，PR1 ✅ / PR2 ✅ / PR3 ✅）
 
 拆分四阶段已收官代码层，但**信息架构层未治本**：① 顶部 7-tab 把用户高频检索和管理员低频维护混在同层级；② Hero 6 格 status-grid warn 不可点击；③ search/context/metrics 三块都是"输入 → 命中"模式但拆三处。本轮按"层级分离 → 同层合并 → 入口收口 → 视觉收敛"四步，分 PR1/PR2/PR3 推进，每 PR 独立可验证、独立可回滚。
 
@@ -695,9 +695,28 @@ D1 同模式扫描：5 处 NPopconfirm（PR1 sidebar reindex + PR2 reject + 2×r
 
 回滚：`git revert <commit>`，再 `rm admin/frontend/src/views/knowledge/components/KnowledgeAdminDrawer.vue` 即恢复（透明 wrap 纪律下子组件 props/emits 不变，回滚自动还原 7-tab）。
 
-#### PR3 用户侧 Workspace 收口 — 待开
+#### PR3 用户侧 Workspace 收口（4 tab → 2 tab，单一 query 同时驱动 details/pack/metrics）— ✅ 2026-05-21
 
-按同 plan PR3 段落执行；PR3 收尾后删除 [KnowledgeSearch.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeSearch.vue)（检索逻辑迁入 KnowledgeContextWorkspace）。
+把 search / context / metrics 三 tab 合成单一 `<KnowledgeContextWorkspace>`，顶部 query + user/group ID 三输入条 submit 一次并发跑 `searchKnowledge` + `debugContext`，命中分文档片段 / 统一上下文两组同屏展示；workspace 内置 3 tab（命中详情 / Prompt Pack / 评测指标）作为同一 query 的不同视角。
+
+改动：
+
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeContextWorkspace.vue](../../admin/frontend/src/views/knowledge/components/KnowledgeContextWorkspace.vue)（623 行）— 顶部 `workspace-query` 容器（主输入 `min(520px) clearable` + 两个 scope 输入 small + submit 主按钮 stretch）+ 内置 `<NTabs type="line">` 三 tab：① 命中详情 用 AppPanelSection 分组渲染文档命中（searchResults，蓝色 score tag）+ 上下文命中（contextHits，hitTypeTag + score）+ 引导 / 不支持 / 空命中三态；② Prompt Pack 单卡片 `<pre class="workspace-pack">` + 省略数 NTag aside；③ 评测指标 6 mini-card + Sources/Types AppPanelSection（前者 aside 嵌"刷新"text 按钮）+ Recent Hits AppPanelSection；4 个 v-model + 11 props + 2 emit（submit / reload-metrics）
+- [admin/frontend/src/views/knowledge/KnowledgeView.vue](../../admin/frontend/src/views/knowledge/KnowledgeView.vue) — ① 顶部 4 tab → 2 tab（删 search / context / metrics 三个 NTabPane，新增单一 `workspace` tab 直接挂载 `<KnowledgeContextWorkspace>`）；② 状态合并：`searchQ` / `contextQ` / `contextUserId` / `contextGroupId` 四个 ref → 三个 ref `workspaceQuery` / `workspaceUserId` / `workspaceGroupId`，新增 `workspaceTab: KnowledgeWorkspaceTab` ref；③ 新增 `submitWorkspace()` 同时并发 `searchKnowledge(query)` + `debugContext(query, userId, groupId)`；④ 新增 `migrateLegacyTabQuery()` onMounted 钩子，把 `?tab=sources|search|context|metrics|candidates|graph|graph_nodes` 翻译成 `activeTab + workspaceTab` 或 `adminDrawerOpen + adminActiveTab` 状态后 `router.replace` 清掉 query。**740 → 755 行（+15）**
+- [admin/frontend/src/views/knowledge/helpers/types.ts](../../admin/frontend/src/views/knowledge/helpers/types.ts) — `KnowledgeTab` 由四值（sources / search / context / metrics）收敛为两值（sources / workspace）；新增 `KnowledgeWorkspaceTab`（details / pack / metrics）
+- 删 [KnowledgeSearch.vue](../../admin/frontend/src/views/knowledge/components/) / KnowledgeContextPanel.vue / KnowledgeMetricsPanel.vue 三个独立子组件（共 575 行 .vue 源码）
+
+D1 同模式扫描：
+
+- `grep -rn "KnowledgeSearch\|KnowledgeContextPanel\|KnowledgeMetricsPanel" admin/frontend/src/` → 0 命中
+- `grep -rn "tab=search\|tab=context\|tab=metrics" admin/frontend/src/ docs/` → 0 命中（外部无外链依赖）；docs/project-info.md L211 已同步改 2 tab 描述
+- 6 个 NPopconfirm（PR1 sidebar reindex + PR2 reject + 2×rollback + supersede + 现 workspace 内若新增高破坏按钮也走 NPopconfirm）形成统一纪律
+
+验证：`vue-tsc --noEmit` 0 error；`vite build` 5.52s；bundle `KnowledgeView-*.js` 61.60 → **63.55 KB / gzip 17.20 → 17.66**（+1.95 / +0.46，workspace 视觉收敛 + 三 panel 合一的合理增量）。
+
+浏览器侧（待用户验收）：① 顶部"上下文调试"tab 输入一句话 → 命中详情 / Prompt Pack / 评测指标 三 tab 同时刷新；② 命中详情 = 旧 search 结果 + 旧 context hit cards 合并展示（用 AppPanelSection 分组）；③ Prompt Pack = 旧 context 的打包文本；④ 评测指标 = 旧 metrics 的 sources/types breakdown，绑定到当前 query；⑤ 旧路由 `?tab=search` → 自动落到 workspace.details；`?tab=context` → workspace.pack；`?tab=metrics` → workspace.metrics；`?tab=candidates|graph|graph_nodes` → 打开管理员 drawer 并定位 tab；⑥ 管理员"管理"按钮抽屉行为不变。
+
+回滚：`git revert <commit>`；admin/static 是 bind mount `npm run build` 立即生效；无后端 / schema / 部署改动。
 
 ## 阶段 4 — 长尾页面（不专门跟踪）
 

@@ -8,8 +8,11 @@
 
 export type KnowledgeTab =
   | 'sources'
-  | 'search'
-  | 'context'
+  | 'workspace'
+
+export type KnowledgeWorkspaceTab =
+  | 'details'
+  | 'pack'
   | 'metrics'
 
 export type KnowledgeAdminTab =

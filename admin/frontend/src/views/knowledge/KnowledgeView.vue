@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import { useMessage } from 'naive-ui'
+import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '../../api/client'
 import AppPage from '../../components/common/AppPage.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
 import KnowledgeAdminDrawer from './components/KnowledgeAdminDrawer.vue'
-import KnowledgeContextPanel from './components/KnowledgeContextPanel.vue'
+import KnowledgeContextWorkspace from './components/KnowledgeContextWorkspace.vue'
 import KnowledgeHero from './components/KnowledgeHero.vue'
-import KnowledgeMetricsPanel from './components/KnowledgeMetricsPanel.vue'
-import KnowledgeSearch from './components/KnowledgeSearch.vue'
 import KnowledgeSidebar from './components/KnowledgeSidebar.vue'
 import KnowledgeSourcesPanel from './components/KnowledgeSourcesPanel.vue'
 import { isNotFound, topEntry } from './helpers/formatters'
@@ -26,12 +25,16 @@ import type {
   KnowledgeSource,
   KnowledgeStats,
   KnowledgeTab,
+  KnowledgeWorkspaceTab,
   SupersedeDraft,
 } from './helpers/types'
 
 const message = useMessage()
+const route = useRoute()
+const router = useRouter()
 
 const activeTab = ref<KnowledgeTab>('sources')
+const workspaceTab = ref<KnowledgeWorkspaceTab>('details')
 const adminDrawerOpen = ref(false)
 const adminActiveTab = ref<KnowledgeAdminTab>('candidates')
 const loading = ref(true)
@@ -45,15 +48,15 @@ const available = ref(false)
 const stats = ref<KnowledgeStats>({})
 const sources = ref<KnowledgeSource[]>([])
 
-const searchQ = ref('')
+const workspaceQuery = ref('')
+const workspaceUserId = ref('')
+const workspaceGroupId = ref('')
+
 const searchResults = ref<KnowledgeResult[]>([])
 const searching = ref(false)
 const hasSearched = ref(false)
 const lastSearchQ = ref('')
 
-const contextQ = ref('')
-const contextUserId = ref('')
-const contextGroupId = ref('')
 const contextPack = ref<ContextPack | null>(null)
 const contextSearching = ref(false)
 const hasContextSearched = ref(false)
@@ -109,8 +112,33 @@ const contextHits = computed(() => contextPack.value?.hits || [])
 const recentMetricItems = computed(() => contextMetrics.value?.recent || [])
 
 onMounted(() => {
+  void migrateLegacyTabQuery()
   void loadAll()
 })
+
+async function migrateLegacyTabQuery() {
+  const rawTab = route.query.tab
+  const tab = Array.isArray(rawTab) ? rawTab[0] : rawTab
+  if (!tab) return
+  const cleanedQuery = { ...route.query }
+  delete cleanedQuery.tab
+  if (tab === 'sources') {
+    activeTab.value = 'sources'
+  } else if (tab === 'search') {
+    activeTab.value = 'workspace'
+    workspaceTab.value = 'details'
+  } else if (tab === 'context') {
+    activeTab.value = 'workspace'
+    workspaceTab.value = 'pack'
+  } else if (tab === 'metrics') {
+    activeTab.value = 'workspace'
+    workspaceTab.value = 'metrics'
+  } else if (tab === 'candidates' || tab === 'graph' || tab === 'graph_nodes') {
+    adminActiveTab.value = tab
+    adminDrawerOpen.value = true
+  }
+  await router.replace({ path: route.path, query: cleanedQuery })
+}
 
 async function loadAll() {
   loading.value = true
@@ -217,8 +245,7 @@ async function reindex() {
   }
 }
 
-async function searchKnowledge() {
-  const query = searchQ.value.trim()
+async function searchKnowledge(query: string) {
   if (!query) {
     searchResults.value = []
     hasSearched.value = false
@@ -251,15 +278,7 @@ async function searchKnowledge() {
   }
 }
 
-function clearSearch() {
-  searchQ.value = ''
-  searchResults.value = []
-  hasSearched.value = false
-  lastSearchQ.value = ''
-}
-
-async function debugContext() {
-  const query = contextQ.value.trim()
+async function debugContext(query: string, userId: string, groupId: string) {
   if (!query) {
     contextPack.value = null
     hasContextSearched.value = false
@@ -273,8 +292,8 @@ async function debugContext() {
       top_k: 12,
       max_chars: 3200,
     }
-    if (contextUserId.value.trim()) params.user_id = contextUserId.value.trim()
-    if (contextGroupId.value.trim()) params.group_id = contextGroupId.value.trim()
+    if (userId) params.user_id = userId
+    if (groupId) params.group_id = groupId
     const data = await api('/api/admin/context/search', { params })
     contextPack.value = data.pack || { text: '', hits: [], omitted_count: 0 }
     hasContextSearched.value = true
@@ -292,6 +311,24 @@ async function debugContext() {
   } finally {
     contextSearching.value = false
   }
+}
+
+async function submitWorkspace() {
+  const query = workspaceQuery.value.trim()
+  const userId = workspaceUserId.value.trim()
+  const groupId = workspaceGroupId.value.trim()
+  if (!query) {
+    searchResults.value = []
+    contextPack.value = null
+    hasSearched.value = false
+    hasContextSearched.value = false
+    lastSearchQ.value = ''
+    return
+  }
+  await Promise.all([
+    searchKnowledge(query),
+    debugContext(query, userId, groupId),
+  ])
 }
 
 async function loadGraph() {
@@ -596,51 +633,27 @@ function handleOpenAdmin(tab: 'candidates' | 'graph' | 'graph_nodes') {
           <KnowledgeSourcesPanel :sources="sources" />
         </NTabPane>
 
-        <NTabPane name="search" tab="搜索核对">
-          <KnowledgeSearch
-            v-model:search-q="searchQ"
+        <NTabPane name="workspace" tab="上下文调试">
+          <KnowledgeContextWorkspace
+            v-model:query-input="workspaceQuery"
+            v-model:user-id-input="workspaceUserId"
+            v-model:group-id-input="workspaceGroupId"
+            v-model:active-tab="workspaceTab"
             :search-results="searchResults"
-            :searching="searching"
             :has-searched="hasSearched"
             :last-search-q="lastSearchQ"
-            @search="searchKnowledge"
-            @clear="clearSearch"
-          />
-        </NTabPane>
-
-        <NTabPane name="context" tab="上下文调试">
-          <KnowledgeContextPanel
-            v-model:context-q="contextQ"
-            v-model:context-user-id="contextUserId"
-            v-model:context-group-id="contextGroupId"
             :context-pack="contextPack"
             :context-hits="contextHits"
-            :context-searching="contextSearching"
             :has-context-searched="hasContextSearched"
             :context-unsupported="contextUnsupported"
-            @debug="debugContext"
+            :context-metrics="contextMetrics"
+            :recent-metric-items="recentMetricItems"
+            :searching="searching"
+            :context-searching="contextSearching"
+            :metrics-loading="metricsLoading"
+            @submit="submitWorkspace"
+            @reload-metrics="loadMetrics"
           />
-        </NTabPane>
-
-        <NTabPane name="metrics" tab="评测指标">
-          <PageToolbar class="mb-16">
-            <template #left>
-              <span class="knowledge-toolbar__title">上下文质量指标</span>
-              <span class="knowledge-toolbar__hint">来自最近统一上下文检索，帮助观察 miss、重复和 Prompt pack 长度。</span>
-            </template>
-            <template #right>
-              <NButton secondary :loading="metricsLoading" @click="loadMetrics">
-                刷新指标
-              </NButton>
-            </template>
-          </PageToolbar>
-
-          <NSpin :show="metricsLoading">
-            <KnowledgeMetricsPanel
-              :context-metrics="contextMetrics"
-              :recent-metric-items="recentMetricItems"
-            />
-          </NSpin>
         </NTabPane>
           </NTabs>
         </div>

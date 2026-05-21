@@ -4,6 +4,57 @@
 
 ---
 
+## 2026-05-21 KnowledgeView 简化重构 PR3 — Workspace 收口（用户侧 4 tab → 2 tab，单一 query 同时驱动 details/pack/metrics）
+
+**变更类型**：refactor（admin/frontend，仅 .vue + 1 .ts，无后端 / schema / 部署）
+
+**背景**：
+
+PR1 削视觉、PR2 改信息架构后，用户侧仍是 4 个并列 tab（文档源 / 搜索 / 上下文调试 / 评测）：① 进页面要先选从哪个 tab 起步、要读完三块说明文字才知道该输入什么；② 搜索和上下文调试都是"输入 query 看命中"，行为重叠；③ 评测指标固定在最后一个 tab，看不见就忘了它存在。PR3 治本：把 search / context / metrics 三 tab 合成单一 `<KnowledgeContextWorkspace>`，顶部统一 query + user/group ID 三输入条，submit 一次并发跑 `searchKnowledge` + `debugContext`，命中分文档片段 / 统一上下文两组同屏展示；workspace 内置 3 tab（命中详情 / Prompt Pack / 评测指标）作为同一 query 的不同视角；evaluation tab 内嵌"刷新"图标按钮取代独立的 PageToolbar。
+
+**改动文件**：
+
+- 新建 [admin/frontend/src/views/knowledge/components/KnowledgeContextWorkspace.vue](admin/frontend/src/views/knowledge/components/KnowledgeContextWorkspace.vue)（623 行）— 顶部 query bar（`workspace-query` 容器，主输入 `min(520px) clearable` + 两个 scope 输入小尺寸 + submit 主按钮 stretch）；下方 `<NTabs type="line">` 三 tab：① **命中详情** 用 AppPanelSection 分组渲染文档命中（searchResults，蓝色 score tag）+ 上下文命中（contextHits，hitTypeTag + score）+ 引导 / 不支持 / 空命中三态；② **Prompt Pack** 单卡片 `<pre class="workspace-pack">` + 省略数 NTag aside；③ **评测指标** 6 mini-card + Sources/Types AppPanelSection（前者 aside 嵌"刷新"text 按钮）+ Recent Hits AppPanelSection；4 个 v-model（queryInput / userIdInput / groupIdInput / activeTab）+ 11 个 props + 2 个 emit（submit / reload-metrics）；scoped CSS 跟 SlangView/SystemView 同 token 体系，`@media 1180/720px` 双层降级
+- [admin/frontend/src/views/knowledge/KnowledgeView.vue](admin/frontend/src/views/knowledge/KnowledgeView.vue) — ① 顶部 4 tab → 2 tab（删 search / context / metrics 三个 NTabPane，新增单一 `workspace` tab 直接挂载 `<KnowledgeContextWorkspace>`）；② 状态合并：`searchQ` / `contextQ` / `contextUserId` / `contextGroupId` 四个 ref → 三个 ref `workspaceQuery` / `workspaceUserId` / `workspaceGroupId`，新增 `workspaceTab: KnowledgeWorkspaceTab` ref；③ 新增 `submitWorkspace()` 同时并发 `searchKnowledge(query)` + `debugContext(query, userId, groupId)`，两个 helper 改成接受参数而不是读 ref；删 `clearSearch`（workspace 自带 NInput clearable）；④ 新增 `migrateLegacyTabQuery()` onMounted 钩子，把 `?tab=sources|search|context|metrics|candidates|graph|graph_nodes` 翻译成 `activeTab + workspaceTab` 或 `adminDrawerOpen + adminActiveTab` 状态后 `router.replace` 清掉 query；⑤ template 删 KnowledgeSearch / KnowledgeContextPanel / KnowledgeMetricsPanel imports + 引用，加 useRoute / useRouter / KnowledgeContextWorkspace。**740→755 行（+15）**
+- [admin/frontend/src/views/knowledge/helpers/types.ts](admin/frontend/src/views/knowledge/helpers/types.ts) — `KnowledgeTab` 由四值（sources / search / context / metrics）收敛为两值（sources / workspace）；新增 `KnowledgeWorkspaceTab`（details / pack / metrics）
+
+**删除文件**（共 575 行 .vue 源码，对应 JS 已通过 KnowledgeContextWorkspace 重新打包入 KnowledgeView chunk）：
+
+- `admin/frontend/src/views/knowledge/components/KnowledgeSearch.vue`（140 行）
+- `admin/frontend/src/views/knowledge/components/KnowledgeContextPanel.vue`（223 行）
+- `admin/frontend/src/views/knowledge/components/KnowledgeMetricsPanel.vue`（212 行）
+
+**Bundle 影响**：
+
+- `KnowledgeView-*.js`：61.60→**63.55 KB** / gzip 17.20→**17.66 KB**（+1.95 KB raw / +0.46 KB gzip）
+- 三个独立子组件 → 单一 workspace 组件后，编译总输出小幅上涨：workspace 内 AppPanelSection 嵌套层级与 metrics tab 内的 AppCard 网格仍占用类似体积；预算可接受
+- 主视图 740→755 行（仍在 ≤ 800 行目标内）；workspace 子组件 623 行（< 800 行单组件预算）
+
+**D1 同模式扫描**：
+
+- `grep -rn "KnowledgeSearch\|KnowledgeContextPanel\|KnowledgeMetricsPanel" admin/frontend/src/` → 0 命中（删干净）
+- `grep -rn "tab=search\|tab=context\|tab=metrics" admin/frontend/src/ docs/` → 0 命中（外部无外链依赖）；docs/project-info.md L211 已同步改 2 tab 描述
+- `grep -rn "ContextHit\|KnowledgeResult" admin/frontend/src/views/knowledge/` → workspace 与 view 都正确导入 helpers/types
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error
+- `npm run build` → 5.52s，KnowledgeView-BLKOdKyc.js 63.55 KB / gzip 17.66 KB
+- 浏览器侧待用户验收：顶部"上下文调试"tab 输入一句话 → 命中详情 / Prompt Pack / 评测指标 三 tab 同时刷新；旧路由 `?tab=search` 进入 → 自动落到 workspace.details；管理员"管理"按钮抽屉行为不变（PR2 已验）
+
+**回滚**：
+
+- `git revert <hash>` 即可，admin/static 是 bind mount `npm run build` 立即生效
+- 无后端 / schema / 部署改动
+
+**Handoff**：
+
+- 简化重构三段式收尾：PR1 视觉 + PR2 信息架构 + PR3 用户侧 query 收口；后续如再裁剪可考虑 sources tab 再合到 hero 默认视图，但本轮按计划停在 2 tab；
+- KnowledgeView 文件至此功能完整；如后续 search 命中再细分（filters by 文档源 / scope），优先在 KnowledgeContextWorkspace 内做，不要回到独立组件
+- 6 个 NPopconfirm（PR1 sidebar reindex + PR2 拒绝候选 + 2× 回滚 + 取代 + 现 workspace 内若新增高破坏按钮也走 NPopconfirm）形成统一纪律
+
+---
+
 ## 2026-05-21 KnowledgeView 简化重构 PR2 — AdminDrawer + 删 NTabs admin 三 tab + NPopconfirm
 
 **变更类型**：refactor（admin/frontend，仅 .vue + index.html，无后端 / schema / 部署）
