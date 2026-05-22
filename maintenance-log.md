@@ -4,6 +4,81 @@
 
 ---
 
+## 2026-05-22 知识库改进 D — thinker / slang_review 静态前缀加固跨过 DeepSeek 1024-token 缓存门槛
+
+**变更类型**：perf（services/llm/thinker.py + services/slang/review_utils.py + tests/）
+
+**背景**：
+
+ABC 三联击落地后做专项 cache 治理。7 天 usage 数据显示两个 DeepSeek 链路 call_type 卡在 1024-token 缓存门槛上：
+
+| call_type | 7 天调用 | 7 天 hit_pct | 静态系统块（B 修订后） | 状态 |
+| --- | --- | --- | --- | --- |
+| thinker @ deepseek | 32 | 30.4% | THINKER_SYSTEM_PROMPT ≈ 1229 token | 紧贴边界 |
+| slang_review @ deepseek | 633 | 30.2% | shared_prefix(934) + review(340) ≈ 1274 token | 紧贴边界 |
+| chat @ deepseek | 11 | 71.9% | 主链路 prompt_builder | 健康（参照） |
+| proactive @ deepseek | 84 | 65.1% | 同主链路 | 健康 |
+
+[services/slang/shared_prefix.py:1-15](services/slang/shared_prefix.py#L1-L15) 注释已明确说明 DeepSeek 词级前缀页缓存的 1024-token 最小可缓存长度。两个紧贴门槛的 call_type 在不同请求间随机跨/不跨过门槛，命中率呈现 ~30% 浮动而非健康的 ≥60%。方案 B 落地时为 thinker 加了 `## 检索 query` 输出小节，又把 thinker 总长推高 ~300 字，但仍处在边界附近。
+
+**改动**：
+
+1. **D.1 [services/llm/thinker.py:45-308](services/llm/thinker.py#L45-L308)** —
+   `THINKER_SYSTEM_PROMPT` 顶部追加 `## 上下文使用须知` 静态文档段（7 条）：
+   - thinker 在主链路里的位置（用户消息 → thinker 决策 → 主 LLM 生成）
+   - thinker 输出不直接给用户，只产出 JSON 决策包
+   - thinker 不写完整回复 / 不替主 LLM 决定具体措辞
+   - 重申 retrieve_mode 四档语义对齐 services/context/service.py 的 `_MODE_SOURCE_FILTER`
+   - 判断必须基于最近对话内容，不凭空推断
+
+   THINKER_SYSTEM_PROMPT token 估算：1229 → **1693 token**（+38%，跨过 1024 门槛留 ~670 安全余量）。
+
+2. **D.2 [services/slang/review_utils.py:26-60](services/slang/review_utils.py#L26-L60)** —
+   `_REVIEW_SYSTEM_PROMPT` 顶部追加 `## 审核纪律` 静态前导段（6 条）：
+   - reviewer 在 slang 流水线第二环（extractor → reviewer → drift / semantic）
+   - 错误批准 vs 错误拒绝代价不对称，**疑则拒**
+   - 群内证据 vs 公网搜索的两类独立信号语义
+   - repeat_policy 四档（含非法值降级处理）
+   - evidence 不足时严格 approved=false
+   - confidence 取值范围建议
+
+   shared_prefix(934) + review_system_prompt: 340 → **813 token**，combined **1747 token**（+37%）。
+
+3. **D 测试加 2 条 sanity 下界护栏**：
+   - [tests/test_thinker.py](tests/test_thinker.py) `test_thinker_system_prompt_clears_deepseek_cache_threshold` — THINKER_SYSTEM_PROMPT token 估算 ≥ 1300。
+   - [tests/test_slang_shared_prefix.py](tests/test_slang_shared_prefix.py) `test_slang_review_static_blocks_clear_deepseek_cache_threshold` — shared_prefix + review_system_prompt 合计 ≥ 1300。
+
+   下次有人删 prompt 文档时 pytest 失败兜底，避免静默回退到 30% 命中率。
+
+**验证**：
+
+- `uv run pytest tests/ -q --ignore=tests/test_admin_api.py` → 1380 passed, 8 skipped
+- `uv run ruff check services/llm/thinker.py services/slang/review_utils.py tests/test_thinker.py tests/test_slang_shared_prefix.py` → All checks passed
+- `uv run pyright` 同上 4 文件 → 5 errors all 预存（`git stash` 验证），方案 D 0 新错
+- `dot_clean . && docker compose up bot -d --build` → 容器重启 OK
+- 24h 后 SQL 回查 hit_pct（验收阈值：thinker / slang_review 均 ≥ 50%）
+
+**影响范围**：
+
+- 主链路：每次主对话调用 thinker 决策，提示词加 ~470 字纯背景文档，**不引入新规则、新输出格式、新决策逻辑**；token 成本：thinker 每次 +160 token 静态块（一次缓存写入 + N 次缓存命中分摊），slang_review 同理 +160 token。
+- 群内黑话：每个候选词复核加 ~340 字纪律说明，约束 reviewer 更严格地 reject 缺证候选；预期 approved 率略降（短期更多走人工审核），但减少误入库。
+- 缓存命中率（预期）：thinker 30% → ≥60%、slang_review 30% → ≥60%。低于 50% 视为方案失败，回滚后改为重排 dynamic_blocks。
+
+**D1 同模式扫描**：
+
+grep 全仓 `task=` 看其他 call_type 的静态块体积——`memo` (~150 token, 5.2% hit, 26 调用) 远低于门槛但调用量太低 ROI 极小；`reply_gate` (3 调用/30 天) 不动；`bilibili_intent` (8 调用 / 0% hit) 不动；`slang_drift` / `slang_semantic` 与 `slang_review` 共享 shared_prefix(934) + 各自 task prompt，本次未单独测，下次回查时一并观察。
+
+**回滚**：
+
+```bash
+git revert <hash>
+dot_clean . && docker compose up bot -d --build
+```
+
+schema 0 改动；24h 内可随时回滚回到方案 D 实施前的 ~30% 命中率，无遗留状态。
+
+---
+
 ## 2026-05-22 知识库改进 ABC — graph 链路可观测性 + query 重写 + prompt 注入护栏
 
 **变更类型**：refactor / feat / 安全护栏（plugins/context + services/llm/thinker + services/context/packing + admin/routes/api/{knowledge,context} + config/soul/instruction.md）

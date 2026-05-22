@@ -17,7 +17,7 @@ import pytest
 
 from services.slang.drift_reviewer import SlangDriftReviewer
 from services.slang.extractor import SlangExtractor
-from services.slang.review_utils import assess_with_llm
+from services.slang.review_utils import _REVIEW_SYSTEM_PROMPT, assess_with_llm
 from services.slang.semantic_reviewer import SlangSemanticReviewer
 from services.slang.shared_prefix import get_shared_slang_prefix
 from services.slang.types import (
@@ -167,3 +167,30 @@ async def test_slang_semantic_reviewer_prepends_shared_prefix_on_every_stage() -
     for request in client.requests:
         assert request.task == "slang_semantic"
         _assert_shared_prefix_first(request)
+
+
+def test_slang_review_static_blocks_clear_deepseek_cache_threshold() -> None:
+    """方案 D.2 — slang_review 静态系统块（shared_prefix + review prompt）
+    必须 ≥ 1300 token 跨过 DeepSeek 1024 缓存门槛。
+
+    shared_prefix.py 注释 1-15 行说明：DeepSeek 自动按词级前缀页缓存，
+    最小可缓存前缀 1024 token。slang_review 之前 ~1274 token 紧贴边界，
+    实测命中率 30.2%。本测试守住 1300 下界，把缓存前缀稳定推过门槛。
+    下次有人删 prompt 文档时 pytest 失败兜底，避免静默回退。
+    """
+    shared = get_shared_slang_prefix()
+    review = _REVIEW_SYSTEM_PROMPT
+
+    def _estimate_tokens(text: str) -> int:
+        cjk = sum(1 for c in text if "一" <= c <= "鿿")
+        ascii_chars = len(text) - cjk
+        return cjk + ascii_chars // 3
+
+    combined = _estimate_tokens(shared) + _estimate_tokens(review)
+    assert combined >= 1300, (
+        f"slang_review static blocks total {combined} tokens, "
+        f"below the 1300 lower bound chosen to clear DeepSeek's 1024 cache "
+        f"threshold with margin. Trimming below this floor will silently "
+        f"regress slang_review cache hit rate from ~60% back to ~30%."
+    )
+

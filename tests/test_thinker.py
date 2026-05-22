@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from services.llm.llm_request import LLMRequest
-from services.llm.thinker import parse_think_output, think
+from services.llm.thinker import THINKER_SYSTEM_PROMPT, parse_think_output, think
 
 
 def test_parse_think_output_accepts_plain_json() -> None:
@@ -226,3 +226,26 @@ async def test_think_without_slang_hint_has_no_extra_dynamic_block() -> None:
     for block in captured_request[0].dynamic_blocks:
         text = block if isinstance(block, str) else block.get("text", "")
         assert "黑话命中" not in text
+
+
+def test_thinker_system_prompt_clears_deepseek_cache_threshold() -> None:
+    """方案 D.1 — DeepSeek 词级前缀缓存最小可缓存前缀 1024 token。
+
+    THINKER_SYSTEM_PROMPT 之前 ~1229 token 紧贴边界，命中率在 ~30% 浮动。
+    本测试守住静态系统块至少 1300 token（CJK 1:1 + ASCII 1:0.3 估算），
+    把缓存前缀稳定推过门槛留 ~280 token 安全余量。下次有人改 prompt 时
+    pytest 失败兜底，避免静默回退到 30% 命中。
+
+    详见 services/slang/shared_prefix.py 注释 1-15 行说明的 1024-token
+    门槛事实，以及 maintenance-log.md 方案 D 条目。
+    """
+    text = THINKER_SYSTEM_PROMPT
+    cjk = sum(1 for c in text if "一" <= c <= "鿿")
+    ascii_chars = len(text) - cjk
+    estimated_tokens = cjk + ascii_chars // 3
+    assert estimated_tokens >= 1300, (
+        f"thinker static system prompt is {estimated_tokens} tokens, "
+        f"below the 1300 lower bound chosen to clear DeepSeek's 1024 cache "
+        f"threshold with margin. Adding new sections is fine; trimming below "
+        f"this floor will silently regress cache hit rate."
+    )
