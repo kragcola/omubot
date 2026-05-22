@@ -52,10 +52,13 @@ def create_api_router(
 
     from admin.routes.api.affection import create_affection_router
     from admin.routes.api.auth import create_auth_router
+    from admin.routes.api.block_trace import create_block_trace_router
     from admin.routes.api.config import create_config_router
     from admin.routes.api.context import create_context_router
+    from admin.routes.api.cross_group import create_cross_group_router
     from admin.routes.api.dashboard import create_dashboard_router
     from admin.routes.api.dream import create_dream_router
+    from admin.routes.api.episodes import create_episodes_router
     from admin.routes.api.events import create_events_router
     from admin.routes.api.groups import create_groups_router
     from admin.routes.api.knowledge import create_knowledge_router
@@ -142,6 +145,9 @@ def create_api_router(
     router.include_router(create_style_router(ctx=ctx, message_log=message_log, llm_client=llm_client))
     router.include_router(create_learning_normalizer_router(ctx=ctx))
     router.include_router(create_learning_router(ctx=ctx))
-    router.include_router(create_events_router(scheduler=scheduler))
+    router.include_router(create_cross_group_router(ctx=ctx, bus=bus))
+    router.include_router(create_episodes_router(ctx=ctx, bus=bus))
+    router.include_router(create_events_router(scheduler=scheduler, message_log=message_log, ctx=ctx, usage_tracker=usage_tracker))
+    router.include_router(create_block_trace_router(ctx=ctx, bus=bus))
 
     return router

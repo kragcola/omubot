@@ -799,6 +799,15 @@ class ChatPlugin(AmadeusPlugin):
         # Tools are registered by individual plugins via bus.collect_tools()
         ctx.tool_registry = tools
 
+        # ---- block trace + budget manager ----
+        from services.block_trace.budget_manager import PromptBudgetManager
+        from services.block_trace.store import BlockTraceStore
+
+        trace_store = BlockTraceStore(db_path="storage/block_trace.db")
+        await trace_store.init()
+        ctx.block_trace_store = trace_store
+        budget_mgr = PromptBudgetManager(trace_store)
+
         # ---- LLM client ----
         from services.llm.client import LLMClient
 
@@ -842,8 +851,42 @@ class ChatPlugin(AmadeusPlugin):
             bus=ctx.bus,
             task_profiles=task_profiles,
             group_config=config.group,
+            slang_store_getter=lambda: getattr(ctx, "slang_store", None),
+            budget_manager=budget_mgr,
         )
         llm.set_task_profile_names(task_profile_names)
+
+        # ---- prompt provider bus (active mode — providers are sole injection path) ----
+        from plugins.style.plugin import StyleConfig as _StyleConfig
+        from services.block_trace.provider_bus import PromptProviderBus
+        from services.block_trace.slang_provider import SlangProvider
+        from services.block_trace.style_provider import StyleProvider
+
+        style_cfg = load_plugin_config("plugins/style/config.default.json", _StyleConfig)
+        style_global_groups = {
+            str(gid).strip()
+            for gid in style_cfg.global_enabled_group_ids
+            if str(gid).strip()
+        }
+
+        provider_bus = PromptProviderBus(trace_store)
+        provider_bus.mode = "active"
+        provider_bus.register(SlangProvider(
+            store_getter=lambda: getattr(ctx, "slang_store", None),
+            group_config=config.group,
+        ))
+        provider_bus.register(StyleProvider(
+            store_getter=lambda: getattr(ctx, "style_store", None),
+            enabled=style_cfg.enabled,
+            profile_enabled=style_cfg.profile_enabled,
+            profile_max_chars=style_cfg.profile_max_chars,
+            max_items=style_cfg.max_items,
+            max_chars=style_cfg.max_chars,
+            min_confidence=style_cfg.min_confidence,
+            global_enabled_groups=style_global_groups,
+        ))
+        llm.set_provider_bus(provider_bus)
+        ctx.provider_bus = provider_bus
 
         # ---- memo extractor ----
         from plugins.memo import MemoExtractor
@@ -903,4 +946,9 @@ class ChatPlugin(AmadeusPlugin):
             await ctx.msg_log.close()
         if ctx.usage_tracker is not None:
             await ctx.usage_tracker.close()
+        block_trace = getattr(ctx, "block_trace_store", None)
+        if block_trace is not None:
+            await block_trace.close()
+        if ctx.card_store is not None:
+            await ctx.card_store.close()
         _L.info("ChatPlugin shutdown complete")

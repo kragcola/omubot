@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -10,11 +11,14 @@ from services.memory.card_store import (
 
 
 @pytest.fixture
-async def store(tmp_path) -> CardStore:
+async def store(tmp_path) -> AsyncIterator[CardStore]:
     db_path = str(tmp_path / "test_cards.db")
     s = CardStore(db_path=db_path)
     await s.init()
-    return s
+    try:
+        yield s
+    finally:
+        await s.close()
 
 
 # ------------------------------------------------------------------
@@ -555,73 +559,98 @@ async def test_backfill_food_series(tmp_path) -> None:
     s = CardStore(db_path=db_path)
     await s.init()
 
-    # Food event cards (old _record_served)
-    for i in range(3):
-        await s._db.execute(
-            "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
-            "VALUES (?, 'event', 'user', '100', ?, 0.5, 'active', 5, 'food_plugin', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
-            (f"old_event_{i}", f"推荐了食物{i}"),
+    try:
+        insert_card_sql = (
+            "INSERT INTO memory_cards ("
+            "card_id, category, scope, scope_id, content, confidence, "
+            "status, priority, source, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
-    # Food preference cards (old _add_preference with source=food_plugin)
-    await s._db.execute(
-        "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
-        "VALUES (?, 'preference', 'user', '100', '喜欢吃辣的', 0.7, 'active', 5, 'food_plugin', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
-        ("old_pref_1",),
-    )
-    # Early served recommendation cards were accidentally stored as preferences.
-    await s._db.execute(
-        "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
-        "VALUES (?, 'preference', 'user', '100', '推荐了热汤面（05-04 22:27）', 0.5, 'active', 5, 'food_plugin', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
-        ("old_served_pref_1",),
-    )
-    # Preference with source=user_config (content-matched)
-    await s._db.execute(
-        "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
-        "VALUES (?, 'preference', 'user', '100', '不喜欢吃甜的', 0.7, 'active', 5, 'user_config', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
-        ("old_pref_2",),
-    )
-    # Non-food card — should be untouched
-    await s._db.execute(
-        "INSERT INTO memory_cards (card_id, category, scope, scope_id, content, confidence, status, priority, source, created_at, updated_at) "
-        "VALUES (?, 'fact', 'user', '100', 'not food', 0.7, 'active', 5, 'manual', '2026-01-01T00:00:00', '2026-01-01T00:00:00')",
-        ("other_card",),
-    )
-    await s._db.commit()
-    await s.close()
+        ts = "2026-01-01T00:00:00"
+
+        # Food event cards (old _record_served)
+        for i in range(3):
+            await s._db.execute(
+                insert_card_sql,
+                (
+                    f"old_event_{i}", "event", "user", "100", f"推荐了食物{i}",
+                    0.5, "active", 5, "food_plugin", ts, ts,
+                ),
+            )
+        # Food preference cards (old _add_preference with source=food_plugin)
+        await s._db.execute(
+            insert_card_sql,
+            (
+                "old_pref_1", "preference", "user", "100", "喜欢吃辣的",
+                0.7, "active", 5, "food_plugin", ts, ts,
+            ),
+        )
+        # Early served recommendation cards were accidentally stored as preferences.
+        await s._db.execute(
+            insert_card_sql,
+            (
+                "old_served_pref_1", "preference", "user", "100", "推荐了热汤面（05-04 22:27）",
+                0.5, "active", 5, "food_plugin", ts, ts,
+            ),
+        )
+        # Preference with source=user_config (content-matched)
+        await s._db.execute(
+            insert_card_sql,
+            (
+                "old_pref_2", "preference", "user", "100", "不喜欢吃甜的",
+                0.7, "active", 5, "user_config", ts, ts,
+            ),
+        )
+        # Non-food card - should be untouched
+        await s._db.execute(
+            insert_card_sql,
+            (
+                "other_card", "fact", "user", "100", "not food",
+                0.7, "active", 5, "manual", ts, ts,
+            ),
+        )
+        await s._db.commit()
+    finally:
+        await s.close()
 
     # Re-init triggers backfill
     s2 = CardStore(db_path=db_path)
     await s2.init()
 
-    cards = await s2.get_entity_cards("user", "100")
-    event_cards = [c for c in cards if c.category == "event"]
-    pref_cards = [c for c in cards if c.category == "preference"]
-    other_cards = [c for c in cards if c.source == "manual"]
+    try:
+        cards = await s2.get_entity_cards("user", "100")
+        event_cards = [c for c in cards if c.category == "event"]
+        pref_cards = [c for c in cards if c.category == "preference"]
+        other_cards = [c for c in cards if c.source == "manual"]
 
-    # Event cards → food_served series
-    assert len(event_cards) == 4
-    assert all(c.series_id is not None for c in event_cards)
-    served_series = await s2.get_series_by_key("food_served:100")
-    assert served_series is not None
-    assert served_series.label == "食物推荐记录"
-    assert all(c.series_id == served_series.series_id for c in event_cards)
-    assert any(c.card_id == "old_served_pref_1" for c in event_cards)
+        # Event cards -> food_served series
+        assert len(event_cards) == 4
+        assert all(c.series_id is not None for c in event_cards)
+        served_series = await s2.get_series_by_key("food_served:100")
+        assert served_series is not None
+        assert served_series.label == "食物推荐记录"
+        assert all(c.series_id == served_series.series_id for c in event_cards)
+        assert any(c.card_id == "old_served_pref_1" for c in event_cards)
 
-    # Preference cards → food_pref series
-    assert len(pref_cards) == 2
-    assert all(c.series_id is not None for c in pref_cards)
-    pref_series = await s2.get_series_by_key("food_pref:100")
-    assert pref_series is not None
-    assert pref_series.label == "食物口味偏好"
-    assert all(c.series_id == pref_series.series_id for c in pref_cards)
+        # Preference cards -> food_pref series
+        assert len(pref_cards) == 2
+        assert all(c.series_id is not None for c in pref_cards)
+        pref_series = await s2.get_series_by_key("food_pref:100")
+        assert pref_series is not None
+        assert pref_series.label == "食物口味偏好"
+        assert all(c.series_id == pref_series.series_id for c in pref_cards)
 
-    # Non-food card untouched
-    assert len(other_cards) == 1
-    assert other_cards[0].series_id is None
+        # Non-food card untouched
+        assert len(other_cards) == 1
+        assert other_cards[0].series_id is None
+    finally:
+        await s2.close()
 
     # Idempotent: re-init again should not duplicate
-    await s2.close()
     s3 = CardStore(db_path=db_path)
     await s3.init()
-    series_list = await s3.list_entity_series("user", "100")
-    assert len(series_list) == 2  # food_served + food_pref
+    try:
+        series_list = await s3.list_entity_series("user", "100")
+        assert len(series_list) == 2  # food_served + food_pref
+    finally:
+        await s3.close()

@@ -105,7 +105,6 @@ class PromptBuilder:
         self._static_block = {
             "type": "text",
             "text": text,
-            "cache_control": {"type": "ephemeral"},
         }
 
     async def build_blocks(
@@ -157,4 +156,4 @@ class PromptBuilder:
             return {"type": "text", "text": ""}
         snapshot = await self._state_board.query_state(group_id)
         text = snapshot.to_prompt_text()
-        return {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
+        return {"type": "text", "text": text}

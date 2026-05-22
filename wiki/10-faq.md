@@ -4,7 +4,7 @@
 
 ### Q: Omubot 和旧项目的关系？
 
-Omubot 是 amadeus-in-shell 的重写版本，目标是解耦单体架构。Phase 1 的 kernel 包与旧代码零冲突，可以逐步迁移。
+Omubot 是 amadeus-in-shell 的重写版本，目标是解耦单体架构。当前单体迁移已经完成，主线是目录插件、统一上下文、黑话/表达治理和管理端运维能力。
 
 ### Q: 为什么要分三层？
 
@@ -57,18 +57,26 @@ class MyPlugin(AmadeusPlugin):
 
 ### Q: 如何覆盖某个群的配置？
 
-在 `config.toml` 中设置：
+在 `config/config.json` 中设置：
 
-```toml
-[group.overrides."123456789"]
-at_only = true
-debounce = 30.0
-blocked_users = ["12345", "67890"]
+```json
+{
+  "group": {
+    "overrides": {
+      "123456789": {
+        "presence_mode": "active",
+        "at_only": true,
+        "debounce_seconds": 30.0,
+        "blocked_users": [12345, 67890]
+      }
+    }
+  }
+}
 ```
 
-### Q: 环境变量和 config.toml 哪个优先级高？
+### Q: 环境变量和 config.json 哪个优先级高？
 
-环境变量。合并顺序：TOML < 环境变量 < CLI 参数。
+环境变量。合并顺序：配置文件（JSON 优先，TOML 兼容）< 环境变量 / `_CLI_*` < CLI 参数。
 
 ## 迁移
 
@@ -78,7 +86,7 @@ blocked_users = ["12345", "67890"]
 
 ### Q: 迁移后旧文件会删除吗？
 
-会。Phase 8 统一清理。每个迁移阶段确认无回归后才删除旧文件。
+早期 `src/` 垫片已经清理。根目录单文件插件不再运行时加载，只会在本地插件索引里标记为 legacy。
 
 ### Q: 现有测试会受影响吗？
 
@@ -102,7 +110,7 @@ INFO | all plugins started | count=5
 
 ### Q: 如何热重载一个插件？
 
-当前不支持热重载。需要重启 bot。热重载在 Phase 8 规划中。
+当前普通代码和大多数插件配置仍需要重启 bot。Admin 支持部分运行态设置热切换，例如 LLM task profile 映射、部分 Web 设置和插件 runtime override；具体以配置 schema 的 `apply_mode` / `restart_required_fields` 为准。
 
 ### Q: 如何调试单个插件的 prompt block 输出？
 

@@ -4,6 +4,413 @@
 
 ---
 
+## 2026-05-20（深夜·补丁 3）Slang DB 反复损坏治本 Phase 1 — 代码侧三连修
+
+**变更类型**：fix / services + scripts + plugins
+
+**根因复盘**（详见 [docs/agent-discipline.md](docs/agent-discipline.md) 与本日补丁 2）：
+
+`storage/slang.db` 在 2026-05-11（3 次）/ 05-17 / 05-20 反复物理损坏，每 5–10 天一次。Phase 1 处理"代码侧 + 主机脚本侧"三个直接根因，零 infra 改动，可纯 git revert 回滚：
+
+- **#3 优雅关闭时漏 wal_checkpoint(TRUNCATE)**：bot shutdown 路径直接 `await db.close()`，WAL 帧未 squash 到主库就关闭句柄；下次 open 时 macOS Docker bind mount 在 fsync 排序上有已知漏洞，可能让乱序 WAL 帧覆盖一个不一致的主库——这是反复损坏的同一根因
+- **#5 主机脚本与容器 bot 的跨进程锁定域冲突**：`scripts/dev/slang_*.py` 6/8 个默认 `--db storage/slang.db` 直指 live DB；只有 `slang_db_repair.py` 部分路径有 `_is_bot_running()` 守卫；主机 sqlite3.connect 持 host inode POSIX 锁，容器持 WAL/shm 锁经 bind mount 互看不见，是 5/11 三连损坏的次根因
+- **#6 `_sqlite_recover` UTF-8 解码炸**：`subprocess.run(..., text=True)` 处理 `.recover` 二进制流，遇到非 UTF-8 字节直接 `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe8`，导致 5/20 抢救必须走 shell pipe 绕过脚本
+
+**变更内容**：
+
+**修复 #3（close_with_checkpoint 工具 + 全 store 接入 + 补齐遗漏 close）**：
+
+- [services/storage/sqlite.py](services/storage/sqlite.py) 新增 `close_with_checkpoint`（async, aiosqlite）+ `close_with_checkpoint_sync`（sync, sqlite3）；TRUNCATE 失败 try/except 降级 warn，close 仍执行
+- [services/storage/__init__.py](services/storage/__init__.py) 导出两个新函数
+- 接入清单（D1 同模式扫描结果）：
+  - 计划内 6 个 — [services/slang/store.py](services/slang/store.py)、[services/memory/message_log.py](services/memory/message_log.py)、[services/knowledge_graph/store.py](services/knowledge_graph/store.py)、[services/block_trace/store.py](services/block_trace/store.py)、[services/memory/card_store.py](services/memory/card_store.py)、[services/knowledge/store.py](services/knowledge/store.py)（同步版）
+  - D1 扫到的同模式补充 4 个 — [services/style/store.py](services/style/store.py)、[services/episodic/store.py](services/episodic/store.py)、[services/conversation_archive/store.py](services/conversation_archive/store.py)、[services/learning_normalizer/store.py](services/learning_normalizer/store.py)
+- 补齐遗漏 close：[plugins/chat/plugin.py](plugins/chat/plugin.py) `on_shutdown` 添加 `await ctx.card_store.close()`；[plugins/knowledge/plugin.py](plugins/knowledge/plugin.py) 之前没有 `on_shutdown`，新增一个关 `KnowledgeIndexStore`
+- D2 cancel-path 回归测试 — [tests/test_storage_sqlite.py](tests/test_storage_sqlite.py) 5 个用例：truncate 实测 / None handling / `pytest.raises(asyncio.TimeoutError)` 包 `wait_for(timeout=0.0001)` 后断言新 connect_sqlite 仍能 quick_check ok 且数据完整 / sync 版同上
+
+**修复 #5（_bot_guard 共享模块 + 5 个写脚本接入）**：
+
+- 新建 [scripts/dev/_bot_guard.py](scripts/dev/_bot_guard.py)：导出 `is_bot_running()`、`assert_bot_stopped(*, action, force=False)`，强制 `--force` 才能在 bot 跑着时继续，否则 `SystemExit(2)`
+- 接入：[slang_db_repair.py](scripts/dev/slang_db_repair.py)（删除本地 `_is_bot_running` + `_docker_compose_json`，validate/rebuild 也补守卫）、[slang_batch_merge_collisions.py](scripts/dev/slang_batch_merge_collisions.py)、[slang_collision_auto_merge.py](scripts/dev/slang_collision_auto_merge.py)（apply 路径）、[slang_meta_migration_p02.py](scripts/dev/slang_meta_migration_p02.py)、[style_seed_approved.py](scripts/dev/style_seed_approved.py)
+- 只读脚本（slang_acceptance_check / slang_alias_collision_report / slang_semantic_smoke）不改
+
+**修复 #6（slang_db_repair 字节流修复）**：
+
+- [scripts/dev/slang_db_repair.py](scripts/dev/slang_db_repair.py) `_sqlite_recover`：第一次 `subprocess.run([sqlite3_bin, ..., ".recover"], text=False)` 取 `bytes`，第二次 `input=stdout_bytes, text=False`，全程不在 Python 层 decode/encode
+
+**验证**：
+
+- 全量 pytest：1197 passed / 8 skipped / 2 failed（pre-existing：`test_admin_api.py::test_system_services_health_endpoint`、`test_backup_service.py::test_disk_usage_warning_threshold`，均环境/磁盘阈值相关，与 Phase 1 无关 — `git stash` 验证过）
+- D1 同模式扫描结果：grep `await self\._db\.close\(\)` 在 services/ 命中 10 个 store，全部接入 close_with_checkpoint
+- D4 外部可观察证据：[tests/test_storage_sqlite.py](tests/test_storage_sqlite.py) `test_close_with_checkpoint_truncates_wal` 实测写 64 行后 `*.db-wal` 文件大小 == 0；`test_close_with_checkpoint_cancel_path` 实测 `wait_for(timeout=0.0001)` 取消后 `connect_sqlite` 仍能跑 `PRAGMA quick_check` 拿到 `ok`、数据全留
+- D2 回归用例：cancel-path 测试已写 + 通过
+- ruff：本次变更全部文件 `All checks passed`（顺手把 `services/learning_normalizer/store.py:973` 一行 E501 也修了，120 字符内）
+- pyright：本次变更引入 0 新错误（其他 142 个错误是 untracked 文件历史遗留 reportOptionalSubscript / reportAttributeAccessIssue，与 Phase 1 无关）
+- 维护脚本回归：[tests/test_slang_db_integrity.py::test_slang_repair_script_detects_compose_json_lines](tests/test_slang_db_integrity.py) 已迁移到 `from scripts.dev import _bot_guard` 路径，`is_bot_running()` 用例通过
+
+**部署**：未部署。本提交是纯代码改动，待用户确认后走 `dot_clean . && docker compose up bot -d --build`（不动 napcat，符合 CLAUDE.md 铁律）；预期 startup 日志：6+ 个 store init 成功 + shutdown 路径在下次重启时输出 `wal_checkpoint(TRUNCATE)` 路径不报警 + `storage/*.db-wal` 在重启后变成 0 字节
+
+**回滚**：单次 `git revert`，无数据迁移。新 helper 只在 close 路径调用，老 close 行为是新行为的真子集（少跑一次 PRAGMA），向后兼容
+
+**与 backup 系统的关系**：5/17 上线的 BackupScheduler 是 RPO 工具（最大可丢窗口）；Phase 1 是 prevention（截断坏帧不写盘）。两条线互补，不冲突——Phase 2 的 hourly quick_check 会把 RPO 与 prevention 衔接成 detection 信号
+
+**遗留 / 跟进**：
+
+- Phase 2（slang journal_mode=DELETE + BackupScheduler hourly quick_check + admin 报警）待至少 24h Phase 1 稳定运行后启动
+- Phase 3（storage → Docker named volume）待 Phase 1+2 稳定 ≥24h 后启动；这是真正的根因消除（绕开 macOS bind mount fsync 漏洞）
+- 本次 close_with_checkpoint 没接入的 [services/llm/usage.py](services/llm/usage.py) — 它用裸 aiosqlite 不带 WAL setup，TRUNCATE 是 no-op，可后续重构 store 体系时再统一
+
+---
+
+## 2026-05-20（深夜·补丁 2）Slang DB 物理损坏抢救（admin web 黑话页面无数据根因）
+
+**变更类型**：incident / data-recovery
+
+**根因**：
+
+`storage/slang.db` 多棵 b-tree 出现 `invalid page number 7xxx` 物理损坏，bot 启动时检测到 `database disk image is malformed`，[plugins/slang/plugin.py](plugins/slang/plugin.py) 走 fail-safe 路径输出 `slang plugin disabled | reason=slang database corrupt`。结果是 `/api/admin/slang/*` 全线降级返回空，admin "黑话"页面变空——并不是 Phase A.5/B 迁移漏了什么，而是 source-of-truth DB 当时不可读。
+
+损坏发生窗口：今早 03:32（`storage/slang.db.bak-pre-a1-merge` 干净 ok，1837 条全量）→ 13:07（live DB 写崩，多个 page 引用越界）。本次会话先前已观察到 slang plugin disabled 但当时被列为"out of scope"未处理。
+
+**抢救过程**：
+
+1. `docker compose stop bot` 释放 db file lock（不要动 napcat，符合 CLAUDE.md 铁律）
+2. 走 shell pipe 字节级 `sqlite3 storage/slang.db .recover | sqlite3 storage/slang.recovered.db`——绕过 [scripts/dev/slang_db_repair.py](scripts/dev/slang_db_repair.py) 用 `text=True` 解码 `.recover` 输出在非 UTF-8 字节上炸 UnicodeDecodeError 的问题
+3. `uv run python scripts/dev/slang_db_repair.py validate --db storage/slang.recovered.db` → integrity ok / quick ok，slang_terms=1832（vs 备份 1837，仅丢 5 条 `.recover` 解不出的 cell）
+4. 原 db 备份为 `slang.db.corrupt-20260520-213619` + 同时间戳 backup 目录，recovered db 替换为 live；删 stale `-wal/-shm`
+5. `docker compose start bot` → `slang store initialized | db=storage/slang.db` + `slang prompt injection delegated to provider bus` + `Bot 就绪`，无 `slang plugin disabled` 行
+6. SlangStore 状态分布：approved 410 / candidate 692 / expired 96 / muted 634；pending_candidates 按群已正常
+
+**遗留 / 跟进项**：
+
+- [scripts/dev/slang_db_repair.py](scripts/dev/slang_db_repair.py) `_sqlite_recover` 用 `subprocess.run(..., text=True)` 处理 `.recover` 流，遇到非 UTF-8 字节会 `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe8`。修法：改 `text=False` + 用 `bytes` 一直传到第二次 `sqlite3` 进程的 `input=` 参数，全程不在 Python 层做编解码。本次抢救未走脚本路径而是手动 pipe，脚本 bug 仍在
+- 损坏原因未定位（需另起一轮单独排查 SQLite WAL/checkpoint 路径或 docker overlay fs 在 13:07 前后是否有异常）。建议下次发现 `slang plugin disabled` 立即检查 db，不要"out of scope"留过夜——损坏会跨小时持续放大可丢失增量
+- 03:32 → 13:07 之间约 5 条 term + 部分 observation/revision 增量永久丢失（被 b-tree 损坏吃掉），不可恢复
+
+**回滚**：损坏的原 db 已保留为 `storage/slang.db.corrupt-20260520-213619` + `storage/backups/slang-corrupt-20260520-213228/`，必要时可还原（但还原意义不大，本来就读不动）
+
+---
+
+## 2026-05-20（深夜·补丁）Block Trace 实时 SSE 推送
+
+**变更类型**：fix / services + admin-backend + admin-frontend
+
+**变更内容**：
+
+Phase B 上线后用户反馈 BlockTraceView 需要点"刷新"才能看到新 trace，本补丁把 BudgetManager / ProviderBus 的 trace 写入事件接入既有 SSE 通道，前端订阅即时拉数据：
+
+- **后端事件** — [services/admin_events.py](services/admin_events.py) 新增 `publish_block_trace_recorded(request_id, count, accepted, trimmed, rejected, shadow_only)`，载荷只带计数（不带完整 trace 字段），保持 SSE 队列在高 prompt-block 体量下也不会膨胀
+- **写入点接线** — [services/block_trace/budget_manager.py](services/block_trace/budget_manager.py) 在 `_fire_and_forget_record(traces)` 之后立即 publish；[services/block_trace/provider_bus.py](services/block_trace/provider_bus.py) `run_shadow` 在 `record_batch` 之后 publish（`shadow_only=len(traces)`）。两侧都是同步调用 + 已有 fire-and-forget 写库，event 在记录入库的同一 tick 推出
+- **SSE 转发** — [admin/routes/api/events.py](admin/routes/api/events.py) `event_stream` 在 `group_queue` drain 循环里识别 `type == "block_trace_recorded"` 并以 `event: block_trace` 帧推送，与 group_message 共用同一个订阅队列
+- **前端订阅** — [admin/frontend/src/composables/useSSE.ts](admin/frontend/src/composables/useSSE.ts) 新增 `SSEBlockTraceEvent` 类型 + `addEventListener('block_trace', ...)` + 导出 `onBlockTrace(handler)`；[BlockTraceView.vue](admin/frontend/src/views/block-trace/BlockTraceView.vue) `onMounted` 内 `useSSE()` 保活共享 EventSource、订阅 `onBlockTrace(scheduleRefresh)`，400 ms debounce 触发 `fetchData()`（同一 request_id 的 shadow + budget 两次事件合并成一次刷新），`onUnmounted` 清理订阅 + 计时器
+
+**验证**：
+
+- `uv run ruff check services/admin_events.py services/block_trace/budget_manager.py services/block_trace/provider_bus.py admin/routes/api/events.py` → All checks passed
+- `uv run pytest tests/test_providers.py tests/test_block_trace.py -q` → 29 passed
+- `vue-tsc --noEmit` clean
+- `npm run build` 成功（admin SPA bind-mount 直接生效，但因为有 .py 改动仍走了 `dot_clean . && docker compose up bot -d --build`）
+- `docker logs qq-bot --tail 20` 显示 bot 正常 ready + 持续接消息，napcat 容器未被触碰（保留设备指纹，符合 CLAUDE.md 铁律）
+
+**回滚**：单次 git revert。SSE 事件名 `block_trace` 是新增帧，旧前端忽略未注册事件不会报错；`publish_block_trace_recorded` 是新函数，无调用方依赖向后兼容
+
+---
+
+## 2026-05-20（深夜）Phase B Step 2/3 — PromptProviderBus + Active 模式 + Block Trace alignment 面板
+
+**变更类型**：feature / kernel + services + plugins + admin-backend + admin-frontend + tests
+
+**变更内容**：
+
+Phase B 收尾：把 slang/style 的 prompt 注入从插件 `on_pre_prompt` 直接 add_block，迁到 `PromptProviderBus + ContextProvider` 模型，所有 block 决策（accepted/trimmed/rejected）和来源（provider vs plugin）通过 `BlockTraceStore` 持久化，达到"谁进 prompt、谁被裁剪、为什么"的可审计目标。分 5 个小阶段（A→E）逐个批准实施：
+
+- **阶段 A** — 运行时接线 — [plugins/chat/plugin.py](plugins/chat/plugin.py) 创建 `BlockTraceStore` + `PromptBudgetManager` 并传入 `LLMClient`；[services/llm/client.py](services/llm/client.py) `chat()` 在 `fire_on_pre_prompt` 之后、`build_blocks()` 之前调用 `budget_manager.process()`；shutdown 关闭 store。补完 Step 1 漏掉的接线（Step 1 写了 BudgetManager 但从未触发）
+
+- **阶段 B** — Provider 协议 — 新建 [services/block_trace/providers.py](services/block_trace/providers.py)（`ContextProvider` Protocol + `QueryContext`）、[services/block_trace/slang_provider.py](services/block_trace/slang_provider.py)（包装 SlangStore，复刻 `_is_group_slang_enabled` + injection_enabled + allows_group 全部门控）、[services/block_trace/style_provider.py](services/block_trace/style_provider.py)（双 candidate：profile_block priority=42 + expression_block priority=45）。Provider 与 ContextSource 是不同抽象：source 返回原始 `ContextHit` 供 search/pack，provider 返回 `PromptBlockCandidate` 直接进 prompt
+
+- **阶段 C** — Shadow 双跑 — 新建 [services/block_trace/provider_bus.py](services/block_trace/provider_bus.py)：`PromptProviderBus` 注册表 + `mode: shadow/active/off`，`run_all` 用 `asyncio.gather(return_exceptions=True)` 隔离 provider 故障，`run_shadow` 写 `decision="shadow_only"` trace。[services/llm/client.py](services/llm/client.py) `chat()` 加 `_provider_bus` + `set_provider_bus()`，shadow 模式下 `asyncio.create_task(bus.run_shadow(qctx))`（fire-and-forget）；active 模式 `prompt_ctx.blocks.extend(provider_blocks)`
+
+- **阶段 D** — Active 切换 — [kernel/types.py](kernel/types.py) `PromptBlock` + `add_block()` 加 `provider: str = ""` 字段；[services/block_trace/budget_manager.py](services/block_trace/budget_manager.py) trace 优先用 `b.provider` fallback 到旧 `source+_plugin`；[plugins/chat/plugin.py](plugins/chat/plugin.py) `provider_bus.mode = "active"`；[plugins/slang/plugin.py](plugins/slang/plugin.py) 与 [plugins/style/plugin.py](plugins/style/plugin.py) 加 `_provider_superseded` 守卫，`on_startup` 检测 provider_bus 注册即停用 `on_pre_prompt` 注入。ChatPlugin 在 bot.py 第一个注册，保证 SlangPlugin/StylePlugin on_startup 时 `ctx.provider_bus` 已就位
+
+- **阶段 E** — Admin alignment + 测试 — [admin/routes/api/block_trace.py](admin/routes/api/block_trace.py) 新增 `GET /alignment` 端点（按 source 聚合 provider vs plugin trace 数 + decision 分布，自动推断 `mode: active/plugin_only/shadow_or_overlap/empty`）；[BlockTraceView.vue](admin/frontend/src/views/block-trace/BlockTraceView.vue) 加 alignment 卡片（mode 标签 + 按 source 的 provider/plugin/decision 计数表）；[tests/test_providers.py](tests/test_providers.py) 16 case：SlangProvider 6 case（emit/store_none/no_group/injection_disabled/group_allowlist/empty_block）+ StyleProvider 5 case（emit/disabled/profile_only/no_group/global_groups）+ Bus 5 case（has_provider/run_active/run_shadow/error_isolation/off_mode）
+
+**验证**：
+
+- `uv run ruff check kernel/types.py services/block_trace/ services/llm/client.py plugins/chat/plugin.py plugins/slang/plugin.py plugins/style/plugin.py admin/routes/api/block_trace.py tests/test_providers.py` → All checks passed
+- `uv run pytest tests/test_providers.py tests/test_block_trace.py tests/test_episode.py tests/test_slang_store.py tests/test_slang_plugin.py tests/test_style_api.py tests/test_style_store.py -q` → 91 passed
+- `uv run pytest tests/` → 1192 passed（2 pre-existing disk-usage warning failures，与本次无关）
+- `vue-tsc --noEmit` clean
+- `npm run build` 成功（admin SPA bind-mount 直接生效，无需重新构建 docker 镜像，符合 D6 规则）
+
+**回滚**：单次 git revert。新表 `prompt_block_traces`、新模块 `services/block_trace/`、新前端 `block-trace` 路由 + alignment 卡片均可一并回滚；插件 `_provider_superseded` 守卫的逆向是删字段 + 删 on_startup 检测 + 删 on_pre_prompt 第一行 return；`PromptBlock.provider` 字段加默认值兼容现有调用
+
+**下一步**：观察 alignment 面板生产 trace 是否 `mode == "active"`、provider 列恒大于 plugin 列。若发现 provider 漏 trace 或裁剪率异常，可临时把 `provider_bus.mode` 切回 `"shadow"` 让插件兜底注入 + provider 旁路 trace 对照
+
+---
+
+## 2026-05-20（晚）Phase A.5 — Knowledge Graph 节点/边 schema + GraphWriter + 图谱节点管理页
+
+**变更类型**：feature / services + admin-backend + admin-frontend + tests
+
+**变更内容**：
+
+A.5 为 KnowledgeGraphStore 引入 `graph_nodes` + `graph_edges` 两张通用图层表，把 slang term / style expression / episode / fact / user / group / document_chunk 等异构实体统一以"节点 + 边"形式投影，为 Phase D Consolidator 双写留出落点。当前阶段不修改任何 source-of-truth store 内部代码，仅落地 schema、Writer、API、UI、测试：
+
+- **A.5.1 Schema + Types** — [services/knowledge_graph/store.py](services/knowledge_graph/store.py) 追加 `_CREATE_NODES` / `_CREATE_EDGES` DDL，6 条普通索引（idx_gn_type_scope / idx_gn_source / idx_ge_type / idx_ge_from / idx_ge_to / idx_ge_scope）+ 2 条跨群部分索引（idx_gn_cross_group / idx_ge_cross_group）；`KnowledgeGraphStore.init()` 加 2 条 `_db.execute()` 建表。两表自带 5 个跨群字段（`cross_group_visible` + `enabled_by/at/for_groups/reason`），与 A2 五库一致
+- **A.5.1 类型** — [services/knowledge_graph/types.py](services/knowledge_graph/types.py) 追加 `GraphNodeType` / `GraphEdgeType` Literal、`GraphNodeDraft` / `GraphEdgeDraft`（frozen dataclass）、`GraphNode` / `GraphEdge`（slots dataclass，带 `to_dict()`）。导出在 [services/knowledge_graph/__init__.py](services/knowledge_graph/__init__.py)
+- **A.5.2 GraphWriter** — [services/knowledge_graph/graph_writer.py](services/knowledge_graph/graph_writer.py)：`write_node` 按 `(source_table, source_id)` upsert（ID `gn_` + token_hex(6)），`write_edge` 按 `(edge_type, from_node_id, to_node_id)` upsert（ID `gx_`，避开已被 evidence 占用的 `ge_` 前缀）。提供 `get_node` / `get_node_by_source` / `list_nodes`（type/group/status/search 过滤 + 分页）/ `list_edges`（direction=both/out/in）/ `get_stats`（按 type 计数）/ `apply_cross_group_filter`（生成跨群可见 SQL where 子句）
+- **A.5.3 dual_write 工具** — [services/knowledge_graph/dual_write.py](services/knowledge_graph/dual_write.py)：`ensure_graph_node()` fire-and-forget 包装，供 Phase D Consolidator 在写 source-of-truth 之后投影到图层，不会破坏原写入路径
+- **A.5.4 Admin API** — [admin/routes/api/knowledge.py](admin/routes/api/knowledge.py) 追加 `_resolve_graph_writer()` + 4 个端点：`GET /knowledge/graph/nodes`（type/group/status/search/limit/offset 过滤）、`GET /knowledge/graph/nodes/{node_id}`（节点详情 + 关联 edges）、`GET /knowledge/graph/edges`（node/direction/type 过滤）、`GET /knowledge/graph/stats`（total + by_node_type/by_edge_type 计数）。Writer 通过 `ctx.knowledge_graph._store` 懒解析
+- **A.5.4 Admin Frontend** — [KnowledgeView.vue](admin/frontend/src/views/knowledge/KnowledgeView.vue) 追加第 7 个 tab "图谱节点"：MetricCard × 4（节点总数 / 边总数 / 主要节点类型 / 主要边类型）+ PageToolbar 三段筛选（node_type / group_id / search）+ 节点卡片列表（label / source / scope / group / 操作）+ NDrawer 详情抽屉（NDescriptions + properties JSON + 关联边列表 + 置信度）+ EmptyState 兜底（"Phase D Consolidator 自动写入"提示）
+- **A.5.5 测试** — [tests/test_graph_writer.py](tests/test_graph_writer.py) 11 case 全覆盖：schema 表存在 / write_node/edge insert+upsert / list_nodes 按 type 过滤 / list_edges direction=both/out/in / get_stats / apply_cross_group_filter SQL（含 table_alias 变体）/ ensure_graph_node 投影 + 二次写入幂等
+
+**验证**：
+- `uv run pytest tests/test_graph_writer.py -q` → 11 passed
+- `uv run pytest tests/` → 1163 passed（2 pre-existing disk-usage warning failures，与 A.5 无关）
+- `uv run ruff check services/knowledge_graph/ tests/test_graph_writer.py admin/routes/api/knowledge.py` → clean（修了 3 处 E501 line-too-long）
+- `vue-tsc --noEmit` clean
+- `npm run build` → KnowledgeView 包 44.65 kB（gzip 12.64 kB），整体 build 成功
+
+**回滚**：单次 git revert。新表 `graph_nodes` + `graph_edges`、新文件 `graph_writer.py` / `dual_write.py` / `test_graph_writer.py`，新前端 tab + 后端 4 端点。删除文件 + DROP TABLE 即回滚；现有 `graph_facts` / `extraction_candidates` / `graph_evidence` 不受影响
+
+**Phase D 接口预留**：Consolidator 落地时只需 `await ensure_graph_node(writer, ...)` 投影 source 实体，再 `await writer.write_edge(...)` 描述关系，不需要修改源表写路径。当前管理端"图谱节点"tab 会显示空态，等 Phase D 写入后自动有数据
+
+---
+
+## 2026-05-20（下午）Phase A2/A3/A0 收口 — 跨群可见 5-store 全覆盖 + 经验反思管理页 + 工具脚本
+
+**变更类型**：feature / admin-frontend + services + scripts
+
+**变更内容**：
+
+Phase A2 跨群可见 + A3 经验反思 + A0 辅助工具一次性收口：
+
+- **A2 cross-group 5-store 扩展**：slang / style / learning_normalizer / knowledge_graph(fact+candidate) / episodic 五库统一拥有 `cross_group_visible` + `enabled_by` + `enabled_at` + `enabled_for_groups` + `enabled_reason` 字段，setter 签名统一 `(visible, actor, reason, enabled_for_groups)`
+- **A2.5 写入约束**：`slang.update_term()` 拒绝任何 caller 设置 `cross_group_visible`，只能走 `set_cross_group_visibility()`
+- **A2.4 跨群审计 admin UI** — [CrossGroupView.vue](admin/frontend/src/views/cross-group/CrossGroupView.vue) 全重写：6-store NTabs segment + 搜索 + MetricCard × 4 + reason 弹窗 + 模拟视角 + 操作时间线
+- **A2.4 后端** — [cross_group.py](admin/routes/api/cross_group.py) 扩展到 6 store (slang/style/episode/normalizer/graph_fact/graph_candidate)，`/enable` 带 reason + enabled_for_groups
+- **A3.4 经验反思 admin UI** — [EpisodesView.vue](admin/frontend/src/views/episodes/EpisodesView.vue) 全重写：5-state MetricCard + 状态/群筛选 + decay 剩余时间 + last_used_at + 720px 详情抽屉含修订历史 + approve/disable/restore reason 弹窗 + Phase B 提示
+- **A0.4 style 数据激活脚本** — [scripts/dev/style_seed_approved.py](scripts/dev/style_seed_approved.py)：enable(写 plugin override) + seed(4 条保守种子 approved 表达) + approve(批量 pending→approved) + status 子命令
+- **A1.2 slang 碰撞自动合并** — [scripts/dev/slang_collision_auto_merge.py](scripts/dev/slang_collision_auto_merge.py)：迭代到稳定（max 6 轮）+ approved↔approved guard + 结构化 JSON log
+- **测试** — [tests/test_cross_group.py](tests/test_cross_group.py) 扩展到 25 case，覆盖全 5 store 的 schema/reason/enabled_for_groups/disable-clears/not-found
+
+**验证**：
+- `vue-tsc --noEmit` clean
+- `npm run build` clean
+- `uv run pytest tests/` → 1147 passed（2 pre-existing disk-usage failures不相关）
+- `uv run ruff check` clean
+- 两个脚本 smoke-test dry-run 通过
+
+**回滚**：单次 git revert。新文件 + 新测试 + 新前端资产，删除即回滚。cross-group 列有 DEFAULT 值，旧代码忽略新列不会报错。
+
+---
+
+## 2026-05-20（凌晨）`cache_control` 注入下沉到 spine — 单注入点 + 按 `LLMTask` profile 控制 + ≤4 marker cap
+
+**变更类型**：refactor / services-llm
+
+**问题来源**：
+
+[2026-05-19（夜+2）管线命中率卡片改 4 横排子卡](maintenance-log.md) 上线后第一份"按 4 管线分桶"的 dashboard 数据暴露了一个长期被掩盖的问题——插件直连路径（`memo` / `slang*` / `style` / `chat_private` / `bilibili_intent` / `element_detect`）的 cache 命中率几乎全为 0%，而走主聊路径的命中率 ~80%+。原因是这些路径**完全不经过** `prompt_builder.py` 的 `cache_control` 注入逻辑，且插件自身没人手动管断点；同时 Anthropic ≤4 ephemeral 断点上限**没有任何位点计数**，主聊最坏路径已在 5–6 个 marker，被 silently 截断。
+
+**根因**：
+
+`cache_control` 散落在 5 处（[prompt_builder.py:108](services/llm/prompt_builder.py#L108) static / [prompt_builder.py:160](services/llm/prompt_builder.py#L160) state_board / [client.py:1327](services/llm/client.py#L1327) group profile / [client.py:1934](services/llm/client.py#L1934) 插件 pre_prompt 包裹器 / 三个 provider 的工具尾），没有全局计数也没有统一来源。
+
+**变更内容**：
+
+将 `cache_control` 注入语义全部下沉到 LLMRequest spine 的 `_dispatch_call`，按 `LLMTask` profile 配置每个 task 的断点数量。Spine 是单一来源，上游所有 `cache_control` 都被剥离再重写，并显式 cap 在总数 ≤4。
+
+- [services/llm/llm_request.py](services/llm/llm_request.py)：新增 `TaskCacheProfile` frozen dataclass + `TASK_CACHE_PROFILES` 18 task 显式注册表 + `DEFAULT_TASK_CACHE_PROFILE` + `cache_profile_for_task()` + `apply_cache_breakpoints(blocks, *, task, has_tools)`。注入策略 outer-first / end-of-segment：static → stable → dynamic 段尾打 marker，static 总是占第一槽（变化最少），dynamic 在 cap 收紧时先牺牲。`reserved = (1 if has_tools else 0) + (1 if profile.message_breakpoint else 0)`，`system_budget = min(profile.system_breakpoints, 4 - reserved)`。同步收紧 `_normalize_block` 把调用方预先放在 dict 里的 `cache_control` 字段剥掉——spine 是 SSOT，不接受外部预设。
+- [services/llm/client.py](services/llm/client.py)：在 `_dispatch_call` 调 `apply_cache_breakpoints(system_blocks, task=task, has_tools=bool(tools))`；删 [client.py:1327](services/llm/client.py#L1327) 群聊回复偏好块的 `cache_control` 字段；删 [client.py:1934](services/llm/client.py#L1934) 插件 pre_prompt 包裹器里 `if pb.position in ("static","stable"): block_dict["cache_control"] = ...` 这段——保留 segment 归桶到 `plugin_static`/`plugin_stable`/`plugin_dynamic`，spine 接管断点。
+- [services/llm/prompt_builder.py](services/llm/prompt_builder.py)：删 [:108](services/llm/prompt_builder.py#L108) `_static_block` 与 [:160](services/llm/prompt_builder.py#L160) `build_state_board_block` 返回 dict 的 `cache_control` 字段。block 仍存在、segment 标签仍是 static，spine 在 dispatch 时按 profile 给它打。
+
+**保留**：
+
+- [client.py:482](services/llm/client.py#L482) `_cached_text` + [client.py:1664-1706](services/llm/client.py#L1664) 群/私聊**消息侧**断点——依赖 `_timeline.get_cached_msg_index` 状态，不能简单下沉；spine 通过 `message_breakpoint=True` 字段从预算里**扣掉它的名额**，而不**注入**它。
+- 三个 provider 的工具尾断点（anthropic 主动加 / deepseek + openai 跟随）——spine 通过 `has_tools=True` 扣 1 个名额。
+
+**测试**：
+
+- [tests/test_llm_request.py](tests/test_llm_request.py)：原 `test_system_blocks_accept_dict_blocks_with_cache_control` 改名为 `test_system_blocks_strip_caller_provided_cache_control`（断契约反转：从"通过"到"被剥离"）。新增 7 case：`test_apply_cache_breakpoints_plugin_default_one`（memo 默认 1 marker）、`test_apply_cache_breakpoints_main_caps_at_four`（main 3 system + 1 tools + 1 message ≤ 4）、`test_apply_cache_breakpoints_strips_caller_provided`、`test_apply_cache_breakpoints_with_tools_reduces_budget`、`test_apply_cache_breakpoints_unknown_task_uses_default`、`test_cache_profile_covers_every_llm_task`、`test_cache_profile_for_task_returns_dataclass_with_expected_fields`。
+- [tests/test_prompt.py](tests/test_prompt.py)：`test_build_static_called_once` 改断 `"cache_control" not in pb.static_block`。
+- [tests/test_client.py](tests/test_client.py)：新增 2 case 整合测试 `test_dispatch_stamps_cache_control_on_plugin_direct_path`（memo 走 `_dispatch_call` 后 system 段确实带 1 个 marker）、`test_dispatch_strips_caller_cache_control_then_re_stamps`（caller 预设的 marker 被剥离，spine 重写到 static-segment 段尾）。
+
+**验证**：
+
+- `uv run pytest -q` → 1095 passed, 8 skipped, 2 failed（仍是 `test_admin_api::test_system_services_health_endpoint` + `test_backup_service::test_disk_usage_warning_threshold` 两个 main 上预先存在的失败，与本次改动无关）。
+- `uv run ruff check services/llm/ kernel/ tests/test_llm_request.py tests/test_prompt.py tests/test_client.py` → All checks passed。
+- `uv run pyright services/llm/llm_request.py services/llm/prompt_builder.py` → 0 errors, 0 warnings。
+- `dot_clean . && docker compose up bot -d --build` → Container qq-bot Recreated；napcat 状态保持 Running 未触碰。
+- `docker exec qq-bot grep -c apply_cache_breakpoints /app/services/llm/{llm_request,client}.py` → 各 4 hits 确认入镜。
+- 重启后 30 分钟样本：`slang_drift` 70.7% / `proactive` 73.9% / `chat` 72.8% / `slang` 38.5% / `slang_review` 21.5% / `thinker` 43.7%。`memo` 仍 0%——但调用 input 仅 258–305 token，低于 DeepSeek 的 1024-token cache 阈值，marker 在该 token 量下本就无效；本次重构的可观察收益对 memo/slang_semantic 这类小 input 路径要等到 admin 把它们路由到 Anthropic（Anthropic 没有 cache 触发阈值）才能体现，对当前 DeepSeek 路由侧主要是架构正确性 + ≤4 cap 安全网。
+
+**回滚路径**：
+
+```bash
+# 单一 commit 回退
+git revert <commit-hash>
+# 后端改动需 rebuild bot；napcat 不要动
+dot_clean . && docker compose up bot -d --build
+```
+
+**权衡 / 风险**：
+
+- 断点策略锁在代码而非配置：`TASK_CACHE_PROFILES` 是 module-level dict，运维改要 rebuild bot。可接受——cache 策略不是日常调参。后续若要 admin 可调，挂到 `LLMConfig.cache_profiles` 即可。
+- 既有"插件 dict 块带 cache_control"契约被破：上游所有地方都已停止注入，spine 是 SSOT。如果以后真有插件需要"我自己控制断点"，应该走专门的 `LLMRequest.cache_overrides` 字段，不在 dict 里偷塞。
+- main 链路某次 plugin 贡献的 system 段比预期多时，spine 不会再加 marker，只会少加——这是安全方向，不会越 4 marker 上限。
+- DeepSeek prefix cache 是 token 自动的不依赖 marker，只有 Anthropic 才严格依赖 ephemeral marker；本次重构对 DeepSeek 路径主要是统一了**注入位点**，命中率拉升要在切到 Anthropic 后才显著。
+
+---
+
+## 2026-05-20（凌晨+1）自审 + 按 task 形状调优 cache profile
+
+**变更类型**：tune / services-llm + services-slang
+
+**变更内容**：
+
+自审确认全部 18 个 LLMTask 的调用路径均经过 `LLMClient._call → _dispatch_call → apply_cache_breakpoints`，无遗漏。唯一例外是 `admin/routes/api/providers.py:_call_provider_probe`（健康探针，故意不走 spine）。新插件只需 `LLMRequest(task=...)` 即自动享受缓存策略。
+
+基于每个 task 的实际 system block 形状做了针对性调优：
+
+- **slang / slang_review / slang_drift / slang_semantic**：`system_breakpoints` 从 1 → 2。同时把 4 个 slang 调用点的 `static_blocks=[shared_prefix, task_prompt]` 拆为 `static_blocks=[shared_prefix]` + `stable_blocks=[task_prompt]`。这样 spine 在两个 segment 尾各打一个 marker——shared_prefix（~800 chars，跨 4 个 slang task 完全相同）的 cache 可以跨 task 复用，task-specific prompt 的 cache 在同 task 连续调用间复用。
+- **chat_private**：保持 1。低频调试工具，所有 block 在同一 segment，增加 budget 无实际收益。
+- **其余 task**：保持不变（main=3+msg, thinker=2, compact/reply_gate/vision/style/memo/bilibili_intent/element_detect/graph_*=1）。
+
+**改动文件**：
+
+- [services/llm/llm_request.py](services/llm/llm_request.py)：slang 4 task profile 从 `TaskCacheProfile(system_breakpoints=1)` → `TaskCacheProfile(system_breakpoints=2)`，注释更新。
+- [services/slang/extractor.py](services/slang/extractor.py)：`static_blocks=[shared_prefix, prompt]` → `static_blocks=[shared_prefix]` + `stable_blocks=[prompt]`。
+- [services/slang/review_utils.py](services/slang/review_utils.py)：同上。
+- [services/slang/drift_reviewer.py](services/slang/drift_reviewer.py)：同上。
+- [services/slang/semantic_reviewer.py](services/slang/semantic_reviewer.py)：同上。
+- [tests/test_llm_request.py](tests/test_llm_request.py)：`test_cache_profile_for_task_returns_dataclass_with_expected_fields` 加 slang 4 task 断言 `system_breakpoints == 2`。
+- [tests/test_client.py](tests/test_client.py)：`test_dispatch_strips_caller_cache_control_then_re_stamps` 改用 `static_blocks + stable_blocks` 模式，断言 2 个 marker 分别落在两个 segment 尾。
+
+**验证**：
+
+- `uv run pytest -q` → 1095 passed, 8 skipped, 2 failed（同前 pre-existing）。
+- `uv run ruff check` 改动文件 → All checks passed。
+- `uv run pyright` 改动文件 → 0 errors。
+
+**预期效果**：
+
+slang 管线（当前 dashboard 显示 38.5% hit rate）应在下次部署后提升——shared_prefix 的 cache 不再因 task 切换（extractor → reviewer → drift → semantic 轮转）而失效。DeepSeek 路径的提升取决于 prefix 长度是否超过 1024-token 阈值（shared_prefix ~400 token + task_prompt ~200 token = ~600 token，仍低于阈值；但连续同 task 调用的 prefix 匹配窗口变长了）。Anthropic 路径（如果 admin 切换路由）将直接受益于双 marker。
+
+**回滚路径**：
+
+```bash
+git revert <commit-hash>
+dot_clean . && docker compose up bot -d --build
+```
+
+---
+
+## 2026-05-19（夜+2）管线命中率卡片改 4 横排子卡 + 双柱图 + 近 5 次综合命中率
+
+**变更类型**：feat / admin-frontend + backend
+
+**变更内容**：
+
+[2026-05-19 仪表盘 24h 调用曲线 → 管线命中率视图](maintenance-log.md) 上线后 panel 是单列纵向 4 行（横向 NProgress + chip 行），有三个体感问题：4 个管线信息密度差太大、只有"周期总命中率"一个时间维度看不出"刚刚有没有恶化"、横向 NProgress 视觉上和 hero "Cache 命中" 重复。本次重做。
+
+**后端改动**：
+
+- [services/llm/usage.py](services/llm/usage.py)：新增 `recent_calls_per_pipeline(*, period, date=None, tz_offset_hours=0.0, limit=5)` — `WITH ranked AS (... ROW_NUMBER() OVER (PARTITION BY call_type ORDER BY ts DESC) ...) WHERE rn <= limit`，返回每个 call_type 在当前 period 内最近 ≤limit 行；`recent_calls_overall(*, period, ..., limit=5)` 简单 `ORDER BY ts DESC LIMIT ?` 返回当前 period 内最近 ≤limit 行（不分 call_type，用于计算 overall.recent 综合命中率）。
+- [services/llm/llm_pipelines.py](services/llm/llm_pipelines.py)：新增 `fold_recent_into_pipelines(payload, recent_per_call_type, recent_overall, *, limit=5)` — 把 SQL 折出的"每 call_type 最近 N 行"按 `resolve_call_type` + `pipeline_for_task` 折桶，桶内再按 ts DESC 排一次序取前 limit；每条 sample 算 `hit / (hit + miss)` 个体命中率（分母 0 → null），pipeline.recent 综合命中率走 `SUM(hit) / SUM(hit + miss)` 加权口径，与"周期总"同口径不漂移。SQL 不直接做 pipeline 映射，把 taxonomy 锁定在 llm_pipelines.py 一处。
+- [admin/routes/api/dashboard.py](admin/routes/api/dashboard.py) + [admin/routes/api/events.py](admin/routes/api/events.py)：endpoint 与 SSE `cache_pipelines` 事件均扩展为 fetch `cache_hit_by_call_type` + `recent_calls_per_pipeline` + `recent_calls_overall` 三套数据再 fold。响应字段向后兼容，仅在 `overall` / 每条 `pipelines[]` 上加可选 `recent: {calls, hit_tokens, miss_tokens, hit_pct, samples[{ts, task, hit_pct, hit_tokens, miss_tokens}]}`。
+
+**前端改动**：
+
+- 新建 [admin/frontend/src/views/dashboard/types.ts](admin/frontend/src/views/dashboard/types.ts)：把 `CachePipelineData` / `CachePipelineGroup` / `CachePipelineOverall` / `CachePipelineTaskMetric` 从 panel 里搬出来（之前 plan 文档说有，实际不存在），加 `CachePipelineSample` / `CachePipelineRecent` 与可选 `recent` 字段。`DashboardView.vue` import 路径改 1 行。
+- 新建 [admin/frontend/src/views/dashboard/components/BarColumnGroup.vue](admin/frontend/src/views/dashboard/components/BarColumnGroup.vue)：纯 SVG 柱图（`viewBox` + `preserveAspectRatio="none"` 自适应宽度，每柱 22px + 6px 间隔，默认高 64）。`barHeight(value)` 对 null 值给 2px sentinel 灰条，区分"调用过但分母 0"与"未触发"。`<title>` 元素提供原生 hover tooltip（task / pct / 副标 task 名）。
+- 重写 [admin/frontend/src/views/dashboard/components/CachePipelinePanel.vue](admin/frontend/src/views/dashboard/components/CachePipelinePanel.vue)：去掉旧的纵向 4 行布局，改 `cache-pipeline__grid` 4-2-1 grid（≥1100px 4 列、760-1100px 2 列、<760px 1 列）。每张子卡片头部 dual-rate `dl` 并列显示"周期总"与"近 N 次"两个加权命中率（颜色按 `cacheHitColor` 各自分段，`dt` 加 `cursor: help` 与 title 解释口径），下面两组 BarColumnGroup：`taskBars(p)` 渲染 per_task 命中率（label = task 名截 6 字），`recentBars(p)` 渲染近 5 次趋势（X 轴 `-5..-1` 最新在右，badge 显该次 task 名）。aside 也加第二个 StateBadge 显 overall.recent。
+- 删除旧的 `.cache-pipeline-row` / `.cache-pipeline-row__head` 等样式，DashboardView.vue 由于 chunk hash 变化导致 28.26 kB DashboardView chunk 重新输出。
+
+**测试**：
+
+- [tests/test_llm_pipelines.py](tests/test_llm_pipelines.py)：加 3 case — `test_fold_recent_into_pipelines_assigns_samples`（mixed call_types 含 legacy chat alias，断 cap=5 + ts DESC + null pct 保留 + 加权口径）、`test_fold_recent_overall_handles_zero_denominator_samples`、`test_fold_recent_into_pipelines_empty_inputs_yield_empty_recent`。
+- [tests/test_dashboard_cache_pipelines.py](tests/test_dashboard_cache_pipelines.py)：加 4 case — `test_recent_short_when_calls_below_limit`、`test_recent_samples_capped_per_pipeline`（8 main 调用断顶 5 条 hit=300..700）、`test_recent_calls_per_pipeline_window_query`（12 同 call_type 行断 SQL 截 5）、`test_recent_calls_overall_period_filter`。
+
+**验证**：
+
+- `uv run pytest tests/test_llm_pipelines.py tests/test_dashboard_cache_pipelines.py -q` → 17 passed in 0.28s
+- `vue-tsc --noEmit` → exit 0
+- `vite build` → DashboardView chunk 28.26 kB / gzip 10.04 kB
+- `uv run pytest -q` → 1086 passed, 8 skipped, 2 failed（2 个失败是 `test_admin_api::test_system_services_health_endpoint` + `test_backup_service::test_disk_usage_warning_threshold`，main 上同样失败，与本次改动无关）
+
+**回滚路径**：
+
+```bash
+# 单一 commit 回退
+git revert <commit-hash>
+# 前端 admin/static 是 bind mount，npm run build 后立即生效，无需 docker rebuild
+cd admin/frontend && npm run build
+```
+
+**已知边界**：
+
+- `recent` 受当前 period 边界限制：period=day 下"近 5 条"= 滚动 24h 内最近 5 条；period 内调用 < 5 时 samples 数组短于 5（前端按实际长度渲染柱子）。
+- "近 N 次综合命中率"与"周期总"两个命中率口径并列展示，操作员可能困惑哪个是"实时"。子卡片头部的 `dt` 元素加了 `cursor: help` 与 title tooltip 解释；如果数据足够久能验证操作员仍然分不清，可考虑改用 micro 趋势箭头替代第二个数字。
+- ROW_NUMBER 性能：SQLite 3.25+ 支持，period=month 数据量预期仍 < 100 ms；如未来证实慢可加 `(call_type, ts)` 组合索引。
+
+---
+
+## 2026-05-19（夜+1）DeepSeek 路径切到 codeseeq — 弃用 CPA fixup sidecar
+
+**变更类型**：local ops / Codex workflow
+
+**问题来源**：
+
+[2026-05-19（夜）CPA fixup sidecar 上线 条目](maintenance-log.md) 后又发现 sidecar 修不了的二级 bug：CPA 7.1.11 的 OpenAI Responses ⇄ DeepSeek chat 翻译里，`function_call`（tool_calls）这条 assistant turn 没机制注入对应的 `reasoning_content`，sidecar 无法在客户端重建。任何带 shell tool 调用的多轮（即所有真实 Codex 使用场景）必 400。
+
+**根因**：
+
+DeepSeek thinking 模式协议要求每条 assistant turn（含 tool_calls）必须带非空 `reasoning_content`。CPA 没把同一段 assistant 的 reasoning + tool_calls 合并到一条 chat-completions message。GPT 不踩这个坑因为 OpenAI 用 `encrypted_content` blob 机制让客户端原样回传，无明文要求。
+
+**变更内容**：
+
+放弃在 CPA 路径修这个深度协议 bug，改用专门为 DeepSeek 写的 [codeseeq](https://github.com/illdynamics/codeseeq) 替代。codeseeq 是 v0.3.0（2026-05-15 发布）的 Codex CLI launcher，自带 Python bridge 实现正确的 Responses ⇄ DeepSeek 翻译，包括 reasoning + tool_calls 合并。
+
+- [local/cpa/codeseeq-vscode.sh](local/cpa/codeseeq-vscode.sh)：新增 VS Code Codex extension launcher，注入 DEEPSEEK_API_KEY（从 CPA 配置同源读取）+ omubot venv PATH（让 codeseeq 的 `python3` 拿到 fastapi/uvicorn/httpx）+ 强制 host runtime + process bridge + 默认 `deepseek-v4-pro-thinking`。继承旧 wrapper 的 NO_PROXY hardening 和 -m/-p 过滤。
+- 装 codeseeq：`gh repo clone illdynamics/codeseeq ~/codeseeq && ~/codeseeq/codeseeq install`，launcher 落地 `~/bin/codeseeq`，repo snapshot 在 `~/.config/codeseeq/`。
+- VS Code `~/Library/Application Support/Code/User/settings.json` 的 `chatgpt.cliExecutable` 从 `codex-vscode-no-proxy.sh` 改到 `codeseeq-vscode.sh`。
+- 关停 CPA fixup sidecar（`cpa-fixup-sidecar-ctl.sh stop`）。文件保留在 [local/cpa/cpa-fixup-sidecar.py](local/cpa/cpa-fixup-sidecar.py) / [cpa-fixup-sidecar-ctl.sh](local/cpa/cpa-fixup-sidecar-ctl.sh) 不动，万一以后想用别的 CPA 路径接入还能复用 reasoning 剥/回填逻辑。
+- CPA 本身（`127.0.0.1:8317`）保留，留给 GPT/Claude 路径用。
+
+**为什么 codeseeq 修得了 CPA 修不了**：
+
+[bin/codeseeq-bridge.py](https://github.com/illdynamics/codeseeq/blob/main/bin/codeseeq-bridge.py) `input_to_messages()` 把所有 `reasoning` / `function_call` / `function_call_output` 合并到同一条 assistant message 上：reasoning 写到 `reasoning_content`，function_call 写到 `tool_calls`，函数输出走 `tool` role。这样 DeepSeek chat-completions 拿到的是合规的 `assistant {reasoning_content, tool_calls}` 单 message，校验通过。CPA 7.1.11 没做这步合并。
+
+**验证**：
+
+- `~/bin/codeseeq doctor`（host+process 模式）：所有 check OK。
+- 单轮 `codeseeq --model deepseek-v4-pro-thinking "say 'hi from codeseeq'"`：DeepSeek 直接 200 OK，bridge log 看到 `request model=deepseek@deepseek-v4-pro thinking=False stream=True messages=4 tools_registered=10`。
+- 多轮 + 2 个 shell tool_call：`create a file named hi.txt with content 'hello' using shell, then read it back to confirm`，全程 200 OK，DeepSeek 正确连续调用 `echo` + `cat`，最终 assistant 输出完整中文总结。
+- VS Code launcher 干跑：`bash -x codeseeq-vscode.sh -m gpt-5.5 -p auto-max --version` 实际 exec 参数为 `--model deepseek-v4-pro-thinking`，hostile 标志被过滤；bridge 在 `:8080` 启动后正确退出。
+
+**保留的旧文件**（gitignored，不影响 omubot 主仓）：
+
+- `local/cpa/cpa-fixup-sidecar.py` / `cpa-fixup-sidecar-ctl.sh`：未删，stopped。万一之后切换或调试 CPA 路径可以快速重启。
+- `local/cpa/codex-vscode-no-proxy.sh`：未删，作为 CPA 路径 wrapper 备份。
+
+**回滚路径**：
+
+```bash
+# 切回 CPA wrapper
+# settings.json: "chatgpt.cliExecutable": ".../codex-vscode-no-proxy.sh"
+# 重新启 sidecar（如果还想要老的"剥 reasoning"行为）：
+~/OmubotWorkspace/omubot/local/cpa/cpa-fixup-sidecar-ctl.sh start
+```
+
+**已知边界**：
+
+- codeseeq 用 host runtime 直接跑 Codex，不带容器隔离。VS Code Codex extension 自己有 sandbox/approval 控制，可以叠加。
+- bridge 端口 8080 写死在 launcher 里，多个 VS Code 窗口共享同一个 bridge（`CODESEEQ_BRIDGE_REUSE=1`），目前看 codeseeq 自带 health check，但负载下行为待观察。
+- DEEPSEEK_API_KEY 仍然从 [local/cpa/config.native.yaml](local/cpa/config.native.yaml) 读取，单一来源；轮换时只改这一处。
+
+---
+
 ## 2026-05-19 仪表盘 24h 调用曲线 → 管线命中率视图
 
 **变更类型**：feat / admin-frontend + backend

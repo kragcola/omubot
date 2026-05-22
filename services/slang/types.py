@@ -30,7 +30,7 @@ class SlangSettings(BaseModel):
     # block as group background context. Direct-hit terms are not capped here;
     # they are bounded only by `max_injected_terms` total.  Set to 0 to inject
     # only terms whose surface form appears in the current conversation.
-    max_indirect_inject_terms: int = Field(default=2, ge=0, le=30)
+    max_indirect_inject_terms: int = Field(default=0, ge=0, le=30)
     extract_interval_minutes: int = Field(default=30, ge=1, le=24 * 60)
     candidate_min_count: int = Field(default=2, ge=1, le=50)
     group_allowlist: list[str] = Field(default_factory=list)
@@ -160,6 +160,11 @@ class SlangTerm:
     notes: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
     last_inferred_at: str | None = None
+    cross_group_visible: bool = False
+    cross_group_enabled_by: str = ""
+    cross_group_enabled_at: str = ""
+    cross_group_enabled_for_groups: list[str] = field(default_factory=list)
+    cross_group_enabled_reason: str = ""
 
     @property
     def unique_user_count(self) -> int:

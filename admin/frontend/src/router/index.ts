@@ -73,6 +73,30 @@ const router = createRouter({
       component: () => import('../views/slang/SlangView.vue'),
     },
     {
+      path: '/style',
+      name: 'style',
+      meta: { title: '表达方式', keepAlive: true },
+      component: () => import('../views/style/StyleView.vue'),
+    },
+    {
+      path: '/cross-group',
+      name: 'cross-group',
+      meta: { title: '跨群可见', keepAlive: true },
+      component: () => import('../views/cross-group/CrossGroupView.vue'),
+    },
+    {
+      path: '/episodes',
+      name: 'episodes',
+      meta: { title: '经验反思', keepAlive: true },
+      component: () => import('../views/episodes/EpisodesView.vue'),
+    },
+    {
+      path: '/block-trace',
+      name: 'block-trace',
+      meta: { title: 'BlockTrace', keepAlive: true },
+      component: () => import('../views/block-trace/BlockTraceView.vue'),
+    },
+    {
       path: '/memos',
       name: 'memos',
       redirect: () => ({

@@ -137,6 +137,8 @@ async def collect_service_health(
         _check_napcat(ctx=ctx, config=config, bot=bot),
         _check_protocol_trace(ctx=ctx),
         _check_sqlite(ctx=ctx, storage_dir=storage_dir),
+        _check_backup_freshness(storage_dir=storage_dir),
+        _check_backup_disk_usage(storage_dir=storage_dir),
         await _check_memory(ctx=ctx),
         await _check_slang(ctx=ctx, storage_dir=storage_dir),
     ]
@@ -537,13 +539,13 @@ def _check_protocol_trace(*, ctx: Any = None) -> dict[str, Any]:
 
 
 def _check_sqlite(*, ctx: Any = None, storage_dir: Path) -> dict[str, Any]:
-    msg_log = getattr(ctx, "msg_log", None) if ctx is not None else None
-    card_store = getattr(ctx, "card_store", None) if ctx is not None else None
-    slang_store = getattr(ctx, "slang_store", None) if ctx is not None else None
+    from services.storage.backup import BACKUP_REGISTRY
+
+    repo_root = storage_dir.parent
     paths = [
-        _resolve_path(getattr(msg_log, "_db_path", None), storage_dir / "messages.db"),
-        _resolve_path(getattr(card_store, "_db_path", None), storage_dir / "memory_cards.db"),
-        _resolve_path(getattr(slang_store, "_db_path", None), storage_dir / "slang.db"),
+        repo_root / item.path
+        for item in BACKUP_REGISTRY
+        if item.item_type == "sqlite"
     ]
     probes = [_sqlite_probe(path) for path in paths]
     error_count = sum(1 for item in probes if item["status"] == "error")
@@ -557,7 +559,7 @@ def _check_sqlite(*, ctx: Any = None, storage_dir: Path) -> dict[str, Any]:
         detail = f"{missing_count} 个数据库文件尚未创建"
     else:
         status = "ok"
-        detail = "关键 SQLite 数据库 quick_check 通过"
+        detail = f"全部 {ok_count} 个 SQLite 数据库 quick_check 通过"
     return _service(
         "sqlite",
         "SQLite",
@@ -571,6 +573,70 @@ def _check_sqlite(*, ctx: Any = None, storage_dir: Path) -> dict[str, Any]:
             "ok_count": ok_count,
         },
     )
+
+
+def _check_backup_freshness(*, storage_dir: Path) -> dict[str, Any]:
+    from datetime import UTC, datetime
+
+    from services.storage.backup import BackupService
+
+    svc = BackupService(storage_dir=storage_dir, repo_root=storage_dir.parent)
+    latest = svc.latest_status()
+    if latest is None:
+        return _service("backup", "Backup", "warning", "尚无备份记录")
+
+    trusted = latest.get("summary", {}).get("trusted", False)
+    if not trusted:
+        return _service("backup", "Backup", "error", "最近备份不可信（trusted=false）",
+                        meta={"backup_id": latest.get("backup_id")})
+
+    try:
+        created = datetime.fromisoformat(latest["created_at"])
+        age_hours = (datetime.now(UTC) - created.astimezone(UTC)).total_seconds() / 3600
+    except Exception:
+        age_hours = 999
+
+    if age_hours > 48:
+        return _service("backup", "Backup", "warning",
+                        f"最近备份已超 {age_hours:.0f} 小时",
+                        meta={"backup_id": latest.get("backup_id"), "age_hours": round(age_hours, 1)})
+
+    return _service("backup", "Backup", "ok",
+                    f"最近备份 {latest.get('backup_id')} 可信",
+                    meta={"backup_id": latest.get("backup_id"), "age_hours": round(age_hours, 1)})
+
+
+def _check_backup_disk_usage(*, storage_dir: Path) -> dict[str, Any]:
+    import os
+
+    backup_root = storage_dir / "backups"
+    if not backup_root.exists():
+        return _service("backup_disk", "Backup Disk", "ok", "尚未创建备份目录")
+
+    st = os.statvfs(backup_root)
+    total = st.f_blocks * st.f_frsize
+    free = st.f_bavail * st.f_frsize
+    used_pct = (total - free) / total * 100 if total > 0 else 0
+
+    used_by_backup = sum(
+        f.stat().st_size for f in backup_root.rglob("*") if f.is_file()
+    )
+
+    if used_pct >= 90:
+        status = "error"
+        detail = f"磁盘占用 {used_pct:.0f}%，备份将很快失败"
+    elif used_pct >= 80:
+        status = "warning"
+        detail = f"磁盘占用 {used_pct:.0f}%，建议清理"
+    else:
+        status = "ok"
+        detail = f"磁盘占用 {used_pct:.0f}%，备份目录 {used_by_backup // 1024 // 1024} MB"
+
+    return _service("backup_disk", "Backup Disk", status, detail, meta={
+        "used_pct": round(used_pct, 1),
+        "free_bytes": free,
+        "backup_bytes": used_by_backup,
+    })
 
 
 async def _check_memory(*, ctx: Any = None) -> dict[str, Any]:

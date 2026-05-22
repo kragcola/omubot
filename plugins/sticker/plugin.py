@@ -125,10 +125,10 @@ class StickerPlugin(AmadeusPlugin):
         freq_prompt = _STICKER_FREQUENCY_PROMPTS.get(frequency)
         if freq_prompt and self._sticker_store is not None:
             formatted = freq_prompt.format(name=ctx.identity.name)
-            ctx.add_block(text=formatted, label="表情包规则", position="static")
+            ctx.add_block(text=formatted, label="表情包规则", position="static", priority=5, source="sticker")
 
         # Sticker library view (stable — changes when stickers added/removed)
         if self._sticker_store is not None:
             view = self._sticker_store.format_prompt_view()
             if view:
-                ctx.add_block(text=view, label="表情包库", position="stable")
+                ctx.add_block(text=view, label="表情包库", position="stable", priority=30, source="sticker")

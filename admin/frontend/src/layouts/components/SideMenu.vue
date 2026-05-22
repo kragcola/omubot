@@ -12,6 +12,11 @@ import {
   NewspaperOutline,
   PricetagsOutline,
   CubeOutline,
+  ChatbubbleEllipsesOutline,
+  TerminalOutline,
+  GlobeOutline,
+  BulbOutline,
+  AnalyticsOutline,
 } from '@vicons/ionicons5'
 import { useAppStore } from '../../stores/app'
 
@@ -35,7 +40,11 @@ const menuOptions: MenuOption[] = [
       { label: '记忆', key: '/memory', icon: renderIcon(LayersOutline) },
       { label: '表情包', key: '/stickers', icon: renderIcon(HappyOutline) },
       { label: '群内黑话', key: '/slang', icon: renderIcon(PricetagsOutline) },
+      { label: '表达方式', key: '/style', icon: renderIcon(ChatbubbleEllipsesOutline) },
+      { label: '跨群可见', key: '/cross-group', icon: renderIcon(GlobeOutline) },
+      { label: '经验反思', key: '/episodes', icon: renderIcon(BulbOutline) },
       { label: '知识库', key: '/knowledge', icon: renderIcon(LibraryOutline) },
+      { label: 'BlockTrace', key: '/block-trace', icon: renderIcon(AnalyticsOutline) },
     ],
   },
   {
@@ -45,6 +54,7 @@ const menuOptions: MenuOption[] = [
     children: [
       { label: '配置', key: '/config', icon: renderIcon(SettingsOutline) },
       { label: '插件', key: '/plugins', icon: renderIcon(CubeOutline) },
+      { label: '沙盒', key: '/sandbox', icon: renderIcon(TerminalOutline) },
       { label: '系统', key: '/system', icon: renderIcon(ServerOutline) },
       { label: '日志', key: '/logs', icon: renderIcon(NewspaperOutline) },
     ],
@@ -55,7 +65,8 @@ const activeKey = computed(() => {
   if (route.path.startsWith('/soul')) return '/soul'
   if (route.path.startsWith('/plugins')) return '/plugins'
   if (route.path === '/affection') return '/memory'
-  if (['/usage', '/schedule', '/sandbox', '/scheduler'].includes(route.path)) return '/system'
+  if (route.path === '/sandbox') return '/sandbox'
+  if (['/usage', '/schedule', '/scheduler'].includes(route.path)) return '/system'
   return route.path
 })
 

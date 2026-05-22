@@ -75,10 +75,14 @@ def _normalize_block(block: str | dict[str, Any], segment: str) -> dict[str, Any
     """Normalize a caller-supplied block into a provider-ready dict.
 
     Callers may pass either a raw string (most common — pre-built prompt
-    text) or an already-shaped block dict (e.g. plugin-contributed
-    blocks that already carry ``cache_control``). Empty / whitespace-only
-    text is dropped — passing it through would create a meaningless
-    extra system block and shift the cached prefix.
+    text) or an already-shaped block dict. Empty / whitespace-only text
+    is dropped — passing it through would create a meaningless extra
+    system block and shift the cached prefix.
+
+    Any ``cache_control`` field on incoming dict blocks is stripped:
+    spine is the single source of truth for prompt-cache breakpoints
+    (see :func:`apply_cache_breakpoints`). Allowing callers to pre-set
+    breakpoints would double-count against Anthropic's ≤4-marker cap.
     """
     if isinstance(block, str):
         text = block.strip()
@@ -94,14 +98,16 @@ def _normalize_block(block: str | dict[str, Any], segment: str) -> dict[str, Any
         text = str(block.get("text", "") or "").strip()
         if not text:
             return None
-        normalized = dict(block)
+        normalized = {k: v for k, v in block.items() if k != "cache_control"}
         normalized["type"] = "text"
         normalized["text"] = text
         normalized.setdefault("_omu_segment", segment)
         return normalized
 
     # Non-text blocks (e.g. image) pass through but still get tagged.
-    normalized = dict(block)
+    # cache_control on non-text blocks is also stripped — spine is the
+    # single source of truth (see ``apply_cache_breakpoints``).
+    normalized = {k: v for k, v in block.items() if k != "cache_control"}
     normalized.setdefault("_omu_segment", segment)
     return normalized
 
@@ -196,3 +202,156 @@ class LLMRequest:
         guarantees the segmented order before it leaves the spine.
         """
         return self.system_blocks(), list(self.user_messages), self.tools
+
+
+# ---------------------------------------------------------------------------
+# Per-task cache profile + spine-side breakpoint injector
+# ---------------------------------------------------------------------------
+#
+# Anthropic limits a single request to ≤4 ephemeral cache breakpoints
+# total (counted across system + tools + messages). Before the spine
+# took over this responsibility, ``cache_control`` was stamped in 5+
+# scattered locations (prompt_builder, client message builders,
+# per-provider tool tail, plugin pre_prompt wrapper) with no global
+# counter — so worst-case ``main`` requests already exceeded the cap
+# silently. Plugin-direct paths (``memo`` / ``slang*`` / ``style`` etc.)
+# meanwhile got ZERO breakpoints because they bypassed prompt_builder
+# entirely, which the dashboard cache-pipeline panel exposed on
+# 2026-05-19. ``apply_cache_breakpoints`` is now the single source of
+# truth: ``LLMClient._dispatch_call`` calls it once per request, after
+# resolving the task profile, and provider tool-tail / message-side
+# breakpoints get a budgeted slot reserved out of the ≤4 cap.
+
+
+@dataclass(frozen=True)
+class TaskCacheProfile:
+    """How many cache breakpoints spine emits for this task.
+
+    Attributes
+    ----------
+    system_breakpoints:
+        Number of ephemeral markers on system blocks. Spine places one
+        at the tail of each segment (static → stable → dynamic),
+        outer-first, capped at this number.
+    message_breakpoint:
+        ``True`` when the path also stamps a user-message-side
+        breakpoint elsewhere (group/private message builders that own
+        timeline state). Spine reads this to subtract from the system
+        budget when computing the ≤4 cap. It is a *predicate*, not a
+        directive — spine never injects message-side markers itself.
+    """
+
+    system_breakpoints: int = 1
+    message_breakpoint: bool = False
+
+
+# Single source of truth — same module as ``LLMTask`` so the two stay
+# aligned. Every entry in ``LLMTask`` should appear here; new tasks
+# fall through to ``DEFAULT_TASK_CACHE_PROFILE``.
+TASK_CACHE_PROFILES: dict[str, TaskCacheProfile] = {
+    # core_chat — main goes through prompt_builder which produces a
+    # static identity block, a state_board block, and a stable plugin
+    # tail (≤3 cacheable system segments) plus a message-side
+    # breakpoint and an Anthropic tool-tail. ``system_breakpoints=3``
+    # + tools + message = 5 → spine caps at 4 by dropping the
+    # outermost system marker first (static > stable > dynamic).
+    "main":       TaskCacheProfile(system_breakpoints=3, message_breakpoint=True),
+    "thinker":    TaskCacheProfile(system_breakpoints=2, message_breakpoint=False),
+    "compact":    TaskCacheProfile(system_breakpoints=1, message_breakpoint=False),
+    "reply_gate": TaskCacheProfile(system_breakpoints=1, message_breakpoint=False),
+    # vision — single static prompt, no plugin contributions.
+    "vision":     TaskCacheProfile(system_breakpoints=1, message_breakpoint=False),
+    # slang governance — 2 static blocks: shared_prefix (identical across
+    # all 4 slang tasks, ~800 chars) + task-specific system prompt.
+    # Marking both lets the shared prefix cache survive across different
+    # slang task calls (extractor → reviewer → drift → semantic).
+    "slang":          TaskCacheProfile(system_breakpoints=2),
+    "slang_review":   TaskCacheProfile(system_breakpoints=2),
+    "slang_drift":    TaskCacheProfile(system_breakpoints=2),
+    "slang_semantic": TaskCacheProfile(system_breakpoints=2),
+    # learning / extraction services.
+    "style":           TaskCacheProfile(system_breakpoints=1),
+    "memo":            TaskCacheProfile(system_breakpoints=1),
+    # chat_private — debug plugin path: low-frequency, 1-2 system blocks
+    # all in static segment. Single marker on the tail is sufficient.
+    "chat_private":    TaskCacheProfile(system_breakpoints=1),
+    "bilibili_intent": TaskCacheProfile(system_breakpoints=1),
+    "element_detect":  TaskCacheProfile(system_breakpoints=1),
+    # memory_graph (reserved) — defaults; tune after first call sites
+    # land and dashboard surfaces real hit rates.
+    "graph_review":            TaskCacheProfile(system_breakpoints=1),
+    "graph_edge_classifier":   TaskCacheProfile(system_breakpoints=1),
+    "reflection_consolidator": TaskCacheProfile(system_breakpoints=1),
+    "episode_summarizer":      TaskCacheProfile(system_breakpoints=1),
+}
+
+DEFAULT_TASK_CACHE_PROFILE = TaskCacheProfile(system_breakpoints=1)
+
+
+def cache_profile_for_task(task: str) -> TaskCacheProfile:
+    """Return the cache profile for ``task``, with safe default fallback."""
+    return TASK_CACHE_PROFILES.get(task, DEFAULT_TASK_CACHE_PROFILE)
+
+
+_ANTHROPIC_CACHE_CAP = 4  # Anthropic prompt-cache hard limit per request.
+
+
+def apply_cache_breakpoints(
+    system_blocks: list[dict[str, Any]],
+    *,
+    task: str,
+    has_tools: bool,
+) -> list[dict[str, Any]]:
+    """Strip caller-provided ``cache_control`` and re-apply per task profile.
+
+    Spine is the single source of truth — this function is the only
+    place ``cache_control`` is stamped on system blocks. Anything
+    upstream is treated as advisory and discarded so we cannot
+    double-count against Anthropic's ≤4-marker cap.
+
+    Placement strategy (outer-first, end-of-segment): for ``N``
+    system breakpoints, walk segments in order (static, stable,
+    dynamic) and mark the **last** block of each. ``static`` always
+    wins the first slot because it changes least; ``dynamic`` is
+    sacrificed first when capping kicks in.
+
+    Tools tail (added by provider) and message-side marker (added by
+    group/private message builders that own timeline state) each eat
+    one slot from the ≤4 cap when they apply.
+    """
+    profile = cache_profile_for_task(task)
+
+    reserved = (1 if has_tools else 0) + (1 if profile.message_breakpoint else 0)
+    system_budget = max(
+        0, min(profile.system_breakpoints, _ANTHROPIC_CACHE_CAP - reserved),
+    )
+
+    stripped: list[dict[str, Any]] = []
+    for block in system_blocks:
+        if isinstance(block, dict) and "cache_control" in block:
+            block = {k: v for k, v in block.items() if k != "cache_control"}
+        stripped.append(block)
+
+    if system_budget <= 0:
+        return stripped
+
+    # Find the tail index of each segment. ``_omu_segment`` is set by
+    # ``_normalize_block``; anything missing it (raw caller dicts that
+    # bypassed normalization) falls back to ``static`` so its marker
+    # gets the highest-priority slot — safer than dropping it.
+    tails: dict[str, int] = {}
+    for i, block in enumerate(stripped):
+        seg = str(block.get("_omu_segment", "") or "static") if isinstance(block, dict) else "static"
+        tails[seg] = i
+
+    chosen: list[int] = []
+    for seg in (_SEGMENT_STATIC, _SEGMENT_STABLE, _SEGMENT_DYNAMIC):
+        if seg in tails and len(chosen) < system_budget:
+            chosen.append(tails[seg])
+
+    for idx in chosen:
+        block = stripped[idx]
+        if isinstance(block, dict):
+            stripped[idx] = {**block, "cache_control": {"type": "ephemeral"}}
+
+    return stripped

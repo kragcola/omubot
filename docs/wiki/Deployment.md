@@ -4,9 +4,10 @@
 
 ```bash
 # 首次启动
-cp config/.env.example config/.env
-cp config/config.toml.example config/config.toml
-cp config/soul/identity.example.md config/soul/identity.md
+cp .env.example config/.env
+cp config.example.toml config/config.toml
+cp soul/identity.example.md config/soul/identity.md
+cp soul/instruction.example.md config/soul/instruction.md
 docker compose up -d
 
 # 日常运维
@@ -34,10 +35,13 @@ docker compose logs bot --tail=50
 ## 本地开发
 
 ```bash
+source ./scripts/dev/env.sh
 uv sync
 docker compose up napcat -d     # 仅启动 NapCat
 uv run python bot.py            # 直接运行 bot
 ```
+
+本机日常开发目录是 `$HOME/OmubotWorkspace/omubot`。原外置盘 checkout `/Volumes/我的电脑/omubot` 只作为 staging/挂载来源，不用于普通测试运行。
 
 ## 容器结构
 
@@ -58,7 +62,12 @@ storage/
 ├── usage.db          # LLM 用量
 ├── messages.db       # 群消息持久化
 ├── memory_cards.db   # 记忆卡片
+├── knowledge_index.db # 文档知识库持久索引
+├── knowledge_graph.db # 知识图谱事实与证据
 ├── slang.db          # 群内黑话、候选、AI 复核、语义漂移、修订历史
+├── style.db          # 表达样本、反馈、动态风格档案
+├── plugins/config/   # 插件 runtime override JSON
+├── config/           # 配置审计与快照
 ├── logs/             # 日志（10MB 切割，30 天保留）
 ├── stickers/         # 表情包
 ├── affection/        # 好感度

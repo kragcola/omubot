@@ -23,8 +23,10 @@ import LogPanel from '../../components/common/LogPanel.vue'
 import type { LogPanelLine } from '../../components/common/LogPanel.vue'
 import RestartBotButton from '../../components/common/RestartBotButton.vue'
 import StateBadge from '../../components/common/StateBadge.vue'
-import { useSSE } from '../../composables/useSSE'
-import CachePipelinePanel, { type CachePipelineData } from './components/CachePipelinePanel.vue'
+import { onCachePipelines, useSSE } from '../../composables/useSSE'
+import type { SSECachePipelinePayload } from '../../composables/useSSE'
+import CachePipelinePanel from './components/CachePipelinePanel.vue'
+import type { CachePipelineData } from './types'
 
 interface DashboardUsage {
   total_calls?: number
@@ -199,6 +201,7 @@ const loadError = ref('')
 const lastLoadedAt = ref('')
 const nowTick = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
+let unsubCachePipelines: (() => void) | null = null
 const { logs, connected } = useSSE()
 
 const compactFormatter = new Intl.NumberFormat('zh-CN', {
@@ -441,6 +444,9 @@ const statusBadges = computed(() => {
 
 onMounted(() => {
   startClockTicker()
+  unsubCachePipelines = onCachePipelines((payload: SSECachePipelinePayload) => {
+    cachePipelines.value = payload as unknown as CachePipelineData
+  })
   void loadDashboard()
 })
 
@@ -448,6 +454,10 @@ onBeforeUnmount(() => {
   if (clockTimer) {
     clearInterval(clockTimer)
     clockTimer = null
+  }
+  if (unsubCachePipelines) {
+    unsubCachePipelines()
+    unsubCachePipelines = null
   }
 })
 

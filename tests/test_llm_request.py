@@ -19,9 +19,12 @@ from pathlib import Path
 import pytest
 
 from services.llm.llm_request import (
+    TASK_CACHE_PROFILES,
     LLMRequest,
     LLMTask,
     all_llm_tasks,
+    apply_cache_breakpoints,
+    cache_profile_for_task,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -66,8 +69,15 @@ def test_system_blocks_drop_empty_and_whitespace_only_text() -> None:
     assert [b["text"] for b in blocks] == ["real-static", "real-dynamic"]
 
 
-def test_system_blocks_accept_dict_blocks_with_cache_control() -> None:
-    """Plugin-contributed blocks may already carry cache_control."""
+def test_system_blocks_strip_caller_provided_cache_control() -> None:
+    """Spine is the single source of truth for ``cache_control``.
+
+    Caller-supplied ``cache_control`` on dict blocks is stripped during
+    normalization; ``apply_cache_breakpoints`` (called from
+    ``LLMClient._dispatch_call``) re-stamps according to the per-task
+    profile. This prevents double-counting against Anthropic's
+    ≤4-marker cap.
+    """
     req = LLMRequest(
         task="main",
         static_blocks=[
@@ -80,8 +90,7 @@ def test_system_blocks_accept_dict_blocks_with_cache_control() -> None:
     )
     [block] = req.system_blocks()
     assert block["text"] == "with-cache-control"
-    assert block["cache_control"] == {"type": "ephemeral"}
-    # Spine tags the segment for downstream diagnostics.
+    assert "cache_control" not in block
     assert block["_omu_segment"] == "static"
 
 
@@ -212,3 +221,113 @@ def test_unknown_task_string_is_rejected_by_type_checker_only() -> None:
 def test_each_documented_task_can_be_constructed(task: str) -> None:
     req = LLMRequest(task=task)  # type: ignore[arg-type]
     assert req.task == task
+
+
+# ---------------------------------------------------------------------------
+# Cache-breakpoint injection — spine takes over from prompt_builder /
+# client message builders / per-provider tool tail. See
+# services/llm/llm_request.py: TASK_CACHE_PROFILES + apply_cache_breakpoints.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_cache_breakpoints_plugin_default_one() -> None:
+    """Plugin-direct paths (default profile) get exactly 1 system marker.
+
+    Before the spine took over this responsibility the plugin-direct
+    pipelines (memo / slang* / style / chat_private / etc.) had ZERO
+    cache markers because they bypassed prompt_builder. This test pins
+    the post-fix behavior.
+    """
+    req = LLMRequest(task="memo", static_blocks=["x"])
+    blocks = req.system_blocks()
+    out = apply_cache_breakpoints(blocks, task="memo", has_tools=False)
+    assert len(out) == 1
+    assert out[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_apply_cache_breakpoints_main_caps_at_four() -> None:
+    """Main path: 3 system + 1 tools + 1 message-side = 5 → spine caps to 4.
+
+    The system budget is computed as:
+        min(profile.system_breakpoints, 4 - tools(1) - message_breakpoint(1))
+    so for ``main`` it lands at 2 system markers, leaving room for the
+    Anthropic tool tail and the message-side marker stamped elsewhere.
+    """
+    req = LLMRequest(
+        task="main",
+        static_blocks=["static-1"],
+        stable_blocks=["stable-1"],
+        dynamic_blocks=["dynamic-1"],
+    )
+    blocks = req.system_blocks()
+    out = apply_cache_breakpoints(blocks, task="main", has_tools=True)
+    cache_count = sum(1 for b in out if b.get("cache_control"))
+    # System markers from spine + reserved (tools + message-side) ≤ 4.
+    assert cache_count + 1 + 1 <= 4
+    # Static must always win the first slot — it's the byte-stable prefix.
+    assert out[0].get("cache_control") == {"type": "ephemeral"}
+
+
+def test_apply_cache_breakpoints_strips_caller_provided() -> None:
+    """Pre-existing ``cache_control`` on system blocks is stripped before re-stamping."""
+    blocks = [
+        {"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}, "_omu_segment": "static"},
+        {"type": "text", "text": "b", "cache_control": {"type": "ephemeral"}, "_omu_segment": "stable"},
+        {"type": "text", "text": "c", "cache_control": {"type": "ephemeral"}, "_omu_segment": "dynamic"},
+    ]
+    out = apply_cache_breakpoints(blocks, task="memo", has_tools=False)
+    cache_count = sum(1 for b in out if b.get("cache_control"))
+    # Default profile = 1 system breakpoint, no tools, no message-side.
+    assert cache_count == 1
+    # Static wins, others get stripped.
+    assert out[0].get("cache_control") == {"type": "ephemeral"}
+    assert out[1].get("cache_control") is None
+    assert out[2].get("cache_control") is None
+
+
+def test_apply_cache_breakpoints_with_tools_reduces_budget() -> None:
+    """``has_tools=True`` reserves one slot for the provider tool tail."""
+    blocks = [
+        {"type": "text", "text": "x", "_omu_segment": "static"},
+    ]
+    # thinker has profile.system_breakpoints=2 → with tools the budget
+    # is min(2, 4 - 1) = 2 (still room). With main + tools +
+    # message_breakpoint = min(3, 4 - 1 - 1) = 2.
+    out_main = apply_cache_breakpoints(blocks, task="main", has_tools=True)
+    out_thinker = apply_cache_breakpoints(blocks, task="thinker", has_tools=True)
+    # Single block can hold at most one marker regardless of budget.
+    assert out_main[0].get("cache_control") == {"type": "ephemeral"}
+    assert out_thinker[0].get("cache_control") == {"type": "ephemeral"}
+
+
+def test_apply_cache_breakpoints_unknown_task_uses_default() -> None:
+    """Tasks not in TASK_CACHE_PROFILES fall back to DEFAULT (1 system marker)."""
+    blocks = [
+        {"type": "text", "text": "x", "_omu_segment": "static"},
+    ]
+    out = apply_cache_breakpoints(blocks, task="not-a-task", has_tools=False)
+    assert sum(1 for b in out if b.get("cache_control")) == 1
+
+
+def test_cache_profile_covers_every_llm_task() -> None:
+    """Every LLMTask should have an explicit profile — defaults are fine
+    but they should be intentional, not implicit."""
+    for task in all_llm_tasks():
+        assert task in TASK_CACHE_PROFILES, (
+            f"task {task!r} missing from TASK_CACHE_PROFILES — "
+            f"add it explicitly, even if it just inherits the default"
+        )
+
+
+def test_cache_profile_for_task_returns_dataclass_with_expected_fields() -> None:
+    profile = cache_profile_for_task("main")
+    assert profile.system_breakpoints == 3
+    assert profile.message_breakpoint is True
+    # slang tasks bumped to 2 (shared_prefix + task-specific prompt)
+    assert cache_profile_for_task("slang").system_breakpoints == 2
+    assert cache_profile_for_task("slang_review").system_breakpoints == 2
+    assert cache_profile_for_task("slang_drift").system_breakpoints == 2
+    assert cache_profile_for_task("slang_semantic").system_breakpoints == 2
+    fallback = cache_profile_for_task("not-a-task")
+    assert fallback.system_breakpoints == 1
+    assert fallback.message_breakpoint is False

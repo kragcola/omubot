@@ -73,8 +73,10 @@ omubot 使用声明式命令注册，在 `register_commands()` 中返回 `Comman
 ### `/version` 输出示例
 
 ```
-Omubot v1.2.5
+Omubot v1.4.0
 GitHub: https://github.com/kragcola/omubot
-最新版本: v1.2.5（发布于 2026-05-05）
-已是最新版本
+
+（无法连接 GitHub，未检查更新）
 ```
+
+本地版本号由 `services/version.py` 从 `pyproject.toml` 读取，`/version` 再按配置决定是否联网检查 GitHub release。

@@ -404,6 +404,70 @@ class UsageTracker:
         """
         return await self.query_raw(sql, params)
 
+    async def recent_calls_per_pipeline(
+        self,
+        *,
+        period: str,
+        date: str | None = None,
+        tz_offset_hours: float = 0.0,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return up to ``limit`` most recent calls per ``call_type``.
+
+        SQL stays pipeline-agnostic — the dashboard endpoint folds these
+        into pipelines via ``resolve_call_type`` + ``pipeline_for_task``
+        and re-sorts within each pipeline (one pipeline contains 4-6
+        ``call_type`` values, so the last 5 per call_type need a second
+        pass to pick the last 5 per pipeline). Keeps the pipeline
+        taxonomy in ``llm_pipelines.py`` as the single source of truth.
+        """
+        tz_modifier = f"{tz_offset_hours:+.1f} hours"
+        where_clause, params = self._period_filter(period, date, tz_modifier)
+        sql = f"""
+            WITH ranked AS (
+                SELECT ts, call_type,
+                       prompt_cache_hit_tokens  AS hit,
+                       prompt_cache_miss_tokens AS miss,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY call_type ORDER BY ts DESC
+                       ) AS rn
+                FROM llm_calls WHERE {where_clause}
+            )
+            SELECT ts, call_type, hit, miss
+            FROM ranked
+            WHERE rn <= ?
+            ORDER BY call_type ASC, ts DESC
+        """
+        return await self.query_raw(sql, (*params, limit))
+
+    async def recent_calls_overall(
+        self,
+        *,
+        period: str,
+        date: str | None = None,
+        tz_offset_hours: float = 0.0,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return the up-to-``limit`` most recent rows in the period.
+
+        Used to compute ``overall.recent`` for the dashboard cache-hit
+        panel — the "近 N 次综合命中率" KPI shown alongside the period
+        total. Single ``ORDER BY ts DESC LIMIT ?`` keeps the query cheap
+        even on the longest period (rolling 30 d).
+        """
+        tz_modifier = f"{tz_offset_hours:+.1f} hours"
+        where_clause, params = self._period_filter(period, date, tz_modifier)
+        sql = f"""
+            SELECT ts, call_type,
+                   prompt_cache_hit_tokens  AS hit,
+                   prompt_cache_miss_tokens AS miss
+            FROM llm_calls
+            WHERE {where_clause}
+            ORDER BY ts DESC
+            LIMIT ?
+        """
+        return await self.query_raw(sql, (*params, limit))
+
     async def timeseries(
         self,
         *,

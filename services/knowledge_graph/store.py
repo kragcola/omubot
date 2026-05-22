@@ -10,9 +10,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import aiosqlite
+from loguru import logger
 
 from services.knowledge_graph.types import GraphCandidate, GraphFact
-from services.storage import connect_sqlite
+from services.storage import close_with_checkpoint, connect_sqlite
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -61,12 +62,61 @@ CREATE TABLE IF NOT EXISTS extraction_candidates (
     updated_at   TEXT NOT NULL
 )"""
 
+_CREATE_NODES = """\
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    node_id         TEXT PRIMARY KEY,
+    node_type       TEXT NOT NULL,
+    source_table    TEXT NOT NULL DEFAULT '',
+    source_id       TEXT NOT NULL DEFAULT '',
+    scope           TEXT NOT NULL DEFAULT 'group',
+    group_id        TEXT NOT NULL DEFAULT '',
+    label           TEXT NOT NULL DEFAULT '',
+    properties_json TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'active',
+    cross_group_visible       INTEGER NOT NULL DEFAULT 0,
+    cross_group_enabled_by    TEXT NOT NULL DEFAULT '',
+    cross_group_enabled_at    TEXT NOT NULL DEFAULT '',
+    cross_group_enabled_for_groups TEXT NOT NULL DEFAULT '[]',
+    cross_group_enabled_reason TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+)"""
+
+_CREATE_EDGES = """\
+CREATE TABLE IF NOT EXISTS graph_edges (
+    edge_id         TEXT PRIMARY KEY,
+    edge_type       TEXT NOT NULL,
+    from_node_id    TEXT NOT NULL,
+    to_node_id      TEXT NOT NULL,
+    scope           TEXT NOT NULL DEFAULT 'group',
+    group_id        TEXT NOT NULL DEFAULT '',
+    confidence      REAL NOT NULL DEFAULT 0.5,
+    evidence_refs   TEXT NOT NULL DEFAULT '[]',
+    properties_json TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'active',
+    cross_group_visible       INTEGER NOT NULL DEFAULT 0,
+    cross_group_enabled_by    TEXT NOT NULL DEFAULT '',
+    cross_group_enabled_at    TEXT NOT NULL DEFAULT '',
+    cross_group_enabled_for_groups TEXT NOT NULL DEFAULT '[]',
+    cross_group_enabled_reason TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    FOREIGN KEY(from_node_id) REFERENCES graph_nodes(node_id),
+    FOREIGN KEY(to_node_id) REFERENCES graph_nodes(node_id)
+)"""
+
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_graph_facts_subject ON graph_facts(subject, status)",
     "CREATE INDEX IF NOT EXISTS idx_graph_facts_object ON graph_facts(object, status)",
     "CREATE INDEX IF NOT EXISTS idx_graph_facts_scope ON graph_facts(scope, scope_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_graph_candidates_status ON extraction_candidates(status, confidence)",
     "CREATE INDEX IF NOT EXISTS idx_graph_candidates_scope ON extraction_candidates(scope, scope_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_gn_type_scope ON graph_nodes(node_type, scope, group_id)",
+    "CREATE INDEX IF NOT EXISTS idx_gn_source ON graph_nodes(source_table, source_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ge_type ON graph_edges(edge_type, status)",
+    "CREATE INDEX IF NOT EXISTS idx_ge_from ON graph_edges(from_node_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_ge_to ON graph_edges(to_node_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_ge_scope ON graph_edges(scope, group_id, status)",
 ]
 
 
@@ -80,12 +130,53 @@ class KnowledgeGraphStore:
         await self._db.execute(_CREATE_FACTS)
         await self._db.execute(_CREATE_EVIDENCE)
         await self._db.execute(_CREATE_CANDIDATES)
+        await self._db.execute(_CREATE_NODES)
+        await self._db.execute(_CREATE_EDGES)
         await self._ensure_column("graph_facts", "scope", "TEXT NOT NULL DEFAULT 'global'")
         await self._ensure_column("graph_facts", "scope_id", "TEXT NOT NULL DEFAULT 'global'")
         await self._ensure_column("extraction_candidates", "scope", "TEXT NOT NULL DEFAULT 'global'")
         await self._ensure_column("extraction_candidates", "scope_id", "TEXT NOT NULL DEFAULT 'global'")
+        # Cross-group visibility migration (A2)
+        await self._ensure_column("graph_facts", "cross_group_visible", "INTEGER NOT NULL DEFAULT 0")
+        await self._ensure_column("graph_facts", "cross_group_enabled_by", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("graph_facts", "cross_group_enabled_at", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column(
+            "graph_facts", "cross_group_enabled_for_groups", "TEXT NOT NULL DEFAULT '[]'"
+        )
+        await self._ensure_column(
+            "graph_facts", "cross_group_enabled_reason", "TEXT NOT NULL DEFAULT ''"
+        )
+        await self._ensure_column("extraction_candidates", "cross_group_visible", "INTEGER NOT NULL DEFAULT 0")
+        await self._ensure_column("extraction_candidates", "cross_group_enabled_by", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("extraction_candidates", "cross_group_enabled_at", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column(
+            "extraction_candidates", "cross_group_enabled_for_groups", "TEXT NOT NULL DEFAULT '[]'"
+        )
+        await self._ensure_column(
+            "extraction_candidates", "cross_group_enabled_reason", "TEXT NOT NULL DEFAULT ''"
+        )
         for statement in _CREATE_INDEXES:
             await self._db.execute(statement)
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_facts_cross_group "
+            "ON graph_facts(cross_group_visible, status) "
+            "WHERE cross_group_visible = 1"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_candidates_cross_group "
+            "ON extraction_candidates(cross_group_visible, status) "
+            "WHERE cross_group_visible = 1"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gn_cross_group "
+            "ON graph_nodes(cross_group_visible, status) "
+            "WHERE cross_group_visible = 1"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ge_cross_group "
+            "ON graph_edges(cross_group_visible, status) "
+            "WHERE cross_group_visible = 1"
+        )
         await self._db.commit()
 
     async def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -96,7 +187,7 @@ class KnowledgeGraphStore:
 
     async def close(self) -> None:
         if self._db is not None:
-            await self._db.close()
+            await close_with_checkpoint(self._db, name="knowledge_graph")
             self._db = None
 
     async def add_fact(
@@ -321,6 +412,112 @@ class KnowledgeGraphStore:
         await self._db.commit()
         return cursor.rowcount > 0
 
+    async def set_fact_cross_group_visibility(
+        self,
+        fact_id: str,
+        *,
+        visible: bool,
+        actor: str,
+        reason: str = "",
+        enabled_for_groups: list[str] | None = None,
+    ) -> bool:
+        """Toggle cross-group visibility on a graph fact.
+
+        KG has no revision table yet (Phase A.5 graph schema will add one), so
+        we log to loguru as the audit trail in the meantime.
+        """
+        fact = await self.get_fact(fact_id)
+        if fact is None:
+            return False
+        now = _now_iso()
+        enabled_by = actor if visible else ""
+        enabled_at = now if visible else ""
+        groups_payload = (
+            [str(g).strip() for g in (enabled_for_groups or []) if str(g).strip()]
+            if visible
+            else []
+        )
+        reason_payload = reason if visible else ""
+        cursor = await self._db.execute(
+            """UPDATE graph_facts
+               SET cross_group_visible = ?, cross_group_enabled_by = ?,
+                   cross_group_enabled_at = ?, cross_group_enabled_for_groups = ?,
+                   cross_group_enabled_reason = ?, updated_at = ?
+               WHERE fact_id = ?""",
+            (
+                int(visible),
+                enabled_by,
+                enabled_at,
+                json.dumps(groups_payload, ensure_ascii=False),
+                reason_payload,
+                now,
+                fact_id,
+            ),
+        )
+        await self._db.commit()
+        if cursor.rowcount <= 0:
+            return False
+        logger.info(
+            "graph_fact cross_group {} by={} reason={!r} groups={} fact_id={}",
+            "enable" if visible else "disable",
+            actor,
+            reason,
+            groups_payload,
+            fact_id,
+        )
+        return True
+
+    async def set_candidate_cross_group_visibility(
+        self,
+        candidate_id: str,
+        *,
+        visible: bool,
+        actor: str,
+        reason: str = "",
+        enabled_for_groups: list[str] | None = None,
+    ) -> bool:
+        """Toggle cross-group visibility on an extraction candidate."""
+        candidate = await self.get_candidate(candidate_id)
+        if candidate is None:
+            return False
+        now = _now_iso()
+        enabled_by = actor if visible else ""
+        enabled_at = now if visible else ""
+        groups_payload = (
+            [str(g).strip() for g in (enabled_for_groups or []) if str(g).strip()]
+            if visible
+            else []
+        )
+        reason_payload = reason if visible else ""
+        cursor = await self._db.execute(
+            """UPDATE extraction_candidates
+               SET cross_group_visible = ?, cross_group_enabled_by = ?,
+                   cross_group_enabled_at = ?, cross_group_enabled_for_groups = ?,
+                   cross_group_enabled_reason = ?, updated_at = ?
+               WHERE candidate_id = ?""",
+            (
+                int(visible),
+                enabled_by,
+                enabled_at,
+                json.dumps(groups_payload, ensure_ascii=False),
+                reason_payload,
+                now,
+                candidate_id,
+            ),
+        )
+        await self._db.commit()
+        if cursor.rowcount <= 0:
+            return False
+        logger.info(
+            "graph_candidate cross_group {} by={} reason={!r} groups={} candidate_id={}",
+            "enable" if visible else "disable",
+            actor,
+            reason,
+            groups_payload,
+            candidate_id,
+        )
+        return True
+
     async def list_entities(self, *, limit: int = 100) -> list[dict[str, Any]]:
         cursor = await self._db.execute(
             "SELECT subject AS name, COUNT(*) AS fact_count FROM graph_facts WHERE status = 'active' "
@@ -362,6 +559,7 @@ class KnowledgeGraphStore:
 
 
 def _row_to_fact(row: aiosqlite.Row) -> GraphFact:
+    keys = row.keys()
     return GraphFact(
         fact_id=row["fact_id"],
         subject=row["subject"],
@@ -377,7 +575,29 @@ def _row_to_fact(row: aiosqlite.Row) -> GraphFact:
         evidence=[],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        cross_group_visible=bool(row["cross_group_visible"]) if "cross_group_visible" in keys else False,
+        cross_group_enabled_by=row["cross_group_enabled_by"] if "cross_group_enabled_by" in keys else "",
+        cross_group_enabled_at=row["cross_group_enabled_at"] if "cross_group_enabled_at" in keys else "",
+        cross_group_enabled_for_groups=_parse_groups_list(
+            row["cross_group_enabled_for_groups"] if "cross_group_enabled_for_groups" in keys else ""
+        ),
+        cross_group_enabled_reason=row["cross_group_enabled_reason"] if "cross_group_enabled_reason" in keys else "",
     )
+
+
+def _parse_groups_list(raw: Any) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(item) for item in raw if str(item).strip()]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item).strip()]
+    return []
 
 
 def _row_to_evidence(row: aiosqlite.Row) -> dict[str, Any]:
@@ -392,6 +612,7 @@ def _row_to_evidence(row: aiosqlite.Row) -> dict[str, Any]:
 
 
 def _row_to_candidate(row: aiosqlite.Row) -> GraphCandidate:
+    keys = row.keys()
     return GraphCandidate(
         candidate_id=row["candidate_id"],
         subject=row["subject"],
@@ -406,6 +627,13 @@ def _row_to_candidate(row: aiosqlite.Row) -> GraphCandidate:
         review_note=row["review_note"] or "",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        cross_group_visible=bool(row["cross_group_visible"]) if "cross_group_visible" in keys else False,
+        cross_group_enabled_by=row["cross_group_enabled_by"] if "cross_group_enabled_by" in keys else "",
+        cross_group_enabled_at=row["cross_group_enabled_at"] if "cross_group_enabled_at" in keys else "",
+        cross_group_enabled_for_groups=_parse_groups_list(
+            row["cross_group_enabled_for_groups"] if "cross_group_enabled_for_groups" in keys else ""
+        ),
+        cross_group_enabled_reason=row["cross_group_enabled_reason"] if "cross_group_enabled_reason" in keys else "",
     )
 
 

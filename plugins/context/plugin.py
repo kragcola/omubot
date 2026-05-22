@@ -103,6 +103,8 @@ class ContextPlugin(AmadeusPlugin):
                 text=pack.text,
                 label="上下文资料",
                 position="dynamic",
+                priority=50,
+                source="context",
             )
         if self._graph_auto_extract and self._graph is not None and pack.hits:
             self._schedule_graph_extract(pack.hits)

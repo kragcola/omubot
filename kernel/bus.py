@@ -246,13 +246,19 @@ class PluginBus:
 
     # ---- 消息管线调度 ----
 
-    async def fire_on_message(self, ctx: MessageContext) -> bool:
+    async def fire_on_message(self, ctx: MessageContext, *, silent_mode: bool = False) -> bool:
         """按优先级调用 on_message，直到有插件返回 True 消费消息。
 
         返回 True 表示消息已被某插件消费，调用方应停止后续处理。
+
+        silent_mode=True 时（presence_mode=silent_learn 群），只调用 silent_safe=True
+        的插件。这是 silent_learn 契约的内核统一门控——拦截器默认 silent_safe=False
+        以防新插件忘记声明而破坏静默。
         """
         for p in self._plugins:
             if not self._has_permission(p, "message"):
+                continue
+            if silent_mode and not getattr(p, "silent_safe", False):
                 continue
             consumed = await self._safe_call(p, p.on_message(ctx), "on_message")
             if consumed is True:

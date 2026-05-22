@@ -4,18 +4,25 @@
 
 ## 服务列表
 
-| 服务 | 模块（规划） | 职责 |
+| 服务 | 模块 | 职责 |
 |------|-------------|------|
 | LLMClient | `services.llm.client` | Anthropic-compatible API 调用、SSE 流、工具循环 |
 | PromptBuilder | `services.llm.prompt_builder` | System prompt 构建与缓存管理 |
 | Thinker | `services.llm.thinker` | 轻量决策：reply/wait/search |
+| ReplyWorkflow | `services.reply_workflow` | 回复门控、分段和发送链路编排 |
 | DreamAgent | `plugins.dream.agent` | 后台整合记忆、清理过期数据 |
 | CardStore | `services.memory.card_store` | 长期记忆卡片 CRUD + 搜索 |
 | RetrievalGate | `services.memory.retrieval` | 检索门控：按需注入卡片 |
 | MessageLog | `services.memory.message_log` | 消息 SQLite 持久化 |
+| ConversationArchive | `services.conversation_archive` | 消息事件流、scanner cursor、证据引用和留存 dry-run |
 | GroupTimeline | `services.memory.timeline` | 群聊时间线、调度触发判定 |
 | ShortTermMemory | `services.memory.short_term` | 会话内短期记忆（deque） |
 | StateBoard | `services.memory.state_board` | 群聊状态面板（活跃用户、话题） |
+| Knowledge | `services.knowledge` | Markdown 知识库索引、持久化和检索 |
+| KnowledgeGraph | `services.knowledge_graph` | 记忆/文档派生事实与证据链 |
+| Slang | `services.slang` | 黑话候选、审核、AI 复核、backlog、漂移治理 |
+| Style | `services.style` | 表达样本、反馈和动态风格档案 |
+| LearningNormalizer | `services.learning_normalizer` | 学习候选规范化和低信号过滤 |
 | ImageCache | `services.media.image_cache` | 图片下载/缩放/缓存 |
 | StickerStore | `services.media.sticker_store` | 表情包库、SHA256 去重 |
 | ToolRegistry | `services.tools.registry` | 工具注册表、按名分发执行 |
@@ -39,7 +46,6 @@ class MyPlugin(AmadeusPlugin):
 ### LLMClient
 
 ```python
-# 核心方法（规划）
 async def chat(
     session_id: str,
     messages: list[dict],
@@ -52,7 +58,6 @@ async def chat(
 ### CardStore
 
 ```python
-# 核心方法（规划）
 async def add_card(scope: str, scope_id: str, content: str, **kw) -> str: ...
 async def search_cards(keyword: str, limit: int = 5) -> list[dict]: ...
 async def list_cards(scope: str, scope_id: str) -> list[dict]: ...
@@ -63,7 +68,6 @@ async def delete_card(card_id: str) -> bool: ...
 ### ImageCache
 
 ```python
-# 核心方法（规划）
 async def download(url: str) -> Path: ...
 async def downscale(path: Path, max_size: tuple) -> Path: ...
 def get_cached(url: str) -> Path | None: ...
@@ -72,7 +76,6 @@ def get_cached(url: str) -> Path | None: ...
 ### StickerStore
 
 ```python
-# 核心方法（规划）
 async def save_sticker(path: Path, tags: list[str]) -> str: ...
 async def search_by_tag(tag: str, limit: int = 10) -> list[dict]: ...
 async def get_random() -> dict | None: ...

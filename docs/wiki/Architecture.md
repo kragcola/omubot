@@ -2,72 +2,149 @@
 
 ## 三层模型
 
+```text
+QQ ←→ NapCat (WS/HTTP) ←→ NoneBot2
+                         └── Omubot
+                              ├── Kernel:  PluginBus · 类型契约 · 插件发现
+                              ├── Services: LLM · Scheduler · Memory · Knowledge · Slang · Style · Archive
+                              └── Plugins: 23 个本地包/能力包
 ```
-QQ ←→ NapCat (WS) ←→ NoneBot2
-                      └── Omubot 框架
-                           ├── Kernel:  PluginBus · 类型 · 发现
-                           ├── Services: LLM · Scheduler · Timeline · Slang
-                           └── Plugins: 19 个可开关插件
-```
+
+当前插件层包含 19 个用户运行时插件，以及 4 个系统锁定能力包：`chat`、`context`、`history_loader`、`vision`。系统级能力由 manifest v3 标记为 `tier=system`、`toggle_policy=locked`，Web 和 API 都不能关闭。
 
 ### Kernel 层 (`kernel/`)
 
-插件总线、类型定义、插件发现。不 import 任何服务或插件。
+插件总线、类型定义、配置加载、插件发现。不 import 任何服务或插件。
 
-- `PluginBus` — 钩子调度（on_startup, on_message, on_pre_prompt, on_post_reply, on_tick），依赖拓扑排序
-- `router.py` — NoneBot 消息路由（私聊 priority=10，群聊 priority=1）
-- `types.py` — `AmadeusPlugin`, `PluginContext`, `MessageContext`, `Command`, `CommandContext` 等接口类型
+- `PluginBus` — 钩子调度（`on_startup`、`on_message`、`on_pre_prompt`、`on_post_reply`、`on_tick` 等），按 priority 稳定排序，单插件异常隔离。
+- `router.py` — NoneBot 消息路由，串联命令、群聊调度、私聊直连和回复发送。
+- `types.py` — `AmadeusPlugin`、`PluginContext`、`MessageContext`、`PromptContext`、`Command`、`Tool` 等接口类型。
+- `config.py` — `BotConfig`、LLM profiles、群访问策略、插件配置加载和 JSON/TOML 兼容。
+- `manifest.py` — manifest v3、本地插件索引、版本兼容、治理状态与签名校验字段。
 
 ### Services 层 (`services/`)
 
-系统服务，可互相 import，不 import 插件。
+系统服务可互相 import，不 import 插件。插件通过 `PluginContext` 获取服务引用。
 
-| 服务 | 文件 | 职责 |
-|------|------|------|
-| LLM Client | `services/llm/client.py` | Anthropic 兼容 SSE 流式调用，工具循环，上下文压缩 |
-| Scheduler | `services/scheduler.py` | Debounce + Batch 双模式群聊调度 |
-| Timeline | `services/memory/timeline.py` | 追加式消息时间线 + pending 缓冲区 |
+| 服务 | 文件/目录 | 职责 |
+|------|-----------|------|
+| LLM Client | `services/llm/client.py` | 多 Provider 调用、SSE 流、工具循环、上下文压缩 |
+| Provider/Profile | `services/llm/` + `kernel/config.py` | 任务级 profile 解析、DeepSeek/OpenAI/Anthropic 兼容 |
+| Scheduler | `services/scheduler.py` | 群聊 debounce + batch 调度、并发与发送节奏 |
+| Reply Workflow | `services/reply_workflow.py` | 回复门控、分段、发送队列与链路编排 |
+| Timeline/MessageLog | `services/memory/` | 群消息持久化、近期窗口、短期状态与压缩输入 |
+| ConversationArchive | `services/conversation_archive/` | 消息事件流、scanner cursor、scan run、证据引用、留存 dry-run |
 | CardStore | `services/memory/card_store.py` | SQLite 记忆卡片（7 类 3 作用域） |
+| Knowledge | `services/knowledge/` | Markdown 文档索引、SQLite 持久索引、BM25/ngram 检索 |
+| Knowledge Graph | `services/knowledge_graph/` | 从记忆/文档派生实体关系事实与证据链 |
 | StickerStore | `services/media/sticker_store.py` | SHA256 去重表情包库 |
-| SlangStore | `services/slang/store.py` | 群内黑话存储、候选生命周期、修订历史、语义漂移治理 |
-| SlangExtractor | `services/slang/extractor.py` | 轻量 LLM 候选抽取，不引入重型 NLP 依赖 |
-| SlangDailyReviewer | `services/slang/daily_reviewer.py` | 每日 AI 搜索复核与 AI 通过标记 |
-| CommandDispatcher | `services/command.py` | /slash 命令解析与路由 |
-| Thinker | `services/llm/thinker.py` | 轻量 LLM 预判 (reply/wait/search) |
+| Slang | `services/slang/` | 黑话存储、候选生命周期、AI 复核、backlog reviewer、漂移治理 |
+| Style | `services/style/` | 表达样本、证据、反馈、动态风格档案与回滚 |
+| Learning Normalizer | `services/learning_normalizer/` | 黑话/表达抽取前的低信号与边界规范化 |
+| Admin Events | `services/admin_events.py` | SSE 事件流、运行态通知 |
+| Health/Trace | `admin/routes/api/` + services | 服务健康、协议连接、trace、runtime error store |
 
 ### Plugins 层 (`plugins/`)
 
-19 个独立插件，只 import 内核类型 + 系统服务。黑话系统采用“服务层 + 薄插件”结构：`services/slang` 承担稳定能力，`plugins/slang` 只接消息、定时任务、Prompt 和工具注册。
+插件只 import 内核类型和系统服务。运行时发现只加载 `plugins/<name>/plugin.py` 目录插件；根目录单文件插件只会进入本地索引治理队列并标记为 legacy，不再作为可加载插件。
+
+重点插件关系：
+
+- `chat` 负责核心聊天入口、LLM 调用和 tool loop。
+- `context` 负责统一动态上下文，把 memory/doc/graph 打包为 `上下文资料`。
+- `memo` 继续负责记忆卡片 CRUD 和工具，但默认不再重复直接注入动态 Prompt。
+- `knowledge` 负责文档知识源扫描和检索；生产聊天默认扫描 `docs/knowledge`。
+- `slang` 是黑话薄插件，业务逻辑在 `services/slang`。
+- `style` 是表达学习薄插件，业务逻辑在 `services/style`。
 
 ## 消息流（群聊）
 
-```
+```text
 QQ 消息 → NapCat → NoneBot → router.py
-  ├── EchoPlugin.on_message()    ← 复读检测 (priority=200)
-  ├── CommandDispatcher.dispatch() ← /debug, /version 等
-  ├── _render_message()          ← 图片描述 + 表情包解析
-  ├── SlangPlugin.on_message()   ← 黑话命中与观察记录
-  ├── timeline.add()             ← 写入时间线
+  ├── 访问策略 / presence_mode 解析
+  ├── CommandDispatcher.dispatch()        ← /debug, /version, /plugins 等
+  ├── _render_message()                   ← 图片描述 + 表情包解析
+  ├── EchoPlugin.on_message()             ← 复读检测
+  ├── SlangPlugin.on_message()            ← 黑话命中与观察记录
+  ├── MessageLog / ConversationArchive    ← 原始消息与归档事件流
   └── scheduler.notify()
-        ├── @bot → 立即触发
+        ├── @bot / active group → 触发回复
         └── 普通消息 → debounce/batch
-              └── thinker.think()  ← reply/wait/search
-                    └── LLM.chat() ← Tool loop (max 5 rounds)
+              └── thinker / reply_gate
+                    └── LLM.chat()
+                          ├── ContextPlugin.on_pre_prompt()  ← memory/doc/graph
+                          ├── SlangPlugin.on_pre_prompt()    ← 当前群黑话
+                          ├── StylePlugin.on_pre_prompt()    ← 表达习惯参考
+                          └── Tool loop
 ```
+
+未获得主动发言权限的群会按 `presence_mode` 处理：`active` 可回复，`silent_learn` 只允许显式开启的学习能力读取，`off` 完全忽略群聊。
 
 ## 消息流（私聊）
 
-```
+```text
 私聊消息 → router.py → CommandDispatcher
-  └── LLM.chat()  ← 无 thinker，直接回复
+  └── LLM.chat()  ← 无群聊 thinker 调度，直接回复
 ```
 
-## Prompt 缓存
+## Prompt 与上下文
 
-4 个断点利用 Anthropic 的 prompt caching：
-1. `tools[-1]` — 工具定义
-2. System block 1 — 人格 + 行为指令
-3. System block 2 — 索引 + 记忆
-4. `messages[near-end]` — 最近消息
+### LLMRequest spine — 统一调用契约
 
-黑话采用动态 PromptBlock：`SlangPlugin.on_pre_prompt()` 只注入当前群和全局已批准词条，并受 `max_injected_terms`、`max_prompt_chars`、`min_inject_confidence` 控制。v3 另注册 `slang_lookup` 工具，允许 LLM 在需要时按需查询当前群黑话，避免无限扩大常驻 Prompt。
+所有 LLM 调用必须构造 `LLMRequest`（定义在 `services/llm/llm_request.py`），通过 `LLMClient._call()` 进入统一调度。`LLMRequest` 将 system prompt 分为三段：
+
+| 段 | 字段 | 语义 | 缓存特性 |
+| ------ | ------ | ------ | ------ |
+| static | `static_blocks` | 跨所有调用不变（身份 prompt、共享前缀） | 最高缓存优先级 |
+| stable | `stable_blocks` | 偶尔变化（群 profile、插件 stable 块） | 中等缓存优先级 |
+| dynamic | `dynamic_blocks` | 每轮变化（心情、好感度、当前时间） | 不缓存 |
+
+三段按固定顺序拼接（static → stable → dynamic），调用方无法重排。
+
+### 缓存断点注入（spine 单一来源）
+
+Anthropic prompt cache 限制每个请求最多 4 个 `cache_control: ephemeral` 标记。Spine 是唯一注入点——调用方预先放在 dict 块上的 `cache_control` 会被剥离，由 `apply_cache_breakpoints()` 按 per-task profile 重新注入。
+
+每个 `LLMTask` 在 `TASK_CACHE_PROFILES` 中有显式配置：
+
+```python
+TASK_CACHE_PROFILES = {
+    “main”:       TaskCacheProfile(system_breakpoints=3, message_breakpoint=True),
+    “thinker”:    TaskCacheProfile(system_breakpoints=2),
+    “slang”:      TaskCacheProfile(system_breakpoints=2),  # shared_prefix + task_prompt
+    “memo”:       TaskCacheProfile(system_breakpoints=1),
+    # ... 18 task 全覆盖
+}
+```
+
+断点预算计算：`system_budget = min(profile.system_breakpoints, 4 - tools_slot - message_slot)`
+
+放置策略（outer-first, end-of-segment）：按 static → stable → dynamic 顺序，在每段的最后一个 block 上打标记。Static 总是占第一槽（变化最少），dynamic 在预算收紧时先牺牲。
+
+新插件只需 `LLMRequest(task=”my_task”)` 即自动享受缓存策略，无需任何 cache 相关代码。
+
+### 动态上下文注入
+
+动态上下文现在优先由 `ContextPlugin` 接管：
+
+- `memory_card` 来自 `CardStore`。
+- `doc_chunk` 来自文档知识库。
+- `graph_fact` 来自知识图谱。
+- 统一打包为 `上下文资料`，避免 `MemoPlugin` 与 `KnowledgePlugin` 重复注入。
+
+黑话与表达学习仍是独立动态块：
+
+- 黑话解释”这个词是什么意思”，并可通过 `slang_lookup` 按需查询。
+- 表达学习提示”这个场景通常怎么说”，不替代人设，不照抄群友原话。
+
+## Admin 架构
+
+Admin API 位于 `admin/routes/api/`，前端位于 `admin/frontend/src/`。当前主控台已统一 Calm Ops / 雾青控制台风格，覆盖 Dashboard、Logs、Groups、Login、Config、System、Slang 等页面。
+
+管理端关键能力：
+
+- 配置：结构化表单、保存前 diff、审计记录、快照回滚。
+- 系统：服务健康、LLM Provider、协议连接、trace、runtime error store、阈值告警。
+- 群管理：群 profile、访问策略、工具 allow/block、presence mode、审计记录。
+- 插件中心：用户插件、系统能力、本地插件包索引、治理队列。
+- Slang/Style/Knowledge：黑话治理、表达学习、知识库调试与评测。

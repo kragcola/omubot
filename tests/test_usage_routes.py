@@ -1,5 +1,7 @@
 """Tests for usage HTTP routes."""
 
+from collections.abc import AsyncIterator, Iterator
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -8,18 +10,22 @@ from services.llm.usage_routes import create_usage_router
 
 
 @pytest.fixture
-async def tracker(tmp_path) -> UsageTracker:
+async def tracker(tmp_path) -> AsyncIterator[UsageTracker]:
     t = UsageTracker(db_path=str(tmp_path / "usage.db"))
     await t.init()
-    return t
+    try:
+        yield t
+    finally:
+        await t.close()
 
 
 @pytest.fixture
-def client(tracker: UsageTracker) -> TestClient:
+def client(tracker: UsageTracker) -> Iterator[TestClient]:
     from fastapi import FastAPI
     app = FastAPI()
     app.include_router(create_usage_router(tracker))
-    return TestClient(app)
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 def test_today_endpoint(client: TestClient) -> None:

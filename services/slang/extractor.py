@@ -8,6 +8,7 @@ from typing import Any
 
 from services.llm.llm_request import LLMRequest
 from services.slang.quality import assess_candidate_quality, is_noise_term, normalize_slang_key
+from services.slang.shared_prefix import get_shared_slang_prefix
 from services.slang.types import (
     VALID_REPEAT_POLICIES,
     SlangExtraction,
@@ -80,7 +81,8 @@ class SlangExtractor:
         try:
             request = LLMRequest(
                 task="slang",
-                static_blocks=[_SYSTEM_PROMPT],
+                static_blocks=[get_shared_slang_prefix()],
+                stable_blocks=[_SYSTEM_PROMPT],
                 user_messages=[{"role": "user", "content": body}],
                 max_tokens=900,
                 requires_capabilities=("chat",),

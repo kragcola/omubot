@@ -11,9 +11,10 @@ import { api } from '../../api/client'
 import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
+import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
 
-type KnowledgeTab = 'sources' | 'search' | 'context' | 'metrics' | 'graph' | 'candidates'
+type KnowledgeTab = 'sources' | 'search' | 'context' | 'metrics' | 'graph' | 'graph_nodes' | 'candidates'
 
 interface KnowledgeStats {
   loaded?: boolean
@@ -131,6 +132,43 @@ interface GraphCandidate {
   review_note?: string
 }
 
+interface GraphNodeRow {
+  node_id: string
+  node_type: string
+  source_table: string
+  source_id: string
+  scope: string
+  group_id: string
+  label: string
+  status: string
+  properties?: Record<string, unknown>
+  created_at: string
+  updated_at: string
+  cross_group_visible?: boolean
+}
+
+interface GraphEdgeRow {
+  edge_id: string
+  edge_type: string
+  from_node_id: string
+  to_node_id: string
+  scope: string
+  group_id: string
+  confidence: number
+  status: string
+  evidence_refs?: string[]
+  properties?: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+interface GraphNodeStats {
+  total_nodes: number
+  total_edges: number
+  by_node_type: Record<string, number>
+  by_edge_type: Record<string, number>
+}
+
 const message = useMessage()
 
 const activeTab = ref<KnowledgeTab>('sources')
@@ -178,6 +216,19 @@ const candidateLoading = ref(false)
 const candidateBusy = ref('')
 const rejectNotes = ref<Record<string, string>>({})
 
+const graphNodes = ref<GraphNodeRow[]>([])
+const graphNodeTotal = ref(0)
+const graphNodeStats = ref<GraphNodeStats | null>(null)
+const graphNodeLoading = ref(false)
+const graphNodesUnsupported = ref(false)
+const graphNodeFilterType = ref('')
+const graphNodeFilterGroup = ref('')
+const graphNodeSearch = ref('')
+const graphNodeDrawerOpen = ref(false)
+const graphNodeDrawerNode = ref<GraphNodeRow | null>(null)
+const graphNodeDrawerEdges = ref<GraphEdgeRow[]>([])
+const graphNodeDrawerLoading = ref(false)
+
 const entryCount = computed(() => stats.value.chunk_count || 0)
 const sourceCount = computed(() => stats.value.source_count || sources.value.length || 0)
 const skippedCount = computed(() => stats.value.skipped_sources || sources.value.filter(source => source.status !== 'indexed').length)
@@ -185,6 +236,11 @@ const indexedCount = computed(() => stats.value.indexed_sources || sources.value
 const pendingCount = computed(() => candidates.value.length)
 const relationshipCount = computed(() => graphRelationships.value.length)
 const scopeRiskCount = computed(() => graphScopeRisks.value.length)
+
+const graphNodeTotalCount = computed(() => graphNodeStats.value?.total_nodes ?? graphNodeTotal.value)
+const graphEdgeTotalCount = computed(() => graphNodeStats.value?.total_edges ?? 0)
+const graphNodeTopType = computed(() => topEntry(graphNodeStats.value?.by_node_type))
+const graphEdgeTopType = computed(() => topEntry(graphNodeStats.value?.by_edge_type))
 
 const sourceSummary = computed(() => {
   if (!available.value) return '知识库插件未启用或运行时实例暂不可用。'
@@ -207,6 +263,7 @@ async function loadAll() {
       loadSources(),
       loadGraph(),
       loadCandidates(),
+      loadGraphNodes(),
       loadMetrics(),
     ])
   } finally {
@@ -480,6 +537,83 @@ async function loadCandidates() {
   }
 }
 
+async function loadGraphNodes() {
+  graphNodeLoading.value = true
+  try {
+    const params: Record<string, string | number> = { limit: 100 }
+    if (graphNodeFilterType.value) params.node_type = graphNodeFilterType.value
+    if (graphNodeFilterGroup.value) params.group_id = graphNodeFilterGroup.value
+    if (graphNodeSearch.value.trim()) params.search = graphNodeSearch.value.trim()
+    const [nodesData, statsData] = await Promise.all([
+      api('/api/admin/knowledge/graph/nodes', { params }),
+      api('/api/admin/knowledge/graph/stats').catch(() => null),
+    ])
+    if (nodesData?.available === false) {
+      graphNodesUnsupported.value = true
+      graphNodes.value = []
+      graphNodeTotal.value = 0
+      graphNodeStats.value = null
+      return
+    }
+    graphNodesUnsupported.value = false
+    graphNodes.value = nodesData?.nodes || []
+    graphNodeTotal.value = nodesData?.total || 0
+    if (statsData && statsData.available !== false) {
+      graphNodeStats.value = {
+        total_nodes: statsData.total_nodes || 0,
+        total_edges: statsData.total_edges || 0,
+        by_node_type: statsData.by_node_type || {},
+        by_edge_type: statsData.by_edge_type || {},
+      }
+    } else {
+      graphNodeStats.value = null
+    }
+  } catch (error) {
+    if (isNotFound(error)) {
+      graphNodesUnsupported.value = true
+      compatibilityWarning.value = '当前运行后端还没有图谱节点 API；请重建/重启 Bot 后再查看图谱节点。'
+      graphNodes.value = []
+      graphNodeTotal.value = 0
+      graphNodeStats.value = null
+      return
+    }
+    message.error('图谱节点加载失败')
+    console.error('Failed to load graph nodes:', error)
+  } finally {
+    graphNodeLoading.value = false
+  }
+}
+
+async function openGraphNodeDetail(node: GraphNodeRow) {
+  graphNodeDrawerNode.value = node
+  graphNodeDrawerOpen.value = true
+  graphNodeDrawerLoading.value = true
+  graphNodeDrawerEdges.value = []
+  try {
+    const data = await api(`/api/admin/knowledge/graph/nodes/${node.node_id}`)
+    if (data?.available === false) {
+      graphNodeDrawerEdges.value = []
+      return
+    }
+    graphNodeDrawerEdges.value = data?.edges || []
+    if (data?.node) {
+      graphNodeDrawerNode.value = data.node as GraphNodeRow
+    }
+  } catch (error) {
+    console.error('Failed to load graph node detail:', error)
+    message.error('节点详情加载失败')
+  } finally {
+    graphNodeDrawerLoading.value = false
+  }
+}
+
+function clearGraphNodeFilters() {
+  graphNodeFilterType.value = ''
+  graphNodeFilterGroup.value = ''
+  graphNodeSearch.value = ''
+  void loadGraphNodes()
+}
+
 async function approveCandidate(candidate: GraphCandidate) {
   candidateBusy.value = candidate.candidate_id
   try {
@@ -589,6 +723,14 @@ function metricRatioEntries(data?: Record<string, number>) {
   return Object.entries(data || {})
     .sort((left, right) => right[1] - left[1])
     .slice(0, 8)
+}
+
+function topEntry(data?: Record<string, number>): string {
+  const entries = Object.entries(data || {})
+  if (!entries.length) return '—'
+  entries.sort((a, b) => b[1] - a[1])
+  const [name, count] = entries[0]
+  return `${name} · ${count}`
 }
 
 function syncSupersedeDrafts() {
@@ -1274,6 +1416,220 @@ function isNotFound(error: unknown) {
             />
           </NSpin>
         </NTabPane>
+
+        <NTabPane name="graph_nodes" tab="图谱节点">
+          <PageToolbar class="mb-16">
+            <template #left>
+              <span class="knowledge-toolbar__title">图谱节点 / 边</span>
+              <span class="knowledge-toolbar__hint">通用图层：术语、风格、片段、事实统一以节点+边形式投影。Phase D Consolidator 会自动写入。</span>
+            </template>
+            <template #right>
+              <NButton secondary :loading="graphNodeLoading" @click="loadGraphNodes">
+                刷新节点
+              </NButton>
+            </template>
+          </PageToolbar>
+
+          <div class="graph-node-metrics">
+            <MetricCard
+              title="节点总数"
+              :value="graphNodeTotalCount"
+              hint="active 节点（不含已撤销）"
+            />
+            <MetricCard
+              title="边总数"
+              :value="graphEdgeTotalCount"
+              hint="active 边（不含已撤销）"
+              accent="info"
+            />
+            <MetricCard
+              title="主要节点类型"
+              :value="graphNodeTopType"
+              hint="按 node_type 分布的最大类目"
+              accent="success"
+            />
+            <MetricCard
+              title="主要边类型"
+              :value="graphEdgeTopType"
+              hint="按 edge_type 分布的最大类目"
+              accent="warning"
+            />
+          </div>
+
+          <PageToolbar class="mb-16">
+            <template #left>
+              <NInput
+                v-model:value="graphNodeFilterType"
+                placeholder="按 node_type 过滤（如 term / fact）"
+                clearable
+                size="small"
+                style="width: 220px"
+                @keyup.enter="loadGraphNodes"
+                @clear="loadGraphNodes"
+              />
+              <NInput
+                v-model:value="graphNodeFilterGroup"
+                placeholder="按群 ID 过滤"
+                clearable
+                size="small"
+                style="width: 180px"
+                @keyup.enter="loadGraphNodes"
+                @clear="loadGraphNodes"
+              />
+              <NInput
+                v-model:value="graphNodeSearch"
+                placeholder="搜索 label / source_id"
+                clearable
+                size="small"
+                style="width: 220px"
+                @keyup.enter="loadGraphNodes"
+                @clear="loadGraphNodes"
+              />
+            </template>
+            <template #right>
+              <NButton size="small" type="primary" secondary @click="loadGraphNodes">
+                应用筛选
+              </NButton>
+              <NButton size="small" quaternary @click="clearGraphNodeFilters">
+                清空
+              </NButton>
+            </template>
+          </PageToolbar>
+
+          <NSpin :show="graphNodeLoading">
+            <div v-if="graphNodes.length" class="candidate-list">
+              <AppCard
+                v-for="node in graphNodes"
+                :key="node.node_id"
+                bordered
+                embedded
+                class="relationship-card graph-node-card"
+              >
+                <div class="section-head">
+                  <div>
+                    <strong>{{ node.label || node.source_id || node.node_id }}</strong>
+                    <p class="graph-node-card__sub">
+                      {{ node.source_table || '—' }} · {{ node.source_id || '—' }}
+                    </p>
+                  </div>
+                  <NSpace :size="6">
+                    <NTag round size="small" type="info">{{ node.node_type }}</NTag>
+                    <NTag round size="small" :type="node.status === 'active' ? 'success' : 'default'">
+                      {{ node.status }}
+                    </NTag>
+                  </NSpace>
+                </div>
+                <div class="relationship-card__meta">
+                  <span>scope {{ node.scope }}</span>
+                  <span>group {{ node.group_id || '—' }}</span>
+                  <span>node_id {{ node.node_id }}</span>
+                  <span>updated {{ node.updated_at }}</span>
+                </div>
+                <div class="graph-node-card__action">
+                  <NButton size="small" quaternary @click="openGraphNodeDetail(node)">
+                    查看属性 / 边
+                  </NButton>
+                </div>
+              </AppCard>
+            </div>
+            <EmptyState
+              v-else-if="graphNodesUnsupported"
+              title="当前后端还没有图谱节点 API"
+              description="请重建/重启 Bot，让后端 API 与新版前端保持一致。"
+              :icon="LayersOutline"
+            />
+            <EmptyState
+              v-else
+              title="尚无图谱节点"
+              description="Phase D Consolidator 会把术语、风格、片段、事实写入图谱底座。当前节点表为空。"
+              :icon="LayersOutline"
+            />
+          </NSpin>
+
+          <NDrawer
+            v-model:show="graphNodeDrawerOpen"
+            :width="640"
+            placement="right"
+          >
+            <NDrawerContent
+              :title="graphNodeDrawerNode ? (graphNodeDrawerNode.label || graphNodeDrawerNode.node_id) : '节点详情'"
+              :native-scrollbar="false"
+              closable
+            >
+              <NSpin :show="graphNodeDrawerLoading">
+                <div v-if="graphNodeDrawerNode" class="graph-node-detail">
+                  <NDescriptions
+                    :column="2"
+                    label-placement="left"
+                    bordered
+                    size="small"
+                    class="graph-node-detail__desc"
+                  >
+                    <NDescriptionsItem label="node_id">
+                      {{ graphNodeDrawerNode.node_id }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem label="node_type">
+                      {{ graphNodeDrawerNode.node_type }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem label="source_table">
+                      {{ graphNodeDrawerNode.source_table || '—' }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem label="source_id">
+                      {{ graphNodeDrawerNode.source_id || '—' }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem label="scope">
+                      {{ graphNodeDrawerNode.scope }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem label="group_id">
+                      {{ graphNodeDrawerNode.group_id || '—' }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem label="status">
+                      {{ graphNodeDrawerNode.status }}
+                    </NDescriptionsItem>
+                    <NDescriptionsItem label="updated_at">
+                      {{ graphNodeDrawerNode.updated_at }}
+                    </NDescriptionsItem>
+                  </NDescriptions>
+
+                  <h4 class="graph-node-detail__heading">properties</h4>
+                  <pre class="graph-node-detail__json">{{ JSON.stringify(graphNodeDrawerNode.properties || {}, null, 2) }}</pre>
+
+                  <h4 class="graph-node-detail__heading">关联边（{{ graphNodeDrawerEdges.length }}）</h4>
+                  <div v-if="graphNodeDrawerEdges.length" class="graph-node-detail__edges">
+                    <div
+                      v-for="edge in graphNodeDrawerEdges"
+                      :key="edge.edge_id"
+                      class="graph-node-edge"
+                    >
+                      <div class="graph-node-edge__head">
+                        <NTag size="small" round type="info">{{ edge.edge_type }}</NTag>
+                        <NTag size="small" round :type="edge.status === 'active' ? 'success' : 'default'">
+                          {{ edge.status }}
+                        </NTag>
+                        <span class="graph-node-edge__conf">{{ Math.round((edge.confidence || 0) * 100) }}%</span>
+                      </div>
+                      <div class="graph-node-edge__body">
+                        <span>{{ edge.from_node_id }}</span>
+                        <span class="graph-node-edge__arrow">→</span>
+                        <span>{{ edge.to_node_id }}</span>
+                      </div>
+                      <div class="graph-node-edge__meta">
+                        <span>edge_id {{ edge.edge_id }}</span>
+                        <span>scope {{ edge.scope }} · group {{ edge.group_id || '—' }}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <EmptyState
+                    v-else
+                    title="尚无关联边"
+                    description="该节点暂无 active 边。Phase D Consolidator 会随事实写入而补齐。"
+                    :icon="LayersOutline"
+                  />
+                </div>
+              </NSpin>
+            </NDrawerContent>
+          </NDrawer>
+        </NTabPane>
       </NTabs>
     </template>
   </AppPage>
@@ -1729,5 +2085,102 @@ function isNotFound(error: unknown) {
   .knowledge-query-input {
     width: 100%;
   }
+}
+
+.graph-node-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 960px) {
+  .graph-node-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.graph-node-card__sub {
+  margin: 4px 0 0;
+  color: var(--om-text-3);
+  font-size: 12px;
+}
+
+.graph-node-card__action {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.graph-node-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.graph-node-detail__heading {
+  margin: 6px 0 -4px;
+  color: var(--om-text-1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.graph-node-detail__json {
+  margin: 0;
+  padding: 12px;
+  background: var(--om-surface-2);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.graph-node-detail__edges {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.graph-node-edge {
+  padding: 12px;
+  border: 1px solid var(--om-border);
+  border-radius: 8px;
+  background: var(--om-surface-1);
+}
+
+.graph-node-edge__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.graph-node-edge__conf {
+  margin-left: auto;
+  color: var(--om-text-3);
+  font-size: 12px;
+}
+
+.graph-node-edge__body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--om-text-1);
+  word-break: break-all;
+}
+
+.graph-node-edge__arrow {
+  color: var(--om-text-3);
+}
+
+.graph-node-edge__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+  color: var(--om-text-3);
+  font-size: 12px;
 }
 </style>

@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+from services.knowledge_graph.graph_writer import GraphWriter
+
 
 def create_knowledge_router(
     *,
@@ -36,6 +38,15 @@ def create_knowledge_router(
 
     def _resolve_knowledge_graph() -> Any:
         return getattr(ctx, "knowledge_graph", None) if ctx is not None else None
+
+    def _resolve_graph_writer() -> GraphWriter | None:
+        graph = _resolve_knowledge_graph()
+        if graph is None:
+            return None
+        store = getattr(graph, "_store", None)
+        if store is None or getattr(store, "_db", None) is None:
+            return None
+        return GraphWriter(store)
 
     def _serialize_hit(hit: Any) -> dict[str, Any]:
         if hasattr(hit, "to_dict"):
@@ -252,6 +263,83 @@ def create_knowledge_router(
             return {"ok": False, "available": False, "error": "knowledge_graph_unavailable"}
         ok = await graph.reject_candidate(candidate_id, note=note)
         return {"ok": ok, "available": True}
+
+    @router.get("/knowledge/graph/nodes")
+    async def graph_nodes_list(
+        node_type: str = Query(""),
+        group_id: str = Query(""),
+        status: str = Query("active"),
+        search: str = Query(""),
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+    ):
+        writer = _resolve_graph_writer()
+        if writer is None:
+            return {"available": False, "nodes": [], "total": 0}
+        nodes, total = await writer.list_nodes(
+            node_type=node_type,
+            group_id=group_id,
+            status=status,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "available": True,
+            "nodes": [n.to_dict() for n in nodes],
+            "total": total,
+        }
+
+    @router.get("/knowledge/graph/nodes/{node_id}")
+    async def graph_node_detail(node_id: str, edge_limit: int = Query(50, ge=1, le=200)):
+        writer = _resolve_graph_writer()
+        if writer is None:
+            return {"available": False, "node": None, "edges": []}
+        node = await writer.get_node(node_id)
+        if node is None:
+            return {"available": True, "node": None, "edges": [], "error": "node_not_found"}
+        edges, total = await writer.list_edges(node_id=node_id, direction="both", limit=edge_limit)
+        return {
+            "available": True,
+            "node": node.to_dict(),
+            "edges": [e.to_dict() for e in edges],
+            "edge_total": total,
+        }
+
+    @router.get("/knowledge/graph/edges")
+    async def graph_edges_list(
+        node_id: str = Query(""),
+        direction: str = Query("both"),
+        edge_type: str = Query(""),
+        status: str = Query("active"),
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+    ):
+        writer = _resolve_graph_writer()
+        if writer is None:
+            return {"available": False, "edges": [], "total": 0}
+        edges, total = await writer.list_edges(
+            node_id=node_id,
+            direction=direction,
+            edge_type=edge_type,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "available": True,
+            "edges": [e.to_dict() for e in edges],
+            "total": total,
+        }
+
+    @router.get("/knowledge/graph/stats")
+    async def graph_stats():
+        writer = _resolve_graph_writer()
+        if writer is None:
+            return {"available": False, "total_nodes": 0, "total_edges": 0,
+                    "by_node_type": {}, "by_edge_type": {}}
+        stats = await writer.get_stats()
+        return {"available": True, **stats}
 
     def _search(kb: Any, query: str, *, top_k: int) -> list[dict[str, Any]]:
         if hasattr(kb, "search_hits"):

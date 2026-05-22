@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -124,3 +125,161 @@ def resolve_call_type(raw: str) -> str:
     returned as-is so the caller can decide whether to drop them.
     """
     return _CALL_TYPE_ALIASES.get(raw, raw)
+
+
+def build_cache_pipelines_payload(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate per-call_type rows into the 4-pipeline payload.
+
+    Takes the output of ``UsageTracker.cache_hit_by_call_type()`` and
+    returns the same ``{period, overall, pipelines}`` shape as the
+    ``/api/admin/dashboard/cache-pipelines`` REST endpoint. Shared
+    between the REST handler and SSE event stream so the computation
+    is defined once.
+    """
+
+    def _pct(hit: int, miss: int) -> float | None:
+        denom = hit + miss
+        return (hit / denom) if denom > 0 else None
+
+    pipeline_buckets: dict[str, dict[str, dict[str, int]]] = {}
+    for pipeline in LLM_PIPELINES:
+        pipeline_buckets[pipeline.key] = {
+            task: {"calls": 0, "hit_tokens": 0, "miss_tokens": 0}
+            for task in pipeline.tasks
+        }
+
+    overall = {"calls": 0, "hit_tokens": 0, "miss_tokens": 0}
+
+    for row in rows:
+        raw_call_type = str(row.get("call_type", "") or "")
+        if not raw_call_type:
+            continue
+        calls = int(row.get("calls", 0) or 0)
+        hit_tokens = int(row.get("hit_tokens", 0) or 0)
+        miss_tokens = int(row.get("miss_tokens", 0) or 0)
+
+        overall["calls"] += calls
+        overall["hit_tokens"] += hit_tokens
+        overall["miss_tokens"] += miss_tokens
+
+        task = resolve_call_type(raw_call_type)
+        pipeline = pipeline_for_task(task)
+        if pipeline is None:
+            continue
+
+        bucket = pipeline_buckets[pipeline.key][task]
+        bucket["calls"] += calls
+        bucket["hit_tokens"] += hit_tokens
+        bucket["miss_tokens"] += miss_tokens
+
+    pipelines_payload: list[dict[str, Any]] = []
+    for pipeline in LLM_PIPELINES:
+        per_task: list[dict[str, Any]] = []
+        p_calls = p_hit = p_miss = 0
+        for task in pipeline.tasks:
+            bucket = pipeline_buckets[pipeline.key][task]
+            per_task.append({
+                "task": task,
+                "calls": bucket["calls"],
+                "hit_tokens": bucket["hit_tokens"],
+                "miss_tokens": bucket["miss_tokens"],
+                "hit_pct": _pct(bucket["hit_tokens"], bucket["miss_tokens"]),
+            })
+            p_calls += bucket["calls"]
+            p_hit += bucket["hit_tokens"]
+            p_miss += bucket["miss_tokens"]
+
+        pipelines_payload.append({
+            "key": pipeline.key,
+            "label": pipeline.label,
+            "tasks": list(pipeline.tasks),
+            "calls": p_calls,
+            "hit_tokens": p_hit,
+            "miss_tokens": p_miss,
+            "hit_pct": _pct(p_hit, p_miss),
+            "per_task": per_task,
+        })
+
+    return {
+        "overall": {
+            **overall,
+            "hit_pct": _pct(overall["hit_tokens"], overall["miss_tokens"]),
+        },
+        "pipelines": pipelines_payload,
+    }
+
+
+def fold_recent_into_pipelines(
+    payload: dict[str, Any],
+    recent_per_call_type: list[dict[str, Any]],
+    recent_overall: list[dict[str, Any]],
+    *,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """Merge per-call_type recent samples into a pipeline payload.
+
+    Mutates ``payload`` (the output of
+    :func:`build_cache_pipelines_payload`) in place — adds a ``recent``
+    dict to each pipeline (with up to ``limit`` samples re-sorted by ts
+    DESC across the pipeline's tasks) and to ``overall`` (the rolling
+    last ``limit`` rows period-wide). Returns the same payload for
+    chaining.
+
+    ``samples[].hit_pct`` is the per-call ratio
+    (``hit / (hit + miss)``); ``recent.hit_pct`` is weighted across the
+    samples (``SUM(hit) / SUM(hit + miss)``) so it matches the overall
+    pipeline ``hit_pct`` formula. Both are ``None`` when the denominator
+    is zero.
+    """
+
+    def _sample(row: dict[str, Any]) -> dict[str, Any]:
+        hit = int(row.get("hit", 0) or 0)
+        miss = int(row.get("miss", 0) or 0)
+        denom = hit + miss
+        return {
+            "ts": str(row.get("ts", "") or ""),
+            "task": resolve_call_type(str(row.get("call_type", "") or "")),
+            "hit_pct": (hit / denom) if denom > 0 else None,
+            "hit_tokens": hit,
+            "miss_tokens": miss,
+        }
+
+    def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        hit = sum(int(r.get("hit", 0) or 0) for r in rows)
+        miss = sum(int(r.get("miss", 0) or 0) for r in rows)
+        denom = hit + miss
+        return {
+            "calls": len(rows),
+            "hit_tokens": hit,
+            "miss_tokens": miss,
+            "hit_pct": (hit / denom) if denom > 0 else None,
+            "samples": [_sample(r) for r in rows],
+        }
+
+    buckets: dict[str, list[dict[str, Any]]] = {p.key: [] for p in LLM_PIPELINES}
+    for row in recent_per_call_type:
+        task = resolve_call_type(str(row.get("call_type", "") or ""))
+        pipeline = pipeline_for_task(task)
+        if pipeline is None:
+            continue
+        buckets[pipeline.key].append(row)
+
+    for pipeline_payload in payload.get("pipelines", []):
+        pipeline_rows = sorted(
+            buckets.get(pipeline_payload["key"], []),
+            key=lambda r: str(r.get("ts", "") or ""),
+            reverse=True,
+        )[:limit]
+        pipeline_payload["recent"] = _summarize(pipeline_rows)
+
+    overall_rows = sorted(
+        recent_overall,
+        key=lambda r: str(r.get("ts", "") or ""),
+        reverse=True,
+    )[:limit]
+    payload.setdefault("overall", {})
+    payload["overall"]["recent"] = _summarize(overall_rows)
+
+    return payload

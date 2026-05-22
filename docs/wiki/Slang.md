@@ -74,6 +74,19 @@ admin/slang     →  Web 审核控制台与设置面板
 5. 高置信且开关允许时写为 `approved + source=ai_auto_review`。
 6. AI 通过词条在 Web 中标记为待人工复核。
 
+### 存量候选池复核
+
+每日 AI 复核只覆盖新抽取窗口，历史 `candidate` 池需要单独的 backlog reviewer 收敛。`SlangBacklogReviewer` 会按置信度和游标分页处理现有候选：
+
+1. 从 `status='candidate'` 的存量词条中按 batch 取一批。
+2. 可调用 `web_search` 辅助判断公网含义。
+3. LLM 判定为群内黑话时升级为 `approved`。
+4. 判定为普通公网词、噪声或不应学习时转为 `muted`。
+5. 证据不足时保持 `candidate`，等待下一轮或人工处理。
+6. `meta:backlog_review_state` 保存进度、游标、已处理数、approved/muted/kept 统计。
+
+2026-05-16 修复后，backlog reviewer 不再每分钟无限重启。它复用 `daily_ai_review_times` 形成 daily slot，清空本 slot 后写入 `meta:last_backlog_review_slot`；同一 slot 再次 tick 会跳过。若一次 tick 只处理到半途，不会锁 slot，下个 tick 会继续同一轮。管理员执行 reset 时会同时清除 slot 记录，允许立刻重跑。
+
 ## v3 质量治理
 
 v3 的重点不是继续扩大自动学习，而是治理学错后的风险。
@@ -141,6 +154,7 @@ v3 新增 `slang_lookup` 工具：
 - 批量批准、静音、过期、删除观察记录。
 - 词条详情编辑、AI 复核、合并重复项、置信度重算。
 - 观察中候选、抽取运行日志、质量治理和修订记录。
+- 存量候选池 AI 清理进度、手动运行和重置。
 - 结构化设置面板，不需要编辑 raw JSON。
 
 ## API
@@ -159,6 +173,9 @@ v3 新增 `slang_lookup` 工具：
 | `POST /api/admin/slang/extract/run` | 手动抽取 |
 | `POST /api/admin/slang/global/scan` | 跨群候选扫描 |
 | `GET/POST /api/admin/slang/settings` | 设置读取/保存 |
+| `GET /api/admin/slang/backlog-review/status` | backlog reviewer 进度 |
+| `POST /api/admin/slang/backlog-review/run` | 立即运行一批或一轮 backlog reviewer |
+| `POST /api/admin/slang/backlog-review/reset` | 重置 backlog reviewer 游标与 slot |
 | `GET /api/admin/slang/terms/{id}/revisions` | v3 修订记录 |
 | `GET /api/admin/slang/drift` | v3 语义漂移列表 |
 | `POST /api/admin/slang/drift/{id}/accept` | 采纳新释义 |
@@ -180,9 +197,21 @@ v3 新增 `slang_lookup` 工具：
 | `stoplist` | `[]` | 永不学习词 |
 | `daily_ai_review_enabled` | `true` | 每日 AI 识别 |
 | `daily_ai_auto_approve_enabled` | `false` | 是否允许 AI 自动通过 |
+| `backlog_review_enabled` | `true` | 是否复核历史积压的 candidate 池 |
+| `backlog_review_batch_size` | `50` | backlog reviewer 每批处理数量 |
+| `backlog_review_min_confidence` | `0.0` | backlog reviewer 处理候选的最低置信度 |
 | `drift_detection_enabled` | `true` | 是否启用语义漂移检测 |
 | `lookup_tool_enabled` | `true` | 是否注册黑话查询工具 |
 | `semantic_backend` | `ngram` | v3.5 预留；默认轻量后端 |
+
+## 与表达学习的边界
+
+黑话负责“这个词在群里是什么意思”，表达学习负责“这个场景大家通常怎么说”。例如：
+
+- “超舟”这类词义、别名、群内梗，属于黑话。
+- “有人发成果时先短促夸一句再补一个具体点”，属于表达学习。
+
+表达学习不写入 `slang_terms`，黑话也不负责动态风格档案。两者可以同时注入 Prompt，但标签和职责分开，避免把词义治理和说话方式混在一起。
 
 ## v3.5 预留
 

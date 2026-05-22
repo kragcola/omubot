@@ -82,4 +82,4 @@ class SchedulePlugin(AmadeusPlugin):
                     p.label, p.energy, p.valence, p.openness, p.tension,
                     f" anomaly={p.anomaly_reason!r}" if p.anomaly_reason else "",
                 )
-            ctx.add_block(text=text, label="当前时间", position="dynamic")
+            ctx.add_block(text=text, label="当前时间", position="dynamic", priority=10, source="schedule")

@@ -85,11 +85,22 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
             "Pragma": "no-cache",
         }
 
+    def _immutable_asset_headers() -> dict[str, str]:
+        # Vite emits hashed filenames under /admin/static/assets/* — content
+        # changes ⇒ filename changes, so the browser can cache forever and
+        # skip the network entirely on reload.
+        return {"Cache-Control": "public, max-age=31536000, immutable"}
+
+    def _headers_for_asset(asset_path: str) -> dict[str, str]:
+        if asset_path.startswith("assets/"):
+            return _immutable_asset_headers()
+        return _static_headers()
+
     def _spa_headers() -> dict[str, str]:
-        return {
-            **_static_headers(),
-            "Clear-Site-Data": '"cache"',
-        }
+        # Don't emit Clear-Site-Data: "cache" — it nukes the immutable hashed
+        # bundle cache on every visit, defeating the whole point of long-lived
+        # asset caching. Hash-based filenames already guarantee freshness.
+        return _static_headers()
 
     def _spa_index_response() -> HTMLResponse | dict[str, str]:
         if not _index_html.is_file():
@@ -110,7 +121,7 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
         target = (_static_dir / asset_path).resolve()
         static_root = _static_dir.resolve()
         if target.is_file() and target.is_relative_to(static_root):
-            return FileResponse(str(target), headers=_static_headers())
+            return FileResponse(str(target), headers=_headers_for_asset(asset_path))
         raise HTTPException(status_code=404, detail="static asset not found")
 
     # --- SPA history mode fallback (must be before Jinja2 routes) ---

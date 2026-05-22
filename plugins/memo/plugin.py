@@ -176,6 +176,8 @@ class MemoPlugin(AmadeusPlugin):
                 text=index_text,
                 label="全局索引",
                 position="stable",
+                priority=15,
+                source="memory",
             )
 
         if self._context_takeover:
@@ -204,6 +206,8 @@ class MemoPlugin(AmadeusPlugin):
                 text=memo_text,
                 label="记忆卡片",
                 position="dynamic",
+                priority=25,
+                source="memory",
             )
 
     async def on_post_reply(self, ctx: ReplyContext) -> None:

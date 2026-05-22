@@ -192,25 +192,27 @@ storage/
 
 ### Admin 管理面板（Vue 3 SPA）
 
-前端基于 Vue 3 + Naive UI + TypeScript，17 个页面，56 个 JSON API 端点。
+前端基于 Vue 3 + Naive UI + TypeScript，18 个页面，56 个 JSON API 端点。
 
 | 页面 | 路由 | 说明 |
 | --- | --- | --- |
-| 仪表盘 | `/admin/` | uptime、今日统计、心情卡片、系统资源 |
-| 用量统计 | `/admin/usage` | 时序图表 + 用户/群排行 |
-| 沙盒 | `/admin/sandbox` | 本地 LLM 对话测试 |
+| 仪表盘 | `/admin/` | uptime、今日统计（含 cache 命中率 / 平均延迟 / 错误数）、心情卡片、待办、近 7 天活跃群 |
+| 用量统计 | `/admin/usage` | 时序图表 + 用户/群排行（**软下线**：核心指标已并入仪表盘，导航栏不再展示，路由仍可手动访问） |
+| 沙盒 | `/admin/sandbox` | 本地 LLM 对话测试（在「设置与维护」一级导航） |
 | 人设编辑 | `/admin/soul` | identity.md / instruction.md 在线编辑 |
-| 日程心情 | `/admin/schedule` | MoodProfile 可视化 + 今日日程 |
+| 日程心情 | `/admin/schedule` | MoodProfile 可视化 + 今日日程（**软下线**：仪表盘右栏已完整覆盖，导航栏不再展示） |
 | 记忆管理 | `/admin/memory` | 卡片列表、池配置、CRUD |
 | 好感度 | `/admin/affection` | 用户排行、详情编辑 |
 | 表情包 | `/admin/stickers` | 网格浏览、描述编辑、删除 |
-| 知识库 | `/admin/knowledge` | 统计 + 关键词搜索 |
+| 群内黑话 | `/admin/slang` | 候选词审核、AI 复核、注入设置 |
+| 表达方式 | `/admin/style` | 群内表达风格抽取、profile 生成、反馈复核 |
+| 知识库 | `/admin/knowledge` | 文档源 / 搜索 / 上下文调试 / 评测 / 图谱关系 / 图谱节点 / 候选队列 |
 | Memo | `/admin/memos` | 按 user_id/kind 筛选 |
 | 群管理 | `/admin/groups` | 群列表、实时状态、消息 |
 | 插件 | `/admin/plugins` | 插件列表、工具/指令详情 |
-| 调度器 | `/admin/scheduler` | 各群 slot 状态、静音控制 |
-| 配置 | `/admin/config` | 结构化配置编辑（JSON 主格式） |
-| 系统 | `/admin/system` | 版本、资源、服务健康、维护窗口建议、备份 |
+| 调度器 | `/admin/scheduler` | 各群 slot 状态、静音控制（**软下线**：实时数据已失效，导航栏不再展示） |
+| 配置 | `/admin/config` | 结构化配置编辑（JSON 主格式，支持 `?task=rhythm` 等 query 直达任务） |
+| 系统 | `/admin/system` | 资源 + 维护建议 + 服务健康 + 关键错误 + 运行策略（含跳配置入口） + 备份 |
 | 日志 | `/admin/logs` | 实时 SSE 推送 + 历史文件 |
 
 访问 `http://localhost:8081/admin/`（生产）或 `http://localhost:5173/admin/`（开发），使用 `ADMIN_TOKEN` 环境变量登录。
@@ -225,18 +227,24 @@ storage/
 **阶段 0-2 已完成，阶段 3 首个视图 Dashboard 重构完成并上线**。详细跟踪见 [docs/tracking/web-refactor.md](./tracking/web-refactor.md)，阶段方案见 [web-refactor-plan.md](./web-refactor-plan.md)。
 
 - 阶段 0（环境清理）：`.nvmrc` Node 20 锁定 + `package.json engines` + `.gitignore admin/static/assets/`。`git rm --cached` 待人工确认。
-- 阶段 1（基础设施固化）：`themeOverrides` 扩展（Tag / DataTable / placeholder / icon），`uno.config.ts` 加 6 个语义 shortcut，新增 [admin-ui-tokens.md](./admin-ui-tokens.md) 速查表。`global.css` 里 6 块冗余 `!important` 已标 `@audit redundant`，等验收后由人工删除（预计从 51 降至 ≤ 18）。
+- 阶段 1（基础设施固化）：`themeOverrides` 扩展（Tag / DataTable / placeholder / icon），`uno.config.ts` 加 6 个语义 shortcut，新增 [admin-ui-tokens.md](./admin-ui-tokens.md) 速查表。**2026-05-14 验收通过后删除 `global.css` 7 个冗余 `!important` 块**（41 行），计数 51 → 31，剩余 31 处全部在 keep 区（`.dark .n-button:not(...)` + `.dark .n-menu` 系列 deep 选择器，themeOverrides API 不能表达）。
 - 阶段 2（公共组件补齐）：新增 `StateBadge / LogPanel / DataToolbar / FieldGroup / SparklineChart` 共 5 个公共组件；`SectionCard` 评估为重复造轮子，跳过。新增 `/admin/design-playground` 视觉验收路由。
 - 阶段 3 进行中：
-  - ✅ **DashboardView** — 2026-05-14 完成三轮迭代：
+  - ✅ **DashboardView** — 2026-05-14 完成三轮迭代后**视觉验收通过**：
     1. 第一版重构：Hero 压缩 + 3 主 KPI + 24h 调用曲线 + 近 7 天活跃群 Top 5 + 待处理 + 日程+心情合并 + LogPanel。
     2. 布局调整：改两栏主布局，右侧 320px sticky 长条放竖版日程时间线 + 心情 + 下一段，左栏重新排布消除空白。
     3. 新增「今日学习收录」模块 + 后端 `/api/admin/learning/today` 聚合端点，3 栏展示黑话 / 表达风格 / 表情包的今日新入库数量、审核统计、最新 Top 5（表情包带缩略图）。
-  - ✅ **LogsView** — 2026-05-14 两轮迭代：
+  - ✅ **LogsView** — 2026-05-14 两轮迭代后**视觉验收通过**：
     1. 组件层重构（commit 8197e60，606 → 583 行）：实时流改用公共 LogPanel 组件，删 60 行手写渲染；StateBadge 统一状态徽章；主 / 侧栏改物理顺序。
-    2. 视觉重设计（本次）：工具栏单行化（自研 Segment 段式选等级 + 内嵌图标的搜索框 + 可点清除 + 重置筛选）；默认模式自动隐藏 DEBUG 降噪；侧栏分组折叠（Bot 展开、Dream 折叠、带今日活跃 tag、相对日期显示）；文件模式去黑底终端改用 `--om-surface-2` 浅面板 + 结构化解析 time/level/channel/msg 四列 grid + 等级色标。LogsView 583 → 1175 行，功能视觉完整度大幅提升。
-  - ⏸ **LoginView** — 暂不动。已用 AppCard + TheLogo，设计稿完成度高，改动收益低。需要时单独立项。
-  - ⏸ **GroupsView（1833 行）** — 需子组件拆分，采用 codex 协同 spec 分片推进，留到下一轮。
+    2. 视觉重设计：工具栏单行化（自研 Segment 段式选等级 + 内嵌图标的搜索框 + 可点清除 + 重置筛选）；默认模式自动隐藏 DEBUG 降噪；侧栏分组折叠（Bot 展开、Dream 折叠、带今日活跃 tag、相对日期显示）；文件模式去黑底终端改用 `--om-surface-2` 浅面板 + 结构化解析 time/level/channel/msg 四列 grid + 等级色标。LogsView 583 → 1175 行，功能视觉完整度大幅提升。
+  - ✅ **GroupsView** — 2026-05-14 完成全量重构后**视觉验收通过**：
+    1. 主页面瘦身：4 张指标卡片 → 单行紧凑概览条（群 / 自定义 / 主动 / 静默 / 关闭 / 门禁），首屏 ~150px → ~52px；表格列数 7 → 4，点行打开抽屉。
+    2. 抽屉重构：旧 Snapshot 块 + Profile 长滚 → `基础 / 节奏 / 高级` 三 Tab（基础含 FieldGroup + 段式按钮 + 6 开关、节奏含 5 个底层数字、高级含工具矩阵 + 实时状态 + 最近消息 + 策略审计）；门禁块从首屏移到独立抽屉，双入口（页头按钮 + 概览条 chip）。
+    3. SSE 事件订阅 last_message_at / 24h 计数实时更新；`window.confirm` → NPopconfirm；连带修了 `config/config.json` 里 `blocked_users: null` 的预存配置 bug。
+  - ✅ **LoginView** — 2026-05-14 完成 PR A→C：视觉沿用双层构图 + 雾青渐变骨架，间距/圆角全量对齐 token 体系，chip/feature 背景改 `color-mix(... var(--om-surface) ...)` 浅深自适应；接入易用增强（autofocus、Caps Lock 检测、上次登录时间、失败卡片抖动、提交按钮三态文案）和安全增强（错误分级 invalid_token vs network_error、连续失败 5 次锁定 30 秒、非 HTTPS 警告条、错误提示带尝试计数）。`auth.login` store 同步改返回结构。规模 431→423 行，`vue-tsc` 0 error，`vite build` 4.83s。**2026-05-14 用户视觉验收通过**。
+  - ✅ **ConfigView** — 2026-05-15 整页重做完成：拆出 7 个子组件（ConfigField / ConfigListField / ConfigKvField / ConfigObjectGroup / ConfigSecretInput / ConfigJsonInput / ConfigStatusStrip）+ 1 个 helper（section-labels.ts），ConfigFieldEditor.vue 改成 deprecated 空壳。任务字段改"按 namespace 分桶 → AppPanelSection × N → ConfigField × N"，单字段基于公共 FieldGroup（switch/select/number 走 inline 模式、其它走 stacked），错误态加左红边 + helper 红字、未保存字段加左黄边 + 已修改 tag + 字段级"撤销"按钮；list / kv 行 flex 布局，switch 类不再撑满 1fr；object 改左 border 装饰 + ≥2 层折叠，去掉卡套卡。toolbar 接入 PageToolbar，diff/backup/audit 全部收纳进 AppPanelSection。`vue-tsc --noEmit` 0 error，`npm run build` 5.43s 通过，ConfigView bundle 52 KB / gzip 17.5 KB。
+  - ✅ **SystemView** — 2026-05-15 完成 PR B-1 helpers / B-2 9 只读子组件 / B-3 3 交互子组件 / C 视觉收敛 4 轮拆分：3326 行 → 590 行（-82%）+ 12 个 < 500 行子组件，头部样式收敛到 [AppPanelSection](../admin/frontend/src/components/common/AppPanelSection.vue)。同日另做布局重构：删 SystemMetrics 引用、资源上移、Policies 加配置跳转、advancedTools 软下线 schedule/scheduler/usage（详见 [maintenance-log.md](../maintenance-log.md)）。
+  - ✅ **SlangView** — 2026-05-15 完成 PR B-1 helpers / B-2 4 只读子组件 / B-3 5 交互子组件 / C 视觉收敛 4 轮拆分：2662 行 → **814 行（-69.4%）** + 9 个子组件 + 3 helper，头部样式全部迁到 [AppPanelSection](../admin/frontend/src/components/common/AppPanelSection.vue)。PR C 把 SlangTermList 的 `slang-list-panel` 与主视图的 `slang-settings-panel` 两块 panel-head 改 AppPanelSection（含 `#aside` slot 顶替分页/折叠按钮），删 7 块冗余样式（panel-head/eyebrow/title/list-panel/settings-panel padding，约 62 行）；`SlangView-*.js` 60.89→**60.63 KB** / gzip 17.34→**17.26 KB**（B-3 +overhead 全部回吐 + 微净降）。
 
 历史已统一风格的页面（2026-05-06 第一轮手工统一）：
 
@@ -251,7 +259,6 @@ storage/
 - [agent-ui-guidelines.md](./agent-ui-guidelines.md)
 - [web-refactor-plan.md](./web-refactor-plan.md)（**新**，分阶段方案）
 - [tracking/web-refactor.md](./tracking/web-refactor.md)（**新**，逐项勾选跟踪）
-- [session-handoff.md](./session-handoff.md)
 
 #### 项目内 Agent / Codex Skill
 
@@ -280,7 +287,7 @@ storage/
 - 流程：Claude 写 spec → 用户 `git stash` + 建分支 `task-YYYYMMDD-NN` → codex 执行 → 用户把 `git diff HEAD` 贴给 Claude 审查 → 通过后 commit + `git stash pop`（不 merge 回 main，main 可能严重落后）
 - spec 必含字段：目标 / 约束 / 动的文件 / 不准动 / 验收命令（可 0/非 0 判断）/ 用户复制命令段（6 步）/ 审查要点
 - 2026-05-14 已做一轮干跑验证，修复三个初版 spec 漏洞（`git diff main` → `git diff HEAD`、grep 误匹配文档注释、期望数字与实际不一致）。详见 maintenance-log。
-- 当前第一个 spec：[TASK-20260514-01](../.claude/handoff/TASK-20260514-01-remove-redundant-important.md) — 删除 `global.css` 冗余 `!important` 块（期望 `!important` 从 51 降到 31）
+- 当前第一个 spec：[TASK-20260514-01](../.claude/handoff/TASK-20260514-01-remove-redundant-important.md) — 删除 `global.css` 冗余 `!important` 块（期望 `!important` 从 51 降到 31）。**2026-05-14 已由 Claude 在主线直接完成（视觉验收通过后），spec 未交给 codex 执行；保留作为干跑验证案例。**
 
 适合给 codex 做的：机械转换 / 照表执行 / 规则明确的样板代码。
 不给 codex 做：视觉设计 / 信息架构 / 跨层贯穿改动 / 调试 / 鉴权相关。

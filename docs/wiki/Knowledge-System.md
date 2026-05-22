@@ -29,10 +29,10 @@ storage/plugins/config/knowledge.json
 | 插件状态 | 已启用 |
 | 扫描目录 | `docs/knowledge` |
 | 持久索引 | `storage/knowledge_index.db` |
-| 当前索引规模 | 3 个生产文档源 / 15 个 chunk |
+| 当前仓库文档源 | 7 个 Markdown 文件（`docs/knowledge/music-games/*` 与 `docs/knowledge/omubot/*`） |
 | 动态注入方式 | 由 `ContextPlugin` 统一打包为 `上下文资料` |
 
-说明：生产聊天知识现在只扫描 `docs/knowledge`。`docs/wiki`、`docs/audits`、`docs/superpowers` 继续保留为研发和留档资料，但默认不进入日常聊天检索。
+说明：生产聊天知识现在只扫描 `docs/knowledge`。`docs/wiki`、`docs/audits`、`docs/superpowers` 继续保留为研发和留档资料，但默认不进入日常聊天检索。实际 chunk 数以 `/admin/knowledge` 的索引状态为准；修改知识文档后需要重新扫描。
 
 ## 当前结构
 
@@ -331,7 +331,7 @@ docker compose up -d --build bot
 - `graph_fact`：知识图谱事实命中。
 - `Prompt Pack`：最终会被打包进上下文的文本。
 
-`ContextPlugin` 现在默认接管动态上下文。调整知识库、记忆或图谱抽取规则后，建议先用这个页面做人工评测，再观察真实聊天效果。
+`ContextPlugin` 现在是 system/locked 能力包，默认接管动态上下文。调整知识库、记忆或图谱抽取规则后，建议先用这个页面做人工评测，再观察真实聊天效果。
 
 ### 8. 查看评测指标
 
@@ -425,7 +425,7 @@ Omubot 管理端也叫 Web 后台、Admin Console、控制台。
 | `doc_chunk` | 文档知识库 |
 | `graph_fact` | 知识图谱 |
 
-默认情况下，`ContextPlugin` 会统一打包 memory/doc/graph，并注入一个 `上下文资料` 动态块，避免 `MemoPlugin` 和 `KnowledgePlugin` 重复注入。
+默认情况下，`ContextPlugin` 会统一打包 memory/doc/graph，并注入一个 `上下文资料` 动态块，避免 `MemoPlugin` 和 `KnowledgePlugin` 重复注入。`ContextPlugin` 的 manifest 为 `tier=system`、`toggle_policy=locked`；日常不应在插件中心关闭它。
 
 如果需要回滚，可在插件配置中关闭 `ContextPlugin.enabled` 或 `takeover_dynamic_prompt`。关闭后，旧路径会恢复：`KnowledgePlugin` 直接把知识库 chunk 注入动态 Prompt，`MemoPlugin` 直接注入实体记忆动态块。
 

@@ -251,10 +251,13 @@ async def on_pre_prompt(self, ctx: PromptContext) -> None:
     )
 ```
 
-`position` 控制缓存行为：
-- `static`: 永不变化，放缓存断点 1 之前
-- `stable`: 罕变，放缓存断点 2 之前
-- `dynamic`: 每轮可变，放缓存断点 2 之后
+`position` 控制块在 system prompt 中的位置和缓存语义：
+
+- `static`: 永不变化的内容（身份、共享前缀）。放在最前面，缓存优先级最高。
+- `stable`: 偶尔变化的内容（群 profile、工具库视图）。放在 static 之后。
+- `dynamic`: 每轮变化的内容（心情、好感度、时间）。放在最后，不缓存。
+
+缓存断点由 spine 自动管理——插件**不需要**手动设置 `cache_control`。`LLMClient._dispatch_call` 会根据当前 task 的 `TaskCacheProfile` 在每个 segment 尾部自动注入 `cache_control: ephemeral` 标记，并确保总数不超过 Anthropic 的 ≤4 marker 上限。插件只需选择正确的 `position`，spine 负责缓存优化。
 
 ## 消息拦截
 

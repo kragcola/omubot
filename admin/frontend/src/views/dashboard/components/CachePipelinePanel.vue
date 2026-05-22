@@ -1,44 +1,18 @@
 <script setup lang="ts">
-import { NButton, NProgress, NTag } from 'naive-ui'
+import { NButton } from 'naive-ui'
 import { computed } from 'vue'
 
 import AppPanelSection from '../../../components/common/AppPanelSection.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import StateBadge from '../../../components/common/StateBadge.vue'
 import { cacheHitColor, formatHitPct } from '../../system/helpers/formatters'
-
-export interface CachePipelineTaskMetric {
-  task: string
-  calls: number
-  hit_tokens: number
-  miss_tokens: number
-  hit_pct: number | null
-}
-
-export interface CachePipelineGroup {
-  key: 'core_chat' | 'slang' | 'learning' | 'memory_graph'
-  label: string
-  tasks: string[]
-  calls: number
-  hit_tokens: number
-  miss_tokens: number
-  hit_pct: number | null
-  per_task: CachePipelineTaskMetric[]
-}
-
-export interface CachePipelineOverall {
-  calls: number
-  hit_tokens: number
-  miss_tokens: number
-  hit_pct: number | null
-}
-
-export interface CachePipelineData {
-  period: 'day' | 'week' | 'month'
-  generated_at: string
-  overall: CachePipelineOverall
-  pipelines: CachePipelineGroup[]
-}
+import {
+  type CachePipelineData,
+  type CachePipelineGroup,
+  type CachePipelineTaskMetric,
+  taskLabelZh,
+} from '../types'
+import BarColumnGroup, { type BarItem } from './BarColumnGroup.vue'
 
 interface Props {
   data: CachePipelineData | null
@@ -51,61 +25,7 @@ const emit = defineEmits<{
   (e: 'navigate', target: string): void
 }>()
 
-// Top-N chip rendering: at most 5 chips per pipeline. Sort by hit_pct DESC
-// (None last), then calls DESC. Tasks with calls === 0 are excluded — they
-// land in the "未触发" footnote so the chip strip stays signal-dense.
-const CHIP_LIMIT = 5
-
-interface ChipModel {
-  task: string
-  pct: number | null
-  calls: number
-  pctLabel: string
-  lowSample: boolean
-}
-
-function rankPerTask(tasks: CachePipelineTaskMetric[]): {
-  chips: ChipModel[]
-  hidden: number
-  untriggered: number
-} {
-  const triggered = tasks.filter(t => t.calls > 0)
-  const untriggered = tasks.length - triggered.length
-
-  triggered.sort((a, b) => {
-    const aPct = a.hit_pct
-    const bPct = b.hit_pct
-    if (aPct === null && bPct === null) return b.calls - a.calls
-    if (aPct === null) return 1
-    if (bPct === null) return -1
-    if (bPct !== aPct) return bPct - aPct
-    return b.calls - a.calls
-  })
-
-  const visible = triggered.slice(0, CHIP_LIMIT)
-  const hidden = Math.max(0, triggered.length - CHIP_LIMIT)
-  const chips: ChipModel[] = visible.map(t => ({
-    task: t.task,
-    pct: t.hit_pct,
-    calls: t.calls,
-    pctLabel: formatHitPct(t.hit_pct),
-    lowSample: t.calls < 3,
-  }))
-  return { chips, hidden, untriggered }
-}
-
-function pctToPercent(pct: number | null): number {
-  if (typeof pct !== 'number' || Number.isNaN(pct)) return 0
-  return Math.max(0, Math.min(100, Math.round(pct * 100)))
-}
-
-function chipTagType(pct: number | null): 'success' | 'warning' | 'error' | 'default' {
-  if (pct === null) return 'default'
-  if (pct >= 0.85) return 'success'
-  if (pct >= 0.40) return 'default'
-  if (pct >= 0.20) return 'warning'
-  return 'error'
-}
+const RECENT_LIMIT = 5
 
 const overall = computed(() => props.data?.overall ?? null)
 const pipelines = computed(() => props.data?.pipelines ?? [])
@@ -118,6 +38,59 @@ const isEmpty = computed(() => {
   if (!o) return true
   return o.calls === 0
 })
+
+// Pad all task-bar groups to the global max task count (across all 4
+// pipelines — currently 6 from `learning`). Without this, the
+// `core_chat`/`slang`/`memory_graph` 4-task cards render fat bars while
+// `learning`'s 6-task card renders narrow ones, breaking the "4 cards
+// look identical" requirement.
+const maxTaskCount = computed(() => {
+  const counts = pipelines.value.map(p => p.per_task.length)
+  return counts.length > 0 ? Math.max(...counts) : 0
+})
+
+function badgeStatus(pct: number | null | undefined): 'success' | 'warning' | 'error' | 'default' {
+  if (typeof pct !== 'number' || Number.isNaN(pct)) return 'default'
+  if (pct >= 0.85) return 'success'
+  if (pct >= 0.40) return 'default'
+  if (pct >= 0.20) return 'warning'
+  return 'error'
+}
+
+function taskBars(p: CachePipelineGroup): BarItem[] {
+  const bars: BarItem[] = p.per_task.map((t: CachePipelineTaskMetric) => ({
+    label: taskLabelZh(t.task),
+    value: t.hit_pct,
+    badge: t.calls > 0 ? `${t.calls} 次` : '未触发',
+  }))
+  // Pad with placeholder slots so widths match across pipelines.
+  while (bars.length < maxTaskCount.value) {
+    bars.push({ label: '', value: null, placeholder: true })
+  }
+  return bars
+}
+
+function recentBars(p: CachePipelineGroup): BarItem[] {
+  const samples = p.recent?.samples ?? []
+  // Backend returns newest-first; reverse so newest renders rightmost.
+  const reversed = samples.slice().reverse()
+  const bars: BarItem[] = reversed.map((s, i) => ({
+    label: `-${reversed.length - i}`,
+    value: s.hit_pct,
+    badge: taskLabelZh(s.task),
+    highlight: i === reversed.length - 1,
+  }))
+  // Always pad to RECENT_LIMIT so all 4 cards have the same column count.
+  while (bars.length < RECENT_LIMIT) {
+    bars.push({ label: '', value: null, placeholder: true })
+  }
+  return bars
+}
+
+function recentLabel(p: CachePipelineGroup): string {
+  const calls = p.recent?.calls ?? 0
+  return calls > 0 ? `近 ${calls} 次` : '近 0 次'
+}
 
 function onNavigate() {
   emit('navigate', '/system')
@@ -139,6 +112,12 @@ function onNavigate() {
         label="今日 0 次"
         compact
       />
+      <StateBadge
+        v-if="overall?.recent && overall.recent.calls > 0"
+        :status="badgeStatus(overall.recent.hit_pct)"
+        :label="`近 ${overall.recent.calls} 次 · ${formatHitPct(overall.recent.hit_pct)}`"
+        compact
+      />
     </template>
 
     <EmptyState
@@ -147,148 +126,149 @@ function onNavigate() {
       description="等待第一次 LLM 调用后会在这里看到分管线命中率。"
     />
 
-    <div v-else class="cache-pipeline-list">
-      <p v-if="showLowSampleHint" class="cache-pipeline-hint">
+    <div v-else class="cache-pipeline">
+      <p v-if="showLowSampleHint" class="cache-pipeline__hint">
         今日样本数较少（{{ overall?.calls ?? 0 }}），命中率仅供参考。
       </p>
 
-      <div
-        v-for="pipeline in pipelines"
-        :key="pipeline.key"
-        class="cache-pipeline-row"
-      >
-        <div class="cache-pipeline-row__head">
-          <div class="cache-pipeline-row__title">
-            <strong>{{ pipeline.label }}</strong>
-            <span class="cache-pipeline-row__meta">{{ pipeline.calls }} 次</span>
-          </div>
-          <div class="cache-pipeline-row__metrics">
-            <span class="cache-pipeline-row__pct">
-              {{ formatHitPct(pipeline.hit_pct) }}
-            </span>
+      <div class="cache-pipeline__grid">
+        <article
+          v-for="pipeline in pipelines"
+          :key="pipeline.key"
+          class="cache-pipeline-card"
+        >
+          <header class="cache-pipeline-card__head">
+            <strong class="cache-pipeline-card__title">{{ pipeline.label }}</strong>
+            <span class="cache-pipeline-card__meta">{{ pipeline.calls }} 次</span>
+          </header>
+
+          <dl class="cache-pipeline-card__rates">
+            <div class="cache-pipeline-card__rate">
+              <dt title="本周期内的总命中率（hit / (hit + miss)）">周期总</dt>
+              <dd :style="{ color: cacheHitColor(pipeline.hit_pct) }">
+                {{ formatHitPct(pipeline.hit_pct) }}
+              </dd>
+            </div>
+            <div class="cache-pipeline-card__rate">
+              <dt title="本周期内最近 N 次调用的加权命中率">{{ recentLabel(pipeline) }}</dt>
+              <dd :style="{ color: cacheHitColor(pipeline.recent?.hit_pct ?? null) }">
+                {{ formatHitPct(pipeline.recent?.hit_pct ?? null) }}
+              </dd>
+            </div>
+          </dl>
+
+          <BarColumnGroup
+            :bars="taskBars(pipeline)"
+            axis-label="按任务"
+          />
+          <BarColumnGroup
+            :bars="recentBars(pipeline)"
+            axis-label="近 5 次"
+          />
+
+          <footer class="cache-pipeline-card__foot">
             <NButton size="tiny" text @click="onNavigate">
               看明细
             </NButton>
-          </div>
-        </div>
-
-        <NProgress
-          type="line"
-          :height="8"
-          :percentage="pctToPercent(pipeline.hit_pct)"
-          :show-indicator="false"
-          :color="cacheHitColor(pipeline.hit_pct)"
-          rail-color="rgba(49, 108, 114, 0.08)"
-          :border-radius="6"
-          :fill-border-radius="6"
-        />
-
-        <template v-if="pipeline.calls > 0">
-          <div class="cache-pipeline-row__chips">
-            <NTag
-              v-for="chip in rankPerTask(pipeline.per_task).chips"
-              :key="chip.task"
-              size="tiny"
-              round
-              :type="chipTagType(chip.pct)"
-            >
-              {{ chip.task }} {{ chip.pctLabel }}{{ chip.lowSample ? '*' : '' }}
-            </NTag>
-            <NTag
-              v-if="rankPerTask(pipeline.per_task).hidden > 0"
-              size="tiny"
-              round
-              type="default"
-            >
-              +{{ rankPerTask(pipeline.per_task).hidden }}
-            </NTag>
-          </div>
-          <p
-            v-if="rankPerTask(pipeline.per_task).untriggered > 0"
-            class="cache-pipeline-row__footnote"
-          >
-            {{ rankPerTask(pipeline.per_task).untriggered }} 个未触发任务
-          </p>
-        </template>
-        <p
-          v-else
-          class="cache-pipeline-row__footnote"
-        >
-          {{ pipeline.tasks.length }} 个未触发任务
-        </p>
+          </footer>
+        </article>
       </div>
     </div>
   </AppPanelSection>
 </template>
 
 <style scoped>
-.cache-pipeline-list {
+.cache-pipeline {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
-.cache-pipeline-hint {
-  margin: 0 0 -4px;
+.cache-pipeline__hint {
+  margin: 0;
   color: var(--om-text-3);
   font-size: 12px;
   line-height: 1.5;
 }
 
-.cache-pipeline-row {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.cache-pipeline-row__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+.cache-pipeline__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
-.cache-pipeline-row__title {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
+@media (max-width: 1100px) {
+  .cache-pipeline__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
-.cache-pipeline-row__title strong {
+@media (max-width: 760px) {
+  .cache-pipeline__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cache-pipeline-card {
+  padding: 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: var(--om-surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.cache-pipeline-card:hover {
+  background: color-mix(in srgb, var(--om-surface-3) 60%, var(--om-surface-2));
+  transform: translateY(-1px);
+}
+
+.cache-pipeline-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cache-pipeline-card__title {
   color: var(--om-text-1);
   font-size: 13px;
   font-weight: 600;
 }
 
-.cache-pipeline-row__meta {
+.cache-pipeline-card__meta {
   color: var(--om-text-3);
   font-size: 11px;
 }
 
-.cache-pipeline-row__metrics {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 10px;
+.cache-pipeline-card__rates {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 12px;
 }
 
-.cache-pipeline-row__pct {
-  color: var(--om-text-1);
+.cache-pipeline-card__rate dt {
+  font-size: 11px;
+  color: var(--om-text-3);
+  cursor: help;
+  margin-bottom: 2px;
+}
+
+.cache-pipeline-card__rate dd {
+  margin: 0;
   font-size: 16px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  line-height: 1.2;
 }
 
-.cache-pipeline-row__chips {
+.cache-pipeline-card__foot {
+  margin-top: auto;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.cache-pipeline-row__footnote {
-  margin: 0;
-  color: var(--om-text-3);
-  font-size: 11px;
-  line-height: 1.5;
+  justify-content: flex-end;
 }
 </style>

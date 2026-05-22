@@ -8,7 +8,7 @@ from typing import Any
 import aiosqlite
 from loguru import logger
 
-from services.storage import connect_sqlite
+from services.storage import close_with_checkpoint, connect_sqlite
 
 _L = logger.bind(channel="debug")
 
@@ -59,7 +59,7 @@ class MessageLog:
     async def close(self) -> None:
         """Close the database connection."""
         if self._db:
-            await self._db.close()
+            await close_with_checkpoint(self._db, name="messages")
             self._db = None
 
     async def record(
@@ -102,6 +102,41 @@ class MessageLog:
                LIMIT ?""",
             (group_id, limit),
         )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in list(rows)[::-1]]
+
+    async def query_term_hits(
+        self,
+        group_id: str,
+        terms: list[str],
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return up to N user messages from the group whose content_text
+        contains any of the given terms. Used by the backlog reviewer to
+        gather concrete UGC evidence for a candidate slang term.
+
+        Performs a LIKE scan; for now we rely on the existing group/time
+        index. If hit volume gets large, add a FTS5 mirror.
+        """
+        if not self._db or not terms:
+            return []
+        cleaned = [t for t in (str(t or "").strip() for t in terms) if t]
+        if not cleaned:
+            return []
+        # OR over a short list of LIKE clauses; keep the term list bounded
+        # by the caller (alias count) so this stays a small predicate.
+        like_clauses = " OR ".join(["content_text LIKE ?"] * len(cleaned))
+        params: list[Any] = [group_id]
+        params.extend(f"%{t}%" for t in cleaned)
+        params.append(limit)
+        sql = (
+            "SELECT role, speaker, content_text, message_id, created_at "
+            "FROM group_messages "
+            f"WHERE group_id = ? AND role = 'user' AND content_text IS NOT NULL AND ({like_clauses}) "
+            "ORDER BY created_at DESC LIMIT ?"
+        )
+        cursor = await self._db.execute(sql, params)
         rows = await cursor.fetchall()
         return [dict(row) for row in list(rows)[::-1]]
 

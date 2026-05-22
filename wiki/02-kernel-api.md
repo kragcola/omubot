@@ -156,7 +156,7 @@ _L = logger.bind(channel="bus")
 
 ## 配置模块
 
-内核配置位于 `kernel.config`，提供 23 个 Pydantic 模型 + `load_config()`。
+内核配置位于 `kernel.config`，提供 `BotConfig`、群访问策略、LLM profiles、JSON/TOML 兼容加载和 `load_config()`。
 
 ### 导入
 
@@ -194,7 +194,7 @@ def load_config(
 ) -> BotConfig: ...
 ```
 
-三层合并：Pydantic 默认值 → TOML 文件 → 环境变量 → CLI 参数。
+合并顺序：Pydantic 默认值 → 配置文件（`config/config.json` 优先，`config/config.toml` 兼容）→ 环境变量 → CLI 参数。
 
 ### 向后兼容
 

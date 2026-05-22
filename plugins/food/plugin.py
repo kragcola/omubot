@@ -1178,4 +1178,6 @@ class FoodPlugin(AmadeusPlugin):
                 text="[食物偏好] " + "；".join(parts),
                 label="food_pref",
                 position="stable",
+                priority=60,
+                source="food",
             )

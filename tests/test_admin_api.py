@@ -1695,8 +1695,13 @@ def test_system_runtime_errors_endpoint_and_health(tmp_path: Path) -> None:
 
 
 def test_system_services_health_endpoint(tmp_path: Path) -> None:
-    for name in ("messages.db", "memory_cards.db", "slang.db"):
-        with sqlite3.connect(tmp_path / name) as conn:
+    storage_dir = tmp_path / "storage"
+    storage_dir.mkdir()
+    for name in (
+        "messages.db", "memory_cards.db", "slang.db", "usage.db",
+        "style.db", "knowledge_graph.db", "knowledge_index.db", "learning_normalizer.db",
+    ):
+        with sqlite3.connect(storage_dir / name) as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS marker (id INTEGER PRIMARY KEY)")
 
     config = BotConfig.model_validate({
@@ -1711,15 +1716,15 @@ def test_system_services_health_endpoint(tmp_path: Path) -> None:
     bus.register(_AlphaPlugin())
     runtime_errors = RuntimeErrorStore()
     ctx = SimpleNamespace(
-        storage_dir=tmp_path,
+        storage_dir=storage_dir,
         bus=bus,
         llm_client=object(),
         protocol_trace=ProtocolTraceStore(),
         protocol_connections=ProtocolConnectionHistory(),
         runtime_errors=runtime_errors,
-        msg_log=SimpleNamespace(_db_path=str(tmp_path / "messages.db")),
-        card_store=SimpleNamespace(_db_path=str(tmp_path / "memory_cards.db")),
-        slang_store=SimpleNamespace(_db_path=str(tmp_path / "slang.db"), initialized=False),
+        msg_log=SimpleNamespace(_db_path=str(storage_dir / "messages.db")),
+        card_store=SimpleNamespace(_db_path=str(storage_dir / "memory_cards.db")),
+        slang_store=SimpleNamespace(_db_path=str(storage_dir / "slang.db"), initialized=False),
         short_term=SimpleNamespace(_store={"group_1": object()}),
         retrieval=SimpleNamespace(semantic_status=lambda: {
             "enabled": True,
@@ -1741,7 +1746,7 @@ def test_system_services_health_endpoint(tmp_path: Path) -> None:
     assert resp.status_code == 200
     payload = resp.json()
     service_ids = {item["id"] for item in payload["services"]}
-    assert {"llm", "plugin_bus", "runtime_errors", "sqlite", "memory", "slang", "napcat"} <= service_ids
+    assert {"llm", "plugin_bus", "runtime_errors", "sqlite", "memory", "slang", "napcat", "backup", "backup_disk"} <= service_ids
     sqlite_service = next(item for item in payload["services"] if item["id"] == "sqlite")
     assert sqlite_service["status"] == "ok"
     runtime_service = next(item for item in payload["services"] if item["id"] == "runtime_errors")
@@ -1752,7 +1757,8 @@ def test_system_services_health_endpoint(tmp_path: Path) -> None:
     assert memory_service["meta"]["semantic"]["hits"] == 2
     assert memory_service["meta"]["semantic"]["hit_rate"] == 0.5
     assert payload["summary"]["ok"] >= 3
-    assert payload["alerts"] == []
+    error_alerts = [a for a in payload["alerts"] if a.get("severity") == "error"]
+    assert error_alerts == []
     assert payload["policy"]["suppressed_count"] >= 2
     assert payload["maintenance_window"]["recommended"] is False
     assert payload["maintenance_window"]["restart_recommended"] is False

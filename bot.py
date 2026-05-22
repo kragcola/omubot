@@ -276,5 +276,51 @@ _logger.info(
     len(_bus.plugins),
 )
 
+# ---- Backup scheduler ----
+import asyncio  # noqa: E402
+
+from services.storage.backup_scheduler import BackupScheduler  # noqa: E402
+
+_backup_scheduler: BackupScheduler | None = None
+
+
+def get_backup_scheduler() -> BackupScheduler | None:
+    return _backup_scheduler
+
+
+@driver.on_startup
+async def _start_backup_scheduler():
+    global _backup_scheduler
+    _backup_scheduler = BackupScheduler(
+        storage_dir=_storage_dir,
+        repo_root=_Path.cwd(),
+        daily_time=_bot_config.backup.daily_time,
+        keep_days=_bot_config.backup.keep_days,
+        default_profile=_bot_config.backup.default_profile,
+        enabled=_bot_config.backup.enabled,
+    )
+    await _backup_scheduler.start()
+
+    async def _smoke_test_backup():
+        await asyncio.sleep(60)
+        try:
+            manifest = await _backup_scheduler.run_now()
+            trusted = manifest.get("summary", {}).get("trusted", False)
+            if trusted:
+                logger.info(f"startup backup smoke test ok: {manifest['backup_id']}")
+            else:
+                logger.warning(f"startup backup smoke test untrusted: {manifest.get('summary')}")
+        except Exception as e:
+            logger.warning(f"startup backup smoke test failed: {e}")
+
+    _backup_smoke_task = asyncio.create_task(_smoke_test_backup())  # noqa: RUF006
+
+
+@driver.on_shutdown
+async def _stop_backup_scheduler():
+    if _backup_scheduler is not None:
+        await _backup_scheduler.stop()
+
+
 if __name__ == "__main__":
     nonebot.run()

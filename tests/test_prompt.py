@@ -62,7 +62,10 @@ def test_build_static_called_once(identity: Identity) -> None:
     assert "I am a bot." in pb.static_block["text"]
     assert "Test instruction." in pb.static_block["text"]
     assert "Proactive rules." in pb.static_block["text"]
-    assert pb.static_block["cache_control"] == {"type": "ephemeral"}
+    # cache_control is no longer stamped here — spine
+    # (apply_cache_breakpoints in LLMClient._dispatch_call) is the
+    # single source of truth, capped at Anthropic's ≤4-marker limit.
+    assert "cache_control" not in pb.static_block
 
 
 async def test_build_blocks_base(identity: Identity, store: CardStore) -> None:
