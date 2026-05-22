@@ -25,6 +25,7 @@ storage/image_cache/
 storage/stickers/
 storage/plugins/
 storage.bind-mount-snapshot-*/
+.restore-staging/
 storage-export/
 !storage/.gitkeep
 !storage/plugins/.gitkeep

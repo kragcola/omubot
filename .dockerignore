@@ -17,6 +17,7 @@ __pycache__
 config/
 storage/
 storage.bind-mount-snapshot-*/
+.restore-staging/
 admin/frontend/node_modules/
 admin/frontend/
 tests/
