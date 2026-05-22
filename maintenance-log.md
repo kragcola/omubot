@@ -4,6 +4,74 @@
 
 ---
 
+## 2026-05-23 阶段 5.2 Vite manualChunks 拆分 + 阶段 0.6 镜像 rebuild 部署
+
+**变更类型**：admin/frontend 构建优化 + deploy（rebuild bot，承接 commit `7a004a0` 的 `admin/__init__.py` + `admin/auth.py` + `admin/routes/api/usage.py` 三处 .py 改动）
+
+**背景**：
+
+- commit `7a004a0` 已落地阶段 0.6 + 阶段 3 长尾收口 + 阶段 4 月度脚本，但 `admin/{__init__,auth}.py` + `admin/routes/api/usage.py` 是 `.py` 改动，bind-mount 不生效（D6）——容器内 import 仍是旧 `admin.routes.usage` / `create_login_router()`，必须 rebuild.
+- 同时按 plan §8.2 启动**阶段 5.2 chunk 拆分**：上一批阶段 3 长尾收口后，21 视图大头 `<AppCard>` → `<AppPanelSection>` 已经全部完成，视图代码瘦身完毕，到了拆 vendor chunk 收益最大的时机。
+
+**改动**：
+
+| 文件 | 类型 | 关键动作 |
+| --- | --- | --- |
+| `admin/frontend/vite.config.ts` | 编辑 | `build.rollupOptions.output.manualChunks` 函数：`@vicons/*` → `vendor-icons`；`vue` / `@vue` / `vue-router` / `pinia` → `vendor-vue`；其余包不切（避免破坏 naive-ui per-component lazy chunk） |
+| `admin/static/index.html` | 编辑 | Vite 自动重写：`index-D9uQnvm4.js` → `index-mRjgZdkh.js`，并新增 2 个 `<link rel="modulepreload">` 指向 vendor chunk（浏览器 DOM ready 即可并行预拉，首屏不慢） |
+
+**chunk size 对比**（阶段 5.2 前 → 后）：
+
+| chunk | 之前 | 之后 | gzip 之后 |
+| --- | ---: | ---: | ---: |
+| `index-*.js` (entry) | 453 KB | **345.61 KB** | **100.68 KB** |
+| `vendor-vue-*.js` (新) | — | **113.23 KB** | **44.32 KB** |
+| `vendor-icons-*.js` (新) | — | **57.77 KB** | **11.53 KB** |
+
+entry 直减 108 KB；vendor 长期 hash 稳定，**视图 hot-fix 时只重发 entry，浏览器仍命中 vendor 缓存**——这是拆 chunk 的真实长期收益，不仅是首次加载体积。naive-ui 不动是刻意的：它已经在做 per-component lazy chunk（`DataTable-*.js` 84KB / `Select-*.js` 55KB / `Popover-*.js` 44KB / `Tabs-*.js` 29KB / `Pagination-*.js` 24KB / `Dropdown-*.js` 19KB），强行合 vendor 反会撑大首屏。
+
+**Docker rebuild**：
+
+```bash
+dot_clean . && docker compose up bot -d --build
+```
+
+- 67s 完成（builder layer 7→9 实际跑，1→6 全 cached）
+- 镜像 hash `8ed08b80343e`
+- 阶段：`bot Built` → `qq-bot Recreated` → `qq-bot Started`，napcat 不动 ✅
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error
+- `cd admin/frontend && npm run build` → ✓ built in 10.56s，新产物落 `admin/static/assets/`
+- `docker compose ps`：napcat 7h Up + qq-bot 32s Up
+- `docker logs qq-bot --tail 15`：`Bot 384801062 connected` + history loaded `group=993065015 messages=17` / `group=984198159 messages=24` + `Bot 就绪，开始接收消息 ✓` + 群消息流正常（`silent_learn` 已收到测试群 963085812 一条消息）
+- `curl http://localhost:8081/admin/` → 200（SPA shell）
+- `curl http://localhost:8081/admin/static/assets/vendor-vue-DFO2iBvO.js` → 200 size=113232
+- `curl http://localhost:8081/admin/static/assets/vendor-icons-DHfKRr0A.js` → 200 size=57771
+- `curl 'http://localhost:8081/api/admin/usage/data?period=day'` → 401（无 cookie 时正确拒绝，证明阶段 0.6 新端点 + auth 中间件正常工作）
+- `curl http://localhost:8081/admin/api/health` → 200
+- `bash scripts/check-ui-compliance.sh` → 数字保持基线（residue=21 / AppCard=25 / AppPanelSection=34 / !important=31，无回归）
+
+**影响范围**：
+
+- 后端：rebuild 后 `admin.routes.usage` import 报错的窗口正式关闭；`/admin/login` POST / `/admin/logout` GET / 7 个 Jinja 子路由全部退役（commit `7a004a0` 已 git rm，但容器层在本次 rebuild 后才真正失效）
+- 前端：构建产物体积变化为 entry -108 KB / +2 个 vendor chunk；浏览器首次加载并行拉 3 个 chunk 总量基本持平，**回访时 vendor 长 cache，只增量拉 entry**
+- Bundle size budget 与 plan §2.1 目标对齐："构建产物体积不恶化，首屏 chunk 不超过 1.1 倍"——entry 实际更小，整体未恶化
+
+**回滚**：
+
+- vite 改动：`git revert <commit>` + `cd admin/frontend && npm run build`，bind mount 自动生效
+- 镜像：`GIT_COMMIT=8cb1b9a docker compose up bot -d --build` 回到上一镜像（5-22 22:46 D+E 镜像）即可
+- vendor chunk 拆分是纯 build-time 行为，无运行态污染
+
+**遗留**：
+
+- D+E 24h 验证窗口仍在跑，今晚 22:46 截止后跑维护日志里的 SQL 把 `hit_pct` 写一条
+- plan §8.1 npm → pnpm 迁移、§8.2 之外的可选项不在本批；plan §7 长尾月度合规扫描走脚本即可，不再开 P-N 批次
+
+---
+
 ## 2026-05-23 阶段 0.6 Jinja 退役完成（一刀切落地）
 
 **变更类型**：admin 后端重构 + SPA 端点迁移（**含 .py 改动 → 需 rebuild bot，D6**）

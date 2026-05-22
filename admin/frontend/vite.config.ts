@@ -41,6 +41,17 @@ export default defineConfig({
   build: {
     outDir: '../static',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return
+          if (id.includes('/@vicons/')) return 'vendor-icons'
+          if (/[\\/]node_modules[\\/](vue|@vue|vue-router|pinia)[\\/]/.test(id)) {
+            return 'vendor-vue'
+          }
+        },
+      },
+    },
   },
   server: {
     port: 5173,
