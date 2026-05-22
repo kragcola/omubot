@@ -4,6 +4,50 @@
 
 ---
 
+## 2026-05-23 SlangView U-1 ~ U-14 收口（前端 sidebar 退场 + 多 slot 测试 + 跟踪文档校准）
+
+**变更类型**：admin/frontend 视图重构（slang）+ tests + docs
+
+**背景**：
+
+- 上一轮盘点发现 [docs/tracking/web-refactor.md](docs/tracking/web-refactor.md) 「2026-05-15 SlangView UX 重构」14 个子任务实际完成度参差：U-10 `SlangSnapshotStrip.vue` 文件存在但**全仓零引用**；U-11 `SlangAdvancedOverview.vue` 被清空成 0 字节但**未 git rm**；U-13 主视图保留 `slang-main-layout` 双栏 + `<aside class="slang-sidebar">`，与 plan 「单栏 hero + Strip + Drawer」相悖，造成两套 settings 入口（侧栏 7 个 NSwitch + Drawer Tab）；U-14 popconfirm 文案被简化丢了 force/跳过当日去重/配额提示三要点；U-5 多 slot 测试缺位。
+- 用户指令「依次收口」——按 U-13 / U-11 / U-5 / U-12-U-14 顺序处理，并把跟踪文档对齐到现状。
+
+**改动**：
+
+| 文件 | 类型 | 关键动作 |
+| --- | --- | --- |
+| `admin/frontend/src/views/slang/SlangView.vue` | 编辑（1029 → 849 行，−180 行） | 删整个 `slang-main-layout` 双栏 grid + `<aside class="slang-sidebar">` 块（7 个 NSwitch / NDynamicTags / autoSaveSidebarSettings 防抖）；hero `#action` 从 3 按钮扩到 5：「刷新 / 手动抽取 / AI 清池(NPopconfirm) / 新建黑话 / ⚙ 设置」；接入 `SlangSnapshotStrip` 在 SummaryBar 之后；`SlangExtractionProgress` / `SlangStatsCards` 落入主列；删 `AppCard` / sidebar 相关 ref / watch / autoSave 函数；删全部 sidebar scoped CSS（约 65 行） |
+| `admin/frontend/src/views/slang/components/SlangAdvancedOverview.vue` | git rm | 0 字节孤儿文件物理移除 |
+| `tests/test_slang_plugin.py` | 编辑（+~155 行） | 新增 8 个 U-5 用例：① validator dedup/sort/默认回退（空列表/None/`""`）；② validator 拒绝非 HH:MM（`25:00 / 12:60 / abc / 12-30`）；③ plugin slot 决策 6 个：`disabled / no_slots / not_due / due 跑完 → 锁 slot / 同 slot rerun → already_ran / 跨 slot reset`，用 `monkeypatch` 冻结 `datetime.now(TZ_SHANGHAI)` + stub `_SlotMemStore` 模拟 meta KV |
+| `docs/tracking/web-refactor.md` | 编辑（+27 行） | 在 U-1 ~ U-14 表后追加「✅ 2026-05-23 收口」段：列出 6 处偏差校准（U-2 `run_backlog_review_one_batch_if_due` + `last_backlog_review_slot` 命名；U-3 走「ctx 可选」路；U-12 width=480 + 三 Tab `抽取/清池/注入`；U-13 hero 5 按钮 + 删 sidebar；U-11 git rm；U-14 popconfirm 文案改回 plan 原版）+ 验证证据 |
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error
+- `cd admin/frontend && npm run build` → 成功；`SlangView-*.js` 76.74 KB → **73.42 KB**（gzip 21.98 → **20.92 KB**）；entry 与 vendor chunk 体积稳定（vendor-vue 113.23 KB / vendor-icons 57.77 KB / index 345.61 KB 不变）
+- `pkill -9 -f pytest && uv run pytest tests/test_slang_plugin.py -q` → **16 passed in 0.50s**（原 8 个 + 新增 8 个 U-5）
+- `bash scripts/check-ui-compliance.sh` → residue 21 / AppCard **24**（−1：`SlangAdvancedOverview.vue` 不算了）/ AppPanelSection 34 / `!important` 31 — 无新增违规
+
+**影响范围**：
+
+- **运行时**：`run_backlog_review_one_batch_if_due` 行为不变；hero「AI 清池」按钮文案重新对齐；删除 sidebar 后所有原 sidebar 配置项（learning_enabled / injection_enabled / review_required / backlog_review_search_enabled / drift_detection_enabled / backlog_review_enabled / backlog_auto_approve_enabled / max_injected_terms / extract_interval_minutes / daily_ai_review_times）只能在 ⚙ 设置 Drawer 中编辑——**用户编辑路径单一化**，无功能丢失
+- **bind-mount**：`admin/static` 直接生效（D6），**不需要 rebuild bot**，刷新浏览器即看到新 hero 与 Drawer
+- **运维心智**：与 plan 偏差校准已沉淀到 [docs/tracking/web-refactor.md](docs/tracking/web-refactor.md)，下次审查 SlangView 不会再被 U-12/U-13/U-14 看似未做的表象误导
+
+**回滚**：
+
+- 全量回滚：`git revert <本次 commit-range>`
+- 单独退回侧栏：`git checkout HEAD~ -- admin/frontend/src/views/slang/SlangView.vue` 后重新 `npm run build`
+- 测试单独回退：`git checkout HEAD~ -- tests/test_slang_plugin.py`
+
+**遗留**：
+
+- ⚠️ D+E 24h 缓存验证窗口（commit `0a0a12e`）今天 22:46 关闭，仍需跑一次 SQL 把 `cache_creation / cache_hit / cache_hit_pct` 写入维护日志
+- ⚠️ 本地 5 个 commit 领先 `origin/main`，未 push（按 git_safety policy 等用户指令）
+
+---
+
 ## 2026-05-23 阶段 5.2 Vite manualChunks 拆分 + 阶段 0.6 镜像 rebuild 部署
 
 **变更类型**：admin/frontend 构建优化 + deploy（rebuild bot，承接 commit `7a004a0` 的 `admin/__init__.py` + `admin/auth.py` + `admin/routes/api/usage.py` 三处 .py 改动）

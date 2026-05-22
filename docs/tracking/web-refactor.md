@@ -619,6 +619,29 @@ NDrawer "工作台设置"（⚙ 触发，~520 px）
 
 本节落入跟踪文档时**未动任何代码**。由用户审查上述 14 个子任务的拆分粒度、是否漏点、是否需要补 D2 cancel-path 测试（跨群多时段时 wait_for 取消的场景）等。审查通过后按 U-1 → U-14 顺序逐项落地，每一步给出 typecheck/build/test 证据。
 
+#### ✅ 2026-05-23 收口（U-1 ~ U-14 全部落地，含偏差校准）
+
+按 plan 逐项推进，期间为符合代码现状做了几处命名/结构偏差，统一校准如下：
+
+- **U-2** plugin 方法名落地为 `run_backlog_review_one_batch_if_due`（不是计划里的 `run_daily_ai_review_if_due`）；meta key 落地为 `last_backlog_review_slot`（不是 `last_daily_ai_review_slot`）。理由：与既有 `run_backlog_review_now / run_backlog_review_continuous` 命名一致，slot 与 backlog 语义绑定更准。
+- **U-3** 走第二条路线：把 `run_backlog_review_now/continuous(ctx=None, *, ...)` 改成可选 ctx，背景任务通过 `_bg_run_with_timeout(plugin, None)` 触发即可，不再缓存 `self._ctx`。
+- **U-4** 路径同 plan：[admin/routes/api/slang.py](../../admin/routes/api/slang.py) `POST /slang/ai-review/run`，plugin 不可用 → 503，`_backlog_review_in_flight=True` → 409，否则 `asyncio.create_task(_bg_run_with_timeout(plugin, None))`。
+- **U-5** 多 slot 测试落地为 8 个新增用例：validator dedup/sort/默认回退/HH:MM 拒绝；plugin slot 决策（`no_slots / not_due / due+drain → 锁 slot / 同 slot rerun → already_ran / 跨 slot reset / disabled`）。`uv run pytest tests/test_slang_plugin.py` 全绿（16 通过）。
+- **U-12** Drawer 的实际宽度与 Tab 命名与 plan 的「520 + 学习与注入 / 漂移与观察 / 统计与运行」不同，落地为 **width=480 + 抽取 / 清池 / 注入** 三 Tab：抽取 = SettingsForm 学习与抽取部分；清池 = 含 `daily_ai_review_times` 的 NDynamicTags + AI 清池开关 + 自动通过阈值；注入 = 注入开关、查询工具、Prompt 字符上限等。理由：与现有 backend 字段分组（`backlog_*`、`extract_*`、`inject_*`）一一对应，运维心智更直，移动端 480 已够用，不必再压。`SlangAdvancedOverview` 的 3 张概览卡复用为 `SlangStatsCards` 直接挂在主视图（不进 Drawer Tab 3）。
+- **U-13** hero 操作区落地为「刷新 / 手动抽取 / AI 清池（NPopconfirm）/ 新建黑话 / ⚙ 设置」5 个按钮；删除 `slang-main-layout` 双栏 grid + 整个 `<aside class="slang-sidebar">` 块（含 7 个 NSwitch、`daily_ai_review_times` NDynamicTags、`autoSaveSidebarSettings` 防抖逻辑）；接入 `SlangSnapshotStrip` 在 SummaryBar 之后；`SlangExtractionProgress` 与 `SlangStatsCards` 落入主列。`SlangView.vue` 从 1029 行降到 849 行（净 −180 行）。
+- **U-11** `SlangAdvancedOverview.vue` 物理删除（git rm，已不被任何文件引用）。
+- **U-14** Popconfirm 文案改回 plan 原版：「将立即对所有启用的群跑一次 AI 审核（force=true，跳过当日去重），可能消耗较多 LLM 配额。是否继续？」
+
+#### 验证证据
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error
+- `cd admin/frontend && npm run build` → 成功，`SlangView-*.js` 体积同步刷新
+- `pkill -9 -f pytest && uv run pytest tests/test_slang_plugin.py -q` → 16 passed
+- `bash scripts/check-ui-compliance.sh` → SlangView 内联样式 / `!important` 数无新增（只在已知白名单范围内）
+- 浏览器手测：hero 5 按钮可用；snapshot 4 胶囊常驻；⚙ Drawer 三 Tab 切换无白屏；AI 清池 popconfirm 文案完整；多时段输入接受 `04:00,16:00`，拒绝 `25:00`；保存后回显去重排序
+
+剩余可选追加：暂无。该 U-1 ~ U-14 计划闭环。
+
 ### ✅ 2026-05-21 KnowledgeView 拆分完成（B-1 helpers ✅ / B-2 只读子组件 ✅ / B-3 交互子组件 ✅ / C AppPanelSection ✅）
 
 按 SystemView / SlangView 同模板（B-1 helpers → B-2 只读子组件 → B-3 交互子组件 → C AppPanelSection 视觉收敛）推进。

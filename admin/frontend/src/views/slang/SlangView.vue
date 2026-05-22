@@ -8,7 +8,6 @@ import {
 import { useMessage } from 'naive-ui'
 
 import { api } from '../../api/client'
-import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
 import SlangStatsCards from './components/SlangStatsCards.vue'
 import SlangBacklogProgress from './components/SlangBacklogProgress.vue'
@@ -17,6 +16,7 @@ import SlangCreateDrawer from './components/SlangCreateDrawer.vue'
 import SlangDetailDrawer from './components/SlangDetailDrawer.vue'
 import SlangQueueToolbar from './components/SlangQueueToolbar.vue'
 import SlangSettingsDrawer from './components/SlangSettingsDrawer.vue'
+import SlangSnapshotStrip from './components/SlangSnapshotStrip.vue'
 import SlangSummaryBar from './components/SlangSummaryBar.vue'
 import SlangTermList from './components/SlangTermList.vue'
 import { statusLabel } from './helpers/badges'
@@ -235,59 +235,7 @@ async function loadSettings() {
   settings.value = mergeSlangSettings(data.settings || {}, settings.value)
   allowlistText.value = settings.value.group_allowlist.join('\n')
   stoplistText.value = settings.value.stoplist.join('\n')
-  sidebarAutoSaveReady.value = true
 }
-
-const sidebarAutoSaveReady = ref(false)
-let sidebarAutoSaveTimer: ReturnType<typeof setTimeout> | null = null
-
-const sidebarSettingsSnapshot = computed(() => ({
-  learning_enabled: settings.value.learning_enabled,
-  injection_enabled: settings.value.injection_enabled,
-  review_required: settings.value.review_required,
-  backlog_review_search_enabled: settings.value.backlog_review_search_enabled,
-  drift_detection_enabled: settings.value.drift_detection_enabled,
-  backlog_auto_approve_enabled: settings.value.backlog_auto_approve_enabled,
-  backlog_review_enabled: settings.value.backlog_review_enabled,
-  max_injected_terms: settings.value.max_injected_terms,
-  extract_interval_minutes: settings.value.extract_interval_minutes,
-  daily_ai_review_times: [...(settings.value.daily_ai_review_times || [])],
-}))
-
-async function autoSaveSidebarSettings() {
-  const times = settings.value.daily_ai_review_times || []
-  if (times.some((t: string) => !/^\d{2}:\d{2}$/.test(t))) {
-    message.warning('AI 清池时段请使用 HH:MM 格式')
-    return
-  }
-  try {
-    const payload = {
-      ...settings.value,
-      group_allowlist: allowlistText.value.split(/\n|,|，/).map(item => item.trim()).filter(Boolean),
-      stoplist: stoplistText.value.split(/\n|,|，/).map(item => item.trim()).filter(Boolean),
-    }
-    const data = await api('/api/admin/slang/settings', {
-      method: 'POST',
-      body: { settings: payload },
-    })
-    if (!data.ok) {
-      message.error(data.error || '保存设置失败')
-      return
-    }
-    settings.value = mergeSlangSettings(data.settings || {}, payload)
-  } catch (error) {
-    console.error('Failed to auto-save slang settings:', error)
-    message.error('保存设置失败')
-  }
-}
-
-watch(sidebarSettingsSnapshot, () => {
-  if (!sidebarAutoSaveReady.value) return
-  if (sidebarAutoSaveTimer) clearTimeout(sidebarAutoSaveTimer)
-  sidebarAutoSaveTimer = setTimeout(() => {
-    void autoSaveSidebarSettings()
-  }, 600)
-}, { deep: true })
 
 async function loadTerms(silent = false) {
   if (queueMode.value === 'drift') {
@@ -774,6 +722,27 @@ async function processDriftBacklog() {
           </template>
           刷新
         </NButton>
+        <NButton secondary size="small" :loading="extracting" @click="runExtract">
+          <template #icon>
+            <NIcon :component="SparklesOutline" />
+          </template>
+          手动抽取
+        </NButton>
+        <NPopconfirm
+          :positive-text="'确认执行'"
+          :negative-text="'取消'"
+          @positive-click="runForceAiReview"
+        >
+          <template #trigger>
+            <NButton secondary size="small" :loading="runningAiReview">
+              <template #icon>
+                <NIcon :component="SparklesOutline" />
+              </template>
+              AI 清池
+            </NButton>
+          </template>
+          将立即对所有启用的群跑一次 AI 审核（force=true，跳过当日去重），可能消耗较多 LLM 配额。是否继续？
+        </NPopconfirm>
         <NButton secondary size="small" @click="openCreateDrawer">
           <template #icon>
             <NIcon :component="PricetagsOutline" />
@@ -791,7 +760,11 @@ async function processDriftBacklog() {
 
     <SlangSummaryBar :summary="summary" @switch-queue-mode="setQueueMode" />
 
+    <SlangSnapshotStrip :summary="summary" />
+
     <SlangBacklogProgress :eligible-count="summary.eligible_backlog_count" @progress="loadSummary" />
+
+    <SlangExtractionProgress />
 
     <SlangQueueToolbar
       v-model:search-text="searchText"
@@ -809,107 +782,29 @@ async function processDriftBacklog() {
 
     <NSkeleton v-if="loading" :repeat="8" text />
 
-    <div v-else class="slang-main-layout">
-      <SlangTermList
-        v-model:page="page"
-        v-model:selected-term-ids="selectedTermIds"
-        :terms="terms"
-        :drift-reviews="driftReviews"
-        :queue-mode="queueMode"
-        :page-count="pageCount"
-        :bulk-loading="bulkLoading"
-        :drift-backlog-loading="driftBacklogLoading"
-        @open-detail="openDetail"
-        @quick-status="quickStatus"
-        @review-ai="reviewAiTerm"
-        @drift-action="handleDriftAction"
-        @bulk-action="runBulkAction"
-        @drift-process-backlog="processDriftBacklog"
-      />
+    <SlangTermList
+      v-else
+      v-model:page="page"
+      v-model:selected-term-ids="selectedTermIds"
+      :terms="terms"
+      :drift-reviews="driftReviews"
+      :queue-mode="queueMode"
+      :page-count="pageCount"
+      :bulk-loading="bulkLoading"
+      :drift-backlog-loading="driftBacklogLoading"
+      @open-detail="openDetail"
+      @quick-status="quickStatus"
+      @review-ai="reviewAiTerm"
+      @drift-action="handleDriftAction"
+      @bulk-action="runBulkAction"
+      @drift-process-backlog="processDriftBacklog"
+    />
 
-      <aside class="slang-sidebar">
-        <div class="slang-sidebar__actions">
-          <NButton type="primary" secondary block :loading="extracting" @click="runExtract">
-            <template #icon>
-              <NIcon :component="SparklesOutline" />
-            </template>
-            手动抽取
-          </NButton>
-          <NPopconfirm
-            :positive-text="'确认执行'"
-            :negative-text="'取消'"
-            @positive-click="runForceAiReview"
-          >
-            <template #trigger>
-              <NButton secondary block :loading="runningAiReview">
-                <template #icon>
-                  <NIcon :component="SparklesOutline" />
-                </template>
-                AI 清池
-              </NButton>
-            </template>
-            立即跑一批 AI 清池，审核现有候选词条。确认继续？
-          </NPopconfirm>
-        </div>
-
-        <SlangExtractionProgress />
-
-        <SlangStatsCards
-          :summary="summary"
-          :stats="stats"
-        />
-
-        <AppCard bordered embedded class="slang-sidebar__settings-card">
-          <div class="slang-sidebar__settings-head">
-            <span>快捷设置</span>
-          </div>
-          <div class="slang-sidebar__settings-body">
-            <label class="slang-sidebar__switch">
-              <span>启用学习</span>
-              <NSwitch v-model:value="settings.learning_enabled" size="small" />
-            </label>
-            <label class="slang-sidebar__switch">
-              <span>启用注入</span>
-              <NSwitch v-model:value="settings.injection_enabled" size="small" />
-            </label>
-            <label class="slang-sidebar__switch">
-              <span>审核优先</span>
-              <NSwitch v-model:value="settings.review_required" size="small" />
-            </label>
-            <label class="slang-sidebar__switch">
-              <span>清池启用搜索</span>
-              <NSwitch v-model:value="settings.backlog_review_search_enabled" size="small" />
-            </label>
-            <label class="slang-sidebar__switch">
-              <span>漂移检测</span>
-              <NSwitch v-model:value="settings.drift_detection_enabled" size="small" />
-            </label>
-            <label class="slang-sidebar__switch">
-              <span>AI 清池</span>
-              <NSwitch v-model:value="settings.backlog_review_enabled" size="small" />
-            </label>
-            <label class="slang-sidebar__switch">
-              <span>清池自动通过</span>
-              <NSwitch v-model:value="settings.backlog_auto_approve_enabled" size="small" />
-            </label>
-            <div class="slang-sidebar__numbers">
-              <label>
-                <span>最大注入</span>
-                <NInputNumber v-model:value="settings.max_injected_terms" :min="1" :max="30" size="small" />
-              </label>
-              <label>
-                <span>抽取间隔(分)</span>
-                <NInputNumber v-model:value="settings.extract_interval_minutes" :min="1" :max="1440" size="small" />
-              </label>
-            </div>
-            <label class="slang-sidebar__field">
-              <span>AI 清池时段</span>
-              <NDynamicTags v-model:value="settings.daily_ai_review_times" :max="12" size="small" />
-            </label>
-          </div>
-        </AppCard>
-      </aside>
-    </div>
+    <SlangStatsCards
+      v-if="!loading"
+      :summary="summary"
+      :stats="stats"
+    />
 
     <SlangCreateDrawer
       v-model:visible="createDrawerVisible"
@@ -950,80 +845,5 @@ async function processDriftBacklog() {
 <style scoped>
 .slang-cache-revision {
   display: none;
-}
-
-.slang-main-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 260px;
-  gap: 16px;
-  align-items: start;
-}
-
-.slang-sidebar {
-  position: sticky;
-  top: 16px;
-  display: grid;
-  gap: 14px;
-}
-
-.slang-sidebar__actions {
-  display: grid;
-  gap: 8px;
-}
-
-.slang-sidebar__settings-card {
-  padding: 12px;
-}
-
-.slang-sidebar__settings-head {
-  margin-bottom: 10px;
-  color: var(--om-text-1);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.slang-sidebar__settings-body {
-  display: grid;
-  gap: 8px;
-}
-
-.slang-sidebar__switch {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--om-text-2);
-}
-
-.slang-sidebar__field {
-  display: grid;
-  gap: 4px;
-  font-size: 11px;
-  color: var(--om-text-3);
-}
-
-.slang-sidebar__numbers {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-top: 2px;
-}
-
-.slang-sidebar__numbers label {
-  display: grid;
-  gap: 3px;
-  font-size: 11px;
-  color: var(--om-text-3);
-}
-
-@media (max-width: 1100px) {
-  .slang-main-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .slang-sidebar {
-    position: static;
-  }
 }
 </style>

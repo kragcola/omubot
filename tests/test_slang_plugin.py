@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from kernel.config import BotConfig
 from kernel.types import Identity, PluginContext, PromptContext
 from plugins.slang.plugin import SlangPlugin
+from services.slang.types import DEFAULT_DAILY_AI_REVIEW_TIMES, SlangSettings
 from services.tools.context import ToolContext
 
 
@@ -332,3 +335,172 @@ async def test_on_startup_marks_orphan_running_runs_abandoned(tmp_path):
         assert any(run.status == "abandoned" for run in runs)
     finally:
         await plugin_b.on_shutdown(ctx_b)
+
+
+# ---------- U-5: daily_ai_review_times slot semantics ----------
+
+
+def test_settings_validator_default_when_empty_or_invalid():
+    assert SlangSettings(daily_ai_review_times=[]).daily_ai_review_times == list(
+        DEFAULT_DAILY_AI_REVIEW_TIMES
+    )
+    assert SlangSettings(daily_ai_review_times=None).daily_ai_review_times == list(
+        DEFAULT_DAILY_AI_REVIEW_TIMES
+    )
+    assert SlangSettings(daily_ai_review_times="").daily_ai_review_times == list(
+        DEFAULT_DAILY_AI_REVIEW_TIMES
+    )
+
+
+def test_settings_validator_dedup_and_sort():
+    s = SlangSettings(daily_ai_review_times=["16:00", "04:00", "16:00", "9:30"])
+    assert s.daily_ai_review_times == ["04:00", "09:30", "16:00"]
+
+
+def test_settings_validator_rejects_bad_format():
+    for bad in ("25:00", "12:60", "abc", "12-30"):
+        with pytest.raises(ValueError):
+            SlangSettings(daily_ai_review_times=[bad])
+
+
+class _SlotMemStore:
+    """Minimal store stub for slot meta tests; only get_meta/set_meta used."""
+
+    def __init__(self) -> None:
+        self.meta: dict[str, str] = {}
+
+    async def get_meta(self, key: str, default: str = "") -> str:
+        return self.meta.get(key, default)
+
+    async def set_meta(self, key: str, value: str) -> None:
+        self.meta[key] = value
+
+
+def _patch_clock(monkeypatch: pytest.MonkeyPatch, fixed: datetime) -> None:
+    """Freeze plugins.slang.plugin.datetime.now() to a known instant."""
+
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    import plugins.slang.plugin as slang_plugin_mod
+
+    monkeypatch.setattr(slang_plugin_mod, "datetime", _FrozenDateTime)
+
+
+@pytest.mark.asyncio
+async def test_run_backlog_review_skipped_when_no_slots(monkeypatch):
+    plugin = SlangPlugin()
+    plugin.store = _SlotMemStore()  # type: ignore[assignment]
+    settings = SlangSettings(
+        backlog_review_enabled=True,
+        daily_ai_review_times=[],
+    )
+    settings.daily_ai_review_times = []  # bypass validator default for this case
+    _patch_clock(monkeypatch, datetime(2026, 5, 23, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+    result = await plugin.run_backlog_review_one_batch_if_due(settings=settings)
+    assert result == {"ok": True, "skipped": "no_slots"}
+
+
+@pytest.mark.asyncio
+async def test_run_backlog_review_skipped_when_not_due(monkeypatch):
+    plugin = SlangPlugin()
+    plugin.store = _SlotMemStore()  # type: ignore[assignment]
+    settings = SlangSettings(
+        backlog_review_enabled=True,
+        daily_ai_review_times=["04:00", "16:00"],
+    )
+    # 03:00 — earliest slot 04:00 hasn't fired yet today
+    _patch_clock(monkeypatch, datetime(2026, 5, 23, 3, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+    result = await plugin.run_backlog_review_one_batch_if_due(settings=settings)
+    assert result == {"ok": True, "skipped": "not_due"}
+
+
+@pytest.mark.asyncio
+async def test_run_backlog_review_locks_slot_after_full_drain(monkeypatch):
+    """Two slots in a day; running at the first slot must lock it; same-slot rerun must short-circuit."""
+    plugin = SlangPlugin()
+    store = _SlotMemStore()
+    plugin.store = store  # type: ignore[assignment]
+    settings = SlangSettings(
+        backlog_review_enabled=True,
+        daily_ai_review_times=["04:00", "16:00"],
+    )
+    call_count = {"n": 0}
+
+    async def _fake_run_now(*args, **kwargs):
+        call_count["n"] += 1
+        # First batch processes a couple of items; subsequent calls hit "no eligible".
+        if call_count["n"] == 1:
+            return {
+                "ok": True,
+                "approved_in_batch": 2,
+                "muted_in_batch": 0,
+                "kept_in_batch": 1,
+                "batch_size": 3,
+                "completed": True,
+                "remaining": 0,
+            }
+        return {"ok": True, "skipped": "no_eligible"}
+
+    monkeypatch.setattr(plugin, "run_backlog_review_now", _fake_run_now)
+    # 04:30 — slot 04:00 is due
+    _patch_clock(monkeypatch, datetime(2026, 5, 23, 4, 30, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    result = await plugin.run_backlog_review_one_batch_if_due(settings=settings)
+    assert result["ok"] is True
+    assert result["slot"] == "2026-05-23:04:00"
+    assert result["completed"] is True
+    assert store.meta["last_backlog_review_slot"] == "2026-05-23:04:00"
+
+    # Same slot rerun: must short-circuit on already_ran without invoking run_now
+    call_count["n"] = 0
+    result2 = await plugin.run_backlog_review_one_batch_if_due(settings=settings)
+    assert result2 == {"ok": True, "skipped": "already_ran"}
+    assert call_count["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_backlog_review_next_slot_resets(monkeypatch):
+    """After the 04:00 slot is locked, advancing past 16:00 must allow a fresh run for the new slot."""
+    plugin = SlangPlugin()
+    store = _SlotMemStore()
+    store.meta["last_backlog_review_slot"] = "2026-05-23:04:00"
+    plugin.store = store  # type: ignore[assignment]
+    settings = SlangSettings(
+        backlog_review_enabled=True,
+        daily_ai_review_times=["04:00", "16:00"],
+    )
+
+    async def _fake_run_now(*args, **kwargs):
+        return {
+            "ok": True,
+            "approved_in_batch": 0,
+            "muted_in_batch": 0,
+            "kept_in_batch": 0,
+            "batch_size": 0,
+            "completed": True,
+            "remaining": 0,
+        }
+
+    monkeypatch.setattr(plugin, "run_backlog_review_now", _fake_run_now)
+    # 16:30 — slot 16:00 is now the latest due slot
+    _patch_clock(monkeypatch, datetime(2026, 5, 23, 16, 30, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    result = await plugin.run_backlog_review_one_batch_if_due(settings=settings)
+    assert result["slot"] == "2026-05-23:16:00"
+    assert store.meta["last_backlog_review_slot"] == "2026-05-23:16:00"
+
+
+@pytest.mark.asyncio
+async def test_run_backlog_review_skipped_when_disabled(monkeypatch):
+    plugin = SlangPlugin()
+    plugin.store = _SlotMemStore()  # type: ignore[assignment]
+    settings = SlangSettings(
+        backlog_review_enabled=False,
+        daily_ai_review_times=["04:00"],
+    )
+    _patch_clock(monkeypatch, datetime(2026, 5, 23, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+    result = await plugin.run_backlog_review_one_batch_if_due(settings=settings)
+    assert result == {"ok": True, "skipped": "disabled"}
