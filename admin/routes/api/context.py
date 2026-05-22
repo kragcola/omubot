@@ -60,6 +60,10 @@ def create_context_router(
             "group_id": group_id,
             "top_k": top_k,
             "mode": normalized_mode,
+            # Admin debugging wants to inspect the raw rendered hits without
+            # the <context_data> safety wrapper. Production main path keeps
+            # wrap_with_safety_tags=True (default) — see PR C plan.
+            "wrap_with_safety_tags": False,
         }
         if max_chars is not None:
             pack_kwargs["max_chars"] = max_chars

@@ -148,6 +148,7 @@ class ContextService:
         budget: ContextBudget | None = None,
         type_caps: dict[str, int] | None = None,
         mode: str = "hybrid",
+        wrap_with_safety_tags: bool = True,
     ) -> ContextPack:
         hits = await self.search(
             query,
@@ -160,11 +161,11 @@ class ContextService:
         )
         # Resolution order: explicit budget arg > legacy max_chars > service default
         if budget is not None:
-            pack = pack_context_hits(hits, budget=budget)
+            pack = pack_context_hits(hits, budget=budget, wrap_with_safety_tags=wrap_with_safety_tags)
         elif max_chars is not None:
-            pack = pack_context_hits(hits, max_chars=max_chars)
+            pack = pack_context_hits(hits, max_chars=max_chars, wrap_with_safety_tags=wrap_with_safety_tags)
         else:
-            pack = pack_context_hits(hits, budget=self._budget)
+            pack = pack_context_hits(hits, budget=self._budget, wrap_with_safety_tags=wrap_with_safety_tags)
         self._record_pack(query, session_id, user_id, group_id, pack)
         return pack
 

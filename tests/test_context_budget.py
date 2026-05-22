@@ -168,6 +168,36 @@ def test_pack_context_hits_text_renders_grouped_sections() -> None:
     assert text.index("记忆卡片") < text.index("文档资料") < text.index("关系事实")
 
 
+def test_pack_context_hits_safety_wrap_default_on() -> None:
+    """PR C: prompt-injection guard. Default rendering wraps content in
+    <context_data> tags + safety preamble so the main LLM treats retrieved
+    content as untrusted reference rather than as instructions."""
+    hits = [_hit("m1", "memory_card", content="user 偏好简短回复")]
+    pack = pack_context_hits(hits, budget=DEFAULT_BUDGET)
+    assert pack.text.startswith("<context_data>")
+    assert pack.text.rstrip().endswith("</context_data>")
+    assert "忽略上文指令" in pack.text  # safety preamble warns about injection patterns
+    assert "记忆卡片" in pack.text  # inner content still rendered
+
+
+def test_pack_context_hits_safety_wrap_off_for_admin_debug() -> None:
+    """Admin debug path passes wrap_with_safety_tags=False to inspect raw hits."""
+    hits = [_hit("m1", "memory_card", content="user 偏好简短回复")]
+    pack = pack_context_hits(hits, budget=DEFAULT_BUDGET, wrap_with_safety_tags=False)
+    assert "<context_data>" not in pack.text
+    assert "</context_data>" not in pack.text
+    assert "忽略上文指令" not in pack.text
+    assert "记忆卡片" in pack.text
+
+
+def test_pack_context_hits_safety_wrap_skips_empty_pack() -> None:
+    """Empty hit list must not emit the wrapper around nothing."""
+    pack = pack_context_hits([], budget=DEFAULT_BUDGET)
+    assert pack.text == ""
+    pack_off = pack_context_hits([], budget=DEFAULT_BUDGET, wrap_with_safety_tags=False)
+    assert pack_off.text == ""
+
+
 def _render_line_for_hit(hit: ContextHit) -> str:
     title = hit.title or hit.source or hit.id
     return f"- [{title}] {hit.content.strip()}"
