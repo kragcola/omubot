@@ -116,9 +116,16 @@ class ContextPlugin(AmadeusPlugin):
     async def on_pre_prompt(self, ctx: PromptContext) -> None:
         if not self._enabled or self._service is None:
             return
-        query = ctx.conversation_text.strip()
+        # Prefer thinker's rewritten query (decontextualized, named-entity-expanded)
+        # so the retrieval sees a self-contained question rather than the noisy
+        # raw "recent + pending" join. Empty rewritten_query (skip / wait /
+        # thinker disabled / parse failure) silently falls back to conversation_text
+        # — zero-break compatibility with legacy callers.
+        rewritten = (getattr(ctx, "rewritten_query", "") or "").strip()
+        query = rewritten or ctx.conversation_text.strip()
         if not query:
             return
+        query_source = "rewritten" if rewritten else "raw"
         # PR5: thinker decided which sources to query. "skip" → no retrieval injection.
         # PR6 fix: still call build_prompt_context so ContextService records the skip event in
         # metrics (recent / hit_source_counts), otherwise admin /context/metrics misses skip
@@ -149,9 +156,10 @@ class ContextPlugin(AmadeusPlugin):
             )
         elapsed_ms = (asyncio.get_running_loop().time() - t0) * 1000
         _L.info(
-            "context prompt pack | mode={} query={!r} hits={} types={} doc_chunks={} "
+            "context prompt pack | mode={} query_source={} query={!r} hits={} types={} doc_chunks={} "
             "pack_chars={} omitted={} elapsed={:.1f}ms sources={}",
             retrieve_mode,
+            query_source,
             _safe_query(query),
             len(pack.hits),
             dict(Counter(str(getattr(hit, "type", "")) for hit in pack.hits)),

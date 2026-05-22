@@ -105,6 +105,62 @@ def test_parse_think_output_accepts_skip_mode() -> None:
     assert decision.retrieve_mode == "skip"
 
 
+def test_parse_think_output_accepts_rewritten_query() -> None:
+    decision = parse_think_output(
+        '{"action":"reply","retrieve_mode":"doc","rewritten_query":'
+        '"Claude API tools 字段支持哪些参数",'
+        '"thought":"查 API","sticker":false,"tone":"认真"}'
+    )
+
+    assert decision is not None
+    assert decision.rewritten_query == "Claude API tools 字段支持哪些参数"
+
+
+def test_parse_think_output_missing_rewritten_query_defaults_empty() -> None:
+    decision = parse_think_output(
+        '{"action":"reply","retrieve_mode":"doc","thought":"查","sticker":false,"tone":"日常"}'
+    )
+
+    assert decision is not None
+    assert decision.rewritten_query == ""
+
+
+def test_parse_think_output_caps_rewritten_query_at_160_chars() -> None:
+    long_query = "A" * 300
+    decision = parse_think_output(
+        '{"action":"reply","retrieve_mode":"hybrid","rewritten_query":"'
+        + long_query
+        + '","thought":"测","sticker":false,"tone":"日常"}'
+    )
+
+    assert decision is not None
+    assert len(decision.rewritten_query) == 160
+    assert decision.rewritten_query == "A" * 160
+
+
+def test_parse_think_output_wait_clears_rewritten_query() -> None:
+    decision = parse_think_output(
+        '{"action":"wait","retrieve_mode":"hybrid","rewritten_query":"留作 fallback",'
+        '"thought":"等等","sticker":false,"tone":"日常"}'
+    )
+
+    assert decision is not None
+    assert decision.action == "wait"
+    assert decision.retrieve_mode == "skip"
+    assert decision.rewritten_query == ""
+
+
+def test_parse_think_output_skip_mode_clears_rewritten_query() -> None:
+    decision = parse_think_output(
+        '{"action":"reply","retrieve_mode":"skip","rewritten_query":"应该被清空",'
+        '"thought":"闲聊","sticker":false,"tone":"日常"}'
+    )
+
+    assert decision is not None
+    assert decision.retrieve_mode == "skip"
+    assert decision.rewritten_query == ""
+
+
 def test_parse_think_output_uses_heuristic_reply_fallback() -> None:
     decision = parse_think_output("哇这个话题我有话想接，简单回一下就好。")
 

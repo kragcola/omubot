@@ -1908,6 +1908,7 @@ class LLMClient:
         thinker_decision: object | None = None
         thinker_action = ""
         thinker_retrieve_mode = "hybrid"
+        thinker_rewritten_query = ""
         if self._thinker_enabled and not force_reply:
             from services.llm.thinker import think
 
@@ -1942,6 +1943,7 @@ class LLMClient:
             thinker_action = thinker_decision.action
             thinker_thought = thinker_decision.thought
             thinker_retrieve_mode = getattr(thinker_decision, "retrieve_mode", "hybrid")
+            thinker_rewritten_query = getattr(thinker_decision, "rewritten_query", "")
 
             await self._fire_thinker_decision(
                 session_id=session_id,
@@ -1997,6 +1999,7 @@ class LLMClient:
                         force_reply=force_reply,
                         privacy_mask=privacy_mask,
                         retrieve_mode=thinker_retrieve_mode,
+                        rewritten_query=thinker_rewritten_query,
                     )
                     await self._bus.fire_on_pre_prompt(prompt_ctx)
                     # --- Provider + Budget management + trace ---

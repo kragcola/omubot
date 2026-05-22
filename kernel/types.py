@@ -267,6 +267,7 @@ class PromptContext:
     force_reply: bool = False
     privacy_mask: bool = True
     retrieve_mode: str = "hybrid"  # thinker 决策的检索模式: "skip" / "doc" / "fact" / "hybrid"
+    rewritten_query: str = ""  # thinker 重写后的检索 query；空字符串时 fallback 到 conversation_text
 
     # 插件追加的 blocks（可变列表）
     blocks: list[PromptBlock] = field(default_factory=list)
