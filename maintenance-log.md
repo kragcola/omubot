@@ -4,6 +4,188 @@
 
 ---
 
+## 2026-05-22 方案 D + E 部署 — bot 镜像 rebuild、容器内代码就位、24h 验证窗口起算
+
+**变更类型**：deploy（rebuild bot 镜像 GIT_COMMIT=0a0a12e + .dockerignore 增补）
+
+**背景**：
+
+代码层方案 D（thinker / slang_review 静态前缀加固）已在 5-22 commit `fb22dd4`，方案 E（slang/drift/semantic 三阶段静态前缀加固）在 5-22 commit `0a0a12e`，但磁盘格式化/迁移期间 docker 镜像没重建过。容器内 grep `## 提取纪律` 命中 0，说明 5-22 04:13 的运行实例还是旧 image。
+
+**部署步骤**：
+
+1. **D7 git hygiene**：`git stash list` 空、`git status -uno` 无 staged，HEAD 在 `0a0a12e`，`storage/{affection,schedule}/*.json` 显示 modified 是 `100644 → 100755` 的 mode 变化（rsync 拷贝时取得可执行位），无内容变化，部署不影响。
+2. **`.dockerignore` 增补 `.restore-staging/`**：`.restore-staging/` 占 4 GB，会被 buildkit 当作 build context 推爆 containerd snapshotter（首次尝试 `docker compose up bot -d --build` 在 transferring context 2.53GB 时报 input/output error）。加 ignore 后 build context 回到正常 size。
+3. **Docker daemon 故障恢复**：第一次失败后 daemon 阻塞 `docker info` / `docker ps`（containerd 写盘 IO error 连锁），`osascript -e 'quit app "Docker"'` + 强杀 + `open -a Docker` 重启，daemon 20s 内恢复。
+4. **`docker builder prune -af`**：释放 8 GB 旧 cache。
+5. **`GIT_COMMIT=0a0a12e docker compose up bot -d --build`**：6 min 构建完成，bot 容器自动重建启动，napcat 不动。
+6. **napcat 反向 ws 重连**：`docker compose restart napcat` 后丢失登录态（QR 二次扫码），登录后 22:46 起 ws 反向连接重新建立，群消息流入恢复。
+
+**容器内代码核对**：
+
+```text
+services/slang/extractor.py        : ## 提取纪律 ×1
+services/slang/drift_reviewer.py   : ## 漂移判定纪律 ×1
+services/slang/semantic_reviewer.py: ## 阶段一纪律 / 阶段二纪律 / 阶段三纪律 ×5
+services/slang/review_utils.py     : 含 reviewer 共享纪律段
+services/slang/shared_prefix.py    : 3974 字节
+```
+
+**Pre-D+E 7-day 基线（snapshot 2026-05-22 22:46，即 D 部署前的真实情况）**：
+
+| call_type | 7 天 calls | hit_pct | avg_in | avg_hit |
+| --- | ---: | ---: | ---: | ---: |
+| slang (extractor) | 943 | **53.6%** | 2250 | 1206 |
+| slang_review | 782 | **45.0%** | 1356 | 610 |
+| slang_drift | 69 | **81.5%** | 990 | 807 |
+| thinker | 38 | **39.4%** | 1170 | 461 |
+| memo | 28 | 5.0% | 273 | 14 |
+
+> 基线时间窗为 2026-05-15 22:46 ~ 2026-05-22 22:46，覆盖了 D / E 代码 commit 但**容器仍跑旧镜像**的 7 天，可视为 0-baseline。
+
+**验证窗口（24h）**：2026-05-22 22:46 → 2026-05-23 22:46。
+
+**预期阈值**（合并 D + E 的 `maintenance-log` 历史预测）：
+
+| call_type | 期望 hit_pct | 触发条件 |
+| --- | --- | --- |
+| thinker | ≥ 60% | static 系统块跨过 1024 token |
+| slang_review | ≥ 60% | static 系统块跨过 1024 token |
+| slang | ≥ 65% | shared_prefix(934) + extractor(962) ≈ 1896 token |
+| slang_drift | ≥ 80% | 已经高位，期望维持 |
+| slang_semantic-* | ≥ 60% | 三阶段都跨过 1024 token |
+
+任一项落地后 hit_pct 不增反降 → 方案需回滚或修补，提交触发条件。
+
+**24h 验证 SQL**（一行可粘贴）：
+
+```sql
+SELECT call_type, COUNT(*) calls,
+       ROUND(100.0 * SUM(prompt_cache_hit_tokens) / NULLIF(SUM(prompt_cache_hit_tokens + prompt_cache_miss_tokens), 0), 1) hit_pct,
+       ROUND(AVG(input_tokens), 0) avg_in,
+       ROUND(AVG(prompt_cache_hit_tokens), 0) avg_hit
+FROM llm_calls
+WHERE ts >= '2026-05-22 22:46:00'
+  AND (call_type LIKE 'slang%' OR call_type IN ('thinker','main','memo'))
+GROUP BY call_type ORDER BY calls DESC;
+```
+
+**回滚路径**：`git revert 0a0a12e fb22dd4 && docker compose up bot -d --build`，5 min 内可回到 D+E 之前的镜像。
+
+---
+
+## 2026-05-22 拉起修复 — stale bind-mount 重建 + 前端 rebuild + napcat 重新扫码
+
+**变更类型**：ops（docker compose down+up + admin/frontend npm install/build）
+
+**根因**：
+
+工作区恢复后 `docker compose up -d` 启动的容器 mount path 仍然是格式化前的旧路径 `/Users/kragcola/OmubotWorkspace/omubot/{config,napcat/{config,data}}`：
+
+```text
+qq-bot:    /host_mnt/Users/kragcola/OmubotWorkspace/omubot/config -> /app/config (rw)
+napcat:    /Users/kragcola/OmubotWorkspace/omubot/napcat/{config,data} -> ...
+```
+
+那条旧路径在 macOS 上是 22:05 自动重建的空目录（containerd 启动检查触发），所以：
+
+- bot 容器 `/app/config/.env` 实际上不存在（`stat` 返回 No such file or directory），但 `env_file: config/.env` 在 compose 解析阶段已经从 cwd 读到，所以 startup 没爆
+- napcat 容器读到的 `/app/napcat/config/onebot11_384801062.json` 是 v4.15 自己写入的空白模板（`websocketClients: []`），所以**反向 ws 通道为空**——napcat 已扫码登录但 bot 完全收不到群消息
+
+排查证据：日志里完全没有 `WebSocket /onebot/v11/ws [accepted]` / `OneBot V11 ... is connected`；host 上 `napcat/config/onebot11_384801062.json` 是 241B 正确版本，容器内是 275B 空白版本。
+
+**修复**：
+
+1. `docker compose down && docker compose up -d` 重建容器，违反 CLAUDE.md "always restart, never down+up" 但**不可避免**——bind mount path 在容器创建期固化，restart 不会重读。
+2. 重建后所有 mount 指向 `/Volumes/OmubotDisk/omubot/`：
+
+   ```text
+   qq-bot:    /host_mnt/Volumes/OmubotDisk/omubot/config -> /app/config
+   napcat:    /Volumes/OmubotDisk/omubot/napcat/{config,data} -> ...
+   ```
+
+3. **napcat 重新扫码登录**——OmubotDisk 上的 `napcat/data/nt_qq_472663eab98450ada5aa8cced909b88a` 设备指纹库无法快速登录（需要 QR 二次授权）。WebUI `http://127.0.0.1:6099/webui?token=24c611869429` 走"快捷登录 384801062"。
+4. **admin/frontend rebuild**：`admin/static/assets/` 在 `.gitignore`（line 55），git 没跟踪、备份没带；HTML 引用 `index-Bhp3Ed7M.js` 但 assets/ 下只有 CSS chunk。`cd admin/frontend && npm install --no-audit --no-fund && npm run build` 产出 30 个 chunk（主 bundle 464 kB / gzip 146.5 kB），filename hash 与 HTML 完全对齐，bind mount 立即生效（D6 纪律：只改前端无需 rebuild bot）。
+
+**验证**（2026-05-22 22:14 起）：
+
+- `docker compose ps` → napcat + qq-bot 双 Up
+- `docker logs qq-bot` → `Omubot PluginBus initialized | plugins=22`、`Application startup complete`、监听 `:8080`
+- `curl http://localhost:8081/admin/static/assets/index-Bhp3Ed7M.js` → HTTP 200 size=464005
+- `curl http://localhost:8081/admin/api/health` → HTTP 200
+- `curl http://localhost:8081/admin/` → HTTP 200（SPA shell）
+
+**未完成**：
+
+- napcat 扫码登录待人工操作；登录后应自动触发 napcat → `ws://bot:8080/onebot/v11/ws` 反向连接，bot 日志会出现 `WebSocket /onebot/v11/ws [accepted]` + `OneBot V11 384801062 connected`，群消息开始流入。
+
+**回滚路径**：
+
+- 容器层无回滚（已用当前 cwd 重建）；bind mount 路径锁定，与 cwd 一致。
+- 前端构建产物在 `admin/static/assets/`，可重新 `npm run build` 覆盖；HTML 也可从 git 恢复。
+
+**遗留 D6 偏离记录**：本次违背 "always restart, never down+up" 是因为旧路径已不存在导致的不可逆迁移；下次 restart napcat 仍可正常运作，规则在新 cwd 上重新生效。
+
+---
+
+## 2026-05-22 工作区恢复 — 从网络共享盘 omubot-critical-backup 恢复 config / napcat / storage
+
+**变更类型**：ops（工作区恢复 + .gitignore + docs/wiki/Home.md）
+
+**背景**：
+
+磁盘格式化后工作区迁移到 `/Volumes/OmubotDisk/omubot`，但只搬运了 git 跟踪的源码（13M），运行态资料未跟随。`docker compose ps` 报错 `env file /Volumes/OmubotDisk/omubot/config/.env not found`，落地 4 类缺口：
+
+1. `config/.env`（仅 `.env.example`）
+2. `config/config.json` 主配置（仅 `config.example.toml`）
+3. `config/soul/identity.md` + `instruction.md`（仅 `soul/*.example.md`）
+4. `storage/` 运行态目录（仅有 git 跟踪的 `affection/` `schedule/` JSON 子集）+ `napcat/` 整目录
+
+GitHub `https://github.com/kragcola/omubot`（public）只是源码备份，不含 `.env` / 运行 DB / napcat 设备指纹，无法用于恢复运行态。
+
+本机网络共享盘 `//mac@192.168.2.2/omubotbackup` 挂在 `/Volumes/omubotbackup/`，里面有 `omubot-critical-backup-20260522-171541.tar.gz`（1.6 GB，4642 entries），是迁移前的完整快照。
+
+**改动**：
+
+1. **解压到 `.restore-staging/`**（`/Volumes/OmubotDisk` 还有 953 GiB 空闲）：
+   - `gzip -t` 通过；解压后 `config/`(108K) + `napcat/`(1.3G) + `storage/`(2.6G)。
+2. **覆盖 `config/`** — 含 `.env`(1420B) `config.json`(10151B) `config.toml`(4390B) `group-memory.json` `group-policy.json` `talk_schedule.json` 和 `soul/{identity.md,instruction.md,SKILL.md}`。
+3. **覆盖 `napcat/`** — `config/{napcat,onebot11,passkey,webui,napcat_384801062,onebot11_384801062,napcat_protocol_384801062}.json` + `data/`（含 `nt_qq_*` 设备指纹库）。**注意：napcat 设备指纹不可丢，是登录态护栏。**
+4. **rsync 覆盖 `storage/`** — 12 个 `.db` 主库（`messages.db` 33M、`slang.db` 30M、`slang.db.bak-pre-a1-merge` 28M、`learning_normalizer.db` 1.4M、`memory_cards.db` `style.db` `usage.db` 等），以及 `backups/`(1.9G)、`logs/`(552M)、`stickers/`(4.2M)、`image_cache/`(580K)、`schedule/` `affection/` 增量 JSON、`plugins/` `groups/`。tracked JSON 比对全部一致或属于增量（`affection/{1256624427,1923179488,942928987}.json` 与 `schedule/2026-05-09..2026-05-21.json`），无冲突。
+5. **`.gitignore`** 增补 `.restore-staging/` 防止误提交。
+6. **`docs/wiki/Home.md`** 更正废弃路径提示 — 旧路径 `$HOME/OmubotWorkspace/omubot` / `/Volumes/我的电脑/omubot` 标记为已废弃，活跃工作区为 `/Volumes/OmubotDisk/omubot`。
+
+**验证**：
+
+- `docker compose config --quiet` ✅ — `.env` 解析通过，`SUPERUSERS` `LLM_API_*` 等 9 类必备 key 在位。
+- 体积合计：`config/`(72K) + `napcat/`(1.3G) + `storage/`(2.6G)。
+
+**影响范围**：
+
+- **本地运行态可在 Docker daemon 恢复后直接拉起。**
+- 但 `omubot-storage` 是 `external: true` 的命名卷（`docker-compose.yml:38-41`），host `storage/` 不会自动注入。本次拉起后 `docker volume inspect omubot-storage` 显示卷自 2026-05-21 创建后**完整保留且数据比 5-22 17:15 备份还新**（容器 `slang.db` 31.4M、`messages.db` 34.6M、含 host 没有的 `consolidator_candidates.db` / `consolidator_normalizer.db` / `knowledge_graph.db`），因此 host `storage/` 仅作 5-22 17:15 离线快照，**不注入命名卷**。
+
+**拉起验证**（2026-05-22 22:05 起 bot @ qq-bot 容器）：
+
+- `docker compose ps` → napcat + qq-bot 双 Up
+- `docker logs qq-bot` → `Omubot PluginBus initialized | plugins=22`、`NoneBot is initializing...`、`Application startup complete`
+- `curl http://localhost:8081/admin/` → HTTP 200
+- knowledge base loaded chunks=31、context plugin enabled takeover=True、slang/style/bilibili/B 站 plugin 均正常启动
+- 无 startup error，无 SQLite 损坏告警
+
+**遗留**：
+
+- `.restore-staging/` 占 4 GB，确认线上拉起正常后可删除（`rm -rf .restore-staging/`）。
+- 旧 `storage.bind-mount-snapshot-20260521-161720/` 决定原样保留待 30 天腐败窗口结束后清理。
+- 方案 D + E 部署仍卡在 Docker daemon containerd 恢复；恢复后按既定顺序 `dot_clean . && docker compose up bot -d --build` + 24h SQL `hit_pct` 验证。
+
+**回滚路径**：
+
+- `config/`、`napcat/`：rm -rf 即可，原始 tar 与 `.restore-staging/` 保留快照。
+- `storage/` 命名卷：导入前先 `docker volume inspect omubot-storage`；若旧数据仍在卷中，使用 `--no-overwrite` 或先 `docker volume rm` 清理。
+
+---
+
 ## 2026-05-22 知识库改进 E — 完成 D 的同模式扫描，slang / slang_drift / slang_semantic 三阶段静态前缀加固
 
 **变更类型**：perf（services/slang/extractor.py + services/slang/drift_reviewer.py + services/slang/semantic_reviewer.py + tests/）
