@@ -4,6 +4,107 @@
 
 ---
 
+## 2026-05-22 知识库治本 PR5 — Thinker retrieve_mode 四档分路（删 search action）
+
+**变更类型**：refactor（services/llm/thinker.py + client.py 删 search 强转 + services/context/service.py 加 mode 过滤 + 1 个新测试文件）
+
+**背景**：
+
+PR3 / PR4 治本 RRF + token 多桶后，继续按 v3 plan 推进 PR5 解决"thinker search action 是治标"。原 [services/llm/thinker.py](services/llm/thinker.py) 输出 `action ∈ {reply, wait, search}`，但 `search` 被 [services/llm/client.py](services/llm/client.py) 旧路径直接强转 `reply` —— 实际上 thinker 的"决定要不要查外部"信号被丢弃，每条用户消息都跑全套 RRF 检索（memory + knowledge + graph）才决定要不要注入，闲聊也付检索成本（典型 60–120ms）。
+
+治本方案：thinker 不再决定"是否调用 web_search 工具"（外部工具调用本就由 main LLM tool loop 处理），改为决定"**这次需要查哪类内部知识源**"，输出 `retrieve_mode ∈ {skip, doc, fact, hybrid}`：
+
+- `skip` —— 闲聊/情绪/玩梗/已在最近上下文内 → 0 source 调用，不查 RRF
+- `doc` —— 项目/工具/系统的"怎么部署/怎么配置/报什么错" → 仅查 KnowledgeContextSource
+- `fact` —— 具体人/QQ号/实体的属性/偏好/历史 → 仅查 MemoryContextSource + GraphContextSource
+- `hybrid` —— 不确定时全开（pre-PR5 行为，向后兼容）
+
+`action=wait` 时强制 `retrieve_mode=skip`（不回复就不必检索）。详细方案 → [tmp/rca-knowledge-treatment-plan-v3.md](tmp/rca-knowledge-treatment-plan-v3.md)。
+
+**改动文件**：
+
+| 文件 | 改动 |
+| --- | --- |
+| [services/llm/thinker.py](services/llm/thinker.py) | `_ALLOWED_ACTIONS` 删 `search`；新增 `_ALLOWED_MODES = {skip, doc, fact, hybrid}`；`THINKER_SYSTEM_PROMPT` 重写——加 "## 检索模式" + "## 判断依据" 章节，输出格式 `{"action", "retrieve_mode", "thought", "sticker", "tone"}`；`ThinkDecision.__slots__` + `__init__` 加 `retrieve_mode` 字段（default `hybrid`）；`_decision_from_data` / `_heuristic_decision` 解析 + 校验 retrieve_mode，wait → 强制 skip |
+| [services/llm/client.py](services/llm/client.py) | 删 `if thinker_action == "search": ... thinker_decision.action = "reply"` 强转 4 行（治标兜底）；新增 `thinker_retrieve_mode = "hybrid"` 默认；`PromptContext` 构造加 `retrieve_mode=thinker_retrieve_mode`；`_fire_thinker_decision` 加 `retrieve_mode` 参数透传 |
+| [services/context/service.py](services/context/service.py) | 新增 `_MODE_SOURCE_FILTER: dict[str, set[str] \| None]`（`skip=set()` / `doc={knowledge}` / `fact={memory,graph}` / `hybrid=None` 不过滤）；`search()` / `build_prompt_context()` 加 `mode: str = "hybrid"` 参数；skip 时 0 source 调用直接 return；`_record()` 把 mode 记到 metrics |
+| [plugins/context/plugin.py](plugins/context/plugin.py) | `on_pre_prompt` 读 `getattr(ctx, "retrieve_mode", "hybrid") or "hybrid"`，skip 时早 return；调 `build_prompt_context(mode=retrieve_mode)`；debug log 包含 mode |
+| [kernel/types.py](kernel/types.py) | `PromptContext` + `ThinkerContext` 加 `retrieve_mode: str = "hybrid"` 字段；`ReplyContext.thinker_action` docstring 删除 `search`（仅 reply / wait） |
+| [tests/test_thinker_modes.py](tests/test_thinker_modes.py) | **新增** 11 个单测：`_StubSource` 计 source.calls；skip → 0 calls / doc → only knowledge / fact → memory+graph / hybrid → all / 默认 hybrid / 未知 mode 回落 hybrid / build_prompt_context skip 返回空 pack / doc 仅渲染 doc_chunk / fact 仅渲染 memory+graph / search records mode 写入 metrics |
+| [tests/test_thinker.py](tests/test_thinker.py) | 加 6 个 mode 校验单测（invalid_action/wait_forces_skip/invalid_mode_falls_back/accepts_doc/fact/skip）；旧 `test_parse_think_output_recovers_embedded_json` 改用 retrieve_mode=doc |
+| [tests/test_context_plugin.py](tests/test_context_plugin.py) | `_FakeContextService.build_prompt_context` 加 `mode="hybrid"` 入参 |
+| [tests/test_kernel_types.py](tests/test_kernel_types.py) | `test_with_tool_calls` 把 `thinker_action="search"` 改 `"reply"` |
+| [tests/test_client.py](tests/test_client.py) | 删 `test_thinker_search_is_coerced_and_hooked`（旧治标路径）→ 替换为 `test_thinker_retrieve_mode_propagates_to_hook`（断言 retrieve_mode=doc 透传到 ThinkerContext） |
+| [docs/project-info.md](docs/project-info.md) | 配置开关表加一行"Thinker 检索模式" |
+
+**爆炸半径**：services/llm/thinker + client + services/context + plugins/context + kernel/types；零 schema 迁移；所有未传 `mode=` 的 caller 默认 `hybrid` = pre-PR5 行为完全兼容；`_MODE_SOURCE_FILTER["hybrid"] = None` 表示不过滤——保留对自定义 source name（如评测 stub）的兼容性。
+
+**D1 同模式扫描**：
+
+```bash
+# 扫 thinker search action 残留
+grep -rn '"search"' services/ plugins/ kernel/ admin/ --include="*.py" | grep -v test_
+# → 0 hit（旧 thinker search action 残留）；其他 hit 是 KB.search 方法名 / bilibili BVID search / food plugin tool 名，与 thinker 无关
+
+# 扫 build_prompt_context / search caller
+grep -rn 'build_prompt_context\|context_service.search\|service\.search' services/ plugins/ admin/ --include="*.py"
+# → 4 个 caller，全部传 mode 或走默认 hybrid（无遗漏）
+```
+
+无遗漏点。
+
+**验证（D4 含证据）**：
+
+```bash
+pkill -9 -f pytest && uv run pytest tests/test_thinker_modes.py -v
+# → 11 passed in 0.04s
+
+uv run pytest tests/test_thinker.py tests/test_thinker_modes.py \
+  tests/test_client.py tests/test_context_eval.py \
+  tests/test_context_plugin.py tests/test_context_service.py \
+  tests/test_kernel_types.py
+# → 99 passed（PR5 所有目标测试 + 回归全绿）
+
+uv run pytest
+# → 1417 passed, 1 failed, 8 skipped, 14.25s
+#   1 个失败是 test_admin_api 的 test_system_services_health_endpoint
+#   (disk 96% backup 告警)，git stash 验证 PR5 改之前就失败，与本 PR 无关
+
+uv run ruff check services/llm/thinker.py services/llm/client.py \
+  services/context/service.py plugins/context/plugin.py kernel/types.py \
+  tests/test_thinker.py tests/test_thinker_modes.py
+# → All checks passed!
+
+uv run pyright services/llm/thinker.py services/context/service.py
+# → 15 errors total，但全部 pre-existing（git stash 验证 PR5 改之前同样 15 个错误）
+#   PR5 introduced 0 new errors
+```
+
+**算法关键性质验证**（test_thinker_modes.py 中显式断言）：
+
+- mode=skip → 0 source 调用（早返回，metrics 仍记录但 hit_count=0）
+- mode=doc → 仅 KnowledgeContextSource 被调用（memory/graph stub.calls == 0）
+- mode=fact → 仅 MemoryContextSource + GraphContextSource（knowledge stub.calls == 0）
+- mode=hybrid → 全部 3 个 source 被调用（pre-PR5 行为）
+- 默认 mode=hybrid（向后兼容）
+- 未知 mode 字符串（如 "unknown"）回落 hybrid
+- action=wait → retrieve_mode 自动强制 skip（thinker 校验层 + 解析层双重保证）
+
+**待补**：
+
+- 真实流量观察：retrieve_mode 分布统计（admin metrics 端点暴露 mode 占比，闲聊群典型期望 skip ≥ 60%）
+- 若线上观察到 thinker 输出 mode=hybrid 频率 > 50%，说明 LLM 判断不够积极——可在 system prompt 加更多 few-shot
+- KnowledgeContextSource 注册名是 `knowledge`，但内部别名是 `doc`（_RRF_SOURCE_ALIASES）；PR5 mode filter 用注册名 `knowledge`，与 RRF fuse 时改名 `doc` 不冲突
+
+**部署计划**：`./scripts/deploy.sh`（PR3+PR4+PR5 同批一次性发版，单独部署 PR5 不接 PR4 token 预算无法发挥分路效益）；napcat 不重启（设备指纹反风控）；admin/static 是 bind mount 无需 rebuild。
+
+**回滚路径**：
+
+- 完整回滚：`git revert <PR5 hash>` 一行；旧 thinker search action 路径 + 旧 client.py 强转代码自动恢复
+- 软回滚：thinker 输出非 retrieve_mode 时 `_decision_from_data` 自动落 `hybrid`，service 默认 `hybrid` 不过滤——等于 pre-PR5 行为，零代码改动即可回退
+
+---
+
 ## 2026-05-22 知识库治本 PR4 — Token 多桶预算（替换字符截断）
 
 **变更类型**：refactor（services/context/packing.py 重写 + service / plugin / config 接通 + 1 个新测试文件）

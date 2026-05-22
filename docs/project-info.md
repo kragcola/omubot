@@ -157,6 +157,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | 知识图谱自动抽取 | `plugins/context/config.default.json` → `graph_auto_extract` | `true`（2026-05-21 PR2 切换为 LLM 抽取器：按句拆分 + 命名实体门控 + 0.85 置信度封顶；所有自动抽取一律进候选审核） |
 | 上下文 RRF 融合 | `plugins/context/config.default.json` → `rrf_k` / `rrf_weights` | `60` / `{doc:0.5, memory:0.3, graph:0.2}`（2026-05-22 PR3 切换 Reciprocal Rank Fusion 替换 raw-score sort，治本跨源量纲不可比） |
 | 上下文 token 预算 | `plugins/context/config.default.json` → `use_token_budget` / `budget` | `true` / `{total:6000, memory:1500, doc:2500, graph:1700, buffer:300}`（2026-05-22 PR4 多桶 token 预算替换 max_chars 字符截断；旧路径 use_token_budget=false 一键回退） |
+| Thinker 检索模式 | `services/llm/thinker.py` 输出 `retrieve_mode` | `skip` / `doc` / `fact` / `hybrid`（2026-05-22 PR5 删除 thinker `search` action，改由 thinker 决定四档检索模式：skip 闲聊不查、doc 查文档、fact 查记忆图谱、hybrid 全开；`action=wait` 时强制 skip。`ContextService.search(mode=...)` 按 mode 过滤 source，未知 mode 回落 hybrid） |
 | 群聊隐私遮掩 | `[group].privacy_mask` | `true` |
 | 预回复思考 | thinker（内置） | `true`（轻量 LLM 判断 reply/wait/search） |
 | 日志频道 | `[log.channels]` | 6 个默认开启，其余关闭 |

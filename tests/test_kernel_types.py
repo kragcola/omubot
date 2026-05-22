@@ -180,12 +180,12 @@ class TestReplyContext:
             reply_content="ok",
             tool_calls=[{"name": "search", "result": "found"}],
             elapsed_ms=1500.0,
-            thinker_action="search",
+            thinker_action="reply",
             thinker_thought="需要查一下资料",
         )
         assert len(ctx.tool_calls) == 1
         assert ctx.elapsed_ms == 1500.0
-        assert ctx.thinker_action == "search"
+        assert ctx.thinker_action == "reply"
         assert ctx.thinker_thought == "需要查一下资料"
 
 

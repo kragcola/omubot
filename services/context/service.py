@@ -20,6 +20,18 @@ _RRF_SOURCE_ALIASES: dict[str, str] = {
 DEFAULT_RRF_K = 60
 DEFAULT_RRF_WEIGHTS: dict[str, float] = {"doc": 0.5, "memory": 0.3, "graph": 0.2}
 
+# PR5: thinker retrieve_mode → which source.name values to query.
+# - skip:   bypass retrieval entirely (empty pack, lowest cost)
+# - doc:    only knowledge / document chunks
+# - fact:   only memory cards + knowledge graph
+# - hybrid: all sources (default; same as pre-PR5 behavior — None means "no filter")
+_MODE_SOURCE_FILTER: dict[str, set[str] | None] = {
+    "skip": set(),
+    "doc": {"knowledge"},
+    "fact": {"memory", "graph"},
+    "hybrid": None,
+}
+
 
 class ContextService:
     """Aggregate context hits from memory cards and document knowledge."""
@@ -69,11 +81,28 @@ class ContextService:
         top_k: int = 10,
         types: set[str] | None = None,
         type_caps: dict[str, int] | None = None,
+        mode: str = "hybrid",
     ) -> list[ContextHit]:
+        # PR5: retrieve_mode short-circuits the whole retrieval if "skip".
+        if mode == "skip":
+            self._record(
+                query, session_id, user_id, group_id, [],
+                error="", source_timings={}, mode=mode,
+            )
+            return []
+        # None = no filter (hybrid / unknown mode falls back to hybrid).
+        allowed_sources = (
+            _MODE_SOURCE_FILTER[mode]
+            if mode in _MODE_SOURCE_FILTER
+            else _MODE_SOURCE_FILTER["hybrid"]
+        )
         per_source_hits: dict[str, list[ContextHit]] = {}
         errors: list[str] = []
         source_timings: dict[str, float] = {}
         for source in self._sources:
+            source_name = str(getattr(source, "name", ""))
+            if allowed_sources is not None and source_name not in allowed_sources:
+                continue
             try:
                 t_source = time.perf_counter()
                 source_hits = await _search_source(
@@ -84,12 +113,11 @@ class ContextService:
                     group_id=group_id,
                     top_k=top_k,
                 )
-                source_timings[source.name] = (time.perf_counter() - t_source) * 1000
+                source_timings[source_name] = (time.perf_counter() - t_source) * 1000
             except Exception as exc:
-                errors.append(f"{source.name}:{type(exc).__name__}")
+                errors.append(f"{source_name}:{type(exc).__name__}")
                 continue
             filtered = [hit for hit in source_hits if types is None or hit.type in types]
-            source_name = str(getattr(source, "name", ""))
             alias = _RRF_SOURCE_ALIASES.get(source_name, source_name)
             existing = per_source_hits.setdefault(alias, [])
             existing.extend(filtered)
@@ -104,6 +132,7 @@ class ContextService:
             result,
             error=";".join(errors),
             source_timings=source_timings,
+            mode=mode,
         )
         return result
 
@@ -118,6 +147,7 @@ class ContextService:
         max_chars: int | None = None,
         budget: ContextBudget | None = None,
         type_caps: dict[str, int] | None = None,
+        mode: str = "hybrid",
     ) -> ContextPack:
         hits = await self.search(
             query,
@@ -126,6 +156,7 @@ class ContextService:
             group_id=group_id,
             top_k=top_k,
             type_caps=type_caps,
+            mode=mode,
         )
         # Resolution order: explicit budget arg > legacy max_chars > service default
         if budget is not None:
@@ -181,6 +212,7 @@ class ContextService:
         *,
         error: str = "",
         source_timings: dict[str, float] | None = None,
+        mode: str = "hybrid",
     ) -> None:
         self._recent.append({
             "created_at": time.time(),
@@ -196,6 +228,7 @@ class ContextService:
             "pack_chars": 0,
             "omitted_count": 0,
             "error": error,
+            "retrieve_mode": mode,
             "source_timings_ms": {
                 name: round(elapsed, 2)
                 for name, elapsed in (source_timings or {}).items()

@@ -266,6 +266,7 @@ class PromptContext:
     conversation_text: str = ""  # 最近对话文本（供关键词检索等使用）
     force_reply: bool = False
     privacy_mask: bool = True
+    retrieve_mode: str = "hybrid"  # thinker 决策的检索模式: "skip" / "doc" / "fact" / "hybrid"
 
     # 插件追加的 blocks（可变列表）
     blocks: list[PromptBlock] = field(default_factory=list)
@@ -298,7 +299,7 @@ class ReplyContext:
     user_msg: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)  # 本轮 LLM 工具调用记录
     elapsed_ms: float = 0.0  # 本轮 LLM 调用耗时
-    thinker_action: str = ""  # thinker 决策: "reply" / "wait" / "search"
+    thinker_action: str = ""  # thinker 决策: "reply" / "wait"
     thinker_thought: str = ""  # thinker 内心想法
 
 
@@ -309,9 +310,10 @@ class ThinkerContext:
     session_id: str
     group_id: str | None
     user_id: str
-    action: str  # "reply" / "wait" / "search"
+    action: str  # "reply" / "wait"
     thought: str  # thinker 的内心想法
     elapsed_ms: float = 0.0
+    retrieve_mode: str = "hybrid"  # "skip" / "doc" / "fact" / "hybrid"
 
 
 # ============================================================================

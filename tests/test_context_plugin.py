@@ -156,8 +156,9 @@ class _FakeContextService:
         max_chars: int | None = None,
         budget: object | None = None,
         type_caps: dict[str, int] | None = None,
+        mode: str = "hybrid",
     ) -> ContextPack:
-        del query, session_id, user_id, group_id, top_k, max_chars, budget, type_caps
+        del query, session_id, user_id, group_id, top_k, max_chars, budget, type_caps, mode
         return ContextPack(
             text="【记忆卡片】\n- [用户记忆] 统一记忆资料\n\n【文档资料】\n- [部署手册] 统一文档资料",
             hits=[

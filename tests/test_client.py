@@ -718,7 +718,8 @@ class TestPassTurn:
             assert bus.post_reply_calls[0].tool_calls
             assert bus.post_reply_calls[0].tool_calls[0]["name"] == "lookup_cards"
 
-    async def test_thinker_search_is_coerced_and_hooked(self, prompt, short_term, tools) -> None:
+    async def test_thinker_retrieve_mode_propagates_to_hook(self, prompt, short_term, tools) -> None:
+        """PR5: thinker decision retrieve_mode reaches ThinkerContext via the bus hook."""
         async for client in _client(prompt, short_term, tools):
             client._thinker_enabled = True
             bus = _Bus()
@@ -729,8 +730,9 @@ class TestPassTurn:
                 patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=MOCK_RESULT_FULL),
             ):
                 mock_think.return_value = SimpleNamespace(
-                    action="search",
-                    thought="查一下",
+                    action="reply",
+                    retrieve_mode="doc",
+                    thought="查文档",
                     sticker=False,
                     tone="认真",
                     usage={"input_tokens": 10, "cache_read": 0, "cache_create": 0, "output_tokens": 2},
@@ -738,13 +740,14 @@ class TestPassTurn:
                 result = await client.chat(
                     session_id="private_100",
                     user_id="100",
-                    user_content="今天几号",
+                    user_content="omubot 怎么部署",
                     identity=_IDENTITY,
                 )
 
             assert result == "reply text"
             assert len(bus.thinker_calls) == 1
             assert bus.thinker_calls[0].action == "reply"
+            assert bus.thinker_calls[0].retrieve_mode == "doc"
 
 
 # ---------------------------------------------------------------------------

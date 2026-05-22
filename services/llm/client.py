@@ -1603,6 +1603,7 @@ class LLMClient:
         action: str,
         thought: str,
         elapsed_ms: float,
+        retrieve_mode: str = "hybrid",
     ) -> None:
         if self._bus is None:
             return
@@ -1614,6 +1615,7 @@ class LLMClient:
                 action=action,
                 thought=thought,
                 elapsed_ms=elapsed_ms,
+                retrieve_mode=retrieve_mode,
             )
         )
 
@@ -1905,6 +1907,7 @@ class LLMClient:
         # ------------------------------------------------------------------
         thinker_decision: object | None = None
         thinker_action = ""
+        thinker_retrieve_mode = "hybrid"
         if self._thinker_enabled and not force_reply:
             from services.llm.thinker import think
 
@@ -1938,11 +1941,7 @@ class LLMClient:
             # Persist decision in prompt context so plugins can see it
             thinker_action = thinker_decision.action
             thinker_thought = thinker_decision.thought
-
-            if thinker_action == "search":
-                _log_thinking.info("thinker_search_coerced | session={} thought={!r}", session_id, thinker_thought)
-                thinker_action = "reply"
-                thinker_decision.action = "reply"
+            thinker_retrieve_mode = getattr(thinker_decision, "retrieve_mode", "hybrid")
 
             await self._fire_thinker_decision(
                 session_id=session_id,
@@ -1951,6 +1950,7 @@ class LLMClient:
                 action=thinker_action,
                 thought=thinker_thought,
                 elapsed_ms=(time.monotonic() - t0) * 1000,
+                retrieve_mode=thinker_retrieve_mode,
             )
 
             if thinker_action == "wait":
@@ -1996,6 +1996,7 @@ class LLMClient:
                         conversation_text=conversation_text,
                         force_reply=force_reply,
                         privacy_mask=privacy_mask,
+                        retrieve_mode=thinker_retrieve_mode,
                     )
                     await self._bus.fire_on_pre_prompt(prompt_ctx)
                     # --- Provider + Budget management + trace ---

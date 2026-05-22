@@ -115,6 +115,11 @@ class ContextPlugin(AmadeusPlugin):
         query = ctx.conversation_text.strip()
         if not query:
             return
+        # PR5: thinker decided which sources to query. "skip" → no retrieval at all.
+        retrieve_mode = getattr(ctx, "retrieve_mode", "hybrid") or "hybrid"
+        if retrieve_mode == "skip":
+            _L.debug("context skip | session={} reason=thinker_skip", ctx.session_id)
+            return
         t0 = asyncio.get_running_loop().time()
         if self._use_token_budget:
             pack = await self._service.build_prompt_context(
@@ -125,6 +130,7 @@ class ContextPlugin(AmadeusPlugin):
                 top_k=self._max_hits,
                 budget=self._budget,
                 type_caps={"doc_chunk": self._max_doc_hits},
+                mode=retrieve_mode,
             )
         else:
             pack = await self._service.build_prompt_context(
@@ -135,11 +141,13 @@ class ContextPlugin(AmadeusPlugin):
                 top_k=self._max_hits,
                 max_chars=self._max_chars,
                 type_caps={"doc_chunk": self._max_doc_hits},
+                mode=retrieve_mode,
             )
         elapsed_ms = (asyncio.get_running_loop().time() - t0) * 1000
         _L.debug(
-            "context prompt pack | query={!r} hits={} types={} doc_chunks={} "
+            "context prompt pack | mode={} query={!r} hits={} types={} doc_chunks={} "
             "pack_chars={} omitted={} elapsed={:.1f}ms sources={}",
+            retrieve_mode,
             _safe_query(query),
             len(pack.hits),
             dict(Counter(str(getattr(hit, "type", "")) for hit in pack.hits)),

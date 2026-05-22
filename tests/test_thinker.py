@@ -30,14 +30,79 @@ def test_parse_think_output_accepts_fenced_json() -> None:
 
 def test_parse_think_output_recovers_embedded_json() -> None:
     decision = parse_think_output(
-        '我先这样判断：{"action":"search","thought":"查一下今天日期","sticker":"0","tone":"认真"} 然后再说。'
+        '我先这样判断：'
+        '{"action":"reply","retrieve_mode":"doc","thought":"查一下今天日期",'
+        '"sticker":"0","tone":"认真"}'
+        ' 然后再说。'
     )
 
     assert decision is not None
-    assert decision.action == "search"
+    assert decision.action == "reply"
+    assert decision.retrieve_mode == "doc"
     assert decision.thought == "查一下今天日期"
     assert decision.sticker is False
     assert decision.tone == "认真"
+
+
+def test_parse_think_output_invalid_action_falls_back_to_reply() -> None:
+    """PR5: 'search' is no longer valid; thinker must coerce to 'reply'."""
+    decision = parse_think_output(
+        '{"action":"search","thought":"想查","sticker":false,"tone":"日常"}'
+    )
+
+    assert decision is not None
+    assert decision.action == "reply"
+    assert decision.retrieve_mode == "hybrid"  # default when not specified
+
+
+def test_parse_think_output_wait_forces_skip_mode() -> None:
+    """PR5: action=wait must override retrieve_mode to 'skip'."""
+    decision = parse_think_output(
+        '{"action":"wait","retrieve_mode":"hybrid","thought":"等一下","sticker":false,"tone":"日常"}'
+    )
+
+    assert decision is not None
+    assert decision.action == "wait"
+    assert decision.retrieve_mode == "skip"
+
+
+def test_parse_think_output_invalid_mode_falls_back_to_hybrid() -> None:
+    decision = parse_think_output(
+        '{"action":"reply","retrieve_mode":"banana","thought":"测试","sticker":false,"tone":"日常"}'
+    )
+
+    assert decision is not None
+    assert decision.retrieve_mode == "hybrid"
+
+
+def test_parse_think_output_accepts_doc_mode() -> None:
+    decision = parse_think_output(
+        '{"action":"reply","retrieve_mode":"doc","thought":"查文档","sticker":false,"tone":"认真"}'
+    )
+
+    assert decision is not None
+    assert decision.action == "reply"
+    assert decision.retrieve_mode == "doc"
+
+
+def test_parse_think_output_accepts_fact_mode() -> None:
+    decision = parse_think_output(
+        '{"action":"reply","retrieve_mode":"fact","thought":"查记忆","sticker":false,"tone":"日常"}'
+    )
+
+    assert decision is not None
+    assert decision.action == "reply"
+    assert decision.retrieve_mode == "fact"
+
+
+def test_parse_think_output_accepts_skip_mode() -> None:
+    decision = parse_think_output(
+        '{"action":"reply","retrieve_mode":"skip","thought":"闲聊不查","sticker":true,"tone":"元气"}'
+    )
+
+    assert decision is not None
+    assert decision.action == "reply"
+    assert decision.retrieve_mode == "skip"
 
 
 def test_parse_think_output_uses_heuristic_reply_fallback() -> None:
