@@ -14,7 +14,7 @@ cp soul/instruction.example.md config/soul/instruction.md
 docker compose up -d
 ```
 
-> 当前配置加载器优先读取 `config/config.json`，并兼容已有 `config/config.toml`。Admin 配置页保存时会写出 JSON 主配置。此机器的活跃开发工作区是 `$HOME/OmubotWorkspace/omubot`，不要把 `/Volumes/我的电脑/omubot` 当作日常测试目录。
+> 当前配置加载器优先读取 `config/config.json`，并兼容已有 `config/config.toml`。Admin 配置页保存时会写出 JSON 主配置。本机开发使用 APFS 外置盘上的仓库 checkout，运行 `uv` / `pytest` 前先 `source ./scripts/dev/env.sh`。
 
 ## 当前状态
 

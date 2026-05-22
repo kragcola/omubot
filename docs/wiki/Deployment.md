@@ -41,7 +41,7 @@ docker compose up napcat -d     # 仅启动 NapCat
 uv run python bot.py            # 直接运行 bot
 ```
 
-本机日常开发目录是 `$HOME/OmubotWorkspace/omubot`。原外置盘 checkout `/Volumes/我的电脑/omubot` 只作为 staging/挂载来源，不用于普通测试运行。
+本机外置开发盘已格式化为 APFS，仓库 checkout 即工作目录，无需再走 sparseimage 挂载流程。运行 `uv` / `pytest` 前先 `source ./scripts/dev/env.sh`，让 uv / pip 缓存落在仓库本地 `.cache/`。
 
 ## 容器结构
 

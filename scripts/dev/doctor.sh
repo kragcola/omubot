@@ -83,11 +83,7 @@ REPO_FS_LOWER="$(printf '%s' "$REPO_FS" | tr '[:upper:]' '[:lower:]')"
 if [[ "$REPO_FS_LOWER" == "apfs" || "$REPO_FS_LOWER" == "hfs" ]]; then
   ok "Repository is running from $REPO_FS."
 else
-  if [[ "$ROOT_DIR" == *"/.workspace_mount/"* || "$ROOT_DIR" == *"/.workspace_mount" || "$ROOT_DIR" == "$HOME_DIR/OmubotWorkspace"* ]]; then
-    fail "Repository filesystem is ${REPO_FS:-unknown}; the workspace image likely exists but is not attached at .workspace_mount."
-  else
-    fail "Repository filesystem is ${REPO_FS:-unknown}; for macOS external-disk development, move into the workspace image first."
-  fi
+  fail "Repository filesystem is ${REPO_FS:-unknown}; reformat the external disk as APFS (or use an APFS/HFS+ volume)."
 fi
 
 if [[ -L "$ROOT_DIR/.venv" ]]; then
