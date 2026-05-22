@@ -153,6 +153,7 @@ class KnowledgeGraphService:
 
     async def extract_from_context_hits(self, hits: list[ContextHit]) -> dict[str, Any]:
         """Extract graph candidates from context hits without affecting this prompt turn."""
+        _L.info("graph extract called | hits={}", len(hits))
         extracted = await self._llm_extractor.extract_from_hits(hits)
         accepted = 0
         pending = 0

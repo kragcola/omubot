@@ -226,6 +226,8 @@ class LLMGraphExtractor:
 
     def __init__(self, llm_client: Any = None) -> None:
         self._llm_client = llm_client
+        self._reject_log_count = 0
+        self._reject_log_burst = 20
 
     async def extract_from_hits(self, hits: list[ContextHit]) -> list[GraphExtractionResult]:
         if self._llm_client is None or not hasattr(self._llm_client, "_call"):
@@ -285,10 +287,12 @@ class LLMGraphExtractor:
                 sentence=sentence,
             )
             if not ok:
-                _L.debug(
-                    "llm graph fact rejected | reason={} subject={!r} predicate={!r} object={!r}",
-                    reason, subject, predicate, obj,
-                )
+                self._reject_log_count += 1
+                if self._reject_log_count <= self._reject_log_burst:
+                    _L.info(
+                        "llm graph fact rejected | reason={} subject={!r} predicate={!r} object={!r}",
+                        reason, subject, predicate, obj,
+                    )
                 continue
             accepted.append(GraphExtractionResult(
                 subject=subject,

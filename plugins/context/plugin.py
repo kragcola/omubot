@@ -148,7 +148,7 @@ class ContextPlugin(AmadeusPlugin):
                 mode=retrieve_mode,
             )
         elapsed_ms = (asyncio.get_running_loop().time() - t0) * 1000
-        _L.debug(
+        _L.info(
             "context prompt pack | mode={} query={!r} hits={} types={} doc_chunks={} "
             "pack_chars={} omitted={} elapsed={:.1f}ms sources={}",
             retrieve_mode,
@@ -195,8 +195,15 @@ class ContextPlugin(AmadeusPlugin):
             except Exception as exc:
                 _L.warning("context graph auto extract failed | error={}", type(exc).__name__)
                 return
-            if summary.get("extracted"):
-                _L.debug("context graph auto extract completed | summary={}", summary)
+            if summary.get("extracted") is None:
+                return
+            _L.info(
+                "context graph auto extract completed | extracted={} accepted={} pending={} ignored={}",
+                summary.get("extracted", 0),
+                summary.get("accepted", 0),
+                summary.get("pending", 0),
+                summary.get("ignored", 0),
+            )
 
         task.add_done_callback(_on_done)
 

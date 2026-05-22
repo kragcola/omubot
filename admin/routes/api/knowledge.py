@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -353,6 +354,72 @@ def create_knowledge_router(
                     "by_node_type": {}, "by_edge_type": {}}
         stats = await writer.get_stats()
         return {"available": True, **stats}
+
+    @router.get("/knowledge/graph/health")
+    async def graph_health():
+        """Diagnostic snapshot for the graph extraction pipeline.
+
+        Read-only aggregation across extraction_candidates, graph_facts, and
+        graph_edges. Surfaces 24h activity so plan A consumers can tell
+        whether the LLM extractor / Phase E listeners are firing without
+        having to shell into sqlite.
+        """
+        writer = _resolve_graph_writer()
+        if writer is None:
+            return {"available": False}
+        db = writer._db
+        if db is None:
+            return {"available": False}
+
+        # Created_at is stored with +08:00 offset; build the cutoff in the
+        # same form so lexical comparison works without julianday casts.
+        tz = timezone(timedelta(hours=8))
+        now = datetime.now(tz)
+        since_24h_iso = (now - timedelta(hours=24)).isoformat()
+
+        cursor = await db.execute(
+            "SELECT status, COUNT(*) FROM extraction_candidates "
+            "WHERE created_at >= ? GROUP BY status",
+            (since_24h_iso,),
+        )
+        candidate_24h = {row[0]: row[1] for row in await cursor.fetchall()}
+
+        cursor = await db.execute(
+            "SELECT status, COUNT(*) FROM extraction_candidates GROUP BY status"
+        )
+        candidate_total = {row[0]: row[1] for row in await cursor.fetchall()}
+
+        cursor = await db.execute(
+            "SELECT source, COUNT(*) FROM graph_facts "
+            "WHERE status='active' GROUP BY source"
+        )
+        facts_active_by_source = {row[0]: row[1] for row in await cursor.fetchall()}
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM graph_facts "
+            "WHERE status='active' AND created_at >= ?",
+            (since_24h_iso,),
+        )
+        row = await cursor.fetchone()
+        facts_active_24h = int(row[0]) if row else 0
+
+        cursor = await db.execute(
+            "SELECT edge_type, COUNT(*) FROM graph_edges "
+            "WHERE status='active' AND created_at >= ? GROUP BY edge_type",
+            (since_24h_iso,),
+        )
+        edges_24h = {row[0]: row[1] for row in await cursor.fetchall()}
+
+        return {
+            "available": True,
+            "checked_at": now.isoformat(),
+            "since": since_24h_iso,
+            "candidate_24h": candidate_24h,
+            "candidate_total": candidate_total,
+            "facts_active_by_source": facts_active_by_source,
+            "facts_active_24h": facts_active_24h,
+            "edges_24h": edges_24h,
+        }
 
     def _search(kb: Any, query: str, *, top_k: int) -> list[dict[str, Any]]:
         if hasattr(kb, "search_hits"):
