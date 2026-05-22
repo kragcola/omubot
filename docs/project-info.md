@@ -160,6 +160,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | Thinker 检索模式 | `services/llm/thinker.py` 输出 `retrieve_mode` | `skip` / `doc` / `fact` / `hybrid`（2026-05-22 PR5 删除 thinker `search` action，改由 thinker 决定四档检索模式：skip 闲聊不查、doc 查文档、fact 查记忆图谱、hybrid 全开；`action=wait` 时强制 skip。`ContextService.search(mode=...)` 按 mode 过滤 source，未知 mode 回落 hybrid。2026-05-22 PR6 修启动顺序：ContextPlugin.on_startup 始终覆盖 ChatPlugin 预创建的 service，配置过的 RRF/budget 真正进生产路径；admin `/context/search` 加 `mode` 参数 + 删前端 hardcoded `max_chars`，调试路径与生产对齐；skip 不再插件层早返，metrics 不再漏记） |
 | 群聊隐私遮掩 | `[group].privacy_mask` | `true` |
 | 预回复思考 | thinker（内置） | `true`（轻量 LLM 判断 reply/wait + retrieve_mode 四档；2026-05-22 PR5 删除 search action；2026-05-22 方案 D 给 `THINKER_SYSTEM_PROMPT` 顶部加 `## 上下文使用须知` 文档段，token 1229 → 1693，跨过 DeepSeek 1024 缓存门槛留 670 安全余量；test_thinker.py 加 ≥1300 sanity 下界） |
+| 群内黑话 prompt 缓存 | shared_prefix + 任务 prompt | `slang` / `slang_review` / `slang_drift` / `slang_semantic`（context/literal/compare）共 5 类 DeepSeek 调用；2026-05-22 方案 D 硬化 `slang_review`（1274 → 1747 token），2026-05-22 方案 E 完成 D 的同模式扫描收尾——`slang`(1218 → 1896) + `slang_drift`(1255 → 1925) + `slang_semantic` 三阶段（1080-1116 → 1556-1586）静态前缀全部跨过 1024 缓存门槛留 250+ 安全余量；test_slang_shared_prefix.py 4 条 sanity ≥1300 下界护栏 |
 | 日志频道 | `[log.channels]` | 6 个默认开启，其余关闭 |
 | 插件发现 | 自动 | `bot.py` 调用 `bus.discover_plugins()` |
 | plugin.json 覆盖 | 自动 | 目录插件可选，覆盖类属性元数据 |

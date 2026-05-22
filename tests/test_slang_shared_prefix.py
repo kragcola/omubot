@@ -15,10 +15,17 @@ from __future__ import annotations
 
 import pytest
 
+from services.slang.drift_reviewer import _SYSTEM_PROMPT as _DRIFT_SYSTEM_PROMPT
 from services.slang.drift_reviewer import SlangDriftReviewer
+from services.slang.extractor import _SYSTEM_PROMPT as _EXTRACTOR_SYSTEM_PROMPT
 from services.slang.extractor import SlangExtractor
 from services.slang.review_utils import _REVIEW_SYSTEM_PROMPT, assess_with_llm
-from services.slang.semantic_reviewer import SlangSemanticReviewer
+from services.slang.semantic_reviewer import (
+    _COMPARE_SYSTEM_PROMPT,
+    _CONTEXT_SYSTEM_PROMPT,
+    _LITERAL_SYSTEM_PROMPT,
+    SlangSemanticReviewer,
+)
 from services.slang.shared_prefix import get_shared_slang_prefix
 from services.slang.types import (
     SlangExtraction,
@@ -193,4 +200,76 @@ def test_slang_review_static_blocks_clear_deepseek_cache_threshold() -> None:
         f"threshold with margin. Trimming below this floor will silently "
         f"regress slang_review cache hit rate from ~60% back to ~30%."
     )
+
+
+def _estimate_tokens(text: str) -> int:
+    """CJK 1:1 + ASCII 1:0.3, aligned with DeepSeek word-page granularity."""
+    cjk = sum(1 for c in text if "一" <= c <= "鿿")
+    ascii_chars = len(text) - cjk
+    return cjk + ascii_chars // 3
+
+
+def test_slang_extractor_static_blocks_clear_deepseek_cache_threshold() -> None:
+    """方案 E.1 — slang extractor 静态系统块（shared_prefix + extractor prompt）
+    必须 ≥ 1300 token 跨过 DeepSeek 1024 缓存门槛。
+
+    实测 7 天 700 次调用 hit_pct 35.4%，shared(934)+extractor(284)=1218 token
+    紧贴 1024 边界。E.1 顶部加"## 提取纪律"段把 combined 推到 ~1900 token，
+    跨过 1300 留 ~600 安全余量。下次有人删 prompt 文档时 pytest 失败兜底，
+    避免静默回退到 ~35% 命中率。
+    """
+    shared = get_shared_slang_prefix()
+    extractor = _EXTRACTOR_SYSTEM_PROMPT
+    combined = _estimate_tokens(shared) + _estimate_tokens(extractor)
+    assert combined >= 1300, (
+        f"slang extractor static blocks total {combined} tokens, below the "
+        f"1300 lower bound chosen to clear DeepSeek's 1024 cache threshold "
+        f"with margin. Trimming below this floor will silently regress slang "
+        f"extractor cache hit rate from ~60% back to ~35%."
+    )
+
+
+def test_slang_drift_static_blocks_clear_deepseek_cache_threshold() -> None:
+    """方案 E.2 — slang_drift 静态系统块（shared_prefix + drift prompt）
+    必须 ≥ 1300 token 跨过 DeepSeek 1024 缓存门槛。
+
+    实测 7 天 61 次调用 hit_pct 44.8%，shared(934)+drift(321)=1255 token
+    紧贴 1024 边界。E.2 顶部加"## 漂移判定纪律"段把 combined 推到 ~1900,
+    跨过 1300 留 ~600 安全余量。下次有人删 prompt 文档时 pytest 失败兜底。
+    """
+    shared = get_shared_slang_prefix()
+    combined = _estimate_tokens(shared) + _estimate_tokens(_DRIFT_SYSTEM_PROMPT)
+    assert combined >= 1300, (
+        f"slang_drift static blocks total {combined} tokens, below the "
+        f"1300 lower bound chosen to clear DeepSeek's 1024 cache threshold "
+        f"with margin. Trimming below this floor will silently regress "
+        f"slang_drift cache hit rate from ~60% back to ~45%."
+    )
+
+
+def test_slang_semantic_three_stages_clear_deepseek_cache_threshold() -> None:
+    """方案 E.3 — slang_semantic 三阶段静态系统块都必须 ≥ 1300 token。
+
+    三阶段（context / literal / compare）共享 shared_prefix(934 token)，
+    但每个阶段的 _SYSTEM_PROMPT 自身只有 146-182 token，combined 1080-1116
+    全部紧贴 1024 边界。E.3 顶部各加"## 阶段 N 纪律"段把每个阶段都推过
+    1300，确保 DeepSeek 词级前缀缓存稳定命中。
+
+    隔离纪律（阶段二只看词形 / 阶段三只看两段 meaning）是三阶段流水线设计
+    的核心；prompt 段同时也起到了把缓存前缀拉过门槛的作用。
+    """
+    shared = get_shared_slang_prefix()
+    shared_tok = _estimate_tokens(shared)
+    for name, prompt in (
+        ("context", _CONTEXT_SYSTEM_PROMPT),
+        ("literal", _LITERAL_SYSTEM_PROMPT),
+        ("compare", _COMPARE_SYSTEM_PROMPT),
+    ):
+        combined = shared_tok + _estimate_tokens(prompt)
+        assert combined >= 1300, (
+            f"slang_semantic stage={name!r} static blocks total {combined} "
+            f"tokens, below the 1300 lower bound chosen to clear DeepSeek's "
+            f"1024 cache threshold with margin. Trimming below this floor "
+            f"will silently regress slang_semantic cache hit rate."
+        )
 

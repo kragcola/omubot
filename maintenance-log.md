@@ -4,6 +4,83 @@
 
 ---
 
+## 2026-05-22 知识库改进 E — 完成 D 的同模式扫描，slang / slang_drift / slang_semantic 三阶段静态前缀加固
+
+**变更类型**：perf（services/slang/extractor.py + services/slang/drift_reviewer.py + services/slang/semantic_reviewer.py + tests/）
+
+**背景**：
+
+D 方案落地后用 7 天 usage 数据复盘，发现 D 的 D1 同模式扫描存在遗漏——只硬化了 thinker / slang_review 两条，但 slang_* 家族其余 4 条仍然紧贴 1024-token 边界：
+
+| call_type | 7 天调用 | 7 天 hit_pct | 静态系统块（D 后） | 状态 |
+| --- | --- | --- | --- | --- |
+| slang @ deepseek (extractor) | 700 | 35.4% | shared_prefix(934) + extractor(284) ≈ 1218 token | 紧贴边界 |
+| slang_drift @ deepseek | 61 | 44.8% | shared_prefix(934) + drift(321) ≈ 1255 token | 紧贴边界 |
+| slang_semantic-context | ~60 | ~30% | shared_prefix(934) + ctx(182) ≈ 1116 token | 紧贴边界 |
+| slang_semantic-literal | ~60 | ~30% | shared_prefix(934) + lit(146) ≈ 1080 token | 紧贴边界 |
+| slang_semantic-compare | ~60 | ~30% | shared_prefix(934) + cmp(173) ≈ 1107 token | 紧贴边界 |
+| slang_review @ deepseek | 633 | 30.2% → ≥60%（D 后） | 1747 token | 已硬化（D.2） |
+| thinker @ deepseek | 32 | 30.4% → ≥60%（D 后） | 1693 token | 已硬化（D.1） |
+
+D 同模式扫描在审查阶段判断 slang/drift/semantic 三类调用量较低、ROI 不足而搁置，但实测 700 + 61 + ~180 ≈ 941 calls/7d 总量比 thinker(32) + slang_review(633) = 665 还高。**这是 D 的 D1 纪律遗漏**，本次方案 E 完成扫描收尾。
+
+**改动**：
+
+1. **E.1 [services/slang/extractor.py:18-72](services/slang/extractor.py#L18-L72)** —
+   `_SYSTEM_PROMPT` 顶部追加 `## 提取纪律` 静态文档段（6 条）：
+   - extractor 在 slang 流水线第一环（extractor → reviewer → drift / semantic）
+   - 假阳/假阴代价不对称——保守提取（每个噪声候选 = 1 次 reviewer LLM + 1 个人工审核位）
+   - confidence 取值惯例（0.6+ / 0.3-0.6 / ≤0.3 三档）
+   - evidence 必须是包含候选词的真句原文
+   - repeat_policy 三档语义边界
+   - 8 个候选硬上限的工程理由（token 预算 + 队列吞吐）
+
+   token 估算：shared(934) + extractor(284→962) = **1896 token**（+56%，跨过 1024 留 ~870 安全余量）。
+
+2. **E.2 [services/slang/drift_reviewer.py:21-72](services/slang/drift_reviewer.py#L21-L72)** —
+   `_SYSTEM_PROMPT` 顶部追加 `## 漂移判定纪律` 静态文档段（5 条）：
+   - drift reviewer 在 slang 流水线第三环（监控已入库词条的语义迁移）
+   - 错判 real_drift vs same_meaning 代价不对称——默认"宁可 unclear 不可 real_drift"
+   - 四档 verdict 语义递进（same_meaning → alias_candidate → real_drift → unclear）
+   - DRIFT_GATE_MIN_CONFIDENCE = 0.72 工程阈值（低于此值降级为 unclear）
+   - 真实漂移信号 = 指代分裂，不是表述差异
+
+   token 估算：shared(934) + drift(321→991) = **1925 token**（+53%）。
+
+3. **E.3 [services/slang/semantic_reviewer.py:22-132](services/slang/semantic_reviewer.py#L22-L132)** —
+   三阶段 `_SYSTEM_PROMPT` 各自顶部追加 `## 阶段 N 纪律` 静态文档段：
+   - **阶段一（context）**: shared(934) + ctx(182→641) = **1575 token**。位置（流水线入口）+ 隔离纪律（只看群聊证据，不用公网知识）+ no_info 边界 + `_MIN_STAGE_CONFIDENCE = 0.55` 工程阈值。
+   - **阶段二（literal）**: shared(934) + lit(146→622) = **1556 token**。隔离纪律（只看候选词本身，污染会让阶段三对比退化）+ 人名/作品名/品牌名识别策略 + 公网梗稳定性区分。
+   - **阶段三（compare）**: shared(934) + cmp(173→652) = **1586 token**。判决环位置 + is_similar 阈值（指代/场景任一不同就 false）+ `_MIN_COMPARE_CONFIDENCE = 0.72` 工程阈值（低于此强制 unclear）。
+
+   三阶段隔离纪律是 semantic 三阶段流水线设计的核心；prompt 段同时也起到把缓存前缀拉过门槛的作用。
+
+4. **E 测试加 4 条 sanity 下界护栏** [tests/test_slang_shared_prefix.py:179-274](tests/test_slang_shared_prefix.py#L179-L274)：
+   - `test_slang_extractor_static_blocks_clear_deepseek_cache_threshold` — combined ≥ 1300
+   - `test_slang_drift_static_blocks_clear_deepseek_cache_threshold` — combined ≥ 1300
+   - `test_slang_semantic_three_stages_clear_deepseek_cache_threshold` — 三阶段 each combined ≥ 1300（一次性遍历 ctx/lit/cmp）
+
+   下次有人删 prompt 文档时 pytest 失败兜底，避免静默回退到 ~35-45% 命中率。
+
+**验证**：
+
+- `uv run pytest tests/test_slang_shared_prefix.py tests/test_slang_drift_reviewer.py tests/test_slang_semantic_reviewer.py tests/test_slang_backlog_reviewer.py tests/test_slang_plugin.py tests/test_slang_collision.py tests/test_slang_alias_collision_report.py tests/test_thinker.py tests/test_llm_request.py -q` → 112 passed, 1 skipped（targeted 回归集；全量 pytest 在 slang_db_repair 子进程触发 D5 死锁，按 D5 协议 pkill -9 后切换到 targeted 集）
+- `uv run ruff check services/slang/extractor.py services/slang/drift_reviewer.py services/slang/semantic_reviewer.py tests/test_slang_shared_prefix.py` → All checks passed（1 个 import 顺序经 --fix 修正）
+- `uv run pyright services/slang/extractor.py services/slang/drift_reviewer.py services/slang/semantic_reviewer.py tests/test_slang_shared_prefix.py` → 4 errors all 预存（test 文件第 73/97/138/175 行 `request.task` 属性访问，非本方案新增），方案 E 0 新错
+- 部署阻塞：Docker daemon containerd 损坏（pre-D 已发现），方案 D + 方案 E 一并等待 Docker 自愈或后续手动恢复后再 `dot_clean . && docker compose up bot -d --build`
+- 24h 后 SQL 回查全部 5 个 task 的 hit_pct（验收阈值：thinker / slang_review / slang / slang_drift / slang_semantic 各 ≥ 50%，目标 ≥ 60%）
+
+**影响范围**：
+
+- slang extractor：每次群聊抽样调用提示词加 ~680 字纯背景文档，**不引入新规则、新输出格式、新决策逻辑**；token 成本：每次 +330 token 静态块（一次缓存写入 + N 次缓存命中分摊）。
+- slang drift reviewer：每次已入库词条新证据复核加 ~670 字纪律说明，约束 reviewer 默认走 unclear 而非 real_drift，预期人工漂移工单率略降。
+- slang semantic 三阶段：每个候选词三次 LLM 调用各加 ~470 字阶段纪律，强化阶段间隔离原则——降低跨阶段污染风险（阶段二被群聊上下文污染会让阶段三对比退化为"上下文 vs 上下文"自我打分）。
+- 缓存命中率（预期）：slang 35% → ≥60%、slang_drift 45% → ≥60%、slang_semantic 三阶段 30% → ≥60%。低于 50% 视为方案失败，回滚后改为重排 dynamic_blocks。
+
+**回滚**：`git revert <hash>`；schema 0 改动；运维 0 改动。回滚后立即恢复到 E 实施前的 ~35-45% 命中率，无遗留状态。
+
+---
+
 ## 2026-05-22 知识库改进 D — thinker / slang_review 静态前缀加固跨过 DeepSeek 1024-token 缓存门槛
 
 **变更类型**：perf（services/llm/thinker.py + services/slang/review_utils.py + tests/）
