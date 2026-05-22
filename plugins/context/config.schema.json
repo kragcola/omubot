@@ -36,6 +36,39 @@
       "type": "boolean",
       "title": "自动抽取图谱候选",
       "description": "从本轮命中的记忆卡片和文档片段中抽取关系事实。2026-05-21 PR2 已切换为 LLM 抽取器（按句拆分 + 命名实体门控 + 0.85 置信度封顶），所有自动抽取一律进候选审核队列。"
+    },
+    "rrf_k": {
+      "type": "integer",
+      "title": "RRF k 常数",
+      "description": "Reciprocal Rank Fusion 的 k 值，控制 rank 衰减。Cormack 2009 / Elasticsearch / LangChain / LlamaIndex / Weaviate / Vespa 默认 60。",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "rrf_weights": {
+      "type": "object",
+      "title": "RRF 跨源权重",
+      "description": "doc / memory / graph 三源在 RRF 融合时的权重。默认 doc:0.5 / memory:0.3 / graph:0.2，可按线上日志调整。",
+      "additionalProperties": false,
+      "properties": {
+        "doc": {
+          "type": "number",
+          "title": "文档权重",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "memory": {
+          "type": "number",
+          "title": "记忆权重",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "graph": {
+          "type": "number",
+          "title": "图谱权重",
+          "minimum": 0,
+          "maximum": 5
+        }
+      }
     }
   }
 }

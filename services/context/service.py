@@ -3,23 +3,48 @@
 from __future__ import annotations
 
 import time
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
+from dataclasses import replace
 from typing import Any
 
 from services.context.packing import pack_context_hits
 from services.context.sources import GraphContextSource, KnowledgeContextSource, MemoryContextSource
 from services.context.types import ContextHit, ContextPack
 
+# Map source.name → external alias used in config (audit/plan use doc/memory/graph,
+# but KnowledgeContextSource is registered under "knowledge"). Resolved at fuse time.
+_RRF_SOURCE_ALIASES: dict[str, str] = {
+    "knowledge": "doc",
+}
+
+DEFAULT_RRF_K = 60
+DEFAULT_RRF_WEIGHTS: dict[str, float] = {"doc": 0.5, "memory": 0.3, "graph": 0.2}
+
 
 class ContextService:
     """Aggregate context hits from memory cards and document knowledge."""
 
-    def __init__(self, sources: list[Any] | None = None) -> None:
+    def __init__(
+        self,
+        sources: list[Any] | None = None,
+        *,
+        rrf_k: int = DEFAULT_RRF_K,
+        rrf_weights: dict[str, float] | None = None,
+    ) -> None:
         self._sources = list(sources or [])
         self._recent: deque[dict[str, Any]] = deque(maxlen=80)
+        self._rrf_k = max(1, int(rrf_k))
+        self._rrf_weights = dict(rrf_weights) if rrf_weights else dict(DEFAULT_RRF_WEIGHTS)
 
     @classmethod
-    def from_runtime(cls, ctx: Any, *, bus: Any = None) -> ContextService:
+    def from_runtime(
+        cls,
+        ctx: Any,
+        *,
+        bus: Any = None,
+        rrf_k: int = DEFAULT_RRF_K,
+        rrf_weights: dict[str, float] | None = None,
+    ) -> ContextService:
         sources: list[Any] = []
         card_store = getattr(ctx, "card_store", None)
         if card_store is not None:
@@ -29,7 +54,7 @@ class ContextService:
             ))
         sources.append(KnowledgeContextSource(ctx=ctx, bus=bus or getattr(ctx, "bus", None)))
         sources.append(GraphContextSource(ctx=ctx))
-        return cls(sources)
+        return cls(sources, rrf_k=rrf_k, rrf_weights=rrf_weights)
 
     async def search(
         self,
@@ -42,7 +67,7 @@ class ContextService:
         types: set[str] | None = None,
         type_caps: dict[str, int] | None = None,
     ) -> list[ContextHit]:
-        all_hits: list[ContextHit] = []
+        per_source_hits: dict[str, list[ContextHit]] = {}
         errors: list[str] = []
         source_timings: dict[str, float] = {}
         for source in self._sources:
@@ -60,11 +85,14 @@ class ContextService:
             except Exception as exc:
                 errors.append(f"{source.name}:{type(exc).__name__}")
                 continue
-            all_hits.extend(hit for hit in source_hits if types is None or hit.type in types)
+            filtered = [hit for hit in source_hits if types is None or hit.type in types]
+            source_name = str(getattr(source, "name", ""))
+            alias = _RRF_SOURCE_ALIASES.get(source_name, source_name)
+            existing = per_source_hits.setdefault(alias, [])
+            existing.extend(filtered)
 
-        deduped = _dedupe_hits(all_hits)
-        deduped.sort(key=lambda hit: (-hit.score, hit.type, hit.id))
-        result = _apply_type_caps(deduped, type_caps)[:top_k]
+        fused = _rrf_fuse(per_source_hits, weights=self._rrf_weights, k=self._rrf_k)
+        result = _apply_type_caps(fused, type_caps)[:top_k]
         self._record(
             query,
             session_id,
@@ -187,16 +215,50 @@ class ContextService:
         item["duplicate_count"] = _count_duplicate_hits(pack.hits)
 
 
-def _dedupe_hits(hits: list[ContextHit]) -> list[ContextHit]:
-    seen: set[tuple[str, str]] = set()
-    deduped: list[ContextHit] = []
-    for hit in hits:
-        key = (hit.type, hit.id)
-        if key in seen:
+def _rrf_fuse(
+    per_source_hits: dict[str, list[ContextHit]],
+    *,
+    weights: dict[str, float] | None = None,
+    k: int = DEFAULT_RRF_K,
+) -> list[ContextHit]:
+    """Reciprocal Rank Fusion across heterogeneous retrievers.
+
+    Cormack 2009; the same default (k=60) is used by Elasticsearch, LangChain,
+    LlamaIndex, Weaviate and Vespa. Only ranks are combined — raw BM25 / cosine /
+    ngram scores are deliberately ignored because their distributions are not
+    comparable across sources.
+
+    score(d) = Σ_s w_s / (k + rank_s(d))   (1-based rank, missing rank = 0)
+    """
+    if not per_source_hits:
+        return []
+    weights = dict(weights) if weights else {}
+
+    fused_score: dict[tuple[str, str], float] = defaultdict(float)
+    node_map: dict[tuple[str, str], ContextHit] = {}
+    for source, hits in per_source_hits.items():
+        if not hits:
             continue
-        seen.add(key)
-        deduped.append(hit)
-    return deduped
+        weight = weights.get(source, 1.0 / max(len(per_source_hits), 1))
+        if weight <= 0:
+            continue
+        seen_in_source: set[tuple[str, str]] = set()
+        rank = 0
+        for hit in hits:
+            key = (hit.type, hit.id)
+            if key in seen_in_source:
+                continue
+            seen_in_source.add(key)
+            rank += 1
+            fused_score[key] += weight / (k + rank)
+            current = node_map.get(key)
+            if current is None or hit.score > current.score:
+                node_map[key] = hit
+
+    return sorted(
+        (replace(node_map[key], score=score) for key, score in fused_score.items()),
+        key=lambda h: (-h.score, h.type, h.id),
+    )
 
 
 async def _search_source(

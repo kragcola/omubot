@@ -22,6 +22,8 @@ class ContextConfig(BaseModel):
     max_doc_hits: int = 3
     max_chars: int = 2400
     graph_auto_extract: bool = True
+    rrf_k: int = 60
+    rrf_weights: dict[str, float] = {"doc": 0.5, "memory": 0.3, "graph": 0.2}
 
 
 class ContextPlugin(AmadeusPlugin):
@@ -38,6 +40,8 @@ class ContextPlugin(AmadeusPlugin):
         self._max_doc_hits = 3
         self._max_chars = 2400
         self._graph_auto_extract = True
+        self._rrf_k = 60
+        self._rrf_weights: dict[str, float] = {"doc": 0.5, "memory": 0.3, "graph": 0.2}
         self._service = None
         self._graph = None
         self._pending_graph_tasks: set[asyncio.Task[dict[str, int]]] = set()
@@ -50,6 +54,8 @@ class ContextPlugin(AmadeusPlugin):
         self._max_doc_hits = cfg.max_doc_hits
         self._max_chars = cfg.max_chars
         self._graph_auto_extract = cfg.graph_auto_extract
+        self._rrf_k = max(1, int(cfg.rrf_k))
+        self._rrf_weights = {k: float(v) for k, v in cfg.rrf_weights.items()}
 
         if not self._enabled:
             _L.info("context plugin disabled; legacy memo/knowledge prompt injection remains active")
@@ -57,17 +63,25 @@ class ContextPlugin(AmadeusPlugin):
 
         from services.context import ContextService
 
-        self._service = getattr(ctx, "context_service", None) or ContextService.from_runtime(ctx, bus=ctx.bus)
+        self._service = getattr(ctx, "context_service", None) or ContextService.from_runtime(
+            ctx,
+            bus=ctx.bus,
+            rrf_k=self._rrf_k,
+            rrf_weights=self._rrf_weights,
+        )
         self._graph = getattr(ctx, "knowledge_graph", None)
         ctx.context_service = self._service
         if self._takeover:
             ctx.context_prompt_owner = "context"
         _L.info(
-            "context plugin enabled | takeover={} max_hits={} max_doc_hits={} max_chars={}",
+            "context plugin enabled | takeover={} max_hits={} max_doc_hits={} "
+            "max_chars={} rrf_k={} rrf_weights={}",
             self._takeover,
             self._max_hits,
             self._max_doc_hits,
             self._max_chars,
+            self._rrf_k,
+            self._rrf_weights,
         )
 
     async def on_pre_prompt(self, ctx: PromptContext) -> None:

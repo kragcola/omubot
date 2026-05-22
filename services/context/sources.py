@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from loguru import logger
 
@@ -11,6 +11,29 @@ from services.memory.retrieval import extract_keywords
 from services.similarity import create_similarity_provider
 
 _L = logger.bind(channel="system")
+
+
+@runtime_checkable
+class ContextRetriever(Protocol):
+    """Structural type that every ContextService source must satisfy.
+
+    Existing duck-typed sources (memory / knowledge / graph) already match this
+    shape; the Protocol is purely for type-checking and to give RRF fusion a
+    stable contract once a second consumer (e.g. PR5 query-mode dispatch)
+    appears.
+    """
+
+    name: str
+
+    async def search(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        user_id: str = "",
+        group_id: str | None = None,
+        top_k: int = 8,
+    ) -> list[ContextHit]: ...
 
 _MAX_MEMORY_SESSIONS = 500
 _MEMORY_REFRESH_INTERVAL = 10

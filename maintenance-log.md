@@ -4,6 +4,66 @@
 
 ---
 
+## 2026-05-22 知识库治本 PR3 — RRF 跨源融合 + ContextRetriever Protocol + 软指令兜底
+
+**变更类型**：refactor（services/context 治本主菜：3 个文件改动 + 1 个新测试 + 2 个配置字段 + 1 段 prompt 软指令）
+
+**背景**：
+
+PR2 部署后实测样本 `omubot怎么部署`（私聊 user=1416930401）→ bot 连续 3 轮 `web_search` 公网搜不到，最终甩锅"找不到详细教程，去看 GitHub README"。**审计报告 + RCA 合并**追到根因：跨源 score 量纲不可比——memory `confidence+priority/10`（0.5–1.5）/ doc BM25 原始分（0.1–10+）/ graph `ngram×confidence`（0.05–0.95）三种分布合在一起 [services/context/service.py:34](services/context/service.py#L34) 直接 `sort(-score)`，BM25 高分外加 max_doc_hits 名额抢占必然把 omubot/* 部署 chunk 挤掉，prompt 里压根没有正确资料 → LLM 自然外网兜底。**4 路并行研究（RRF / LightRAG / LlamaIndex / Self-RAG-CRAG）后**确定治本算法：Reciprocal Rank Fusion（Cormack 2009，k=60 行业默认；Elasticsearch / LangChain / LlamaIndex / Weaviate / Vespa 全部 k=60），只用 rank 不用 raw score，天然解决量纲问题。详细方案 → [tmp/rca-knowledge-treatment-plan-v3.md](tmp/rca-knowledge-treatment-plan-v3.md)。
+
+**改动文件**：
+
+| 文件 | 改动 |
+| --- | --- |
+| [services/context/sources.py](services/context/sources.py) | **新增** `ContextRetriever` Protocol（`@runtime_checkable`，10 行）。Memory / Knowledge / Graph 三个现有 source 已结构性满足，零行为变更，仅类型契约固化 |
+| [services/context/service.py](services/context/service.py) | **新增** `_rrf_fuse()` 纯函数（~40 行）：score(d) = Σ w_s/(k+rank_s(d))，1-based rank、缺失项隐式 0、source 内同 (type,id) 去重；`ContextService.__init__` 加 `rrf_k` / `rrf_weights` 注入；`from_runtime` classmethod 同步；`search()` 把"按 score 直接合并排序"换成"按 source 分桶 → RRF 融合"——**根因焊死**。`KnowledgeContextSource.name="knowledge"` 通过 `_RRF_SOURCE_ALIASES` 映射为外部别名 `doc`，对齐审计/配置语义 |
+| [plugins/context/plugin.py](plugins/context/plugin.py) | `ContextConfig` 加 `rrf_k=60` / `rrf_weights={doc:0.5, memory:0.3, graph:0.2}` 默认值；`on_startup` 把权重传给 `ContextService.from_runtime`；启动日志同步打印 |
+| [plugins/context/config.default.json](plugins/context/config.default.json) | 加 `rrf_k: 60` + `rrf_weights: {doc: 0.5, memory: 0.3, graph: 0.2}` 默认值（向后兼容，旧配置文件缺这两个字段不影响启动） |
+| [plugins/context/config.schema.json](plugins/context/config.schema.json) | 同步加 `rrf_k`（int 1-1000）+ `rrf_weights`（doc/memory/graph 三个 number 0-5）字段定义 |
+| [config/soul/instruction.md](config/soul/instruction.md) | "主动搜索"段加 1 行软指令兜底：涉及 Omubot 自身（部署、架构、管理端、插件、配置）问题优先调用 knowledge_search 查本地，不要直接 web_search |
+| [tests/test_context_rrf.py](tests/test_context_rrf.py) | **新增** 8 个单测：BM25 量纲不可比反例 / 权重生效 / 跨源同 id 重叠累加 / 空输入 / 0 权重跳过 / Protocol 结构契约 / "omubot 怎么部署"模拟回归 / 默认权重保持 doc 优先 |
+
+**爆炸半径**：
+
+- services/context 内部 + 2 配置文件 + 1 prompt 文件 + 1 新测试，admin/static 不动，无 schema 迁移
+- ContextService 调用方（plugins/context/plugin.py:on_pre_prompt）API 不变，签名向后兼容
+- 后端运行时：bot 容器需 rebuild（services/* 改动）；napcat 不动
+- admin/frontend：无改动
+- 回滚：`git revert <hash>`，无 DB 迁移
+
+**D1 同模式扫描**：
+
+| 检查 | 命令 | 结果 |
+| --- | --- | --- |
+| 其他"按 raw score 直接跨源排序"位点 | `grep -rn "sort.*score" services/ plugins/` | services/context/sources.py:132/387 是单源内部排序（同量纲合理）；services/knowledge/retrievers.py:147 是 BM25 内部 ranker；跨源融合**只此一处**已切 RRF ✅ |
+| 其他直接 sort score 的多源合并 | `grep -rn "all_hits.extend\|hits.extend" services/` | service.py 此前一处已替换；其他 extend 均为单源内分页/去重 ✅ |
+| Protocol 结构兼容 | `pyright services/context/` | 0 errors ✅ |
+
+**验证**（D4 完成声明含证据）：
+
+- **新增测试**：`uv run pytest tests/test_context_rrf.py -q` → **8 passed in 0.05s** ✅
+- **既有 context/knowledge 测试不破**：`uv run pytest tests/test_context_rrf.py tests/test_context_service.py tests/test_context_eval.py tests/test_context_plugin.py tests/test_knowledge.py tests/test_knowledge_graph.py -q` → **52 passed in 0.32s** ✅
+- **ruff**：`uv run ruff check services/context/ plugins/context/ tests/test_context_rrf.py` → **All checks passed** ✅
+- **pyright**：`uv run pyright services/context/service.py services/context/sources.py tests/test_context_rrf.py` → **0 errors** ✅（plugins/context/plugin.py 4 个错误是历史遗留 PluginContext 动态属性 / list 协变 / Optional 守卫，PR3 5 行新增**未引入新错误**）
+- **算法关键性质验证**（test_context_rrf.py 覆盖）：
+  - ✅ 等权 RRF：doc 5 条 BM25 分 11–15 + graph 1 条 0.6 → graph rank-1 不会被挤到 top-3 之外（旧实现下排第 6）
+  - ✅ 默认权重 doc:0.5/memory:0.3/graph:0.2 + 同 query → doc 仍排第一（不破"doc 命中通常最 trusted"先验）
+  - ✅ 跨源同 id 重叠（含 doc 又含 memory）→ 融合分 = 双源贡献和，材化时取较高 raw score 节点
+  - ✅ 0 权重源被跳过（不影响其他源排名）
+  - ✅ Protocol 结构契约：MemoryContextSource / KnowledgeContextSource / GraphContextSource 全部 `isinstance(..., ContextRetriever)` 通过
+
+**待补**（不阻塞 PR3 合入）：
+
+- 真实库 fixture eval 回归（services/context/eval.py:223 已有 fixture），需在 bot rebuild 后跑 sandbox 模式追加"omubot 怎么部署"用例并对比 RRF 前后 top-k；下一轮 context_hit 实证后写补充条目
+- 软指令 P3-A 是 belt-and-suspenders 兜底，依赖 LLM 听话——若 PR4 token budget 上线后效果显著，可考虑收紧或废除
+
+**部署计划**：`./scripts/deploy.sh`（PR3+PR4 同批一次性发版）；napcat 不重启
+
+**回滚路径**：`git revert <PR3 hash>` 一行；旧配置文件无 rrf_k/rrf_weights 字段时自动用 ContextConfig 默认值，零配置迁移
+
+---
+
 ## 2026-05-21 知识图谱抽取治本 PR2 — LLM 抽取器 + 拆 0.85 快车道 + 重开 graph_auto_extract
 
 **变更类型**：refactor（services/knowledge_graph 治本主菜：1 个新模块 + 2 个文件改动 + 6 个测试文件迁移 + 3 个配置默认值翻转）

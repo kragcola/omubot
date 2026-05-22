@@ -7,6 +7,12 @@
     "max_hits": 5,
     "max_doc_hits": 3,
     "max_chars": 2400,
-    "graph_auto_extract": true
+    "graph_auto_extract": true,
+    "rrf_k": 60,
+    "rrf_weights": {
+      "doc": 0.5,
+      "memory": 0.3,
+      "graph": 0.2
+    }
   }
 }
