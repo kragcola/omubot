@@ -7,7 +7,7 @@ from collections import Counter, defaultdict, deque
 from dataclasses import replace
 from typing import Any
 
-from services.context.packing import pack_context_hits
+from services.context.packing import DEFAULT_BUDGET, ContextBudget, pack_context_hits
 from services.context.sources import GraphContextSource, KnowledgeContextSource, MemoryContextSource
 from services.context.types import ContextHit, ContextPack
 
@@ -30,11 +30,13 @@ class ContextService:
         *,
         rrf_k: int = DEFAULT_RRF_K,
         rrf_weights: dict[str, float] | None = None,
+        budget: ContextBudget | None = None,
     ) -> None:
         self._sources = list(sources or [])
         self._recent: deque[dict[str, Any]] = deque(maxlen=80)
         self._rrf_k = max(1, int(rrf_k))
         self._rrf_weights = dict(rrf_weights) if rrf_weights else dict(DEFAULT_RRF_WEIGHTS)
+        self._budget = budget or DEFAULT_BUDGET
 
     @classmethod
     def from_runtime(
@@ -44,6 +46,7 @@ class ContextService:
         bus: Any = None,
         rrf_k: int = DEFAULT_RRF_K,
         rrf_weights: dict[str, float] | None = None,
+        budget: ContextBudget | None = None,
     ) -> ContextService:
         sources: list[Any] = []
         card_store = getattr(ctx, "card_store", None)
@@ -54,7 +57,7 @@ class ContextService:
             ))
         sources.append(KnowledgeContextSource(ctx=ctx, bus=bus or getattr(ctx, "bus", None)))
         sources.append(GraphContextSource(ctx=ctx))
-        return cls(sources, rrf_k=rrf_k, rrf_weights=rrf_weights)
+        return cls(sources, rrf_k=rrf_k, rrf_weights=rrf_weights, budget=budget)
 
     async def search(
         self,
@@ -112,7 +115,8 @@ class ContextService:
         user_id: str = "",
         group_id: str | None = None,
         top_k: int = 10,
-        max_chars: int = 2400,
+        max_chars: int | None = None,
+        budget: ContextBudget | None = None,
         type_caps: dict[str, int] | None = None,
     ) -> ContextPack:
         hits = await self.search(
@@ -123,7 +127,13 @@ class ContextService:
             top_k=top_k,
             type_caps=type_caps,
         )
-        pack = pack_context_hits(hits, max_chars=max_chars)
+        # Resolution order: explicit budget arg > legacy max_chars > service default
+        if budget is not None:
+            pack = pack_context_hits(hits, budget=budget)
+        elif max_chars is not None:
+            pack = pack_context_hits(hits, max_chars=max_chars)
+        else:
+            pack = pack_context_hits(hits, budget=self._budget)
         self._record_pack(query, session_id, user_id, group_id, pack)
         return pack
 

@@ -13,6 +13,14 @@
       "doc": 0.5,
       "memory": 0.3,
       "graph": 0.2
+    },
+    "use_token_budget": true,
+    "budget": {
+      "total_tokens": 6000,
+      "memory_tokens": 1500,
+      "doc_tokens": 2500,
+      "graph_tokens": 1700,
+      "buffer_tokens": 300
     }
   }
 }

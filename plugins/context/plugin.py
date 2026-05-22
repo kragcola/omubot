@@ -15,6 +15,14 @@ from kernel.types import AmadeusPlugin, PluginContext, PromptContext
 _L = logger.bind(channel="system")
 
 
+class ContextBudgetConfig(BaseModel):
+    total_tokens: int = 6000
+    memory_tokens: int = 1500
+    doc_tokens: int = 2500
+    graph_tokens: int = 1700
+    buffer_tokens: int = 300
+
+
 class ContextConfig(BaseModel):
     enabled: bool = True
     takeover_dynamic_prompt: bool = True
@@ -24,6 +32,8 @@ class ContextConfig(BaseModel):
     graph_auto_extract: bool = True
     rrf_k: int = 60
     rrf_weights: dict[str, float] = {"doc": 0.5, "memory": 0.3, "graph": 0.2}
+    budget: ContextBudgetConfig = ContextBudgetConfig()
+    use_token_budget: bool = True
 
 
 class ContextPlugin(AmadeusPlugin):
@@ -42,6 +52,8 @@ class ContextPlugin(AmadeusPlugin):
         self._graph_auto_extract = True
         self._rrf_k = 60
         self._rrf_weights: dict[str, float] = {"doc": 0.5, "memory": 0.3, "graph": 0.2}
+        self._budget = None  # services.context.packing.ContextBudget; resolved in on_startup
+        self._use_token_budget = True
         self._service = None
         self._graph = None
         self._pending_graph_tasks: set[asyncio.Task[dict[str, int]]] = set()
@@ -56,18 +68,29 @@ class ContextPlugin(AmadeusPlugin):
         self._graph_auto_extract = cfg.graph_auto_extract
         self._rrf_k = max(1, int(cfg.rrf_k))
         self._rrf_weights = {k: float(v) for k, v in cfg.rrf_weights.items()}
+        self._use_token_budget = cfg.use_token_budget
 
         if not self._enabled:
             _L.info("context plugin disabled; legacy memo/knowledge prompt injection remains active")
             return
 
         from services.context import ContextService
+        from services.context.packing import ContextBudget
+
+        self._budget = ContextBudget(
+            total_tokens=cfg.budget.total_tokens,
+            memory_tokens=cfg.budget.memory_tokens,
+            doc_tokens=cfg.budget.doc_tokens,
+            graph_tokens=cfg.budget.graph_tokens,
+            buffer_tokens=cfg.budget.buffer_tokens,
+        )
 
         self._service = getattr(ctx, "context_service", None) or ContextService.from_runtime(
             ctx,
             bus=ctx.bus,
             rrf_k=self._rrf_k,
             rrf_weights=self._rrf_weights,
+            budget=self._budget,
         )
         self._graph = getattr(ctx, "knowledge_graph", None)
         ctx.context_service = self._service
@@ -75,10 +98,12 @@ class ContextPlugin(AmadeusPlugin):
             ctx.context_prompt_owner = "context"
         _L.info(
             "context plugin enabled | takeover={} max_hits={} max_doc_hits={} "
-            "max_chars={} rrf_k={} rrf_weights={}",
+            "use_token_budget={} budget_total={} max_chars_legacy={} rrf_k={} rrf_weights={}",
             self._takeover,
             self._max_hits,
             self._max_doc_hits,
+            self._use_token_budget,
+            self._budget.total_tokens,
             self._max_chars,
             self._rrf_k,
             self._rrf_weights,
@@ -91,15 +116,26 @@ class ContextPlugin(AmadeusPlugin):
         if not query:
             return
         t0 = asyncio.get_running_loop().time()
-        pack = await self._service.build_prompt_context(
-            query,
-            session_id=ctx.session_id,
-            user_id=ctx.user_id,
-            group_id=ctx.group_id,
-            top_k=self._max_hits,
-            max_chars=self._max_chars,
-            type_caps={"doc_chunk": self._max_doc_hits},
-        )
+        if self._use_token_budget:
+            pack = await self._service.build_prompt_context(
+                query,
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+                group_id=ctx.group_id,
+                top_k=self._max_hits,
+                budget=self._budget,
+                type_caps={"doc_chunk": self._max_doc_hits},
+            )
+        else:
+            pack = await self._service.build_prompt_context(
+                query,
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+                group_id=ctx.group_id,
+                top_k=self._max_hits,
+                max_chars=self._max_chars,
+                type_caps={"doc_chunk": self._max_doc_hits},
+            )
         elapsed_ms = (asyncio.get_running_loop().time() - t0) * 1000
         _L.debug(
             "context prompt pack | query={!r} hits={} types={} doc_chunks={} "

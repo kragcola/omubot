@@ -69,6 +69,50 @@
           "maximum": 5
         }
       }
+    },
+    "use_token_budget": {
+      "type": "boolean",
+      "title": "启用 token 多桶预算",
+      "description": "启用后用 budget 字段控制 prompt 注入上限；关闭则回退 max_chars 字符截断。"
+    },
+    "budget": {
+      "type": "object",
+      "title": "上下文 token 多桶预算",
+      "description": "PR4：替代 max_chars 的多桶 token 预算。total_tokens 是全局硬顶，per-bucket 是软上限，buffer_tokens 留给框架渲染。token 估算使用 len(text) // 3 启发式（与 services/block_trace 对齐）。",
+      "additionalProperties": false,
+      "properties": {
+        "total_tokens": {
+          "type": "integer",
+          "title": "总预算 (tokens)",
+          "minimum": 500,
+          "maximum": 30000
+        },
+        "memory_tokens": {
+          "type": "integer",
+          "title": "记忆桶预算",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "doc_tokens": {
+          "type": "integer",
+          "title": "文档桶预算",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "graph_tokens": {
+          "type": "integer",
+          "title": "图谱桶预算",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "buffer_tokens": {
+          "type": "integer",
+          "title": "buffer 预留 (tokens)",
+          "description": "从 total_tokens 中预留给框架渲染（标签、换行、标题）的 token 数，避免边界溢出。",
+          "minimum": 0,
+          "maximum": 5000
+        }
+      }
     }
   }
 }

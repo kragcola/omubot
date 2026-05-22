@@ -4,6 +4,93 @@
 
 ---
 
+## 2026-05-22 知识库治本 PR4 — Token 多桶预算（替换字符截断）
+
+**变更类型**：refactor（services/context/packing.py 重写 + service / plugin / config 接通 + 1 个新测试文件）
+
+**背景**：
+
+PR3 拿下"跨源 score 量纲不可比"根因后，继续按 v3 plan 推进 PR4 解决"max_chars=2400 字符截断 → token 不可控"。原 [packing.py:19-33](services/context/packing.py#L19) 用字符长度做硬截断：CJK 与 ASCII 字符的 token 成本差 4–5 倍，同样 200 字的 graph_fact 可能吃掉 800 token，而同样 200 字的 ASCII doc 可能只值 60 token——LLM 真实预算是 token 不是字符。同时单一字符上限让 doc 洪流可以挤占 memory/graph 的注入额度。
+
+治本方案：LightRAG / GraphRAG 同款 **多桶 token 预算**——total 全局硬顶 + per-bucket 软上限 + buffer 预留。memory + graph 优先填（cheap & decisive），doc 当残值桶。token 估算复用项目内既有 `len(text) // 3` 启发式（与 [services/block_trace/budget_manager.py:106](services/block_trace/budget_manager.py#L106) 对齐），不引入 tiktoken 新依赖——Omubot 内部所有 token 估算都用同一个口径，PR4 不破坏这层一致性。详细方案 → [tmp/rca-knowledge-treatment-plan-v3.md](tmp/rca-knowledge-treatment-plan-v3.md)。
+
+**改动文件**：
+
+| 文件 | 改动 |
+| --- | --- |
+| [services/context/packing.py](services/context/packing.py) | **重写**：新增 `ContextBudget` dataclass / `estimate_tokens()` / `_pack_with_budget()`；保留旧 `pack_context_hits(max_chars=...)` 入参做向后兼容（自动翻译为单桶 token budget）。Pack 顺序：memory → graph → doc，doc 当残值桶吃剩余全局预算 |
+| [services/context/service.py](services/context/service.py) | `ContextService.__init__` / `from_runtime` 加 `budget` 参数；`build_prompt_context` 接受 `budget` / `max_chars` 任一传入，优先级 budget > max_chars > service default |
+| [plugins/context/plugin.py](plugins/context/plugin.py) | 新 `ContextBudgetConfig` Pydantic 子模型；`ContextConfig` 加 `budget` + `use_token_budget` 字段；`on_startup` 把配置翻成 `ContextBudget` 注入 service；`on_pre_prompt` 按 `use_token_budget` 开关分两条路径调 `build_prompt_context`（容易回滚） |
+| [plugins/context/config.default.json](plugins/context/config.default.json) | 加 `use_token_budget: true` + `budget: {total:6000, memory:1500, doc:2500, graph:1700, buffer:300}` |
+| [plugins/context/config.schema.json](plugins/context/config.schema.json) | 同步 schema：`use_token_budget` boolean + `budget` object 含 5 个 integer 字段（含 min/max 边界） |
+| [admin/routes/api/context.py](admin/routes/api/context.py) | `/context/search` 端点 `max_chars` 参数改为可选；不传时 service 走默认 budget（PR4 默认行为），传时仍走 legacy 字符截断（admin 调试时可对比） |
+| [tests/test_context_budget.py](tests/test_context_budget.py) | **新增** 9 个单测：token 估算单调性 / 全局 ceiling / per-bucket cap 防 doc 洪流 / buffer 预留 / pack order / legacy max_chars 兼容 / 默认 budget / 空输入 / 文本分组渲染 |
+| [tests/test_context_plugin.py](tests/test_context_plugin.py) | `_FakeContextService` 接受新 `budget` kwarg；`_enabled_context_plugin` helper 设 `_budget=DEFAULT_BUDGET` + `_use_token_budget=True` 走新路径 |
+
+**爆炸半径**：services/context + plugins/context + admin/context API，零 schema 迁移；`ContextBudget` 是新增类，旧 caller 走 `max_chars` legacy 路径继续工作；旧配置文件缺 `budget` / `use_token_budget` 字段时自动用 ContextConfig 默认值。
+
+**D1 同模式扫描**：
+
+```bash
+grep -rn "build_prompt_context\|pack_context_hits" --include="*.py"
+```
+
+3 个 caller：
+
+1. [admin/routes/api/context.py:46](admin/routes/api/context.py#L46) — 已升级（`max_chars` 改可选）
+2. [plugins/context/plugin.py](plugins/context/plugin.py) — 已升级（双路径分流）
+3. [services/context/eval.py:252](services/context/eval.py#L252) — 评测专用，明确按字符评估，**不动**（评测路径与生产路径解耦）
+
+无遗漏点。
+
+**验证（D4 含证据）**：
+
+```bash
+pkill -9 -f pytest && uv run pytest tests/test_context_budget.py -v
+# → 9 passed in 0.05s
+
+uv run pytest tests/test_context_rrf.py tests/test_context_budget.py \
+  tests/test_context_eval.py tests/test_context_plugin.py \
+  tests/test_context_service.py tests/test_knowledge*.py
+# → 76 passed in 0.33s（PR3 + PR4 + 全部知识/上下文回归）
+
+uv run pytest
+# → 1400 passed, 1 failed, 8 skipped — 1 个失败是 test_admin_api 的
+#   test_system_services_health_endpoint（disk 96% backup 告警），
+#   git stash 验证 PR4 改之前就失败，与本 PR 无关
+
+uv run ruff check services/context plugins/context tests/test_context_budget.py \
+  tests/test_context_plugin.py admin/routes/api/context.py
+# → All checks passed!
+
+uv run pyright services/context/packing.py services/context/service.py \
+  admin/routes/api/context.py tests/test_context_budget.py
+# → 0 errors（plugin.py 的 4 个 list covariance/None guard 是 PR2 历史遗留，
+#   PR4 未引入新错误）
+```
+
+**算法关键性质验证**（test_context_budget.py 中显式断言）：
+
+- 全局 ceiling 不可破：50 个 50 字 chunk + total=80 → 仅 ~5 存活，token 总和 ≤ 80
+- per-bucket 防洪：20 个 200 字 doc + 1 关键 memory + 1 关键 graph + doc_cap=200 → memory 和 graph 必然存活
+- buffer 预留：total=200 + buffer=100 → 实际可用 ≤ 100 token
+- pack order：tight budget 下 memory 和 graph 优先于 doc 入选
+
+**待补**：
+
+- [admin/frontend/src/views/config/](admin/frontend/src/views/config/) 配置编辑器加 budget 编辑入口（沿用 ConfigField 模板，不阻塞 PR4 上线——后端默认值已可用）
+- 真实流量观察：`max_pack_chars` 指标对比 budget 切换前后差异（写到 [docs/project-info.md](docs/project-info.md) 时一并更新观察口径）
+- 若线上观察到 graph 注入数量增多但 doc 命中率下降，可调 `graph_tokens` 1700 → 1200 给 doc 让位（配置即可，无需改代码）
+
+**部署计划**：`./scripts/deploy.sh`（与 PR3 同批一次性发版，PR4 是 PR3 的天然延续，单独部署 PR3 后字符上限仍是瓶颈）；napcat 不重启。
+
+**回滚路径**：
+
+- 不回代码：`use_token_budget=false` 一键回退字符截断（向后兼容路径完整保留）
+- 完整回滚：`git revert <PR4 hash>` 一行；旧配置文件无 `budget` 字段时 ContextConfig 自动用默认值，零迁移
+
+---
+
 ## 2026-05-22 知识库治本 PR3 — RRF 跨源融合 + ContextRetriever Protocol + 软指令兜底
 
 **变更类型**：refactor（services/context 治本主菜：3 个文件改动 + 1 个新测试 + 2 个配置字段 + 1 段 prompt 软指令）

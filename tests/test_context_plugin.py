@@ -97,6 +97,7 @@ async def test_context_plugin_auto_extracts_graph_candidates_after_prompt_pack()
 
 
 def _enabled_context_plugin() -> ContextPlugin:
+    from services.context.packing import DEFAULT_BUDGET
     plugin = ContextPlugin()
     plugin._enabled = True
     plugin._takeover = True
@@ -104,6 +105,8 @@ def _enabled_context_plugin() -> ContextPlugin:
     plugin._max_chars = 1200
     plugin._graph_auto_extract = False
     plugin._service = _FakeContextService()
+    plugin._budget = DEFAULT_BUDGET
+    plugin._use_token_budget = True
     return plugin
 
 
@@ -150,10 +153,11 @@ class _FakeContextService:
         user_id: str = "",
         group_id: str | None = None,
         top_k: int = 10,
-        max_chars: int = 2400,
+        max_chars: int | None = None,
+        budget: object | None = None,
         type_caps: dict[str, int] | None = None,
     ) -> ContextPack:
-        del query, session_id, user_id, group_id, top_k, max_chars, type_caps
+        del query, session_id, user_id, group_id, top_k, max_chars, budget, type_caps
         return ContextPack(
             text="【记忆卡片】\n- [用户记忆] 统一记忆资料\n\n【文档资料】\n- [部署手册] 统一文档资料",
             hits=[
