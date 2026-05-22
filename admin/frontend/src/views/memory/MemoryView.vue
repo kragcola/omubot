@@ -579,20 +579,20 @@ function statusLabel(status: string) {
         <NSelect
           v-model:value="filterScope"
           :options="scopeOptions"
-          style="width: 132px"
+          class="memory-toolbar__scope"
         />
         <NInput
           v-model:value="filterScopeId"
           clearable
           placeholder="实体 ID"
-          style="width: min(180px, 100%)"
+          class="memory-toolbar__scope-id"
         />
         <NSelect
           v-model:value="filterSeries"
           :options="seriesOptions"
           clearable
           placeholder="按系列筛选"
-          style="width: min(220px, 100%)"
+          class="memory-toolbar__series"
         />
       </template>
       <template #right>
@@ -685,7 +685,7 @@ function statusLabel(status: string) {
                   :min="0"
                   :max="1"
                   :step="0.1"
-                  style="width: 100%"
+                  class="memory-drawer__numeric"
                 />
               </div>
               <div class="memory-drawer__field">
@@ -695,7 +695,7 @@ function statusLabel(status: string) {
                   :min="1"
                   :max="10"
                   :step="1"
-                  style="width: 100%"
+                  class="memory-drawer__numeric"
                 />
               </div>
               <div class="memory-drawer__field memory-drawer__field--full">
@@ -730,6 +730,22 @@ function statusLabel(status: string) {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px 12px;
+}
+
+.memory-toolbar__scope {
+  width: 132px;
+}
+
+.memory-toolbar__scope-id {
+  width: min(180px, 100%);
+}
+
+.memory-toolbar__series {
+  width: min(220px, 100%);
+}
+
+.memory-drawer__numeric {
+  width: 100%;
 }
 
 .memory-view-toggle {

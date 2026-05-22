@@ -18,6 +18,7 @@ import {
 import { api } from '../../api/client'
 import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 
@@ -137,153 +138,141 @@ async function loadData(silent = false) {
 
     <template v-else>
       <div class="schedule-layout">
-        <AppCard bordered elevated class="schedule-panel">
-          <div class="schedule-panel__head">
-            <div>
-              <p class="schedule-panel__eyebrow">
-                Today Schedule
-              </p>
-              <h3 class="schedule-panel__title">
-                今日日程
-              </h3>
-            </div>
+        <AppPanelSection
+          eyebrow="Today Schedule"
+          title="今日日程"
+          class="schedule-panel"
+        >
+          <template #aside>
             <NTag round size="small" :type="schedule?.schedule?.slots?.length ? 'info' : 'default'">
               {{ schedule?.date || '未获取日期' }}
             </NTag>
-          </div>
-
-          <template v-if="schedule?.schedule?.slots?.length">
-            <AppCard bordered embedded class="schedule-theme-card">
-              <div class="schedule-theme-card__head">
-                <div>
-                  <strong>{{ schedule.schedule.theme || '今日主题' }}</strong>
-                  <p>{{ schedule.schedule.day_narrative || '当前没有附加叙述。' }}</p>
-                </div>
-              </div>
-            </AppCard>
-
-            <div class="schedule-timeline">
-              <div
-                v-for="(slot, index) in schedule.schedule.slots"
-                :key="`${slot.time}-${index}`"
-                class="schedule-timeline__item"
-              >
-                <div class="schedule-timeline__marker" />
-                <div class="schedule-timeline__content">
-                  <div class="schedule-timeline__head">
-                    <strong>{{ slot.time }}</strong>
-                    <NTag v-if="slot.location" size="small" round>
-                      {{ slot.location }}
-                    </NTag>
-                  </div>
-                  <p class="schedule-timeline__activity">
-                    {{ slot.activity }}
-                  </p>
-                  <p class="schedule-timeline__hint">
-                    {{ slot.mood_hint || '当前没有 mood hint。' }}
-                  </p>
-                </div>
-              </div>
-            </div>
           </template>
 
-          <EmptyState
-            v-else
-            title="今天还没有排定日程"
-            :description="schedule?.error || (schedule?.store_available === false ? '当前没有可用的 schedule store。' : '当前日期下没有可展示的日程槽位。')"
-            :icon="TimeOutline"
-          />
-        </AppCard>
+          <div class="schedule-panel__body">
+            <template v-if="schedule?.schedule?.slots?.length">
+              <AppCard bordered embedded class="schedule-theme-card">
+                <div class="schedule-theme-card__head">
+                  <div>
+                    <strong>{{ schedule.schedule.theme || '今日主题' }}</strong>
+                    <p>{{ schedule.schedule.day_narrative || '当前没有附加叙述。' }}</p>
+                  </div>
+                </div>
+              </AppCard>
+
+              <div class="schedule-timeline">
+                <div
+                  v-for="(slot, index) in schedule.schedule.slots"
+                  :key="`${slot.time}-${index}`"
+                  class="schedule-timeline__item"
+                >
+                  <div class="schedule-timeline__marker" />
+                  <div class="schedule-timeline__content">
+                    <div class="schedule-timeline__head">
+                      <strong>{{ slot.time }}</strong>
+                      <NTag v-if="slot.location" size="small" round>
+                        {{ slot.location }}
+                      </NTag>
+                    </div>
+                    <p class="schedule-timeline__activity">
+                      {{ slot.activity }}
+                    </p>
+                    <p class="schedule-timeline__hint">
+                      {{ slot.mood_hint || '当前没有 mood hint。' }}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <EmptyState
+              v-else
+              title="今天还没有排定日程"
+              :description="schedule?.error || (schedule?.store_available === false ? '当前没有可用的 schedule store。' : '当前日期下没有可展示的日程槽位。')"
+              :icon="TimeOutline"
+            />
+          </div>
+        </AppPanelSection>
 
         <div class="schedule-side">
-          <AppCard bordered elevated class="schedule-panel">
-            <div class="schedule-panel__head">
-              <div>
-                <p class="schedule-panel__eyebrow">
-                  Mood Detail
+          <AppPanelSection
+            eyebrow="Mood Detail"
+            title="心情细项"
+            class="schedule-panel"
+          >
+            <div class="schedule-panel__body">
+              <div class="schedule-progress-list">
+                <div class="schedule-progress-item">
+                  <div class="schedule-progress-item__head">
+                    <span>Energy</span>
+                    <strong>{{ energyPercent }}%</strong>
+                  </div>
+                  <NProgress type="line" :percentage="energyPercent" :height="12" color="#c58a2b" />
+                </div>
+
+                <div class="schedule-progress-item">
+                  <div class="schedule-progress-item__head">
+                    <span>Valence</span>
+                    <strong>{{ valencePercent }}%</strong>
+                  </div>
+                  <NProgress type="line" :percentage="valencePercent" :height="12" color="#2e8f6b" />
+                </div>
+
+                <div class="schedule-progress-item">
+                  <div class="schedule-progress-item__head">
+                    <span>Openness</span>
+                    <strong>{{ opennessPercent }}%</strong>
+                  </div>
+                  <NProgress type="line" :percentage="opennessPercent" :height="12" color="#4d7892" />
+                </div>
+
+                <div class="schedule-progress-item">
+                  <div class="schedule-progress-item__head">
+                    <span>Tension</span>
+                    <strong>{{ tensionPercent }}%</strong>
+                  </div>
+                  <NProgress type="line" :percentage="tensionPercent" :height="12" color="#b84c5c" />
+                </div>
+              </div>
+
+              <AppCard bordered embedded class="schedule-note-card">
+                <p class="schedule-note-card__text">
+                  {{ mood?.prompt || mood?.error || '当前没有可展示的心情描述。' }}
                 </p>
-                <h3 class="schedule-panel__title">
-                  心情细项
-                </h3>
-              </div>
+              </AppCard>
             </div>
+          </AppPanelSection>
 
-            <div class="schedule-progress-list">
-              <div class="schedule-progress-item">
-                <div class="schedule-progress-item__head">
-                  <span>Energy</span>
-                  <strong>{{ energyPercent }}%</strong>
+          <AppPanelSection
+            eyebrow="Runtime"
+            title="运行状态"
+            class="schedule-panel"
+          >
+            <div class="schedule-panel__body">
+              <div class="schedule-runtime-grid">
+                <div class="schedule-runtime-card">
+                  <span>发言倍率</span>
+                  <strong>{{ Number(schedule?.time_multiplier ?? 1).toFixed(1) }}x</strong>
                 </div>
-                <NProgress type="line" :percentage="energyPercent" :height="12" color="#c58a2b" />
+                <div class="schedule-runtime-card">
+                  <span>梦代理</span>
+                  <strong>{{ schedule?.dream?.running ? '运行中' : '空闲' }}</strong>
+                </div>
+                <div class="schedule-runtime-card">
+                  <span>梦间隔</span>
+                  <strong>{{ schedule?.dream?.interval_hours ?? '--' }}h</strong>
+                </div>
+                <div class="schedule-runtime-card">
+                  <span>存储状态</span>
+                  <strong>{{ schedule?.store_available === false ? '不可用' : '可读取' }}</strong>
+                </div>
               </div>
 
-              <div class="schedule-progress-item">
-                <div class="schedule-progress-item__head">
-                  <span>Valence</span>
-                  <strong>{{ valencePercent }}%</strong>
-                </div>
-                <NProgress type="line" :percentage="valencePercent" :height="12" color="#2e8f6b" />
-              </div>
-
-              <div class="schedule-progress-item">
-                <div class="schedule-progress-item__head">
-                  <span>Openness</span>
-                  <strong>{{ opennessPercent }}%</strong>
-                </div>
-                <NProgress type="line" :percentage="opennessPercent" :height="12" color="#4d7892" />
-              </div>
-
-              <div class="schedule-progress-item">
-                <div class="schedule-progress-item__head">
-                  <span>Tension</span>
-                  <strong>{{ tensionPercent }}%</strong>
-                </div>
-                <NProgress type="line" :percentage="tensionPercent" :height="12" color="#b84c5c" />
-              </div>
+              <NText v-if="schedule?.error" depth="3">
+                {{ schedule.error }}
+              </NText>
             </div>
-
-            <AppCard bordered embedded class="schedule-note-card">
-              <p class="schedule-note-card__text">
-                {{ mood?.prompt || mood?.error || '当前没有可展示的心情描述。' }}
-              </p>
-            </AppCard>
-          </AppCard>
-
-          <AppCard bordered elevated class="schedule-panel">
-            <div class="schedule-panel__head">
-              <div>
-                <p class="schedule-panel__eyebrow">
-                  Runtime
-                </p>
-                <h3 class="schedule-panel__title">
-                  运行状态
-                </h3>
-              </div>
-            </div>
-
-            <div class="schedule-runtime-grid">
-              <div class="schedule-runtime-card">
-                <span>发言倍率</span>
-                <strong>{{ Number(schedule?.time_multiplier ?? 1).toFixed(1) }}x</strong>
-              </div>
-              <div class="schedule-runtime-card">
-                <span>梦代理</span>
-                <strong>{{ schedule?.dream?.running ? '运行中' : '空闲' }}</strong>
-              </div>
-              <div class="schedule-runtime-card">
-                <span>梦间隔</span>
-                <strong>{{ schedule?.dream?.interval_hours ?? '--' }}h</strong>
-              </div>
-              <div class="schedule-runtime-card">
-                <span>存储状态</span>
-                <strong>{{ schedule?.store_available === false ? '不可用' : '可读取' }}</strong>
-              </div>
-            </div>
-
-            <NText depth="3" v-if="schedule?.error">
-              {{ schedule.error }}
-            </NText>
-          </AppCard>
+          </AppPanelSection>
         </div>
       </div>
     </template>
@@ -310,34 +299,10 @@ async function loadData(silent = false) {
   gap: 16px;
 }
 
-.schedule-panel {
+.schedule-panel__body {
   display: grid;
   align-content: start;
   gap: 16px;
-  padding: 20px;
-}
-
-.schedule-panel__head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.schedule-panel__eyebrow {
-  margin: 0 0 8px;
-  color: var(--om-text-3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-.schedule-panel__title {
-  margin: 0;
-  color: var(--om-text-1);
-  font-size: 18px;
-  font-weight: 700;
 }
 
 .schedule-theme-card,
@@ -501,7 +466,6 @@ async function loadData(silent = false) {
     grid-template-columns: 1fr;
   }
 
-  .schedule-panel__head,
   .schedule-timeline__head {
     flex-direction: column;
     align-items: stretch;

@@ -16,15 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from admin.auth import create_login_router
 from admin.routes.api import create_api_router
-from admin.routes.config_viewer import create_config_router
-from admin.routes.dashboard import create_dashboard_router
-from admin.routes.group_memory import create_group_memory_router
-from admin.routes.groups import create_groups_router
-from admin.routes.logs import create_logs_router
-from admin.routes.soul import create_soul_router
-from admin.routes.usage import create_usage_admin_router
 
 
 def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
@@ -124,8 +116,10 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
             return FileResponse(str(target), headers=_headers_for_asset(asset_path))
         raise HTTPException(status_code=404, detail="static asset not found")
 
-    # --- SPA history mode fallback (must be before Jinja2 routes) ---
-    # Any /admin/* path → serve Vue SPA index.html for browser requests
+    # --- SPA history mode fallback ---
+    # Any /admin/* path → serve Vue SPA index.html for browser requests.
+    # The legacy Jinja-rendered admin pages were retired 2026-05-23; everything
+    # under /admin/* is now SPA, and data lives at /api/admin/*.
 
     @router.get("/admin/{rest:path}")
     async def spa_fallback(request: Request, rest: str):
@@ -134,35 +128,6 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
     @router.get("/admin")
     async def spa_fallback_root(request: Request):
         return _spa_index_response()
-
-    # --- Login/logout routes ---
-    router.include_router(create_login_router())
-
-    # --- Sub-routers (protected by AdminAuthMiddleware) ---
-    router.include_router(
-        create_dashboard_router(
-            usage_tracker=usage_tracker,
-            message_log=message_log,
-            group_config=group_config,
-            admins=admins,
-            bot_start_time=bot_start_time,
-        )
-    )
-    router.include_router(create_usage_admin_router(usage_tracker))
-    router.include_router(
-        create_groups_router(
-            group_config=group_config,
-            message_log=message_log,
-        )
-    )
-    router.include_router(create_config_router(config_path))
-    router.include_router(create_soul_router(soul_dir, identity_mgr=identity_mgr))
-    router.include_router(create_logs_router(log_dir))
-    router.include_router(create_group_memory_router(
-        card_store=card_store,
-        group_memory_config=group_memory_config,
-        retrieval_gate=retrieval_gate,
-    ))
 
     # --- JSON API router (/api/admin/*) ---
     router.include_router(create_api_router(

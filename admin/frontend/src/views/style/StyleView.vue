@@ -10,6 +10,7 @@ import { useMessage } from 'naive-ui'
 
 import { api } from '../../api/client'
 import AppPage from '../../components/common/AppPage.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
@@ -528,16 +529,17 @@ watch([groupId, statusFilter, scopeFilter, sortMode], () => {
 
       <NSpin :show="loading">
         <div class="style-console__grid">
-          <section class="style-panel style-panel--main">
-            <div class="style-panel__head">
-              <div>
-                <h2>表达样本</h2>
-                <p>按当前筛选展示，可通过、拒绝、静音或反馈好坏。</p>
-              </div>
-              <NTag round>
+          <AppPanelSection
+            eyebrow="Expressions"
+            title="表达样本"
+            description="按当前筛选展示，可通过、拒绝、静音或反馈好坏。"
+            class="style-main-panel"
+          >
+            <template #aside>
+              <NTag round size="small" :type="expressions.length ? 'info' : 'default'">
                 {{ expressions.length }} 条
               </NTag>
-            </div>
+            </template>
             <EmptyState
               v-if="!expressions.length"
               compact
@@ -615,16 +617,14 @@ watch([groupId, statusFilter, scopeFilter, sortMode], () => {
                 </div>
               </article>
             </div>
-          </section>
+          </AppPanelSection>
 
           <aside class="style-console__side">
-            <section class="style-panel">
-              <div class="style-panel__head">
-                <div>
-                  <h2>最近抽取</h2>
-                  <p>显示有效文本、原始行、候选和剩余待扫量。</p>
-                </div>
-              </div>
+            <AppPanelSection
+              eyebrow="Latest Extract"
+              title="最近抽取"
+              description="显示有效文本、原始行、候选和剩余待扫量。"
+            >
               <EmptyState
                 v-if="!lastExtractResult"
                 compact
@@ -685,15 +685,13 @@ watch([groupId, statusFilter, scopeFilter, sortMode], () => {
                   </article>
                 </div>
               </div>
-            </section>
+            </AppPanelSection>
 
-            <section class="style-panel">
-              <div class="style-panel__head">
-                <div>
-                  <h2>动态风格档案</h2>
-                  <p>生成后自动启用，可启用旧版、回滚或禁用。</p>
-                </div>
-              </div>
+            <AppPanelSection
+              eyebrow="Style Profiles"
+              title="动态风格档案"
+              description="生成后自动启用，可启用旧版、回滚或禁用。"
+            >
               <EmptyState
                 v-if="!profiles.length"
                 compact
@@ -740,15 +738,13 @@ watch([groupId, statusFilter, scopeFilter, sortMode], () => {
                   </div>
                 </article>
               </div>
-            </section>
+            </AppPanelSection>
 
-            <section class="style-panel">
-              <div class="style-panel__head">
-                <div>
-                  <h2>反馈记录</h2>
-                  <p>人工反馈与 bot 回复弱信号。</p>
-                </div>
-              </div>
+            <AppPanelSection
+              eyebrow="Feedback"
+              title="反馈记录"
+              description="人工反馈与 bot 回复弱信号。"
+            >
               <EmptyState
                 v-if="!feedback.length"
                 compact
@@ -767,7 +763,7 @@ watch([groupId, statusFilter, scopeFilter, sortMode], () => {
                   <p>{{ item.raw_text || item.context || item.target_type }}</p>
                 </article>
               </div>
-            </section>
+            </AppPanelSection>
           </aside>
         </div>
       </NSpin>
@@ -809,36 +805,8 @@ watch([groupId, statusFilter, scopeFilter, sortMode], () => {
   gap: 18px;
 }
 
-.style-panel {
-  border: 1px solid var(--om-border);
-  border-radius: 16px;
-  background: var(--om-surface-2);
-  padding: 18px;
-}
-
-.style-panel--main {
+.style-main-panel {
   min-width: 0;
-}
-
-.style-panel__head {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 14px;
-}
-
-.style-panel__head h2 {
-  margin: 0;
-  color: var(--om-text-1);
-  font-size: 17px;
-  font-weight: 650;
-}
-
-.style-panel__head p {
-  margin: 6px 0 0;
-  color: var(--om-text-2);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .expression-list,

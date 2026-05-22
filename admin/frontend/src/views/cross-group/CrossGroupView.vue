@@ -11,7 +11,7 @@ import type { DataTableColumns } from 'naive-ui'
 
 import { api } from '../../api/client'
 import AppPage from '../../components/common/AppPage.vue'
-import AppCard from '../../components/common/AppCard.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
@@ -394,7 +394,18 @@ onMounted(() => refreshAll())
       />
     </div>
 
-    <AppCard bordered class="cg-section">
+    <AppPanelSection
+      eyebrow="Cross Group Items"
+      title="可见条目"
+      description="按 store 分类查看所有当前对外可见的跨群条目，可直接禁用或搜索筛选。"
+      class="cg-items-panel"
+    >
+      <template #aside>
+        <NTag round size="small" :type="filteredItems.length ? 'info' : 'default'">
+          {{ filteredItems.length }} / {{ items.length }} 项
+        </NTag>
+      </template>
+
       <PageToolbar class="cg-toolbar">
         <template #left>
           <NTabs
@@ -417,7 +428,7 @@ onMounted(() => refreshAll())
             placeholder="搜索内容 / 群 / 启用者 / 理由"
             clearable
             size="small"
-            style="width: 260px"
+            class="cg-toolbar__search"
           />
         </template>
       </PageToolbar>
@@ -439,27 +450,22 @@ onMounted(() => refreshAll())
         description="任何被 admin 开启跨群可见的项目会出现在这里。所有变更都会记录到修订历史。"
         :icon="GlobeOutline"
       />
-    </AppCard>
+    </AppPanelSection>
 
     <div class="cg-grid">
-      <AppCard bordered class="cg-section">
-        <header class="cg-section__head">
-          <div class="cg-section__title">
-            <NIcon :component="TelescopeOutline" :size="18" />
-            <span>模拟视角</span>
-          </div>
-          <p class="cg-section__hint">
-            填入群 ID，预览该群当前可注入的跨群黑话（不含 global / 本群）。
-          </p>
-        </header>
-
+      <AppPanelSection
+        eyebrow="Simulator"
+        title="模拟视角"
+        description="填入群 ID，预览该群当前可注入的跨群黑话（不含 global / 本群）。"
+        class="cg-simulate-panel"
+      >
         <NSpace align="center" :size="12" class="cg-simulate">
           <NInput
             v-model:value="simulateGroupId"
             placeholder="例如 123456789"
             size="small"
             clearable
-            style="width: 220px"
+            class="cg-simulate__input"
             @keyup.enter="simulate"
           />
           <NButton type="primary" size="small" :loading="simulateLoading" @click="simulate">
@@ -484,22 +490,17 @@ onMounted(() => refreshAll())
           description="未命中任何来自其他群的 cross_group_visible 黑话。"
           :icon="TelescopeOutline"
         />
-        <p v-else class="cg-section__placeholder">
+        <p v-else class="cg-simulate__placeholder">
           模拟结果会展示当前群可注入的跨群黑话。
         </p>
-      </AppCard>
+      </AppPanelSection>
 
-      <AppCard bordered class="cg-section">
-        <header class="cg-section__head">
-          <div class="cg-section__title">
-            <NIcon :component="TimeOutline" :size="18" />
-            <span>操作时间线</span>
-          </div>
-          <p class="cg-section__hint">
-            最近 50 条启用 / 禁用记录，含 reason。图谱条目暂未接入修订表。
-          </p>
-        </header>
-
+      <AppPanelSection
+        eyebrow="Audit Timeline"
+        title="操作时间线"
+        description="最近 50 条启用 / 禁用记录，含 reason。图谱条目暂未接入修订表。"
+        class="cg-timeline-panel"
+      >
         <NDataTable
           v-if="timeline.length > 0"
           :columns="timelineColumns"
@@ -515,7 +516,7 @@ onMounted(() => refreshAll())
           description="跨群启用 / 禁用都会在这里留下审计痕迹。"
           :icon="TimeOutline"
         />
-      </AppCard>
+      </AppPanelSection>
     </div>
 
     <NModal
@@ -587,51 +588,41 @@ onMounted(() => refreshAll())
   margin-bottom: 20px;
 }
 
-.cg-section {
-  padding: 20px 22px;
+.cg-items-panel,
+.cg-simulate-panel,
+.cg-timeline-panel {
   margin-bottom: 20px;
 }
 
-.cg-section + .cg-section {
-  margin-top: 0;
+.cg-grid > .cg-simulate-panel,
+.cg-grid > .cg-timeline-panel {
+  margin-bottom: 0;
 }
 
 .cg-toolbar {
   margin-bottom: 16px;
 }
 
+.cg-toolbar__search {
+  width: 260px;
+}
+
 .cg-tabs {
   width: 100%;
 }
 
-.cg-section__head {
+.cg-simulate {
   margin-bottom: 14px;
 }
 
-.cg-section__title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--om-text-1);
+.cg-simulate__input {
+  width: 220px;
 }
 
-.cg-section__hint {
-  margin: 6px 0 0;
-  color: var(--om-text-2);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.cg-section__placeholder {
+.cg-simulate__placeholder {
   margin: 16px 0 0;
   color: var(--om-text-3);
   font-size: 13px;
-}
-
-.cg-simulate {
-  margin-bottom: 14px;
 }
 
 .cg-grid {

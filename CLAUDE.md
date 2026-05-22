@@ -75,6 +75,22 @@ Fix any errors discovered during testing, even if they were pre-existing and not
 
 发布新版本时，Docker 镜像版本必须和 git tag 对齐。无正式 tag 时使用 `vYYYYMMDD-<short hash>` 格式（如 `v20260404-cd328d2`）。
 
+## Skill 自动触发
+
+涉及以下范围的任意改动或审计任务，**必须**首先 invoke `Skill omubot-admin-console`，再开始具体工作。本规则覆盖模型默认的相关性判断，不依赖用户显式 `/omubot-admin-console`。
+
+触发范围：
+
+- `admin/frontend/**` —— 前端 SPA 任意改动 / 新增 / 审计
+- `admin/routes/**`、`admin/__init__.py`、`admin/auth.py` —— 后台路由、认证、API 层
+- `docs/tracking/**`、`maintenance-log.md`、`docs/agent-ui-guidelines.md`、`docs/admin-ui-style-guide.md` —— 项目治理 / UI 规范文档
+- `scripts/check-ui-compliance.sh` —— 月度合规扫描脚本
+- 任务措辞含「后台 / 控制台 / 管理端 / 前端审计 / wiki 审计 / 风格统一」等本仓特定语境
+
+例外（可跳过 skill）：单文件 typo 修正、纯 grep / Read 探索且不会触发 Edit、与上述范围完全无关的工作。
+
+session 恢复（compact 之后）：若 system-reminder 已显式注入 `### Skill: omubot-admin-console` 的指南内容，可视为已加载，**不再重复 invoke**——此时只继承行为指南。**新会话**首次触及上述范围必须 invoke 一次。
+
 ## Language
 
 Chinese: user-facing strings, identity configs. English: code, comments, docstrings, logs, commits.

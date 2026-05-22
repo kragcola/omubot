@@ -82,12 +82,14 @@ def create_api_router(
     from admin.routes.api.stickers import create_stickers_router
     from admin.routes.api.style import create_style_router
     from admin.routes.api.system import create_system_router
+    from admin.routes.api.usage import create_usage_router
 
     router.include_router(create_auth_router())
     router.include_router(create_dashboard_router(
         usage_tracker=usage_tracker, bot_start_time=bot_start_time,
         mood_engine=mood_engine, schedule_store=schedule_store, ctx=ctx,
     ))
+    router.include_router(create_usage_router(usage_tracker=usage_tracker))
     router.include_router(create_groups_router(
         config=config,
         group_config=group_config,

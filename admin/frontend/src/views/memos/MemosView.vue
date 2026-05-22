@@ -23,6 +23,7 @@ import {
 import { api } from '../../api/client'
 import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
@@ -335,7 +336,7 @@ function affectionTierLabel(value?: string) {
           v-model:value="searchInput"
           clearable
           placeholder="输入 User ID / Group ID"
-          style="width: min(260px, 100%)"
+          class="memos-toolbar__search"
           @keyup.enter="searchCards"
         >
           <template #prefix>
@@ -369,20 +370,16 @@ function affectionTierLabel(value?: string) {
 
     <template v-else-if="!selectedScope">
       <div class="memos-entity-grid">
-        <AppCard bordered elevated class="memos-entity-panel">
-          <div class="memos-panel__head">
-            <div>
-              <p class="memos-panel__eyebrow">
-                User Entities
-              </p>
-              <h3 class="memos-panel__title">
-                用户实体
-              </h3>
-            </div>
+        <AppPanelSection
+          eyebrow="User Entities"
+          title="用户实体"
+          class="memos-entity-panel"
+        >
+          <template #aside>
             <NTag round size="small" type="info">
               {{ userEntities.length }}
             </NTag>
-          </div>
+          </template>
 
           <div v-if="userEntities.length > 0" class="memos-entity-list">
             <button
@@ -410,22 +407,18 @@ function affectionTierLabel(value?: string) {
             description="当前记忆存储中还没有可浏览的用户侧记忆。"
             :icon="PersonOutline"
           />
-        </AppCard>
+        </AppPanelSection>
 
-        <AppCard bordered elevated class="memos-entity-panel">
-          <div class="memos-panel__head">
-            <div>
-              <p class="memos-panel__eyebrow">
-                Group Entities
-              </p>
-              <h3 class="memos-panel__title">
-                群聊实体
-              </h3>
-            </div>
+        <AppPanelSection
+          eyebrow="Group Entities"
+          title="群聊实体"
+          class="memos-entity-panel"
+        >
+          <template #aside>
             <NTag round size="small" type="success">
               {{ groupEntities.length }}
             </NTag>
-          </div>
+          </template>
 
           <div v-if="groupEntities.length > 0" class="memos-entity-list">
             <button
@@ -453,7 +446,7 @@ function affectionTierLabel(value?: string) {
             description="当前记忆存储中还没有可浏览的群聊侧记忆。"
             :icon="PeopleOutline"
           />
-        </AppCard>
+        </AppPanelSection>
       </div>
     </template>
 
@@ -469,20 +462,16 @@ function affectionTierLabel(value?: string) {
       </template>
 
       <div v-else class="memos-detail">
-        <AppCard bordered elevated class="memos-summary">
-          <div class="memos-panel__head">
-            <div>
-              <p class="memos-panel__eyebrow">
-                Entity Snapshot
-              </p>
-              <h3 class="memos-panel__title">
-                {{ selectedId }}
-              </h3>
-            </div>
+        <AppPanelSection
+          eyebrow="Entity Snapshot"
+          :title="selectedId"
+          class="memos-summary"
+        >
+          <template #aside>
             <NTag round size="small" :type="selectedScope === 'user' ? 'info' : 'success'">
               {{ scopeLabel(selectedScope) }}
             </NTag>
-          </div>
+          </template>
 
           <div class="memos-summary__stats">
             <div class="memos-summary__stat">
@@ -536,22 +525,19 @@ function affectionTierLabel(value?: string) {
               当前没有额外关系画像，仍可继续通过记忆卡浏览这个用户的上下文。
             </p>
           </div>
-        </AppCard>
+        </AppPanelSection>
 
-        <AppCard v-if="seriesList.length > 0" bordered elevated class="memos-section">
-          <div class="memos-panel__head">
-            <div>
-              <p class="memos-panel__eyebrow">
-                Series
-              </p>
-              <h3 class="memos-panel__title">
-                系列记忆
-              </h3>
-            </div>
+        <AppPanelSection
+          v-if="seriesList.length > 0"
+          eyebrow="Series"
+          title="系列记忆"
+          class="memos-section"
+        >
+          <template #aside>
             <NTag round size="small">
               {{ seriesList.length }} 组
             </NTag>
-          </div>
+          </template>
 
           <div class="memos-series-list">
             <AppCard
@@ -608,22 +594,18 @@ function affectionTierLabel(value?: string) {
               </div>
             </AppCard>
           </div>
-        </AppCard>
+        </AppPanelSection>
 
-        <AppCard bordered elevated class="memos-section">
-          <div class="memos-panel__head">
-            <div>
-              <p class="memos-panel__eyebrow">
-                Standalone
-              </p>
-              <h3 class="memos-panel__title">
-                独立卡片
-              </h3>
-            </div>
+        <AppPanelSection
+          eyebrow="Standalone"
+          title="独立卡片"
+          class="memos-section"
+        >
+          <template #aside>
             <NTag round size="small">
               {{ standaloneCards.length }} 张
             </NTag>
-          </div>
+          </template>
 
           <div v-if="standaloneCards.length > 0" class="memos-card-list">
             <AppCard
@@ -665,7 +647,7 @@ function affectionTierLabel(value?: string) {
             description="当前实体的卡片都已经归入系列分组。"
             :icon="LayersOutline"
           />
-        </AppCard>
+        </AppPanelSection>
       </div>
     </template>
   </AppPage>
@@ -677,11 +659,6 @@ function affectionTierLabel(value?: string) {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
-}
-
-.memos-view-toggle {
-  display: inline-flex;
-  gap: 8px;
 }
 
 .memos-metric-grid {
@@ -701,35 +678,8 @@ function affectionTierLabel(value?: string) {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.memos-entity-panel,
-.memos-section,
-.memos-summary {
-  padding: 20px;
-}
-
-.memos-panel__head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.memos-panel__eyebrow {
-  margin: 0 0 8px;
-  color: var(--om-text-3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-.memos-panel__title {
-  margin: 0;
-  overflow-wrap: anywhere;
-  color: var(--om-text-1);
-  font-size: 18px;
-  font-weight: 700;
+.memos-toolbar__search {
+  width: min(260px, 100%);
 }
 
 .memos-entity-list,
@@ -929,10 +879,6 @@ function affectionTierLabel(value?: string) {
     justify-content: flex-start;
   }
 
-  .memos-view-toggle {
-    width: 100%;
-  }
-
   .memos-metric-grid,
   .memos-summary__stats,
   .memos-relationship__grid,
@@ -940,7 +886,6 @@ function affectionTierLabel(value?: string) {
     grid-template-columns: 1fr;
   }
 
-  .memos-panel__head,
   .memos-card-item__head {
     flex-direction: column;
     align-items: stretch;

@@ -217,7 +217,7 @@ onMounted(() => {
           v-model:value="selectedProfile"
           :options="profileOptions"
           size="small"
-          style="width: 180px"
+          class="sb-profile-select"
           @update:value="loadBackups"
         />
         <NButton type="primary" :loading="backupLoading" @click="createBackup">
@@ -228,19 +228,19 @@ onMounted(() => {
     </template>
 
     <!-- Backup history -->
-    <div style="margin-top: 16px">
-      <NText depth="3" style="font-size: 13px; margin-bottom: 8px; display: block">
-        最近备份
-      </NText>
+    <section class="sb-block sb-block--first">
+      <header class="sb-block__head">
+        <h4 class="sb-block__title">最近备份</h4>
+      </header>
       <NSpin :show="listLoading">
-        <div v-if="backups.length === 0" style="color: var(--text-color-3)">
+        <p v-if="backups.length === 0" class="sb-empty">
           暂无备份记录
-        </div>
-        <NSpace v-else vertical size="small">
-          <div
+        </p>
+        <ul v-else class="sb-list">
+          <li
             v-for="b in backups.slice(0, 5)"
             :key="b.backup_id"
-            style="display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap"
+            class="sb-row"
           >
             <NTag :type="b.trusted ? 'success' : 'error'" size="small">
               {{ b.trusted ? '可信' : '不可信' }}
@@ -248,131 +248,241 @@ onMounted(() => {
             <NTag v-if="b.complete === false" type="warning" size="small">
               不完整
             </NTag>
-            <span>{{ b.backup_id }}</span>
-            <NText depth="3">{{ b.created_at?.slice(0, 19) }}</NText>
-            <NText v-if="b.skipped_host_only?.length" depth="3" style="font-size: 12px">
+            <span class="sb-row__id">{{ b.backup_id }}</span>
+            <NText depth="3" class="sb-row__meta">
+              {{ b.created_at?.slice(0, 19) }}
+            </NText>
+            <NText v-if="b.skipped_host_only?.length" depth="3" class="sb-row__meta">
               (跳过: {{ b.skipped_host_only.join(', ') }})
             </NText>
-          </div>
-        </NSpace>
+          </li>
+        </ul>
       </NSpin>
-    </div>
+    </section>
 
     <!-- Quick-check panel -->
-    <NDivider style="margin: 16px 0 12px" />
-    <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 12px">
-      <NIcon :component="ShieldCheckmarkOutline" size="16" />
-      <NText strong style="font-size: 13px">SQLite 完整性巡检</NText>
-      <NTag
-        v-if="quickCheck.results.length"
-        :type="quickCheck.fail_count === 0 ? 'success' : 'error'"
-        size="small"
-        style="margin-left: 4px"
-      >
-        {{ quickCheck.ok_count }} ok / {{ quickCheck.fail_count }} 异常
-      </NTag>
-      <NText depth="3" style="font-size: 12px; margin-left: auto">
-        上次执行：{{ lastQuickCheckLabel }}
-      </NText>
-      <NButton size="tiny" :loading="probing" @click="runQuickCheck">立即巡检</NButton>
-    </div>
-    <NSpin :show="quickCheckLoading">
-      <div
-        v-if="!quickCheck.results.length"
-        style="color: var(--text-color-3); font-size: 13px"
-      >
-        尚无巡检数据；调度器开启后会按配置周期自动巡检。
-      </div>
-      <NSpace v-else vertical size="small">
-        <div
-          v-for="r in quickCheck.results"
-          :key="r.db_id"
-          style="display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap"
+    <section class="sb-block">
+      <header class="sb-block__head">
+        <NIcon :component="ShieldCheckmarkOutline" :size="16" />
+        <h4 class="sb-block__title">SQLite 完整性巡检</h4>
+        <NTag
+          v-if="quickCheck.results.length"
+          :type="quickCheck.fail_count === 0 ? 'success' : 'error'"
+          size="small"
         >
-          <NTag :type="r.ok ? 'success' : 'error'" size="small">
-            {{ r.ok ? 'ok' : r.quick_check }}
-          </NTag>
-          <span style="font-weight: 500">{{ r.db_id }}</span>
-          <NText depth="3" style="font-size: 12px">
-            journal_mode={{ r.journal_mode || '?' }}
-          </NText>
-          <NText v-if="r.error" depth="3" style="font-size: 12px; color: var(--error-color)">
-            {{ r.error }}
-          </NText>
-        </div>
-      </NSpace>
-    </NSpin>
+          {{ quickCheck.ok_count }} ok / {{ quickCheck.fail_count }} 异常
+        </NTag>
+        <span class="sb-block__meta">上次执行：{{ lastQuickCheckLabel }}</span>
+        <NButton size="tiny" :loading="probing" @click="runQuickCheck">
+          立即巡检
+        </NButton>
+      </header>
+      <NSpin :show="quickCheckLoading">
+        <p v-if="!quickCheck.results.length" class="sb-empty">
+          尚无巡检数据；调度器开启后会按配置周期自动巡检。
+        </p>
+        <ul v-else class="sb-list">
+          <li
+            v-for="r in quickCheck.results"
+            :key="r.db_id"
+            class="sb-row"
+          >
+            <NTag :type="r.ok ? 'success' : 'error'" size="small">
+              {{ r.ok ? 'ok' : r.quick_check }}
+            </NTag>
+            <span class="sb-row__id">{{ r.db_id }}</span>
+            <NText depth="3" class="sb-row__meta">
+              journal_mode={{ r.journal_mode || '?' }}
+            </NText>
+            <NText v-if="r.error" depth="3" class="sb-row__error">
+              {{ r.error }}
+            </NText>
+          </li>
+        </ul>
+      </NSpin>
+    </section>
 
     <!-- Settings -->
-    <NDivider style="margin: 16px 0 12px" />
-    <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 12px">
-      <NIcon :component="SettingsOutline" size="16" />
-      <NText strong style="font-size: 13px">备份调度配置</NText>
-    </div>
-    <NSpin :show="settingsLoading">
-      <NSpace vertical size="small">
-        <NSpace align="center">
-          <NText style="width: 120px; font-size: 13px">启用自动备份</NText>
-          <NSwitch v-model:value="settings.enabled" size="small" />
-        </NSpace>
-        <NSpace align="center">
-          <NText style="width: 120px; font-size: 13px">执行时间</NText>
-          <NInput
-            v-model:value="settings.daily_time"
+    <section class="sb-block">
+      <header class="sb-block__head">
+        <NIcon :component="SettingsOutline" :size="16" />
+        <h4 class="sb-block__title">备份调度配置</h4>
+      </header>
+      <NSpin :show="settingsLoading">
+        <div class="sb-form">
+          <label class="sb-field">
+            <span>启用自动备份</span>
+            <NSwitch v-model:value="settings.enabled" size="small" />
+          </label>
+          <label class="sb-field">
+            <span>执行时间</span>
+            <NInput
+              v-model:value="settings.daily_time"
+              size="small"
+              placeholder="HH:MM"
+              class="sb-field__short"
+            />
+          </label>
+          <label class="sb-field">
+            <span>保留天数</span>
+            <NInputNumber
+              v-model:value="settings.keep_days"
+              size="small"
+              :min="1"
+              :max="90"
+              class="sb-field__short"
+            />
+          </label>
+          <label class="sb-field">
+            <span>默认 Profile</span>
+            <NSelect
+              v-model:value="settings.default_profile"
+              :options="profileOptions"
+              size="small"
+              class="sb-field__select"
+            />
+          </label>
+          <label class="sb-field">
+            <span>完整性巡检</span>
+            <NSwitch v-model:value="settings.quick_check_enabled" size="small" />
+          </label>
+          <label class="sb-field">
+            <span>巡检间隔（分钟）</span>
+            <NInputNumber
+              v-model:value="settings.quick_check_interval_minutes"
+              size="small"
+              :min="15"
+              :max="1440"
+              class="sb-field__medium"
+            />
+          </label>
+        </div>
+        <div class="sb-actions">
+          <NButton
+            type="primary"
             size="small"
-            placeholder="HH:MM"
-            style="width: 100px"
-          />
-        </NSpace>
-        <NSpace align="center">
-          <NText style="width: 120px; font-size: 13px">保留天数</NText>
-          <NInputNumber
-            v-model:value="settings.keep_days"
-            size="small"
-            :min="1"
-            :max="90"
-            style="width: 100px"
-          />
-        </NSpace>
-        <NSpace align="center">
-          <NText style="width: 120px; font-size: 13px">默认 Profile</NText>
-          <NSelect
-            v-model:value="settings.default_profile"
-            :options="profileOptions"
-            size="small"
-            style="width: 180px"
-          />
-        </NSpace>
-        <NSpace align="center">
-          <NText style="width: 120px; font-size: 13px">完整性巡检</NText>
-          <NSwitch v-model:value="settings.quick_check_enabled" size="small" />
-        </NSpace>
-        <NSpace align="center">
-          <NText style="width: 120px; font-size: 13px">巡检间隔（分钟）</NText>
-          <NInputNumber
-            v-model:value="settings.quick_check_interval_minutes"
-            size="small"
-            :min="15"
-            :max="1440"
-            style="width: 120px"
-          />
-        </NSpace>
-        <NButton
-          type="primary"
-          size="small"
-          :loading="saving"
-          style="margin-top: 8px"
-          @click="saveSettings"
-        >
-          保存配置
-        </NButton>
-      </NSpace>
-    </NSpin>
+            :loading="saving"
+            @click="saveSettings"
+          >
+            保存配置
+          </NButton>
+        </div>
+      </NSpin>
+    </section>
   </AppPanelSection>
 </template>
 
 <style scoped>
 .system-backup {
   margin-top: 16px;
+}
+
+.sb-profile-select {
+  width: 180px;
+}
+
+.sb-block {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--om-border);
+}
+
+.sb-block--first {
+  margin-top: 16px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.sb-block__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.sb-block__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--om-text-1);
+}
+
+.sb-block__meta {
+  margin-left: auto;
+  color: var(--om-text-3);
+  font-size: 12px;
+}
+
+.sb-empty {
+  margin: 0;
+  color: var(--om-text-3);
+  font-size: 13px;
+}
+
+.sb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sb-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.sb-row__id {
+  font-weight: 500;
+  color: var(--om-text-1);
+}
+
+.sb-row__meta {
+  font-size: 12px;
+}
+
+.sb-row__error {
+  font-size: 12px;
+  color: var(--om-error);
+}
+
+.sb-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sb-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sb-field > span {
+  width: 120px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--om-text-2);
+}
+
+.sb-field__short {
+  width: 100px;
+}
+
+.sb-field__medium {
+  width: 120px;
+}
+
+.sb-field__select {
+  width: 180px;
+}
+
+.sb-actions {
+  margin-top: 12px;
 }
 </style>

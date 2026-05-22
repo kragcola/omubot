@@ -13,6 +13,7 @@ import { NButton, NIcon, NInput, NSelect, NTag, NText } from 'naive-ui'
 import { api } from '../../api/client'
 import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
 
@@ -190,131 +191,118 @@ function onEnter(event: KeyboardEvent) {
           />
         </div>
 
-        <AppCard bordered embedded class="sandbox-composer">
-          <div class="sandbox-composer__head">
-            <div>
-              <p class="sandbox-chat__eyebrow">
-                Composer
-              </p>
-              <h4 class="sandbox-composer__title">
-                输入测试消息
-              </h4>
-            </div>
+        <AppPanelSection
+          eyebrow="Composer"
+          title="输入测试消息"
+          class="sandbox-composer"
+        >
+          <template #aside>
             <NText depth="3">
               Enter 发送，Shift+Enter 换行
             </NText>
-          </div>
+          </template>
 
-          <NInput
-            v-model:value="inputMsg"
-            type="textarea"
-            :autosize="{ minRows: 3, maxRows: 8 }"
-            placeholder="输入一条想让 Omubot 处理的消息"
-            :disabled="sending"
-            @keydown.enter.exact.prevent="onEnter"
-            @compositionstart="onCompositionStart"
-            @compositionend="onCompositionEnd"
-          />
+          <div class="sandbox-composer__body">
+            <NInput
+              v-model:value="inputMsg"
+              type="textarea"
+              :autosize="{ minRows: 3, maxRows: 8 }"
+              placeholder="输入一条想让 Omubot 处理的消息"
+              :disabled="sending"
+              @keydown.enter.exact.prevent="onEnter"
+              @compositionstart="onCompositionStart"
+              @compositionend="onCompositionEnd"
+            />
 
-          <div class="sandbox-composer__actions">
-            <NText depth="3" class="sandbox-composer__hint">
-              {{ simulate === 'group' ? '群聊模式会启用隐私掩码并附带 Group ID。' : '私聊模式下仅带入 User ID。' }}
-            </NText>
-            <div class="sandbox-composer__buttons">
-              <NButton secondary @click="clear">
-                清空会话
-              </NButton>
-              <NButton type="primary" :loading="sending" :disabled="!inputMsg.trim()" @click="send">
-                <template #icon>
-                  <NIcon :component="PaperPlaneOutline" />
-                </template>
-                发送消息
-              </NButton>
+            <div class="sandbox-composer__actions">
+              <NText depth="3" class="sandbox-composer__hint">
+                {{ simulate === 'group' ? '群聊模式会启用隐私掩码并附带 Group ID。' : '私聊模式下仅带入 User ID。' }}
+              </NText>
+              <div class="sandbox-composer__buttons">
+                <NButton secondary @click="clear">
+                  清空会话
+                </NButton>
+                <NButton type="primary" :loading="sending" :disabled="!inputMsg.trim()" @click="send">
+                  <template #icon>
+                    <NIcon :component="PaperPlaneOutline" />
+                  </template>
+                  发送消息
+                </NButton>
+              </div>
             </div>
           </div>
-        </AppCard>
+        </AppPanelSection>
         </AppCard>
 
         <div class="sandbox-side">
-          <AppCard bordered elevated class="sandbox-panel">
-          <div class="sandbox-panel__head">
-            <div>
-              <p class="sandbox-panel__eyebrow">
-                Context
-              </p>
-              <h3 class="sandbox-panel__title">
-                会话参数
-              </h3>
+          <AppPanelSection
+            eyebrow="Context"
+            title="会话参数"
+            class="sandbox-panel"
+          >
+            <template #aside>
+              <NTag round size="small" type="info">
+                sandbox_{{ userId }}
+              </NTag>
+            </template>
+
+            <div class="sandbox-fields">
+              <label class="sandbox-field">
+                <span>模式</span>
+                <NSelect v-model:value="simulate" :options="modeOptions" />
+              </label>
+
+              <label class="sandbox-field">
+                <span>User ID</span>
+                <NInput v-model:value="userId" placeholder="sandbox_user" />
+              </label>
+
+              <label v-if="simulate === 'group'" class="sandbox-field">
+                <span>Group ID</span>
+                <NInput v-model:value="groupId" placeholder="sandbox_group" />
+              </label>
             </div>
-            <NTag round size="small" type="info">
-              sandbox_{{ userId }}
-            </NTag>
-          </div>
+          </AppPanelSection>
 
-          <div class="sandbox-fields">
-            <label class="sandbox-field">
-              <span>模式</span>
-              <NSelect v-model:value="simulate" :options="modeOptions" />
-            </label>
-
-            <label class="sandbox-field">
-              <span>User ID</span>
-              <NInput v-model:value="userId" placeholder="sandbox_user" />
-            </label>
-
-            <label v-if="simulate === 'group'" class="sandbox-field">
-              <span>Group ID</span>
-              <NInput v-model:value="groupId" placeholder="sandbox_group" />
-            </label>
-          </div>
-          </AppCard>
-
-          <AppCard bordered elevated class="sandbox-panel">
-          <div class="sandbox-panel__head">
-            <div>
-              <p class="sandbox-panel__eyebrow">
-                Runtime Notes
-              </p>
-              <h3 class="sandbox-panel__title">
-                调试提示
-              </h3>
-            </div>
-          </div>
-
-          <div class="sandbox-notes">
-            <div class="sandbox-note">
-              <div class="sandbox-note__icon">
-                <NIcon :component="simulate === 'group' ? PeopleOutline : PersonOutline" />
+          <AppPanelSection
+            eyebrow="Runtime Notes"
+            title="调试提示"
+            class="sandbox-panel"
+          >
+            <div class="sandbox-notes">
+              <div class="sandbox-note">
+                <div class="sandbox-note__icon">
+                  <NIcon :component="simulate === 'group' ? PeopleOutline : PersonOutline" />
+                </div>
+                <div>
+                  <strong>{{ simulate === 'group' ? '群聊身份' : '私聊身份' }}</strong>
+                  <p>
+                    {{ simulate === 'group' ? `请求会带入 ${effectiveGroupId} 作为群聊上下文。` : '请求会以单人会话方式发送，不附带群聊 ID。' }}
+                  </p>
+                </div>
               </div>
-              <div>
-                <strong>{{ simulate === 'group' ? '群聊身份' : '私聊身份' }}</strong>
-                <p>
-                  {{ simulate === 'group' ? `请求会带入 ${effectiveGroupId} 作为群聊上下文。` : '请求会以单人会话方式发送，不附带群聊 ID。' }}
-                </p>
-              </div>
-            </div>
 
-            <div class="sandbox-note">
-              <div class="sandbox-note__icon">
-                <NIcon :component="PulseOutline" />
+              <div class="sandbox-note">
+                <div class="sandbox-note__icon">
+                  <NIcon :component="PulseOutline" />
+                </div>
+                <div>
+                  <strong>当前链路</strong>
+                  <p>调用 `/api/admin/sandbox/chat`，并沿用实际 LLM chat 接口返回内容。</p>
+                </div>
               </div>
-              <div>
-                <strong>当前链路</strong>
-                <p>调用 `/api/admin/sandbox/chat`，并沿用实际 LLM chat 接口返回内容。</p>
-              </div>
-            </div>
 
-            <div class="sandbox-note">
-              <div class="sandbox-note__icon">
-                <NIcon :component="SparklesOutline" />
-              </div>
-              <div>
-                <strong>多轮观察</strong>
-                <p>左侧消息流不会自动清空，适合连续测试同一身份下的多轮表现。</p>
+              <div class="sandbox-note">
+                <div class="sandbox-note__icon">
+                  <NIcon :component="SparklesOutline" />
+                </div>
+                <div>
+                  <strong>多轮观察</strong>
+                  <p>左侧消息流不会自动清空，适合连续测试同一身份下的多轮表现。</p>
+                </div>
               </div>
             </div>
-          </div>
-          </AppCard>
+          </AppPanelSection>
         </div>
       </div>
     </div>
@@ -344,17 +332,14 @@ function onEnter(event: KeyboardEvent) {
   padding: 20px;
 }
 
-.sandbox-chat__head,
-.sandbox-panel__head,
-.sandbox-composer__head {
+.sandbox-chat__head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.sandbox-chat__eyebrow,
-.sandbox-panel__eyebrow {
+.sandbox-chat__eyebrow {
   margin: 0 0 8px;
   color: var(--om-text-3);
   font-size: 11px;
@@ -363,9 +348,7 @@ function onEnter(event: KeyboardEvent) {
   text-transform: uppercase;
 }
 
-.sandbox-chat__title,
-.sandbox-panel__title,
-.sandbox-composer__title {
+.sandbox-chat__title {
   margin: 0;
   color: var(--om-text-1);
   font-size: 18px;
@@ -433,11 +416,9 @@ function onEnter(event: KeyboardEvent) {
   color: var(--om-text-1);
 }
 
-.sandbox-composer {
+.sandbox-composer__body {
   display: grid;
   gap: 14px;
-  padding: 18px;
-  border-radius: 18px;
 }
 
 .sandbox-composer__actions {
@@ -463,12 +444,6 @@ function onEnter(event: KeyboardEvent) {
   align-content: start;
   gap: 16px;
   min-height: 0;
-}
-
-.sandbox-panel {
-  display: grid;
-  gap: 16px;
-  padding: 20px;
 }
 
 .sandbox-fields {
@@ -539,9 +514,7 @@ function onEnter(event: KeyboardEvent) {
 
 @media (max-width: 760px) {
   .sandbox-composer__actions,
-  .sandbox-chat__head,
-  .sandbox-panel__head,
-  .sandbox-composer__head {
+  .sandbox-chat__head {
     flex-direction: column;
     align-items: stretch;
   }

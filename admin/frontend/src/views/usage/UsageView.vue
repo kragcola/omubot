@@ -9,8 +9,8 @@ import {
 import { useMessage } from 'naive-ui'
 
 import { api } from '../../api/client'
-import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import RestartBotButton from '../../components/common/RestartBotButton.vue'
@@ -165,18 +165,11 @@ function actorLabel(actor: UsageActor, type: 'user' | 'group') {
       </div>
 
       <div class="usage-layout">
-        <AppCard bordered elevated class="usage-summary">
-          <div class="usage-section__head">
-            <div>
-              <p class="usage-section__eyebrow">
-                Runtime Notes
-              </p>
-              <h3 class="usage-section__title">
-                今日运行补充信息
-              </h3>
-            </div>
-          </div>
-
+        <AppPanelSection
+          eyebrow="Runtime Notes"
+          title="今日运行补充信息"
+          class="usage-summary-panel"
+        >
           <div class="usage-summary-grid">
             <div class="usage-summary-item">
               <span>Cache 命中率</span>
@@ -203,23 +196,19 @@ function actorLabel(actor: UsageActor, type: 'user' | 'group') {
               <strong>近 7 天</strong>
             </div>
           </div>
-        </AppCard>
+        </AppPanelSection>
 
         <div class="usage-rank-grid">
-          <AppCard bordered elevated class="usage-rank-card">
-            <div class="usage-section__head">
-              <div>
-                <p class="usage-section__eyebrow">
-                  Top Users
-                </p>
-                <h3 class="usage-section__title">
-                  活跃用户 Top 10
-                </h3>
-              </div>
+          <AppPanelSection
+            eyebrow="Top Users"
+            title="活跃用户 Top 10"
+            class="usage-rank-panel"
+          >
+            <template #aside>
               <NTag size="small" round>
                 {{ topUsers.length }} 人
               </NTag>
-            </div>
+            </template>
 
             <div v-if="topUsers.length > 0" class="usage-rank-list">
               <div
@@ -247,22 +236,18 @@ function actorLabel(actor: UsageActor, type: 'user' | 'group') {
               description="当前统计窗口内没有记录到用户侧调用。"
               :icon="PeopleOutline"
             />
-          </AppCard>
+          </AppPanelSection>
 
-          <AppCard bordered elevated class="usage-rank-card">
-            <div class="usage-section__head">
-              <div>
-                <p class="usage-section__eyebrow">
-                  Top Groups
-                </p>
-                <h3 class="usage-section__title">
-                  活跃群 Top 10
-                </h3>
-              </div>
+          <AppPanelSection
+            eyebrow="Top Groups"
+            title="活跃群 Top 10"
+            class="usage-rank-panel"
+          >
+            <template #aside>
               <NTag size="small" round>
                 {{ topGroups.length }} 群
               </NTag>
-            </div>
+            </template>
 
             <div v-if="topGroups.length > 0" class="usage-rank-list">
               <div
@@ -290,7 +275,7 @@ function actorLabel(actor: UsageActor, type: 'user' | 'group') {
               description="当前统计窗口内没有记录到群聊侧调用。"
               :icon="ChatbubbleEllipsesOutline"
             />
-          </AppCard>
+          </AppPanelSection>
         </div>
       </div>
     </template>
@@ -312,39 +297,15 @@ function actorLabel(actor: UsageActor, type: 'user' | 'group') {
   align-items: start;
 }
 
-.usage-summary,
-.usage-rank-card {
-  padding: 20px;
+.usage-summary-panel,
+.usage-rank-panel {
+  margin-bottom: 0;
 }
 
 .usage-rank-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
-}
-
-.usage-section__head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.usage-section__eyebrow {
-  margin: 0 0 8px;
-  color: var(--om-text-3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.usage-section__title {
-  margin: 0;
-  color: var(--om-text-1);
-  font-size: 20px;
-  font-weight: 700;
 }
 
 .usage-summary-grid {
@@ -437,11 +398,8 @@ function actorLabel(actor: UsageActor, type: 'user' | 'group') {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .usage-section__head,
   .usage-rank-item {
     grid-template-columns: minmax(0, 1fr);
-    flex-direction: column;
-    align-items: flex-start;
   }
 
   .usage-rank-item__stats {

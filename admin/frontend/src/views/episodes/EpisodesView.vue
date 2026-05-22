@@ -12,7 +12,7 @@ import type { DataTableColumns, SelectOption } from 'naive-ui'
 
 import { api } from '../../api/client'
 import AppPage from '../../components/common/AppPage.vue'
-import AppCard from '../../components/common/AppCard.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
@@ -445,14 +445,25 @@ onMounted(() => refresh())
       <strong>Phase B 提示</strong> · enabled_for_prompt 状态推进按钮在 Phase B BlockTraceBus 落地前不可用。当前可执行：批准 / 停用 / 恢复。
     </NAlert>
 
-    <AppCard bordered class="ep-section">
+    <AppPanelSection
+      eyebrow="Episode List"
+      title="经验列表"
+      description="按状态 / 群 ID 过滤，查看每条经验的完整生命周期与可执行操作。"
+      class="ep-list-panel"
+    >
+      <template #aside>
+        <NTag round size="small" :type="episodes.length ? 'info' : 'default'">
+          {{ episodes.length }} 条
+        </NTag>
+      </template>
+
       <PageToolbar class="ep-toolbar">
         <template #left>
           <NSelect
             v-model:value="filterStateValue"
             :options="stateOptions"
             size="small"
-            style="width: 220px"
+            class="ep-toolbar__state"
             @update:value="fetchEpisodes"
           />
           <NInput
@@ -460,7 +471,7 @@ onMounted(() => refresh())
             placeholder="按群 ID 过滤"
             clearable
             size="small"
-            style="width: 200px"
+            class="ep-toolbar__group"
             @keyup.enter="fetchEpisodes"
             @clear="fetchEpisodes"
           />
@@ -489,7 +500,7 @@ onMounted(() => refresh())
         description="Bot 完成对话后由 Consolidator 写入。dry_run 是默认初始状态，置信度达 0.6 后自动晋升 candidate。"
         :icon="BulbOutline"
       />
-    </AppCard>
+    </AppPanelSection>
 
     <NModal
       v-model:show="showActionDialog"
@@ -767,13 +778,20 @@ onMounted(() => refresh())
   border-radius: 12px;
 }
 
-.ep-section {
-  padding: 20px 22px;
+.ep-list-panel {
   margin-bottom: 16px;
 }
 
 .ep-toolbar {
   margin-bottom: 16px;
+}
+
+.ep-toolbar__state {
+  width: 220px;
+}
+
+.ep-toolbar__group {
+  width: 200px;
 }
 
 .ep-action-panel__line {

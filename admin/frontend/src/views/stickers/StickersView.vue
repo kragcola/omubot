@@ -232,7 +232,7 @@ function resetFilters() {
           v-model:value="searchText"
           clearable
           placeholder="搜索 ID、描述、提示或来源"
-          style="width: min(300px, 100%)"
+          class="stickers-toolbar__search"
         >
           <template #prefix>
             <NIcon :component="SearchOutline" />
@@ -417,6 +417,10 @@ function resetFilters() {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 24px;
+}
+
+.stickers-toolbar__search {
+  width: min(300px, 100%);
 }
 
 .stickers-grid {

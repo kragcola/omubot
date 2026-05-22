@@ -10,7 +10,7 @@ import type { DataTableColumns, SelectOption } from 'naive-ui'
 
 import { api } from '../../api/client'
 import AppPage from '../../components/common/AppPage.vue'
-import AppCard from '../../components/common/AppCard.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
@@ -203,11 +203,14 @@ onUnmounted(() => {
 <template>
   <AppPage
     title="BlockTrace"
-    subtitle="Prompt block 预算仲裁与追踪"
+    eyebrow="Block Trace"
+    description="Prompt block 预算仲裁与追踪。"
   >
-    <template #hero-extra>
-      <NButton quaternary size="small" @click="fetchData" :loading="loading">
-        <template #icon><NIcon :component="RefreshOutline" /></template>
+    <template #action>
+      <NButton secondary size="small" :loading="loading" @click="fetchData">
+        <template #icon>
+          <NIcon :component="RefreshOutline" />
+        </template>
         刷新
       </NButton>
     </template>
@@ -234,41 +237,50 @@ onUnmounted(() => {
       />
     </div>
 
-    <PageToolbar>
-      <NInput
-        v-model:value="requestFilter"
-        placeholder="Filter by request_id..."
-        clearable
-        style="width: 260px"
-      />
-      <NSelect
-        v-model:value="sourceFilter"
-        :options="sourceOptions"
-        placeholder="Source"
-        clearable
-        style="width: 160px"
-      />
-      <NButton
-        size="small"
-        type="warning"
-        :loading="pruning"
-        @click="handlePrune"
-      >
-        <template #icon><NIcon :component="TrashOutline" /></template>
-        Prune (7d)
-      </NButton>
+    <PageToolbar class="mb-16">
+      <template #left>
+        <NInput
+          v-model:value="requestFilter"
+          placeholder="Filter by request_id..."
+          clearable
+          class="bt-toolbar__request"
+        />
+        <NSelect
+          v-model:value="sourceFilter"
+          :options="sourceOptions"
+          placeholder="Source"
+          clearable
+          class="bt-toolbar__source"
+        />
+      </template>
+      <template #right>
+        <NButton
+          size="small"
+          type="warning"
+          :loading="pruning"
+          @click="handlePrune"
+        >
+          <template #icon>
+            <NIcon :component="TrashOutline" />
+          </template>
+          Prune (7d)
+        </NButton>
+      </template>
     </PageToolbar>
 
-    <AppCard v-if="alignment" class="bt-alignment">
-      <template #header>
-        <div class="bt-align-header">
-          <span>Provider / Plugin Alignment</span>
-          <NTag :type="MODE_TAG[alignment.mode]" size="small" :bordered="false">
-            {{ MODE_LABEL[alignment.mode] }}
-          </NTag>
-          <span class="bt-align-meta">基于最近 {{ alignment.sample_size }} 条 trace</span>
-        </div>
+    <AppPanelSection
+      v-if="alignment"
+      eyebrow="Alignment"
+      title="Provider / Plugin Alignment"
+      :description="`基于最近 ${alignment.sample_size} 条 trace`"
+      class="bt-alignment-panel"
+    >
+      <template #aside>
+        <NTag :type="MODE_TAG[alignment.mode]" size="small" :bordered="false" round>
+          {{ MODE_LABEL[alignment.mode] }}
+        </NTag>
       </template>
+
       <NDataTable
         :columns="[
           { title: 'Source', key: 'source', width: 120 },
@@ -285,7 +297,7 @@ onUnmounted(() => {
         size="small"
         :row-key="(row: AlignmentRow) => row.source"
       />
-    </AppCard>
+    </AppPanelSection>
 
     <EmptyState
       v-if="!loading && traces.length === 0"
@@ -295,21 +307,23 @@ onUnmounted(() => {
     />
 
     <div v-else class="bt-request-groups">
-      <AppCard
+      <AppPanelSection
         v-for="[reqId, items] in groupedTraces"
         :key="reqId"
         class="bt-request-card"
       >
-        <template #header>
-          <div class="bt-request-header">
-            <NIcon :component="FunnelOutline" :size="16" />
-            <code class="bt-request-id">{{ reqId }}</code>
-            <NTag size="tiny" :bordered="false">
-              {{ items.length }} blocks
-            </NTag>
-            <span class="bt-request-time">{{ items[0]?.created_at ?? '' }}</span>
-          </div>
+        <template #aside>
+          <span class="bt-request-time">{{ items[0]?.created_at ?? '' }}</span>
         </template>
+
+        <div class="bt-request-header">
+          <NIcon :component="FunnelOutline" :size="16" />
+          <code class="bt-request-id">{{ reqId }}</code>
+          <NTag size="tiny" round :bordered="false">
+            {{ items.length }} blocks
+          </NTag>
+        </div>
+
         <NDataTable
           :columns="columns"
           :data="items"
@@ -319,7 +333,7 @@ onUnmounted(() => {
           :row-key="(row: TraceItem) => row.trace_id"
           max-height="320"
         />
-      </AppCard>
+      </AppPanelSection>
     </div>
   </AppPage>
 </template>
@@ -332,6 +346,18 @@ onUnmounted(() => {
   margin-bottom: 16px;
 }
 
+.bt-toolbar__request {
+  width: 260px;
+}
+
+.bt-toolbar__source {
+  width: 160px;
+}
+
+.bt-alignment-panel {
+  margin-bottom: 12px;
+}
+
 .bt-request-groups {
   display: flex;
   flex-direction: column;
@@ -342,39 +368,18 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 12px;
   font-size: 13px;
 }
 
 .bt-request-id {
+  color: var(--om-text-2);
   font-family: var(--font-mono, 'JetBrains Mono', monospace);
   font-size: 12px;
-  color: var(--text-color-secondary);
 }
 
 .bt-request-time {
-  margin-left: auto;
+  color: var(--om-text-3);
   font-size: 12px;
-  color: var(--text-color-tertiary);
-}
-
-.bt-request-card {
-  overflow: hidden;
-}
-
-.bt-alignment {
-  margin-bottom: 12px;
-}
-
-.bt-align-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 13px;
-}
-
-.bt-align-meta {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--text-color-tertiary);
 }
 </style>

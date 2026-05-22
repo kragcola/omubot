@@ -350,7 +350,7 @@ function formatSignedNumber(value?: number) {
           v-model:value="searchText"
           clearable
           placeholder="搜索 QQ、昵称或称呼"
-          style="width: min(260px, 100%)"
+          class="affection-toolbar__search"
         >
           <template #prefix>
             <NIcon :component="SearchOutline" />
@@ -359,7 +359,7 @@ function formatSignedNumber(value?: number) {
         <NSelect
           v-model:value="tierFilter"
           :options="tierOptions"
-          style="width: 132px"
+          class="affection-toolbar__filter"
         />
       </template>
 
@@ -462,7 +462,7 @@ function formatSignedNumber(value?: number) {
                     :min="0"
                     :max="100"
                     :step="1"
-                    style="width: 100%"
+                    class="affection-detail__numeric"
                   />
                 </label>
               </div>
@@ -523,6 +523,18 @@ function formatSignedNumber(value?: number) {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 24px;
+}
+
+.affection-toolbar__search {
+  width: min(260px, 100%);
+}
+
+.affection-toolbar__filter {
+  width: 132px;
+}
+
+.affection-detail__numeric {
+  width: 100%;
 }
 
 .affection-table:deep(.n-data-table-th) {

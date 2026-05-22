@@ -4,6 +4,280 @@
 
 ---
 
+## 2026-05-23 阶段 0.6 Jinja 退役完成（一刀切落地）
+
+**变更类型**：admin 后端重构 + SPA 端点迁移（**含 .py 改动 → 需 rebuild bot，D6**）
+
+**背景**：
+
+同日早些时候完成的「阶段 0/3 长尾/4」批次把 0.6 标为 ⏸ 暂缓，原因是 12 处 `await render("xxx.html", ...)` 仍在活路径——SPA 仍依赖 `/admin/usage/data` 一条数据接口，且 `auth.py` 的 `POST /admin/login` 失败回填用 `login.html`。本批次按跟踪文档「前置条件」四步顺序拆解，人工拍板"一刀切（推荐）"后**整体落地**：所有前置条件 + `git rm` 一次推进。证据齐全（无 SPA 残余调用、无外部脚本依赖、无测试覆盖），原子提交风险最低。
+
+**改动**：
+
+| 文件 | 类型 | 关键动作 |
+| --- | --- | --- |
+| `admin/routes/api/usage.py` | **新增** | `create_usage_router()` 把 `/admin/usage/data`（period / date 两参，返回 timeseries / summary / top_users / top_groups / by_model 五段）整体平移到 `/api/admin/usage/data`。与 `services/llm/usage_routes.py` 的单值公开端点正交 |
+| `admin/routes/api/__init__.py` | 编辑 | 在 dashboard 之后挂载 `create_usage_router(usage_tracker=usage_tracker)` |
+| `admin/frontend/src/views/dashboard/DashboardView.vue:476` | 编辑 | `/admin/usage/data?period=day` → `/api/admin/usage/data?period=day` |
+| `admin/__init__.py` | 编辑 | 删除 7 个 Jinja 子路由 import + `from admin.auth import create_login_router`；删除 `include_router(create_login_router())` + 7 个 `include_router(create_*)` 共 8 行挂载；SPA 兜底注释更新为"legacy Jinja-rendered admin pages were retired 2026-05-23" |
+| `admin/auth.py` | 编辑 | 删除整个 `create_login_router()`（含 `GET/POST /admin/login` + `GET /admin/logout`）+ 不再使用的 `RedirectResponse` import；保留 `AdminAuthMiddleware` + 4 个 HMAC helper + `_get_admin_token` + `_API_SKIP_PATHS` |
+| `admin/routes/{config_viewer,dashboard,group_memory,groups,logs,soul,usage}.py` | **删除** | 7 个 Jinja 子路由文件 |
+| `admin/templates.py` | **删除** | Jinja2 渲染入口 |
+| `admin/templates/{base,config_viewer,dashboard,group_memory,groups,login,logs,soul,usage}.html` | **删除** | 9 个模板，目录从磁盘消失 |
+| `docs/tracking/web-refactor.md` | 更新 | 元信息 / 阶段 0 表 / 阶段 0.6 段：状态翻 ✅ + 4 步落地证据 |
+
+合计 17 个文件 `git rm`、3 个 `.py` 编辑、1 个 `.py` 新增、1 个 `.vue` 编辑。
+
+**验证**：
+
+- `python -c "from admin import create_admin_router"` → import ok（确认无悬挂引用）
+- `uv run pytest tests/test_admin_api.py tests/test_usage_routes.py --deselect ::test_system_services_health_endpoint` → 53 passed。被 deselect 的 `test_system_services_health_endpoint` 在 stash 后复现，是 backup_disk 磁盘 97% 触发的 error alert——属于真实环境状态，与本批无关
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error
+- `cd admin/frontend && npm run build` → ✓ built in 10.80s，新产物 `DashboardView-t4Z3CdC8.js` 28.76 KB / gzip 10.20 KB
+- `grep -roE '"/admin/usage/data"' admin/static/assets/ admin/frontend/src/` → 0 命中
+- `git ls-files admin/templates/ admin/templates.py 2>/dev/null` → 0 行
+
+**影响范围**：
+
+- 后端：移除 7 个 Jinja 子路由 + 1 个登录回填路由；新增 1 个 JSON API 子路由；中间件 `AdminAuthMiddleware` 行为不变
+- 前端：仅 DashboardView 一处 endpoint 切换；SPA 路由表无变化
+- API 表面：`/admin/{login,logout,dashboard,usage,groups,config,soul,logs,group-memory/*}` 全部退役（GET 由 SPA fallback 接管，渲染 SPA index.html；POST 退役且无替换者，原 `POST /admin/login` 已被 SPA 通过 `/api/admin/login` JSON 端点取代）；`/admin/usage/data` 退役，`GET /api/admin/usage/data` 上线
+
+**部署提示（D6）**：
+
+- `admin/__init__.py` / `admin/auth.py` / 新增 `admin/routes/api/usage.py` 是 **`.py` 改动**——bind-mount 不生效，必须 `dot_clean . && docker compose up bot -d --build`
+- SPA 部分由 `admin/static` bind mount 直接生效，浏览器刷新即可
+
+**回滚路径**：
+
+`git revert <commit>` 一步回退即可；模板 / 路由文件均在 git 历史可恢复，新端点 `/api/admin/usage/data` 回退后会随 import 一起消失，SPA 旧 endpoint 回到 `/admin/usage/data` 走旧 Jinja 路由（需对应回退 SPA 构建产物）。
+
+---
+
+## 2026-05-23 阶段 0/3 长尾/4 收口（5 视图收敛 + 月度合规脚本上线）
+
+**变更类型**：admin/frontend 前端重构 + 维护工具新增（D6 admin/static bind mount，无需 rebuild bot）
+
+**背景**：
+
+按计划执行「阶段 0 → 4」。其中阶段 1、2 早已完成；阶段 0 复审、阶段 3 长尾、阶段 4 工具上线本次一并合并提交。要点：
+
+- 阶段 0.4 现状是 ✅（git ls-files admin/static/assets/ 计数 0，磁盘构建产物保留），跟踪文档原写"待人工确认"系状态滞后；
+- 阶段 0.6 复审发现**仍有 12 处 `await render("xxx.html", ...)` 调用活在 admin/auth.py + admin/routes/*.py**，模板和 8 个 Jinja 子路由还在 active code path——`git rm admin/templates/*.html` 不能直接执行，必须先迁移 `DashboardView.vue:476` 的 `/admin/usage/data` 到 `/api/admin/usage/...`、再处理 `auth.py` 失败回填 → 详见跟踪文档「阶段 0.6 二审」。
+- 阶段 3 长尾按 P-7 约定（≤700 行视图只做 C 级视觉收敛），把 UsageView / SystemBackup / AffectionView / StickersView / MemoryView 的 inline-style 残留集中清掉，AppPanelSection 用在「panel head」位点；SystemPolicies 已审计但**故意保留**——它的 3 个 embedded 子卡是面板内分组卡，不属于 panel head。
+- 阶段 4 新增 `scripts/check-ui-compliance.sh`，6 项指标，本次跑出首期基线快照。
+
+**改动**：
+
+| 文件 | 类型 | 关键动作 |
+| --- | --- | --- |
+| `scripts/check-ui-compliance.sh` | **新增** | bash 合规扫描脚本：统计 src/views 全量 inline-style（区分 width-only 白名单 / 真残留）、dynamic `:style`、AppCard / AppPanelSection 文件占用、global.css `!important` 计数。`set -uo pipefail` + `count_or_zero` 包装吞掉 grep 零匹配的 exit 1，可重复跑 |
+| `admin/frontend/src/views/usage/UsageView.vue` | 重构 | 451 → 409 行；3 处外层 `<AppCard bordered elevated>` → `<AppPanelSection eyebrow title>`（Runtime Notes / Top Users / Top Groups），计数 NTag 改走 `#aside`；删 ~38 行旧 scoped CSS；AppCard import → AppPanelSection import |
+| `admin/frontend/src/views/system/components/SystemBackup.vue` | 重构 | 378 → 488 行；模板整体重构，30 处 inline-style → 0；新增 `.sb-block × 3` / `.sb-block__head/__title/__meta` / `.sb-list / .sb-row` / `.sb-form / .sb-field` 共 ~90 行 scoped CSS。行数 +110 是把 inline 集中到 `<style>` 的预期开销 |
+| `admin/frontend/src/views/affection/AffectionView.vue` | 重构 | 3 处 inline-style → 0：迁 `.affection-toolbar__search / __filter / .affection-detail__numeric` |
+| `admin/frontend/src/views/stickers/StickersView.vue` | 重构 | 1 处 inline-style → 0：迁 `.stickers-toolbar__search`。v-for 内 `<AppCard>` 是「列表项卡」，按 P-7 约定**保留** |
+| `admin/frontend/src/views/memory/MemoryView.vue` | 重构 | 5 处 inline-style → 0：3 处 toolbar input + 2 处 NInputNumber，迁 `.memory-toolbar__scope / __scope-id / __series` 与共享 `.memory-drawer__numeric` |
+| `docs/tracking/web-refactor.md` | 更新 | 阶段 0 表 0.4 改 ✅ / 0.6 改 ⏸ 暂缓 + 二审证据；新增「阶段 4」段：P-5 长尾收口表 + 合规脚本说明 + 首期基线快照 |
+
+**首期基线快照**（来自 `bash scripts/check-ui-compliance.sh`）：
+
+```text
+src/views (admin frontend):
+  static  style="..." sites     : 36
+    └─ width-only (whitelist)   : 15
+    └─ residue (target → 0)     : 21
+  dynamic :style="..." bindings : 14   (allowed)
+  AppCard files                 : 25
+  AppPanelSection files         : 34
+
+global.css:
+  !important count              : 31
+```
+
+口径解读见跟踪文档「首期基线快照」段。`residue=21` 主要集中在 ConfigSystemBackup（与 SystemBackup 是不同文件，未在本批次范围）+ DashboardView 的 `--tone` CSS 变量挂载（合理用法可豁免）。`AppPanelSection` 文件数随阶段 3 推进继续上升，`!important` 维持阶段 1 完工后的 31 行稳定基线。
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error
+- `cd admin/frontend && npm run build` → ✓ built in 10.66s
+- `bash scripts/check-ui-compliance.sh` → exit 0，输出上方快照
+- `git ls-files admin/static/assets/ | wc -l` → 0（确认阶段 0.4）
+- `grep -rnE "render\(['\"]" admin/ --include='*.py' | wc -l` → 12（确认阶段 0.6 仍活）
+
+**影响范围**：
+
+- 仅前端 SPA bundle + 维护脚本；admin/static bind mount，浏览器刷新即生效。
+- 无后端 / 无 API / 无配置 / 无 docker rebuild。
+- 阶段 0.6 不再写"待人工确认 → 一句 git rm 解决"的措辞——必须**先**迁移 SPA 的 `/admin/usage/data` + 处理 `auth.py` 登录失败回填，**再**清理 Jinja 路由 + 模板，否则会破坏 DashboardView 与登录失败回填体验。
+
+**回滚**：
+
+`git revert <hash>` + `cd admin/frontend && npm run build`，bind mount 自动生效。`scripts/check-ui-compliance.sh` 是只读脚本，删除即可回滚。
+
+**遗留**：
+
+- 阶段 0.6 模板清理需要单独运维窗口，前置：① 把 `DashboardView.vue:476` 的 `/admin/usage/data` 切到 `/api/admin/usage/...`；② 评估 `auth.py` 失败回填要不要改 JSON；③ 删 `admin/__init__.py:142-165` 的 8 个 `include_router(...)`；④ 之后 `git rm admin/templates/*.html` 与 `admin/routes/{groups,soul,usage,group_memory,config_viewer,logs,dashboard}.py`。
+- 阶段 4 之后按月跑一次 `scripts/check-ui-compliance.sh`，写一段简短维护日志即可，不必再开 P-N 批次。
+- `residue=21` 中 ConfigSystemBackup 的 9 处 `font-size/color` inline 是下一个低优先收尾点。
+
+---
+
+## 2026-05-23 P-4 ~ P-7 长尾 4 视图 AppPanelSection 批次（BlockTrace / Episodes / MemoryConsolidator / Style）
+
+**变更类型**：admin/frontend 前端重构（D6 admin/static bind mount，无需 rebuild bot）
+
+**背景**：
+
+P-3 收尾后批量结清剩余的中长视图——4 个 380 ~ 974 行视图都只有 1 ~ 4 块 panel，体量小但 CSS 模式参差：BlockTrace 还混着早期 AppCard `#header` 槽 + 错的 AppPage 槽名（`subtitle` / `#hero-extra` 都不存在 → 刷新按钮一直渲染不出）；StyleView 沿用最早的 `<section class="style-panel">` 写法，连 AppCard 都没用。本批继续 C 阶段约定 ① ~ ④，并沿用 P-3 的⑤ title-icon 移除规则，eyebrow 担纲分类语义。NDrawerContent 内的子区段（`*-detail__section`）不算 panel-card 不动；NModal `style="width: ###px"` 也按 GroupsView 惯例保留。
+
+**改动**：
+
+| View | 之前 | 之后 | Δ 行 | bundle JS / gzip 之前 → 之后 | 关键动作 |
+| --- | --- | --- | --- | --- | --- |
+| `views/block-trace/BlockTraceView.vue` | 380 | 380 | 0 | 6.48 / 2.89 → **6.54 / 2.90 KB**（gzip +0.01 噪声） | ① **顺手修了一个隐性 bug**：原 AppPage 用 `subtitle="..."` + `<template #hero-extra>` ——这两个 props/slot 都不存在，刷新按钮一直渲染不出，改成 `description="..."` + `<template #action>`；② Alignment 卡 `<AppCard>` + 自写 `#header` 槽 → AppPanelSection（eyebrow="Alignment" / title="Provider / Plugin Alignment"），MODE_TAG 走 `#aside`；③ per-request groups 的 `<AppCard>` + `#header` → `<AppPanelSection class="bt-request-card">`，时间走 `#aside`，request-header div 进 default 槽；④ 删 toolbar 两处 `style="width: 260px / 160px"`，迁 `.bt-toolbar__request / .bt-toolbar__source`；⑤ 删 `.bt-align-header / .bt-align-meta / .bt-alignment` 三块旧样式，新增 `.bt-toolbar__request/.bt-toolbar__source/.bt-alignment-panel/.bt-request-header { margin-bottom: 12px }` |
+| `views/episodes/EpisodesView.vue` | 868 | 868 | 0 | 16.69 / 6.16 → **17.02 / 6.25 KB**（+0.33 / +0.09 gzip） | ① 1 块 `<AppCard bordered class="ep-section">` → AppPanelSection（eyebrow="Episode List" / title="经验列表"），episodes 计数 NTag 走 `#aside`；② 删 toolbar 两处 `style="width: 220px / 200px"`，迁 `.ep-toolbar__state / .ep-toolbar__group`；③ NModal `style="width: 540px"` 按惯例保留；④ NDrawerContent 内 4 块 `<section class="ep-detail__section">` 是抽屉子区段不是 panel-card，**不动**——若套 AppPanelSection 会在抽屉内嵌套出多余卡面；⑤ 删 `.ep-section`，新增 `.ep-list-panel { margin-bottom: 16px }` + 两个 toolbar 修饰类 |
+| `views/memory-consolidator/MemoryConsolidatorView.vue` | 978 | 982 | +4 | 18.43 / 6.77 → **18.43 / 6.77 KB**（持平） | ① 1 块 `<AppCard bordered class="mc-section">` → AppPanelSection（eyebrow="Candidates" / title="候选列表"）；页头 `#action` 已挂 `filteredCandidates / candidates` 计数 + 刷新按钮，AppPanelSection `#aside` 不再重复挂计数 NTag；② 删 toolbar 两处 `style="width: 180px"`，迁 `.mc-toolbar__state / .mc-toolbar__group`；③ NModal `style="width: 540px"` 保留；④ NDrawerContent 内 4 块 `<section class="mc-detail__section">` 同样不动；⑤ 删 `.mc-section { padding: 20px 22px; margin-bottom: 16px }`，新增 `.mc-list-panel { margin-bottom: 16px }` + 两个 toolbar 修饰类 |
+| `views/style/StyleView.vue` | 974 | 968 | -6 | 17.29 / 5.55 → **17.13 / 5.52 KB**（**-0.16 / -0.03 gzip**） | 4 块 `<section class="style-panel">` 全部改 AppPanelSection：① 表达样本（`Expressions / 表达样本`，expressions 计数 NTag 走 `#aside`，主区域用 `class="style-main-panel"` 替代旧 `style-panel--main`）/ ② 最近抽取（`Latest Extract / 最近抽取`）/ ③ 动态风格档案（`Style Profiles / 动态风格档案`）/ ④ 反馈记录（`Feedback / 反馈记录`）；删 5 块 `.style-panel*` scoped CSS（border/radius/bg/padding + `__head/h2/p` 共 ~38 行），新增 `.style-main-panel { min-width: 0 }`；视图本身**没有 inline-style** 需迁；本视图原来连 AppCard 都没用，是最旧的写法 |
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error（4 视图分别跑过，每次 exit 0）
+- `cd admin/frontend && npm run build` → ✓ built in 10.40s（最后一次）；BlockTrace/Episodes/MemoryConsolidator/StyleView 全部出新 chunk
+- 视觉对齐：4 个视图 panel padding 全部从 18-22px 收敛到 18px、title 字号统一到 16px、head margin-bottom 统一到 14px——与 P-1 ~ P-3 已完成视图对齐
+
+**影响范围**：
+
+- 仅前端 SPA bundle，admin/static bind mount，浏览器刷新即生效。
+- 无后端 / 无 API / 无配置 / 无 docker rebuild。
+- 隐性收益：BlockTraceView 刷新按钮终于能渲染（修复了用错 AppPage 槽的历史 bug）。
+- 视觉差异：title 字号 15-17px → 16px、删除 title-icon 改 eyebrow 标签、padding 18-22px → 18px——与 P-1 ~ P-3 视图对齐。
+
+**回滚**：
+
+`git revert <hash>` + `cd admin/frontend && npm run build`，bind mount 自动生效。**注意**：P-4 顺手修复的 BlockTraceView AppPage 槽 bug（subtitle → description, #hero-extra → #action）会一并回退——回退后需要手动单独修一次，否则刷新按钮会再次消失。
+
+**遗留**：
+
+- 阶段 3 长尾里所有过 700 行 + AppCard 包 panel 的视图至此全部完成（BlockTrace / Episodes / MemoryConsolidator / Style / CrossGroup / Memos / Soul（已收敛）/ ConfigView / SystemView / SlangView / KnowledgeView / GroupsView 全部对齐 AppPanelSection）。后续日常巡检里若再发现新加视图用 AppCard 包 panel，按 C 阶段约定就近收敛。
+- 表格内 `style="color: var(--om-text-3); font-size: 12px"` 等 utility 染色不在本批范围；如要彻底清除可在阶段 5 用 UnoCSS shortcut 一刀切。
+
+---
+
+## 2026-05-23 P-3 CrossGroupView — 3 块 panel 收敛 + icon-title 移除
+
+**变更类型**：admin/frontend 前端重构（D6 admin/static bind mount，无需 rebuild bot）
+
+**背景**：
+
+P-2 之后继续在长尾里挑下一个目标。CrossGroupView 676 行，3 块 `<AppCard bordered class="cg-section">` + `<header class="cg-section__head">` 还挂着 `<NIcon :component="..." :size="18">` 做 title-icon——属于 AppPanelSection 引入前的老写法，与已统一的 eyebrow + title 双行排版不一致。本批沿用 P-1/P-2 工艺再加一条：旧 title-icon 统一移除，靠 `eyebrow` 承担「类型」语义、`description` 承担原来 `__hint` 的副标题文案。
+
+**改动**：
+
+| View | 之前 | 之后 | Δ 行 | bundle JS / gzip | 关键动作 |
+| --- | --- | --- | --- | --- | --- |
+| `views/cross-group/CrossGroupView.vue` | 676 | 667 | -9 | 14.93 KB / 6.00 KB（之前 14.95 / 5.95，gzip +0.05 噪声） | 3 块 `<AppCard bordered class="cg-section">` 改 AppPanelSection（可见条目 / 模拟视角 / 操作时间线）；filteredItems 计数 NTag 走 `#aside`；删 `<NIcon :component="TelescopeOutline\|TimeOutline" :size="18">` 两处 title-icon；删 `style="width: 260px"` + `style="width: 220px"` 两处 inline-style，迁到 `.cg-toolbar__search` / `.cg-simulate__input`（NModal `style="width: 520px"` 保留 — 与 GroupsView 惯例一致）；删 `.cg-section/__head/__title/__hint/__placeholder` 共 5 块 ~30 行 scoped CSS；补 `.cg-items-panel/.cg-simulate-panel/.cg-timeline-panel` 三个外层 margin-bottom 修饰类复刻原布局节奏 |
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error（exit 0）
+- `cd admin/frontend && npm run build` → ✓ built in 10.94s
+- `grep -nE 'style="|<AppCard|cg-section'` CrossGroupView → 仅剩 NModal `style="width: 520px"`（合规）；旧 `cg-section` 全部清除
+- 残留 AppCard 用途：本视图 0 处（NModal 内部 NDivider / NFormItem 是 Naive UI 原生组件，不依赖 AppCard）
+
+**影响范围**：
+
+- 仅前端 SPA bundle，admin/static bind mount，浏览器刷新即生效。
+- 无后端 / 无 API / 无配置 / 无 docker rebuild。
+- 视觉差异：title 字号 15px → 16px、删除 line-icon 改 eyebrow 标签、padding 20-22px → 18px——与 P-1/P-2 视图对齐。
+
+**回滚**：
+
+`git revert <hash>` + `cd admin/frontend && npm run build`，bind mount 自动生效。
+
+**遗留**：
+
+- C 阶段长尾仍有 StyleView（974 行 / 17 处 `__head` 引用）/ EpisodesView（868 行 / 1 处 AppCard + 3 处 `<section>`）/ MemoryConsolidatorView（978 行 / 1 处 AppCard + 3 处 `<section>`）/ BlockTraceView（380 行 / 2 处 AppCard）按需穿插。其中 StyleView 用 `<section class="style-panel">` 而非 AppCard，需要更深的 CSS 替换；建议留到下一批集中处理。
+- 24h D+E 验证窗口仍未到 22:46 截止，今晚再统一 grep 一次缓存命中率。
+
+---
+
+## 2026-05-23 P-2 MemosView — 5 块 panel 收敛 AppPanelSection
+
+**变更类型**：admin/frontend 前端重构（D6 admin/static bind mount，无需 rebuild bot）
+
+**背景**：
+
+P-1 短链路三连之后的下一档切入点。MemosView 949 行单文件，C 阶段照旧不抽 helper / 不拆子组件——视图本身就是「实体列表 + 实体详情」两段并列模板，逻辑层无可压缩噪音。沿用 P-1 工艺约定：① `<AppCard bordered elevated class="memos-*-panel">` + 手写 `__head/__eyebrow/__title` 块 → `<AppPanelSection eyebrow title>`，trailing 计数 / scope NTag 走 `#aside`；② 删 inline-style 迁 scoped class；③ 嵌套展示卡保留 `bordered embedded`；④ 空态走 `<EmptyState>`。
+
+**改动**：
+
+| View | 之前 | 之后 | Δ 行 | bundle JS / gzip | 关键动作 |
+| --- | --- | --- | --- | --- | --- |
+| `views/memos/MemosView.vue` | 949 | 894 | -55 | 27.13 KB / 8.88 KB（随 `MemoryConsoleView-*.js` 静态绑定打包） | 5 块外层 `<AppCard bordered elevated>`（User Entities / Group Entities / Entity Snapshot / Series / Standalone）改 AppPanelSection；trailing 计数 NTag / scope NTag 走 `#aside`；删 `style="width: min(260px, 100%)"` 一处 inline-style，迁到 `.memos-toolbar__search`；删 `.memos-entity-panel/.memos-section/.memos-summary { padding: 20px }`（与 AppPanelSection 自带 18px 冲突），删 `.memos-panel__head/__eyebrow/__title` 三组 ~30 行 scoped CSS，删 `.memos-view-toggle` 孤儿规则；760px media query 同步移除 `.memos-panel__head` 引用；嵌套 `memos-series-card` / `memos-card-item` 保留 `bordered embedded` |
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error（exit 0）
+- `cd admin/frontend && npm run build` → ✓ built in 10.71s
+- `grep -n 'style="'` MemosView → 0 处遗留 inline-style；保留 `:style="categoryStyle(card.category)"` 两处动态绑定（按 category 配色）
+- 残留 AppCard 用途：MemosView 3 处（series 折叠卡 + series 展开卡 + standalone 卡），全部为合法 `bordered embedded` 嵌入展示卡
+
+**影响范围**：
+
+- 仅前端 SPA bundle，admin/static 是 bind mount，浏览器刷新即生效。
+- 无后端 / 无 API / 无配置 / 无 docker rebuild。
+- 视觉差异：title 字号 18px → 16px、padding 20px → 18px、head 底 margin 16 → 14px——与 P-1 三视图 / KnowledgeView / SlangView 等已完成视图正式对齐。
+
+**回滚**：
+
+`git revert <hash>` + `cd admin/frontend && npm run build`，bind mount 自动生效。后端不动。
+
+**遗留**：
+
+- C 阶段长尾仍有 StyleView / EpisodesView / CrossGroupView / MemoryConsolidatorView / BlockTraceView，按 plan §7 在日常任务里穿插推进。
+- 24h D+E 验证窗口（DeepSeek 1024-token cache breakpoint）尚未到截止时间，今晚 22:46 收尾时再统一 grep 一次缓存命中率。
+
+---
+
+## 2026-05-22 P-1 短链路三连 — Scheduler / Sandbox / Schedule 视图收敛 AppPanelSection
+
+**变更类型**：admin/frontend 前端重构（D6 admin/static bind mount，无需 rebuild bot）
+
+**背景**：
+
+继 ConfigView / SystemView / SlangView / KnowledgeView 等大视图重构完成后，自审 web 重构进度时把 14 个视图分成 A/B/C 三档。本批从 C 档（仍持有手写 `__head/__eyebrow/__title` panel-head 模式）的短链路（≤ 600 行、不需要 helper / 子组件拆分）里挑了 SchedulerView / SandboxView / ScheduleView 一起改。约定：① `<AppCard>` → `<AppPanelSection eyebrow title>`，trailing 走 `#aside`；② 删 inline-style，迁 scoped class；③ 高破坏按钮（无）补 NPopconfirm；④ 空态用 `<EmptyState>`；⑤ helpers 不抽。
+
+**改动**：
+
+| View | 之前 | 之后 | Δ 行 | bundle JS / gzip | 关键动作 |
+| --- | --- | --- | --- | --- | --- |
+| `views/scheduler/SchedulerView.vue` | 503 | 461 | -42 | 10.15 KB / 4.33 KB | 槽位 `<AppCard bordered elevated interactive>` → `<AppPanelSection eyebrow="Group Slot" :title="slot.groupId">`；状态 + 连续跳过 NTag 走 `#aside`；删 `style="width: min(260px, 100%)"` / `style="width: 148px"` 两处 inline-style，迁到 `.scheduler-toolbar__search` / `.scheduler-toolbar__filter` 两个 scoped class；删 `__head/__title-block/__eyebrow/__title/__tags` 共 5 块 ~30 行 scoped CSS；嵌套 `__summary` 卡保留 |
+| `views/sandbox/SandboxView.vue` | 561 | 534 | -27 | 8.29 KB / 3.51 KB | 外层 `sandbox-chat`（`om-fill-card` fill-height grid 容器）保留 AppCard；内嵌 composer + 右侧 Context / Runtime Notes 共 3 块改 AppPanelSection；NText 提示 + Context tag 走 `#aside`；删 `__head/__eyebrow/__title` 共 18 行 scoped CSS；composer 内层加 `.sandbox-composer__body` 保留 14px gap |
+| `views/schedule/ScheduleView.vue` | 510 | 474 | -36 | 7.13 KB / 2.79 KB | 三个 `<AppCard bordered elevated class="schedule-panel">`（今日日程 / 心情细项 / 运行状态）改 AppPanelSection；日期 NTag 走 `#aside`；每块内层加 `.schedule-panel__body { display: grid; gap: 16px }` 包裹，避开 AppPanelSection `__head` 14px margin-bottom 与 panel gap 叠加；嵌套 theme-card / note-card 保持 bordered embedded；删 `__head/__eyebrow/__title` 共 ~33 行 scoped CSS |
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 error（exit 0）
+- `cd admin/frontend && npm run build` → ✓ built in 10.14s
+- `grep -c 'style="'` 三视图 → 0
+- 残留 AppCard 用途：SchedulerView 1 处（`__summary` 嵌入卡）/ SandboxView 1 处（fill-height 布局容器）/ ScheduleView 2 处（theme-card + note-card 嵌入卡）—— 全部为合法 `bordered embedded` 嵌入或 `om-fill-card` 容器，不是 panel-head 复刻
+
+**影响范围**：
+
+- 仅前端 SPA bundle，admin/static 是 bind mount，浏览器刷新即生效。
+- 无后端 / 无 API / 无配置 / 无 docker rebuild。
+- 视觉差异：title 字号 18px → 16px、padding 20px → 18px、head 底 margin 18 → 14px——与 GroupsView / MemoryView / SystemView / SlangView / KnowledgeView 等已完成视图正式对齐。
+
+**回滚**：
+
+`git revert <hash>` + `cd admin/frontend && npm run build`，bind mount 自动生效。后端不动。
+
+**遗留**：
+
+阶段 3 长尾仍有 P-2（MemosView，含富文本 / 列表交互，需评估 4 阶段 B-1/B-2/B-3/C 是否要走完）和 P-3（StyleView / EpisodesView / CrossGroupView / MemoryConsolidatorView / BlockTraceView 五个 long-tail 视图，按 plan §7 在日常任务里穿插）。
+
+---
+
 ## 2026-05-22 方案 D + E 部署 — bot 镜像 rebuild、容器内代码就位、24h 验证窗口起算
 
 **变更类型**：deploy（rebuild bot 镜像 GIT_COMMIT=0a0a12e + .dockerignore 增补）

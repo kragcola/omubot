@@ -473,7 +473,7 @@ async function loadDashboard(silent = false) {
       api<DashboardServicesHealth>('/api/admin/services/health'),
       api<DashboardSlangSummary>('/api/admin/slang/summary'),
       api<DashboardStyleSummary>('/api/admin/style/summary'),
-      api<UsageDataResponse>('/admin/usage/data?period=day'),
+      api<UsageDataResponse>('/api/admin/usage/data?period=day'),
       api<LearningTodayResponse>('/api/admin/learning/today'),
       api<CachePipelineData>('/api/admin/dashboard/cache-pipelines?period=day'),
     ])

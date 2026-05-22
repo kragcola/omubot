@@ -1,25 +1,25 @@
-"""Usage admin routes: stats pages + JSON API for Chart.js."""
+"""JSON API: usage — port of legacy /admin/usage/data for SPA dashboard.
+
+The Jinja-era /admin/usage/data endpoint was the only legacy /admin/* path
+still consumed by the SPA (DashboardView). This router moves the same payload
+under /api/admin/usage/data so the legacy Jinja stack can be retired.
+
+The /api/usage/* router (services/llm/usage_routes.py) covers the public
+single-stat endpoints (today, month, top-users, top-groups). This router is
+specifically the dashboard's combined snapshot.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query, Request
-
-from admin.templates import render
+from fastapi import APIRouter, Query
 
 
-def create_usage_admin_router(usage_tracker: Any = None) -> APIRouter:
+def create_usage_router(usage_tracker: Any = None) -> APIRouter:
     router = APIRouter()
 
-    @router.get("/admin/usage")
-    async def usage_page(request: Request):
-        return await render("usage.html", {
-            "request": request,
-            "active_page": "usage",
-        })
-
-    @router.get("/admin/usage/data")
+    @router.get("/usage/data")
     async def usage_data(
         period: str = Query("day"),
         date: str | None = Query(None),

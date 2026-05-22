@@ -7,7 +7,6 @@ import hmac
 import time
 
 from fastapi import Request
-from fastapi.responses import RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
@@ -86,61 +85,3 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
 
         request.state.admin_authenticated = True
         return await call_next(request)
-
-
-def create_login_router():
-    """Returns an APIRouter with login/logout routes."""
-    from fastapi import APIRouter
-    from fastapi.responses import HTMLResponse
-
-    router = APIRouter()
-
-    @router.get("/admin/login", response_class=HTMLResponse)
-    async def login_page(request: Request):
-        from admin.templates import render
-        return await render("login.html", {"request": request})
-
-    @router.post("/admin/login")
-    async def login(request: Request):
-        admin_token = _get_admin_token()
-        signing_key = _derive_signing_key(admin_token)
-
-        content_type = request.headers.get("content-type", "")
-        if "application/json" in content_type:
-            import json as _json
-            body = await request.body()
-            try:
-                data = _json.loads(body)
-                token = data.get("token", "")
-            except _json.JSONDecodeError:
-                token = ""
-        else:
-            # form-encoded or query string
-            form = await request.form()
-            token: str = str(form.get("token", ""))
-
-        if not token or token != admin_token:
-            from admin.templates import render
-            return await render("login.html", {
-                "request": request,
-                "messages": [{"type": "danger", "text": "Token 无效"}],
-            })
-
-        signed = _sign_value(token, signing_key)
-        response = RedirectResponse(url="/admin/", status_code=303)
-        response.set_cookie(
-            "admin_session",
-            signed,
-            httponly=True,
-            max_age=86400 * 7,
-            samesite="lax",
-        )
-        return response
-
-    @router.get("/admin/logout")
-    async def logout():
-        response = RedirectResponse(url="/admin/login", status_code=303)
-        response.delete_cookie("admin_session")
-        return response
-
-    return router

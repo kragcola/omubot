@@ -13,7 +13,7 @@ import type { DataTableColumns } from 'naive-ui'
 
 import { api } from '../../api/client'
 import AppPage from '../../components/common/AppPage.vue'
-import AppCard from '../../components/common/AppCard.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
@@ -478,21 +478,26 @@ watch(filterState, fetchCandidates)
       <MetricCard title="episode 域" :value="stats.episode" hint="可走 promote 桥进 EpisodeStore" />
     </div>
 
-    <AppCard bordered class="mc-section">
+    <AppPanelSection
+      eyebrow="Candidates"
+      title="候选列表"
+      description="按状态 / 域 / 群 ID 过滤所有 Phase C 产出的候选，点击行可查看 payload 与修订历史。"
+      class="mc-list-panel"
+    >
       <PageToolbar class="mc-toolbar">
         <template #left>
           <NSelect
             v-model:value="filterState"
             :options="stateOptions"
             size="small"
-            style="width: 180px"
+            class="mc-toolbar__state"
           />
           <NInput
             v-model:value="filterGroup"
             placeholder="按群 ID 过滤"
             clearable
             size="small"
-            style="width: 180px"
+            class="mc-toolbar__group"
           />
           <div class="mc-domain-chips">
             <NTag
@@ -543,7 +548,7 @@ watch(filterState, fetchCandidates)
         description="Phase C 还未跑出本筛选条件下的候选；可在筛选项放宽后重试。"
         :icon="BulbOutline"
       />
-    </AppCard>
+    </AppPanelSection>
 
     <NModal
       v-model:show="showDecideDialog"
@@ -815,13 +820,20 @@ watch(filterState, fetchCandidates)
   margin-bottom: 18px;
 }
 
-.mc-section {
-  padding: 20px 22px;
+.mc-list-panel {
   margin-bottom: 16px;
 }
 
 .mc-toolbar {
   margin-bottom: 16px;
+}
+
+.mc-toolbar__state {
+  width: 180px;
+}
+
+.mc-toolbar__group {
+  width: 180px;
 }
 
 .mc-domain-chips {

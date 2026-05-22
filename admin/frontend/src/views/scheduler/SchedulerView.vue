@@ -23,6 +23,7 @@ import {
 import { api } from '../../api/client'
 import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
+import AppPanelSection from '../../components/common/AppPanelSection.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import MetricCard from '../../components/common/MetricCard.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
@@ -228,7 +229,7 @@ function statusLabel(slot: SlotEntry) {
           v-model:value="searchText"
           clearable
           placeholder="搜索群号或最后用户"
-          style="width: min(260px, 100%)"
+          class="scheduler-toolbar__search"
         >
           <template #prefix>
             <NIcon :component="SearchOutline" />
@@ -237,7 +238,7 @@ function statusLabel(slot: SlotEntry) {
         <NSelect
           v-model:value="statusFilter"
           :options="statusOptions"
-          style="width: 148px"
+          class="scheduler-toolbar__filter"
         />
       </template>
 
@@ -270,85 +271,75 @@ function statusLabel(slot: SlotEntry) {
       />
 
       <div v-else class="scheduler-slot-grid">
-        <AppCard
+        <AppPanelSection
           v-for="slot in filteredSlots"
           :key="slot.groupId"
-          bordered
-          elevated
-          interactive
+          eyebrow="Group Slot"
+          :title="slot.groupId"
           class="scheduler-slot-card"
         >
-          <div class="scheduler-slot-card__head">
-            <div class="scheduler-slot-card__title-block">
-              <p class="scheduler-slot-card__eyebrow">
-                Group Slot
-              </p>
-              <h3 class="scheduler-slot-card__title">
-                {{ slot.groupId }}
-              </h3>
-            </div>
-
-            <div class="scheduler-slot-card__tags">
-              <NTag round size="small" :type="statusType(slot)">
-                {{ statusLabel(slot) }}
-              </NTag>
-              <NTag
-                v-if="slot.consecutive_skip > 0"
-                round
-                size="small"
-                type="warning"
-              >
-                连续跳过 {{ slot.consecutive_skip }}
-              </NTag>
-            </div>
-          </div>
-
-          <div class="scheduler-slot-card__stats">
-            <div class="scheduler-slot-card__stat">
-              <span>消息数</span>
-              <strong>{{ slot.msg_count }}</strong>
-            </div>
-            <div class="scheduler-slot-card__stat">
-              <span>最后用户</span>
-              <strong class="scheduler-slot-card__mono">{{ slot.last_user_id || '--' }}</strong>
-            </div>
-            <div class="scheduler-slot-card__stat">
-              <span>最后触发</span>
-              <strong>{{ formatTimestamp(slot.last_fire_time) }}</strong>
-            </div>
-            <div class="scheduler-slot-card__stat">
-              <span>待发时间</span>
-              <strong>{{ formatTimestamp(slot.pending_at) }}</strong>
-            </div>
-          </div>
-
-          <AppCard bordered embedded class="scheduler-slot-card__summary">
-            <div class="scheduler-slot-card__summary-item">
-              <span>触发状态</span>
-              <NText>{{ slot.has_trigger ? '已排队' : '暂无待发' }}</NText>
-            </div>
-            <div class="scheduler-slot-card__summary-item">
-              <span>任务状态</span>
-              <NText>{{ slot.has_running_task ? '回复生成中' : '空闲中' }}</NText>
-            </div>
-          </AppCard>
-
-          <div class="scheduler-slot-card__footer">
-            <NText depth="3" class="scheduler-slot-card__footer-note">
-              {{ slot.is_muted ? '已停止自动响应，可随时恢复。' : '当前允许调度器自动生成和发送回复。' }}
-            </NText>
-            <NButton
+          <template #aside>
+            <NTag round size="small" :type="statusType(slot)">
+              {{ statusLabel(slot) }}
+            </NTag>
+            <NTag
+              v-if="slot.consecutive_skip > 0"
+              round
               size="small"
-              :type="slot.is_muted ? 'success' : 'warning'"
-              @click="toggleMute(slot.groupId, slot.is_muted)"
+              type="warning"
             >
-              <template #icon>
-                <NIcon :component="slot.is_muted ? PlayOutline : VolumeMuteOutline" />
-              </template>
-              {{ slot.is_muted ? '取消静音' : '静音槽位' }}
-            </NButton>
+              连续跳过 {{ slot.consecutive_skip }}
+            </NTag>
+          </template>
+
+          <div class="scheduler-slot-card__body">
+            <div class="scheduler-slot-card__stats">
+              <div class="scheduler-slot-card__stat">
+                <span>消息数</span>
+                <strong>{{ slot.msg_count }}</strong>
+              </div>
+              <div class="scheduler-slot-card__stat">
+                <span>最后用户</span>
+                <strong class="scheduler-slot-card__mono">{{ slot.last_user_id || '--' }}</strong>
+              </div>
+              <div class="scheduler-slot-card__stat">
+                <span>最后触发</span>
+                <strong>{{ formatTimestamp(slot.last_fire_time) }}</strong>
+              </div>
+              <div class="scheduler-slot-card__stat">
+                <span>待发时间</span>
+                <strong>{{ formatTimestamp(slot.pending_at) }}</strong>
+              </div>
+            </div>
+
+            <AppCard bordered embedded class="scheduler-slot-card__summary">
+              <div class="scheduler-slot-card__summary-item">
+                <span>触发状态</span>
+                <NText>{{ slot.has_trigger ? '已排队' : '暂无待发' }}</NText>
+              </div>
+              <div class="scheduler-slot-card__summary-item">
+                <span>任务状态</span>
+                <NText>{{ slot.has_running_task ? '回复生成中' : '空闲中' }}</NText>
+              </div>
+            </AppCard>
+
+            <div class="scheduler-slot-card__footer">
+              <NText depth="3" class="scheduler-slot-card__footer-note">
+                {{ slot.is_muted ? '已停止自动响应，可随时恢复。' : '当前允许调度器自动生成和发送回复。' }}
+              </NText>
+              <NButton
+                size="small"
+                :type="slot.is_muted ? 'success' : 'warning'"
+                @click="toggleMute(slot.groupId, slot.is_muted)"
+              >
+                <template #icon>
+                  <NIcon :component="slot.is_muted ? PlayOutline : VolumeMuteOutline" />
+                </template>
+                {{ slot.is_muted ? '取消静音' : '静音槽位' }}
+              </NButton>
+            </div>
           </div>
-        </AppCard>
+        </AppPanelSection>
       </div>
     </template>
   </AppPage>
@@ -360,6 +351,14 @@ function statusLabel(slot: SlotEntry) {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.scheduler-toolbar__search {
+  width: min(260px, 100%);
+}
+
+.scheduler-toolbar__filter {
+  width: 148px;
 }
 
 .scheduler-metric-grid {
@@ -375,45 +374,9 @@ function statusLabel(slot: SlotEntry) {
   gap: 16px;
 }
 
-.scheduler-slot-card {
+.scheduler-slot-card__body {
   display: grid;
   gap: 16px;
-  padding: 20px;
-}
-
-.scheduler-slot-card__head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.scheduler-slot-card__title-block {
-  min-width: 0;
-}
-
-.scheduler-slot-card__eyebrow {
-  margin: 0 0 8px;
-  color: var(--om-text-3);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-.scheduler-slot-card__title {
-  margin: 0;
-  overflow-wrap: anywhere;
-  color: var(--om-text-1);
-  font-size: 18px;
-  font-weight: 700;
-}
-
-.scheduler-slot-card__tags {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
 }
 
 .scheduler-slot-card__stats {
@@ -490,14 +453,9 @@ function statusLabel(slot: SlotEntry) {
     grid-template-columns: 1fr;
   }
 
-  .scheduler-slot-card__head,
   .scheduler-slot-card__footer {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .scheduler-slot-card__tags {
-    justify-content: flex-start;
   }
 }
 </style>
