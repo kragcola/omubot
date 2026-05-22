@@ -26,6 +26,14 @@ import type {
 } from '../helpers/types'
 
 type WorkspaceTab = 'details' | 'pack' | 'metrics'
+type RetrieveMode = 'hybrid' | 'doc' | 'fact' | 'skip'
+
+const MODE_OPTIONS: { label: string; value: RetrieveMode }[] = [
+  { label: 'Hybrid（默认）', value: 'hybrid' },
+  { label: '仅文档（doc）', value: 'doc' },
+  { label: '仅记忆+图谱（fact）', value: 'fact' },
+  { label: '跳过检索（skip）', value: 'skip' },
+]
 
 interface Props {
   searchResults: KnowledgeResult[]
@@ -47,6 +55,7 @@ const props = defineProps<Props>()
 const queryInput = defineModel<string>('queryInput', { required: true })
 const userIdInput = defineModel<string>('userIdInput', { required: true })
 const groupIdInput = defineModel<string>('groupIdInput', { required: true })
+const modeInput = defineModel<RetrieveMode>('modeInput', { required: true })
 const activeTab = defineModel<WorkspaceTab>('activeTab', { required: true })
 
 const emit = defineEmits<{
@@ -94,6 +103,13 @@ const showNoResultEmpty = computed(
             size="small"
             placeholder="群 ID（可选）"
             class="workspace-query__scope-input"
+          />
+          <NSelect
+            v-model:value="modeInput"
+            :options="MODE_OPTIONS"
+            size="small"
+            class="workspace-query__scope-input workspace-query__scope-mode"
+            placeholder="检索模式"
           />
         </div>
       </div>
@@ -416,6 +432,10 @@ const showNoResultEmpty = computed(
 
 .workspace-query__scope-input {
   width: min(200px, 100%);
+}
+
+.workspace-query__scope-mode {
+  width: min(180px, 100%);
 }
 
 .workspace-query__submit {

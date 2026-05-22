@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+_ALLOWED_MODES = ("skip", "doc", "fact", "hybrid")
+
 
 def create_context_router(
     *,
@@ -32,6 +34,10 @@ def create_context_router(
         user_id: str = Query(""),
         group_id: str | None = Query(None),
         top_k: int = Query(10, ge=1, le=30),
+        mode: str = Query(
+            "hybrid",
+            description="检索模式：skip / doc / fact / hybrid（与 thinker.retrieve_mode 同语义）",
+        ),
         max_chars: int | None = Query(
             None,
             ge=300,
@@ -47,11 +53,13 @@ def create_context_router(
                 "hits": [],
                 "pack": {"text": "", "hits": [], "omitted_count": 0},
             }
+        normalized_mode = mode if mode in _ALLOWED_MODES else "hybrid"
 
         pack_kwargs: dict[str, Any] = {
             "user_id": user_id,
             "group_id": group_id,
             "top_k": top_k,
+            "mode": normalized_mode,
         }
         if max_chars is not None:
             pack_kwargs["max_chars"] = max_chars
@@ -61,6 +69,7 @@ def create_context_router(
             "query": q,
             "user_id": user_id,
             "group_id": group_id,
+            "mode": normalized_mode,
             "hits": [hit.to_dict() for hit in pack.hits],
             "pack": pack.to_dict(),
         }

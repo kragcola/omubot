@@ -4,6 +4,100 @@
 
 ---
 
+## 2026-05-22 知识库治本 PR6 — 收尾三个 mid-priority 漏点（启动顺序 / admin 链路 / skip metrics）
+
+**变更类型**：fix（plugins/context/plugin.py 启动顺序 + admin/routes/api/context.py 加 mode 参数 + KnowledgeView.vue 接通 mode + skip 不再早返）
+
+**背景**：
+
+PR3 / PR4 / PR5 治本三联击部署后，外部审计指出三个 mid-priority 漏点（实测复核全部属实）：
+
+1. **RRF 配置不进生产路径**：[plugins/chat/plugin.py:755](plugins/chat/plugin.py#L755) `ChatPlugin priority=0` 已先创建 `ctx.context_service = ContextService.from_runtime(ctx, bus=ctx.bus)` 走库默认 RRF 参数；[plugins/context/plugin.py:88](plugins/context/plugin.py#L88) `ContextPlugin priority=7` 用 `getattr(...) or ContextService.from_runtime(...)` 短路，**永远 reuse 旧 service**。结果 `plugins/context/config.default.json` 里改的 `rrf_k` / `rrf_weights` 不进 live `search()` 路径，[services/context/service.py:125](services/context/service.py#L125)。当前默认值碰巧一致所以表面无症状，但任何配置调优都不生效。
+2. **admin 调试链路与生产脱节**：前端 [KnowledgeView.vue:293](admin/frontend/src/views/knowledge/KnowledgeView.vue#L293) 强行传 `max_chars: 3200` → 后端 [admin/routes/api/context.py:56](admin/routes/api/context.py#L56) 收到非 None 立刻走 legacy 字符截断，**绕过 PR4 的 token 多桶预算**；同时 admin API 没有 `mode` 参数，永远 hybrid，**复现不出 thinker 选 doc/fact/skip 的真实分路**。
+3. **skip 流量丢 metrics**：`ContextService.search(mode="skip")` 第 87 行本来设计了"记一次 retrieve_mode=skip 零命中事件"，[tests/test_thinker_modes.py:143](tests/test_thinker_modes.py#L143) 也覆盖了 service 直调路径；但生产链路里 [plugins/context/plugin.py:120 (PR5)](plugins/context/plugin.py#L120) 在 skip 时直接 `return`，根本没调到 service.search，**admin `/context/metrics` 系统性漏掉这部分流量**——线上无法观察 thinker 输出 skip 的占比。
+
+**改动文件**：
+
+| 文件 | 改动 |
+| --- | --- |
+| [plugins/context/plugin.py](plugins/context/plugin.py) | 删 `getattr(ctx, "context_service", None) or ContextService.from_runtime(...)` 短路；改为**始终**重建并覆盖（注释明确说明 ChatPlugin 预创建只为防 ContextPlugin 禁用时崩溃）。`on_pre_prompt` skip 不再早返——让 `service.build_prompt_context(mode=skip)` 内部 0 source 调用 + 记 metrics（pack 返回空 text，不注入 block） |
+| [admin/routes/api/context.py](admin/routes/api/context.py) | 加 `_ALLOWED_MODES = ("skip", "doc", "fact", "hybrid")` 常量；`/context/search` 新增 `mode: str = Query("hybrid", ...)` 参数；非法值回落 hybrid；`max_chars` 注释明确"不传则 PR4 token budget" |
+| [admin/frontend/src/views/knowledge/KnowledgeView.vue](admin/frontend/src/views/knowledge/KnowledgeView.vue) | 删 `max_chars: 3200` hardcode；新增 `workspaceMode` ref（`hybrid \| doc \| fact \| skip`）；`debugContext` 改传 `mode: workspaceMode.value`；透传到 `KnowledgeContextWorkspace` |
+| [admin/frontend/src/views/knowledge/components/KnowledgeContextWorkspace.vue](admin/frontend/src/views/knowledge/components/KnowledgeContextWorkspace.vue) | 加 `RetrieveMode` 类型 + `MODE_OPTIONS`；`defineModel<RetrieveMode>('modeInput')`；query bar 加 `<NSelect>` 检索模式选择器；CSS 加 `.workspace-query__scope-mode` |
+| [admin/static/index.html](admin/static/index.html) + assets | npm build 产物（D6 bind mount 自动生效，admin 容器无需 rebuild） |
+| [tests/test_context_plugin.py](tests/test_context_plugin.py) | **新增 2 个回归测试**：(1) `test_context_plugin_skip_mode_still_records_metrics_via_service` — 断言 skip 仍调 service.build_prompt_context 且 mode=skip；(2) `test_context_plugin_on_startup_overrides_pre_existing_service` — 断言 ContextPlugin.on_startup 覆盖 ChatPlugin 预创建的 service，且新 service 携带配置过的 `_rrf_k` / `_rrf_weights` |
+
+**爆炸半径**：plugins/context + admin/routes/api/context + admin/frontend；零 schema 迁移；admin API mode 默认 hybrid 完全向后兼容（前端不传 mode 时 = pre-PR6 行为）；admin/static 是 bind mount——前端 `npm run build` 已生效，bot 容器无需 rebuild（仅 Python 改动需要）。
+
+**D1 同模式扫描**：
+
+```bash
+# 扫"reuse 旧 service"短路同模式
+grep -rn 'getattr.*context_service.*or\|getattr.*\b\(service\|context\)\b.*or' plugins/ services/ admin/ --include='*.py'
+# → 仅 admin/routes/api/context.py:18 一处合理（无 ctx 时返 None；并非吞配置），已审，不动
+
+# 扫 admin API 走 legacy max_chars 强制路径
+grep -rn 'max_chars\s*=' admin/frontend/src/views/ --include='*.vue'
+# → 改前 1 处（KnowledgeView L293），改后 0 处
+
+# 扫"on_pre_prompt 早返跳过 service"
+grep -rn 'return$' plugins/context/plugin.py | grep -i 'skip\|early'
+# → 改前 1 处，改后 0 处
+```
+
+无遗漏点。
+
+**验证（D4 含证据）**：
+
+```bash
+pkill -9 -f pytest && uv run pytest tests/test_context_plugin.py -v
+# → 5 passed in 0.14s（含 2 个 PR6 新增回归测试）
+
+uv run pytest tests/test_context_plugin.py tests/test_thinker_modes.py \
+  tests/test_thinker.py tests/test_context_service.py tests/test_context_eval.py \
+  tests/test_context_rrf.py tests/test_context_budget.py tests/test_admin_api.py
+# → 110 passed, 1 failed（pre-existing disk 97% backup，与 PR6 无关）
+
+uv run pytest
+# → 1419 passed, 1 failed, 8 skipped, 14.45s
+#   1419 = PR5 的 1417 + PR6 新增 2 个测试
+
+uv run ruff check plugins/context/plugin.py admin/routes/api/context.py \
+  tests/test_context_plugin.py
+# → All checks passed!
+
+uv run pyright plugins/context/plugin.py admin/routes/api/context.py \
+  services/context/service.py
+# → 4 errors，全部 pre-existing（git stash 验证 PR6 改之前同样 4 个）
+#   PR6 introduced 0 new errors
+
+cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit
+# → 0 error
+
+cd admin/frontend && npm run build
+# → ✓ built in 5.57s（KnowledgeView 67.49 kB / SlangView 76.17 kB / index 464 kB）
+```
+
+**算法关键性质验证**（test_context_plugin.py 中显式断言）：
+
+- ContextPlugin.on_startup 后 `ctx.context_service is not pre_existing_service` —— 启动顺序回归保证
+- 新 service 的 `_rrf_k` 和 `_rrf_weights` 等于 plugin 配置值 —— 真正注入生产路径
+- skip 模式下 `service.build_prompt_context(mode="skip")` 被调用且 query 透传 —— metrics 不再漏记 skip 流量
+- skip 模式 pack.text 为空，不注入 `上下文资料` block —— 行为保持（与 PR5 一致）
+
+**部署计划**：
+
+- 后端：`./scripts/deploy.sh` 不存在；按 CLAUDE.md 标准命令 `dot_clean . && docker compose up bot -d --build` 重建 bot 镜像；napcat 不动（Up X hours，设备指纹反风控）
+- 前端：admin/static 已 bind mount 同步，无需 rebuild
+
+**回滚路径**：
+
+- 完整回滚：`git revert <PR6 hash>` 一行
+- 软回滚（仅 mode 漏点）：admin 前端默认 mode=hybrid 不传，等于 pre-PR6 行为
+- 软回滚（启动顺序）：删 PR6-1 几行 diff，回到 `or` 短路；ChatPlugin 预创建的服务再次接管（但配置不生效）
+
+---
+
 ## 2026-05-22 知识库治本 PR5 — Thinker retrieve_mode 四档分路（删 search action）
 
 **变更类型**：refactor（services/llm/thinker.py + client.py 删 search 强转 + services/context/service.py 加 mode 过滤 + 1 个新测试文件）

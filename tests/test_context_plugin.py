@@ -96,6 +96,60 @@ async def test_context_plugin_auto_extracts_graph_candidates_after_prompt_pack()
     assert [hit.type for hit in graph.extracted_batches[0]] == ["memory_card", "doc_chunk"]
 
 
+@pytest.mark.asyncio
+async def test_context_plugin_skip_mode_still_records_metrics_via_service() -> None:
+    """PR6 fix: skip mode must reach ContextService.search so metrics include skip traffic.
+
+    Pre-PR6 the plugin returned early on skip, leaving /context/metrics blind to the
+    proportion of conversations that bypassed retrieval.
+    """
+    fake = _FakeContextService()
+    plugin = _enabled_context_plugin()
+    plugin._service = fake
+
+    prompt_ctx = _prompt_ctx()
+    prompt_ctx.retrieve_mode = "skip"
+    await plugin.on_pre_prompt(prompt_ctx)
+
+    assert fake.calls == [{"mode": "skip", "query": "Docker Compose"}]
+    # Skip pack returns empty text (FakeContextService obeys the contract via the mode kwarg below)
+    assert all(block.label != "上下文资料" or block.text for block in prompt_ctx.blocks)
+
+
+@pytest.mark.asyncio
+async def test_context_plugin_on_startup_overrides_pre_existing_service(tmp_path) -> None:
+    """PR6 fix: ChatPlugin (priority=0) pre-creates ctx.context_service with library
+    defaults; ContextPlugin (priority=7) MUST overwrite it so configured RRF / budget
+    parameters reach the live retrieval path.
+    """
+    from types import SimpleNamespace
+
+    pre_existing_service = object()
+    ctx = SimpleNamespace(
+        context_service=pre_existing_service,
+        bus=None,
+        card_store=None,
+        knowledge_base=None,
+        knowledge_graph=None,
+        group_memory_config=None,
+    )
+
+    plugin = ContextPlugin()
+    plugin._enabled = True
+    await plugin.on_startup(ctx)  # type: ignore[arg-type]
+
+    assert ctx.context_service is not pre_existing_service, (
+        "ContextPlugin must replace the ChatPlugin-defaulted service so configured "
+        "rrf_k / rrf_weights / budget take effect"
+    )
+    assert ctx.context_service is plugin._service
+    # The newly built service must carry the configured RRF parameters
+    assert plugin._service is not None
+    assert getattr(plugin._service, "_rrf_k", None) == plugin._rrf_k
+    assert getattr(plugin._service, "_rrf_weights", None) == plugin._rrf_weights
+    del tmp_path  # unused; pytest fixture only
+
+
 def _enabled_context_plugin() -> ContextPlugin:
     from services.context.packing import DEFAULT_BUDGET
     plugin = ContextPlugin()
@@ -145,6 +199,9 @@ def _block_text(ctx: PromptContext, label: str) -> str:
 
 
 class _FakeContextService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+
     async def build_prompt_context(
         self,
         query: str,
@@ -158,7 +215,10 @@ class _FakeContextService:
         type_caps: dict[str, int] | None = None,
         mode: str = "hybrid",
     ) -> ContextPack:
-        del query, session_id, user_id, group_id, top_k, max_chars, budget, type_caps, mode
+        del session_id, user_id, group_id, top_k, max_chars, budget, type_caps
+        self.calls.append({"mode": mode, "query": query})
+        if mode == "skip":
+            return ContextPack(text="", hits=[])
         return ContextPack(
             text="【记忆卡片】\n- [用户记忆] 统一记忆资料\n\n【文档资料】\n- [部署手册] 统一文档资料",
             hits=[

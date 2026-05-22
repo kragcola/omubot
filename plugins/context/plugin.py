@@ -85,7 +85,11 @@ class ContextPlugin(AmadeusPlugin):
             buffer_tokens=cfg.budget.buffer_tokens,
         )
 
-        self._service = getattr(ctx, "context_service", None) or ContextService.from_runtime(
+        # ChatPlugin (priority=0) pre-creates ctx.context_service with library defaults so the
+        # bot never crashes if ContextPlugin is disabled. We always overwrite here so the configured
+        # rrf_k / rrf_weights / budget actually reach the live retrieval path — otherwise admins
+        # editing config.json would never see their RRF tuning take effect.
+        self._service = ContextService.from_runtime(
             ctx,
             bus=ctx.bus,
             rrf_k=self._rrf_k,
@@ -115,11 +119,11 @@ class ContextPlugin(AmadeusPlugin):
         query = ctx.conversation_text.strip()
         if not query:
             return
-        # PR5: thinker decided which sources to query. "skip" → no retrieval at all.
+        # PR5: thinker decided which sources to query. "skip" → no retrieval injection.
+        # PR6 fix: still call build_prompt_context so ContextService records the skip event in
+        # metrics (recent / hit_source_counts), otherwise admin /context/metrics misses skip
+        # traffic entirely. ContextService.search short-circuits to zero source calls when mode=skip.
         retrieve_mode = getattr(ctx, "retrieve_mode", "hybrid") or "hybrid"
-        if retrieve_mode == "skip":
-            _L.debug("context skip | session={} reason=thinker_skip", ctx.session_id)
-            return
         t0 = asyncio.get_running_loop().time()
         if self._use_token_budget:
             pack = await self._service.build_prompt_context(

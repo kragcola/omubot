@@ -51,6 +51,7 @@ const sources = ref<KnowledgeSource[]>([])
 const workspaceQuery = ref('')
 const workspaceUserId = ref('')
 const workspaceGroupId = ref('')
+const workspaceMode = ref<'hybrid' | 'doc' | 'fact' | 'skip'>('hybrid')
 
 const searchResults = ref<KnowledgeResult[]>([])
 const searching = ref(false)
@@ -290,7 +291,7 @@ async function debugContext(query: string, userId: string, groupId: string) {
     const params: Record<string, string | number> = {
       q: query,
       top_k: 12,
-      max_chars: 3200,
+      mode: workspaceMode.value,
     }
     if (userId) params.user_id = userId
     if (groupId) params.group_id = groupId
@@ -638,6 +639,7 @@ function handleOpenAdmin(tab: 'candidates' | 'graph' | 'graph_nodes') {
             v-model:query-input="workspaceQuery"
             v-model:user-id-input="workspaceUserId"
             v-model:group-id-input="workspaceGroupId"
+            v-model:mode-input="workspaceMode"
             v-model:active-tab="workspaceTab"
             :search-results="searchResults"
             :has-searched="hasSearched"
