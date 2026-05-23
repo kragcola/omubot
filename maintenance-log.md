@@ -12,7 +12,7 @@
 
 **问题根因**：`LearningTable.vue` 把审核队列当报表渲染——内容与元数据视觉权重相同，状态色仅靠右边的 NTag 单点呈现，行间没有可瞄准的视觉锚（无 hover affordance、无 stripe、无层次）。审核场景的本质是「先看内容、再看分类、最后看状态/操作」，flat table 反着来。
 
-**重设计**（commit `<待填>`）
+**重设计**（commit `dfe9d97`）
 
 `admin/frontend/src/views/learning/components/LearningTable.vue` 完全重写：去掉 NDataTable，换成 `<article class="learning-row">` 行卡片列表。
 
