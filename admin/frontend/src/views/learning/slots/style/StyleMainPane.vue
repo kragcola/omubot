@@ -1,0 +1,220 @@
+<script setup lang="ts">
+import EmptyState from '../../../../components/common/EmptyState.vue'
+import { SparklesOutline } from '@vicons/ionicons5'
+import { useStyleConsoleInject } from './state'
+import type { StyleStatus, OutputPolicy, NormalizationInfo, StyleExpression } from './state'
+
+const console_ = useStyleConsoleInject()
+const {
+  loading,
+  expressions,
+  setStatus,
+  sendFeedback,
+  loadNormalizerDetail,
+  normalizerDetail,
+  lockNormalizerCluster,
+  splitNormalizerItem,
+  undoNormalizerAutoMerge,
+} = console_
+
+function statusType(status: StyleStatus) {
+  return status === 'approved' ? 'success' : status === 'pending' ? 'warning' : status === 'muted' ? 'default' : 'error'
+}
+
+function policyText(policy: OutputPolicy) {
+  return policy === 'allow_use' ? '可参考' : policy === 'transform' ? '需转译' : '只观察'
+}
+
+function normalizationLabel(info?: NormalizationInfo | null) {
+  if (!info?.cluster_id) return ''
+  const method = info.method === 'new_cluster' ? '新簇' : info.method || '归一化'
+  const score = Number(info.score || 0)
+  const scoreText = score > 0 ? ` · ${Math.round(score * 100)}%` : ''
+  return `${method}${scoreText}`
+}
+
+function normalizerAutoMergeRevision(item: StyleExpression) {
+  const info = item.normalization
+  const detail = normalizerDetail(info)
+  return detail?.revisions.find(entry => entry.action === 'auto_merge' && entry.item_id === info?.item_id)
+    || detail?.revisions.find(entry => entry.action === 'auto_merge')
+}
+
+function canUndoNormalizerAutoMerge(item: StyleExpression) {
+  if (!item.normalization?.cluster_id) return false
+  const detail = normalizerDetail(item.normalization)
+  return !detail || Boolean(normalizerAutoMergeRevision(item))
+}
+</script>
+
+<template>
+  <section class="style-fold-main">
+    <NSkeleton v-if="loading" :repeat="6" text />
+    <EmptyState
+      v-else-if="!expressions.length"
+      compact
+      title="暂无表达样本"
+      description="可以先点上方抽取，或调整筛选条件。"
+      :icon="SparklesOutline"
+    />
+    <div v-else class="expression-list">
+      <article
+        v-for="item in expressions"
+        :key="item.expression_id"
+        class="expression-item"
+      >
+        <div class="expression-item__main">
+          <div class="expression-item__tags">
+            <NTag size="small" :type="statusType(item.status)">
+              {{ item.status }}
+            </NTag>
+            <NTag size="small">
+              {{ item.scope === 'global' ? '全局' : `群 ${item.group_id}` }}
+            </NTag>
+            <NTag size="small" :type="item.output_policy === 'observe_only' ? 'warning' : 'info'">
+              {{ policyText(item.output_policy) }}
+            </NTag>
+          </div>
+          <h3>{{ item.situation }}</h3>
+          <p>{{ item.style }}</p>
+          <div class="expression-item__meta">
+            <span>置信 {{ Math.round(item.confidence * 100) }}%</span>
+            <span>计数 {{ item.count }}</span>
+            <span>更新 {{ item.updated_at }}</span>
+            <span v-if="item.normalization?.cluster_id">归一化 {{ normalizationLabel(item.normalization) }}</span>
+            <span v-if="item.risk_tags.length">风险 {{ item.risk_tags.join(' / ') }}</span>
+          </div>
+          <div v-if="item.normalization?.cluster_id" class="expression-item__normalization">
+            <NTag size="small" round>
+              簇 {{ item.normalization.cluster_id.slice(-6) }}
+            </NTag>
+            <span>代表：{{ item.normalization.canonical_text || item.situation }}</span>
+            <span v-if="item.normalization.auto_merged">自动归并</span>
+          </div>
+          <div
+            v-if="item.normalization?.cluster_id"
+            class="expression-item__normalizer-actions"
+            @mouseenter="loadNormalizerDetail(item.normalization)"
+          >
+            <NButton size="tiny" secondary @click="lockNormalizerCluster(item)">
+              锁定代表
+            </NButton>
+            <NButton size="tiny" secondary @click="splitNormalizerItem(item)">
+              拆出变体
+            </NButton>
+            <NButton
+              size="tiny"
+              secondary
+              :disabled="!canUndoNormalizerAutoMerge(item)"
+              @click="undoNormalizerAutoMerge(item)"
+            >
+              撤销归并
+            </NButton>
+          </div>
+        </div>
+        <div class="expression-item__actions">
+          <NButton size="small" secondary @click="setStatus(item, 'approved')">
+            通过
+          </NButton>
+          <NButton size="small" secondary @click="setStatus(item, 'rejected')">
+            拒绝
+          </NButton>
+          <NButton size="small" secondary @click="setStatus(item, 'muted')">
+            静音
+          </NButton>
+          <NButton size="small" quaternary @click="sendFeedback(item, 'positive')">
+            好
+          </NButton>
+          <NButton size="small" quaternary @click="sendFeedback(item, 'negative')">
+            坏
+          </NButton>
+        </div>
+      </article>
+    </div>
+  </section>
+</template>
+
+<style scoped>
+.style-fold-main {
+  display: grid;
+  gap: 14px;
+}
+
+.expression-list {
+  display: grid;
+  gap: 12px;
+}
+
+.expression-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 14px;
+  background: var(--om-surface);
+}
+
+.expression-item__tags,
+.expression-item__meta,
+.expression-item__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.expression-item h3 {
+  margin: 10px 0 6px;
+  color: var(--om-text-1);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.expression-item p {
+  margin: 0;
+  color: var(--om-text-2);
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.expression-item__meta {
+  margin-top: 10px;
+  color: var(--om-text-3);
+  font-size: 12px;
+}
+
+.expression-item__normalization {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  color: var(--om-text-3);
+  font-size: 12px;
+}
+
+.expression-item__normalizer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.expression-item__actions {
+  justify-content: flex-end;
+  align-content: flex-start;
+  max-width: 210px;
+}
+
+@media (max-width: 1100px) {
+  .expression-item {
+    grid-template-columns: 1fr;
+  }
+  .expression-item__actions {
+    justify-content: flex-start;
+    max-width: none;
+  }
+}
+</style>
