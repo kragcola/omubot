@@ -8,6 +8,10 @@ const { stats } = console_
 
 <template>
   <div class="memory-fold-side">
+    <header class="memory-fold-side__header">
+      <span class="memory-fold-side__eyebrow">Consolidator Pipeline</span>
+      <p class="memory-fold-side__hint">记忆整合候选流水（每日 dry-run，approve 后 promote 到生产）。</p>
+    </header>
     <div class="memory-fold-side__metrics">
       <MetricCard title="总候选" :value="stats.total" hint="全部可见候选" />
       <MetricCard title="dry_run" :value="stats.dry_run" hint="刚生成" accent="info" />
@@ -22,6 +26,26 @@ const { stats } = console_
 .memory-fold-side {
   display: grid;
   gap: 12px;
+}
+
+.memory-fold-side__header {
+  display: grid;
+  gap: 4px;
+}
+
+.memory-fold-side__eyebrow {
+  color: var(--om-text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.memory-fold-side__hint {
+  margin: 0;
+  color: var(--om-text-2);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .memory-fold-side__metrics {

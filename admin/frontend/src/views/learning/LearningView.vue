@@ -235,7 +235,11 @@ const isMemoryNoun = computed(() => activeNoun.value === 'memory')
 const foldedNoun = computed(() =>
   isSlangNoun.value || isStyleNoun.value || isEpisodeNoun.value || isMemoryNoun.value,
 )
-const nounTakesMain = computed(() => foldedNoun.value && activeStage.value !== 'hits')
+const nounTakesMain = computed(() =>
+  foldedNoun.value
+  && activeStage.value !== 'hits'
+  && !isMemoryNoun.value,
+)
 
 const formattedAsOf = computed(() => {
   if (!pipeline.value?.as_of) return '尚未同步'
@@ -373,6 +377,7 @@ function selectStage(stage: LearningStageKey) {
   if (stage === activeStage.value) return
   const patch: Partial<ReturnType<typeof normalizeRouteQuery>> = { stage }
   if (stage === 'hits') patch.date = 'today'
+  else if (stage === 'approved' || stage === 'archived') patch.date = 'all'
   void router.push({ name: 'learning', query: nextQuery(patch) })
 }
 
@@ -382,6 +387,7 @@ function jumpToNounStage(noun: LearningNounKey, stage: LearningStageKey) {
     stage,
   }
   if (stage === 'hits') patch.date = 'today'
+  else if (stage === 'approved' || stage === 'archived') patch.date = 'all'
   void router.push({ name: 'learning', query: nextQuery(patch) })
 }
 

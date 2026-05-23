@@ -8,7 +8,6 @@ import {
 } from './state'
 import MemoryToolbarContent from './MemoryToolbarContent.vue'
 import MemorySidePanelContent from './MemorySidePanelContent.vue'
-import MemoryMainPane from './MemoryMainPane.vue'
 import MemoryDrawerContent from './MemoryDrawerContent.vue'
 
 const props = defineProps<{
@@ -19,12 +18,12 @@ const props = defineProps<{
   sideTarget: string
 }>()
 
+void props.mainPaneTarget
+
 const console_ = createMemoryConsole()
 provide(MEMORY_CONSOLE_KEY, console_)
 
 console_.filterState.value = stageToCandidateState(props.stage)
-
-const showMainPane = computed(() => props.stage !== 'hits')
 
 watch(
   () => props.stage,
@@ -64,9 +63,6 @@ onMounted(() => {
   </Teleport>
   <Teleport :to="props.sideTarget" defer>
     <MemorySidePanelContent />
-  </Teleport>
-  <Teleport v-if="showMainPane" :to="props.mainPaneTarget" defer>
-    <MemoryMainPane />
   </Teleport>
   <MemoryDrawerContent />
 </template>

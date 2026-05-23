@@ -4,6 +4,58 @@
 
 ---
 
+## 2026-05-23 学习管道：noun=memory 数据源修正 + inventory stage 默认 date=all
+
+**变更类型**：admin/frontend 数据流 bug + UX 一致性 / bind-mount 即生效
+
+**触发**：用户截图 + 原话「显示入库 26 记忆，为什么记忆不显示？其他栏的记忆也有这个问题。请全面排查」。
+
+**全面排查（两个互相独立的 bug 同时命中）**：
+
+- **Bug A — `noun=memory` 槽数据源错挂**：
+  - StageStrip 标记「记忆 26」来自 `_collect_memory_counts()` → `memory_cards.db WHERE status='active'` 表（live container 真实有 26 active / 67 expired / 23 superseded 行）
+  - 但 `MemoryFoldInProvider.fetchCandidates()` 调用 `/api/admin/memory_consolidator/candidates` —— 完全是另一张表 `consolidator_candidates`，container 内**该表 0 行**
+  - 主面板 `MemoryMainPane` 用 consolidator 数据 → empty → "暂无候选"
+  - 这是 v1 fold-in 时代「memory 等于 consolidator candidate」的遗留映射，v2.1 之后概念已分裂但 UI 没跟上
+- **Bug B — counts 与 items 的 date 过滤不对称**：
+  - `_collect_memory_counts` (stage 卡数字) 不带 date 过滤 → 26
+  - `_collect_memory_items` (列表) 带 `_date_filter("created_at", date)` → 选「今天」时只匹配 `created_at LIKE '2026-05-23%'`，最近 active card 是 `2026-05-23T16:41:21`（仅 1 条）
+  - 切到 `stage=approved/archived` 这种**库存快照**语义的阶段时，date 应回退到 `all`，否则会出现「卡显示 N、列表显示 0」的视觉错位 —— 同样问题影响 slang 504、style 1 等所有 noun
+
+**实施**：
+
+- **`admin/frontend/src/views/learning/LearningView.vue`**：
+  - `selectStage()` / `jumpToNounStage()`：当切换到 `approved` / `archived`（库存快照）时强制 `date='all'`，与既有的 `hits → today` 对偶
+  - `nounTakesMain` 排除 `noun=memory` —— LearningTable 接管主面板渲染（消费 `/api/admin/learning/items?noun=memory`，已正确接 memory_cards）
+- **`admin/frontend/src/views/learning/slots/memory/MemoryFoldInProvider.vue`**：
+  - 移除 `<Teleport :to="mainPaneTarget">` 的 `MemoryMainPane` 投递；删除 `showMainPane` computed 与 import
+  - 保留 toolbar / side / drawer 三个槽 —— 它们提供 consolidator pipeline 的辅助信息，仍然有用
+- **`admin/frontend/src/views/learning/slots/memory/MemorySidePanelContent.vue`**：
+  - 新增 header `Consolidator Pipeline` + 一行 hint「记忆整合候选流水（每日 dry-run，approve 后 promote 到生产）」—— 让 5 张 0 数值的 MetricCard 不再像「memory 自己的指标」
+- **`admin/frontend/src/views/learning/slots/memory/MemoryToolbarContent.vue`**：
+  - chip 行前加 label `consolidator 候选`，第一项从「全部域」改为「全部 consolidator 域」—— 同样的去歧义意图
+
+**约束保留**：
+
+- `MemoryMainPane.vue` 留在原位（dead code，但 PR-E 阶段 fact/graph_relation 槽落地时可复用同一表格组件）
+- StageStrip 「记忆 26」继续来自 memory_cards count，不动后端
+- date 过滤策略只改前端的「stage 切换时的 date 默认值」—— URL 里手填 `?stage=approved&date=today` 仍然生效，是用户的显式意图
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ 11.33s；LearningView chunk **157.42 KB（gzip 45.47 KB，相对上一版 −1.63 KB ≈ MemoryMainPane DataTable 死码下沉到独立 chunk）**
+- D6 bind-mount，浏览器手测留给用户：
+  - `/learning?noun=memory` 主面板显示 26 张 memory_cards 行卡（不再是「暂无候选」）
+  - `/learning?noun=memory&stage=approved` 自动落到 `date=all`，与 stage 卡的 26 一致
+  - 切「今天」依然按字面意图过滤（用户显式选择优先）
+  - 侧栏 5 个 MetricCard 现在被 `Consolidator Pipeline` header 框起来，明确不是 memory 本体指标
+- 跟踪文档 `docs/tracking/learning-pipeline-foldin.md` §9 已追加 1 行
+
+**回滚**：单 commit，`git revert <sha>` 即可恢复 consolidator 主面板 + stage 切换不重置 date。
+
+---
+
 ## 2026-05-23 学习管道 v3 fold-in：黑话槽双轴根除，单轴回收
 
 **变更类型**：admin/frontend 信息架构修复 / bind-mount 即生效
