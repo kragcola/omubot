@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-05-23 LearningTable 二次重设计：行卡片 → 仪表盘级密集行（26px/row）
+
+**变更类型**：admin/frontend 视觉收口 / bind-mount 即生效
+
+**触发**：上一版（`dfe9d97`）的行卡片仍然「太蠢」——右侧 ~40% 空白、行高 ~76px、必须点详情才能看到完整内容。用户原话：「信息密度还是太低，不必非得要详情，我只要高密度信息获取，像仪表盘一样，不用显示全部」。
+
+**问题诊断**：行卡片范式天生留白；审核场景需要 Bloomberg/Datadog 式的「列对齐 · 单行 · 数字密集」表格行，不是 Linear/GitHub Issues 的 chip 卡片。
+
+**重设计**（commit `f58b444`）
+
+`admin/frontend/src/views/learning/components/LearningTable.vue` 再次完全重写：
+
+- **单行 26px**（同屏 ~16 行 vs 旧 ~7 行；行高减 66%）
+- **8 列等齐 grid-template**：`20px ● 状态点 / 44px 类型 / 1fr 标题 / 72px 群 / 72px 时间 / 36px 置信 / 52px 状态 / auto hover-act`
+- **状态点用文字 glyph**：`✓ · ✕` + 状态色（statusTone 派生 success/pending/rejected/neutral），废弃 NTag chip 节省 80% 水平占位
+- **数字列 tabular-nums 右对齐**；置信改 `::after { content: '%' }` 比 NTag chip 窄一半
+- **审/详按钮 hover 才显形**（opacity 0→1，0.12s ease）—— 默认状态零干扰，整行 click 仍触发 openDetail
+- **sticky 表头 24px**：列标签 10.5px / uppercase / --om-text-3 / 灰底 surface-2 mix
+- **行底 dashed 1px border-color-mix 55%** —— 区分行但不喧宾夺主
+- **mobile @720px** 自动收起时间/状态/操作三列，剩主轴 5 列
+
+**LearningView 内层卡片配套收紧**：
+
+- `.learning-items` padding 16→10px / gap 16→8px / border-radius 16→12px
+- `.learning-items__header h2` 18px/700 → 14px/600（次级标题，不抢密集行视觉）
+
+**emit 契约保持不变**：`openDetail / reviewItem / loadMore` 三个事件继续沿用，LearningView 行 831–840 零改动。
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ built in 10.79s；LearningView chunk 149.95 KB（gzip 42.66 KB）与上版持平（diff +0.07 KB）
+- 视觉验证留给用户在浏览器手测（D6：bind-mount 已生效）
+
+**回滚**：`git revert f58b444` 单 commit 回到行卡片版。
+
+---
+
 ## 2026-05-23 学习管道 v3 LearningTable 视觉重设计：flat 7 列表 → 行卡片列表
 
 **变更类型**：admin/frontend 视觉收口 / bind-mount 即生效（仅前端 build）
