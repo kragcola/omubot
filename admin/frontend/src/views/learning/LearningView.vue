@@ -2,6 +2,7 @@
 import { FlashOutline, RefreshOutline, WarningOutline } from '@vicons/ionicons5'
 import { useMessage } from 'naive-ui'
 import { api } from '../../api/client'
+import AllOverviewDashboard from './components/AllOverviewDashboard.vue'
 import LearningReviewHost from './components/LearningReviewHost.vue'
 import LearningTable from './components/LearningTable.vue'
 import StageStrip from './components/StageStrip.vue'
@@ -225,6 +226,7 @@ const slotContext = computed<NounSlotContext>(() => ({
   refresh,
 }))
 
+const isAllNoun = computed(() => activeNoun.value === 'all')
 const showNounSlots = computed(() => activeNoun.value !== 'all')
 const isSlangNoun = computed(() => activeNoun.value === 'slang')
 const isStyleNoun = computed(() => activeNoun.value === 'style')
@@ -370,6 +372,15 @@ function nextQuery(patch: Partial<ReturnType<typeof normalizeRouteQuery>>) {
 function selectStage(stage: LearningStageKey) {
   if (stage === activeStage.value) return
   const patch: Partial<ReturnType<typeof normalizeRouteQuery>> = { stage }
+  if (stage === 'hits') patch.date = 'today'
+  void router.push({ name: 'learning', query: nextQuery(patch) })
+}
+
+function jumpToNounStage(noun: LearningNounKey, stage: LearningStageKey) {
+  const patch: Partial<ReturnType<typeof normalizeRouteQuery>> = {
+    noun,
+    stage,
+  }
   if (stage === 'hits') patch.date = 'today'
   void router.push({ name: 'learning', query: nextQuery(patch) })
 }
@@ -783,7 +794,20 @@ function formatCount(value: number | null): string {
         </div>
       </NAlert>
 
-      <section class="learning-snapshot">
+      <AllOverviewDashboard
+        v-if="isAllNoun"
+        :stages="stageItems"
+        :items="learningItems"
+        :loading="loading && !pipeline"
+        :as-of="formattedAsOf"
+        :noun-labels="nounLabels"
+        :active-stage="activeStage"
+        @select-noun="(noun) => updateNoun(noun)"
+        @select-stage="jumpToNounStage"
+        @open-item="openItemDetail"
+      />
+
+      <section v-if="!isAllNoun" class="learning-snapshot">
         <header class="learning-snapshot__header">
           <div>
             <span class="learning-snapshot__eyebrow">Current Stage</span>
@@ -816,6 +840,7 @@ function formatCount(value: number | null): string {
       </section>
 
       <div
+        v-if="!isAllNoun"
         class="learning-body"
         :class="{ 'learning-body--with-side': showNounSlots }"
       >

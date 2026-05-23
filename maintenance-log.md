@@ -4,6 +4,60 @@
 
 ---
 
+## 2026-05-23 LearningTable 第四次重设计：列表 → 仪表盘三段式
+
+**变更类型**：admin/frontend 视觉范式切换 / bind-mount 即生效
+
+**触发**：第三次 Bento 卡片网格（`8bbe608`）依然被否决——「太丑了，不合适，重做。信息总览-各个模块概括-信息速递。已这种感觉来。抛弃前面【全部】的思路，这是学习管线仪表盘」。问题根源不是卡片样式，是范式：之前三次都在「全部 = 跨 noun 大列表」的前提下迭代密度/卡片，但 `/learning?noun=all` 本来就该是**学习管线仪表盘**，不是「所有 noun 列表的合集」。具体名词进具体 noun，全局视角应该呈现 **管线鸟瞰 + 模块概览 + 实时活动**。
+
+**搜索调研**：
+
+- ML pipeline observability dashboard pattern（Datadog / Honeycomb / Sentry 2026）—— Hero KPI strip + per-stage cards + activity feed 三段式
+- shadcn Dashboard Data Pipeline block —— 顶部 KPI tile / 中段模块统计 grid / 底部 live feed 流式列表
+- 飞书 Tableau 模式：信息总览（KPI）→ 维度切片（模块）→ 实时滚动（feed），决策链从总览到细节
+
+**重设计**：
+
+新建 `admin/frontend/src/views/learning/components/AllOverviewDashboard.vue`（约 680 行）：
+
+- **§1 Hero KPI 速览**（4 列 × 1 行）：候选池 / 待人工审核 / 已入库 / 今日命中——左侧 3px tone 边（neutral / warn / success / info），值 26px/700 tabular-nums，hint 11px。数据源 = `pipeline.stages[*].total`
+- **§2 各模块概览**（3 列 × 2 行 = 6 个 noun 卡）：
+  - 卡片头：noun 中文名（14px/600）+ 总数（18px/700 tabular-nums）
+  - **5 阶段迷你柱状图**：候选/待审/入库/命中/归档 5 列，bar 高 36px，fill 高度 = `(byStage[stage] / max) × 100%`，最大值阶段染 `--om-info`，其余 `--om-text-3 0.7 alpha`，零值留空。点击柱状图直接 `selectStage` 跳到对应 noun + stage
+  - 底部 dashed 分隔行：`{n} 待审` warn chip / `已入库 {n}` ok chip / `暂无积压` mute chip 三选一 + 「最近 · {recent.content}」——一眼能看到这个 noun 最新一条样本，无需点进去
+  - 整张卡可点（`tabindex="0"` + Enter）→ `selectNoun` 切到该 noun 维持当前 stage
+- **§3 信息速递**（最近 12 条流式列表）：5 列 grid（`78px(time) 44px(kind) 1fr(title) 64px(group) 36px(conf)`），行高 30px，kind 文字按 statusTone 着色（success/warning/danger）。点击行 `openItem` 跳详情。loading 时 6 行 NSkeleton；空态用 EmptyState compact
+
+**LearningView.vue 改造**（11 行加法）：
+
+- import `AllOverviewDashboard`
+- 新增 `isAllNoun = computed(() => activeNoun === 'all')`
+- 新增 `jumpToNounStage(noun, stage)` 一次性切 noun + stage（hits 自动设 `date=today`）
+- 模板：`<AllOverviewDashboard v-if="isAllNoun" .../>` 三个 emit 路由：`select-noun → updateNoun` / `select-stage → jumpToNounStage` / `open-item → openItemDetail`
+- 原 `<section class="learning-snapshot">` 与 `<div class="learning-body">` 加 `v-if="!isAllNoun"`——非 all noun 行为完全不变（StageStrip / Toolbar / Snapshot / LearningTable / NounSidePanelSlot 全部保留）
+
+**LearningTable.vue 复位**：第三次 Bento 网格回退到第二次 26px 单行密集表格（即 `f58b444` 内容）。原因：bento 是为「全部」一列做的，但「全部」已下线为仪表盘；具体 noun 的列表场景里，单行密集表反而比 4-列卡片网格更合适（noun=fact / graph_relation 占位用，noun=slang/style/episode/memory 已被 SlangFoldInProvider 等通过 Teleport 接管主表）。emit 契约 `openDetail / reviewItem / loadMore` 不变。
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → exit 0（无输出）
+- `npm run build` → `✓ built in 10.98s`；LearningView chunk **156.33 KB（gzip 44.78 KB）**，相对第三次 +6.70 KB raw / +2.14 KB gzip——纯加法（新组件），LearningTable 回退抵消了一部分体积
+- bind-mount：D6 已生效，无需 `docker compose up bot --build`
+- 浏览器手测留给用户：访问 `/learning`（默认 noun=all）应见三段式仪表盘；切到 `/learning?noun=slang` 等具体 noun 应回到原 fold-in 视图
+
+**回滚链**：
+
+- `git revert <本次 sha>` → 回到 LearningTable Bento + LearningView 全 noun 用列表
+- `8bbe608` Bento → `f58b444` 26px 单行 → `dfe9d97` 行卡片 → 原 7 列 NDataTable
+
+**与同类工作的边界**：
+
+- 不动 fold-in：noun=slang/style/episode/memory 通过 Teleport 接管主表/工具栏/侧栏的 v3 PR-B/C 行为零改动（`SlangFoldInProvider` 等仍 v-if 在 `learning-page` 末尾挂载）
+- 不动 stage 主轴：5 阶段 StageStrip 在 all noun 下仍可点击（点 stage 不会切走 dashboard，因为 dashboard 内部不依赖 activeStage 渲染——它读 `pipeline.stages[*].total`）
+- 不动后端：`/api/admin/learning/pipeline` 与 `/api/admin/learning/items` 契约零变更，dashboard 直接复用现有 `pipeline.value` 与 `learningItems.value`
+
+---
+
 ## 2026-05-23 LearningTable 第三次重设计：单行表格 → Bento 卡片网格
 
 **变更类型**：admin/frontend 视觉收口 / bind-mount 即生效
