@@ -55,63 +55,57 @@ function shortGroup(value: string): string {
 
 <template>
   <div class="lt">
-    <div v-if="loading && !items.length" class="lt-grid lt-grid--loading">
+    <div v-if="loading && !items.length" class="lt-list lt-list--loading">
       <div v-for="i in 8" :key="i" class="lt-skeleton">
-        <NSkeleton :width="56" :height="14" :sharp="false" />
-        <NSkeleton :height="16" :sharp="false" style="margin-top: 10px" />
-        <NSkeleton :width="180" :height="14" :sharp="false" style="margin-top: 6px" />
-        <NSkeleton :width="120" :height="12" :sharp="false" style="margin-top: 14px" />
+        <NSkeleton :width="36" :height="14" :sharp="false" />
+        <NSkeleton :height="14" :sharp="false" style="flex: 1; margin: 0 12px" />
+        <NSkeleton :width="80" :height="12" :sharp="false" />
       </div>
     </div>
 
     <template v-else-if="items.length">
-      <div class="lt-grid">
-        <article
+      <div class="lt-list">
+        <div
           v-for="item in items"
           :key="item.id"
-          class="lt-card"
-          :class="`lt-card--${statusTone(item.status)}`"
+          class="lt-row"
+          :class="`lt-row--${statusTone(item.status)}`"
           tabindex="0"
           role="button"
           @click="emit('openDetail', item)"
           @keydown.enter.prevent="emit('openDetail', item)"
           @keydown.space.prevent="emit('openDetail', item)"
         >
-          <header class="lt-card__head">
-            <span class="lt-card__kind">{{ item.kind_label }}</span>
-            <span class="lt-card__status">{{ item.status_label || item.status }}</span>
-          </header>
-
-          <p class="lt-card__title" :title="item.content_full || item.content">
+          <span class="lt-row__kind">{{ item.kind_label }}</span>
+          <span class="lt-row__content" :title="item.content_full || item.content">
             {{ item.content || '——' }}
-          </p>
-
-          <footer class="lt-card__foot">
-            <span class="lt-card__meta lt-card__meta--group" :title="item.group_id">
-              {{ shortGroup(item.group_id) }}
-            </span>
-            <span class="lt-card__meta lt-card__meta--time">{{ formatTime(item.created_at) }}</span>
-            <span
-              v-if="formatConfidence(item.confidence)"
-              class="lt-card__meta lt-card__meta--conf"
-            >
-              {{ formatConfidence(item.confidence) }}
-            </span>
-            <span class="lt-card__actions" @click.stop>
-              <button
-                v-if="item.review_drawer"
-                type="button"
-                class="lt-card__act"
-                @click="emit('reviewItem', item)"
-              >审核</button>
-              <button
-                type="button"
-                class="lt-card__act lt-card__act--ghost"
-                @click="emit('openDetail', item)"
-              >详情</button>
-            </span>
-          </footer>
-        </article>
+          </span>
+          <span class="lt-row__group" :title="item.group_id">
+            {{ shortGroup(item.group_id) }}
+          </span>
+          <span class="lt-row__time">{{ formatTime(item.created_at) }}</span>
+          <span
+            v-if="formatConfidence(item.confidence)"
+            class="lt-row__conf"
+          >
+            {{ formatConfidence(item.confidence) }}
+          </span>
+          <span v-else class="lt-row__conf lt-row__conf--empty">——</span>
+          <span class="lt-row__status">{{ item.status_label || item.status }}</span>
+          <span class="lt-row__actions" @click.stop>
+            <button
+              v-if="item.review_drawer"
+              type="button"
+              class="lt-row__act"
+              @click="emit('reviewItem', item)"
+            >审核</button>
+            <button
+              type="button"
+              class="lt-row__act lt-row__act--ghost"
+              @click="emit('openDetail', item)"
+            >详情</button>
+          </span>
+        </div>
       </div>
     </template>
 
@@ -135,27 +129,27 @@ function shortGroup(value: string): string {
   font-feature-settings: 'tnum' 1;
 }
 
-.lt-grid {
+.lt-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .lt-skeleton {
-  display: block;
-  padding: 14px;
+  display: flex;
+  align-items: center;
+  padding: 10px 14px 10px 18px;
   border: 1px solid var(--om-border);
   border-radius: 10px;
   background: var(--om-surface-solid);
-  min-height: 120px;
 }
 
-.lt-card {
+.lt-row {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 8px;
-  padding: 12px 14px;
+  grid-template-columns: auto minmax(0, 1fr) auto auto 50px auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px 10px 18px;
   border: 1px solid var(--om-border);
   border-radius: 10px;
   background: var(--om-surface-solid);
@@ -168,11 +162,11 @@ function shortGroup(value: string): string {
     box-shadow 0.16s ease;
 }
 
-.lt-card::before {
+.lt-row::before {
   content: '';
   position: absolute;
-  top: 12px;
-  bottom: 12px;
+  top: 10px;
+  bottom: 10px;
   left: 0;
   width: 3px;
   border-radius: 0 2px 2px 0;
@@ -181,12 +175,12 @@ function shortGroup(value: string): string {
   transition: background-color 0.16s ease, opacity 0.16s ease;
 }
 
-.lt-card--success::before { background: var(--om-success); opacity: 1; }
-.lt-card--pending::before { background: var(--om-warning); opacity: 1; }
-.lt-card--rejected::before { background: var(--om-danger); opacity: 0.85; }
+.lt-row--success::before { background: var(--om-success); opacity: 1; }
+.lt-row--pending::before { background: var(--om-warning); opacity: 1; }
+.lt-row--rejected::before { background: var(--om-danger); opacity: 0.85; }
 
-.lt-card:hover,
-.lt-card:focus-visible {
+.lt-row:hover,
+.lt-row:focus-visible {
   border-color: var(--om-border-strong);
   background: color-mix(in srgb, var(--om-surface-2) 35%, var(--om-surface-solid));
   outline: none;
@@ -194,15 +188,7 @@ function shortGroup(value: string): string {
   box-shadow: var(--om-shadow-sm);
 }
 
-.lt-card__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 18px;
-}
-
-.lt-card__kind {
+.lt-row__kind {
   display: inline-flex;
   align-items: center;
   height: 18px;
@@ -213,64 +199,41 @@ function shortGroup(value: string): string {
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.02em;
+  flex-shrink: 0;
 }
 
-.lt-card__status {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--om-text-3);
-}
-
-.lt-card--success .lt-card__status { color: var(--om-success); }
-.lt-card--pending .lt-card__status { color: var(--om-warning); }
-.lt-card--rejected .lt-card__status { color: var(--om-danger); }
-
-.lt-card__title {
-  margin: 0;
+.lt-row__content {
   color: var(--om-text-1);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 500;
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
+  line-height: 1.4;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   word-break: break-word;
 }
 
-.lt-card__foot {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding-top: 6px;
-  border-top: 1px dashed color-mix(in srgb, var(--om-border) 70%, transparent);
+.lt-row__group {
   color: var(--om-text-3);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  min-height: 26px;
-}
-
-.lt-card__meta {
-  display: inline-flex;
-  align-items: center;
   white-space: nowrap;
+  max-width: 9ch;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.lt-card__meta--group {
-  max-width: 9ch;
-}
-
-.lt-card__meta--time {
+.lt-row__time {
   color: var(--om-text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.lt-card__meta--conf {
+.lt-row__conf {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   height: 16px;
   padding: 0 5px;
   border-radius: 2px;
@@ -278,23 +241,43 @@ function shortGroup(value: string): string {
   color: var(--om-text-2);
   font-size: 10.5px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+  text-align: center;
 }
 
-.lt-card__actions {
-  margin-left: auto;
+.lt-row__conf--empty {
+  background: transparent;
+  color: var(--om-text-3);
+  font-weight: 400;
+}
+
+.lt-row__status {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--om-text-3);
+  white-space: nowrap;
+}
+
+.lt-row--success .lt-row__status { color: var(--om-success); }
+.lt-row--pending .lt-row__status { color: var(--om-warning); }
+.lt-row--rejected .lt-row__status { color: var(--om-danger); }
+
+.lt-row__actions {
   display: inline-flex;
   gap: 4px;
   opacity: 0;
   transition: opacity 0.16s ease;
 }
 
-.lt-card:hover .lt-card__actions,
-.lt-card:focus-visible .lt-card__actions,
-.lt-card:focus-within .lt-card__actions {
+.lt-row:hover .lt-row__actions,
+.lt-row:focus-visible .lt-row__actions,
+.lt-row:focus-within .lt-row__actions {
   opacity: 1;
 }
 
-.lt-card__act {
+.lt-row__act {
   height: 22px;
   padding: 0 9px;
   border: 1px solid color-mix(in srgb, var(--om-border-strong) 70%, transparent);
@@ -308,18 +291,18 @@ function shortGroup(value: string): string {
   transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 
-.lt-card__act:hover {
+.lt-row__act:hover {
   background: var(--om-surface-2);
   color: var(--om-text-1);
   border-color: var(--om-border-strong);
 }
 
-.lt-card__act--ghost {
+.lt-row__act--ghost {
   background: transparent;
   color: var(--om-text-3);
 }
 
-.lt-card__act--ghost:hover {
+.lt-row__act--ghost:hover {
   background: color-mix(in srgb, var(--om-surface-2) 60%, transparent);
   color: var(--om-text-2);
 }
@@ -330,11 +313,25 @@ function shortGroup(value: string): string {
   padding: 4px 0 0;
 }
 
-@media (max-width: 720px) {
-  .lt-grid {
-    grid-template-columns: 1fr;
+@media (max-width: 1100px) {
+  .lt-row {
+    grid-template-columns: auto minmax(0, 1fr) auto 50px auto auto;
   }
-  .lt-card__actions {
+  .lt-row__group {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .lt-row {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    gap: 8px;
+  }
+  .lt-row__time,
+  .lt-row__conf {
+    display: none;
+  }
+  .lt-row__actions {
     opacity: 1;
   }
 }

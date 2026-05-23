@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-05-23 学习管道：LearningTable 卡片网格 → 单行紧凑行（与黑话同源）
+
+**变更类型**：admin/frontend 视觉修正 / bind-mount 即生效
+
+**触发**：用户截图 + 原话「这是什么？记忆卡片格式没统一。我很无语」。上一版（commit `889eb68`）声称「单行使用类黑话，多行使用类风格」并落地了 `SlangTermList`/`StyleMainPane` 的视觉同源，但 `LearningTable.vue`（`/learning?noun=memory` 主面板的实际渲染组件）仍然是 3 列卡片网格——记忆词条普遍只有一行短句（"用户有男朋友"、"用户喜欢泡面"），3 列卡片每张占 120px+ 高，密度严重不足且与同页 SlangTermList 单行版视觉割裂。
+
+**问题**：
+
+- 单行/多行变体判定错位：memory item 的 `content` 几乎都是 ≤ 30 字单句，应走单行紧凑契约（黑话样式），而不是卡片网格
+- 视觉语言三套并存：`SlangTermList.lt-row`（10px 圆角 + 3px 侧栏 + 单行 grid）+ `LearningTable.lt-card`（10px 圆角 + 3px 侧栏 + 三段卡片）+ `AllOverviewDashboard` 模块卡（多段大卡）—— 上一版只统一了视觉契约（圆角 / 侧栏 / hover），没统一「每条占多少行」
+
+**实施**：
+
+- **`admin/frontend/src/views/learning/components/LearningTable.vue`** 整体重写：
+  - `.lt-grid`（3 列 `repeat(auto-fill, minmax(320px, 1fr))`）→ `.lt-list`（单列 `display: grid; gap: 8px`）
+  - `<article class="lt-card">` 三段结构（head + title + foot）→ `<div class="lt-row">` 单行 7 列 grid：`auto / 1fr / auto / auto / 50px / auto / auto`，对应 kind chip / content / group / time / conf / status / actions
+  - 沿用 SlangTermList 同款 padding `10px 14px 10px 18px` + 3px `::before` 状态色侧栏（top/bottom 10px gutter，opacity 与 SlangTermList 完全一致）+ hover translateY(-1px) + shadow-sm + border-strong
+  - `content` 单行 `white-space: nowrap; text-overflow: ellipsis`，长内容靠 `:title` 兜底；conf chip 退化为 16px 高的 info-tinted badge（与 SlangTermList 的 `confidenceText` 视觉对位）；actions hover 浮出（保留原 22px ghost 按钮规格）
+  - skeleton 也从 4 段卡片改成单行（kind / content / time）
+  - 响应式：≤1100px 隐藏 group；≤720px 隐藏 time/conf 并强制 actions opacity=1（同 SlangTermList 的 1100/1000/640 断点节奏）
+- emit 契约 `openDetail / reviewItem / loadMore` / props 形状 / `statusTone()` / `formatConfidence()` / `formatTime()` / `shortGroup()` 全部 0 改动
+- LearningView 零改动；其他 noun（fact / graph_relation / 全部聚合）默认走相同的单行布局——因为这些条目本质也是单行短句，多行卡片是错误抽象
+
+**约束保持**：
+
+- 卡片视觉契约（10px 圆角 / 3px 状态色侧栏 / hover lift / 可键盘 tabindex+Enter/Space）跟 SlangTermList / StyleMainPane 同源
+- 业务路由 `LearningView` 对 LearningTable 的消费方式 / props 全部不变
+- 多行变体（StyleMainPane）保持卡片块结构不变——多行场景下卡片仍是合理选择
+
+**Verification**：vue-tsc 0 errors；build OK，LearningView chunk **156.66 KB（gzip 45.44 KB，相对 commit `889eb68` 的 156.83 KB / gzip 45.46 KB 几乎不变 ≈ DOM 结构简化抵消 7 列 grid CSS）**。
+
+**Follow-up**：Episode `EpisodeMainPane.vue` 仍是 NDataTable，结构性差异大，下一批次单独处理。
+
+---
+
 ## 2026-05-23 学习管道：toolbar 跨 noun 统一 + 词条卡片视觉同源
 
 **变更类型**：admin/frontend 视觉重设计 + 信息架构 / bind-mount 即生效
