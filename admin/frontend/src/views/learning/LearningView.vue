@@ -5,6 +5,7 @@ import { api } from '../../api/client'
 import AllOverviewDashboard from './components/AllOverviewDashboard.vue'
 import LearningReviewHost from './components/LearningReviewHost.vue'
 import LearningTable from './components/LearningTable.vue'
+import NounSwitcher from './components/NounSwitcher.vue'
 import StageStrip from './components/StageStrip.vue'
 import NounComingSoonCard from './slots/NounComingSoonCard.vue'
 import NounDrawerHost from './slots/NounDrawerHost.vue'
@@ -107,9 +108,9 @@ const extractMetricLabels: Record<string, string> = {
   scanned: '扫描',
 }
 
-const nounOptions = [
+const nounOptions: { label: string, value: LearningNounFilter }[] = [
   { label: '全部', value: 'all' },
-  ...nounKeys.map(noun => ({ label: nounLabels[noun], value: noun })),
+  ...nounKeys.map(noun => ({ label: nounLabels[noun], value: noun as LearningNounFilter })),
 ]
 
 const dateOptions = [
@@ -140,6 +141,7 @@ const groupDraft = ref('')
 const reviewOpen = ref(false)
 const reviewItem = ref<LearningItem | null>(null)
 const extractRun = ref<LearningExtractRun | null>(null)
+const memoryProviderRef = ref<{ openCardDetail: (cardId: string) => Promise<void> } | null>(null)
 let extractPollTimer: ReturnType<typeof setTimeout> | null = null
 
 const routeState = computed(() => normalizeRouteQuery(route.query))
@@ -641,6 +643,13 @@ function openReview(item: LearningItem) {
 }
 
 function openItemDetail(item: LearningItem) {
+  if (item.noun === 'memory' && item.id.startsWith('memory-')) {
+    const cardId = item.id.slice('memory-'.length)
+    if (cardId && memoryProviderRef.value) {
+      void memoryProviderRef.value.openCardDetail(cardId)
+      return
+    }
+  }
   if (!item.deep_link) return
   void router.push(item.deep_link).catch(() => {})
 }
@@ -692,6 +701,15 @@ function formatCount(value: number | null): string {
     </template>
 
     <div class="learning-page">
+      <NounSwitcher
+        :options="nounOptions"
+        :active="activeNoun"
+        :total="activeStageItem.total"
+        :by-noun="activeStageItem.byNoun"
+        :loading="loading && !pipeline"
+        @select="updateNoun"
+      />
+
       <StageStrip
         :stages="stageItems"
         :active-stage="activeStage"
@@ -700,17 +718,6 @@ function formatCount(value: number | null): string {
       />
 
       <PageToolbar>
-        <template #left>
-          <NRadioGroup :value="activeNoun" @update:value="updateNoun">
-            <NRadioButton
-              v-for="option in nounOptions"
-              :key="option.value"
-              :value="option.value"
-            >
-              {{ option.label }}
-            </NRadioButton>
-          </NRadioGroup>
-        </template>
         <template #right>
           <NInput
             v-model:value="groupDraft"
@@ -904,6 +911,7 @@ function formatCount(value: number | null): string {
 
     <MemoryFoldInProvider
       v-if="isMemoryNoun"
+      ref="memoryProviderRef"
       :stage="activeStage"
       :group="activeGroup"
       main-pane-target="#learning-noun-main-target"

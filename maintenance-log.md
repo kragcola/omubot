@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-05-24 学习管道词条切换器重做 — NounSwitcher 落地
+
+**变更类型**：admin/frontend 学习页 词条主切换轴交互重设计
+
+**内容**：新增 [admin/frontend/src/views/learning/components/NounSwitcher.vue](admin/frontend/src/views/learning/components/NounSwitcher.vue)，在 [LearningView.vue](admin/frontend/src/views/learning/LearningView.vue) 中替换原 `NRadioGroup` 词条切换。新位置位于 hero 与 StageStrip 之间，独立成行——把"先选词条 → 看 5 阶段进度 → 调群/日期/排序"的阅读顺序显式化。每枚词条 = `outline` 图标 + 中文标签 + tabular-nums 计数胶囊；激活态用主色文字 + 下划线 inset 阴影 + 主色高亮计数胶囊；零数据自动 0.62 透明度；"全部" 与具体词条之间用 1px 分隔条隔出语义层级。计数取自 `activeStageItem.byNoun[noun]`（"全部"取 `total`），切前预测，与 StageStrip / 主表格保持一致。
+
+**影响**：业务行为零改动——`updateNoun` 与 `LearningNounFilter` 类型链路保持原状；右侧群号/日期/排序保持 PageToolbar 原位（PageToolbar 在 `#left` slot 缺失时自动只渲染 `#right`）。`nounOptions` 加上显式类型 `{ label, value: LearningNounFilter }[]` 以满足 NounSwitcher 的 props。建议参照页面：dashboard / system / logs 的 hero+toolbar 节奏一致。
+
+**验证**：`vue-tsc --noEmit` 干净；`npm run build` 成功，新 chunk `LearningView-BXq3Sb1p.js`（171.27 KB，gzip 49.24 KB，相对前版仅 +1 KB）；vendor-icons 因 7 枚新 outline 图标 +1.9 KB。回滚路径：恢复 `<PageToolbar>` 中 `<NRadioGroup>` 块、删 NounSwitcher.vue 与对应 import 即可。
+
+---
+
 ## 2026-05-24 admin SPA hero 卡片改为随主体滚动
 
 **变更类型**：admin/frontend AppPage 公共组件结构调整
