@@ -46,11 +46,15 @@ interface NounModule {
   isEmpty: boolean
 }
 
+type NounChipTone = 'info' | 'success' | 'warn' | 'neutral'
+
 interface FeedRow {
   id: string
   noun: LearningNounKey
   nounLabel: string
+  nounTone: NounChipTone
   title: string
+  statusLabel: string
   group: string
   time: string
   conf: number | null
@@ -68,16 +72,38 @@ function safeNum(value: number | null | undefined): number {
   return typeof value === 'number' ? value : 0
 }
 
-function formatTime(value: string): string {
+const nounToneMap: Record<LearningNounKey, NounChipTone> = {
+  slang: 'neutral',
+  style: 'neutral',
+  episode: 'info',
+  memory: 'success',
+  fact: 'warn',
+  graph_relation: 'neutral',
+}
+
+function nounToneOf(noun: LearningNounKey): NounChipTone {
+  return nounToneMap[noun] ?? 'neutral'
+}
+
+function formatRelativeTime(value: string): string {
   if (!value) return '——'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
+  const now = Date.now()
+  const diff = now - date.getTime()
+  if (diff < 0) return '刚刚'
+  const sec = Math.floor(diff / 1000)
+  if (sec < 60) return '刚刚'
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min} 分钟前`
+  const hour = Math.floor(min / 60)
+  if (hour < 24) return `${hour} 小时前`
+  const day = Math.floor(hour / 24)
+  if (day === 1) return '昨天'
+  if (day < 7) return `${day} 天前`
   return new Intl.DateTimeFormat('zh-CN', {
     month: '2-digit',
     day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
   }).format(date).replace(/\//g, '-')
 }
 
@@ -182,13 +208,15 @@ const nounModules = computed<NounModule[]>(() => {
 })
 
 const feedRows = computed<FeedRow[]>(() => {
-  return props.items.slice(0, 18).map(item => ({
+  return props.items.slice(0, 12).map(item => ({
     id: item.id,
     noun: item.noun,
-    nounLabel: item.kind_label || props.nounLabels[item.noun] || item.noun,
+    nounLabel: props.nounLabels[item.noun] || item.kind_label || item.noun,
+    nounTone: nounToneOf(item.noun),
     title: item.content || '——',
+    statusLabel: item.status_label || item.status || '',
     group: shortGroup(item.group_id),
-    time: formatTime(item.created_at),
+    time: formatRelativeTime(item.created_at),
     conf: item.confidence,
     tone: statusTone(item.status),
   }))
@@ -299,7 +327,7 @@ function maxStageValue(mod: NounModule): number {
       </header>
 
       <div v-if="loading && !feedRows.length" class="ov-feed__loading">
-        <NSkeleton v-for="i in 9" :key="i" :height="26" />
+        <NSkeleton v-for="i in 6" :key="i" :height="40" />
       </div>
 
       <ol v-else-if="feedRows.length" class="ov-feed__list">
@@ -310,11 +338,23 @@ function maxStageValue(mod: NounModule): number {
           :class="`feed-row--${row.tone}`"
           @click="emit('openItem', props.items.find(it => it.id === row.id)!)"
         >
-          <span class="feed-time">{{ row.time }}</span>
-          <span class="feed-kind">{{ row.nounLabel }}</span>
-          <span class="feed-title" :title="row.title">{{ row.title }}</span>
-          <span class="feed-group">{{ row.group }}</span>
-          <span v-if="row.conf !== null" class="feed-conf">{{ Math.round(row.conf * 100) }}%</span>
+          <span class="feed-dot" :title="row.statusLabel" />
+          <div class="feed-main">
+            <div class="feed-title" :title="row.title">{{ row.title }}</div>
+            <div class="feed-meta">
+              <span class="feed-meta__status">{{ row.statusLabel || '——' }}</span>
+              <span class="feed-meta__sep">·</span>
+              <span class="feed-meta__group">群 {{ row.group }}</span>
+              <template v-if="row.conf !== null">
+                <span class="feed-meta__sep">·</span>
+                <span class="feed-meta__conf">{{ Math.round(row.conf * 100) }}%</span>
+              </template>
+            </div>
+          </div>
+          <div class="feed-side">
+            <span class="feed-noun" :class="`feed-noun--${row.nounTone}`">{{ row.nounLabel }}</span>
+            <span class="feed-time">{{ row.time }}</span>
+          </div>
         </li>
       </ol>
 
@@ -593,7 +633,6 @@ function maxStageValue(mod: NounModule): number {
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0;
   border: 1px solid var(--om-border);
   border-radius: 10px;
@@ -607,60 +646,117 @@ function maxStageValue(mod: NounModule): number {
 }
 
 .feed-row {
+  position: relative;
   display: grid;
-  grid-template-columns: 60px 36px minmax(0, 1fr) 52px 30px;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
   align-items: center;
-  column-gap: 8px;
-  height: 26px;
-  padding: 0 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--om-border) 45%, transparent);
-  font-size: 11.5px;
+  column-gap: 12px;
+  min-height: 52px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--om-border) 55%, transparent);
   cursor: pointer;
   transition: background-color 0.12s ease;
 }
 
-.feed-row:nth-child(even) {
-  border-left: 1px dashed color-mix(in srgb, var(--om-border) 60%, transparent);
-}
-
-.feed-row:nth-last-child(-n+2) {
+.feed-row:last-child {
   border-bottom: 0;
 }
 
 .feed-row:hover {
-  background: color-mix(in srgb, var(--om-surface-2) 60%, transparent);
+  background: color-mix(in srgb, var(--om-surface-2) 55%, transparent);
 }
 
-.feed-time {
-  color: var(--om-text-3);
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
+.feed-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--om-text-3);
+  opacity: 0.55;
 }
 
-.feed-kind {
-  color: var(--om-text-3);
-  font-size: 10.5px;
-  letter-spacing: 0.02em;
-}
+.feed-row--success .feed-dot { background: var(--om-success); opacity: 1; }
+.feed-row--pending .feed-dot { background: var(--om-warning); opacity: 1; }
+.feed-row--rejected .feed-dot { background: var(--om-danger); opacity: 1; }
 
-.feed-row--success .feed-kind { color: var(--om-success); }
-.feed-row--pending .feed-kind { color: var(--om-warning); }
-.feed-row--rejected .feed-kind { color: var(--om-danger); }
+.feed-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
 
 .feed-title {
   color: var(--om-text-1);
+  font-size: 14px;
   font-weight: 500;
+  line-height: 1.3;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.feed-group,
-.feed-conf {
+.feed-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: var(--om-text-3);
-  font-size: 10.5px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.feed-meta__status {
   font-variant-numeric: tabular-nums;
-  text-align: right;
+}
+
+.feed-row--success .feed-meta__status { color: var(--om-success); }
+.feed-row--pending .feed-meta__status { color: var(--om-warning); }
+.feed-row--rejected .feed-meta__status { color: var(--om-danger); }
+
+.feed-meta__sep {
+  opacity: 0.5;
+}
+
+.feed-meta__group,
+.feed-meta__conf {
+  font-variant-numeric: tabular-nums;
+}
+
+.feed-side {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+
+.feed-noun {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  background: color-mix(in srgb, var(--om-text-3) 12%, transparent);
+  color: var(--om-text-2);
+}
+
+.feed-noun--info {
+  background: color-mix(in srgb, var(--om-info) 12%, transparent);
+  color: var(--om-info);
+}
+
+.feed-noun--success {
+  background: color-mix(in srgb, var(--om-success) 12%, transparent);
+  color: var(--om-success);
+}
+
+.feed-noun--warn {
+  background: color-mix(in srgb, var(--om-warning) 14%, transparent);
+  color: var(--om-warning);
+}
+
+.feed-time {
+  color: var(--om-text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
 }
 
 @media (max-width: 1100px) {
@@ -670,18 +766,6 @@ function maxStageValue(mod: NounModule): number {
   .ov-kpi {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .ov-feed__list {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .feed-row:nth-child(even) {
-    border-left: 0;
-  }
-  .feed-row:nth-last-child(-n+2) {
-    border-bottom: 1px solid color-mix(in srgb, var(--om-border) 45%, transparent);
-  }
-  .feed-row:last-child {
-    border-bottom: 0;
-  }
 }
 
 @media (max-width: 720px) {
@@ -690,10 +774,9 @@ function maxStageValue(mod: NounModule): number {
     grid-template-columns: 1fr;
   }
   .feed-row {
-    grid-template-columns: 60px minmax(0, 1fr) 52px;
+    grid-template-columns: 8px minmax(0, 1fr) auto;
   }
-  .feed-kind,
-  .feed-conf {
+  .feed-noun {
     display: none;
   }
 }

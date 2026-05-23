@@ -4,6 +4,45 @@
 
 ---
 
+## 2026-05-23 信息速递词条式重做：主流字号 + 单列 12 行
+
+**变更类型**：admin/frontend 视觉重做 / bind-mount 即生效
+
+**触发**：上一轮把 12 行 30px 单列 → 18 行 26px 双列 11.5px 后，用户判定「字号过小不好看」，要求「字号和主流一致 / 参考黑话页面 / 左侧词条 / 右侧一栏」，并先设计后实施。
+
+**设计决策**（依据 `docs/admin-ui-style-guide.md` 主流字号阶梯 14/500 + 12/400）：
+
+- **行内布局参考** `views/slang/components/SlangTermList.vue` 的 grid 词条卡范式：左主右从、行卡片化、主流字号
+- **三槽 grid** `8px / 1fr / auto`：左圆点（statusTone 着色） + 中主从行（标题 + 元信息） + 右栈（noun chip + 相对时间）
+- **右侧一栏内容**：经 AskUserQuestion 用户钦定 → noun 类型 chip + 相对时间（"刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / MM-DD"）
+- **noun chip 着色**：slang/style/graph_relation neutral · episode info · memory success · fact warn —— 与全局 6 noun 语义一致
+- **相对时间助手** `formatRelativeTime()` 替代仪表盘原 `formatTime()` 的「MM-DD HH:mm」绝对时间，避免跨日重复 prefix
+
+**实施**（文件 `admin/frontend/src/views/learning/components/AllOverviewDashboard.vue`）：
+
+- `<script>`：新增 `NounChipTone` 类型 / `nounToneMap` 表 / `nounToneOf()` / `formatRelativeTime()`；`FeedRow` 接口加入 `nounTone / statusLabel`，移除老 `formatTime` 用法
+- `feedRows` slice 18 → **12**；nounLabel 优先级从 `kind_label || nounLabels[noun]` 改为 `nounLabels[noun] || kind_label`（更稳定）
+- 模板：`<li class="feed-row">` 重写为 3 个孩子 `feed-dot / feed-main(.feed-title + .feed-meta) / feed-side(.feed-noun + .feed-time)`，元信息行 dot-separated `状态 · 群 ⋯xxxx · 置信%`，`row.conf` 为 null 时跳过 conf 槽
+- CSS：行高 26px → **min-height 52px**，padding 0 10px → **10px 14px**，列宽全部撤掉 → 单列；font 11.5px → **14/500 标题 + 12/400 元 + 11.5/400 时间**；移除 `repeat(2, 1fr)` 双列与 `:nth-child(even)` dashed 分隔；保留 hover 浅底；`<720px` 隐藏 noun chip，行结构不变
+- loading skeleton 9×26px → **6×40px**
+
+**视觉差异**：
+
+- 上一轮（被否）：双列 9 行 × 26px × 11.5px，4 列等宽紧凑表，短词条挨着出现但字号过小
+- 本轮：单列 12 行 × 52px，14px 标题 + 12px 元 + 11px noun chip，每行像黑话词条卡，扫读靠"圆点 + 状态文字"双重着色 + 主从字号阶梯
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ built in 11.20s；LearningView chunk **157.20 KB（gzip 45.07 KB，相对上一版 +0.87 KB ≈ 时间助手 + 新 CSS）**
+- D6 bind-mount 已生效，浏览器手测留给用户
+- 跟踪文档 `docs/tracking/learning-pipeline-foldin.md` §9 已追加 1 行
+- D7 stash 检查：开 work 前 `git stash list` 空 / `git status -uno` 仅本任务文件 + 已标记 staged 的其它工作
+
+**回滚**：单 commit，`git revert <sha>` 即可还原到双列 18 行 11.5px 版本。
+
+---
+
 ## 2026-05-23 信息速递加密：单列 12 行 → 双列 18 行
 
 **变更类型**：admin/frontend 视觉密度调优 / bind-mount 即生效
