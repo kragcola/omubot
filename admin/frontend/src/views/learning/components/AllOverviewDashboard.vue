@@ -46,7 +46,7 @@ interface NounModule {
   isEmpty: boolean
 }
 
-type NounChipTone = 'info' | 'success' | 'warn' | 'neutral'
+type NounChipTone = 'info' | 'success' | 'warn' | 'violet' | 'cyan' | 'neutral'
 
 interface FeedRow {
   id: string
@@ -73,8 +73,8 @@ function safeNum(value: number | null | undefined): number {
 }
 
 const nounToneMap: Record<LearningNounKey, NounChipTone> = {
-  slang: 'neutral',
-  style: 'neutral',
+  slang: 'cyan',
+  style: 'violet',
   episode: 'info',
   memory: 'success',
   fact: 'warn',
@@ -723,38 +723,56 @@ function maxStageValue(mod: NounModule): number {
 .feed-side {
   display: grid;
   justify-items: end;
-  gap: 4px;
+  gap: 6px;
+  min-width: 96px;
 }
 
 .feed-noun {
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1.4;
-  letter-spacing: 0.01em;
-  background: color-mix(in srgb, var(--om-text-3) 12%, transparent);
-  color: var(--om-text-2);
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  background: color-mix(in srgb, var(--om-text-3) 18%, transparent);
+  color: var(--om-text-1);
+  border: 1px solid color-mix(in srgb, var(--om-text-3) 22%, transparent);
 }
 
 .feed-noun--info {
-  background: color-mix(in srgb, var(--om-info) 12%, transparent);
+  background: color-mix(in srgb, var(--om-info) 16%, transparent);
   color: var(--om-info);
+  border-color: color-mix(in srgb, var(--om-info) 30%, transparent);
 }
 
 .feed-noun--success {
-  background: color-mix(in srgb, var(--om-success) 12%, transparent);
+  background: color-mix(in srgb, var(--om-success) 16%, transparent);
   color: var(--om-success);
+  border-color: color-mix(in srgb, var(--om-success) 30%, transparent);
 }
 
 .feed-noun--warn {
-  background: color-mix(in srgb, var(--om-warning) 14%, transparent);
+  background: color-mix(in srgb, var(--om-warning) 18%, transparent);
   color: var(--om-warning);
+  border-color: color-mix(in srgb, var(--om-warning) 32%, transparent);
+}
+
+.feed-noun--violet {
+  background: color-mix(in srgb, #8b5cf6 16%, transparent);
+  color: #a78bfa;
+  border-color: color-mix(in srgb, #8b5cf6 32%, transparent);
+}
+
+.feed-noun--cyan {
+  background: color-mix(in srgb, #06b6d4 14%, transparent);
+  color: #22d3ee;
+  border-color: color-mix(in srgb, #06b6d4 30%, transparent);
 }
 
 .feed-time {
-  color: var(--om-text-3);
-  font-size: 11.5px;
+  color: var(--om-text-2);
+  font-size: 12px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
 }
