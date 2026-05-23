@@ -9,6 +9,7 @@ const props = defineProps<{
   groups: string[]
   displayTotal: number
   scanningGlobal: boolean
+  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -91,7 +92,7 @@ function setQueueMode(value: SlangQueueMode) {
 
 <template>
   <div class="slang-control-strip">
-    <div class="slang-control-strip__segments" role="tablist" aria-label="黑话审核队列">
+    <div v-if="!props.embedded" class="slang-control-strip__segments" role="tablist" aria-label="黑话审核队列">
       <NTooltip v-for="option in queueOptions" :key="option.value" :disabled="!option.tooltip" placement="top">
         <template #trigger>
           <button

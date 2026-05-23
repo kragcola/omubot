@@ -23,7 +23,6 @@ const {
   selectedTermIds,
   displayTotal,
   pageCount,
-  setQueueMode,
   resetFilters,
   runGlobalScan,
   openDetail,
@@ -37,7 +36,7 @@ const {
 
 <template>
   <section class="slang-fold-pane">
-    <SlangSummaryBar :summary="summary" @switch-queue-mode="setQueueMode" />
+    <SlangSummaryBar :summary="summary" :embedded="true" />
 
     <SlangQueueToolbar
       v-model:search-text="searchText"
@@ -49,6 +48,7 @@ const {
       :groups="groups"
       :display-total="displayTotal"
       :scanning-global="scanningGlobal"
+      :embedded="true"
       @reset="resetFilters"
       @scan-global="runGlobalScan"
     />

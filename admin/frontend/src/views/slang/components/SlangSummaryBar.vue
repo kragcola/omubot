@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import type { SlangQueueMode, SlangSummary } from '../helpers/types'
 
-defineProps<{
+const props = defineProps<{
   summary: SlangSummary
+  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'switch-queue-mode', mode: SlangQueueMode): void
 }>()
+
+function onSwitchMode(mode: SlangQueueMode) {
+  if (props.embedded) return
+  emit('switch-queue-mode', mode)
+}
 
 function statusColor(status: string): string {
   if (status === 'success') return 'var(--om-success)'
@@ -28,18 +34,30 @@ function statusText(status: string): string {
 <template>
   <div class="slang-summary-bar">
     <div class="slang-summary-bar__row">
-      <button class="slang-summary-bar__count slang-summary-bar__count--warning" @click="emit('switch-queue-mode', 'candidate')">
+      <component
+        :is="props.embedded ? 'span' : 'button'"
+        class="slang-summary-bar__count slang-summary-bar__count--warning"
+        @click="onSwitchMode('candidate')"
+      >
         <span class="slang-summary-bar__label">待清池</span>
         <strong>{{ summary.candidate_unreviewed_count + summary.under_observation_count + summary.drift_count }}</strong>
-      </button>
-      <button class="slang-summary-bar__count slang-summary-bar__count--success" @click="emit('switch-queue-mode', 'approved')">
+      </component>
+      <component
+        :is="props.embedded ? 'span' : 'button'"
+        class="slang-summary-bar__count slang-summary-bar__count--success"
+        @click="onSwitchMode('approved')"
+      >
         <span class="slang-summary-bar__label">已批准</span>
         <strong>{{ summary.approved_count }}</strong>
-      </button>
-      <button class="slang-summary-bar__count slang-summary-bar__count--danger" @click="emit('switch-queue-mode', 'ai_rejected')">
+      </component>
+      <component
+        :is="props.embedded ? 'span' : 'button'"
+        class="slang-summary-bar__count slang-summary-bar__count--danger"
+        @click="onSwitchMode('ai_rejected')"
+      >
         <span class="slang-summary-bar__label">已否决</span>
         <strong>{{ summary.ai_rejected_count }}</strong>
-      </button>
+      </component>
 
       <span class="slang-summary-bar__sep"></span>
 
@@ -53,13 +71,14 @@ function statusText(status: string): string {
       <span class="slang-summary-bar__pill">
         活跃群 <strong>{{ summary.group_count }}</strong>
       </span>
-      <button
+      <component
         v-if="summary.drift_count > 0"
+        :is="props.embedded ? 'span' : 'button'"
         class="slang-summary-bar__pill slang-summary-bar__pill--warn"
-        @click="emit('switch-queue-mode', 'drift')"
+        @click="onSwitchMode('drift')"
       >
         ⚠ {{ summary.drift_count }} 个漂移待处理
-      </button>
+      </component>
     </div>
   </div>
 </template>

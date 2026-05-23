@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-05-23 学习管道 v3 fold-in：黑话槽双轴根除，单轴回收
+
+**变更类型**：admin/frontend 信息架构修复 / bind-mount 即生效
+
+**触发**：用户截图 + 原话「待审-已否决 / 入库-已批准 / 命中-没有对应 / 归档-全部，子tab选择黑话，目前tab栏跳转黑话逻辑是错的。你不是说不要双tab吗？这是什么」。
+
+诊断：
+
+- stage→queueMode 映射本身**正确**（review→ai_rejected / approved→approved / archived→all / hits→null）—— 这是 `SlangFoldInProvider.stageToQueueMode()` 已经在做的，用户原话其实是在**确认期望**。
+- 真问题：`SlangMainPane.vue` 同时挂了 `<SlangSummaryBar>` + `<SlangQueueToolbar>`，两个组件内部各自渲染了与父 stage strip 语义重叠的子 tab：
+  - SummaryBar 三个 count 按钮（待清池 / 已批准 / 已否决）+ 漂移红色 pill —— 都 `emit('switch-queue-mode', ...)`
+  - QueueToolbar `.slang-control-strip__segments` 5 个分段 tab（待清池 / 语义漂移 / 已批准 / 已否决 / 全部）—— 双向绑定 `queueMode`
+- 这违反 v3 fold-in §3 单轴约束：「主轴只剩一个 —— 5 阶段；三槽内容不能再有候选/待审/入库这种与主轴冲突的语义切换」。子 tab 切换不会反向同步到 LearningView 的 stage strip，导致 stage strip 还停留在「已批准」但内容已经变成「已否决」，用户看到的就是「逻辑错」。
+
+**实施**：
+
+- **`admin/frontend/src/views/slang/components/SlangQueueToolbar.vue`**：
+  - 新增 `embedded?: boolean` prop
+  - `<div class="slang-control-strip__segments">` 加 `v-if="!props.embedded"` —— fold-in 模式下整个 5 段 tab 条退场，仅保留搜索/群/置信/排序/重置/跨群扫描/总数
+- **`admin/frontend/src/views/slang/components/SlangSummaryBar.vue`**：
+  - 新增 `embedded?: boolean` prop
+  - 三个 count 按钮 + 漂移 pill 用 `<component :is="props.embedded ? 'span' : 'button'">` 动态切换标签 —— embedded 时 DOM 变成纯展示 `<span>`，无 button 语义、无键盘焦点、无 hover cursor；click handler 走 `onSwitchMode()` 包裹，`if (props.embedded) return` 双重保护
+  - 数字与色阶完全保留，只是不可点击
+- **`admin/frontend/src/views/learning/slots/slang/SlangMainPane.vue`**：
+  - 给两个子组件都传 `:embedded="true"`
+  - 移除 `<SlangSummaryBar @switch-queue-mode="setQueueMode">` 的事件桥接（embedded 模式下不会再 emit，桥接是死代码）
+  - 从 `useSlangConsoleInject()` 解构里删掉 `setQueueMode`（已不再使用）
+
+**约束保留**：
+
+- 独立 `/slang` 路由已 PR-D redirect 到 `/learning?noun=slang`，所以 SlangView 已不存在，`embedded` prop 默认 falsy 等于「没有人会以非 fold-in 方式使用这两个组件」—— 但保留 prop 默认行为，是为了未来若有独立审核页快速恢复
+- stage→queueMode 映射 0 改动 —— 这是用户已确认的正确行为
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ built in 17.15s；LearningView chunk **159.05 KB（gzip 45.66 KB，相对上一版 +0.38 KB ≈ embedded 条件渲染分支）**
+- D6 bind-mount，浏览器手测留给用户：5 个 stage tab 切换 → 主面板内容跟随；fold-in 区域内不再有任何「子 tab 跳转」入口
+- D7 stash 检查通过；只动 3 个 .vue + 1 个 admin/static/index.html（build 产物）
+- 跟踪文档 `docs/tracking/learning-pipeline-foldin.md` §9 已追加 1 行
+
+**回滚**：单 commit，`git revert <sha>` 即可恢复 fold-in 区域的双 tab。
+
+---
+
 ## 2026-05-23 信息速递改"双卡仪表盘底排"：单行紧凑流 + 群活跃榜并列
 
 **变更类型**：admin/frontend 信息架构 + 视觉重做 / bind-mount 即生效
