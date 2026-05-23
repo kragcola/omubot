@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-05-23 LearningTable 第三次重设计：单行表格 → Bento 卡片网格
+
+**变更类型**：admin/frontend 视觉收口 / bind-mount 即生效
+
+**触发**：上一版（`f58b444`）把 26px 单行做出来后用户反馈「审美呢？空白干嘛的？多用卡片」。问题不在密度，在范式选错——审核场景里「单行密集 + hover 操作 + 字段稀疏」是字典查询页的范式，每行右侧其实没填满；用户要的是仪表盘风格，卡内字段要装满，不靠减小行高获得密度。
+
+**搜索调研**：
+
+- Bento Grid Dashboard（Apple/Linear 2026 主流）—— 不对称 tile 网格，密度靠每个 tile 内部装满，不靠行间距
+- shadcn Reviews Moderation Queue —— severity stripe + 元数据 grid + 动作按钮的卡片，是审核场景标准
+- 飞书设计指南 —— 卡片 padding 12px、4N 间距、标题 14-16px Medium、辅助 12px
+- InfoQ「UI 密度」本质：`价值 / 时空`——卡片不是空的，是装满
+
+**重设计**（commit `8bbe608`）
+
+`admin/frontend/src/views/learning/components/LearningTable.vue` 第三次完全重写：
+
+- **CSS Grid `repeat(auto-fill, minmax(300px, 1fr))`**：1280 屏 4 列 / 1600 屏 5 列 / mobile 1 列；卡片 124px 高
+- **每张卡 4 行结构**（`grid-template-rows: auto auto 1fr auto`）：
+  - 顶行：kind chip（10.5px/600 灰底）+ 时间·置信右对齐 11px tabular-nums
+  - 标题行：14px/600 单行 ellipsis（--om-text-1）
+  - 内容行：12px / `-webkit-line-clamp: 2` / `word-break: break-word` 的 PUA 词条释义预览，用 `content_full` 兜底——**直接卡内可见，无需点详情**
+  - 底行 dashed 分隔：群号 chip + 状态 chip（带状态色 `color-mix 14%` 背景）+ 审核/详情按钮
+- **左侧 3px 状态色 stripe**：absolute 定位、top/bottom 10px、宽 3px、success/pending/rejected/neutral 对应 --om-success/--om-warning/--om-danger/--om-text-3
+- **hover/focus**：border-strong + surface-2 50% mix + stripe opacity 0.85→1 + 操作按钮 fade-in（opacity 0→1，translateX 4→0px）+ 微 box-shadow
+- **状态 chip**：根据 statusTone 切换背景与文字色（success → success 14% bg + success text）
+- **mobile @720px**：grid 单列 + 操作按钮常驻 opacity 1
+- **a11y**：`tabindex="0"` + Enter 触发 openDetail，键盘可达
+
+**emit 契约保持不变**：`openDetail / reviewItem / loadMore` 三个事件继续沿用。
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ built in 10.83s；LearningView chunk 149.63 KB（gzip 42.64 KB，相对 f58b444 -0.32 KB）
+- 视觉验证留给用户在浏览器手测（D6：bind-mount 已生效）
+
+**回滚链**：
+
+- `git revert 8bbe608` → 回到 26px 单行表格行（f58b444）
+- 再 `git revert f58b444` → 回到行卡片版（dfe9d97）
+- 再 `git revert dfe9d97` → 回到原 7 列 NDataTable
+
+---
+
 ## 2026-05-23 LearningTable 二次重设计：行卡片 → 仪表盘级密集行（26px/row）
 
 **变更类型**：admin/frontend 视觉收口 / bind-mount 即生效
