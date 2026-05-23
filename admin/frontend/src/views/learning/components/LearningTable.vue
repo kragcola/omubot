@@ -30,7 +30,7 @@ function statusTone(status: string): StatusTone {
 
 function formatConfidence(value: number | null): string {
   if (value === null || Number.isNaN(Number(value))) return '——'
-  return `${Math.round(Number(value) * 100)}`
+  return `${Math.round(Number(value) * 100)}%`
 }
 
 function formatTime(value: string): string {
@@ -52,69 +52,64 @@ function shortGroup(value: string): string {
   return `…${value.slice(-5)}`
 }
 
-function statusGlyph(tone: StatusTone): string {
-  if (tone === 'success') return '✓'
-  if (tone === 'pending') return '·'
-  if (tone === 'rejected') return '✕'
-  return '·'
+function preview(item: LearningItem): string {
+  const text = item.content_full || item.content || ''
+  if (!text) return '暂无内容预览'
+  if (text === item.content) return text
+  return text
 }
 </script>
 
 <template>
-  <div class="lt">
-    <div v-if="loading && !items.length" class="lt-loading">
-      <NSkeleton v-for="i in 18" :key="i" :height="26" :sharp="true" />
+  <div class="lg">
+    <div v-if="loading && !items.length" class="lg-grid">
+      <NSkeleton v-for="i in 12" :key="i" :height="124" :sharp="false" :border-radius="10" />
     </div>
 
-    <template v-else-if="items.length">
-      <header class="lt-head">
-        <span class="lt-col lt-col--dot" />
-        <span class="lt-col lt-col--kind">类型</span>
-        <span class="lt-col lt-col--title">条目</span>
-        <span class="lt-col lt-col--group">群</span>
-        <span class="lt-col lt-col--time">时间</span>
-        <span class="lt-col lt-col--conf">置信</span>
-        <span class="lt-col lt-col--status">状态</span>
-        <span class="lt-col lt-col--act" />
-      </header>
-
-      <div class="lt-body">
-        <button
-          v-for="item in items"
-          :key="item.id"
-          type="button"
-          class="lt-row"
-          :class="`lt-row--${statusTone(item.status)}`"
-          @click="emit('openDetail', item)"
-        >
-          <span
-            class="lt-col lt-col--dot"
-            :title="item.status_label || item.status"
-          >{{ statusGlyph(statusTone(item.status)) }}</span>
-          <span class="lt-col lt-col--kind">{{ item.kind_label }}</span>
-          <span class="lt-col lt-col--title" :title="item.content_full || item.content">
-            {{ item.content || '——' }}
+    <div v-else-if="items.length" class="lg-grid">
+      <article
+        v-for="item in items"
+        :key="item.id"
+        class="card"
+        :class="`card--${statusTone(item.status)}`"
+        tabindex="0"
+        @click="emit('openDetail', item)"
+        @keyup.enter="emit('openDetail', item)"
+      >
+        <header class="card-top">
+          <span class="card-kind">{{ item.kind_label }}</span>
+          <span class="card-meta-inline">
+            <span class="card-time">{{ formatTime(item.created_at) }}</span>
+            <span v-if="item.confidence !== null" class="card-conf">{{ formatConfidence(item.confidence) }}</span>
           </span>
-          <span class="lt-col lt-col--group" :title="item.group_id">{{ shortGroup(item.group_id) }}</span>
-          <span class="lt-col lt-col--time">{{ formatTime(item.created_at) }}</span>
-          <span class="lt-col lt-col--conf">{{ formatConfidence(item.confidence) }}</span>
-          <span class="lt-col lt-col--status">{{ item.status_label || item.status }}</span>
-          <span class="lt-col lt-col--act" @click.stop>
+        </header>
+
+        <h4 class="card-title" :title="item.content">{{ item.content || '——' }}</h4>
+
+        <p class="card-body" :title="preview(item)">{{ preview(item) }}</p>
+
+        <footer class="card-bottom" @click.stop>
+          <span class="card-group" :title="item.group_id">
+            <span class="card-group-key">群</span>
+            <span class="card-group-val">{{ shortGroup(item.group_id) }}</span>
+          </span>
+          <span class="card-status">{{ item.status_label || item.status }}</span>
+          <span class="card-acts">
             <button
               v-if="item.review_drawer"
               type="button"
-              class="lt-act"
+              class="card-act card-act--primary"
               @click="emit('reviewItem', item)"
-            >审</button>
+            >审核</button>
             <button
               type="button"
-              class="lt-act"
+              class="card-act"
               @click="emit('openDetail', item)"
-            >详</button>
+            >详情</button>
           </span>
-        </button>
-      </div>
-    </template>
+        </footer>
+      </article>
+    </div>
 
     <EmptyState
       v-else
@@ -123,189 +118,234 @@ function statusGlyph(tone: StatusTone): string {
       description="当前筛选下没有学习条目。"
     />
 
-    <div v-if="hasMore" class="lt-footer">
-      <NButton size="tiny" :loading="loadingMore" @click="emit('loadMore')">加载更多</NButton>
+    <div v-if="hasMore" class="lg-footer">
+      <NButton size="small" :loading="loadingMore" @click="emit('loadMore')">加载更多</NButton>
     </div>
   </div>
 </template>
 
 <style scoped>
-.lt {
+.lg {
   display: grid;
-  gap: 0;
+  gap: 12px;
   font-feature-settings: 'tnum' 1;
 }
 
-.lt-loading {
+.lg-grid {
   display: grid;
-  gap: 1px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 10px;
 }
 
-.lt-head,
-.lt-row {
-  display: grid;
-  grid-template-columns:
-    20px              /* dot */
-    44px              /* kind */
-    minmax(0, 1fr)    /* title */
-    72px              /* group */
-    72px              /* time */
-    36px              /* conf */
-    52px              /* status */
-    auto;             /* act */
-  align-items: center;
-  column-gap: 12px;
-  padding: 0 12px;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.lt-head {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  height: 24px;
-  color: var(--om-text-3);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  background: color-mix(in srgb, var(--om-surface-2) 70%, var(--om-surface-solid));
-  border-bottom: 1px solid var(--om-border);
-}
-
-.lt-body {
-  display: grid;
-  gap: 0;
-}
-
-.lt-row {
+.card {
   position: relative;
-  height: 26px;
-  border: 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--om-border) 55%, transparent);
-  background: transparent;
-  color: var(--om-text-1);
-  text-align: left;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 6px;
+  min-height: 124px;
+  padding: 10px 12px 10px 16px;
+  border: 1px solid var(--om-border);
+  border-radius: 10px;
+  background: var(--om-surface-solid);
   cursor: pointer;
-  transition: background-color 0.12s ease;
-}
-
-.lt-row:hover {
-  background: color-mix(in srgb, var(--om-surface-2) 60%, transparent);
-}
-
-.lt-row:focus-visible {
-  outline: none;
-  background: color-mix(in srgb, var(--om-info) 12%, transparent);
-}
-
-.lt-col {
-  min-width: 0;
+  text-align: left;
   overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  transition: border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
-.lt-col--dot {
-  justify-self: center;
-  width: 14px;
-  height: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--om-text-3);
+.card::before {
+  content: '';
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 6px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--om-text-3);
+  opacity: 0.5;
+  transition: opacity 0.16s ease, background-color 0.16s ease;
 }
 
-.lt-row--success .lt-col--dot { color: var(--om-success); }
-.lt-row--pending .lt-col--dot { color: var(--om-warning); }
-.lt-row--rejected .lt-col--dot { color: var(--om-danger); }
+.card--success::before { background: var(--om-success); opacity: 0.85; }
+.card--pending::before { background: var(--om-warning); opacity: 0.85; }
+.card--rejected::before { background: var(--om-danger); opacity: 0.7; }
 
-.lt-col--kind {
-  color: var(--om-text-3);
-  font-size: 11px;
-  letter-spacing: 0.02em;
+.card:hover,
+.card:focus-visible {
+  border-color: var(--om-border-strong);
+  background: color-mix(in srgb, var(--om-surface-2) 50%, var(--om-surface-solid));
+  box-shadow: 0 1px 0 0 color-mix(in srgb, var(--om-border) 60%, transparent);
+  outline: none;
 }
 
-.lt-col--title {
-  color: var(--om-text-1);
-  font-weight: 500;
-}
-
-.lt-col--group,
-.lt-col--time,
-.lt-col--conf {
-  color: var(--om-text-3);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-.lt-col--conf::after {
-  content: '%';
-  margin-left: 1px;
-  color: var(--om-text-3);
-  opacity: 0.55;
-}
-
-.lt-col--status {
-  color: var(--om-text-2);
-  font-size: 11px;
-  text-align: right;
-}
-
-.lt-row--success .lt-col--status { color: var(--om-success); }
-.lt-row--pending .lt-col--status { color: var(--om-warning); }
-.lt-row--rejected .lt-col--status { color: var(--om-danger); }
-
-.lt-col--act {
-  display: inline-flex;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-
-.lt-row:hover .lt-col--act,
-.lt-row:focus-visible .lt-col--act {
+.card:hover::before,
+.card:focus-visible::before {
   opacity: 1;
 }
 
-.lt-act {
+.card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.card-kind {
+  display: inline-flex;
+  align-items: center;
   height: 18px;
   padding: 0 6px;
-  border: 1px solid color-mix(in srgb, var(--om-border-strong) 70%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--om-text-2) 10%, transparent);
+  color: var(--om-text-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.card-meta-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--om-text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-conf {
+  color: var(--om-text-2);
+  font-weight: 500;
+}
+
+.card-title {
+  margin: 0;
+  color: var(--om-text-1);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.005em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-body {
+  margin: 0;
+  color: var(--om-text-2);
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+}
+
+.card-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed color-mix(in srgb, var(--om-border) 65%, transparent);
+  font-size: 11px;
+}
+
+.card-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--om-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.card-group-key {
+  opacity: 0.7;
+}
+
+.card-group-val {
+  color: var(--om-text-2);
+}
+
+.card-status {
+  margin-left: auto;
+  padding: 1px 6px;
   border-radius: 3px;
+  background: color-mix(in srgb, var(--om-text-3) 12%, transparent);
+  color: var(--om-text-2);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.card--success .card-status {
+  background: color-mix(in srgb, var(--om-success) 14%, transparent);
+  color: var(--om-success);
+}
+.card--pending .card-status {
+  background: color-mix(in srgb, var(--om-warning) 14%, transparent);
+  color: var(--om-warning);
+}
+.card--rejected .card-status {
+  background: color-mix(in srgb, var(--om-danger) 14%, transparent);
+  color: var(--om-danger);
+}
+
+.card-acts {
+  display: inline-flex;
+  gap: 4px;
+  opacity: 0;
+  transform: translateX(4px);
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.card:hover .card-acts,
+.card:focus-visible .card-acts {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.card-act {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--om-border-strong) 70%, transparent);
+  border-radius: 4px;
   background: var(--om-surface-solid);
   color: var(--om-text-2);
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
-  transition: background-color 0.1s ease, color 0.1s ease;
+  transition: background-color 0.1s ease, color 0.1s ease, border-color 0.1s ease;
 }
 
-.lt-act:hover {
+.card-act:hover {
   background: var(--om-surface-2);
   color: var(--om-text-1);
 }
 
-.lt-footer {
+.card-act--primary {
+  border-color: color-mix(in srgb, var(--om-info) 50%, transparent);
+  color: var(--om-info);
+}
+
+.card-act--primary:hover {
+  background: color-mix(in srgb, var(--om-info) 12%, transparent);
+  color: var(--om-info);
+}
+
+.lg-footer {
   display: flex;
   justify-content: center;
-  padding: 8px 0 0;
+  padding-top: 4px;
 }
 
 @media (max-width: 720px) {
-  .lt-head,
-  .lt-row {
-    grid-template-columns: 20px 44px minmax(0, 1fr) 72px 36px;
-    column-gap: 8px;
+  .lg-grid {
+    grid-template-columns: 1fr;
   }
-  .lt-col--time,
-  .lt-col--status,
-  .lt-col--act {
-    display: none;
+  .card-acts {
+    opacity: 1;
+    transform: none;
   }
 }
 </style>
