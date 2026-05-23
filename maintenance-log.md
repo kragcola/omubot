@@ -4,6 +4,47 @@
 
 ---
 
+## 2026-05-23 学习管道：LearningTable 行卡列表 → 卡片网格统一
+
+**变更类型**：admin/frontend 视觉重设计 / bind-mount 即生效
+
+**触发**：用户截图 + 原话「统一卡片格式，不要使用这样简陋的列表」。
+
+**问题**：`LearningTable` 当前是 26px 单行密集表（`f58b444` 时代为追求信息密度而做），与同页内 fold-in 槽（slang/style/episode 主面板都是卡片化）+ AllOverviewDashboard 的「3×2 模块卡」+ slot side panel 的 MetricCard 视觉语言不一致 —— `noun=memory` Bug A 修复后让 LearningTable 接管 memory 主面板，密集表的简陋感与 26 张活跃记忆的内容反差被立刻放大。
+
+**实施**：
+
+- **`admin/frontend/src/views/learning/components/LearningTable.vue`** 整体重写为卡片网格：
+  - 容器：`grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))`，gap 10px —— 与 AllOverviewDashboard `.ov-modules__grid` 同源
+  - 单卡（`.lt-card`）：12/14px padding、10px 圆角、`var(--om-surface-solid)` 底色、3px 状态色侧栏（`success/pending/rejected/neutral`，由 `statusTone(status)` 派生），与 LearningTable 上一版的状态语义保留
+  - 三段结构：
+    - head：kind chip（11px 灰底）+ status 文本（success/warning/danger 着色）
+    - title：`-webkit-line-clamp: 2`，13.5px 主字号，`break-word`
+    - foot：dashed 分隔线 + group / time / conf chip 三段 meta，hover 时右侧浮出「审核 / 详情」两个 22px 按钮
+  - 交互：tabindex=0 + role=button + Enter/Space keydown 等价 click，hover translateY(-1px) + shadow-sm + border-strong
+  - 加载：8 张 `<div class="lt-skeleton">` 占位（NSkeleton 4 段：kind / title / subtitle / meta）—— 替代原先 18×26px 单行 NSkeleton
+  - emit 契约 `openDetail / reviewItem / loadMore` 0 改动，LearningView 零改动
+  - mobile (≤720px) 单列堆叠 + actions 始终可见（无 hover）
+
+**约束保留**：
+
+- 状态色映射、kind label、shortGroup（>8 字符截断为 …xxxxxx）、formatTime（zh-CN MM-DD HH:mm）逻辑不变
+- 26px 单行表的下沉留给 fact / graph_relation 槽（PR-E 阶段如需密集表可重新派生）
+- AllOverviewDashboard 的 26px 信息速递不动（那是 Live Feed 语义，刻意走更高密度）
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ 11.23s；LearningView chunk **157.20 KB（gzip 45.41 KB，相对上一版 −0.22 KB）** —— 列容器/装饰 CSS 与卡片样式抵消
+- D6 bind-mount，浏览器手测留给用户：
+  - `/learning?noun=memory&stage=approved` 主面板从「26 行密集列表」变为「自适应卡片网格」
+  - 列宽 320px 起，1280px 视口 ≈ 4 列；笔记本 ≈ 3 列
+  - hover 时 actions 浮出，与 AllOverviewDashboard 模块卡 hover 行为同源
+
+**回滚**：单 commit，`git revert <sha>` 即可恢复 26px 单行表。
+
+---
+
 ## 2026-05-23 学习管道：noun=memory 数据源修正 + inventory stage 默认 date=all
 
 **变更类型**：admin/frontend 数据流 bug + UX 一致性 / bind-mount 即生效

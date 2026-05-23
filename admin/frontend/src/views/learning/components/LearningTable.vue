@@ -28,9 +28,9 @@ function statusTone(status: string): StatusTone {
   return 'neutral'
 }
 
-function formatConfidence(value: number | null): string {
-  if (value === null || Number.isNaN(Number(value))) return '——'
-  return `${Math.round(Number(value) * 100)}`
+function formatConfidence(value: number | null): string | null {
+  if (value === null || Number.isNaN(Number(value))) return null
+  return `${Math.round(Number(value) * 100)}%`
 }
 
 function formatTime(value: string): string {
@@ -48,71 +48,70 @@ function formatTime(value: string): string {
 
 function shortGroup(value: string): string {
   if (!value) return '——'
-  if (value.length <= 6) return value
-  return `…${value.slice(-5)}`
-}
-
-function statusGlyph(tone: StatusTone): string {
-  if (tone === 'success') return '✓'
-  if (tone === 'pending') return '·'
-  if (tone === 'rejected') return '✕'
-  return '·'
+  if (value.length <= 8) return value
+  return `…${value.slice(-6)}`
 }
 </script>
 
 <template>
   <div class="lt">
-    <div v-if="loading && !items.length" class="lt-loading">
-      <NSkeleton v-for="i in 18" :key="i" :height="26" :sharp="true" />
+    <div v-if="loading && !items.length" class="lt-grid lt-grid--loading">
+      <div v-for="i in 8" :key="i" class="lt-skeleton">
+        <NSkeleton :width="56" :height="14" :sharp="false" />
+        <NSkeleton :height="16" :sharp="false" style="margin-top: 10px" />
+        <NSkeleton :width="180" :height="14" :sharp="false" style="margin-top: 6px" />
+        <NSkeleton :width="120" :height="12" :sharp="false" style="margin-top: 14px" />
+      </div>
     </div>
 
     <template v-else-if="items.length">
-      <header class="lt-head">
-        <span class="lt-col lt-col--dot" />
-        <span class="lt-col lt-col--kind">类型</span>
-        <span class="lt-col lt-col--title">条目</span>
-        <span class="lt-col lt-col--group">群</span>
-        <span class="lt-col lt-col--time">时间</span>
-        <span class="lt-col lt-col--conf">置信</span>
-        <span class="lt-col lt-col--status">状态</span>
-        <span class="lt-col lt-col--act" />
-      </header>
-
-      <div class="lt-body">
-        <button
+      <div class="lt-grid">
+        <article
           v-for="item in items"
           :key="item.id"
-          type="button"
-          class="lt-row"
-          :class="`lt-row--${statusTone(item.status)}`"
+          class="lt-card"
+          :class="`lt-card--${statusTone(item.status)}`"
+          tabindex="0"
+          role="button"
           @click="emit('openDetail', item)"
+          @keydown.enter.prevent="emit('openDetail', item)"
+          @keydown.space.prevent="emit('openDetail', item)"
         >
-          <span
-            class="lt-col lt-col--dot"
-            :title="item.status_label || item.status"
-          >{{ statusGlyph(statusTone(item.status)) }}</span>
-          <span class="lt-col lt-col--kind">{{ item.kind_label }}</span>
-          <span class="lt-col lt-col--title" :title="item.content_full || item.content">
+          <header class="lt-card__head">
+            <span class="lt-card__kind">{{ item.kind_label }}</span>
+            <span class="lt-card__status">{{ item.status_label || item.status }}</span>
+          </header>
+
+          <p class="lt-card__title" :title="item.content_full || item.content">
             {{ item.content || '——' }}
-          </span>
-          <span class="lt-col lt-col--group" :title="item.group_id">{{ shortGroup(item.group_id) }}</span>
-          <span class="lt-col lt-col--time">{{ formatTime(item.created_at) }}</span>
-          <span class="lt-col lt-col--conf">{{ formatConfidence(item.confidence) }}</span>
-          <span class="lt-col lt-col--status">{{ item.status_label || item.status }}</span>
-          <span class="lt-col lt-col--act" @click.stop>
-            <button
-              v-if="item.review_drawer"
-              type="button"
-              class="lt-act"
-              @click="emit('reviewItem', item)"
-            >审</button>
-            <button
-              type="button"
-              class="lt-act"
-              @click="emit('openDetail', item)"
-            >详</button>
-          </span>
-        </button>
+          </p>
+
+          <footer class="lt-card__foot">
+            <span class="lt-card__meta lt-card__meta--group" :title="item.group_id">
+              {{ shortGroup(item.group_id) }}
+            </span>
+            <span class="lt-card__meta lt-card__meta--time">{{ formatTime(item.created_at) }}</span>
+            <span
+              v-if="formatConfidence(item.confidence)"
+              class="lt-card__meta lt-card__meta--conf"
+            >
+              {{ formatConfidence(item.confidence) }}
+            </span>
+            <span class="lt-card__actions" @click.stop>
+              <button
+                v-if="item.review_drawer"
+                type="button"
+                class="lt-card__act"
+                @click="emit('reviewItem', item)"
+              >审核</button>
+              <button
+                type="button"
+                class="lt-card__act lt-card__act--ghost"
+                @click="emit('openDetail', item)"
+              >详情</button>
+            </span>
+          </footer>
+        </article>
       </div>
     </template>
 
@@ -124,7 +123,7 @@ function statusGlyph(tone: StatusTone): string {
     />
 
     <div v-if="hasMore" class="lt-footer">
-      <NButton size="tiny" :loading="loadingMore" @click="emit('loadMore')">加载更多</NButton>
+      <NButton size="small" :loading="loadingMore" @click="emit('loadMore')">加载更多</NButton>
     </div>
   </div>
 </template>
@@ -132,180 +131,211 @@ function statusGlyph(tone: StatusTone): string {
 <style scoped>
 .lt {
   display: grid;
-  gap: 0;
+  gap: 12px;
   font-feature-settings: 'tnum' 1;
 }
 
-.lt-loading {
+.lt-grid {
   display: grid;
-  gap: 1px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 10px;
 }
 
-.lt-head,
-.lt-row {
-  display: grid;
-  grid-template-columns:
-    20px              /* dot */
-    44px              /* kind */
-    minmax(0, 1fr)    /* title */
-    72px              /* group */
-    72px              /* time */
-    36px              /* conf */
-    52px              /* status */
-    auto;             /* act */
-  align-items: center;
-  column-gap: 12px;
-  padding: 0 12px;
-  font-size: 12px;
-  line-height: 1;
+.lt-skeleton {
+  display: block;
+  padding: 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 10px;
+  background: var(--om-surface-solid);
+  min-height: 120px;
 }
 
-.lt-head {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  height: 24px;
-  color: var(--om-text-3);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  background: color-mix(in srgb, var(--om-surface-2) 70%, var(--om-surface-solid));
-  border-bottom: 1px solid var(--om-border);
-}
-
-.lt-body {
-  display: grid;
-  gap: 0;
-}
-
-.lt-row {
+.lt-card {
   position: relative;
-  height: 26px;
-  border: 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--om-border) 55%, transparent);
-  background: transparent;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 10px;
+  background: var(--om-surface-solid);
   color: var(--om-text-1);
-  text-align: left;
   cursor: pointer;
-  transition: background-color 0.12s ease;
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
 }
 
-.lt-row:hover {
-  background: color-mix(in srgb, var(--om-surface-2) 60%, transparent);
+.lt-card::before {
+  content: '';
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--om-text-3);
+  opacity: 0.45;
+  transition: background-color 0.16s ease, opacity 0.16s ease;
 }
 
-.lt-row:focus-visible {
+.lt-card--success::before { background: var(--om-success); opacity: 1; }
+.lt-card--pending::before { background: var(--om-warning); opacity: 1; }
+.lt-card--rejected::before { background: var(--om-danger); opacity: 0.85; }
+
+.lt-card:hover,
+.lt-card:focus-visible {
+  border-color: var(--om-border-strong);
+  background: color-mix(in srgb, var(--om-surface-2) 35%, var(--om-surface-solid));
   outline: none;
-  background: color-mix(in srgb, var(--om-info) 12%, transparent);
+  transform: translateY(-1px);
+  box-shadow: var(--om-shadow-sm);
 }
 
-.lt-col {
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+.lt-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 18px;
 }
 
-.lt-col--dot {
-  justify-self: center;
-  width: 14px;
-  height: 14px;
+.lt-card__kind {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--om-text-3) 14%, transparent);
+  color: var(--om-text-2);
   font-size: 11px;
-  font-weight: 700;
-  color: var(--om-text-3);
-}
-
-.lt-row--success .lt-col--dot { color: var(--om-success); }
-.lt-row--pending .lt-col--dot { color: var(--om-warning); }
-.lt-row--rejected .lt-col--dot { color: var(--om-danger); }
-
-.lt-col--kind {
-  color: var(--om-text-3);
-  font-size: 11px;
+  font-weight: 500;
   letter-spacing: 0.02em;
 }
 
-.lt-col--title {
-  color: var(--om-text-1);
-  font-weight: 500;
+.lt-card__status {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--om-text-3);
 }
 
-.lt-col--group,
-.lt-col--time,
-.lt-col--conf {
+.lt-card--success .lt-card__status { color: var(--om-success); }
+.lt-card--pending .lt-card__status { color: var(--om-warning); }
+.lt-card--rejected .lt-card__status { color: var(--om-danger); }
+
+.lt-card__title {
+  margin: 0;
+  color: var(--om-text-1);
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.lt-card__foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 6px;
+  border-top: 1px dashed color-mix(in srgb, var(--om-border) 70%, transparent);
   color: var(--om-text-3);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  text-align: right;
+  min-height: 26px;
 }
 
-.lt-col--conf::after {
-  content: '%';
-  margin-left: 1px;
-  color: var(--om-text-3);
-  opacity: 0.55;
-}
-
-.lt-col--status {
-  color: var(--om-text-2);
-  font-size: 11px;
-  text-align: right;
-}
-
-.lt-row--success .lt-col--status { color: var(--om-success); }
-.lt-row--pending .lt-col--status { color: var(--om-warning); }
-.lt-row--rejected .lt-col--status { color: var(--om-danger); }
-
-.lt-col--act {
+.lt-card__meta {
   display: inline-flex;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity 0.12s ease;
+  align-items: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.lt-row:hover .lt-col--act,
-.lt-row:focus-visible .lt-col--act {
+.lt-card__meta--group {
+  max-width: 9ch;
+}
+
+.lt-card__meta--time {
+  color: var(--om-text-3);
+}
+
+.lt-card__meta--conf {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--om-info) 12%, transparent);
+  color: var(--om-text-2);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.lt-card__actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+
+.lt-card:hover .lt-card__actions,
+.lt-card:focus-visible .lt-card__actions,
+.lt-card:focus-within .lt-card__actions {
   opacity: 1;
 }
 
-.lt-act {
-  height: 18px;
-  padding: 0 6px;
+.lt-card__act {
+  height: 22px;
+  padding: 0 9px;
   border: 1px solid color-mix(in srgb, var(--om-border-strong) 70%, transparent);
-  border-radius: 3px;
+  border-radius: 4px;
   background: var(--om-surface-solid);
   color: var(--om-text-2);
   font-size: 11px;
+  font-weight: 500;
   line-height: 1;
   cursor: pointer;
-  transition: background-color 0.1s ease, color 0.1s ease;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 
-.lt-act:hover {
+.lt-card__act:hover {
   background: var(--om-surface-2);
   color: var(--om-text-1);
+  border-color: var(--om-border-strong);
+}
+
+.lt-card__act--ghost {
+  background: transparent;
+  color: var(--om-text-3);
+}
+
+.lt-card__act--ghost:hover {
+  background: color-mix(in srgb, var(--om-surface-2) 60%, transparent);
+  color: var(--om-text-2);
 }
 
 .lt-footer {
   display: flex;
   justify-content: center;
-  padding: 8px 0 0;
+  padding: 4px 0 0;
 }
 
 @media (max-width: 720px) {
-  .lt-head,
-  .lt-row {
-    grid-template-columns: 20px 44px minmax(0, 1fr) 72px 36px;
-    column-gap: 8px;
+  .lt-grid {
+    grid-template-columns: 1fr;
   }
-  .lt-col--time,
-  .lt-col--status,
-  .lt-col--act {
-    display: none;
+  .lt-card__actions {
+    opacity: 1;
   }
 }
 </style>
