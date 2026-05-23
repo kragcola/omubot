@@ -5,7 +5,13 @@ import { api } from '../../api/client'
 import LearningReviewHost from './components/LearningReviewHost.vue'
 import LearningTable from './components/LearningTable.vue'
 import StageStrip from './components/StageStrip.vue'
+import NounComingSoonCard from './slots/NounComingSoonCard.vue'
+import NounDrawerHost from './slots/NounDrawerHost.vue'
+import NounSidePanelSlot from './slots/NounSidePanelSlot.vue'
+import NounToolbarSlot from './slots/NounToolbarSlot.vue'
+import type { NounSlotContext } from './slots/types'
 import type {
+  LearningDateFilter,
   LearningExtractNounKey,
   LearningExtractNounProgress,
   LearningExtractNounStatus,
@@ -13,14 +19,12 @@ import type {
   LearningExtractRunStatus,
   LearningItem,
   LearningItemsResponse,
+  LearningNounFilter,
   LearningNounKey,
   LearningSortKey,
   LearningStageKey,
   StageStripItem,
 } from './types'
-
-type LearningNounFilter = LearningNounKey | 'all'
-type LearningDateFilter = 'today' | '7d' | '30d' | 'all'
 
 interface PipelineStagePayload {
   total: number
@@ -208,6 +212,16 @@ const combinedWarnings = computed(() => [
   ...(pipeline.value?.warnings ?? []),
   ...itemWarnings.value,
 ])
+
+const slotContext = computed<NounSlotContext>(() => ({
+  noun: activeNoun.value,
+  stage: activeStage.value,
+  group: activeGroup.value,
+  date: activeDate.value,
+  refresh,
+}))
+
+const showNounSlots = computed(() => activeNoun.value !== 'all')
 
 const formattedAsOf = computed(() => {
   if (!pipeline.value?.as_of) return '尚未同步'
@@ -688,6 +702,7 @@ function formatCount(value: number | null): string {
             :options="sortOptions"
             @update:value="updateSort"
           />
+          <NounToolbarSlot v-if="showNounSlots" :ctx="slotContext" />
         </template>
       </PageToolbar>
 
@@ -786,25 +801,36 @@ function formatCount(value: number | null): string {
         />
       </section>
 
-      <section class="learning-items">
-        <header class="learning-items__header">
-          <div>
-            <span class="learning-snapshot__eyebrow">Learning Items</span>
-            <h2>{{ activeStageItem.label }}列表</h2>
-          </div>
-          <span>{{ learningItems.length }} 条</span>
-        </header>
-        <LearningTable
-          :items="learningItems"
-          :loading="itemsLoading"
-          :has-more="hasMoreItems"
-          :loading-more="moreLoading"
-          @review-item="openReview"
-          @open-detail="openItemDetail"
-          @load-more="loadMoreItems"
-        />
-      </section>
+      <div
+        class="learning-body"
+        :class="{ 'learning-body--with-side': showNounSlots }"
+      >
+        <section class="learning-items">
+          <header class="learning-items__header">
+            <div>
+              <span class="learning-snapshot__eyebrow">Learning Items</span>
+              <h2>{{ activeStageItem.label }}列表</h2>
+            </div>
+            <span>{{ learningItems.length }} 条</span>
+          </header>
+          <LearningTable
+            :items="learningItems"
+            :loading="itemsLoading"
+            :has-more="hasMoreItems"
+            :loading-more="moreLoading"
+            @review-item="openReview"
+            @open-detail="openItemDetail"
+            @load-more="loadMoreItems"
+          />
+        </section>
+
+        <NounSidePanelSlot v-if="showNounSlots" :ctx="slotContext">
+          <NounComingSoonCard :ctx="slotContext" />
+        </NounSidePanelSlot>
+      </div>
     </div>
+
+    <NounDrawerHost v-if="showNounSlots" :ctx="slotContext" />
 
     <LearningReviewHost
       v-model:show="reviewOpen"
@@ -818,6 +844,16 @@ function formatCount(value: number | null): string {
 .learning-page {
   display: grid;
   gap: 16px;
+}
+
+.learning-body {
+  display: grid;
+  gap: 16px;
+}
+
+.learning-body--with-side {
+  grid-template-columns: minmax(0, 1fr) 320px;
+  align-items: start;
 }
 
 .learning-page__group {
@@ -1000,6 +1036,12 @@ function formatCount(value: number | null): string {
 
 .learning-noun-row--empty {
   opacity: 0.64;
+}
+
+@media (max-width: 1180px) {
+  .learning-body--with-side {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 760px) {

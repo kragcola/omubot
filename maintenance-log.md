@@ -4,6 +4,70 @@
 
 ---
 
+## 2026-05-23 学习管道 v3 (Fold-in) 立项 + PR-A 槽骨架落地
+
+**变更类型**：frontend 架构演进 / bind-mount 即生效
+
+**背景**：
+
+v2.1 已经把 5 个名词（slang / style / episode / memory / fact / graph_relation）的 5 阶段统一到 `/learning`，但 `slang / style / cross-group / episodes / memory-consolidator` 5 个老页面仍以独立路由挂在「学习与记忆」分组里，造成「老页面功能全 / 新管道视图统一」的二选一困境。用户明确要求 **「不要跳转专门旧页面，所以内容都要在新管线中整合完成」**——即把老页面的所有交互（设置抽屉、漂移卡、AI 清理、批量、统计、抽取进度等）**搬进** `/learning`，老路由 redirect，老入口删除。
+
+**v3 设计要点**（详见 `docs/tracking/learning-pipeline-foldin.md`）：
+
+- 主轴只剩**一个**：5 阶段 StageStrip
+- 名词差异通过**正交三槽**暴露：`NounToolbarSlot` / `NounSidePanelSlot` / `NounDrawerHost`
+- 三槽内容**禁止**再有「候选/待审/入库」类与主轴冲突的语义
+- 老路由 `/slang /style /cross-group /episodes /memory-consolidator` 全部 redirect 到 `/learning?noun=...`
+- SideMenu 「学习与记忆」分组最终收敛到 3 项：学习管道 / 知识库 / BlockTrace
+
+**PR 切片**：A 骨架 → B slang → C 其余 4 noun → D redirect + 菜单 → E 后端列表收敛。本次仅落 PR-A。
+
+**PR-A 改动**：
+
+- 新增 `admin/frontend/src/views/learning/slots/`
+  - `types.ts` — `NounSlotContext` 接口（noun / stage / group / date / refresh）
+  - `NounToolbarSlot.vue` — PageToolbar 右侧延伸槽
+  - `NounSidePanelSlot.vue` — 主列表右侧栏槽
+  - `NounDrawerHost.vue` — Teleport 抽屉挂载点
+  - `NounComingSoonCard.vue` — PR-A 占位卡（PR-B/C 替换为 noun 专属内容）
+- `views/learning/types.ts` 提取 `LearningNounFilter` / `LearningDateFilter` 为公共类型，slot 模块复用
+- `views/learning/LearningView.vue`：
+  - 引入 4 个 slot 组件 + `slotContext` computed + `showNounSlots`（`activeNoun !== 'all'` 时为 true）
+  - PageToolbar 右侧追加 `<NounToolbarSlot>`（空槽）
+  - 学习条目区域包入 `learning-body` 网格容器；当 `showNounSlots` 时切换到 `1fr / 320px` 双栏，右栏挂 `<NounSidePanelSlot>` + `NounComingSoonCard` 占位
+  - 页面尾部追加 `<NounDrawerHost>`
+  - 新增 `@media (max-width: 1180px)` 退化为单列
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 errors
+- `npm run build` → 成功，10.98s；产物 `LearningView-48o19UA6.js` 25.84 KB（slot 引入约 +0.5 KB）；其它 chunk 体积无意外波动
+- 5 阶段主轴回归：StageStrip 切换 / 刷新 / 一键抽取按钮逻辑未触碰
+- `activeNoun === 'all'` 时三槽不渲染，页面与 v2.1 视图一致
+- `activeNoun !== 'all'` 时右栏出现 ComingSoonCard 占位，工具栏槽与抽屉槽为空（PR-B/C 填充）
+
+**为何不开 docker rebuild**：
+
+- `admin/static` 是 bind-mount，仅前端构建产物变更，无 .py 改动 → 浏览器硬刷新即生效（D6）
+
+**风险与回滚**：
+
+- 风险低：纯加法 PR，无现有交互被改写
+- 回滚路径：`git revert <PR-A sha>` 即可，5 个新文件 + LearningView 局部增量
+
+**影响范围**：
+
+- 前端：仅 `admin/frontend/src/views/learning/`
+- 后端：无改动
+- 用户可见：`activeNoun !== 'all'` 时多出右侧「即将到来」占位卡 —— 这是 PR-A 验收信号，PR-B/C 会替换为真实内容
+
+**Handoff**：
+
+- PR-B 起点：把 `views/slang/components/*` 通过 `git mv` 迁到 `views/learning/slots/slang/components/`，然后实现 `SlangToolbarSlot.vue` / `SlangSidePanelSlot.vue` / `SlangDrawerHost.vue` 三个具体槽，再在 LearningView 内做 `noun → slot 组件` 的派发（建议用一个 `defineAsyncComponent` 表）
+- 跟踪文档：`docs/tracking/learning-pipeline-foldin.md` §9 实施日志填入 PR-A commit sha 后再起 PR-B
+
+---
+
 ## 2026-05-23 学习管道 v2.1 上线后两处回归修复
 
 **变更类型**：frontend 回归修复 / bind-mount 即生效

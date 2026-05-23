@@ -2,6 +2,10 @@ export type LearningStageKey = 'candidate' | 'review' | 'approved' | 'hits' | 'a
 
 export type LearningSortKey = 'newest' | 'confidence' | 'group'
 
+export type LearningDateFilter = 'today' | '7d' | '30d' | 'all'
+
+export type LearningNounFilter = LearningNounKey | 'all'
+
 export type LearningNounKey =
   | 'slang'
   | 'style'
