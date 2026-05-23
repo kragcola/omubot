@@ -222,6 +222,47 @@ const feedRows = computed<FeedRow[]>(() => {
   }))
 })
 
+interface RankRow {
+  group: string
+  groupShort: string
+  count: number
+  pct: number
+  byNoun: Partial<Record<LearningNounKey, number>>
+  topNoun: LearningNounKey
+}
+
+const groupRanking = computed<RankRow[]>(() => {
+  const acc = new Map<string, { count: number; byNoun: Map<LearningNounKey, number> }>()
+  for (const item of props.items) {
+    const key = item.group_id || '——'
+    let bucket = acc.get(key)
+    if (!bucket) {
+      bucket = { count: 0, byNoun: new Map() }
+      acc.set(key, bucket)
+    }
+    bucket.count += 1
+    bucket.byNoun.set(item.noun, (bucket.byNoun.get(item.noun) ?? 0) + 1)
+  }
+  const list = Array.from(acc.entries())
+    .map(([group, b]) => {
+      let topNoun: LearningNounKey = 'slang'
+      let topVal = -1
+      const byNoun: Partial<Record<LearningNounKey, number>> = {}
+      for (const [noun, n] of b.byNoun) {
+        byNoun[noun] = n
+        if (n > topVal) {
+          topVal = n
+          topNoun = noun
+        }
+      }
+      return { group, groupShort: shortGroup(group), count: b.count, byNoun, topNoun, pct: 0 }
+    })
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 8)
+  const max = list[0]?.count ?? 1
+  return list.map(r => ({ ...r, pct: max > 0 ? r.count / max : 0 }))
+})
+
 function maxStageValue(mod: NounModule): number {
   let max = 0
   for (const stage of stageOrder) {
@@ -317,31 +358,31 @@ function maxStageValue(mod: NounModule): number {
       </div>
     </section>
 
-    <section class="ov-feed">
-      <header class="ov-section-head">
-        <span class="ov-eyebrow">Live Feed</span>
-        <h3>信息速递</h3>
-        <span class="ov-meta">
-          最近 {{ feedRows.length }} 条 · {{ asOf || '尚未同步' }}
-        </span>
-      </header>
+    <section class="ov-bottom">
+      <article class="ov-feed">
+        <header class="ov-section-head">
+          <span class="ov-eyebrow">Live Feed</span>
+          <h3>信息速递</h3>
+          <span class="ov-meta">
+            最近 {{ feedRows.length }} 条 · {{ asOf || '尚未同步' }}
+          </span>
+        </header>
 
-      <div v-if="loading && !feedRows.length" class="ov-feed__loading">
-        <NSkeleton v-for="i in 6" :key="i" :height="40" />
-      </div>
+        <div v-if="loading && !feedRows.length" class="ov-feed__loading">
+          <NSkeleton v-for="i in 6" :key="i" :height="36" />
+        </div>
 
-      <ol v-else-if="feedRows.length" class="ov-feed__list">
-        <li
-          v-for="row in feedRows"
-          :key="row.id"
-          class="feed-row"
-          :class="`feed-row--${row.tone}`"
-          @click="emit('openItem', props.items.find(it => it.id === row.id)!)"
-        >
-          <span class="feed-dot" :title="row.statusLabel" />
-          <div class="feed-main">
-            <div class="feed-title" :title="row.title">{{ row.title }}</div>
-            <div class="feed-meta">
+        <ol v-else-if="feedRows.length" class="ov-feed__list">
+          <li
+            v-for="row in feedRows"
+            :key="row.id"
+            class="feed-row"
+            :class="`feed-row--${row.tone}`"
+            @click="emit('openItem', props.items.find(it => it.id === row.id)!)"
+          >
+            <span class="feed-dot" :title="row.statusLabel" />
+            <span class="feed-title" :title="row.title">{{ row.title }}</span>
+            <span class="feed-meta">
               <span class="feed-meta__status">{{ row.statusLabel || '——' }}</span>
               <span class="feed-meta__sep">·</span>
               <span class="feed-meta__group">群 {{ row.group }}</span>
@@ -349,21 +390,57 @@ function maxStageValue(mod: NounModule): number {
                 <span class="feed-meta__sep">·</span>
                 <span class="feed-meta__conf">{{ Math.round(row.conf * 100) }}%</span>
               </template>
-            </div>
-          </div>
-          <div class="feed-side">
+            </span>
             <span class="feed-noun" :class="`feed-noun--${row.nounTone}`">{{ row.nounLabel }}</span>
             <span class="feed-time">{{ row.time }}</span>
-          </div>
-        </li>
-      </ol>
+          </li>
+        </ol>
 
-      <EmptyState
-        v-else
-        compact
-        title="暂无最新条目"
-        description="抽取产物或审核结果会在这里实时滚动。"
-      />
+        <EmptyState
+          v-else
+          compact
+          title="暂无最新条目"
+          description="抽取产物或审核结果会在这里实时滚动。"
+        />
+      </article>
+
+      <article class="ov-rank">
+        <header class="ov-section-head">
+          <span class="ov-eyebrow">Group Activity</span>
+          <h3>群活跃榜</h3>
+          <span class="ov-meta">Top {{ groupRanking.length }}</span>
+        </header>
+
+        <div v-if="loading && !groupRanking.length" class="ov-rank__loading">
+          <NSkeleton v-for="i in 6" :key="i" :height="32" />
+        </div>
+
+        <ol v-else-if="groupRanking.length" class="ov-rank__list">
+          <li
+            v-for="(row, idx) in groupRanking"
+            :key="row.group"
+            class="rank-row"
+          >
+            <span class="rank-idx">{{ idx + 1 }}</span>
+            <span class="rank-group" :title="row.group">群 {{ row.groupShort }}</span>
+            <span class="rank-bar">
+              <span
+                class="rank-bar__fill"
+                :class="`rank-bar__fill--${nounToneOf(row.topNoun)}`"
+                :style="{ width: `${Math.max(6, row.pct * 100)}%` }"
+              />
+            </span>
+            <span class="rank-count">{{ row.count }}</span>
+          </li>
+        </ol>
+
+        <EmptyState
+          v-else
+          compact
+          title="尚无活跃数据"
+          description="抽取后会按群聚合显示。"
+        />
+      </article>
     </section>
   </div>
 </template>
@@ -627,7 +704,22 @@ function maxStageValue(mod: NounModule): number {
   font-style: italic;
 }
 
-/* ---------- 信息速递 ---------- */
+/* ---------- 底排两栏 ---------- */
+.ov-bottom {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.ov-feed,
+.ov-rank {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* ---------- 信息速递（单行紧凑流） ---------- */
 .ov-feed__list {
   list-style: none;
   margin: 0;
@@ -648,11 +740,11 @@ function maxStageValue(mod: NounModule): number {
 .feed-row {
   position: relative;
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-columns: 8px auto minmax(0, 1fr) auto auto;
   align-items: center;
   column-gap: 12px;
-  min-height: 52px;
-  padding: 10px 14px;
+  height: 36px;
+  padding: 0 14px;
   border-bottom: 1px solid color-mix(in srgb, var(--om-border) 55%, transparent);
   cursor: pointer;
   transition: background-color 0.12s ease;
@@ -678,29 +770,28 @@ function maxStageValue(mod: NounModule): number {
 .feed-row--pending .feed-dot { background: var(--om-warning); opacity: 1; }
 .feed-row--rejected .feed-dot { background: var(--om-danger); opacity: 1; }
 
-.feed-main {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
 .feed-title {
   color: var(--om-text-1);
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 500;
-  line-height: 1.3;
+  line-height: 1.2;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 18ch;
 }
 
 .feed-meta {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   color: var(--om-text-3);
-  font-size: 12px;
+  font-size: 11.5px;
   line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .feed-meta__status {
@@ -720,17 +811,10 @@ function maxStageValue(mod: NounModule): number {
   font-variant-numeric: tabular-nums;
 }
 
-.feed-side {
-  display: grid;
-  justify-items: end;
-  gap: 6px;
-  min-width: 96px;
-}
-
 .feed-noun {
-  padding: 3px 10px;
+  padding: 2px 8px;
   border-radius: 999px;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 1.3;
   letter-spacing: 0.02em;
@@ -770,11 +854,91 @@ function maxStageValue(mod: NounModule): number {
 }
 
 .feed-time {
-  color: var(--om-text-2);
-  font-size: 12px;
-  font-weight: 500;
+  color: var(--om-text-3);
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
+  min-width: 56px;
+  text-align: right;
+}
+
+/* ---------- 群活跃榜 ---------- */
+.ov-rank__list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--om-border);
+  border-radius: 10px;
+  background: var(--om-surface-solid);
+  overflow: hidden;
+}
+
+.ov-rank__loading {
+  display: grid;
+  gap: 4px;
+}
+
+.rank-row {
+  display: grid;
+  grid-template-columns: 22px 70px minmax(0, 1fr) 36px;
+  align-items: center;
+  column-gap: 10px;
+  height: 36px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+
+.rank-idx {
+  color: var(--om-text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.rank-row:nth-child(1) .rank-idx { color: var(--om-warning); }
+.rank-row:nth-child(2) .rank-idx { color: var(--om-info); }
+.rank-row:nth-child(3) .rank-idx { color: var(--om-success); }
+
+.rank-group {
+  color: var(--om-text-2);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rank-bar {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 6px;
+  background: color-mix(in srgb, var(--om-border) 55%, transparent);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.rank-bar__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--om-text-3);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.rank-bar__fill--info { background: var(--om-info); }
+.rank-bar__fill--success { background: var(--om-success); }
+.rank-bar__fill--warn { background: var(--om-warning); }
+.rank-bar__fill--violet { background: #a78bfa; }
+.rank-bar__fill--cyan { background: #22d3ee; }
+
+.rank-count {
+  color: var(--om-text-1);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 @media (max-width: 1100px) {
@@ -783,6 +947,12 @@ function maxStageValue(mod: NounModule): number {
   }
   .ov-kpi {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ov-bottom {
+    grid-template-columns: 1fr;
+  }
+  .feed-title {
+    max-width: 24ch;
   }
 }
 
@@ -794,6 +964,7 @@ function maxStageValue(mod: NounModule): number {
   .feed-row {
     grid-template-columns: 8px minmax(0, 1fr) auto;
   }
+  .feed-meta,
   .feed-noun {
     display: none;
   }

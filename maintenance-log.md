@@ -4,6 +4,47 @@
 
 ---
 
+## 2026-05-23 信息速递改"双卡仪表盘底排"：单行紧凑流 + 群活跃榜并列
+
+**变更类型**：admin/frontend 信息架构 + 视觉重做 / bind-mount 即生效
+
+**触发**：用户反馈截图——单卡通栏 1500px+ 宽度只放 5–6 字短词条，行内中间留下大片空白「养鱼」，质问「你知道仪表盘怎么设计的多卡片结合么」。问题不是行高也不是字号，是底排只有 1 个全宽卡片，没有第二个内容来吃掉横向 real estate。
+
+**调研**：典型仪表盘底排（Linear / Vercel / Grafana）都不是单卡通栏，而是「Activity Feed + Top N 排行」或「Activity Feed + 状态分布」并列。Feed 看具体动态，并列卡片看分布或排行，互为佐证；同时把 Feed 收窄到 6/12 比例后单条行内就不再有空白，meta 直接挨在标题后面。
+
+**实施**（文件 `admin/frontend/src/views/learning/components/AllOverviewDashboard.vue`）：
+
+- **新增 `<section class="ov-bottom">`**：`grid-template-columns: 7fr 5fr` 两栏，等高拉伸，gap 12px
+  - 左栏 `.ov-feed`：保留信息速递
+  - 右栏 `.ov-rank`：**新增「群活跃榜」**
+- **Feed row 单行紧凑流**：从「2 行 × 52px min-height」改为「1 行 × 36px 固定高」
+  - grid 5 列：`8px dot · auto title · 1fr meta · auto chip · auto time`
+  - 标题 `max-width: 18ch` 限宽，避免 5 字词条把后面 meta 推到右边
+  - meta inline 跟在标题后：`状态 · 群 ⋯xxxx · 置信%`
+  - chip 紧贴 meta 后，时间最右锚定
+  - 字号阶梯：标题 13.5/500、meta/chip 11.5/600、时间 11
+- **新增 `groupRanking` computed**：按 `group_id` 聚合 props.items，取 top 8
+  - 每行：序号 + `群 ⋯xxxx` + 6px 高横向 bar（按该群 topNoun 着色，slang→cyan、style→violet、episode→info、memory→success、fact→warn）+ count
+  - 序号 1/2/3 着 warning/info/success，标准排行榜视觉
+- **响应式**：≤1100px 退化为单列堆叠（feed 上、rank 下，feed title 放宽到 24ch）；≤720px 隐藏 meta 与 chip
+
+**视觉差异**：
+
+- 之前：单卡通栏 12 行 × 52px = 624px 高、行内左右 1000px+ 空白
+- 之后：双卡 12 行 × 36px = 432px 高、横向 7:5 分割；每条 Feed 行 meta 紧贴标题，无空白；右侧 8 行 rank bar 提供第二维度信息（哪个群最活跃 + 主导 noun 类型）
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ built in 11.11s；LearningView chunk **158.67 KB（gzip 45.62 KB，相对上一版 +1.47 KB ≈ rank computed + bar 样式）**
+- D6 bind-mount，浏览器手测留给用户
+- 跟踪文档 `docs/tracking/learning-pipeline-foldin.md` §9 已追加 1 行
+- D7 stash 检查通过
+
+**回滚**：单 commit，`git revert <sha>` 即可还原到单卡通栏 52px 词条版。
+
+---
+
 ## 2026-05-23 信息速递词条式重做：主流字号 + 单列 12 行
 
 **变更类型**：admin/frontend 视觉重做 / bind-mount 即生效
