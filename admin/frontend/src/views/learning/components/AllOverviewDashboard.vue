@@ -182,7 +182,7 @@ const nounModules = computed<NounModule[]>(() => {
 })
 
 const feedRows = computed<FeedRow[]>(() => {
-  return props.items.slice(0, 12).map(item => ({
+  return props.items.slice(0, 18).map(item => ({
     id: item.id,
     noun: item.noun,
     nounLabel: item.kind_label || props.nounLabels[item.noun] || item.noun,
@@ -299,7 +299,7 @@ function maxStageValue(mod: NounModule): number {
       </header>
 
       <div v-if="loading && !feedRows.length" class="ov-feed__loading">
-        <NSkeleton v-for="i in 6" :key="i" :height="32" />
+        <NSkeleton v-for="i in 9" :key="i" :height="26" />
       </div>
 
       <ol v-else-if="feedRows.length" class="ov-feed__list">
@@ -593,6 +593,7 @@ function maxStageValue(mod: NounModule): number {
   margin: 0;
   padding: 0;
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0;
   border: 1px solid var(--om-border);
   border-radius: 10px;
@@ -607,18 +608,24 @@ function maxStageValue(mod: NounModule): number {
 
 .feed-row {
   display: grid;
-  grid-template-columns: 78px 44px minmax(0, 1fr) 64px 36px;
+  grid-template-columns: 60px 36px minmax(0, 1fr) 52px 30px;
   align-items: center;
-  column-gap: 12px;
-  height: 30px;
-  padding: 0 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--om-border) 55%, transparent);
-  font-size: 12px;
+  column-gap: 8px;
+  height: 26px;
+  padding: 0 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--om-border) 45%, transparent);
+  font-size: 11.5px;
   cursor: pointer;
   transition: background-color 0.12s ease;
 }
 
-.feed-row:last-child { border-bottom: 0; }
+.feed-row:nth-child(even) {
+  border-left: 1px dashed color-mix(in srgb, var(--om-border) 60%, transparent);
+}
+
+.feed-row:nth-last-child(-n+2) {
+  border-bottom: 0;
+}
 
 .feed-row:hover {
   background: color-mix(in srgb, var(--om-surface-2) 60%, transparent);
@@ -626,13 +633,14 @@ function maxStageValue(mod: NounModule): number {
 
 .feed-time {
   color: var(--om-text-3);
-  font-size: 11px;
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
 
 .feed-kind {
   color: var(--om-text-3);
-  font-size: 11px;
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
 }
 
 .feed-row--success .feed-kind { color: var(--om-success); }
@@ -650,7 +658,7 @@ function maxStageValue(mod: NounModule): number {
 .feed-group,
 .feed-conf {
   color: var(--om-text-3);
-  font-size: 11px;
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -662,6 +670,18 @@ function maxStageValue(mod: NounModule): number {
   .ov-kpi {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .ov-feed__list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .feed-row:nth-child(even) {
+    border-left: 0;
+  }
+  .feed-row:nth-last-child(-n+2) {
+    border-bottom: 1px solid color-mix(in srgb, var(--om-border) 45%, transparent);
+  }
+  .feed-row:last-child {
+    border-bottom: 0;
+  }
 }
 
 @media (max-width: 720px) {
@@ -670,7 +690,7 @@ function maxStageValue(mod: NounModule): number {
     grid-template-columns: 1fr;
   }
   .feed-row {
-    grid-template-columns: 64px minmax(0, 1fr) 56px;
+    grid-template-columns: 60px minmax(0, 1fr) 52px;
   }
   .feed-kind,
   .feed-conf {

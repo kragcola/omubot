@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-05-23 信息速递加密：单列 12 行 → 双列 18 行
+
+**变更类型**：admin/frontend 视觉密度调优 / bind-mount 即生效
+
+**触发**：仪表盘三段式落地后（`5c58179`）用户反馈「信息速递太空了，几个字就占一整行」。问题是单列 30px 行 + `1fr` title 在「黑话/反思」这种几个字的短词条上确实大量留白。
+
+**搜索调研**：
+
+- shadcn Activity Feed / Customer.io Activity Logs：高密度日志靠「行紧凑 + 多列并排 + 视觉 type 区分」，不靠大间距
+- ui-patterns Activity Stream「Make it easy to scan」：扫读靠 type 颜色/对齐而非行高
+- LayoutPrompts 双列：仪表盘场景里 `2 × N grid` 比 `1 × 2N` 横向利用率高且保留时间顺序
+
+**调优**（文件 `admin/frontend/src/views/learning/components/AllOverviewDashboard.vue`，CSS only）：
+
+- `<ol class="ov-feed__list">`：`display: grid` + `grid-template-columns: repeat(2, minmax(0, 1fr))` —— 单列变双列
+- 行高 30px → **26px**，font-size 12px → **11.5px**，column-gap 12px → 8px，padding 12px → 10px
+- 列宽收紧：time 78px → 60px，kind 44px → 36px，group 64px → 52px，conf 36px → 30px；title 仍 `1fr`
+- 双列分隔：偶数行 `border-left: 1px dashed --om-border 60%` —— 视觉柱分隔但不喧宾夺主
+- 行底 border：透明度 55% → 45% 更轻；最后两行（双列对齐）`:nth-last-child(-n+2)` 去掉 border-bottom
+- `feedRows` 数量 12 → **18**（双列 9 行），同等纵向空间下信息密度 +50%
+- loading skeleton 6×32px → 9×26px，与新行高对齐
+- 媒体查询：≤1100px 退化到单列；≤720px 单列 + 隐藏 kind/conf
+
+**视觉差异**：
+
+- 之前：单列 12 行 × 30px = 360px 高、约 36 字宽 title，短词条留白严重
+- 之后：双列 9 行 × 26px = 234px 高、每行 18~24 字 title，短词条挨着出现，长词条 ellipsis；总条目 +50%
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ built in 10.80s；LearningView chunk **156.33 KB（gzip 44.78 KB，纯 CSS 调整无变化）**
+- bind-mount D6 已生效，浏览器手测留给用户
+
+**回滚**：`git revert <本次 sha>` → 单列 30px 12 行版
+
+---
+
 ## 2026-05-23 LearningTable 第四次重设计：列表 → 仪表盘三段式
 
 **变更类型**：admin/frontend 视觉范式切换 / bind-mount 即生效
