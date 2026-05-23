@@ -9,6 +9,7 @@ import {
 import MemoryToolbarContent from './MemoryToolbarContent.vue'
 import MemorySidePanelContent from './MemorySidePanelContent.vue'
 import MemoryDrawerContent from './MemoryDrawerContent.vue'
+import MemoryCardDrawerContent from './MemoryCardDrawerContent.vue'
 
 const props = defineProps<{
   stage: LearningStageKey
@@ -22,6 +23,10 @@ void props.mainPaneTarget
 
 const console_ = createMemoryConsole()
 provide(MEMORY_CONSOLE_KEY, console_)
+
+defineExpose({
+  openCardDetail: console_.openCardDetail,
+})
 
 console_.filterState.value = stageToCandidateState(props.stage)
 
@@ -65,4 +70,5 @@ onMounted(() => {
     <MemorySidePanelContent />
   </Teleport>
   <MemoryDrawerContent />
+  <MemoryCardDrawerContent />
 </template>

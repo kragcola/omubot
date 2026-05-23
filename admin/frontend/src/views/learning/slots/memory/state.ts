@@ -31,6 +31,23 @@ export interface Revision {
   meta: Record<string, any>
 }
 
+export interface MemoryCard {
+  card_id: string
+  category: string
+  category_label?: string
+  scope: string
+  scope_label?: string
+  scope_id: string
+  content: string
+  confidence: number
+  status: string
+  priority: number
+  source: string
+  series_id?: string | null
+  created_at: string
+  updated_at: string
+}
+
 export const DOMAIN_LABEL: Record<string, string> = {
   fact: '事实 fact',
   slang: '黑话 slang',
@@ -112,6 +129,11 @@ export function createMemoryConsole() {
   const decideAction = ref<'approved' | 'rejected'>('approved')
   const decideReason = ref('')
   const decideSubmitting = ref(false)
+
+  const cardDetail = ref<MemoryCard | null>(null)
+  const cardDrawerVisible = ref(false)
+  const cardLoading = ref(false)
+  const cardError = ref('')
 
   const filteredCandidates = computed(() => {
     return candidates.value.filter((c) => {
@@ -282,6 +304,51 @@ export function createMemoryConsole() {
     }
   }
 
+  async function openCardDetail(cardId: string) {
+    cardDrawerVisible.value = true
+    cardLoading.value = true
+    cardError.value = ''
+    cardDetail.value = null
+    try {
+      const data = await api<Partial<MemoryCard> & { error?: string }>(
+        `/api/admin/memory/cards/${encodeURIComponent(cardId)}`,
+      )
+      if (data.error || !data.card_id) {
+        cardError.value = data.error || '未找到目标记忆卡片'
+        return
+      }
+      cardDetail.value = data as MemoryCard
+    } catch (e: any) {
+      cardError.value = e?.message ? String(e.message) : '加载记忆卡片失败'
+    } finally {
+      cardLoading.value = false
+    }
+  }
+
+  function closeCardDetail() {
+    cardDrawerVisible.value = false
+    cardDetail.value = null
+    cardError.value = ''
+  }
+
+  async function expireCard() {
+    if (!cardDetail.value) return
+    const cardId = cardDetail.value.card_id
+    try {
+      const data = await api<{ ok?: boolean, error?: string }>(
+        `/api/admin/memory/cards/${encodeURIComponent(cardId)}/expire`,
+        { method: 'POST' },
+      )
+      if (data.error) {
+        cardError.value = data.error
+        return
+      }
+      closeCardDetail()
+    } catch (e: any) {
+      cardError.value = e?.message ? String(e.message) : '过期标记失败'
+    }
+  }
+
   return {
     loading,
     candidates,
@@ -302,6 +369,10 @@ export function createMemoryConsole() {
     decideReason,
     decideSubmitting,
     canEdit,
+    cardDetail,
+    cardDrawerVisible,
+    cardLoading,
+    cardError,
     fetchCandidates,
     openDetail,
     closeDetail,
@@ -311,6 +382,9 @@ export function createMemoryConsole() {
     openDecide,
     closeDecide,
     submitDecide,
+    openCardDetail,
+    closeCardDetail,
+    expireCard,
   }
 }
 

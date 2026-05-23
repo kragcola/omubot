@@ -17,6 +17,7 @@ const {
   lockNormalizerCluster,
   splitNormalizerItem,
   undoNormalizerAutoMerge,
+  openDetail,
 } = console_
 
 const PAGE_SIZE = 12
@@ -153,7 +154,7 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
           <button
             type="button"
             class="expression-item__config"
-            @click="setStatus(item, 'approved')"
+            @click="openDetail(item)"
           >
             <span class="expression-item__config-icon">
               <NIcon :component="ChevronForwardOutline" />

@@ -167,6 +167,19 @@ export function createStyleConsole() {
   const lastExtractResult = ref<StyleExtractResult | null>(null)
   const normalizerDetails = ref<Record<string, NormalizerClusterDetail>>({})
 
+  const detailItem = ref<StyleExpression | null>(null)
+  const drawerVisible = ref(false)
+
+  function openDetail(item: StyleExpression) {
+    detailItem.value = item
+    drawerVisible.value = true
+    void loadNormalizerDetail(item.normalization)
+  }
+
+  function closeDetail() {
+    drawerVisible.value = false
+  }
+
   function statusForRequest(): StyleStatus | '' | 'archived' {
     if (stageStatusFilter.value === 'all') return ''
     return stageStatusFilter.value
@@ -211,6 +224,10 @@ export function createStyleConsole() {
       expressions.value = expr
       profiles.value = profileResp.profiles || []
       feedback.value = feedbackResp.feedback || []
+      if (detailItem.value) {
+        const refreshed = expr.find(it => it.expression_id === detailItem.value!.expression_id)
+        if (refreshed) detailItem.value = refreshed
+      }
     } catch (error) {
       console.error('[style fold-in] loadAll failed', error)
     } finally {
@@ -417,6 +434,10 @@ export function createStyleConsole() {
     feedback,
     lastExtractResult,
     normalizerDetails,
+    detailItem,
+    drawerVisible,
+    openDetail,
+    closeDetail,
     loadAll,
     setStatus,
     sendFeedback,

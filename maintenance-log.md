@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-05-24 fold-in PR-C 尾巴 — style/memory 槽 Drawer 收口
+
+**变更类型**：admin/frontend learning 槽抽屉补完（fold-in PR-C 遗留）
+
+**内容**：把 [docs/tracking/learning-pipeline-foldin.md](docs/tracking/learning-pipeline-foldin.md) PR-C「style / episode / memory 折入」契约里 G3「0 跳转 / 详情抽屉」未补完的两块尾巴落地：
+
+- **style 槽**：新增 [StyleDrawerContent.vue](admin/frontend/src/views/learning/slots/style/StyleDrawerContent.vue) —— 表达详情 Drawer（状态/置信度/计数/归一化簇/锁定代表/拆分/撤销自动归并/反馈/批准/拒绝/静音）；[StyleMainPane.vue](admin/frontend/src/views/learning/slots/style/StyleMainPane.vue) 行级 chevron 按钮**改语义**：`@click="setStatus(item, 'approved')"` → `@click="openDetail(item)"`，原先一键审批属于状态突变无确认页，违反 G3 边界；[state.ts](admin/frontend/src/views/learning/slots/style/state.ts) 新增 `detailItem/drawerVisible/openDetail/closeDetail`，并在 `loadAll` 后用最新数据 in-place 刷新打开中的抽屉（避免审核完后看到旧值）。后端 `/api/admin/style/expressions/{id}/...` 系列端点已存在，无需新写。
+- **memory 槽**：新增 [MemoryCardDrawerContent.vue](admin/frontend/src/views/learning/slots/memory/MemoryCardDrawerContent.vue) —— 记忆卡片详情 Drawer（status/category/scope/content/confidence/priority/source/series_id/created_at/updated_at + 标记过期 popconfirm + 前往 /memory 管理深链）。区别于已有 `MemoryDrawerContent.vue`（candidate 审核 Drawer）：这是消费 `memory_cards` 表的入库视角。[state.ts](admin/frontend/src/views/learning/slots/memory/state.ts) 新增 `MemoryCard` 接口与 `cardDetail/cardDrawerVisible/cardLoading/cardError + openCardDetail/closeCardDetail/expireCard`，对接已存在的 [admin/routes/api/memory.py](admin/routes/api/memory.py) `GET /memory/cards/{id}` + `POST /memory/cards/{id}/expire`；[MemoryFoldInProvider.vue](admin/frontend/src/views/learning/slots/memory/MemoryFoldInProvider.vue) `defineExpose({ openCardDetail })` 让 LearningView 通过 `memoryProviderRef` 直拉。LearningView 的 `openItemDetail` 早在 NounSwitcher 时就已加上 `item.noun === 'memory' && item.id.startsWith('memory-')` → `memoryProviderRef.value.openCardDetail(cardId)` 分支，本轮抽屉补齐后这条路径才真正闭合。
+
+**影响**：把「memory 行点击跳到 `/memory?view=manage&card_id=...`」(L2 路径) 升级为 `/learning` 内**就地打开 Drawer**，符合 fold-in G2/G3「0 跳转」设计目标；style 槽行级误操作风险消除（误点不再直接 approve）。Style fold-in `loadAll` 抽屉数据自刷新避免审核后停留旧值。两个 Drawer 的 emit 契约 / fold-in 三槽契约 0 改动；无后端改动；其他 noun（slang/episode）不受影响。
+
+**验证**：`vue-tsc --noEmit` 干净；`npm run build` 成功，LearningView chunk **171.29 KB（gzip 49.25 KB，相对前版 +0.02 KB ≈ 两个 Drawer 模板/样式与 sub-chunk 抵消）**。回滚路径：删 `StyleDrawerContent.vue` + `MemoryCardDrawerContent.vue` 两个新文件 + 两个 Provider 的 import/render/expose + 两个 state.ts 的抽屉相关 ref/方法 + `StyleMainPane.vue` 行级 chevron 改回 `setStatus(item, 'approved')` 即可。
+
+---
+
 ## 2026-05-24 Docker 镜像/构建缓存清理 + bot 内存上限护栏
 
 **变更类型**：dev 主机 docker 资源回收 + compose 防御性内存上限 + 一键清理脚本
@@ -19,6 +34,18 @@
 **影响**：dev 主机磁盘从 65.99 GB 回到 2.241 GB（包含 4.477 GB volume），相当于回收掉之前 ~65 倍的镜像残留。`docker-compose.yml` bot 服务获得 mem_limit 防御红线；napcat service 行为零改动。本次未触碰任何 runtime 行为，bot 与 napcat 持续在线全程未掉线。
 
 **验证**：`docker stats` bot 282→127 MiB（recreate 后），napcat 308 MiB 不变；`docker compose config | grep mem_` 仅 bot 命中；`docker logs --tail 10 napcat` 与 bot 均显示活跃接群消息；admin `curl -s -o /dev/null -w "%{http_code}" /admin/`=200。回滚路径：删 docker-compose.yml 中 bot 的 `mem_limit/mem_reservation` 三行 + 注释（napcat 仍照原样）；`scripts/dev/docker-cleanup.sh` 是只读消费脚本，删除即可。
+
+---
+
+## 2026-05-24 Persona Source Importer S6/S10' admin SPA 首版落地
+
+**变更类型**：admin/frontend Persona Importer 页面 + persona source API
+
+**内容**：新增 `/admin/persona-importer` 管理端页面，接入 `source.md` 在线加载/保存、draft 导入/刷新、`_import_report.json` 的 Issues / Fields / Files 视图，以及 Pending Freeze 二次确认。后端新增 `GET/PUT /api/admin/persona/source/{persona_id}`，只读写 `config/persona/<id>-v2/source.md`；保存 source 后页面会阻止直接 Pending Freeze，要求重新 import，避免旧 draft 被暂存。
+
+**影响**：S6/S10' 已具备首版可用闭环：source 编辑 → import → report/draft 查看 → Pending Freeze。仍不写正式 runtime persona 路径；v2 compiler / Schema Freeze / RuntimeStateBus / SystemModule 未启动。双栏点击 issue 自动滚动并高亮 source 行还未实现，当前只显示 `source_span` 文本。
+
+**验证**：`ruff check` 覆盖 persona API/importer 相关文件通过；`pytest` 覆盖 `tests/test_persona_importer.py`、`tests/test_persona_importer_api.py`、LLM task/pipeline/config 相关测试，`45 passed`；`vue-tsc --noEmit` 通过；`npm run build` 成功，生成 `PersonaImporterView-cbtwzOB2.js` 与 `PersonaImporterView-CE0hmiqa.css`。
 
 ---
 

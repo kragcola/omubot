@@ -9,6 +9,7 @@ import {
 import StyleToolbarContent from './StyleToolbarContent.vue'
 import StyleSidePanelContent from './StyleSidePanelContent.vue'
 import StyleMainPane from './StyleMainPane.vue'
+import StyleDrawerContent from './StyleDrawerContent.vue'
 
 const props = defineProps<{
   stage: LearningStageKey
@@ -72,4 +73,5 @@ onMounted(() => {
   <Teleport v-if="showMainPane" :to="props.mainPaneTarget" defer>
     <StyleMainPane />
   </Teleport>
+  <StyleDrawerContent />
 </template>
