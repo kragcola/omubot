@@ -69,8 +69,10 @@ const router = createRouter({
     {
       path: '/slang',
       name: 'slang',
-      meta: { title: '群内黑话', keepAlive: true },
-      component: () => import('../views/slang/SlangView.vue'),
+      redirect: to => ({
+        path: '/learning',
+        query: { ...to.query, noun: 'slang' },
+      }),
     },
     {
       path: '/learning',
@@ -81,27 +83,34 @@ const router = createRouter({
     {
       path: '/style',
       name: 'style',
-      meta: { title: '表达方式', keepAlive: true },
-      component: () => import('../views/style/StyleView.vue'),
+      redirect: to => ({
+        path: '/learning',
+        query: { ...to.query, noun: 'style' },
+      }),
     },
     {
       path: '/cross-group',
       name: 'cross-group',
-      meta: { title: '跨群可见', keepAlive: true },
-      component: () => import('../views/cross-group/CrossGroupView.vue'),
+      redirect: to => ({
+        path: '/learning',
+        query: { ...to.query, noun: 'slang', scope: 'cross' },
+      }),
     },
     {
       path: '/episodes',
       name: 'episodes',
-      meta: { title: '经验反思', keepAlive: true },
-      component: () => import('../views/episodes/EpisodesView.vue'),
+      redirect: to => ({
+        path: '/learning',
+        query: { ...to.query, noun: 'episode' },
+      }),
     },
     {
       path: '/memory-consolidator',
       name: 'memory-consolidator',
-      meta: { title: '记忆候选', keepAlive: true },
-      component: () =>
-        import('../views/memory-consolidator/MemoryConsolidatorView.vue'),
+      redirect: to => ({
+        path: '/learning',
+        query: { ...to.query, noun: 'memory' },
+      }),
     },
     {
       path: '/block-trace',

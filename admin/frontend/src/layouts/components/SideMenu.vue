@@ -10,14 +10,9 @@ import {
   SettingsOutline,
   ServerOutline,
   NewspaperOutline,
-  PricetagsOutline,
   CubeOutline,
-  ChatbubbleEllipsesOutline,
   TerminalOutline,
-  GlobeOutline,
-  BulbOutline,
   AnalyticsOutline,
-  FunnelOutline,
 } from '@vicons/ionicons5'
 import { useAppStore } from '../../stores/app'
 
@@ -48,11 +43,6 @@ const menuOptions: MenuOption[] = [
     key: 'learning',
     children: [
       { label: '学习管道', key: '/learning', icon: renderIcon(AnalyticsOutline) },
-      { label: '群内黑话', key: '/slang', icon: renderIcon(PricetagsOutline) },
-      { label: '表达方式', key: '/style', icon: renderIcon(ChatbubbleEllipsesOutline) },
-      { label: '跨群可见', key: '/cross-group', icon: renderIcon(GlobeOutline) },
-      { label: '经验反思', key: '/episodes', icon: renderIcon(BulbOutline) },
-      { label: '记忆候选', key: '/memory-consolidator', icon: renderIcon(FunnelOutline) },
       { label: '知识库', key: '/knowledge', icon: renderIcon(LibraryOutline) },
       { label: 'BlockTrace', key: '/block-trace', icon: renderIcon(AnalyticsOutline) },
     ],
