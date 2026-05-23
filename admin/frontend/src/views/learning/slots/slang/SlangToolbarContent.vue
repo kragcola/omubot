@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import {
   PricetagsOutline,
-  RefreshOutline,
   SettingsOutline,
   SparklesOutline,
 } from '@vicons/ionicons5'
@@ -9,11 +8,9 @@ import { useSlangConsoleInject } from './injection'
 
 const console_ = useSlangConsoleInject()
 const {
-  refreshing,
   extracting,
   runningAiReview,
   settingsDrawerVisible,
-  loadAll,
   runExtract,
   runForceAiReview,
   openCreateDrawer,
@@ -22,12 +19,6 @@ const {
 
 <template>
   <NSpace align="center" :size="6">
-    <NButton secondary size="small" :loading="refreshing" @click="loadAll(true)">
-      <template #icon>
-        <NIcon :component="RefreshOutline" />
-      </template>
-      刷新
-    </NButton>
     <NButton secondary size="small" :loading="extracting" @click="runExtract">
       <template #icon>
         <NIcon :component="SparklesOutline" />
@@ -55,11 +46,14 @@ const {
       </template>
       新建
     </NButton>
-    <NButton quaternary size="small" @click="settingsDrawerVisible = true">
+  </NSpace>
+
+  <Teleport to="#learning-action-extra" defer>
+    <NButton secondary size="small" @click="settingsDrawerVisible = true">
       <template #icon>
         <NIcon :component="SettingsOutline" />
       </template>
-      设置
+      黑话设置
     </NButton>
-  </NSpace>
+  </Teleport>
 </template>

@@ -4,6 +4,62 @@
 
 ---
 
+## 2026-05-23 学习管道：toolbar 跨 noun 统一 + 词条卡片视觉同源
+
+**变更类型**：admin/frontend 视觉重设计 + 信息架构 / bind-mount 即生效
+
+**触发**：用户截图 + 原话「第一，统一管线页面全部词条卡片格式。单行使用类黑话，多行使用类风格。第二，如图，每个子页面tab栏都不同，尽量统一。将设置配置挪到总学习管道总览那里」。
+
+**问题**：
+
+- **toolbar 不齐**：slang slot 有 [刷新 / 抽取 / AI 清池 / 新建 / 设置]，style slot 有 [scope / sort / 刷新 / 抽取 / 生成档案]，episode slot 只有 [刷新]，memory slot 有 [consolidator chips / 刷新]。`刷新` 跟父级 LearningView header 的「刷新」冗余；`设置` 是 4 个 noun 里独有的，结构上不该挂在 fold-in 槽里
+- **词条卡片混杂**：LearningTable 上版改成卡片网格后，slang `.slang-term-row`（8px 圆角 + 单行 grid）与 style `.expression-item`（14px 圆角 + 双区文章）与 LearningTable `.lt-card`（10px 圆角 + 3px 状态色侧栏 + dashed footer）三套视觉语言并存
+
+**实施**：
+
+- **`admin/frontend/src/views/learning/LearningView.vue`**：header `#action` slot 加 `<span id="learning-action-extra" />` 作为 noun-aware 设置按钮的 Teleport target（位于「一键抽取 / 刷新」之前，noun 切换时按需出现）
+- **`admin/frontend/src/views/learning/slots/slang/SlangToolbarContent.vue`**：
+  - 删除 `刷新` 按钮 + `RefreshOutline` import + `loadAll` 解构（父级 LearningView 已有刷新）
+  - 「设置」按钮通过 `<Teleport to="#learning-action-extra" defer>` 挪到 hero header，icon + label 改成「黑话设置」（区分父级控件 vs noun 局部控件）
+- **`admin/frontend/src/views/learning/slots/episode/EpisodeToolbarContent.vue`**：删除唯一的「刷新」按钮，替换为一行 hint「由 Consolidator 周期写入；置信度 ≥ 0.6 自动晋升 candidate」—— 让 toolbar 区域至少不空
+- **`admin/frontend/src/views/learning/slots/style/StyleToolbarContent.vue`**：删除「刷新」（保留 scope filter / sort / 抽取 / 生成档案，因为这些是 noun 特有）
+- **`admin/frontend/src/views/learning/slots/memory/MemoryToolbarContent.vue`**：删除「刷新」（保留 consolidator 域 chips）
+
+- **`admin/frontend/src/views/slang/components/SlangTermList.vue`** 单行卡视觉同源：
+  - 加 `statusTone(status: SlangStatus)` 派生 `success/pending/rejected/neutral`（approved → success / candidate → pending / expired → rejected / muted → neutral）
+  - 行 wrapper 加 `slang-term-row--{tone}` class
+  - `.slang-term-row` CSS 重写：8px → 10px 圆角，10px 14px 10px 18px padding（左侧让出 3px stripe），`::before` 3px 状态色侧栏（与 `.lt-card::before` 同模板），hover 加 `transform: translateY(-1px) + shadow-sm + border-strong`
+  - `.slang-term-row__check` margin/padding 从 -8/12 改成 -10/18 适配新 padding
+  - 列表 gap 4px → 8px，`.slang-drift-list` gap 6 → 8（与 LearningTable gap 一致）
+
+- **`admin/frontend/src/views/learning/slots/style/StyleMainPane.vue`** 多行卡视觉同源：
+  - 加 `statusTone(status: StyleStatus)` 派生 4 tone（approved → success / pending → pending / rejected/muted → rejected）
+  - article 加 `expression-item--{tone}` class
+  - `.expression-item` 14px → 10px 圆角，`var(--om-surface)` → `var(--om-surface-solid)`（避免与父 surface 同色），padding 14 → 14/16/14/20，`::before` 3px 状态色侧栏（与 LearningTable / SlangTermList 同模板），hover translateY + shadow + border-strong
+  - `.expression-item__meta` 加 `border-top: 1px dashed`（与 LearningTable foot 同源）
+  - 列表 gap 12 → 10（与上面 gap 8 略有差异因为多行卡承载更多内容）
+
+**约束保留**：
+
+- emit 契约 / business logic / queueMode 映射 0 改动
+- StyleMainPane 的 `expression-item__normalization` / `expression-item__normalizer-actions` / `expression-item__actions` 子元素 0 改动
+- SlangTermList 的 grid 列宽、checkbox 行为、bulk bar、drift list 0 改动
+- Episode 主面板（`NDataTable`）本轮**不动** —— 它带分页/排序/scroll-x 等表格语义，迁移成本高，跟踪文档里挂作 follow-up
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ 11.12s；LearningView chunk **156.83 KB（gzip 45.46 KB，相对上一版 −0.37 KB）**
+- D6 bind-mount，浏览器手测留给用户：
+  - `/learning?noun=slang` toolbar 缩短：[抽取 / AI 清池 / 新建]，hero header 多出「黑话设置」
+  - `/learning?noun=style|episode|memory` toolbar 不再有冗余「刷新」
+  - 词条卡：slang 单行 + 3px 状态侧栏；style 多行 + 3px 状态侧栏 + dashed meta；LearningTable 卡片 + 3px 状态侧栏 —— 三套视觉语言收敛为一套
+- 跟踪文档 `docs/tracking/learning-pipeline-foldin.md` §9 已追加 1 行
+
+**回滚**：单 commit，`git revert <sha>` 恢复原四套不齐的 toolbar + 三套混杂卡片样式。
+
+---
+
 ## 2026-05-23 学习管道：LearningTable 行卡列表 → 卡片网格统一
 
 **变更类型**：admin/frontend 视觉重设计 / bind-mount 即生效

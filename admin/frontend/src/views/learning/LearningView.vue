@@ -667,6 +667,7 @@ function formatCount(value: number | null): string {
     description="候选、审核、入库、命中、归档的同一条学习管道。"
   >
     <template #action>
+      <span id="learning-action-extra" />
       <NPopconfirm
         positive-text="继续"
         negative-text="取消"

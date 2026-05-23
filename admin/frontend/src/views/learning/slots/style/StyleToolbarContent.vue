@@ -1,14 +1,12 @@
 <script setup lang="ts">
-import { FlashOutline, RefreshOutline, SparklesOutline } from '@vicons/ionicons5'
+import { FlashOutline, SparklesOutline } from '@vicons/ionicons5'
 import { useStyleConsoleInject } from './state'
 
 const console_ = useStyleConsoleInject()
 const {
-  loading,
   actionLoading,
   scopeFilter,
   sortMode,
-  loadAll,
   runExtract,
   generateProfile,
 } = console_
@@ -39,12 +37,6 @@ const sortOptions = [
       size="small"
       :options="sortOptions"
     />
-    <NButton secondary size="small" :loading="loading" @click="loadAll">
-      <template #icon>
-        <NIcon :component="RefreshOutline" />
-      </template>
-      刷新
-    </NButton>
     <NButton secondary size="small" :loading="actionLoading" @click="runExtract">
       <template #icon>
         <NIcon :component="SparklesOutline" />

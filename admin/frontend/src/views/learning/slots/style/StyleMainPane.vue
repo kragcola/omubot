@@ -21,6 +21,13 @@ function statusType(status: StyleStatus) {
   return status === 'approved' ? 'success' : status === 'pending' ? 'warning' : status === 'muted' ? 'default' : 'error'
 }
 
+function statusTone(status: StyleStatus): 'success' | 'pending' | 'rejected' | 'neutral' {
+  if (status === 'approved') return 'success'
+  if (status === 'pending') return 'pending'
+  if (status === 'rejected' || status === 'muted') return 'rejected'
+  return 'neutral'
+}
+
 function policyText(policy: OutputPolicy) {
   return policy === 'allow_use' ? '可参考' : policy === 'transform' ? '需转译' : '只观察'
 }
@@ -62,6 +69,7 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
         v-for="item in expressions"
         :key="item.expression_id"
         class="expression-item"
+        :class="`expression-item--${statusTone(item.status)}`"
       >
         <div class="expression-item__main">
           <div class="expression-item__tags">
@@ -142,17 +150,47 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
 
 .expression-list {
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
 .expression-item {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
-  padding: 14px;
+  padding: 14px 16px 14px 20px;
   border: 1px solid var(--om-border);
-  border-radius: 14px;
-  background: var(--om-surface);
+  border-radius: 10px;
+  background: var(--om-surface-solid);
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.expression-item::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--om-text-3);
+  opacity: 0.45;
+  transition: background-color 0.16s ease, opacity 0.16s ease;
+}
+
+.expression-item--success::before { background: var(--om-success); opacity: 1; }
+.expression-item--pending::before { background: var(--om-warning); opacity: 1; }
+.expression-item--rejected::before { background: var(--om-danger); opacity: 0.85; }
+
+.expression-item:hover {
+  border-color: var(--om-border-strong);
+  background: color-mix(in srgb, var(--om-surface-2) 35%, var(--om-surface-solid));
+  transform: translateY(-1px);
+  box-shadow: var(--om-shadow-sm);
 }
 
 .expression-item__tags,
@@ -181,6 +219,8 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
 
 .expression-item__meta {
   margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed color-mix(in srgb, var(--om-border) 70%, transparent);
   color: var(--om-text-3);
   font-size: 12px;
 }

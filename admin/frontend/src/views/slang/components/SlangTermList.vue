@@ -68,6 +68,12 @@ function toggleTermSelection(termId: string, checked: boolean) {
   }
   selectedTermIds.value = selectedTermIds.value.filter(id => id !== termId)
 }
+function statusTone(status: SlangTerm['status']): 'success' | 'pending' | 'rejected' | 'neutral' {
+  if (status === 'approved') return 'success'
+  if (status === 'candidate') return 'pending'
+  if (status === 'expired') return 'rejected'
+  return 'neutral'
+}
 </script>
 
 <template>
@@ -153,7 +159,10 @@ function toggleTermSelection(termId: string, checked: boolean) {
         v-for="term in terms"
         :key="term.term_id"
         class="slang-term-row"
-        :class="{ 'slang-term-row--selected': selectedTermIds.includes(term.term_id) }"
+        :class="[
+          `slang-term-row--${statusTone(term.status)}`,
+          { 'slang-term-row--selected': selectedTermIds.includes(term.term_id) },
+        ]"
         @click="handleRowClick(term)"
       >
         <div class="slang-term-row__check" @click.stop @mousedown.stop>
@@ -306,30 +315,54 @@ function toggleTermSelection(termId: string, checked: boolean) {
 
 .slang-term-list {
   display: grid;
-  gap: 4px;
+  gap: 8px;
 }
 
 .slang-drift-list {
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
 
 .slang-term-row {
+  position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto 60px 50px 80px auto;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 10px 14px 10px 18px;
   border: 1px solid var(--om-border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--om-surface-solid);
   cursor: pointer;
-  transition: border-color 0.12s, box-shadow 0.12s;
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
 }
 
+.slang-term-row::before {
+  content: '';
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--om-text-3);
+  opacity: 0.45;
+  transition: background-color 0.16s ease, opacity 0.16s ease;
+}
+
+.slang-term-row--success::before { background: var(--om-success); opacity: 1; }
+.slang-term-row--pending::before { background: var(--om-warning); opacity: 1; }
+.slang-term-row--rejected::before { background: var(--om-danger); opacity: 0.85; }
+
 .slang-term-row:hover {
-  border-color: color-mix(in srgb, var(--om-border-strong) 60%, transparent);
-  box-shadow: 0 1px 4px color-mix(in srgb, var(--om-shadow-sm) 40%, transparent);
+  border-color: var(--om-border-strong);
+  background: color-mix(in srgb, var(--om-surface-2) 35%, var(--om-surface-solid));
+  transform: translateY(-1px);
+  box-shadow: var(--om-shadow-sm);
 }
 
 .slang-term-row--selected {
@@ -349,8 +382,8 @@ function toggleTermSelection(termId: string, checked: boolean) {
   z-index: 1;
   width: 36px;
   height: 100%;
-  margin: -8px -5px -8px -12px;
-  padding: 8px 5px 8px 12px;
+  margin: -10px -5px -10px -18px;
+  padding: 10px 5px 10px 18px;
   cursor: pointer;
 }
 

@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { RefreshOutline } from '@vicons/ionicons5'
 import { useMemoryConsoleInject } from './state'
 
 const console_ = useMemoryConsoleInject()
-const { loading, fetchCandidates, filterDomain } = console_
+const { filterDomain } = console_
 
 const domainOptions = [
   { value: 'all', label: '全部 consolidator 域' },
@@ -32,12 +31,6 @@ const domainOptions = [
         {{ opt.label }}
       </NTag>
     </div>
-    <NButton secondary size="small" :loading="loading" @click="fetchCandidates">
-      <template #icon>
-        <NIcon :component="RefreshOutline" />
-      </template>
-      刷新
-    </NButton>
   </NSpace>
 </template>
 
