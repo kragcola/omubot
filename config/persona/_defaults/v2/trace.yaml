@@ -1,0 +1,25 @@
+schema: omubot.trace.v2
+version: 2.1.0-proposal
+
+retention_days: 30
+sampling:
+  importer: always
+  runtime: configurable
+
+pii_redaction:
+  enabled: true
+  fields:
+    - user_id
+    - raw_message
+
+records:
+  - prompt_blocks
+  - dynamic_refs
+  - retrieved_memories
+  - plugin_diffs
+  - tool_calls
+  - state_decision
+  - guard_decision
+  - send_result
+  - import_sources
+  - import_confidence

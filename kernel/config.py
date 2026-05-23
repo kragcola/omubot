@@ -161,6 +161,7 @@ class LLMConfig(BaseModel):
             ),
             "style": "style" if "style" in self.profiles else fallback,
             "memo": "memo" if "memo" in self.profiles else fallback,
+            "persona_import": "persona_import" if "persona_import" in self.profiles else fallback,
             "vision": "vision" if "vision" in self.profiles else fallback,
         }
         for task, profile_name in defaults.items():

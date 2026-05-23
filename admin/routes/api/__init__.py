@@ -72,6 +72,7 @@ def create_api_router(
         create_memory_consolidator_router,
     )
     from admin.routes.api.memos import create_memos_router
+    from admin.routes.api.persona_importer import create_persona_importer_router
     from admin.routes.api.plugins import create_plugins_router
     from admin.routes.api.protocol import create_protocol_router
     from admin.routes.api.providers import create_providers_router
@@ -146,6 +147,7 @@ def create_api_router(
         bus=bus,
     ))
     router.include_router(create_memos_router(card_store=card_store, ctx=ctx))
+    router.include_router(create_persona_importer_router(ctx=ctx))
     router.include_router(create_dream_router(dream_agent=dream_agent))
     router.include_router(create_sandbox_router(llm_client=llm_client, identity_mgr=identity_mgr, ctx=ctx))
     router.include_router(create_slang_router(ctx=ctx, bus=bus, message_log=message_log, llm_client=llm_client))

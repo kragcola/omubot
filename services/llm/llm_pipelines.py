@@ -69,7 +69,7 @@ LLM_PIPELINES: tuple[LLMPipeline, ...] = (
     LLMPipeline(
         "learning",
         "学习与工具",
-        ("style", "memo", "chat_private", "bilibili_intent", "element_detect", "vision"),
+        ("style", "memo", "persona_import", "chat_private", "bilibili_intent", "element_detect", "vision"),
     ),
     LLMPipeline(
         "memory_graph",

@@ -49,6 +49,7 @@ const providerTaskOrder: ProviderTaskKey[] = [
   'slang_semantic',
   'style',
   'memo',
+  'persona_import',
   'chat_private',
   'bilibili_intent',
   'element_detect',
@@ -70,6 +71,7 @@ const providerTaskLabels: Record<ProviderTaskKey, string> = {
   slang_semantic: '黑话语义',
   style: '风格学习',
   memo: '记忆卡片',
+  persona_import: '人设导入',
   chat_private: '私聊',
   bilibili_intent: 'B 站意图',
   element_detect: '元素识别',
@@ -124,6 +126,7 @@ function providerTaskCapabilityWarning(task: ProviderTaskKey): string {
     main: ['chat', 'tools'],
     compact: ['chat', 'tools'],
     vision: ['chat', 'vision'],
+    persona_import: ['json'],
   }
   const wants = required[task] || ['chat']
   const missing = wants.filter(c => !caps.has(c))

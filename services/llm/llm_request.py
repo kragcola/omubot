@@ -42,6 +42,7 @@ LLMTask = Literal[
     # Other learning / extraction services.
     "style",
     "memo",
+    "persona_import",
     # Plugin-direct call sites. Each plugin entry point gets its own
     # task name so admins can route it to a different provider in the
     # admin panel without touching code.

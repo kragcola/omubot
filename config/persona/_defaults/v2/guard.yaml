@@ -1,0 +1,36 @@
+schema: omubot.guard.v2
+version: 2.1.0-proposal
+
+input_guard:
+  enabled: true
+  untrusted_context_policy: reference_only
+
+hard_check:
+  patterns:
+    - id: hc_no_ai_self_reveal
+      regex: "我是.{0,3}(AI|语言模型|大模型|chatbot)"
+      action: rewrite
+      reason_ref: persona.constitution.hard_rules[0]
+    - id: hc_no_template_phrasing
+      regex: "(作为|根据).{0,4}(凤笑梦|我的设定)"
+      action: rewrite
+      reason_ref: voice.style_principles.banned_patterns
+
+soft_judge:
+  enabled: true
+  sample_rate: 0.2
+  task_profile: persona_import
+  prompts_ref: guard/prompts/soft_judge.txt
+  max_attempts: 1
+
+rewrite:
+  enabled: true
+  max_attempts: 2
+  scope: voice_layer_only
+
+memory_write:
+  default_status: candidate
+  require_source_ref: true
+
+output_blocking:
+  on_critical_failure: refuse_in_character

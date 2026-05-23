@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-05-24 Persona Source Importer Part A S1-S5 首版落地
+
+**变更类型**：services/persona importer + admin API + LLM task profile
+
+**内容**：实现 Persona Source Importer Part A 后端/CLI 首版：新增 `services/persona/` parser/builder/writer/CLI/LLM extractor；`source.md` 可导入为 15 个 `.draft/*.yaml` skeleton、`.draft/modules/_README.md` 和 `_import_report.json`；Pending Freeze 只复制到 `_pending_freeze/` 并生成 `source.frozen.md`；新增 `/api/admin/persona/import`、`/api/admin/persona/draft/{id}`、`/api/admin/persona/freeze/{id}`；新增 `persona_import` LLMTask/profile，并同步 admin provider task 类型、标签、顺序和 learning pipeline。
+
+**影响**：首版已支持 CLI 与 JSON API round-trip，但仍不写正式 runtime persona 路径；admin SPA 双栏高亮、v2 compiler / Schema Freeze、RuntimeStateBus/SystemModule 仍为后续工作。`.gitignore` 已放行 `config/persona/*/source.md`，继续忽略 `.draft/`、`source.frozen.md` 和 `_pending_freeze/`。
+
+**验证**：`python -m pytest tests/test_persona_importer.py tests/test_persona_importer_api.py tests/test_llm_task_admin_sync.py tests/test_llm_pipelines.py` 通过（19 passed）；`ruff check` 覆盖 importer/API/LLM task 同步文件通过。`uv run pytest` 在当前 macOS 挂载环境触发 uv system-configuration panic，实际验证改用仓库 `.venv/bin/python -m pytest`。
+
+---
+
+## 2026-05-24 Persona Source Importer P0/P1/P2 整改收口
+
+**变更类型**：docs/tracking 方案整改 + 配置模板护栏
+
+**内容**：按用户确认的 Q1-Q17 决策表完成 Persona Source Importer P0/P1/P2 收口：`persona-spec-format.md` 追加 v2.1 state/thinker/system/modules 扩展；新增 `config/persona/_defaults/v2/` 的 guard/eval/trace 默认模板；将 Runtime/SystemModule 架构拆到 [docs/tracking/system-module-architecture.md](docs/tracking/system-module-architecture.md)；统一 compiler 前 Freeze 为 `_pending_freeze/`；首版 draft 合同收敛为 15 个 partial skeleton + `_import_report.json`；补齐 API 前缀、`persona_import` task profile、hard_rule enforce 分类、字段缺失行为、proposal-level schema 和膨胀控制。
+
+**影响**：当前仅完成文档/config 层整改，未启动 `services/`、admin API、frontend 或 runtime compiler 实现。后续进入 Part A S1 前，以 [docs/tracking/persona-source-importer-remediation-execution.md](docs/tracking/persona-source-importer-remediation-execution.md) 和 [docs/migrations/persona-v2-importer.md](docs/migrations/persona-v2-importer.md) 为接手入口；真实配置仍由 `.gitignore` 保护，只放行 `_defaults/v2` 模板。
+
+---
+
+## 2026-05-24 Persona Source Importer 方案审计落档
+
+**变更类型**：docs/tracking 方案审计记录
+
+**内容**：在 [docs/tracking/persona-source-importer.md](docs/tracking/persona-source-importer.md) 末尾追加 `## 18. GPT 审计记录（2026-05-24）`，署名“审计人：GPT”。审计结论指出当前方案需先收口再实现：`persona-spec-format.md` 仍为 12 文件而 importer 方案已声明 15 文件 + modules；首版 draft 输出、默认模板覆盖、Freeze 行为、API 路径与 LLM task/profile 均需对齐。
+
+**影响**：后续进入实现前，应优先处理审计记录中的阻断项，尤其是 spec 对齐、importer/runtime 文档拆分、compiler 前 Freeze 仅落 `_pending_freeze/`、新增 `persona_import` LLMTask/profile。
+
+---
+
 ## 2026-05-23 学习管道：4 noun 主面板美学统一（以黑话为模板）
 
 **变更类型**：admin/frontend 视觉统一 / bind-mount 即生效

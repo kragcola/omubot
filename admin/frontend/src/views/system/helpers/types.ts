@@ -111,6 +111,7 @@ export type ProviderTaskKey =
   | 'slang_semantic'
   | 'style'
   | 'memo'
+  | 'persona_import'
   | 'chat_private'
   | 'bilibili_intent'
   | 'element_detect'
