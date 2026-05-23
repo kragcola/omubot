@@ -54,6 +54,7 @@ interface FeedRow {
   nounLabel: string
   nounTone: NounChipTone
   title: string
+  annotation: string
   statusLabel: string
   group: string
   time: string
@@ -105,12 +106,6 @@ function formatRelativeTime(value: string): string {
     month: '2-digit',
     day: '2-digit',
   }).format(date).replace(/\//g, '-')
-}
-
-function shortGroup(value: string): string {
-  if (!value) return '——'
-  if (value.length <= 6) return value
-  return `…${value.slice(-5)}`
 }
 
 function formatCount(value: number): string {
@@ -208,18 +203,24 @@ const nounModules = computed<NounModule[]>(() => {
 })
 
 const feedRows = computed<FeedRow[]>(() => {
-  return props.items.slice(0, 12).map(item => ({
-    id: item.id,
-    noun: item.noun,
-    nounLabel: props.nounLabels[item.noun] || item.kind_label || item.noun,
-    nounTone: nounToneOf(item.noun),
-    title: item.content || '——',
-    statusLabel: item.status_label || item.status || '',
-    group: shortGroup(item.group_id),
-    time: formatRelativeTime(item.created_at),
-    conf: item.confidence,
-    tone: statusTone(item.status),
-  }))
+  return props.items.slice(0, 12).map((item) => {
+    const title = item.content || '——'
+    const full = item.content_full || ''
+    const annotation = full && full !== title ? full : ''
+    return {
+      id: item.id,
+      noun: item.noun,
+      nounLabel: props.nounLabels[item.noun] || item.kind_label || item.noun,
+      nounTone: nounToneOf(item.noun),
+      title,
+      annotation,
+      statusLabel: item.status_label || item.status || '',
+      group: item.group_id || '——',
+      time: formatRelativeTime(item.created_at),
+      conf: item.confidence,
+      tone: statusTone(item.status),
+    }
+  })
 })
 
 interface RankRow {
@@ -255,7 +256,7 @@ const groupRanking = computed<RankRow[]>(() => {
           topNoun = noun
         }
       }
-      return { group, groupShort: shortGroup(group), count: b.count, byNoun, topNoun, pct: 0 }
+      return { group, groupShort: group, count: b.count, byNoun, topNoun, pct: 0 }
     })
     .sort((a, b) => b.count - a.count)
     .slice(0, 8)
@@ -382,6 +383,9 @@ function maxStageValue(mod: NounModule): number {
           >
             <span class="feed-dot" :title="row.statusLabel" />
             <span class="feed-title" :title="row.title">{{ row.title }}</span>
+            <span v-if="row.annotation" class="feed-annot" :title="row.annotation">
+              {{ row.annotation }}
+            </span>
             <span class="feed-meta">
               <span class="feed-meta__status">{{ row.statusLabel || '——' }}</span>
               <span class="feed-meta__sep">·</span>
@@ -781,8 +785,21 @@ function maxStageValue(mod: NounModule): number {
   white-space: nowrap;
 }
 
+.feed-annot {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-left: 10px;
+  border-left: 1px solid color-mix(in srgb, var(--om-border) 65%, transparent);
+  color: var(--om-text-2);
+  font-size: 12px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .feed-meta {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -790,8 +807,6 @@ function maxStageValue(mod: NounModule): number {
   color: var(--om-text-3);
   font-size: 11.5px;
   line-height: 1.2;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -824,6 +839,10 @@ function maxStageValue(mod: NounModule): number {
   background: color-mix(in srgb, var(--om-text-3) 18%, transparent);
   color: var(--om-text-1);
   border: 1px solid color-mix(in srgb, var(--om-text-3) 22%, transparent);
+}
+
+.feed-row:has(.feed-annot) .feed-noun {
+  margin-left: 0;
 }
 
 .feed-noun--info {
@@ -886,7 +905,7 @@ function maxStageValue(mod: NounModule): number {
 
 .rank-row {
   display: grid;
-  grid-template-columns: 22px 70px minmax(0, 1fr) 36px;
+  grid-template-columns: 22px auto minmax(0, 1fr) 36px;
   align-items: center;
   column-gap: 10px;
   height: 36px;
@@ -962,6 +981,7 @@ function maxStageValue(mod: NounModule): number {
   .ov-kpi {
     grid-template-columns: 1fr;
   }
+  .feed-annot,
   .feed-meta,
   .feed-noun {
     display: none;
