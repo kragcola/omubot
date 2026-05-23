@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-05-24 admin SPA hero 卡片改为随主体滚动
+
+**变更类型**：admin/frontend AppPage 公共组件结构调整
+
+**内容**：[AppPage.vue](admin/frontend/src/components/common/AppPage.vue) 把 hero 卡片（标题/操作区）从滚动容器外挪进 `om-page__body` 内部——从"hero 吸顶 + body 单独滚"改为"hero 与内容卡片同列、整体一起滚"。同步把 `om-page__body` 的 4px 内边距清零、用 `om-page__surface-wrap` 接管下半区的 mx/mb/rounded，避免双层 padding 视觉拉胯。
+
+**影响**：所有走 AppPage 的页面（dashboard、learning、memory、groups、system、logs、…）顶部 hero 卡片不再 sticky；用户上滑主内容时 hero 会自然滑出视口，与主流后台一致。无业务逻辑改动；左侧导航栏 sticky 行为由根布局保证，不受影响。
+
+**验证**：`vue-tsc --noEmit` 干净；`npm run build` 成功，新产物 `admin/static/assets/index-BC46WxR2.js`。回滚路径：把 hero 移回 `om-page__body` 之外、恢复 `om-page__body padding:4px` 与原 `om-page__surface min-h-full` 即可。
+
+---
+
+## 2026-05-24 admin SPA 全局滚动修复 — 侧栏不再随主列滚走
+
+**变更类型**：admin/frontend 全局 CSS 一行修复
+
+**内容**：`admin/frontend/src/styles/reset.css` 的 100% 高度选择器从 `html, body, #app` 扩展为 `html, body, #app, .n-config-provider`。根因：`NConfigProvider` 默认渲染 `<div class="n-config-provider">` 但 naive-ui 不给它任何 CSS，导致它落在 `#app` 与 `NormalLayout` 之间，把 `#app { height: 100% }` 链路打断；下游 `<div class="wh-full flex">` 的 `h-full` 失去基准高度后退化为 auto，整页被内容撑开，body 出现纵向滚动条，左侧 `<aside>` 作为 body 的孙子跟着卷出视口。
+
+**影响**：所有 admin 页面恢复"内嵌滚动"——左侧导航栏 sticky 不动，纵向滚动只发生在 `.om-page__body` (`cus-scroll h-0 flex-1`) 内部。`admin/static` 是 bind mount，浏览器刷新即生效，无需 `docker compose up bot --build`。
+
+**验证**：`vue-tsc --noEmit` 无报错；`npm run build` 成功，新 CSS bundle `admin/static/assets/index-Brc6c6GG.css` 已含 `html,body,#app,.n-config-provider{height:100%}`。回滚路径：删去 `, .n-config-provider` 一段即可。
+
+---
+
 ## 2026-05-24 Persona Source Importer Part A S1-S5 首版落地
 
 **变更类型**：services/persona importer + admin API + LLM task profile

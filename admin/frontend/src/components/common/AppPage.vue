@@ -20,54 +20,56 @@ const resolvedEyebrow = computed(() => props.eyebrow ?? 'Omubot Console')
 
 <template>
   <main class="om-page h-full flex-col flex-1 overflow-hidden">
-    <AppCard
-      v-if="showHeader"
-      bordered
-      elevated
-      class="om-page__hero mx-16 mt-16 min-h-60"
-    >
-      <slot v-if="$slots.header" name="header" />
-      <template v-else>
-        <div class="om-page__hero-inner">
-          <div class="om-page__hero-main">
-            <div class="om-page__eyebrow">
-              {{ resolvedEyebrow }}
-            </div>
-            <div class="om-page__title-row">
-              <slot name="title-prefix">
-                <button
-                  v-if="back"
-                  type="button"
-                  class="om-page__back"
-                  @click="router.back()"
-                >
-                  <span>←</span>
-                  <span>返回</span>
-                </button>
-              </slot>
-              <div class="om-page__title-stack">
-                <div class="om-page__title-line">
-                  <h1 class="om-page__title">
-                    {{ resolvedTitle }}
-                  </h1>
-                  <slot name="title-suffix" />
+    <div data-page-scroll-root class="cus-scroll om-page__body h-0 flex-1">
+      <AppCard
+        v-if="showHeader"
+        bordered
+        elevated
+        class="om-page__hero mx-16 mt-16 min-h-60"
+      >
+        <slot v-if="$slots.header" name="header" />
+        <template v-else>
+          <div class="om-page__hero-inner">
+            <div class="om-page__hero-main">
+              <div class="om-page__eyebrow">
+                {{ resolvedEyebrow }}
+              </div>
+              <div class="om-page__title-row">
+                <slot name="title-prefix">
+                  <button
+                    v-if="back"
+                    type="button"
+                    class="om-page__back"
+                    @click="router.back()"
+                  >
+                    <span>←</span>
+                    <span>返回</span>
+                  </button>
+                </slot>
+                <div class="om-page__title-stack">
+                  <div class="om-page__title-line">
+                    <h1 class="om-page__title">
+                      {{ resolvedTitle }}
+                    </h1>
+                    <slot name="title-suffix" />
+                  </div>
+                  <p v-if="resolvedDescription" class="om-page__description">
+                    {{ resolvedDescription }}
+                  </p>
                 </div>
-                <p v-if="resolvedDescription" class="om-page__description">
-                  {{ resolvedDescription }}
-                </p>
               </div>
             </div>
+            <div v-if="$slots.action" class="om-page__action">
+              <slot name="action" />
+            </div>
           </div>
-          <div v-if="$slots.action" class="om-page__action">
-            <slot name="action" />
-          </div>
-        </div>
-      </template>
-    </AppCard>
-    <div data-page-scroll-root class="cus-scroll om-page__body mx-12 mb-12 h-0 flex-1 rounded-16">
-      <AppCard bordered elevated class="om-page__surface min-h-full p-24">
-        <slot />
+        </template>
       </AppCard>
+      <div class="om-page__surface-wrap mx-12 mb-12 mt-12 rounded-16">
+        <AppCard bordered elevated class="om-page__surface p-24">
+          <slot />
+        </AppCard>
+      </div>
     </div>
   </main>
 </template>
@@ -185,10 +187,15 @@ const resolvedEyebrow = computed(() => props.eyebrow ?? 'Omubot Console')
 }
 
 .om-page__body {
-  padding: 4px;
+  padding: 0;
+}
+
+.om-page__surface-wrap {
+  display: flex;
 }
 
 .om-page__surface {
+  flex: 1;
   border-radius: 22px;
   background: var(--om-surface);
 }
