@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { ChevronForwardOutline, SparklesOutline } from '@vicons/ionicons5'
+import { computed, ref, watch } from 'vue'
+import AppPanelSection from '../../../../components/common/AppPanelSection.vue'
 import EmptyState from '../../../../components/common/EmptyState.vue'
-import { SparklesOutline } from '@vicons/ionicons5'
 import { useStyleConsoleInject } from './state'
 import type { StyleStatus, OutputPolicy, NormalizationInfo, StyleExpression } from './state'
 
@@ -16,6 +18,20 @@ const {
   splitNormalizerItem,
   undoNormalizerAutoMerge,
 } = console_
+
+const PAGE_SIZE = 12
+const page = ref(1)
+
+const pageCount = computed(() => Math.max(1, Math.ceil(expressions.value.length / PAGE_SIZE)))
+const pagedExpressions = computed(() => {
+  const start = (page.value - 1) * PAGE_SIZE
+  return expressions.value.slice(start, start + PAGE_SIZE)
+})
+
+watch(() => expressions.value.length, () => {
+  if (page.value > pageCount.value) page.value = pageCount.value
+  if (page.value < 1) page.value = 1
+})
 
 function statusType(status: StyleStatus) {
   return status === 'approved' ? 'success' : status === 'pending' ? 'warning' : status === 'muted' ? 'default' : 'error'
@@ -55,7 +71,20 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
 </script>
 
 <template>
-  <section class="style-fold-main">
+  <AppPanelSection
+    class="style-list-panel"
+    eyebrow="Style Expressions"
+    title="风格表达样本"
+  >
+    <template v-if="pageCount > 1" #aside>
+      <NPagination
+        v-model:page="page"
+        :page-count="pageCount"
+        :page-slot="5"
+        size="small"
+      />
+    </template>
+
     <NSkeleton v-if="loading" :repeat="6" text />
     <EmptyState
       v-else-if="!expressions.length"
@@ -66,7 +95,7 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
     />
     <div v-else class="expression-list">
       <article
-        v-for="item in expressions"
+        v-for="item in pagedExpressions"
         :key="item.expression_id"
         class="expression-item"
         :class="`expression-item--${statusTone(item.status)}`"
@@ -120,37 +149,56 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
             </NButton>
           </div>
         </div>
-        <div class="expression-item__actions">
-          <NButton size="small" secondary @click="setStatus(item, 'approved')">
-            通过
-          </NButton>
-          <NButton size="small" secondary @click="setStatus(item, 'rejected')">
-            拒绝
-          </NButton>
-          <NButton size="small" secondary @click="setStatus(item, 'muted')">
-            静音
-          </NButton>
-          <NButton size="small" quaternary @click="sendFeedback(item, 'positive')">
-            好
-          </NButton>
-          <NButton size="small" quaternary @click="sendFeedback(item, 'negative')">
-            坏
-          </NButton>
+        <div class="expression-item__rail">
+          <button
+            type="button"
+            class="expression-item__config"
+            @click="setStatus(item, 'approved')"
+          >
+            <span class="expression-item__config-icon">
+              <NIcon :component="ChevronForwardOutline" />
+            </span>
+            <span class="expression-item__config-text">配置</span>
+          </button>
+          <div class="expression-item__actions">
+            <NButton size="small" secondary @click="setStatus(item, 'approved')">
+              通过
+            </NButton>
+            <NButton size="small" secondary @click="setStatus(item, 'rejected')">
+              拒绝
+            </NButton>
+            <NButton size="small" secondary @click="setStatus(item, 'muted')">
+              静音
+            </NButton>
+            <NButton size="small" quaternary @click="sendFeedback(item, 'positive')">
+              好
+            </NButton>
+            <NButton size="small" quaternary @click="sendFeedback(item, 'negative')">
+              坏
+            </NButton>
+          </div>
         </div>
       </article>
     </div>
-  </section>
+
+    <div v-if="pageCount > 1" class="style-pagination-bottom">
+      <NPagination
+        v-model:page="page"
+        :page-count="pageCount"
+        :page-slot="7"
+      />
+    </div>
+  </AppPanelSection>
 </template>
 
 <style scoped>
-.style-fold-main {
-  display: grid;
-  gap: 14px;
+.style-list-panel {
+  font-feature-settings: 'tnum' 1;
 }
 
 .expression-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .expression-item {
@@ -158,7 +206,7 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
-  padding: 14px 16px 14px 20px;
+  padding: 12px 14px 12px 18px;
   border: 1px solid var(--om-border);
   border-radius: 10px;
   background: var(--om-surface-solid);
@@ -172,8 +220,8 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
 .expression-item::before {
   content: '';
   position: absolute;
-  top: 14px;
-  bottom: 14px;
+  top: 12px;
+  bottom: 12px;
   left: 0;
   width: 3px;
   border-radius: 0 2px 2px 0;
@@ -203,26 +251,27 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
 }
 
 .expression-item h3 {
-  margin: 10px 0 6px;
+  margin: 8px 0 4px;
   color: var(--om-text-1);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 650;
+  line-height: 1.45;
 }
 
 .expression-item p {
   margin: 0;
   color: var(--om-text-2);
   font-size: 13px;
-  line-height: 1.7;
+  line-height: 1.6;
   overflow-wrap: anywhere;
 }
 
 .expression-item__meta {
-  margin-top: 10px;
-  padding-top: 8px;
+  margin-top: 8px;
+  padding-top: 6px;
   border-top: 1px dashed color-mix(in srgb, var(--om-border) 70%, transparent);
   color: var(--om-text-3);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .expression-item__normalization {
@@ -230,16 +279,63 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
-  margin-top: 10px;
+  margin-top: 8px;
   color: var(--om-text-3);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .expression-item__normalizer-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
+  margin-top: 8px;
+}
+
+.expression-item__rail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  align-self: flex-start;
+}
+
+.expression-item__config {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 12px 3px 6px;
+  border: 1.5px solid color-mix(in srgb, var(--om-info) 32%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--om-info) 6%, transparent);
+  color: var(--om-info);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.expression-item__config-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--om-info);
+  color: #fff;
+  font-size: 14px;
+}
+
+.expression-item__config:hover {
+  border-color: var(--om-info);
+  background: var(--om-info);
+  color: #fff;
+}
+
+.expression-item__config:hover .expression-item__config-icon {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
 }
 
 .expression-item__actions {
@@ -248,9 +344,20 @@ function canUndoNormalizerAutoMerge(item: StyleExpression) {
   max-width: 210px;
 }
 
+.style-pagination-bottom {
+  display: flex;
+  justify-content: center;
+  margin-top: 14px;
+}
+
 @media (max-width: 1100px) {
   .expression-item {
     grid-template-columns: 1fr;
+  }
+  .expression-item__rail {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
   }
   .expression-item__actions {
     justify-content: flex-start;

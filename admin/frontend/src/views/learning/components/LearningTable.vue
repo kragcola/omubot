@@ -1,16 +1,23 @@
 <script setup lang="ts">
+import { ChevronForwardOutline, FileTrayOutline } from '@vicons/ionicons5'
+import { computed, ref, watch } from 'vue'
+import AppPanelSection from '../../../components/common/AppPanelSection.vue'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import type { LearningItem } from '../types'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   items: LearningItem[]
   loading?: boolean
   hasMore?: boolean
   loadingMore?: boolean
+  eyebrow?: string
+  title?: string
 }>(), {
   loading: false,
   hasMore: false,
   loadingMore: false,
+  eyebrow: 'Learning Items',
+  title: '学习条目',
 })
 
 const emit = defineEmits<{
@@ -18,6 +25,34 @@ const emit = defineEmits<{
   reviewItem: [item: LearningItem]
   loadMore: []
 }>()
+
+const PAGE_SIZE = 20
+const page = ref(1)
+
+const pageCount = computed(() => {
+  const loaded = Math.ceil(props.items.length / PAGE_SIZE) || 1
+  return loaded + (props.hasMore ? 1 : 0)
+})
+
+const pagedItems = computed(() => {
+  const start = (page.value - 1) * PAGE_SIZE
+  return props.items.slice(start, start + PAGE_SIZE)
+})
+
+watch(
+  () => [props.items.length, props.hasMore],
+  () => {
+    if (page.value > pageCount.value) page.value = pageCount.value
+    if (page.value < 1) page.value = 1
+  },
+)
+
+watch(page, (next) => {
+  const loaded = Math.ceil(props.items.length / PAGE_SIZE) || 1
+  if (next > loaded && props.hasMore && !props.loadingMore) {
+    emit('loadMore')
+  }
+})
 
 type StatusTone = 'success' | 'pending' | 'rejected' | 'neutral'
 
@@ -54,7 +89,20 @@ function shortGroup(value: string): string {
 </script>
 
 <template>
-  <div class="lt">
+  <AppPanelSection
+    class="learning-table-panel"
+    :eyebrow="eyebrow"
+    :title="title"
+  >
+    <template v-if="pageCount > 1" #aside>
+      <NPagination
+        v-model:page="page"
+        :page-count="pageCount"
+        :page-slot="5"
+        size="small"
+      />
+    </template>
+
     <div v-if="loading && !items.length" class="lt-list lt-list--loading">
       <div v-for="i in 8" :key="i" class="lt-skeleton">
         <NSkeleton :width="36" :height="14" :sharp="false" />
@@ -63,69 +111,75 @@ function shortGroup(value: string): string {
       </div>
     </div>
 
-    <template v-else-if="items.length">
-      <div class="lt-list">
-        <div
-          v-for="item in items"
-          :key="item.id"
-          class="lt-row"
-          :class="`lt-row--${statusTone(item.status)}`"
-          tabindex="0"
-          role="button"
-          @click="emit('openDetail', item)"
-          @keydown.enter.prevent="emit('openDetail', item)"
-          @keydown.space.prevent="emit('openDetail', item)"
+    <div v-else-if="pagedItems.length" class="lt-list">
+      <div
+        v-for="item in pagedItems"
+        :key="item.id"
+        class="lt-row"
+        :class="`lt-row--${statusTone(item.status)}`"
+        tabindex="0"
+        role="button"
+        @click="emit('openDetail', item)"
+        @keydown.enter.prevent="emit('openDetail', item)"
+        @keydown.space.prevent="emit('openDetail', item)"
+      >
+        <span class="lt-row__kind">{{ item.kind_label }}</span>
+        <span class="lt-row__content" :title="item.content_full || item.content">
+          {{ item.content || '——' }}
+        </span>
+        <span class="lt-row__group" :title="item.group_id">
+          {{ shortGroup(item.group_id) }}
+        </span>
+        <span class="lt-row__time">{{ formatTime(item.created_at) }}</span>
+        <span
+          v-if="formatConfidence(item.confidence)"
+          class="lt-row__conf"
         >
-          <span class="lt-row__kind">{{ item.kind_label }}</span>
-          <span class="lt-row__content" :title="item.content_full || item.content">
-            {{ item.content || '——' }}
+          {{ formatConfidence(item.confidence) }}
+        </span>
+        <span v-else class="lt-row__conf lt-row__conf--empty">——</span>
+        <button
+          type="button"
+          class="lt-row__config"
+          @click.stop="emit('openDetail', item)"
+        >
+          <span class="lt-row__config-icon">
+            <NIcon :component="ChevronForwardOutline" />
           </span>
-          <span class="lt-row__group" :title="item.group_id">
-            {{ shortGroup(item.group_id) }}
-          </span>
-          <span class="lt-row__time">{{ formatTime(item.created_at) }}</span>
-          <span
-            v-if="formatConfidence(item.confidence)"
-            class="lt-row__conf"
-          >
-            {{ formatConfidence(item.confidence) }}
-          </span>
-          <span v-else class="lt-row__conf lt-row__conf--empty">——</span>
-          <span class="lt-row__status">{{ item.status_label || item.status }}</span>
-          <span class="lt-row__actions" @click.stop>
-            <button
-              v-if="item.review_drawer"
-              type="button"
-              class="lt-row__act"
-              @click="emit('reviewItem', item)"
-            >审核</button>
-            <button
-              type="button"
-              class="lt-row__act lt-row__act--ghost"
-              @click="emit('openDetail', item)"
-            >详情</button>
-          </span>
-        </div>
+          <span class="lt-row__config-text">配置</span>
+        </button>
+        <span class="lt-row__status">{{ item.status_label || item.status }}</span>
+        <span class="lt-row__actions" @click.stop>
+          <button
+            v-if="item.review_drawer"
+            type="button"
+            class="lt-row__act"
+            @click="emit('reviewItem', item)"
+          >审核</button>
+        </span>
       </div>
-    </template>
+    </div>
 
     <EmptyState
       v-else
       compact
       title="没有匹配项"
       description="当前筛选下没有学习条目。"
+      :icon="FileTrayOutline"
     />
 
-    <div v-if="hasMore" class="lt-footer">
-      <NButton size="small" :loading="loadingMore" @click="emit('loadMore')">加载更多</NButton>
+    <div v-if="pageCount > 1" class="lt-pagination-bottom">
+      <NPagination
+        v-model:page="page"
+        :page-count="pageCount"
+        :page-slot="7"
+      />
     </div>
-  </div>
+  </AppPanelSection>
 </template>
 
 <style scoped>
-.lt {
-  display: grid;
-  gap: 12px;
+.learning-table-panel {
   font-feature-settings: 'tnum' 1;
 }
 
@@ -146,9 +200,9 @@ function shortGroup(value: string): string {
 .lt-row {
   position: relative;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto 50px auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto 50px auto auto auto;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 10px 14px 10px 18px;
   border: 1px solid var(--om-border);
   border-radius: 10px;
@@ -252,6 +306,45 @@ function shortGroup(value: string): string {
   font-weight: 400;
 }
 
+.lt-row__config {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 12px 3px 6px;
+  border: 1.5px solid color-mix(in srgb, var(--om-info) 32%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--om-info) 6%, transparent);
+  color: var(--om-info);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.lt-row__config-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--om-info);
+  color: #fff;
+  font-size: 14px;
+}
+
+.lt-row__config:hover {
+  border-color: var(--om-info);
+  background: var(--om-info);
+  color: #fff;
+}
+
+.lt-row__config:hover .lt-row__config-icon {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
 .lt-row__status {
   font-size: 11px;
   font-weight: 600;
@@ -297,25 +390,15 @@ function shortGroup(value: string): string {
   border-color: var(--om-border-strong);
 }
 
-.lt-row__act--ghost {
-  background: transparent;
-  color: var(--om-text-3);
-}
-
-.lt-row__act--ghost:hover {
-  background: color-mix(in srgb, var(--om-surface-2) 60%, transparent);
-  color: var(--om-text-2);
-}
-
-.lt-footer {
+.lt-pagination-bottom {
   display: flex;
   justify-content: center;
-  padding: 4px 0 0;
+  margin-top: 14px;
 }
 
 @media (max-width: 1100px) {
   .lt-row {
-    grid-template-columns: auto minmax(0, 1fr) auto 50px auto auto;
+    grid-template-columns: auto minmax(0, 1fr) auto 50px auto auto auto;
   }
   .lt-row__group {
     display: none;
@@ -324,7 +407,7 @@ function shortGroup(value: string): string {
 
 @media (max-width: 720px) {
   .lt-row {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
     gap: 8px;
   }
   .lt-row__time,

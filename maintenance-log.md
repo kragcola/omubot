@@ -4,6 +4,59 @@
 
 ---
 
+## 2026-05-23 学习管道：4 noun 主面板美学统一（以黑话为模板）
+
+**变更类型**：admin/frontend 视觉统一 / bind-mount 即生效
+
+**触发**：用户原话「美学统一：已黑话界面为模板，将界面风格统一到管线内全部页面。包括颜色衬底，翻页，词条间隔，词条配置等」。前序提交（`889eb68` / `82d63db` / `beed63f`）已经把 stage→mode 路由语义和 SlangTermList / LearningTable 行级视觉契约对齐，但 4 个 noun 主面板的「壳」和「翻页/配置」交互仍然不齐：
+
+- **slang**（`SlangTermList`）：`AppPanelSection eyebrow=Review Queue` + `#aside` 槽 NPagination + 行尾「配置」info-tinted 圆角 pill + 8px 行间距 + 10/14/10/18 padding + 3px 状态色侧栏 + 底部 NPagination —— 这是模板
+- **memory**（`LearningTable`）：裸 div + `<header>` 文字「Learning Items / xxx 列表 / N 条」+「加载更多」NButton —— 缺壳、缺翻页、无配置 pill
+- **style**（`StyleMainPane`）：裸 `section` + 一次性 80 条铺平 + 没有翻页 + 通过/拒绝/静音 5 个 NButton 直接占行尾 —— 缺壳、缺翻页、无配置 pill
+- **episode**（`EpisodeMainPane`）：直接 `NDataTable` + naive-ui 自带分页 —— 跟其他 3 个 noun 视觉语言完全不同源
+
+**实施**：
+
+- **[LearningTable.vue](admin/frontend/src/views/learning/components/LearningTable.vue)**（memory / fact / graph_relation 共用）
+  - 外层包 `AppPanelSection` `eyebrow="Learning Items"` + `title="<stage>列表"`（title 由 LearningView 通过新 prop 注入），LearningView 的 `learning-items__header` + `learning-snapshot__eyebrow` 重复装饰删除
+  - 客户端分页：`PAGE_SIZE=20`；`pageCount = Math.ceil(items / 20) + (hasMore ? 1 : 0)`；翻到最后一页且 `hasMore` 时 watch 触发 `emit('loadMore')` —— 既保持 slang 同款 NPagination 视觉，又不破坏后端「加载更多」分批拉取契约
+  - 行 grid 7 列 → **8 列**：`auto / 1fr / auto / auto / 50px / auto / auto / auto`，新增「配置」pill（在 status 与 actions 之间），`color-mix(--om-info 6%)` 衬底 + `--om-info` 描边 + 20px 圆形图标背景 + `ChevronForwardOutline`，hover `--om-info` 实心反相（与 SlangTermList `slang-term-row__config` 完全同源）
+  - 「加载更多」NButton 删除；底部 NPagination（page-slot=7）作为 SPA 风格底部翻页
+  - Empty state 的 icon 改 `FileTrayOutline`（语义比未指定更稳）
+- **[LearningView.vue](admin/frontend/src/views/learning/LearningView.vue)** 删除 `<header class="learning-items__header">` 三层装饰（包含一份 `learning-snapshot__eyebrow` 复用），改成 `:title` prop 透传到 LearningTable；同时删除已无消费者的 `.learning-items__header` 三段 CSS 规则（27 行）
+- **[StyleMainPane.vue](admin/frontend/src/views/learning/slots/style/StyleMainPane.vue)**
+  - 外层从裸 `section.style-fold-main` 换成 `AppPanelSection` `eyebrow="Style Expressions"` + `title="风格表达样本"`
+  - 客户端分页：`PAGE_SIZE=12`；style 后端 limit 80 一次拉满，前端按 12 条 / 页切片渲染
+  - 卡片 padding 从 `14/16/14/20` 收紧到 `12/14/12/18`（与 slang 同），`expression-list` gap 从 10 → 8px，h3 margin `10/0/6` → `8/0/4`，meta 字号 12→11.5px，meta padding-top 8→6px —— 整体行高密度向 slang 看齐
+  - 在 actions 5 段 NButton 之上新增「配置」pill（与 LearningTable 同源），抽取到 `expression-item__rail` 列，桌面态右侧竖排（pill 在上、actions 在下），≤1100px 横排
+  - 底部 + 顶部 NPagination；title 移到 `AppPanelSection` 头部，`#aside` 槽塞顶部 NPagination
+- **[EpisodeMainPane.vue](admin/frontend/src/views/learning/slots/episode/EpisodeMainPane.vue)** 整体重写
+  - `NDataTable` + 4 列 columns + 自带 `pagination={ pageSize: 20 }` 全量删除
+  - 改成 `AppPanelSection` `eyebrow="Episodes"` + `title="经验反思"` + 行卡片列表（与 slang `slang-term-row` 同源：10/14/10/18 padding / 10px 圆角 / 3px 状态色侧栏 / hover translateY(-1px) + shadow-sm + border-strong）
+  - 行 grid 8 列：`situation / group / time / 50px conf / 配置 pill / decay / status / actions`；status 文字按 `episodeTone()` 着色（success / pending / rejected / neutral），actions hover 浮出（22px ghost 按钮 + success/danger 描边变体）
+  - 客户端分页：`PAGE_SIZE=20`；NPagination 顶部 + 底部
+  - `episodeTone()` 映射：`enabled_for_prompt|approved` → success；`candidate|dry_run` → pending；`disabled` → rejected
+  - 操作按钮收敛：candidate→批准+停用；approved/enabled_for_prompt→停用；disabled→恢复（保持 EpisodeFoldInProvider `openActionDialog` 契约 0 改动）
+
+**约束保持**：
+
+- 4 个 noun 的 `FoldInProvider` Teleport 投递目标 / props / state.ts / composable / API 调用 0 改动 —— 视觉同源仅触及主面板组件本身
+- slang `SlangTermList` 自身 0 改动（它就是模板）
+- 多行变体（StyleMainPane）卡片仍是合理抽象（situation/style/meta 多段），只是壳和翻页与 slang 同源
+- 漂移视图（slang queueMode='drift'）仍走 `SlangDriftCard`，不纳入 Episodes 行卡同源（语义不同）
+- AppPanelSection `#aside` 槽与底部居中 NPagination 双布局：≤1 页时双方 `v-if` 隐藏，避免空槽视觉
+
+**D4 完成证据**：
+
+- `vue-tsc --noEmit` = 0 errors
+- `npm run build` OK，`LearningView-*.js` chunk **159.76 KB / gzip 46.30 KB**（相对 `beed63f` 156.83 KB，+2.93 KB ≈ 3 个壳 AppPanelSection + 3 套 NPagination 顶/底 + 3 套配置 pill + ep-row 重写 CSS）
+- 触摸文件：`admin/frontend/src/views/learning/components/LearningTable.vue`、`admin/frontend/src/views/learning/LearningView.vue`、`admin/frontend/src/views/learning/slots/style/StyleMainPane.vue`、`admin/frontend/src/views/learning/slots/episode/EpisodeMainPane.vue`、`admin/static/index.html` + `admin/static/assets/*`
+- 同模式扫描（D1）：4 noun 主面板视觉契约表（壳 / padding / 行间距 / 状态色侧栏 / hover lift / 配置 pill / 翻页）—— slang 模板，其余 3 个全部对齐到模板
+- 部署：admin/static 是 bind mount（D6），`npm run build` 已写入，刷新即生效
+- 回滚路径：单 commit revert（仅前端 4 文件 + admin/static）
+
+---
+
 ## 2026-05-23 学习管道：stage→noun-mode 跨 4 noun 全栈映射对齐（5 处 mismatch）
 
 **变更类型**：admin/frontend 路由语义修正 + 后端 review_filter 扩展 / bind-mount 即生效

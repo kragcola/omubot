@@ -852,13 +852,6 @@ function formatCount(value: number | null): string {
         :class="{ 'learning-body--with-side': showNounSlots }"
       >
         <section class="learning-items">
-          <header class="learning-items__header">
-            <div>
-              <span class="learning-snapshot__eyebrow">Learning Items</span>
-              <h2>{{ activeStageItem.label }}列表</h2>
-            </div>
-            <span v-if="!nounTakesMain">{{ learningItems.length }} 条</span>
-          </header>
           <div id="learning-noun-main-target" />
           <LearningTable
             v-if="!nounTakesMain"
@@ -866,6 +859,7 @@ function formatCount(value: number | null): string {
             :loading="itemsLoading"
             :has-more="hasMoreItems"
             :loading-more="moreLoading"
+            :title="`${activeStageItem.label}列表`"
             @review-item="openReview"
             @open-detail="openItemDetail"
             @load-more="loadMoreItems"
@@ -1024,25 +1018,6 @@ function formatCount(value: number | null): string {
   color: var(--om-text-2);
   font-size: 12px;
   line-height: 1.6;
-}
-
-.learning-items__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.learning-items__header h2 {
-  margin: 2px 0 0;
-  color: var(--om-text-1);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.learning-items__header span:last-child {
-  color: var(--om-text-3);
-  font-size: 12px;
 }
 
 .learning-snapshot__header {
