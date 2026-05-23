@@ -4,6 +4,73 @@
 
 ---
 
+## 2026-05-23 学习管道 v3 PR-C / PR-D 收口：style/episode/memory 折入 + 5 路由 redirect + 旧页面退场
+
+**变更类型**：frontend 架构演进 / bind-mount 即生效
+
+**目标（承接 PR-B 的尾巴）**：把剩余三个名词（style / episode / memory）按 PR-B 的同套路折进 `/learning?noun=...`，然后 redirect 5 条老路由、收菜单、删旧文件——**v3 fold-in 整轮收口**。
+
+**PR-C：三套 `slots/<noun>/` 自包含 console**（commit `58a17aa`）
+
+每个 noun 一套独立 console，不复用 PR-B 的 `useSlangConsole` 模式（slang 那套体量大且 store 复杂，单独抽 composable 合理；style/episode/memory 各自简单，不值得二次工程化），改用更轻的 `createXxxConsole()` 工厂 + InjectionKey 模式：
+
+- `slots/style/`：state.ts（`createStyleConsole` + `STYLE_CONSOLE_KEY` + `stageToStyleStatus`）+ Provider + Toolbar + Side + Main，复用 `/api/admin/style/{summary,expressions,profiles,feedback}`；archived stage 客户端再过滤 rejected+muted
+- `slots/episode/`：state.ts（`createEpisodeConsole` + `stageToEpisodeState`）+ Provider + Toolbar + Side + Main + Drawer，复用 `/api/admin/episodes`
+- `slots/memory/`：state.ts（`createMemoryConsole` + `stageToCandidateState`）+ Provider + Toolbar + Side + Main + Drawer，复用 `/api/admin/memory/candidates`
+
+**stage → noun 内部状态映射**（每个 noun 自定义，本 PR 的核心适配点）：
+
+| noun | candidate | review | approved | archived | hits |
+|---|---|---|---|---|---|
+| style | pending | pending | approved | archived（再过滤 rejected+muted） | all |
+| episode | dry_run | candidate | approved | disabled | — |
+| memory | dry_run | queued | approved | rejected | all |
+
+LearningView 派发改造：`isSlangNoun` 一变四（`isSlangNoun / isStyleNoun / isEpisodeNoun / isMemoryNoun`）→ `foldedNoun` / `nounTakesMain` 取代 `slangTakesMain`；末尾挂四个并列 Provider；`NounComingSoonCard` 改为 `v-if="!foldedNoun"`，只剩 fact / graph_relation 两个 noun 还显示占位。
+
+**PR-D：路由 redirect + 菜单收敛 + 旧页面退场**（commit `f75370f`）
+
+- router/index.ts：5 条函数式 redirect，透传 query；cross-group 额外注入 `scope=cross`
+  - `/slang` → `/learning?noun=slang`
+  - `/style` → `/learning?noun=style`
+  - `/cross-group` → `/learning?noun=slang&scope=cross`
+  - `/episodes` → `/learning?noun=episode`
+  - `/memory-consolidator` → `/learning?noun=memory`
+- SideMenu「学习与记忆」分组：8 项 → 3 项（学习管道 / 知识库 / BlockTrace），同时清掉 6 个不再使用的 ionicons import
+- 删除 5 个旧 view 文件：SlangView / StyleView / EpisodesView / MemoryConsolidatorView / CrossGroupView（slang 子目录 components/composables/helpers 保留供 slots/slang 复用）
+- PluginsView 内的 `router.push('/slang')` 不动——redirect 透明生效
+
+**验证**：
+
+- PR-C：`vue-tsc --noEmit` 0 errors；`npm run build` OK；LearningView chunk 80.52 KB（含三套 console state）
+- PR-D：`vue-tsc --noEmit` 0 errors；`npm run build` OK；旧 SlangView/StyleView/EpisodesView/MemoryConsolidatorView/CrossGroupView 五个独立 chunk **全部消失**；LearningView chunk 149.28 KB / gzip 42.34 KB（slang 共享 chunk `useSlangConsole` 仍是 69.86 KB 独立 chunk）
+- 老链接行为：浏览器访问 `/slang?id=X` → 自动跳到 `/learning?id=X&noun=slang`，书签/分享/旧 deep_link 均不 404
+
+**为何不开 docker rebuild**：
+
+- `admin/static` 是 bind-mount（D6），仅前端构建产物变更 → 浏览器硬刷新即生效
+
+**风险与回滚**：
+
+- PR-D 做了 5 个文件物理删除，回滚时 `git revert f75370f` 即恢复（删除是删除，git history 完整保留）
+- PR-C 是纯加法（17 个新文件 + LearningView 9 行改动），`git revert 58a17aa` 不影响 PR-B 的 slang 折入
+- 整轮 v3 fold-in 回滚顺序：D → C → B → A，每一步都是单 commit
+- 已验证：旧 5 路由的 redirect 透传 query；deep_link（`/slang?id=...`、`/episodes?id=...`、`/style?id=...`、`/memory-consolidator`）经 redirect 后仍带原 id 参数到新页
+
+**影响范围**：
+
+- 前端：`admin/frontend/src/views/learning/slots/{style,episode,memory}/`（17 个新文件）+ `LearningView.vue` + `router/index.ts` + `SideMenu.vue`；删除 5 个旧 view 文件
+- 后端：无改动；`learning_pipeline.py` 内的 `deep_link` 字符串保持不动，redirect 把它们都接住
+- 用户可见：「学习与记忆」侧边栏从 8 项 → 3 项；`/learning?noun=style/episode/memory` 现在是真实可用的控制台，不再是占位卡
+
+**Handoff**：
+
+- v3 fold-in 整轮（PR-A → PR-D）已收口；旧 5 路由可在 1~2 个版本周期后清理 redirect 条目（用户书签迁移期）
+- PR-E（后端 list API 收敛）按 plan 延后；当前 `/api/admin/learning/items` 已是统一入口，零散 list API 仅是 deprecation 标注问题，不阻塞前端发布
+- 下一步可观察：LearningView chunk 149 KB 单文件偏大，未来若需再瘦身，可把 episode/memory drawer 拆成 dynamic import（PR-C 内本想做，但 chunk 数量增加换取体积下降不明显，搁置）
+
+---
+
 ## 2026-05-23 学习管道 v3 PR-B 落地：slang 折入新管道
 
 **变更类型**：frontend 架构演进 / bind-mount 即生效
