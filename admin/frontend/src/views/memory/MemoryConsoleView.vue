@@ -19,7 +19,7 @@ watchEffect(() => {
 
   void router.replace({
     name: 'memory',
-    query: { view: 'browse' },
+    query: { ...route.query, view: 'browse' },
   })
 })
 
@@ -28,7 +28,7 @@ function setView(view: MemoryViewMode) {
 
   void router.replace({
     name: 'memory',
-    query: { view },
+    query: { ...route.query, view },
   })
 }
 </script>

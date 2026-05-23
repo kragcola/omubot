@@ -103,6 +103,19 @@ CREATE TABLE IF NOT EXISTS style_feedback (
     meta_json       TEXT NOT NULL DEFAULT '{}'
 )"""
 
+_CREATE_OBSERVATIONS_TABLE = """\
+CREATE TABLE IF NOT EXISTS style_observations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    expression_id TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    group_id      TEXT NOT NULL DEFAULT '',
+    observed_at   TEXT NOT NULL,
+    trigger_type  TEXT NOT NULL,
+    message_id    TEXT NOT NULL DEFAULT '',
+    meta          TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(expression_id, message_id, trigger_type) ON CONFLICT IGNORE
+)"""
+
 _CREATE_PROFILES_TABLE = """\
 CREATE TABLE IF NOT EXISTS style_profiles (
     profile_id          TEXT PRIMARY KEY,
@@ -132,6 +145,8 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_style_revision_expr ON style_revisions(expression_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_style_feedback_target ON style_feedback(target_type, target_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_style_feedback_group ON style_feedback(group_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_style_obs_today ON style_observations(observed_at, expression_id)",
+    "CREATE INDEX IF NOT EXISTS idx_style_obs_scope ON style_observations(scope, group_id, observed_at)",
     "CREATE INDEX IF NOT EXISTS idx_style_profile_scope ON style_profiles(scope, group_id, status, version)",
 ]
 
@@ -565,6 +580,7 @@ class StyleStore:
         await self._db.execute(_CREATE_EVIDENCE_TABLE)
         await self._db.execute(_CREATE_REVISIONS_TABLE)
         await self._db.execute(_CREATE_FEEDBACK_TABLE)
+        await self._db.execute(_CREATE_OBSERVATIONS_TABLE)
         await self._db.execute(_CREATE_PROFILES_TABLE)
         for index_sql in _CREATE_INDEXES:
             await self._db.execute(index_sql)
@@ -883,6 +899,26 @@ class StyleStore:
         max_chars: int = 800,
         min_confidence: float = 0.0,
     ) -> str:
+        block, _ = await self.build_prompt_block_with_refs(
+            group_id=group_id,
+            conversation_text=conversation_text,
+            include_global=include_global,
+            max_items=max_items,
+            max_chars=max_chars,
+            min_confidence=min_confidence,
+        )
+        return block
+
+    async def build_prompt_block_with_refs(
+        self,
+        *,
+        group_id: str,
+        conversation_text: str,
+        include_global: bool = False,
+        max_items: int = 3,
+        max_chars: int = 800,
+        min_confidence: float = 0.0,
+    ) -> tuple[str, tuple[str, ...]]:
         expressions = await self.get_prompt_expressions(
             group_id=group_id,
             conversation_text=conversation_text,
@@ -891,18 +927,22 @@ class StyleStore:
             min_confidence=min_confidence,
         )
         if not expressions:
-            return ""
+            return "", ()
         limit = max(160, min(int(max_chars or 800), 2000))
         lines = [
             "【表达习惯参考】",
             "以下只用于调整本轮说话方式；不要照抄，不要改变核心人设。",
         ]
+        evidence_refs: list[str] = []
         for expression in expressions:
             line = _prompt_line(expression)
             if len("\n".join([*lines, line])) > limit:
                 break
             lines.append(line)
-        return "\n".join(lines) if len(lines) > 2 else ""
+            evidence_refs.append(expression.expression_id)
+        if len(lines) <= 2:
+            return "", ()
+        return "\n".join(lines), tuple(evidence_refs)
 
     async def record_feedback(
         self,
@@ -1260,21 +1300,39 @@ class StyleStore:
         include_global: bool = False,
         max_chars: int = 900,
     ) -> str:
+        block, _ = await self.build_profile_prompt_block_with_refs(
+            group_id=group_id,
+            include_global=include_global,
+            max_chars=max_chars,
+        )
+        return block
+
+    async def build_profile_prompt_block_with_refs(
+        self,
+        *,
+        group_id: str,
+        include_global: bool = False,
+        max_chars: int = 900,
+    ) -> tuple[str, tuple[str, ...]]:
         profiles = await self.get_enabled_profiles(group_id=group_id, include_global=include_global)
         if not profiles:
-            return ""
+            return "", ()
         limit = max(160, min(int(max_chars or 900), 2400))
         lines = [
             "【当前动态风格档案】",
             "以下用于把表达习惯压缩成稳定说话倾向；不得改变核心人设、身份、价值观或禁区。",
         ]
+        evidence_refs: list[str] = []
         for profile in profiles:
             heading = "全局共享" if profile.scope == "global" else f"群 {profile.group_id}"
             section = f"- {heading} v{profile.version}：{profile.content}"
             if len("\n".join([*lines, section])) > limit:
                 break
             lines.append(section)
-        return "\n".join(lines) if len(lines) > 2 else ""
+            evidence_refs.extend(profile.expression_ids)
+        if len(lines) <= 2:
+            return "", ()
+        return "\n".join(lines), tuple(dict.fromkeys(evidence_refs))
 
     async def update_expression(
         self,
@@ -1470,6 +1528,38 @@ class StyleStore:
         )
         rows = await cursor.fetchall()
         return [_row_to_evidence(row) for row in rows]
+
+    async def record_observation(
+        self,
+        expression_id: str,
+        *,
+        message_id: str = "",
+        trigger_type: str = "expression_inject",
+        group_id: str = "",
+        scope: str = "group",
+        meta: dict[str, Any] | None = None,
+        observed_at: str | None = None,
+    ) -> bool:
+        expression_id = str(expression_id or "").strip()
+        if not expression_id:
+            return False
+        db = self._require_db()
+        cursor = await db.execute(
+            """INSERT OR IGNORE INTO style_observations
+               (expression_id, scope, group_id, observed_at, trigger_type, message_id, meta)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                expression_id,
+                "global" if scope == "global" else "group",
+                str(group_id or ""),
+                observed_at or _now_iso(),
+                _clean_text(trigger_type, max_len=80) or "expression_inject",
+                str(message_id or ""),
+                json.dumps(meta or {}, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
     async def record_revision(
         self,

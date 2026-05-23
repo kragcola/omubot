@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import re
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -16,7 +17,8 @@ from typing import Any
 import aiohttp
 from loguru import logger as _base_logger
 
-from kernel.types import ReplyContext, ThinkerContext
+from kernel.types import PromptBlock, ReplyContext, ThinkerContext
+from services.block_trace.types import PromptBlockCandidate
 from services.identity import Identity
 from services.llm.cache_diagnostic import (
     CacheDiagnostic,
@@ -73,6 +75,31 @@ _CONTROL_TOKEN_RE = re.compile(
     r"(?is)\s*(?:\[\s*pass[_\s-]*turn\s*\]|pass[_\s-]*turn|passturn)\s*(?:[:：\-]\s*.*)?\s*"
 )
 _VISIBLE_TOOL_OUTPUT_NAMES = {"send_sticker", "send_group_msg"}
+
+
+def _candidate_from_prompt_block(
+    block: PromptBlock,
+    *,
+    group_id: str | None,
+) -> PromptBlockCandidate:
+    source = block.source or "system"
+    provider = block.provider or (f"{source}_plugin" if source else "unknown")
+    position = block.position if block.position in {"static", "stable", "dynamic"} else "dynamic"
+    layer = "stable" if position in {"static", "stable"} else "dynamic"
+    return PromptBlockCandidate(
+        candidate_id="pbc_" + secrets.token_hex(6),
+        source=source,
+        provider=provider,
+        layer=layer,
+        label=block.label,
+        text=block.text,
+        priority=block.priority,
+        position=position,
+        scope="group" if group_id else "global",
+        group_id=group_id or "",
+        hit_reason=block.label or source,
+        char_count=len(block.text),
+    )
 
 # Markdown stripping — QQ does not render Markdown.
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
@@ -2004,6 +2031,7 @@ class LLMClient:
                     await self._bus.fire_on_pre_prompt(prompt_ctx)
                     # --- Provider + Budget management + trace ---
                     req_id = f"{session_id}_{int(time.monotonic() * 1000)}"
+                    provider_candidates: list[PromptBlockCandidate] = []
                     if self._provider_bus is not None and getattr(self._provider_bus, "mode", "off") != "off":
                         from services.block_trace.providers import QueryContext as QCtx
                         qctx = QCtx(
@@ -2015,13 +2043,20 @@ class LLMClient:
                         )
                         bus = self._provider_bus
                         if bus.mode == "active":
-                            provider_blocks = await bus.run_active(qctx)
-                            prompt_ctx.blocks.extend(provider_blocks)
+                            if self._budget_manager is not None:
+                                provider_candidates = await bus.run_all(qctx)
+                            else:
+                                provider_blocks = await bus.run_active(qctx)
+                                prompt_ctx.blocks.extend(provider_blocks)
                         elif bus.mode == "shadow":
                             asyncio.create_task(bus.run_shadow(qctx))  # noqa: RUF006
                     if self._budget_manager is not None:
-                        prompt_ctx.blocks = self._budget_manager.process(
-                            prompt_ctx.blocks,
+                        prompt_candidates = [
+                            _candidate_from_prompt_block(block, group_id=group_id)
+                            for block in prompt_ctx.blocks
+                        ]
+                        prompt_ctx.blocks, _accepted_decisions = self._budget_manager.process(
+                            [*prompt_candidates, *provider_candidates],
                             request_id=req_id,
                             task="main",
                             session_id=session_id,

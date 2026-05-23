@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -50,14 +50,25 @@ class SlangProvider:
         settings = await store.load_settings()
         if not settings.injection_enabled or not settings.allows_group(ctx.group_id):
             return []
-        block = await store.build_prompt_block(
-            group_id=ctx.group_id,
-            conversation_text=ctx.conversation_text,
-            max_terms=settings.max_injected_terms,
-            max_chars=settings.max_prompt_chars,
-        )
+        refs: tuple[str, ...] = ()
+        build_with_refs = getattr(store, "build_prompt_block_with_refs", None)
+        if callable(build_with_refs):
+            block, refs = await cast(Any, build_with_refs)(
+                group_id=ctx.group_id,
+                conversation_text=ctx.conversation_text,
+                max_terms=settings.max_injected_terms,
+                max_chars=settings.max_prompt_chars,
+            )
+        else:
+            block = await store.build_prompt_block(
+                group_id=ctx.group_id,
+                conversation_text=ctx.conversation_text,
+                max_terms=settings.max_injected_terms,
+                max_chars=settings.max_prompt_chars,
+            )
         if not block:
             return []
+        evidence_refs = tuple(str(ref) for ref in refs if str(ref).strip())
         return [PromptBlockCandidate(
             candidate_id="pbc_" + secrets.token_hex(6),
             source="slang",
@@ -71,6 +82,7 @@ class SlangProvider:
             group_id=ctx.group_id,
             hit_reason="slang_injection",
             char_count=len(block),
+            evidence_refs=evidence_refs,
         )]
 
 

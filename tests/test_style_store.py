@@ -22,6 +22,11 @@ async def test_style_store_init_creates_tables(store: StyleStore) -> None:
     cursor = await store._db.execute("PRAGMA journal_mode")
     journal = await cursor.fetchone()
     assert journal[0] == "delete"
+    cursor = await store._db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='style_observations'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
 
 
 @pytest.mark.asyncio
@@ -59,6 +64,50 @@ async def test_style_store_upserts_expression_with_evidence_and_revision(store: 
     revisions = await store.list_revisions(expression.expression_id)
     assert len(revisions) == 1
     assert revisions[0].action == "create"
+
+
+@pytest.mark.asyncio
+async def test_style_store_record_observation_dedupes_by_message_and_trigger(store: StyleStore) -> None:
+    expression = await store.upsert_expression(
+        NewStyleExpression(
+            situation="有人连续吐槽",
+            style="短促接梗但不抢话",
+            group_id="100",
+        )
+    )
+
+    first = await store.record_observation(
+        expression.expression_id,
+        message_id="req_1",
+        trigger_type="expression_inject",
+        group_id="100",
+        scope="group",
+        meta={"candidate_id": "pbc_1"},
+    )
+    duplicate = await store.record_observation(
+        expression.expression_id,
+        message_id="req_1",
+        trigger_type="expression_inject",
+        group_id="100",
+        scope="group",
+    )
+    other_trigger = await store.record_observation(
+        expression.expression_id,
+        message_id="req_1",
+        trigger_type="profile_inject",
+        group_id="100",
+        scope="group",
+    )
+
+    assert first is True
+    assert duplicate is False
+    assert other_trigger is True
+    cursor = await store._db.execute(
+        "SELECT COUNT(*) AS cnt FROM style_observations WHERE expression_id = ?",
+        (expression.expression_id,),
+    )
+    row = await cursor.fetchone()
+    assert row["cnt"] == 2
 
 
 @pytest.mark.asyncio

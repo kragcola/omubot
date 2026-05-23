@@ -75,6 +75,19 @@ CREATE TABLE IF NOT EXISTS episode_revisions (
     FOREIGN KEY(episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE
 )"""
 
+_CREATE_OBSERVATIONS_TABLE = """\
+CREATE TABLE IF NOT EXISTS episode_observations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id    TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    group_id      TEXT NOT NULL DEFAULT '',
+    observed_at   TEXT NOT NULL,
+    trigger_type  TEXT NOT NULL,
+    message_id    TEXT NOT NULL DEFAULT '',
+    meta          TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(episode_id, message_id, trigger_type) ON CONFLICT IGNORE
+)"""
+
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_episode_state ON episodes(episode_state, group_id)",
     "CREATE INDEX IF NOT EXISTS idx_episode_group ON episodes(scope, group_id, episode_state)",
@@ -84,6 +97,8 @@ _CREATE_INDEXES = [
         "ON episodes(cross_group_visible, episode_state) WHERE cross_group_visible = 1"
     ),
     "CREATE INDEX IF NOT EXISTS idx_episode_rev ON episode_revisions(episode_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_episode_obs_today ON episode_observations(observed_at, episode_id)",
+    "CREATE INDEX IF NOT EXISTS idx_episode_obs_scope ON episode_observations(scope, group_id, observed_at)",
 ]
 
 
@@ -285,6 +300,7 @@ class EpisodeStore:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute(_CREATE_EPISODES_TABLE)
         await self._db.execute(_CREATE_REVISIONS_TABLE)
+        await self._db.execute(_CREATE_OBSERVATIONS_TABLE)
         for idx_sql in _CREATE_INDEXES:
             await self._db.execute(idx_sql)
         await self._ensure_column(
@@ -449,6 +465,38 @@ class EpisodeStore:
         cursor = await db.execute(
             "UPDATE episodes SET last_used_at = ? WHERE episode_id = ?",
             (now, episode_id),
+        )
+        await db.commit()
+        return (cursor.rowcount or 0) > 0
+
+    async def record_observation(
+        self,
+        episode_id: str,
+        *,
+        message_id: str = "",
+        trigger_type: str = "episode_inject",
+        group_id: str = "",
+        scope: str = "group",
+        meta: dict[str, Any] | None = None,
+        observed_at: str | None = None,
+    ) -> bool:
+        episode_id = str(episode_id or "").strip()
+        if not episode_id:
+            return False
+        db = self._require_db()
+        cursor = await db.execute(
+            """INSERT OR IGNORE INTO episode_observations
+               (episode_id, scope, group_id, observed_at, trigger_type, message_id, meta)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                episode_id,
+                "global" if scope == "global" else "group",
+                str(group_id or ""),
+                observed_at or _now_iso(),
+                str(trigger_type or "episode_inject")[:80],
+                str(message_id or ""),
+                json.dumps(meta or {}, ensure_ascii=False, sort_keys=True),
+            ),
         )
         await db.commit()
         return (cursor.rowcount or 0) > 0

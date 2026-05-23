@@ -73,6 +73,12 @@ const router = createRouter({
       component: () => import('../views/slang/SlangView.vue'),
     },
     {
+      path: '/learning',
+      name: 'learning',
+      meta: { title: '学习管道总览', keepAlive: true },
+      component: () => import('../views/learning/LearningView.vue'),
+    },
+    {
       path: '/style',
       name: 'style',
       meta: { title: '表达方式', keepAlive: true },

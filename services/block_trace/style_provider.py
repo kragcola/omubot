@@ -55,11 +55,19 @@ class StyleProvider:
         candidates: list[PromptBlockCandidate] = []
 
         if self._profile_enabled:
-            profile_block = await store.build_profile_prompt_block(
-                group_id=str(ctx.group_id),
-                include_global=include_global,
-                max_chars=self._profile_max_chars,
-            )
+            if hasattr(store, "build_profile_prompt_block_with_refs"):
+                profile_block, profile_refs = await store.build_profile_prompt_block_with_refs(
+                    group_id=str(ctx.group_id),
+                    include_global=include_global,
+                    max_chars=self._profile_max_chars,
+                )
+            else:
+                profile_block = await store.build_profile_prompt_block(
+                    group_id=str(ctx.group_id),
+                    include_global=include_global,
+                    max_chars=self._profile_max_chars,
+                )
+                profile_refs = ()
             if profile_block:
                 candidates.append(PromptBlockCandidate(
                     candidate_id="pbc_" + secrets.token_hex(6),
@@ -74,16 +82,28 @@ class StyleProvider:
                     group_id=ctx.group_id,
                     hit_reason="style_profile_injection",
                     char_count=len(profile_block),
+                    evidence_refs=tuple(profile_refs),
                 ))
 
-        block = await store.build_prompt_block(
-            group_id=str(ctx.group_id),
-            conversation_text=ctx.conversation_text,
-            include_global=include_global,
-            max_items=self._max_items,
-            max_chars=self._max_chars,
-            min_confidence=self._min_confidence,
-        )
+        if hasattr(store, "build_prompt_block_with_refs"):
+            block, expression_refs = await store.build_prompt_block_with_refs(
+                group_id=str(ctx.group_id),
+                conversation_text=ctx.conversation_text,
+                include_global=include_global,
+                max_items=self._max_items,
+                max_chars=self._max_chars,
+                min_confidence=self._min_confidence,
+            )
+        else:
+            block = await store.build_prompt_block(
+                group_id=str(ctx.group_id),
+                conversation_text=ctx.conversation_text,
+                include_global=include_global,
+                max_items=self._max_items,
+                max_chars=self._max_chars,
+                min_confidence=self._min_confidence,
+            )
+            expression_refs = ()
         if block:
             candidates.append(PromptBlockCandidate(
                 candidate_id="pbc_" + secrets.token_hex(6),
@@ -98,6 +118,7 @@ class StyleProvider:
                 group_id=ctx.group_id,
                 hit_reason="style_expression_injection",
                 char_count=len(block),
+                evidence_refs=tuple(expression_refs),
             ))
 
         return candidates

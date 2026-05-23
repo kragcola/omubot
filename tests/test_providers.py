@@ -38,9 +38,11 @@ class _FakeSlangStore:
         *,
         settings: _FakeSlangSettings | None = None,
         block_text: str = "fake-slang",
+        prompt_refs: tuple[str, ...] = ("slang_ref_1",),
     ) -> None:
         self._settings = settings or _FakeSlangSettings()
         self._block_text = block_text
+        self._prompt_refs = prompt_refs
         self.calls: list[dict[str, Any]] = []
 
     async def load_settings(self) -> _FakeSlangSettings:
@@ -50,6 +52,10 @@ class _FakeSlangStore:
         self.calls.append(kwargs)
         return self._block_text
 
+    async def build_prompt_block_with_refs(self, **kwargs: Any) -> tuple[str, tuple[str, ...]]:
+        self.calls.append(kwargs)
+        return self._block_text, self._prompt_refs
+
 
 class _FakeStyleStore:
     def __init__(
@@ -57,9 +63,13 @@ class _FakeStyleStore:
         *,
         profile_text: str = "profile-block",
         expression_text: str = "expression-block",
+        profile_refs: tuple[str, ...] = ("expr_profile",),
+        expression_refs: tuple[str, ...] = ("expr_prompt",),
     ) -> None:
         self._profile = profile_text
         self._expression = expression_text
+        self._profile_refs = profile_refs
+        self._expression_refs = expression_refs
         self.profile_calls: list[dict[str, Any]] = []
         self.expression_calls: list[dict[str, Any]] = []
 
@@ -67,9 +77,17 @@ class _FakeStyleStore:
         self.profile_calls.append(kwargs)
         return self._profile
 
+    async def build_profile_prompt_block_with_refs(self, **kwargs: Any) -> tuple[str, tuple[str, ...]]:
+        self.profile_calls.append(kwargs)
+        return self._profile, self._profile_refs
+
     async def build_prompt_block(self, **kwargs: Any) -> str:
         self.expression_calls.append(kwargs)
         return self._expression
+
+    async def build_prompt_block_with_refs(self, **kwargs: Any) -> tuple[str, tuple[str, ...]]:
+        self.expression_calls.append(kwargs)
+        return self._expression, self._expression_refs
 
 
 @pytest.fixture
@@ -109,6 +127,7 @@ async def test_slang_provider_emits_candidate(qctx: QueryContext) -> None:
     assert cand.position == "dynamic"
     assert cand.text == "fake-slang"
     assert cand.label == "群内黑话"
+    assert cand.evidence_refs == ("slang_ref_1",)
     assert store.calls[0]["group_id"] == "123456"
 
 
@@ -170,6 +189,8 @@ async def test_style_provider_emits_two_candidates(qctx: QueryContext) -> None:
     assert expression.priority == 45
     assert profile.source == "style"
     assert expression.provider == "style_provider"
+    assert profile.evidence_refs == ("expr_profile",)
+    assert expression.evidence_refs == ("expr_prompt",)
 
 
 @pytest.mark.asyncio

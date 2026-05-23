@@ -7,6 +7,7 @@ from services.block_trace.slang_provider import SlangProvider
 from services.block_trace.store import BlockTraceStore
 from services.block_trace.style_provider import StyleProvider
 from services.block_trace.types import (
+    AcceptedDecision,
     BudgetDecision,
     PromptBlockCandidate,
     PromptBlockTrace,
@@ -22,6 +23,7 @@ from services.block_trace.types import (
 BlockTraceBus = BlockTraceStore
 
 __all__ = [
+    "AcceptedDecision",
     "BlockTraceBus",
     "BlockTraceStore",
     "BudgetDecision",

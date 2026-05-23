@@ -65,6 +65,7 @@ def create_api_router(
     from admin.routes.api.knowledge import create_knowledge_router
     from admin.routes.api.learning import create_learning_router
     from admin.routes.api.learning_normalizer import create_learning_normalizer_router
+    from admin.routes.api.learning_pipeline import create_learning_pipeline_router
     from admin.routes.api.logs import create_logs_router
     from admin.routes.api.memory import create_memory_router
     from admin.routes.api.memory_consolidator import (
@@ -151,6 +152,7 @@ def create_api_router(
     router.include_router(create_style_router(ctx=ctx, message_log=message_log, llm_client=llm_client))
     router.include_router(create_learning_normalizer_router(ctx=ctx))
     router.include_router(create_learning_router(ctx=ctx))
+    router.include_router(create_learning_pipeline_router(ctx=ctx))
     router.include_router(create_cross_group_router(ctx=ctx, bus=bus))
     router.include_router(create_episodes_router(ctx=ctx, bus=bus))
     router.include_router(create_memory_consolidator_router(ctx=ctx))

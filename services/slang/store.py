@@ -2999,6 +2999,24 @@ class SlangStore:
         max_chars: int = 1200,
         max_indirect_terms: int | None = None,
     ) -> str:
+        block, _refs = await self.build_prompt_block_with_refs(
+            group_id=group_id,
+            conversation_text=conversation_text,
+            max_terms=max_terms,
+            max_chars=max_chars,
+            max_indirect_terms=max_indirect_terms,
+        )
+        return block
+
+    async def build_prompt_block_with_refs(
+        self,
+        *,
+        group_id: str,
+        conversation_text: str = "",
+        max_terms: int = 8,
+        max_chars: int = 1200,
+        max_indirect_terms: int | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
         settings = await self.load_settings()
         if max_indirect_terms is None:
             max_indirect_terms = settings.max_indirect_inject_terms
@@ -3010,10 +3028,11 @@ class SlangStore:
             max_indirect_terms=max_indirect_terms,
         )
         if not terms:
-            return ""
+            return "", ()
         lines = [
             "以下是当前群的黑话/约定用语。优先用于理解群聊上下文，不要为了显得懂梗而强行复述。",
         ]
+        term_ids: list[str] = []
         for term in terms:
             aliases = f"；别名：{'、'.join(term.aliases[:5])}" if term.aliases else ""
             policy = {
@@ -3025,7 +3044,8 @@ class SlangStore:
             if len("\n".join([*lines, next_line])) > max_chars:
                 break
             lines.append(next_line)
-        return "\n".join(lines)
+            term_ids.append(term.term_id)
+        return "\n".join(lines), tuple(term_ids)
 
     async def stats(self, *, days: int = 14) -> dict[str, Any]:
         """Return lightweight review and activity stats for the admin console."""

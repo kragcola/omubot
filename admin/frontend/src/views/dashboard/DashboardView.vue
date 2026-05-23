@@ -315,7 +315,7 @@ const pendingItems = computed<PendingItem[]>(() => {
       title: '黑话待审核',
       value: `${slangSummary.value?.candidate_count || 0} 条`,
       note: '新词条还没有人工确认，暂时不会直接进入 Prompt。',
-      route: '/slang',
+      route: '/learning?stage=candidate&noun=slang',
       severity: 'warning',
     })
   }
@@ -326,7 +326,7 @@ const pendingItems = computed<PendingItem[]>(() => {
       title: 'AI 待人工复核',
       value: `${slangSummary.value?.ai_pending_review_count || 0} 条`,
       note: '已通过 AI 初审，等待人工确认或否决。',
-      route: '/slang',
+      route: '/learning?stage=review&noun=slang',
       severity: 'info',
     })
   }
@@ -337,7 +337,7 @@ const pendingItems = computed<PendingItem[]>(() => {
       title: '表达学习待审',
       value: `${styleSummary.value?.pending || 0} 条`,
       note: '新提取的表达片段等待人工核对是否入库。',
-      route: '/style',
+      route: '/learning?stage=review&noun=style',
       severity: 'info',
     })
   }
@@ -379,11 +379,14 @@ const pendingItems = computed<PendingItem[]>(() => {
 })
 
 const primaryShortcut = computed(() => {
-  if ((slangSummary.value?.candidate_count || 0) > 0 || (slangSummary.value?.ai_pending_review_count || 0) > 0) {
-    return { label: '去处理黑话', route: '/slang' }
+  if ((slangSummary.value?.candidate_count || 0) > 0) {
+    return { label: '去处理黑话', route: '/learning?stage=candidate&noun=slang' }
+  }
+  if ((slangSummary.value?.ai_pending_review_count || 0) > 0) {
+    return { label: '去复核黑话', route: '/learning?stage=review&noun=slang' }
   }
   if ((styleSummary.value?.pending || 0) > 0) {
-    return { label: '去处理风格', route: '/style' }
+    return { label: '去处理风格', route: '/learning?stage=review&noun=style' }
   }
   if (pendingItems.value.some(item => item.route === '/system')) {
     return { label: '查看系统异常', route: '/system' }
@@ -575,7 +578,7 @@ function moodToneColor(tone: 'success' | 'warning' | 'info' | 'primary') {
 }
 
 function goTo(route: string) {
-  void router.push({ path: route })
+  void router.push(route)
 }
 </script>
 
@@ -778,7 +781,7 @@ function goTo(route: string) {
             </template>
             <div class="dash-learn-grid">
               <!-- Slang card -->
-              <div class="dash-learn" @click="goTo('/slang')">
+              <div class="dash-learn" @click="goTo('/learning?stage=approved&noun=slang&date=today')">
                 <div class="dash-learn__head">
                   <span class="dash-learn__icon" style="--tone: var(--om-warning)">
                     <NIcon :component="ChatbubbleEllipsesOutline" :size="16" />
@@ -816,7 +819,7 @@ function goTo(route: string) {
               </div>
 
               <!-- Style card -->
-              <div class="dash-learn" @click="goTo('/style')">
+              <div class="dash-learn" @click="goTo('/learning?stage=approved&noun=style&date=today')">
                 <div class="dash-learn__head">
                   <span class="dash-learn__icon" style="--tone: var(--om-info)">
                     <NIcon :component="SparklesOutline" :size="16" />

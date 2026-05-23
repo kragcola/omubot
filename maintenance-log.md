@@ -4,6 +4,380 @@
 
 ---
 
+## 2026-05-23 学习管道 v2.1 统一验收 + 部署上线
+
+**变更类型**：deploy / docs tracking 同步 / 验收
+
+**背景**：
+
+`docs/tracking/learning-pipeline.md` v2.1（在 v2 上经审计修订，含 5 项 finding F1-F5）由 gpt 跨多次会话实施，中途经历 session 中断与多次接力。本条目覆盖 **统一验收 + 上线动作**，L1-L4 / PR1-PR6 的逐项实现细节见前面已存在的条目。
+
+**验收结论**：
+
+- F1（accepted-only observation 移到 budget_manager）已落地，且**带 L3 折入**：trimmed 也写 observation，但 trigger_type / reason 加 `_trimmed` 后缀；rejected 不计。
+- F2（budget_manager 吃 `PromptBlockCandidate` 并贯通 `evidence_refs`）已落地，并提供 `_candidate_from_prompt_block` 适配旧 provider 链路。
+- F3（`/memory?view=manage` 深链 + L2 `card_id` 远端 fallback fetch）已落地，超额交付 L2。
+- F4（`/learning/pipeline` 响应 schema 为 `stages[stage].by_noun[noun] = number | null` 标量）已落地。
+- F5（extract-all 改 `async with _extract_all_lock` + per-noun `_run_with_timeout` + `asyncio.gather`，并叠加 L4 `run_id` registry 异步轮询）已落地。
+- PR1-PR6（含 PR2 拆 a/b）全部交付：后端 `/learning` 路由组 + 前端 `LearningView` + StageStrip + LearningTable + LearningReviewHost 多态容器（slang/style/episode/consolidator） + SideMenu 新增「学习管道」 + Dashboard 4 个深链。
+- 本次同步：`docs/tracking/learning-pipeline.md` §22.1.3 / §22.1.5 / §24 把 trimmed 决议从初稿「不计入」更新为 L3 实施口径「计入但加 `_trimmed` 后缀」，并补 §22.0 表格脚注，消除 doc/code drift。
+
+**测试基线**（部署前）：
+
+- `.venv/bin/python -m pytest -q` → 1459 passed / 1 pre-existing failure（`test_admin_api.py::test_system_services_health_endpoint`，与本期无关，已用 `git stash` 验证）
+- `ruff check` → 全部 v2.1 范围文件 clean（一处 F841 在 `admin/__init__.py:34`，pre-existing 不在范围内）
+- `pyright` → v2.1 新增核心文件 0 errors（`services/llm/client.py` 内 11 个 pre-existing 来自 `_provider_bus: object | None` 类型擦除，避免循环导入）
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 errors
+- `cd admin/frontend && npm run build` → 成功，产物 `LearningView-BO9Y1BvX.js` / `LearningView-DDREf7qo.css`、entry `index-D_KAw0Od.js`
+
+**部署动作**：
+
+- D7 `git stash list && git status -uno` → 无 stash，工作区干净。
+- 本轮 25 modified + 5 untracked（含 4 个新文件 + 1 个新目录 `admin/frontend/src/views/learning/`）按文件白名单 stage，禁用 `git add -A`，`storage/*.db*` / `*.bak*` 走 .gitignore 物理护栏。
+- commit 走 conventional commit；admin/static 是 bind-mount，前端 build 已落，**无需** docker rebuild 前端；后端 `.py` 是 baked 进 image（`docker-compose.yml` bot 服务只挂 `config` + `admin/static`），所以 `dot_clean . && docker compose up bot -d --build`。
+- napcat 不动；如果未来需要重启 napcat，仍坚持 `docker compose restart napcat`，禁止 `down`+`up`（设备指纹 → 风控）。
+
+**回滚路径**：
+
+- 代码：`git revert <deploy-commit>` 即可全量回退本次发布；前端 build 产物在 `admin/static/assets/` 由旧 commit 的 `npm run build` 重新覆盖。
+- 服务：`docker compose up bot -d --build` 重建到上一 image。
+- 数据：本期未增删表结构、未跑 migration，无需 DB 回滚。
+
+**影响范围**：
+
+- 新页面 `/learning` 上线，SideMenu / Dashboard 入口可见；admin token 鉴权链路与 v2 同。
+- prompt budget hot path 写 observation 的口径变更：所有 accepted + trimmed 的 evidence_refs 都会触发对应 store 的 `record_observation`，rejected 不会。trimmed 走 `_trimmed` 后缀 trigger / `prompt_inject_trimmed:` reason，前端可按需筛选。
+- `services/block_trace/__init__.py` 新增 `BlockTraceBus = BlockTraceStore` 别名，匹配 § 10.2 协议形状。
+
+**遗留风险 / 后续待办**：
+
+- `admin/routes/api/learning_pipeline.py:258` 对 `_extract_all_active_run_id` 与 `_extract_all_lock.locked()` 的判断和后续设值存在窄竞态窗口（admin-only 接口、影响极小，已记入 `docs/tracking/learning-pipeline-execution.md`）。
+- pre-existing `tests/test_admin_api.py::test_system_services_health_endpoint` 仍 failing，与 v2.1 无关，建议下次同模式扫描时一并修。
+- markdown lint（MD040 / MD031 / MD032）在 `learning-pipeline.md` 内是 v2 起的存量噪声，本期不做。
+
+---
+
+## 2026-05-23 `/learning` L4 收口（extract-all run_id 进度查询）
+
+**变更类型**：admin API / admin frontend / tests / build artifact / docs tracking
+
+**内容**：
+
+- `POST /api/admin/learning/extract-all` 新增 `run_id` 运行态：模块级 registry 记录整体 status、per-noun status/result、started/updated/finished 时间和参数；默认 `wait=true` 保持同步返回最终 results，前端使用 `wait=false` 异步启动。
+- 新增 `GET /api/admin/learning/extract-all/{run_id}` 查询接口；not found 返回 `status=not_found`；同一时间仍只允许一个 extract-all active run，锁冲突返回当前 active run_id。
+- `LearningView.vue` 的一键抽取改为启动 run 后轮询 status endpoint，页面展示 run_id、整体状态、slang/style/consolidator 三路进度和结果摘要；完成/失败/跳过后停止轮询并刷新 pipeline/items。
+- `types.ts` 增加 extract run/noun/result 类型；`docs/tracking/learning-pipeline-execution.md` 将 L4 和整个 L 系列标为完成。
+
+**验证**：
+
+- `.venv/bin/python -m pytest tests/test_admin_api_learning_pipeline.py -q` → 11 passed
+- `.venv/bin/python -m ruff check admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → All checks passed
+- `.venv/bin/pyright admin/routes/api/learning_pipeline.py` → 0 errors
+- `.venv/bin/python -m py_compile admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 通过
+- `cd admin/frontend && npm run build` → 成功；entry `index-D_KAw0Od.js`
+- `rg -n "style=|!important|#[0-9A-Fa-f]{3,6}|linear-gradient|radial-gradient" admin/frontend/src/views/learning` → 无匹配
+
+**影响范围**：
+
+- `/learning` 一键抽取现在有可见运行进度；现有同步调用仍可从 POST 响应读取最终 results。
+- 本轮交付 run_id query polling，没有扩展全局 `/events` SSE；run registry 为进程内短生命周期状态，服务重启后历史 run 查询会返回 `not_found`。
+
+---
+
+## 2026-05-23 `/learning` L3 收口（trimmed prompt block 计入 hits）
+
+**变更类型**：services / prompt budget hot path / tests / docs tracking
+
+**内容**：
+
+- `PromptBudgetManager` 新增独立 `observation_decisions` 队列：完整 accepted 和 trimmed 都写 observation，返回给调用侧的 `accepted_decisions` 仍保持 accepted-only。
+- `AcceptedDecision` 增加 `decision` 字段，observation meta 写入 `budget_decision`，便于区分完整注入和裁剪注入。
+- slang trimmed reason 记为 `prompt_inject_trimmed:<request_id>`；style/episode trimmed trigger 记为 `expression_inject_trimmed` / `profile_inject_trimmed` / `episode_inject_trimmed`。
+- `tests/test_block_trace.py` 覆盖 trimmed 写 observation、rejected 不写，以及 slang/style/episode 三类 trimmed 来源。
+- `docs/tracking/learning-pipeline-execution.md` 将 L3 标为完成，补充拆解、验证证据和遗留风险。
+
+**验证**：
+
+- `.venv/bin/python -m pytest tests/test_block_trace.py tests/test_providers.py tests/test_slang_store.py tests/test_style_store.py tests/test_episode.py -q` → 94 passed
+- `.venv/bin/python -m ruff check services/block_trace/budget_manager.py services/block_trace/types.py tests/test_block_trace.py` → All checks passed
+- `.venv/bin/pyright services/block_trace/budget_manager.py services/block_trace/types.py` → 0 errors
+- `.venv/bin/python -m py_compile services/block_trace/budget_manager.py services/block_trace/types.py tests/test_block_trace.py` → 通过
+
+**影响范围**：
+
+- `/learning` hits 后续会自然包含 trimmed prompt 注入命中；rejected block 仍不计入 hits。
+- 不回填历史数据；同一 ref 在同一 request 中若完整/裁剪分别进入 prompt，会以不同 trigger/reason 保留事实。
+
+---
+
+## 2026-05-23 `/learning` L2 收口（memory card_id 深链定位）
+
+**变更类型**：admin API / admin frontend / tests / build artifact / docs tracking
+
+**内容**：
+
+- `/api/admin/learning/items` 的 memory 行 deep link 从 `/memory?view=manage` 改为 `/memory?view=manage&card_id=<card_id>`，并对 `card_id` 做 URL encode。
+- `MemoryConsoleView.vue` 在补默认 `view` 和切换 browse/manage 时保留已有 query，避免丢失 `card_id`。
+- `MemoryView.vue` 监听 `route.query.card_id`，优先复用当前列表卡片，找不到时调用既有 `GET /api/admin/memory/cards/{card_id}`，命中后复用 `openEdit(card)` 自动打开编辑 Drawer。
+- `docs/tracking/learning-pipeline-execution.md` 将 L2 标为完成，补充拆解、盘点、验证证据和遗留风险。
+
+**验证**：
+
+- `.venv/bin/python -m pytest tests/test_admin_api_learning_pipeline.py -q` → 9 passed
+- `.venv/bin/python -m ruff check admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → All checks passed
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 通过
+- `cd admin/frontend && npm run build` → 成功；entry `index-EUIh6UKR.js`
+- `rg -n "style=|!important|#[0-9A-Fa-f]{3,6}|linear-gradient|radial-gradient" admin/frontend/src/views/memory admin/frontend/src/views/learning` → 无匹配
+
+**影响范围**：
+
+- `/learning` memory 详情现在能直接定位并打开目标记忆卡；Memory 管理页既有列表、筛选、保存、过期流程不变。
+- 未做浏览器真实点击手测；表格滚动/高亮未纳入本轮，避免对 Naive DataTable DOM 做侵入改动。
+
+---
+
+## 2026-05-23 `/learning` L1 收口（slang accepted-only prompt observation）
+
+**变更类型**：services / prompt budget hot path / tests / docs tracking
+
+**内容**：
+
+- `SlangStore` 新增 `build_prompt_block_with_refs()`，返回实际进入 prompt 的 block 文本和 term_id refs；旧 `build_prompt_block()` 保持兼容。
+- `SlangProvider` 优先调用 with_refs 方法，把实际注入 term_id 写入 `PromptBlockCandidate.evidence_refs`。
+- `PromptBudgetManager` 新增 `slang_store_getter`，只对 `accepted_decisions` 中的 slang refs 写 `slang_observations`，reason 标记为 `prompt_inject:<request_id>`；trimmed/rejected 不写，重复 refs 去重。
+- `plugins/chat/plugin.py` 初始化 budget manager 时注入 `ctx.slang_store` getter。
+- `docs/tracking/learning-pipeline-execution.md` 将 L1 标为完成，补充详细子步骤、改动文件、验证证据和遗留风险。
+
+**验证**：
+
+- `.venv/bin/python -m pytest tests/test_block_trace.py tests/test_providers.py tests/test_slang_store.py -q` → 52 passed
+- `.venv/bin/python -m ruff check services/block_trace/budget_manager.py services/block_trace/slang_provider.py services/slang/store.py plugins/chat/plugin.py tests/test_block_trace.py tests/test_providers.py tests/test_slang_store.py` → All checks passed
+- `.venv/bin/pyright services/block_trace/budget_manager.py services/block_trace/slang_provider.py` → 0 errors
+- `.venv/bin/python -m py_compile services/block_trace/budget_manager.py services/block_trace/slang_provider.py services/slang/store.py plugins/chat/plugin.py tests/test_block_trace.py tests/test_providers.py tests/test_slang_store.py` → 通过
+- `.venv/bin/python -m pytest tests/test_admin_api_learning_pipeline.py -q` → 9 passed
+- `.venv/bin/python -m ruff check admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → All checks passed
+
+**影响范围**：
+
+- `/learning` slang hits 后续可看到 prompt accepted 注入观测；既有 `message_match` 用户消息命中保留不变。
+- 未改 `slang_observations` 表结构；如后续要在 UI 区分 message hit 与 prompt inject，需要 L2 增加分桶统计或字段迁移。
+
+---
+
+## 2026-05-23 `/learning` 学习管道 PR5b + PR6 收口（style runner + 入口深链）
+
+**变更类型**：admin API / admin frontend / tests / build artifact / docs tracking
+
+**内容**：
+
+- 接续 PR5a 后补强 production style 抽取：`admin/routes/api/style.py` 抽出 `run_style_manual_extract(...)`，`/api/admin/style/extract/run` 与 `/api/admin/learning/extract-all` 共用同一实现。
+- `admin/routes/api/learning_pipeline.py` 的 `_run_style_extract()` 在无测试 runner 时直接调用 production style helper，不再默认 `skipped=true`；测试新增 `test_learning_style_extract_uses_production_runner`。
+- `LearningReviewHost.vue` 保持轻量状态处理边界，在抽屉底部补「打开原页面」，复杂编辑仍回到 slang/style/episodes/memory-consolidator 原页面。
+- `SideMenu.vue` 在「日常」分组新增「学习管道」入口；`DashboardView.vue` 的待办项、primary shortcut、今日学习黑话/风格卡改为 `/learning` 深链，表情包卡继续跳 `/stickers`。
+- `docs/tracking/learning-pipeline-execution.md` 将 PR6 标为完成，记录 PR5b/PR6 验证证据与遗留风险；构建刷新 `admin/static/index.html` 入口 hash。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && bash ./scripts/dev/doctor.sh` → 0 fail, 0 warn（APFS、repo-local uv/pip cache、无 AppleDouble）。
+- `.venv/bin/python -m ruff check admin/routes/api/style.py admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → All checks passed
+- `.venv/bin/python -m pytest tests/test_admin_api_learning_pipeline.py -q` → 9 passed
+- `.venv/bin/python -m py_compile admin/routes/api/style.py admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → 通过
+- `.venv/bin/pyright admin/routes/api/learning_pipeline.py admin/routes/api/style.py` → 0 errors
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 通过
+- `cd admin/frontend && npm run build` → 成功；`LearningView-*.js` 20.73 KB（gzip 7.66 KB），`DashboardView-*.js` 28.16 KB（gzip 9.83 KB），entry `index-CryzHcyH.js`
+- `rg -n "style=|!important|#[0-9A-Fa-f]{3,6}|linear-gradient|radial-gradient" admin/frontend/src/views/learning admin/frontend/src/layouts/components/SideMenu.vue` → 无匹配；Dashboard 扫描仅命中既有动态样式/旧渐变，本轮未新增样式。
+
+**影响范围**：
+
+- `/admin/learning` 现在具备入口、Dashboard 引流、pipeline/items、extract-all、轻量审核状态处理和 production style 抽取接线；PR1-PR6 主线已收口。
+- 未做浏览器真实点击手测；上线前建议手点 SideMenu `/learning`、Dashboard 3 个待办深链和今日学习黑话/风格/表情包卡。
+- 后续 L1：slang observation 仍需迁移到 budget accepted 写入；`LearningReviewHost` 可按需要再升级为专项 ReviewPanel。
+
+---
+
+## 2026-05-23 `/learning` 学习管道 PR5a 接手（extract-all + 轻量审核抽屉）
+
+**变更类型**：admin API / admin frontend / tests / build artifact / docs tracking
+
+**内容**：
+
+- 接手意外中断后的 `/learning` 未提交改动，复跑 PR1-PR4 后端与前端验证，确认当前基线可继续推进。
+- `admin/routes/api/learning_pipeline.py` 新增 `POST /api/admin/learning/extract-all`：模块级 `asyncio.Lock` 防并发、per-noun timeout、`gather` 并发、部分失败结果；支持测试 runner、slang plugin 与 memory consolidator fallback，style runner 未接入时返回 `skipped=true`。
+- `LearningView.vue` 增加「一键抽取」确认按钮，完成后刷新 pipeline/items。
+- 新增 `LearningReviewHost.vue`，`LearningTable.vue` 行操作增加「审核」；按 row 类型调用现有 slang/style/episode/consolidator 状态 API，memory 行仍仅详情跳转。
+- `docs/tracking/learning-pipeline-execution.md` 将 PR5 标为进行中，记录 PR5a 完成项与 PR5b 风险。
+- 构建刷新 `admin/static/index.html` 入口 hash。
+
+**验证**：
+
+- `.venv/bin/python -m ruff check admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → All checks passed
+- `.venv/bin/python -m pytest tests/test_admin_api_learning_pipeline.py -q` → 8 passed
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 通过
+- `cd admin/frontend && npm run build` → 成功；`LearningView-*.js` 20.39 KB（gzip 7.55 KB），`LearningView-*.css` 5.92 KB（gzip 1.33 KB）
+- `rg -n "style=|!important|#[0-9A-Fa-f]{3,6}|linear-gradient|radial-gradient" admin/frontend/src/views/learning` → 无匹配
+
+**影响范围**：
+
+- `/admin/learning` 已从只读列表推进到可触发抽取和轻量状态处理；复杂编辑仍应跳转原页面。
+- PR5 尚未完全收口：production style manual extractor 需要抽成可复用 runner；专项 ReviewPanel 与 PR6 SideMenu/Dashboard 深链仍待后续。
+
+---
+
+## 2026-05-23 `/learning` 学习管道 PR4 落地（items 列表 + LearningTable）
+
+**变更类型**：admin API / admin frontend / tests / build artifact
+
+**内容**：
+
+- `admin/routes/api/learning_pipeline.py` 新增 `GET /api/admin/learning/items`，支持 `stage/noun/group/date/sort/limit/cursor`；第一版采用各 noun fan-out 查询、内存归并排序和 offset cursor 编码。
+- pipeline 阶段卡的 style/episode hits 计数接入 PR2b 的 `style_observations` / `episode_observations`；memory hits 继续保持 `null`。
+- 新增 `LearningTable.vue`，在 `/learning` 中展示类型、内容、来源群、时间、状态、置信度和详情操作；详情跳现有页面，memory 行固定跳 `/memory?view=manage` 且不带 `card_id`。
+- `LearningView.vue` 接入 `/learning/items`，stage/noun/date/group/sort 变化重置列表；阶段/noun/date 继续进 history，sort 用 `router.replace`，加载更多不进 history。
+- 更新 `tests/test_admin_api_learning_pipeline.py`，覆盖 items schema、memory deep link、style/episode hits 和 cursor 分页。
+- 构建刷新 `admin/static/index.html` 入口 hash；`components.d.ts` 由构建工具补充 radio 组件声明。
+
+**验证**：
+
+- `.venv/bin/python -m ruff check admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → All checks passed
+- `.venv/bin/python -m pytest tests/test_admin_api_learning_pipeline.py -q` → 5 passed
+- `.venv/bin/python -m py_compile admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → 通过
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 通过
+- `cd admin/frontend && npm run build` → 成功；`LearningView-*.js` 12.66 KB（gzip 5.23 KB），`LearningView-*.css` 5.16 KB（gzip 1.21 KB）
+- `rg -n "style=|!important|#[0-9A-Fa-f]{3,6}|linear-gradient|radial-gradient" admin/frontend/src/views/learning` → 无匹配
+
+**影响范围**：
+
+- `/admin/learning` 已可看到真实列表数据，但审核 Drawer、折返菜单、extract-all、SideMenu 入口和 Dashboard 深链仍留给 PR5/PR6。
+- cursor 分页是后台低流量保守实现；若数据量明显增长，再做 union-all 或每 noun cursor 优化。
+
+---
+
+## 2026-05-23 `/learning` 学习管道 PR3 落地（前端骨架 + StageStrip）
+
+**变更类型**：admin/frontend / route / build artifact / docs tracking
+
+**内容**：
+
+- 新增 `/learning` 前端路由，`meta.title` 为「学习管道总览」；SideMenu 入口仍留到 PR6。
+- 新增 `LearningView.vue`，复用 `AppPage` / `PageToolbar`，读取 `/api/admin/learning/pipeline` 并展示阶段总览、noun 筛选、群筛选、时间筛选和阶段快照。
+- 新增 `StageStrip.vue` 与 `views/learning/types.ts`，交付 5 阶段横向阶段卡；点击阶段、noun、date 用 `router.push`，group 输入和非法 query 归一用 `router.replace`。
+- 构建工具更新 `components.d.ts` 的 `NRadioGroup` / `NRadioButton` 声明，并刷新 `admin/static/index.html` 的入口 hash。
+- PR3 不提前接 `/learning/items`、审核 Drawer、SideMenu 或 Dashboard 深链；这些仍按追踪文档留给 PR4-PR6。
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 通过
+- `cd admin/frontend && npm run build` → 成功；`LearningView-*.js` 8.43 KB（gzip 3.81 KB），`LearningView-*.css` 4.09 KB（gzip 1.07 KB）
+- `rg -n "style=|!important|#[0-9A-Fa-f]{3,6}|linear-gradient|radial-gradient" admin/frontend/src/views/learning` → 无新增内联样式、`!important`、硬编码色值或渐变
+
+**影响范围**：
+
+- `/admin/learning` 已可直接访问并读取 PR1 的只读 pipeline 接口；导航入口尚未暴露在侧栏。
+- 未做浏览器手测；本轮以类型检查和生产构建收口。
+
+---
+
+## 2026-05-23 `/learning` 学习管道 PR2b 落地（style/episode accepted-only observations）
+
+**变更类型**：services / storage schema / prompt observation / tests
+
+**内容**：
+
+- `StyleStore` 新增 `style_observations` 表、索引与 `record_observation()`；UNIQUE 口径为 `(expression_id, message_id, trigger_type)`。
+- `EpisodeStore` 新增 `episode_observations` 表、索引与 `record_observation()`；UNIQUE 口径为 `(episode_id, message_id, trigger_type)`。
+- `PromptBudgetManager` 初始化支持 style/episode store getter，并只对 `accepted_decisions` fire-and-forget 写 observation；trimmed/rejected 不写。
+- `plugins/chat/plugin.py` 在创建 `PromptBudgetManager` 时注入 `ctx.style_store` / `ctx.episode_store` getter。
+- slang observation 本轮不迁移，避免与既有 `SlangProvider` 路径双写；该风险继续按 v2.1 L1 后续待办跟踪。
+
+**验证**：
+
+- `.venv/bin/python -m ruff check services/block_trace/budget_manager.py services/style/store.py services/episodic/store.py plugins/chat/plugin.py tests/test_block_trace.py tests/test_style_store.py tests/test_episode.py` → All checks passed
+- `.venv/bin/python -m pytest tests/test_block_trace.py tests/test_style_store.py tests/test_episode.py -q` → 61 passed
+- `.venv/bin/pyright services/block_trace/budget_manager.py services/style/store.py services/episodic/store.py` → 0 errors
+- `.venv/bin/python -m py_compile services/block_trace/budget_manager.py services/style/store.py services/episodic/store.py plugins/chat/plugin.py` → 通过
+- `rg "record_observation" services/block_trace services/style services/episodic services/slang` → style/episode provider 无直接写入；style/episode 写入集中在 budget manager；slang 保留既有链路。
+
+**影响范围**：
+
+- 后续 `/learning` 命中阶段可读取真实 style/episode observation 数据，但命中计数 API 仍需在 PR4 接入。
+- 触碰 prompt budget 热路径；失败写入被隔离为 fire-and-forget，不影响 `process()` 返回。
+
+---
+
+## 2026-05-23 `/learning` 学习管道 PR2a 落地（BudgetManager 改吃 candidate）
+
+**变更类型**：services / LLM prompt 热路径 / tests
+
+**内容**：
+
+- `PromptBudgetManager.process()` 从 `PromptBlock` 入参改为 `PromptBlockCandidate` 入参，返回 `(surviving_blocks, accepted_decisions)`。
+- budget trace 不再重新生成随机 candidate_id，也不再把 `evidence_refs` 写空；trace 记录沿用 candidate 的 `candidate_id/evidence_refs/metadata`。
+- `services/llm/client.py` active provider 路径在启用 budget manager 时改走 `run_all()` candidate；普通 plugin `PromptBlock` 转 synthetic candidate 后统一预算裁剪。
+- 新增 `AcceptedDecision`，为 PR2b accepted-only observation 写入提供 refs / metadata / group_id / scope。
+- `StyleStore` 新增 `build_prompt_block_with_refs()` 与 `build_profile_prompt_block_with_refs()`，`StyleProvider` 开始给 style candidate 填 `evidence_refs`；旧方法保持兼容。
+
+**验证**：
+
+- `.venv/bin/python -m ruff check services/block_trace/types.py services/block_trace/budget_manager.py services/block_trace/__init__.py services/block_trace/style_provider.py services/style/store.py services/llm/client.py tests/test_block_trace.py tests/test_providers.py` → All checks passed
+- `.venv/bin/python -m pytest tests/test_block_trace.py tests/test_providers.py -q` → 33 passed
+- `.venv/bin/pyright services/block_trace/budget_manager.py services/block_trace/style_provider.py services/style/store.py` → 0 errors
+- `.venv/bin/python -m py_compile services/block_trace/types.py services/block_trace/budget_manager.py services/block_trace/style_provider.py services/style/store.py services/llm/client.py` → 通过
+
+**影响范围**：
+
+- 触碰 LLM prompt 热路径，但未新增 observation 写入和新表；PR2b 才接入 accepted-only 业务写入。
+- `services/llm/client.py` 仍存在既有 `object` 属性访问 pyright 类型债，本次只修复新增 `layer` 类型问题，未扩大到整文件类型重构。
+
+---
+
+## 2026-05-23 `/learning` 学习管道 PR1 落地（只读 pipeline + 执行追踪）
+
+**变更类型**：admin API / tests / docs tracking
+
+**内容**：
+
+- 新增 `docs/tracking/learning-pipeline-execution.md`，作为 v2.1 实施追踪文档；后续每步开工前细化任务，完成后同步状态与验证证据。
+- 新增 `admin/routes/api/learning_pipeline.py`，提供 `GET /api/admin/learning/pipeline` 只读聚合；`admin/routes/api/__init__.py` 已注册该 router。
+- 保持 `admin/routes/api/learning.py` 的 `GET /api/admin/learning/today` 不变，继续服务 Dashboard 现有学习模块。
+- memory 口径按 `memory_cards` SQLite 表只读统计：`candidate/review/hits = null`，`approved = active`，`archived = expired`；不扫描旧 `.md` 文件。
+- 审核组件盘点已写入追踪文档：slang 复用现有 Drawer，style/episode/memory_consolidator 留到后续 PR 做多态 ReviewPanel，memory 无审核态。
+
+**验证**：
+
+- `python -m py_compile admin/routes/api/learning_pipeline.py admin/routes/api/__init__.py` → 通过
+- `.venv/bin/python -m ruff check admin/routes/api/learning_pipeline.py tests/test_admin_api_learning_pipeline.py` → All checks passed
+- `.venv/bin/python -m pytest tests/test_admin_api_learning_pipeline.py -q` → 2 passed
+- `uv run pytest tests/test_admin_api_learning_pipeline.py -q` 在当前沙箱触发 macOS `system-configuration` panic，未进入测试；本轮改用仓库 `.venv` 完成验证。
+
+**影响范围**：
+
+- 新增 `/api/admin/learning/pipeline` 只读接口，不改变现有 Dashboard `/api/admin/learning/today` 契约。
+- 目前只交付 PR1；PR2a 将继续按追踪文档拆解执行。
+
+---
+
+## 2026-05-23 `/learning` 学习管道总览方案 gpt 独立审计
+
+**变更类型**：docs / 方案审计
+
+**内容**：
+
+- 阅读 wiki、高层架构文档、近期维护日志，并对 `docs/tracking/learning-pipeline.md` 的 `/learning` 学习管道总览方案做独立审计。
+- 在 `docs/tracking/learning-pipeline.md` 顶部状态、§14 审计记录与新增 §17 中标注审计人 `gpt`。
+- 审计结论：产品方向成立，但当前 §15 实施版需先修订后再进入 PR；阻塞点集中在 `/memory` 口径仍沿旧 `.md` 文件库、style/episode 命中写入点应走 provider_bus active 路径、API 注册文件与 memory_consolidator 路由前缀需对齐实现。
+
+**影响范围**：
+
+- 仅文档与后续实现口径，无运行时、前端 bundle、API 或配置变更。
+- 后续启动 `/learning` PR 前应先处理 `docs/tracking/learning-pipeline.md` §17.5 的必改清单。
+
+**验证**：
+
+- 通过文件核对确认 `docs/tracking/learning-pipeline.md` 已包含 gpt 审计记录、阻塞项、条件项、可行项、建议 PR 顺序与必改清单。
+
+---
+
 ## 2026-05-23 SlangView U-1 ~ U-14 收口（前端 sidebar 退场 + 多 slot 测试 + 跟踪文档校准）
 
 **变更类型**：admin/frontend 视图重构（slang）+ tests + docs

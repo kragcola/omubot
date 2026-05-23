@@ -82,6 +82,7 @@ const emit = defineEmits<{
   (e: 'change-view', view: MemoryViewMode): void
 }>()
 
+const route = useRoute()
 const loading = ref(true)
 const refreshing = ref(false)
 const cards = ref<Card[]>([])
@@ -97,6 +98,8 @@ const drawerVisible = ref(false)
 const editingCard = ref<Card | null>(null)
 const isNew = ref(false)
 const saving = ref(false)
+const targetRouteCardId = ref('')
+const resolvingRouteCardId = ref('')
 
 const editContent = ref('')
 const editCategory = ref('fact')
@@ -337,6 +340,18 @@ onMounted(() => {
   void loadCards()
 })
 
+watch(
+  () => route.query.card_id,
+  (rawCardId) => {
+    const cardId = queryValueToString(rawCardId)
+    targetRouteCardId.value = cardId
+    if (!cardId) return
+
+    void openCardFromRoute(cardId)
+  },
+  { immediate: true },
+)
+
 watch(seriesList, (list) => {
   const next = new Set<string>()
   for (const series of list) {
@@ -346,6 +361,62 @@ watch(seriesList, (list) => {
   }
   expandedSeries.value = next
 })
+
+function queryValueToString(value: unknown) {
+  if (Array.isArray(value)) {
+    const first = value[0]
+    return typeof first === 'string' ? first.trim() : ''
+  }
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function findLoadedCard(cardId: string) {
+  return cards.value.find(card => card.card_id === cardId) || null
+}
+
+function expandCardSeries(card: Card) {
+  if (!card.series_id) return
+  const next = new Set(expandedSeries.value)
+  next.add(card.series_id)
+  expandedSeries.value = next
+}
+
+async function openCardFromRoute(cardId: string) {
+  if (drawerVisible.value && editingCard.value?.card_id === cardId) return
+
+  const loadedCard = findLoadedCard(cardId)
+  if (loadedCard) {
+    expandCardSeries(loadedCard)
+    openEdit(loadedCard)
+    return
+  }
+
+  if (resolvingRouteCardId.value === cardId) return
+  resolvingRouteCardId.value = cardId
+
+  try {
+    const data = await api<Partial<Card> & { error?: string }>(
+      `/api/admin/memory/cards/${encodeURIComponent(cardId)}`,
+    )
+    if (targetRouteCardId.value !== cardId) return
+    if (data.error || !data.card_id) {
+      message.warning('未找到目标记忆卡片')
+      return
+    }
+
+    const card = data as Card
+    expandCardSeries(card)
+    openEdit(card)
+  } catch {
+    if (targetRouteCardId.value === cardId) {
+      message.error('目标记忆卡片加载失败')
+    }
+  } finally {
+    if (resolvingRouteCardId.value === cardId) {
+      resolvingRouteCardId.value = ''
+    }
+  }
+}
 
 async function loadCards(silent = false) {
   if (silent) refreshing.value = true

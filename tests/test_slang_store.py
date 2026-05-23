@@ -602,6 +602,50 @@ async def test_build_prompt_block_respects_max_indirect_setting(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_prompt_block_with_refs_returns_included_term_ids(tmp_path):
+    store = SlangStore(tmp_path / "slang.db")
+    await store.init()
+    try:
+        term_a = await store.upsert_candidate(
+            term="甲词",
+            meaning="甲词解释",
+            group_id="610",
+            user_id="u1",
+            confidence=0.91,
+        )
+        term_b = await store.upsert_candidate(
+            term="乙词",
+            meaning="乙词解释",
+            group_id="610",
+            user_id="u1",
+            confidence=0.8,
+        )
+        assert term_a is not None
+        assert term_b is not None
+        await store.set_status(term_a, "approved")
+        await store.set_status(term_b, "approved")
+
+        block, refs = await store.build_prompt_block_with_refs(
+            group_id="610",
+            conversation_text="甲词 乙词",
+            max_terms=8,
+            max_chars=2000,
+        )
+
+        assert "甲词" in block
+        assert "乙词" in block
+        assert refs == (term_a, term_b)
+        assert await store.build_prompt_block(
+            group_id="610",
+            conversation_text="甲词 乙词",
+            max_terms=8,
+            max_chars=2000,
+        ) == block
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_build_prompt_block_default_indirect_cap_is_direct_only(tmp_path):
     """Default prompt injection should only include direct-hit approved slang."""
     store = SlangStore(tmp_path / "slang.db")

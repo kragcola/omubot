@@ -33,6 +33,7 @@ async def test_init_creates_tables(store: EpisodeStore):
         tables = [row["name"] for row in await cur.fetchall()]
     assert "episodes" in tables
     assert "episode_revisions" in tables
+    assert "episode_observations" in tables
 
 
 @pytest.mark.asyncio
@@ -316,6 +317,45 @@ async def test_update_last_used_stamps_episode(store: EpisodeStore):
     after = await store.get_episode(ep_id)
     assert after is not None
     assert after.last_used_at != ""
+
+
+@pytest.mark.asyncio
+async def test_record_observation_dedupes_by_message_and_trigger(store: EpisodeStore):
+    ep = await store.create_episode(situation="bot remembered a pattern", group_id="g1")
+
+    first = await store.record_observation(
+        ep.episode_id,
+        message_id="req_1",
+        trigger_type="episode_inject",
+        group_id="g1",
+        scope="group",
+        meta={"candidate_id": "pbc_ep"},
+    )
+    duplicate = await store.record_observation(
+        ep.episode_id,
+        message_id="req_1",
+        trigger_type="episode_inject",
+        group_id="g1",
+        scope="group",
+    )
+    other_trigger = await store.record_observation(
+        ep.episode_id,
+        message_id="req_1",
+        trigger_type="reflection_cite",
+        group_id="g1",
+        scope="group",
+    )
+
+    assert first is True
+    assert duplicate is False
+    assert other_trigger is True
+    db = store._require_db()
+    async with db.execute(
+        "SELECT COUNT(*) AS cnt FROM episode_observations WHERE episode_id = ?",
+        (ep.episode_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["cnt"] == 2
 
 
 @pytest.mark.asyncio

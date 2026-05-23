@@ -36,6 +36,21 @@ class PromptBlockCandidate:
 
 
 @dataclass(frozen=True)
+class AcceptedDecision:
+    candidate_id: str
+    source: str
+    provider: str
+    evidence_refs: tuple[str, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+    char_count: int = 0
+    group_id: str = ""
+    scope: str = ""
+    hit_reason: str = ""
+    label: str = ""
+    decision: BudgetDecision = "accepted"
+
+
+@dataclass(frozen=True)
 class PromptBlockTrace:
     trace_id: str
     request_id: str

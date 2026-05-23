@@ -862,7 +862,12 @@ class ChatPlugin(AmadeusPlugin):
         trace_store = BlockTraceStore(db_path="storage/block_trace.db")
         await trace_store.init()
         ctx.block_trace_store = trace_store
-        budget_mgr = PromptBudgetManager(trace_store)
+        budget_mgr = PromptBudgetManager(
+            trace_store,
+            slang_store_getter=lambda: getattr(ctx, "slang_store", None),
+            style_store_getter=lambda: getattr(ctx, "style_store", None),
+            episode_store_getter=lambda: getattr(ctx, "episode_store", None),
+        )
 
         # ---- LLM client ----
         from services.llm.client import LLMClient
