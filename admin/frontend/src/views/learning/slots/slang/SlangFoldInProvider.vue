@@ -22,11 +22,11 @@ function stageToQueueMode(stage: LearningStageKey): SlangQueueMode | null {
     case 'candidate':
       return 'candidate'
     case 'review':
-      return 'ai_rejected'
+      return 'pending_human_review'
     case 'approved':
       return 'approved'
     case 'archived':
-      return 'all'
+      return 'archived'
     case 'hits':
     default:
       return null

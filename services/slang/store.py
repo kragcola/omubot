@@ -1836,6 +1836,8 @@ class SlangStore:
             where.append(f"status = 'candidate' AND {ai_reviewed_any} AND {ai_kept}")
         elif review_filter == "ai_rejected_only":
             where.append(f"status = 'muted' AND {ai_rejected} AND NOT {human_reviewed}")
+        elif review_filter == "archived_only":
+            where.append("status IN ('muted', 'expired')")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         count_cursor = await db.execute(f"SELECT COUNT(*) AS cnt FROM slang_terms {where_sql}", values)
         total = int((await count_cursor.fetchone())["cnt"])

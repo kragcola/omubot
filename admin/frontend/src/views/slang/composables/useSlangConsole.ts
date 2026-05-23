@@ -158,6 +158,13 @@ export function useSlangConsole(options: UseSlangConsoleOptions = {}) {
       params.status = 'muted'
       params.review_filter = 'ai_rejected_only'
     }
+    if (queueMode.value === 'pending_human_review') {
+      params.status = 'approved'
+      params.review_filter = 'needs_human_review'
+    }
+    if (queueMode.value === 'archived') {
+      params.review_filter = 'archived_only'
+    }
     if (searchText.value.trim()) params.search = searchText.value.trim()
     if (minConfidence.value) params.min_confidence = Number(minConfidence.value)
     if (sortBy.value && sortBy.value !== 'updated_desc') params.sort_by = sortBy.value

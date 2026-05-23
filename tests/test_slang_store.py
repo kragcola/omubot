@@ -294,6 +294,49 @@ async def test_slang_store_ai_approved_terms_and_human_review(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_slang_store_archived_only_filter(tmp_path):
+    # Backs the learning-pipeline `archived` stage for slang: muted + expired
+    # terms are surfaced together, since the admin API can't express two
+    # statuses in a single call without this filter.
+    store = SlangStore(tmp_path / "slang.db")
+    await store.init()
+    try:
+        muted = await store.create_term(
+            term="过气黑话",
+            meaning="不再使用的黑话",
+            scope="group",
+            group_id="100",
+            status="muted",
+            confidence=0.5,
+        )
+        expired = await store.create_term(
+            term="淘汰梗",
+            meaning="已被合并的梗",
+            scope="group",
+            group_id="100",
+            status="expired",
+            confidence=0.4,
+        )
+        live = await store.create_term(
+            term="活跃黑话",
+            meaning="仍在使用",
+            scope="group",
+            group_id="100",
+            status="approved",
+            confidence=0.8,
+        )
+
+        archived_terms, total = await store.list_terms(review_filter="archived_only")
+        archived_ids = {t.term_id for t in archived_terms}
+        assert total == 2
+        assert muted.term_id in archived_ids
+        assert expired.term_id in archived_ids
+        assert live.term_id not in archived_ids
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_slang_store_v3_drift_reviews_revisions_and_min_inject_confidence(tmp_path):
     store = SlangStore(tmp_path / "slang.db")
     await store.init()

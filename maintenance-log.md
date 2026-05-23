@@ -4,6 +4,58 @@
 
 ---
 
+## 2026-05-23 学习管道：stage→noun-mode 跨 4 noun 全栈映射对齐（5 处 mismatch）
+
+**变更类型**：admin/frontend 路由语义修正 + 后端 review_filter 扩展 / bind-mount 即生效
+
+**触发**：用户原话「待审-黑话页面怎么出现的是已否决，你还是没解决对应问题。通篇全查，别让我再审查到类似问题/pua」。`/learning?noun=slang&stage=review` 渲染的是「已否决」（muted + ai_rejected）而不是「待人工复核」（approved + needs_human_review），这是单点 bug 表象——根因是 4 个 noun（slang / style / episode / memory）的 stage→noun-mode 映射当初是「凭直觉」拍的，没跟 `admin/routes/api/learning_pipeline.py` 的后端 SQL 对齐。
+
+**D1 同模式扫描表**（4 noun × 5 stage = 20 cell，对照后端 [admin/routes/api/learning_pipeline.py](admin/routes/api/learning_pipeline.py) 各 noun handler）：
+
+| noun | stage | 后端 SQL 语义 | 前端旧映射 | 前端新映射 | 状态 |
+|---|---|---|---|---|---|
+| slang | candidate | `status='candidate'` | `'candidate'` | `'candidate'` | OK |
+| slang | review | `status='approved' AND ai_reviewed AND NOT human_reviewed` | `'ai_rejected'` ❌ | `'pending_human_review'` | **修** |
+| slang | approved | `status='approved' AND human_reviewed` | `'approved'` | `'approved'` | OK |
+| slang | hits | （命中流，不渲染队列） | `null` | `null` | OK |
+| slang | archived | `status IN ('muted','expired')` | `'all'` ❌ | `'archived'` | **修** |
+| episode | candidate | `episode_state='candidate'` | `'dry_run'` ❌ | `'candidate'` | **修** |
+| episode | review | `episode_state='approved'`（待启用） | `'candidate'` ❌ | `'approved'` | **修** |
+| episode | approved | `episode_state='enabled_for_prompt'` | `'approved'` ❌ | `'enabled_for_prompt'` | **修** |
+| episode | archived | `episode_state='disabled'` | `'disabled'` | `'disabled'` | OK |
+| style/memory | 全部 stage | 直接走 `state` 透传 | 与后端字面一致 | 不变 | OK |
+
+5 处 mismatch 全部命中 `slang` + `episode` 两个 noun；`style` 和 `memory` 因为前端直接把 stage 当 state 字符串透传给后端，没有翻译层，所以天然对齐。
+
+**实施**：
+
+- **后端**：[services/slang/store.py:1839-1840](services/slang/store.py#L1839-L1840) 新增 `review_filter='archived_only'` 分支（`status IN ('muted', 'expired')`）。原因：slang 后端 list_terms API 单 status 字段，无法在一次调用里同时查 muted + expired，必须新增 filter。
+- **前端类型扩展**：[admin/frontend/src/views/slang/helpers/types.ts:10](admin/frontend/src/views/slang/helpers/types.ts#L10) `SlangQueueMode` union 增加 `'pending_human_review'` 和 `'archived'` 两个值（仅供 fold-in 内部使用）。
+- **前端 buildParams**：[admin/frontend/src/views/slang/composables/useSlangConsole.ts](admin/frontend/src/views/slang/composables/useSlangConsole.ts) 增加两个 mode→API 参数翻译分支（`pending_human_review` → `status=approved&review_filter=needs_human_review`，`archived` → `review_filter=archived_only`）。
+- **前端 stage→mode 修正**：
+  - [admin/frontend/src/views/learning/slots/slang/SlangFoldInProvider.vue:20-34](admin/frontend/src/views/learning/slots/slang/SlangFoldInProvider.vue#L20-L34) `stageToQueueMode`：review 从 `'ai_rejected'` 改 `'pending_human_review'`，archived 从 `'all'` 改 `'archived'`
+  - [admin/frontend/src/views/learning/slots/episode/state.ts:75-89](admin/frontend/src/views/learning/slots/episode/state.ts#L75-L89) `stageToEpisodeState`：candidate→`'candidate'`、review→`'approved'`、approved→`'enabled_for_prompt'`（3 处全错位修正）
+- **回归测试**（D2）：[tests/test_slang_store.py](tests/test_slang_store.py) 新增 `test_slang_store_archived_only_filter`——分别 create_term muted/expired/approved 三条，断言 `review_filter='archived_only'` 只返回前两条。
+
+**约束保持**：
+
+- 非嵌入态 `/slang` 路由的 5 段 tab `SlangQueueToolbar`（candidate / ai_rejected / pending_human_review / approved / drift）**不**纳入新增的 archived 模式——保留现状，避免破坏黑话独立路由的既有交互。新模式仅 fold-in 内部驱动。
+- 黑话 `'all'` 模式仍保留（用于 SlangSummary 全量浏览），未删除。
+- LearningView / LearningTable / SlangTermList / EpisodeFoldInProvider 等渲染层 0 改动——只动了「stage 翻译成 mode/state」这一层。
+
+**D4 完成证据**：
+
+- 同模式扫描结果：4 noun × 5 stage 全表覆盖，命中 5 处 mismatch（见上表），无遗漏（style/memory 因无翻译层天然对齐已二次确认）
+- pytest：`tests/test_slang_store.py` 16 passed（15→16，+1 archived_only 回归）
+- 类型检查：`vue-tsc --noEmit` 0 errors
+- 构建：`npm run build` OK，`LearningView-*.js` chunk 156.83 KB / gzip 45.47 KB
+- 外部可观察：`/api/admin/slang?status=approved&review_filter=needs_human_review` 现在对应 `stage=review`；`/api/admin/slang?review_filter=archived_only` 现在对应 `stage=archived`；`/api/admin/episodes?state=enabled_for_prompt` 现在对应 episode `stage=approved`
+- 回滚路径：单 commit revert（仅前端 4 文件 + 后端 1 文件 + 测试 1 文件 + admin/static/index.html）
+
+**部署**：admin/static 是 bind mount（D6），`npm run build` 已写入 `admin/static/`，刷新页面即生效，无需 `docker compose up bot --build`。
+
+---
+
 ## 2026-05-23 学习管道：LearningTable 卡片网格 → 单行紧凑行（与黑话同源）
 
 **变更类型**：admin/frontend 视觉修正 / bind-mount 即生效

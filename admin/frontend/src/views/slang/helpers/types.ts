@@ -7,7 +7,7 @@
 
 export type SlangStatus = 'candidate' | 'approved' | 'muted' | 'expired'
 export type RepeatPolicy = 'understand_only' | 'allow_rephrase' | 'allow_use'
-export type SlangQueueMode = 'candidate' | 'ai_rejected' | 'approved' | 'drift' | 'all'
+export type SlangQueueMode = 'candidate' | 'ai_rejected' | 'pending_human_review' | 'approved' | 'archived' | 'drift' | 'all'
 
 export interface SlangSummary {
   candidate_count: number

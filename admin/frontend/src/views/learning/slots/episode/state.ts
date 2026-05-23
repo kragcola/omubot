@@ -75,11 +75,11 @@ export const EPISODE_ACTION_LABEL: Record<EpisodeAction, string> = {
 export function stageToEpisodeState(stage: LearningStageKey): string | null {
   switch (stage) {
     case 'candidate':
-      return 'dry_run'
-    case 'review':
       return 'candidate'
-    case 'approved':
+    case 'review':
       return 'approved'
+    case 'approved':
+      return 'enabled_for_prompt'
     case 'archived':
       return 'disabled'
     case 'hits':
