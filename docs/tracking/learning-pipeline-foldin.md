@@ -207,8 +207,8 @@ D6：bind-mount，前端 PR 只需 `npm run build`，无需 `docker compose up b
 | 时间 | PR | 状态 | 备注 |
 |------|----|----|------|
 | 2026-05-23 | 文档 | ✅ 落地 | v5 plan 写入本文件 |
-| 2026-05-23 | PR-A | 🚧 进行中 | NounToolbarSlot / NounSidePanelSlot / NounDrawerHost 骨架 + slotContext 派发 |
-| — | PR-B | ⏳ 待开始 | slang 折入 |
+| 2026-05-23 | PR-A | ✅ 落地 | `305325a` 三槽骨架 + `slotContext` + `learning-body` 双栏；vue-tsc 0 errors，LearningView chunk 25.84 KB |
+| 2026-05-23 | PR-B | ✅ 落地 | slang 折入：`useSlangConsole` 抽离、SlangFoldInProvider 通过 `Teleport defer` 将 toolbar / 主表 / side 三槽内容投递进 LearningView 的 mount target；SlangView 改为消费 composable；vue-tsc 0 errors，LearningView 33.72 KB / useSlangConsole 独立 chunk 69.86 KB；stage→queueMode 映射：candidate→candidate / review→ai_rejected / approved→approved / archived→all / hits→fallback LearningTable |
 | — | PR-C | ⏳ 待开始 | style / episode / memory / cross-group 折入 |
 | — | PR-D | ⏳ 待开始 | redirect + SideMenu |
 | — | PR-E | ⏳ 待开始 | 后端 list API 收敛 |

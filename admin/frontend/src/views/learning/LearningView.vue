@@ -9,6 +9,7 @@ import NounComingSoonCard from './slots/NounComingSoonCard.vue'
 import NounDrawerHost from './slots/NounDrawerHost.vue'
 import NounSidePanelSlot from './slots/NounSidePanelSlot.vue'
 import NounToolbarSlot from './slots/NounToolbarSlot.vue'
+import SlangFoldInProvider from './slots/slang/SlangFoldInProvider.vue'
 import type { NounSlotContext } from './slots/types'
 import type {
   LearningDateFilter,
@@ -222,6 +223,8 @@ const slotContext = computed<NounSlotContext>(() => ({
 }))
 
 const showNounSlots = computed(() => activeNoun.value !== 'all')
+const isSlangNoun = computed(() => activeNoun.value === 'slang')
+const slangTakesMain = computed(() => isSlangNoun.value && activeStage.value !== 'hits')
 
 const formattedAsOf = computed(() => {
   if (!pipeline.value?.as_of) return '尚未同步'
@@ -702,7 +705,9 @@ function formatCount(value: number | null): string {
             :options="sortOptions"
             @update:value="updateSort"
           />
-          <NounToolbarSlot v-if="showNounSlots" :ctx="slotContext" />
+          <NounToolbarSlot v-if="showNounSlots" :ctx="slotContext">
+            <div id="learning-noun-toolbar-target" />
+          </NounToolbarSlot>
         </template>
       </PageToolbar>
 
@@ -811,9 +816,11 @@ function formatCount(value: number | null): string {
               <span class="learning-snapshot__eyebrow">Learning Items</span>
               <h2>{{ activeStageItem.label }}列表</h2>
             </div>
-            <span>{{ learningItems.length }} 条</span>
+            <span v-if="!slangTakesMain">{{ learningItems.length }} 条</span>
           </header>
+          <div id="learning-noun-main-target" />
           <LearningTable
+            v-if="!slangTakesMain"
             :items="learningItems"
             :loading="itemsLoading"
             :has-more="hasMoreItems"
@@ -825,12 +832,22 @@ function formatCount(value: number | null): string {
         </section>
 
         <NounSidePanelSlot v-if="showNounSlots" :ctx="slotContext">
-          <NounComingSoonCard :ctx="slotContext" />
+          <div id="learning-noun-side-target" />
+          <NounComingSoonCard v-if="!isSlangNoun" :ctx="slotContext" />
         </NounSidePanelSlot>
       </div>
     </div>
 
     <NounDrawerHost v-if="showNounSlots" :ctx="slotContext" />
+
+    <SlangFoldInProvider
+      v-if="isSlangNoun"
+      :stage="activeStage"
+      :group="activeGroup"
+      main-pane-target="#learning-noun-main-target"
+      toolbar-target="#learning-noun-toolbar-target"
+      side-target="#learning-noun-side-target"
+    />
 
     <LearningReviewHost
       v-model:show="reviewOpen"

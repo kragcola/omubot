@@ -4,6 +4,77 @@
 
 ---
 
+## 2026-05-23 学习管道 v3 PR-B 落地：slang 折入新管道
+
+**变更类型**：frontend 架构演进 / bind-mount 即生效
+
+**目标**：把成熟的 `/slang` 页面（设置抽屉、漂移卡、AI 清理、批量、统计、抽取进度）**完整搬进** `/learning?noun=slang`，老路由暂保留（PR-D 切 redirect），老页面与新管道共享同一份逻辑，无重复实现。
+
+**核心方案：composable + Teleport defer 投递**
+
+- 抽离 `views/slang/composables/useSlangConsole.ts`（约 600 行）—— 把 `SlangView.vue` 全部状态（27 个 ref / 4 个 computed / 23 个 action）提升为 composable，可同时被 `/slang` 老页与 `/learning` 新管道实例化
+- 新增 `views/learning/slots/slang/` 套件：
+  - `injection.ts` —— `SLANG_CONSOLE_KEY` provide/inject 钥匙
+  - `SlangFoldInProvider.vue` —— 顶层 provider，按 `props.stage` 派生 `SlangQueueMode` 并 `provide()` console；通过 `<Teleport :to defer>` 把 4 块内容投到 LearningView 的 `#learning-noun-toolbar-target` / `#learning-noun-main-target` / `#learning-noun-side-target`，抽屉随 SFC 树挂载
+  - `SlangToolbarContent.vue` —— 刷新 / 抽取 / AI 清池 NPopconfirm / 新建 / 设置（5 个按钮）
+  - `SlangMainPane.vue` —— SlangSummaryBar + SlangQueueToolbar + SlangTermList（候选/待审/入库/归档 stage 时替换 LearningTable）
+  - `SlangSidePanelContent.vue` —— SnapshotStrip + BacklogProgress + ExtractionProgress + StatsCards
+  - `SlangDrawerContent.vue` —— Create + Detail + Settings 三个 Drawer
+- `views/slang/SlangView.vue` 重写为 `useSlangConsole()` 消费者，删除约 300 行内联状态；视图逻辑不变
+
+**stage → queueMode 映射**（核心适配点，避免主 tab 与子 tab 语义冲突）：
+
+| stage | queueMode | 主表来源 |
+|---|---|---|
+| candidate | `candidate` | SlangTermList |
+| review | `ai_rejected` | SlangTermList |
+| approved | `approved` | SlangTermList |
+| archived | `all` | SlangTermList |
+| hits | — | LearningTable（命中流走聚合表） |
+
+**LearningView 改动**：
+
+- 新增 `isSlangNoun` / `slangTakesMain` computed
+- toolbar 槽内放 `<div id="learning-noun-toolbar-target" />` 作为 Teleport target
+- side 槽内放 `<div id="learning-noun-side-target" />` + `NounComingSoonCard v-if="!isSlangNoun"`（slang 接管后不再显示占位）
+- 主列表区放 `<div id="learning-noun-main-target" />`，`LearningTable v-if="!slangTakesMain"`（stage=hits 时回退到聚合表）
+- 末尾挂 `<SlangFoldInProvider v-if="isSlangNoun" :stage :group :*-target>`
+- `Teleport defer`（Vue 3.5+）确保 target div 先挂载、teleport 后投递，无需 `nextTick` hack
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 errors
+- `npm run build` → 11.56s；产物对比：
+  - `LearningView` 25.84 → 33.72 KB（+slot 派发与 provider 链路）
+  - `SlangView` 14.x → 7.24 KB（状态外移）
+  - 新增独立 chunk `useSlangConsole-sQKRNeNv.js` 69.86 KB（被 SlangView 与 LearningView 共享）
+- 老 `/slang` 页面回归：5 个 tab、漂移、抽取、AI 清池、设置抽屉、新建抽屉、详情抽屉、合并、跨群扫描——逻辑由 composable 共享，行为等价
+- 新 `/learning?noun=slang&stage=candidate/review/approved/archived` 全部走 SlangMainPane；`stage=hits` 退回 LearningTable
+
+**为何不开 docker rebuild**：
+
+- `admin/static` 是 bind-mount（D6），仅前端构建产物变更 → 浏览器硬刷新即生效
+
+**风险与回滚**：
+
+- 风险中：composable 化是结构性改造，但视图层契约（emit / props / API 调用）100% 保留
+- 回滚路径：`git revert <PR-B sha>` —— SlangView 回到内联状态版本，slot 槽回到 ComingSoon 占位（PR-A 状态）
+
+**影响范围**：
+
+- 前端：`admin/frontend/src/views/slang/` 与 `admin/frontend/src/views/learning/slots/slang/`
+- 后端：无改动
+- 用户可见：`/learning?noun=slang` 现在是真实可用的黑话控制台，不再是占位卡
+
+**Handoff**：
+
+- PR-C 起点：style / episode / memory / cross-group 4 个 noun 同样套路——抽 composable，建 slot 套件，LearningView 内 dispatch
+  - cross-group 不是独立 noun：作为 `slang` 的 scope=cross 过滤器
+  - style / memory 各自页面较小，可考虑 composable 简化或直接 SFC 二次注入
+- PR-D：5 条 router redirect + SideMenu 「学习与记忆」分组收敛到 3 项
+
+---
+
 ## 2026-05-23 学习管道 v3 (Fold-in) 立项 + PR-A 槽骨架落地
 
 **变更类型**：frontend 架构演进 / bind-mount 即生效
