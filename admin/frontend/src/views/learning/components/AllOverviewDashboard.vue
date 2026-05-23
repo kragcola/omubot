@@ -386,17 +386,19 @@ function maxStageValue(mod: NounModule): number {
             <span v-if="row.annotation" class="feed-annot" :title="row.annotation">
               {{ row.annotation }}
             </span>
-            <span class="feed-meta">
-              <span class="feed-meta__status">{{ row.statusLabel || '——' }}</span>
-              <span class="feed-meta__sep">·</span>
-              <span class="feed-meta__group">群 {{ row.group }}</span>
-              <template v-if="row.conf !== null">
+            <span class="feed-tail">
+              <span class="feed-meta">
+                <span class="feed-meta__status">{{ row.statusLabel || '——' }}</span>
                 <span class="feed-meta__sep">·</span>
-                <span class="feed-meta__conf">{{ Math.round(row.conf * 100) }}%</span>
-              </template>
+                <span class="feed-meta__group">群 {{ row.group }}</span>
+                <template v-if="row.conf !== null">
+                  <span class="feed-meta__sep">·</span>
+                  <span class="feed-meta__conf">{{ Math.round(row.conf * 100) }}%</span>
+                </template>
+              </span>
+              <span class="feed-noun" :class="`feed-noun--${row.nounTone}`">{{ row.nounLabel }}</span>
+              <span class="feed-time">{{ row.time }}</span>
             </span>
-            <span class="feed-noun" :class="`feed-noun--${row.nounTone}`">{{ row.nounLabel }}</span>
-            <span class="feed-time">{{ row.time }}</span>
           </li>
         </ol>
 
@@ -798,12 +800,19 @@ function maxStageValue(mod: NounModule): number {
   white-space: nowrap;
 }
 
+.feed-tail {
+  flex-shrink: 0;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .feed-meta {
-  flex: 0 0 auto;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-width: 0;
   color: var(--om-text-3);
   font-size: 11.5px;
   line-height: 1.2;
@@ -829,7 +838,6 @@ function maxStageValue(mod: NounModule): number {
 
 .feed-noun {
   flex-shrink: 0;
-  margin-left: auto;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
@@ -839,10 +847,6 @@ function maxStageValue(mod: NounModule): number {
   background: color-mix(in srgb, var(--om-text-3) 18%, transparent);
   color: var(--om-text-1);
   border: 1px solid color-mix(in srgb, var(--om-text-3) 22%, transparent);
-}
-
-.feed-row:has(.feed-annot) .feed-noun {
-  margin-left: 0;
 }
 
 .feed-noun--info {
@@ -982,8 +986,7 @@ function maxStageValue(mod: NounModule): number {
     grid-template-columns: 1fr;
   }
   .feed-annot,
-  .feed-meta,
-  .feed-noun {
+  .feed-meta {
     display: none;
   }
 }
