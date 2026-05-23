@@ -762,49 +762,55 @@ async function processDriftBacklog() {
 
     <SlangSnapshotStrip :summary="summary" />
 
-    <SlangBacklogProgress :eligible-count="summary.eligible_backlog_count" @progress="loadSummary" />
+    <div class="slang-main-layout">
+      <div class="slang-main-layout__main">
+        <SlangQueueToolbar
+          v-model:search-text="searchText"
+          v-model:group-filter="groupFilter"
+          v-model:queue-mode="queueMode"
+          v-model:min-confidence="minConfidence"
+          v-model:sort-by="sortBy"
+          :summary="summary"
+          :groups="groups"
+          :display-total="displayTotal"
+          :scanning-global="scanningGlobal"
+          @reset="resetFilters"
+          @scan-global="runGlobalScan"
+        />
 
-    <SlangExtractionProgress />
+        <NSkeleton v-if="loading" :repeat="8" text />
 
-    <SlangQueueToolbar
-      v-model:search-text="searchText"
-      v-model:group-filter="groupFilter"
-      v-model:queue-mode="queueMode"
-      v-model:min-confidence="minConfidence"
-      v-model:sort-by="sortBy"
-      :summary="summary"
-      :groups="groups"
-      :display-total="displayTotal"
-      :scanning-global="scanningGlobal"
-      @reset="resetFilters"
-      @scan-global="runGlobalScan"
-    />
+        <SlangTermList
+          v-else
+          v-model:page="page"
+          v-model:selected-term-ids="selectedTermIds"
+          :terms="terms"
+          :drift-reviews="driftReviews"
+          :queue-mode="queueMode"
+          :page-count="pageCount"
+          :bulk-loading="bulkLoading"
+          :drift-backlog-loading="driftBacklogLoading"
+          @open-detail="openDetail"
+          @quick-status="quickStatus"
+          @review-ai="reviewAiTerm"
+          @drift-action="handleDriftAction"
+          @bulk-action="runBulkAction"
+          @drift-process-backlog="processDriftBacklog"
+        />
+      </div>
 
-    <NSkeleton v-if="loading" :repeat="8" text />
+      <aside class="slang-main-layout__side">
+        <SlangBacklogProgress :eligible-count="summary.eligible_backlog_count" @progress="loadSummary" />
 
-    <SlangTermList
-      v-else
-      v-model:page="page"
-      v-model:selected-term-ids="selectedTermIds"
-      :terms="terms"
-      :drift-reviews="driftReviews"
-      :queue-mode="queueMode"
-      :page-count="pageCount"
-      :bulk-loading="bulkLoading"
-      :drift-backlog-loading="driftBacklogLoading"
-      @open-detail="openDetail"
-      @quick-status="quickStatus"
-      @review-ai="reviewAiTerm"
-      @drift-action="handleDriftAction"
-      @bulk-action="runBulkAction"
-      @drift-process-backlog="processDriftBacklog"
-    />
+        <SlangExtractionProgress />
 
-    <SlangStatsCards
-      v-if="!loading"
-      :summary="summary"
-      :stats="stats"
-    />
+        <SlangStatsCards
+          v-if="!loading"
+          :summary="summary"
+          :stats="stats"
+        />
+      </aside>
+    </div>
 
     <SlangCreateDrawer
       v-model:visible="createDrawerVisible"
@@ -845,5 +851,35 @@ async function processDriftBacklog() {
 <style scoped>
 .slang-cache-revision {
   display: none;
+}
+
+.slang-main-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 16px;
+  align-items: start;
+}
+
+.slang-main-layout__main {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.slang-main-layout__side {
+  position: sticky;
+  top: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+@media (max-width: 1100px) {
+  .slang-main-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .slang-main-layout__side {
+    position: static;
+  }
 }
 </style>

@@ -40,6 +40,13 @@ const menuOptions: MenuOption[] = [
       { label: '群管理', key: '/groups', icon: renderIcon(PeopleOutline) },
       { label: '记忆', key: '/memory', icon: renderIcon(LayersOutline) },
       { label: '表情包', key: '/stickers', icon: renderIcon(HappyOutline) },
+    ],
+  },
+  {
+    type: 'group',
+    label: '学习与记忆',
+    key: 'learning',
+    children: [
       { label: '学习管道', key: '/learning', icon: renderIcon(AnalyticsOutline) },
       { label: '群内黑话', key: '/slang', icon: renderIcon(PricetagsOutline) },
       { label: '表达方式', key: '/style', icon: renderIcon(ChatbubbleEllipsesOutline) },

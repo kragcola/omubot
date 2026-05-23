@@ -4,6 +4,46 @@
 
 ---
 
+## 2026-05-23 学习管道 v2.1 上线后两处回归修复
+
+**变更类型**：frontend 回归修复 / bind-mount 即生效
+
+**背景**：
+
+v2.1 上线后用户反馈两处页面问题：
+
+1. SideMenu 没有按 plan §4.1 line 77 的「学习与记忆」**子分组**摆放，「学习管道」被平铺塞在「记忆」「表情包」「群内黑话」之间，没有视觉分组提示。
+2. 群内黑话（SlangView）右栏卡片错位 —— 原本应在右侧 280px 列的 `SlangBacklogProgress` / `SlangExtractionProgress` / `SlangStatsCards` 现在挤回主列上下顺序，观感上像 4 张全宽横条堆叠。
+
+**根因定位**：
+
+- SideMenu：`feat(learning) ee4ba06` 实施时只在「日常」组里平插了一行 `/learning`，没有按 plan §4.1 把「学习与记忆」拆成独立的 `type: 'group'` 节，导致用户看不到子分组标题。
+- SlangView：`refactor(slang) 787ab50`（U-1~U-14）一次性删除了 `slang-main-layout` 双栏 grid + `<aside class="slang-sidebar">` —— 这一刀本是为了去掉旧的 7 个 NSwitch 内联设置面板（已迁到 SettingsDrawer），但顺手把右栏的三张观察卡片也一起拉回主列了，属于 over-deletion。
+
+**修复动作**：
+
+- `admin/frontend/src/layouts/components/SideMenu.vue`：拆出第二个 `type: 'group'`「学习与记忆」，把 `/learning` 放在该组顶部，下接 `/slang`、`/style`、`/cross-group`、`/episodes`、`/memory-consolidator`、`/knowledge`、`/block-trace`，与 plan §4.1 line 133 的样图一致。「日常」组只保留前 5 项（仪表盘/人设/群管理/记忆/表情包）。
+- `admin/frontend/src/views/slang/SlangView.vue`：恢复 `slang-main-layout` 双栏 grid（`minmax(0,1fr) 280px`）+ `<aside class="slang-main-layout__side">`。主列保留 `SlangQueueToolbar` + `SlangTermList`；右列摆 `SlangBacklogProgress` + `SlangExtractionProgress` + `SlangStatsCards`。`@media (max-width: 1100px)` 下退化为单列。**没有**复活已被 U-13 移除的内联 NSwitch 面板 / `daily_ai_review_times` 标签 —— 那些设置仍在 `SlangSettingsDrawer` 里。
+- 5 张 hero 按钮（刷新 / 手动抽取 / AI 清池 NPopconfirm / 新建黑话 / ⚙ 设置）保持 U-13 的安排不动。
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 0 errors
+- `npm run build` → 成功，产物 `SlangView--V_0qYny.js` 73.57 KB（vs U-13 后的 73.42 KB，+0.15 KB 仅来自新 grid 样式）；entry 不变 `index-CHFg-lWI.js`。
+- `admin/static` 是 bind-mount，**无需** docker rebuild；浏览器硬刷新即生效。
+- 无 .py 改动，bot 容器不重启。
+
+**回滚路径**：
+
+- 单 commit reset 即可恢复回归状态（仅 2 个前端文件变更）。
+
+**影响范围**：
+
+- 仅前端视觉层；路由 / API / Pinia store / 业务逻辑零变更。
+- 与 v2.1 后端能力（F1-F5、PR1-6）解耦，不影响在跑的 LearningView / observation 写入路径。
+
+---
+
 ## 2026-05-23 学习管道 v2.1 统一验收 + 部署上线
 
 **变更类型**：deploy / docs tracking 同步 / 验收
