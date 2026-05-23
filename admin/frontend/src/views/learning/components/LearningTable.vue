@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { ChevronForwardOutline, OpenOutline, TimeOutline } from '@vicons/ionicons5'
 import EmptyState from '../../../components/common/EmptyState.vue'
 import type { LearningItem } from '../types'
 
@@ -29,21 +28,13 @@ function statusTone(status: string): StatusTone {
   return 'neutral'
 }
 
-function statusTagType(status: string) {
-  const tone = statusTone(status)
-  if (tone === 'success') return 'success'
-  if (tone === 'pending') return 'warning'
-  if (tone === 'rejected') return 'error'
-  return 'default'
-}
-
 function formatConfidence(value: number | null): string {
-  if (value === null || Number.isNaN(Number(value))) return '—'
-  return `${Math.round(Number(value) * 100)}%`
+  if (value === null || Number.isNaN(Number(value))) return '——'
+  return `${Math.round(Number(value) * 100)}`
 }
 
 function formatTime(value: string): string {
-  if (!value) return '—'
+  if (!value) return '——'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return new Intl.DateTimeFormat('zh-CN', {
@@ -52,85 +43,78 @@ function formatTime(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
-  }).format(date)
+  }).format(date).replace(/\//g, '-')
+}
+
+function shortGroup(value: string): string {
+  if (!value) return '——'
+  if (value.length <= 6) return value
+  return `…${value.slice(-5)}`
+}
+
+function statusGlyph(tone: StatusTone): string {
+  if (tone === 'success') return '✓'
+  if (tone === 'pending') return '·'
+  if (tone === 'rejected') return '✕'
+  return '·'
 }
 </script>
 
 <template>
-  <div class="learning-list">
-    <div v-if="loading && !items.length" class="learning-list__loading">
-      <NSkeleton v-for="i in 6" :key="i" :height="64" />
+  <div class="lt">
+    <div v-if="loading && !items.length" class="lt-loading">
+      <NSkeleton v-for="i in 18" :key="i" :height="26" :sharp="true" />
     </div>
 
-    <div v-else-if="items.length" class="learning-list__rows">
-      <article
-        v-for="item in items"
-        :key="item.id"
-        class="learning-row"
-        :class="`learning-row--${statusTone(item.status)}`"
-        @click="emit('openDetail', item)"
-      >
-        <span class="learning-row__stripe" />
-        <div class="learning-row__head">
-          <NTag
-            class="learning-row__kind"
-            size="small"
-            :bordered="false"
-          >
-            {{ item.kind_label }}
-          </NTag>
-          <h4 class="learning-row__title">
-            {{ item.content || '—' }}
-          </h4>
-        </div>
+    <template v-else-if="items.length">
+      <header class="lt-head">
+        <span class="lt-col lt-col--dot" />
+        <span class="lt-col lt-col--kind">类型</span>
+        <span class="lt-col lt-col--title">条目</span>
+        <span class="lt-col lt-col--group">群</span>
+        <span class="lt-col lt-col--time">时间</span>
+        <span class="lt-col lt-col--conf">置信</span>
+        <span class="lt-col lt-col--status">状态</span>
+        <span class="lt-col lt-col--act" />
+      </header>
 
-        <div class="learning-row__meta">
-          <span v-if="item.group_id" class="learning-row__chip">
-            <span class="learning-row__chip-key">群</span>
-            <span class="learning-row__chip-val">{{ item.group_id }}</span>
+      <div class="lt-body">
+        <button
+          v-for="item in items"
+          :key="item.id"
+          type="button"
+          class="lt-row"
+          :class="`lt-row--${statusTone(item.status)}`"
+          @click="emit('openDetail', item)"
+        >
+          <span
+            class="lt-col lt-col--dot"
+            :title="item.status_label || item.status"
+          >{{ statusGlyph(statusTone(item.status)) }}</span>
+          <span class="lt-col lt-col--kind">{{ item.kind_label }}</span>
+          <span class="lt-col lt-col--title" :title="item.content_full || item.content">
+            {{ item.content || '——' }}
           </span>
-          <span class="learning-row__chip">
-            <NIcon :component="TimeOutline" :size="13" />
-            {{ formatTime(item.created_at) }}
-          </span>
-          <span v-if="item.confidence !== null" class="learning-row__chip learning-row__chip--mono">
-            置信 {{ formatConfidence(item.confidence) }}
-          </span>
-        </div>
-
-        <div class="learning-row__tail">
-          <NTag
-            size="small"
-            round
-            :bordered="false"
-            :type="statusTagType(item.status)"
-          >
-            {{ item.status_label || item.status }}
-          </NTag>
-          <div class="learning-row__actions" @click.stop>
-            <NButton
+          <span class="lt-col lt-col--group" :title="item.group_id">{{ shortGroup(item.group_id) }}</span>
+          <span class="lt-col lt-col--time">{{ formatTime(item.created_at) }}</span>
+          <span class="lt-col lt-col--conf">{{ formatConfidence(item.confidence) }}</span>
+          <span class="lt-col lt-col--status">{{ item.status_label || item.status }}</span>
+          <span class="lt-col lt-col--act" @click.stop>
+            <button
               v-if="item.review_drawer"
-              size="tiny"
-              secondary
+              type="button"
+              class="lt-act"
               @click="emit('reviewItem', item)"
-            >
-              审核
-            </NButton>
-            <NButton
-              size="tiny"
-              quaternary
+            >审</button>
+            <button
+              type="button"
+              class="lt-act"
               @click="emit('openDetail', item)"
-            >
-              <template #icon>
-                <NIcon :component="OpenOutline" />
-              </template>
-              详情
-            </NButton>
-          </div>
-          <NIcon class="learning-row__chevron" :component="ChevronForwardOutline" :size="16" />
-        </div>
-      </article>
-    </div>
+            >详</button>
+          </span>
+        </button>
+      </div>
+    </template>
 
     <EmptyState
       v-else
@@ -139,180 +123,189 @@ function formatTime(value: string): string {
       description="当前筛选下没有学习条目。"
     />
 
-    <div v-if="hasMore" class="learning-list__footer">
-      <NButton :loading="loadingMore" @click="emit('loadMore')">
-        加载更多
-      </NButton>
+    <div v-if="hasMore" class="lt-footer">
+      <NButton size="tiny" :loading="loadingMore" @click="emit('loadMore')">加载更多</NButton>
     </div>
   </div>
 </template>
 
 <style scoped>
-.learning-list {
+.lt {
   display: grid;
-  gap: 12px;
+  gap: 0;
+  font-feature-settings: 'tnum' 1;
 }
 
-.learning-list__loading {
+.lt-loading {
   display: grid;
-  gap: 8px;
+  gap: 1px;
 }
 
-.learning-list__rows {
+.lt-head,
+.lt-row {
   display: grid;
-  gap: 6px;
-}
-
-.learning-row {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: auto auto;
-  grid-template-areas:
-    'head tail'
-    'meta tail';
-  column-gap: 16px;
-  row-gap: 6px;
+  grid-template-columns:
+    20px              /* dot */
+    44px              /* kind */
+    minmax(0, 1fr)    /* title */
+    72px              /* group */
+    72px              /* time */
+    36px              /* conf */
+    52px              /* status */
+    auto;             /* act */
   align-items: center;
-  padding: 12px 16px 12px 22px;
-  border: 1px solid var(--om-border);
-  border-radius: 12px;
-  background: var(--om-surface-solid);
-  cursor: pointer;
-  transition: border-color 0.16s ease, background-color 0.16s ease, transform 0.16s ease;
+  column-gap: 12px;
+  padding: 0 12px;
+  font-size: 12px;
+  line-height: 1;
 }
 
-.learning-row:hover {
-  border-color: var(--om-border-strong);
-  background: color-mix(in srgb, var(--om-surface-2) 60%, var(--om-surface-solid));
-}
-
-.learning-row:hover .learning-row__chevron {
-  color: var(--om-text-2);
-  transform: translateX(2px);
-}
-
-.learning-row__stripe {
-  position: absolute;
-  top: 10px;
-  bottom: 10px;
-  left: 8px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--om-text-3);
-  opacity: 0.55;
-}
-
-.learning-row--success .learning-row__stripe {
-  background: var(--om-success);
-  opacity: 0.85;
-}
-
-.learning-row--pending .learning-row__stripe {
-  background: var(--om-warning);
-  opacity: 0.85;
-}
-
-.learning-row--rejected .learning-row__stripe {
-  background: var(--om-danger);
-  opacity: 0.7;
-}
-
-.learning-row__head {
-  grid-area: head;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.learning-row__kind {
-  flex-shrink: 0;
-  background: color-mix(in srgb, var(--om-text-2) 10%, transparent) !important;
-  color: var(--om-text-2) !important;
+.lt-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 24px;
+  color: var(--om-text-3);
+  font-size: 10.5px;
   font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--om-surface-2) 70%, var(--om-surface-solid));
+  border-bottom: 1px solid var(--om-border);
+}
+
+.lt-body {
+  display: grid;
+  gap: 0;
+}
+
+.lt-row {
+  position: relative;
+  height: 26px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--om-border) 55%, transparent);
+  background: transparent;
+  color: var(--om-text-1);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.lt-row:hover {
+  background: color-mix(in srgb, var(--om-surface-2) 60%, transparent);
+}
+
+.lt-row:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--om-info) 12%, transparent);
+}
+
+.lt-col {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.lt-col--dot {
+  justify-self: center;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--om-text-3);
+}
+
+.lt-row--success .lt-col--dot { color: var(--om-success); }
+.lt-row--pending .lt-col--dot { color: var(--om-warning); }
+.lt-row--rejected .lt-col--dot { color: var(--om-danger); }
+
+.lt-col--kind {
+  color: var(--om-text-3);
+  font-size: 11px;
   letter-spacing: 0.02em;
 }
 
-.learning-row__title {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
+.lt-col--title {
   color: var(--om-text-1);
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.005em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 500;
 }
 
-.learning-row__meta {
-  grid-area: meta;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
+.lt-col--group,
+.lt-col--time,
+.lt-col--conf {
   color: var(--om-text-3);
-  font-size: 12px;
-}
-
-.learning-row__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  white-space: nowrap;
-}
-
-.learning-row__chip--mono {
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
-.learning-row__chip-key {
+.lt-col--conf::after {
+  content: '%';
+  margin-left: 1px;
   color: var(--om-text-3);
-  opacity: 0.78;
+  opacity: 0.55;
 }
 
-.learning-row__chip-val {
+.lt-col--status {
   color: var(--om-text-2);
-  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  text-align: right;
 }
 
-.learning-row__tail {
-  grid-area: tail;
-  display: flex;
-  align-items: center;
-  gap: 12px;
+.lt-row--success .lt-col--status { color: var(--om-success); }
+.lt-row--pending .lt-col--status { color: var(--om-warning); }
+.lt-row--rejected .lt-col--status { color: var(--om-danger); }
+
+.lt-col--act {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
 
-.learning-row__actions {
-  display: flex;
-  gap: 4px;
+.lt-row:hover .lt-col--act,
+.lt-row:focus-visible .lt-col--act {
+  opacity: 1;
 }
 
-.learning-row__chevron {
-  flex-shrink: 0;
-  color: var(--om-text-3);
-  transition: color 0.16s ease, transform 0.16s ease;
+.lt-act {
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--om-border-strong) 70%, transparent);
+  border-radius: 3px;
+  background: var(--om-surface-solid);
+  color: var(--om-text-2);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.1s ease, color 0.1s ease;
 }
 
-.learning-list__footer {
+.lt-act:hover {
+  background: var(--om-surface-2);
+  color: var(--om-text-1);
+}
+
+.lt-footer {
   display: flex;
   justify-content: center;
-  padding-top: 4px;
+  padding: 8px 0 0;
 }
 
 @media (max-width: 720px) {
-  .learning-row {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas:
-      'head'
-      'meta'
-      'tail';
-    row-gap: 8px;
+  .lt-head,
+  .lt-row {
+    grid-template-columns: 20px 44px minmax(0, 1fr) 72px 36px;
+    column-gap: 8px;
   }
-
-  .learning-row__tail {
-    justify-content: space-between;
+  .lt-col--time,
+  .lt-col--status,
+  .lt-col--act {
+    display: none;
   }
 }
 </style>

@@ -929,10 +929,10 @@ function formatCount(value: number | null): string {
 
 .learning-items {
   display: grid;
-  gap: 16px;
-  padding: 16px;
+  gap: 8px;
+  padding: 10px 12px 12px;
   border: 1px solid var(--om-border);
-  border-radius: 16px;
+  border-radius: 12px;
   background: var(--om-surface);
 }
 
@@ -1002,10 +1002,10 @@ function formatCount(value: number | null): string {
 }
 
 .learning-items__header h2 {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   color: var(--om-text-1);
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .learning-items__header span:last-child {
