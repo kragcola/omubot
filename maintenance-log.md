@@ -4,6 +4,37 @@
 
 ---
 
+## 2026-05-23 学习管道 v3 LearningTable 视觉重设计：flat 7 列表 → 行卡片列表
+
+**变更类型**：admin/frontend 视觉收口 / bind-mount 即生效（仅前端 build）
+
+**触发**：用户在 `/learning?noun=all` 反馈「子词条太丑了，搜索设计合适的」——附图是当前 7 列 NDataTable（kind / 内容 / 群 / 状态 / 时间 / 置信 / 操作），所有列等权、无主次，一眼扫不到内容焦点。
+
+**问题根因**：`LearningTable.vue` 把审核队列当报表渲染——内容与元数据视觉权重相同，状态色仅靠右边的 NTag 单点呈现，行间没有可瞄准的视觉锚（无 hover affordance、无 stripe、无层次）。审核场景的本质是「先看内容、再看分类、最后看状态/操作」，flat table 反着来。
+
+**重设计**（commit `<待填>`）
+
+`admin/frontend/src/views/learning/components/LearningTable.vue` 完全重写：去掉 NDataTable，换成 `<article class="learning-row">` 行卡片列表。
+
+- **状态色侧栏**：每行左侧绝对定位 3px stripe，颜色由 `statusTone(status)` 派生：success（hit/approved/enabled_for_prompt/active）→ `--om-success`；pending（pending/candidate/dry_run/queued）→ `--om-warning`；rejected（muted/expired/rejected/disabled）→ `--om-danger`；其余 neutral → `--om-text-3`。一眼区分 review queue 状态。
+- **CSS Grid 双轴布局**：`grid-template-areas: 'head tail' / 'meta tail'`——head（kind tag + 内容标题）+ meta（群/时间/置信 chip 行）+ tail（状态 NTag + 审核/详情按钮 + chevron）。内容标题字重 600、ellipsis、--om-text-1，是行内主焦点。
+- **chip 行**：群号、时间、置信用 `.learning-row__chip` 统一渲染——12px、--om-text-3、内嵌 ionicon（TimeOutline）；置信单独 tabular-nums。视觉低权重，留给标题主轴。
+- **hover affordance**：border-color → `--om-border-strong`，背景 `color-mix(--om-surface-2 60%, --om-surface-solid)`，chevron 右移 2px + 颜色升 --om-text-2。可瞄准、有反馈，整行 click → openDetail。
+- **loading skeleton**：6× `<NSkeleton :height="64">` 替代 NDataTable 的 loading mask。
+- **mobile @720px**：grid 单列堆叠（head / meta / tail 三行），tail 行 `space-between`。
+
+**emit 契约保持不变**：`openDetail / reviewItem / loadMore`——LearningView 行 831–840 的 props/listeners 全部沿用，零改动。
+
+**验证**：
+
+- `vue-tsc --noEmit` → exit 0
+- `npm run build` → ✓ built in 10.65s；LearningView chunk 149.95 KB（gzip 42.59 KB），与 PR-D 后的 149.28 KB 持平（diff +0.67 KB，纯 CSS + template）
+- 视觉验证留给用户在浏览器手测（D6：bind-mount 已生效）
+
+**回滚**：`git revert <sha>` 单 commit 恢复旧 NDataTable。
+
+---
+
 ## 2026-05-23 学习管道 v3 PR-C / PR-D 收口：style/episode/memory 折入 + 5 路由 redirect + 旧页面退场
 
 **变更类型**：frontend 架构演进 / bind-mount 即生效
