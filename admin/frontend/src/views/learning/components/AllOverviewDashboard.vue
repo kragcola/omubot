@@ -739,10 +739,9 @@ function maxStageValue(mod: NounModule): number {
 
 .feed-row {
   position: relative;
-  display: grid;
-  grid-template-columns: 8px auto minmax(0, 1fr) auto auto;
+  display: flex;
   align-items: center;
-  column-gap: 12px;
+  gap: 12px;
   height: 36px;
   padding: 0 14px;
   border-bottom: 1px solid color-mix(in srgb, var(--om-border) 55%, transparent);
@@ -759,6 +758,7 @@ function maxStageValue(mod: NounModule): number {
 }
 
 .feed-dot {
+  flex-shrink: 0;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -771,6 +771,7 @@ function maxStageValue(mod: NounModule): number {
 .feed-row--rejected .feed-dot { background: var(--om-danger); opacity: 1; }
 
 .feed-title {
+  flex: 0 1 auto;
   color: var(--om-text-1);
   font-size: 13.5px;
   font-weight: 500;
@@ -778,10 +779,10 @@ function maxStageValue(mod: NounModule): number {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 18ch;
 }
 
 .feed-meta {
+  flex: 0 1 auto;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -812,6 +813,8 @@ function maxStageValue(mod: NounModule): number {
 }
 
 .feed-noun {
+  flex-shrink: 0;
+  margin-left: auto;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
@@ -854,6 +857,7 @@ function maxStageValue(mod: NounModule): number {
 }
 
 .feed-time {
+  flex-shrink: 0;
   color: var(--om-text-3);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -951,18 +955,12 @@ function maxStageValue(mod: NounModule): number {
   .ov-bottom {
     grid-template-columns: 1fr;
   }
-  .feed-title {
-    max-width: 24ch;
-  }
 }
 
 @media (max-width: 720px) {
   .ov-modules__grid,
   .ov-kpi {
     grid-template-columns: 1fr;
-  }
-  .feed-row {
-    grid-template-columns: 8px minmax(0, 1fr) auto;
   }
   .feed-meta,
   .feed-noun {
