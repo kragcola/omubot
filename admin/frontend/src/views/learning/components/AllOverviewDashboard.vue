@@ -731,6 +731,7 @@ function maxStageValue(mod: NounModule): number {
   margin: 0;
   padding: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0;
   border: 1px solid var(--om-border);
   border-radius: 10px;
@@ -748,6 +749,7 @@ function maxStageValue(mod: NounModule): number {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
   height: 36px;
   padding: 0 14px;
   border-bottom: 1px solid color-mix(in srgb, var(--om-border) 55%, transparent);
