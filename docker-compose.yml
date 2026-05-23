@@ -34,6 +34,10 @@ services:
       - ./admin/static:/app/admin/static:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # 防御性内存上限：实测峰值 ~300 MiB，给 7x 余量。
+    # napcat 故意不加（D6：napcat 不能 recreate，device fingerprint 反风控）。
+    mem_limit: 2g
+    mem_reservation: 512m
 
 volumes:
   omubot-storage:

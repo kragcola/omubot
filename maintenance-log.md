@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-05-24 Docker 镜像/构建缓存清理 + bot 内存上限护栏
+
+**变更类型**：dev 主机 docker 资源回收 + compose 防御性内存上限 + 一键清理脚本
+
+**内容**：dev 主机 `docker system df` 报 33.77 GB 占用，复盘后定位真因并非 napcat 容器吃内存（实测 `docker stats` 仅 308 MiB / 282 MiB），而是 `docker compose up -d --build` 反复触发 `--build` 后的 146 张 dangling 镜像残留。按以下顺序回收：
+
+1. `docker image prune -a -f` —— 148 张镜像收敛到 2 张（`omubot-bot:latest` + `mlikiowa/napcat-docker:v4.15.0`，均为 running container 锁定），实际释放 16.31 GB（`system df` 给的 63.63 GB 是跨镜像共享层重复计数，不可信）。
+2. `docker builder prune -f` —— buildkit 缓存从 1.412 GB 清到 0 B。
+3. compose 给 `bot` 服务加上 `mem_limit: 2g` / `mem_reservation: 512m`（实测峰值 ~300 MiB，给 7× 余量当防御红线，不收紧到峰值附近以免误杀）。napcat **故意不加**——D6 红线：napcat 不能 recreate（device fingerprint 反风控）；compose 上限要落地必须 recreate，违反 D6。
+4. 用 `docker compose up -d bot` 单独 recreate bot（验证范围只到 bot），napcat 全程保持 Up 29h 不动；bot 起来后 127 MiB / 2 GiB，admin HTTP 200，bot 仍在接群消息。
+5. 把整套清理动作固化到 [scripts/dev/docker-cleanup.sh](scripts/dev/docker-cleanup.sh)：D7 stash/status 自检 → 列 `docker system df` → 跑 image prune + builder prune → 再列一次 + 容器健康表，**不碰 volumes**（`omubot-storage` 4.477 GB 持久数据），脚本注释里明文复述 D6。
+
+**影响**：dev 主机磁盘从 65.99 GB 回到 2.241 GB（包含 4.477 GB volume），相当于回收掉之前 ~65 倍的镜像残留。`docker-compose.yml` bot 服务获得 mem_limit 防御红线；napcat service 行为零改动。本次未触碰任何 runtime 行为，bot 与 napcat 持续在线全程未掉线。
+
+**验证**：`docker stats` bot 282→127 MiB（recreate 后），napcat 308 MiB 不变；`docker compose config | grep mem_` 仅 bot 命中；`docker logs --tail 10 napcat` 与 bot 均显示活跃接群消息；admin `curl -s -o /dev/null -w "%{http_code}" /admin/`=200。回滚路径：删 docker-compose.yml 中 bot 的 `mem_limit/mem_reservation` 三行 + 注释（napcat 仍照原样）；`scripts/dev/docker-cleanup.sh` 是只读消费脚本，删除即可。
+
+---
+
 ## 2026-05-24 学习管道词条切换器重做 — NounSwitcher 落地
 
 **变更类型**：admin/frontend 学习页 词条主切换轴交互重设计
