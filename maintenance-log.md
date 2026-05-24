@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-05-24 Persona v2 source.md 迁移 — fengxiaomeng-v2 dry-run
+
+**变更类型**：persona v2 source / dry-run import + freeze / B2 准备
+
+**内容**：按 [persona-runtime-cutover-B1-execution.md](docs/tracking/persona-runtime-cutover-B1-execution.md) 既定路径"B2 → B3 串行 + 单群灰度 993065015 + persona_id=fengxiaomeng-v2"，把 v1 `config/soul/identity.md` + `config/soul/instruction.md` 迁移到 v2 `config/persona/fengxiaomeng-v2/source.md`：
+
+- **front matter**：`persona_id: fengxiaomeng` / `canonical_name: 凤笑梦` / `version_hint: 2.1.0` / `legacy_instruction_md: true` / `legacy_instruction_md_path: "../../soul/instruction.md"`，opt-in 路径让 importer 把 v1 instruction.md bullets 追加到 `guard.yaml.behavior_instructions.items[]` 末尾（per [§11](docs/migrations/persona-v2-importer.md#11-legacy-instructionmd-opt-in-dry-run)）。
+- **正文章节**：§1 是谁 / §1.1 性格底色 / §1.2 不应该出现的样子 / §1.3 价值观与硬规则（含 7 条硬规则 with `# enforce: pattern_guardable|judge_guardable|eval_only`）/ §3 怎么说话 / §4 知道什么 / 不知道什么 / §7 例子（4 正例 + 4 反例）/ §7.插话方式（v1 §"插话方式"完整搬入）/ §8.4 行为指令。
+- **importer dry-run**：`PersonaDraftWriter.import_source('fengxiaomeng')` → `has_errors=False`，0 issues，311 fields，17 generated files。
+- **compile_persona_dry_run**：`ok=True, mode='dry_run'`，6 prompt blocks（core.identity 1393 chars / runtime.adapter 99 / core.voice 563 / core.knowledge 240 / core.examples 247 / core.guard 7733）。
+- **parity audit**：`has_divergence=True`、`v1_only_axes=('admins',)`，6 findings 中 3 条 divergent / 1 v1_only / 1 aligned / 2 not_applicable；3 条 divergent 全部对应 [§9 parity audit dry-run](docs/migrations/persona-v2-importer.md#9-s12-parity-audit-dry-run) 已知 follow-up——`identity_personality` 是 v1 第二人称 vs v2 第三人称改写（内容等价但锚点不同）；`behavior_instruction` 是 v1 markdown heading anchor vs v2 bullets 直接进 items[]（heading 不入 prompt 是预期）；`admins` v1_only 是 source.md 暂未承载 admins front matter（per §9 已声明"未列入本轮"）。`proactive_rules` aligned（v1 §"插话方式"完整迁入 source.md §7 后命中首行锚点）。
+- **pending_freeze**：`writer.pending_freeze('fengxiaomeng')` → `ok=True, schema_version=1.0, source_sha256=c0d3d4c6…`，`_pending_freeze/<id>/_persona_runtime.json` meta 落地。
+- **load_pending_freeze 验证**：`load_pending_freeze('fengxiaomeng')` 返回 `bundle.ok=True / compile_result.mode='runtime' / warnings=() / errors=()`，6 prompt blocks 与 dry_run 同 byte（B1.3 byte-equal 不变量在真实 persona 上得到验证）。
+
+**影响**：`config/persona/fengxiaomeng-v2/source.md` 是本仓**首个 v2 persona source**；`.draft/` 与 `_pending_freeze/` 走 `.gitignore` 物理护栏（D7），仅 `source.md` 入库。`PromptBuilder` / `LLMClient` / `GroupChatScheduler` / admin Soul SPA 编辑入口 / `BotConfig` / `config.toml` 本期**完全不动**——4 个 v2 feature flag 仍默认全 off，runtime 行为零变化。本条迁移落地后即可进入 B2 shadow compare 实现（双算 v1+v2 prompt blocks 并落 diff log，不发 LLM）。
+
+**验证**：`PersonaDraftWriter.import_source` + `compile_persona_dry_run` + `compile_persona_runtime` + `compare_v1_vs_v2_dry_run` + `load_pending_freeze` 全链路 0 异常；`git status` 仅 `config/persona/fengxiaomeng-v2/` untracked；`git add --dry-run` 仅 `source.md` 命中（`.draft/` / `_pending_freeze/` 被 .gitignore 拦截）；D1 同模式扫描 `grep -rn 'fengxiaomeng' --include='*.py' --include='*.toml'` 仅命中 tests fixture（其他 persona_id 在 tests 用 default 值），runtime 路径零命中。
+
+**回滚路径**：删 `config/persona/fengxiaomeng-v2/source.md` 即可；`.draft/` 与 `_pending_freeze/` 不入库不需 revert；B1 已落地的 4 commit（`12cecca` / `dfc7c38` / `a9a2eb6` / `ebae601`）不受影响；本条维护日志单 commit revert 即可清空记录。
+
+---
+
 ## 2026-05-24 Persona Runtime Cutover B1 — 协议层 + 配置层 + runtime 入口骨架
 
 **变更类型**：persona runtime cutover / config / tests / docs
