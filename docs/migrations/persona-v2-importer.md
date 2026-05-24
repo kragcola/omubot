@@ -1,6 +1,6 @@
 # Persona v2 Importer 迁移清单
 
-> 状态：2026-05-24 Part A importer 已完整收尾（含 #1/#7/#5 小尾巴）；S6/S10' admin SPA 首版闭环已完成；Part B dry-run 闭环与 #3/#4/#8 prompt source 映射已完成。
+> 状态：2026-05-24 Part A importer 已完整收尾（含 #1/#7/#5 小尾巴）；S6/S10' admin SPA 首版闭环已完成；Part B dry-run 闭环与 #3/#4/#8 prompt source 映射已完成；S12' parity audit dry-run 已上线。
 >
 > 上游：[Persona Source Importer](../tracking/persona-source-importer.md)、
 > [整改执行追踪](../tracking/persona-source-importer-remediation-execution.md)。
@@ -93,3 +93,66 @@
 | #4 bot QQ self id 由 `PromptBuilder.build_static(..., bot_self_id)` 运行时提示，v2 source 无 hint/schema | front matter `bot_self_id_hint` / `known_bot_self_ids` → `adapter.yaml.bot_identity`，`runtime_source=adapter_connect_event`，compiler dry-run 输出 `runtime.adapter` | ✅ 已实现；运行时真实 self id 仍由 adapter connect event 提供 |
 | #8 `GroupOverride.reply_style/custom_prompt` 由 `LLMClient._build_group_profile_block()` 运行时拼入 plugin_stable，v2 source 无群级 override 映射 | front matter `group_profiles.<gid>.reply_style/custom_prompt` → `runtime.yaml.per_group_overrides.<gid>`，`source=source_front_matter`，compiler dry-run 输出 `runtime.group_profile` / `position=stable` | ✅ 已实现；只覆盖 reply_style/custom_prompt |
 | 正式 runtime 切流 | 仍由 v1 `PromptBuilder` / `LLMClient` 使用现有配置路径；v2 compiler dry-run 仅用于比对和后续灰度 | ⏳ 后续 S12' |
+
+## 9. S12' parity audit dry-run
+
+> 上游：[persona-s12-parity-audit-execution.md](../tracking/persona-s12-parity-audit-execution.md)
+>
+> 本节仅记录 v1 → v2 比对工具的落地。`PromptBuilder` / `LLMClient` runtime 仍是 v1，未切流。
+
+| axis | v1 出处 | v2 dry-run 出处 | 当前 parity status | 备注 |
+|---|---|---|---|---|
+| identity_personality | `Identity.personality` 写入 `PromptBuilder.build_static()` Block 1 头部 | `core.identity` (`position=static`) | aligned（happy path） | parity 用 personality 首行作为 substring 锚点 |
+| bot_self_id | `PromptBuilder.build_static(identity, bot_self_id)` 拼接 `【你的QQ号是 …】` 段 | `runtime.adapter` (`position=static`) | aligned（提供 hint 时） | 三锚点齐：`bot self id hint：{id}`、`runtime source：adapter_connect_event`、`昵称不可信` |
+| behavior_instruction | `PromptBuilder.build_static()` 拼接 `self._instruction`（来自 `instruction.md`） | `core.guard` 的 `行为指令：…` 段 | aligned（source §8.4 写明时） | source 没写时 v2 缺段，axis = `divergent` |
+| admins | `PromptBuilder.build_static()` 输出 `【管理员】@QQ(nick)、…` | adapter.yaml.permissions.admins[] 仅落 draft 字段 | v1_only | follow-up：v2 prompt block 仍需补，未列入本轮 |
+| proactive_rules | `PromptBuilder.build_static()` 末尾追加 `identity.proactive` | source 暂未承载 `## 插话方式` | v1_only | follow-up：source schema 与 prompt block 同步立项 |
+| group_profile | `LLMClient._build_group_profile_block()` 输出 plugin_stable | `runtime.group_profile` (`position=stable`) | aligned | reply_style hint + custom_prompt 都覆盖；hint 表由 `tests/test_persona_parity_audit.py::test_reply_style_hints_reference_matches_runtime` 锁住 |
+
+| 旧状态 / 旧入口 | 新状态 / 新入口 | 状态 |
+|---|---|---|
+| 没有 v1 vs v2 比对工具 | `services/persona/parity_audit.py::compare_v1_vs_v2_dry_run()` + `tests/test_persona_parity_audit.py` | ✅ 已实现 |
+| 切流前需 admin SPA parity 视图 | `/api/admin/persona/*` 暂未暴露 `ParityReport` | ⏳ 后续 |
+| 切流前需 `proactive_rules` / `admins` 落 prompt block | source schema + compiler block 设计未启动 | ⏳ 后续 |
+| 正式 runtime 切流 | 仍由 v1 `PromptBuilder` / `LLMClient` 使用现有配置路径；parity audit 仅用于离线比对 | ⏳ 后续 |
+
+## 10. GroupOverride 完整迁移 dry-run
+
+> 上游：[persona-group-override-full-execution.md](../tracking/persona-group-override-full-execution.md)
+>
+> 本节仅记录 importer / compiler dry-run 扩展；`kernel.config.GroupOverride` / `LLMClient` / `GroupChatScheduler` runtime 未切流。
+
+| 字段 | v1 出处 | v2 dry-run 落点 | 状态 |
+|---|---|---|---|
+| blocked_users | `GroupOverride.blocked_users` (list[int]) | `runtime.yaml.per_group_overrides.<gid>.blocked_users[]` | ✅ 已实现；非 list 写 warn issue |
+| allowed_tools | `GroupOverride.allowed_tools` | 同前 | ✅ 已实现；元素 strip |
+| blocked_tools | `GroupOverride.blocked_tools` | 同前 | ✅ 已实现 |
+| at_only | `GroupOverride.at_only` | 同前 | ✅ 已实现；非 bool 写 warn |
+| talk_value | `GroupOverride.talk_value` | 同前 | ✅ 已实现；非数字写 warn |
+| planner_smooth | 同上 | 同上 | ✅ 已实现 |
+| debounce_seconds | 同上 | 同上 | ✅ 已实现 |
+| batch_size | `GroupOverride.batch_size` | 同上 | ✅ 已实现；非 int 写 warn |
+| history_load_count | 同上 | 同上 | ✅ 已实现 |
+| reply_style | `GroupOverride.reply_style`（GroupReplyStyle 枚举） | 同上 | ✅ 已实现；非法值写 warn |
+| custom_prompt | `GroupOverride.custom_prompt` | 同上 | ✅ 已实现 |
+| tools_enabled | `GroupOverride.tools_enabled` | 同上 | ✅ 已实现 |
+| sticker_mode | `GroupOverride.sticker_mode`（GroupStickerMode 枚举） | 同上 | ✅ 已实现 |
+| slang_enabled | `GroupOverride.slang_enabled` | 同上 | ✅ 已实现 |
+| presence_mode | `GroupOverride.presence_mode`（GroupPresenceMode 枚举） | 同上 | ✅ 已实现 |
+| compiler dry-run group_profile block | 仅渲染 reply_style/custom_prompt | 按固定字段顺序渲染全部 15 字段 + `source` token；空值跳过 | ✅ 已实现 |
+| parity audit 全字段比对 | 仅覆盖 reply_style/custom_prompt | 暂未扩展 | ⏳ 后续 |
+| 正式 runtime 切流 | 仍由 v1 `BotConfig.group.overrides` / `LLMClient` / `GroupChatScheduler` 消费 | dry-run only | ⏳ 后续 |
+
+## 11. Legacy `instruction.md` opt-in dry-run
+
+> 上游：[persona-legacy-instruction-md-execution.md](../tracking/persona-legacy-instruction-md-execution.md)
+>
+> 本节仅记录 importer dry-run 扩展；v1 `PromptBuilder._instruction` / `LLMClient` / admin Soul SPA 全部不动。
+
+| 旧状态 / 旧入口 | 新状态 / 新入口 | 状态 |
+|---|---|---|
+| importer 完全不读 `config/soul/instruction.md` | front matter `legacy_instruction_md: true` + `legacy_instruction_md_path` 显式 opt-in 后，writer 从相对 `source.md` 的路径读取文本，bullets 追加到 `guard.yaml.behavior_instructions.items[]` | ✅ 已实现；默认关闭，不影响现有 importer 行为 |
+| 行为指令 extractor 仅 `behavior_instruction_md` | 新增 `legacy_instruction_md_opt_in`（confidence=0.6）；report 中 source-section bullets 在前、legacy bullets 在后 | ✅ 已实现 |
+| opt-in 但缺路径 / 路径不存在时无信号 | 落 warn issue `legacy_instruction_md_path_missing` / `legacy_instruction_md_file_not_found`，不阻断 import、不读任何文件 | ✅ 已实现 |
+| compiler dry-run `core.guard` 行为指令拼接 | 自动覆盖 legacy 追加项（`behavior_instructions.items[]` 已经是统一来源） | ✅ 已实现，无需 compiler 改动 |
+| 正式 runtime 切流 | 仍由 v1 `PromptBuilder._instruction` 直接读 `config/soul/instruction.md`，不走 v2 importer | ⏳ 后续 |
