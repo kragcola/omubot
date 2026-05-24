@@ -1,0 +1,28 @@
+schema: omubot.thinker.v2
+version: 2.1.0-proposal
+
+enabled: true
+max_tokens: 512
+
+policy:
+  action_set:
+    - reply
+    - wait
+  retrieve_modes:
+    - skip
+    - doc
+    - fact
+    - hybrid
+  tone_set:
+    - 日常
+    - 认真
+    - 轻松
+  extra_principles: []
+
+output_schema:
+  action: string
+  tone: string
+  retrieve_mode: string
+  sticker: boolean
+  thought: string
+  rewritten_query: string

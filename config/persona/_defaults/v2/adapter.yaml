@@ -1,0 +1,17 @@
+schema: omubot.adapter.v2
+version: 2.1.0-proposal
+
+platform:
+  kind: onebot_v11
+  adapter: napcat
+
+events:
+  message_received: true
+  recall_received: true
+  send_receipt: true
+
+send:
+  max_segments: 4
+  segment_delay_seconds: 0.8
+  humanizer: inherit
+  reply_prefix_for_at: true

@@ -1,0 +1,28 @@
+schema: omubot.state.v2
+version: 2.1.0-proposal
+
+mood:
+  enabled: true
+  bias: neutral
+  thresholds:
+    low_energy: 0.25
+    high_energy: 0.75
+    high_tension: 0.75
+
+schedule:
+  enabled: true
+  preferences: []
+
+calendar:
+  enabled: true
+  self: {}
+  wxs_members: []
+
+state_board:
+  enabled: true
+
+reserved:
+  world: {}
+  desire: {}
+  values_drift: {}
+  intimacy: {}

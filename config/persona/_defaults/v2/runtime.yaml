@@ -1,0 +1,25 @@
+schema: omubot.runtime.v2
+version: 2.1.0-proposal
+
+scheduler:
+  enabled: true
+  talk_value_base: 1.0
+  cooldown_seconds: 30
+  max_mood_multiplier: 1.5
+
+calendar:
+  enabled: true
+  max_time_multiplier: 1.0
+
+context_retrieval:
+  enabled: true
+  rrf:
+    document: 0.34
+    memory: 0.33
+    graph: 0.33
+
+per_group_overrides: {}
+
+post_process:
+  max_segments: 4
+  segment_delay_seconds: 0.8

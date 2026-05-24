@@ -1,0 +1,51 @@
+schema: omubot.system.v2
+version: 2.1.0-proposal
+
+modules:
+  core.identity: { enabled: true, required: true }
+  core.voice: { enabled: true }
+  core.knowledge: { enabled: true }
+  core.relationships: { enabled: true }
+  core.examples: { enabled: true }
+  core.guard: { enabled: true, required: true }
+  runtime.adapter: { enabled: true, required: true }
+  memory.short_term: { enabled: true, required: true }
+  runtime.calendar: { enabled: true }
+  state.calendar: { enabled: true }
+  state.schedule: { enabled: true }
+  state.mood: { enabled: true }
+  state.affection: { enabled: true }
+  state.board: { enabled: true }
+  runtime.scheduler: { enabled: true, required: true }
+  runtime.thinker: { enabled: true }
+  memory.long_term: { enabled: true }
+  memory.compactor: { enabled: true }
+  memory.consolidator: { enabled: true }
+  learning.slang: { enabled: true }
+  learning.style: { enabled: true }
+  learning.episode: { enabled: true }
+  context.retrieval: { enabled: true }
+  context.graph: { enabled: true }
+  output.sticker: { enabled: true }
+  output.send: { enabled: true, required: true }
+  eval.online: { enabled: false }
+  observer.feedback: { enabled: false, reserved: true }
+  runtime.planner: { enabled: false, reserved: true }
+  self.reflection: { enabled: false, reserved: true }
+  state.desire: { enabled: false, reserved: true }
+  state.intimacy: { enabled: false, reserved: true }
+  state.values_drift: { enabled: false, reserved: true }
+  state.world: { enabled: false, reserved: true }
+
+dag_check:
+  on_cycle: refuse_boot
+  on_missing_dep: refuse_boot
+
+trace:
+  retention_days: 30
+  records_required:
+    - state_snapshots
+    - module_decisions
+    - prompt_blocks_per_module
+    - guard_verdict
+    - send_receipt

@@ -4,8 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import ImportIssue, ImportReport, ImportResult, ReportField, SourceDocument, SourceField, SourceSpan
+from services.system_module import REQUIRED_MODULE_IDS, RESERVED_MODULE_IDS, catalog_system_modules
+
+from .models import (
+    ImportIssue,
+    ImportReport,
+    ImportResult,
+    ReportField,
+    SourceDocument,
+    SourceField,
+    SourceSection,
+    SourceSpan,
+)
 from .parser import bullet_items, first_prefixed_value, list_after_label
+from .system_validation import validate_system_modules
 
 DRAFT_YAML_FILES = (
     "persona.yaml",
@@ -25,7 +37,17 @@ DRAFT_YAML_FILES = (
     "system.yaml",
 )
 
-DEFAULT_TEMPLATE_FILES = ("guard.yaml", "eval.yaml", "trace.yaml")
+DEFAULT_TEMPLATE_FILES = (
+    "guard.yaml",
+    "eval.yaml",
+    "trace.yaml",
+    "runtime.yaml",
+    "state.yaml",
+    "thinker.yaml",
+    "adapter.yaml",
+    "capabilities.yaml",
+    "system.yaml",
+)
 
 
 def build_persona_draft(
@@ -62,6 +84,8 @@ def build_persona_draft(
     _extract_voice(source, draft, report)
     _extract_knowledge(source, draft, report)
     _extract_examples(source, draft, report)
+    _extract_part_b_overrides(source, draft, report)
+    validate_system_modules(draft, report)
     _validate_required(draft, report)
 
     report.generated_files = [
@@ -141,7 +165,25 @@ def _empty_draft(persona_id: str, source: SourceDocument) -> dict[str, dict[str,
         "trace.yaml": _skeleton("omubot.trace.v2", source),
         "state.yaml": _skeleton("omubot.state.v2", source),
         "thinker.yaml": _skeleton("omubot.thinker.v2", source),
-        "system.yaml": _skeleton("omubot.system.v2", source),
+        "system.yaml": {
+            "schema": "omubot.system.v2",
+            "version": "2.1.0-proposal",
+            "modules": catalog_system_modules(),
+            "dag_check": {
+                "on_cycle": "refuse_boot",
+                "on_missing_dep": "refuse_boot",
+            },
+            "trace": {
+                "retention_days": 30,
+                "records_required": [
+                    "state_snapshots",
+                    "module_decisions",
+                    "prompt_blocks_per_module",
+                    "guard_verdict",
+                    "send_receipt",
+                ],
+            },
+        },
     }
 
 
@@ -280,6 +322,83 @@ def _extract_examples(source: SourceDocument, draft: dict[str, dict[str, Any]], 
     _set_list(draft, report, "examples.yaml", "negative", negatives, "llm_extract_stub")
 
 
+def _extract_part_b_overrides(
+    source: SourceDocument,
+    draft: dict[str, dict[str, Any]],
+    report: ImportReport,
+) -> None:
+    _extract_tone_palette(source, draft, report)
+    _extract_module_switches(source, draft, report)
+
+
+def _extract_tone_palette(source: SourceDocument, draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
+    thinker = source.section("思考器", "tone_palette", "tone palette")
+    tones = list_after_label(thinker, "tone_palette", source_file=source.path)
+    if not tones:
+        tones = list_after_label(thinker, "语气集合", source_file=source.path)
+    if not tones:
+        return
+    _set_list(draft, report, "voice.yaml", "tone_palette", tones, "list_md")
+    _set_list(draft, report, "thinker.yaml", "policy.tone_set", tones, "list_md")
+
+
+def _extract_module_switches(source: SourceDocument, draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
+    section = source.section("模块开关")
+    if section is None:
+        return
+    modules = draft.get("system.yaml", {}).get("modules")
+    if not isinstance(modules, dict):
+        return
+    for item in _checkbox_items(section, source_file=source.path):
+        module_id = item.value["module_id"]
+        enabled = item.value["enabled"]
+        row = modules.get(module_id)
+        if not isinstance(row, dict):
+            report.issues.append(
+                ImportIssue(
+                    "warn",
+                    "unknown_system_module",
+                    f"source.md §12 引用了未知模块 `{module_id}`",
+                    "system.yaml",
+                    f"modules.{module_id}",
+                    item.span,
+                )
+            )
+            continue
+        row["enabled"] = enabled
+        report.fields.append(
+            ReportField(
+                "system.yaml",
+                f"modules.{module_id}.enabled",
+                item.span,
+                1.0,
+                "checkbox_md",
+            )
+        )
+        if module_id in REQUIRED_MODULE_IDS and not enabled:
+            report.issues.append(
+                ImportIssue(
+                    "error",
+                    "required_module_disabled",
+                    f"required module `{module_id}` cannot be disabled",
+                    "system.yaml",
+                    f"modules.{module_id}.enabled",
+                    item.span,
+                )
+            )
+        if module_id in RESERVED_MODULE_IDS and enabled:
+            report.issues.append(
+                ImportIssue(
+                    "error",
+                    "reserved_module_enabled",
+                    f"reserved module `{module_id}` has no implementation",
+                    "system.yaml",
+                    f"modules.{module_id}.enabled",
+                    item.span,
+                )
+            )
+
+
 def _validate_required(draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
     required = (
         ("persona.yaml", "id", "persona_id"),
@@ -406,10 +525,36 @@ def _split_enforce(text: str) -> tuple[str, str]:
     return body.strip(), enforce.strip().split()[0] if enforce.strip() else ""
 
 
+def _checkbox_items(section: SourceSection, *, source_file: str) -> list[SourceField]:
+    items: list[SourceField] = []
+    for offset, line in enumerate(section.body.split("\n")):
+        stripped = line.strip()
+        if not stripped.startswith("- ["):
+            continue
+        if len(stripped) < 5:
+            continue
+        mark = stripped[3].lower()
+        if mark not in {" ", "x"}:
+            continue
+        module_id = stripped[5:].strip().split(" ", 1)[0].strip()
+        if not module_id:
+            continue
+        line_no = section.body_start_line + offset
+        items.append(
+            SourceField(
+                "module_switch",
+                {"module_id": module_id, "enabled": mark == "x"},
+                SourceSpan(source_file, (line_no, line_no)),
+            )
+        )
+    return items
+
+
 def _modules_readme(persona_id: str) -> str:
     return (
         f"# modules placeholder for {persona_id}\n\n"
-        "Persona Source Importer Part A only creates this placeholder.\n"
-        "Concrete `modules/<id>/module.yaml` files belong to Part B "
-        "Runtime/SystemModule implementation.\n"
+        "Persona Part B S1' provides a canonical SystemModule catalog and "
+        "RuntimeStateBus dry-run validator.\n"
+        "Concrete `modules/<id>/module.yaml` files still belong to later "
+        "module implementation slices.\n"
     )

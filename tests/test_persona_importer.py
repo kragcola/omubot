@@ -124,6 +124,83 @@ def test_persona_importer_writes_15_yaml_files_and_report(tmp_path: Path) -> Non
     assert "persona.yaml" in report["generated_files"]
 
 
+def test_persona_importer_loads_part_b_defaults_and_module_switches(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE + """
+
+# 11. 思考器倾向
+
+tone_palette:
+- 日常
+- 认真
+- 轻松
+
+# 12. 模块开关
+
+- [ ] eval.online
+- [ ] output.sticker
+- [x] state.world
+- [ ] core.identity
+"""
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    for name, body in {
+        "runtime.yaml": "schema: omubot.runtime.v2\nversion: test\nscheduler: {enabled: true}\n",
+        "state.yaml": "schema: omubot.state.v2\nversion: test\nmood: {enabled: true}\n",
+        "thinker.yaml": "schema: omubot.thinker.v2\nversion: test\npolicy: {tone_set: [日常]}\n",
+        "adapter.yaml": "schema: omubot.adapter.v2\nversion: test\nsend: {max_segments: 4}\n",
+        "capabilities.yaml": "schema: omubot.capabilities.v2\nversion: test\nsticker: {mode: inherit}\n",
+        "system.yaml": (
+            "schema: omubot.system.v2\n"
+            "version: test\n"
+            "modules:\n"
+            "  core.identity: {enabled: true, required: true}\n"
+            "  output.sticker: {enabled: true}\n"
+            "  eval.online: {enabled: false}\n"
+            "  state.world: {enabled: false, reserved: true}\n"
+        ),
+    }.items():
+        (defaults / name).write_text(body, encoding="utf-8")
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(source, encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    assert result.draft["runtime.yaml"]["scheduler"]["enabled"] is True
+    assert result.draft["voice.yaml"]["tone_palette"] == ["日常", "认真", "轻松"]
+    assert result.draft["thinker.yaml"]["policy"]["tone_set"] == ["日常", "认真", "轻松"]
+    modules = result.draft["system.yaml"]["modules"]
+    assert modules["output.sticker"]["enabled"] is False
+    assert modules["eval.online"]["enabled"] is False
+    assert modules["state.world"]["enabled"] is True
+    issue_codes = {issue.code for issue in result.report.issues}
+    assert "reserved_module_enabled" in issue_codes
+    assert "required_module_disabled" in issue_codes
+    assert any(field.key_path == "_system_module_validation" for field in result.report.fields)
+
+
+def test_strict_import_does_not_write_when_system_module_validation_fails(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE + """
+
+# 12. 模块开关
+
+- [ ] core.identity
+"""
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(source, encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=True)
+
+    assert result.report.has_errors
+    assert any(issue.code == "required_module_disabled" for issue in result.report.issues)
+    assert not (source_dir / ".draft").exists()
+
+
 def test_strict_import_does_not_write_when_required_fields_missing(tmp_path: Path) -> None:
     persona_root = tmp_path / "persona"
     defaults = _write_defaults(persona_root)

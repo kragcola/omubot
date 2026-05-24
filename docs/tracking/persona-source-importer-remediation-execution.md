@@ -1,6 +1,6 @@
 # Persona Source Importer 整改执行追踪
 
-> 状态：Part A S1-S5 后端/CLI 首版完成；S6/S10' admin SPA 与 Part B 待后续发令
+> 状态：Part A S1-S5 后端/CLI 首版完成；S6/S10' admin SPA 首版闭环完成；Part B dry-run 闭环完成
 > 启动时间：2026-05-24
 > 执行人：Codex
 > 上游步骤：[persona-source-importer-remediation.md](./persona-source-importer-remediation.md)
@@ -54,6 +54,18 @@
 | P2-6 | 字段映射表补“缺失时行为”列 | ✅ 完成 | Codex | §6 表格 30 行均补 `缺失时行为` |
 | P2-7 | v2 schema 标注 proposal-level | ✅ 完成 | Codex | 文首新增 proposal-level + 松 schema 声明 |
 | P2-8 | 膨胀控制条款 | ✅ 完成 | Codex | importer 主文档 1330 行；§20 维护纪律落地 |
+| B0 | S6/S10' 范围确认与追踪启动 | ✅ 完成 | Codex | 本文新增 `## 6. S6/S10' admin SPA 实施追踪` |
+| B1 | `source.md` 读写 API + 测试 | ✅ 完成 | Codex | `tests/test_persona_importer_api.py` 3 passed |
+| B2 | Admin Persona Importer 页面、路由与菜单 | ✅ 完成 | Codex | `vue-tsc --noEmit` 通过 |
+| B3 | S6/S10' 验证与文档收口 | ✅ 完成 | Codex | `45 passed` + `vue-tsc` + `npm run build` |
+| C0 | Part B S1' 启动与范围确认 | ✅ 完成 | Codex | Part B 范围锁定为 S1' dry-run 骨架 |
+| C1 | SystemModule 契约模型与默认目录 | ✅ 完成 | Codex | 新增 `services/system_module/{catalog,models,validator}.py` |
+| C2 | RuntimeStateBus 骨架与 dry-run 校验 | ✅ 完成 | Codex | `tests/test_system_module.py` 8 passed |
+| C3 | S1' 验证、迁移清单与维护日志 | ✅ 完成 | Codex | `18 passed` + 迁移清单/维护日志已同步 |
+| C4 | S2'/S3' source 扩展与 9 默认模板 | ✅ 完成 | Codex | 9 默认模板 + §12/§11.2 抽取测试通过 |
+| C5 | S5' SystemModule validator 接入 importer report | ✅ 完成 | Codex | `_system_module_validation` 写入 report |
+| C6 | S11' persona compiler dry-run | ✅ 完成 | Codex | `services/persona/compiler.py` + CLI `--compile-dry-run` |
+| C7 | Part B dry-run 闭环验证与收口 | ✅ 完成 | Codex | `23 passed` + ruff |
 
 ---
 
@@ -867,3 +879,578 @@
 - 遗留风险：
   - `uv run pytest ...` 在当前 macOS 挂载环境触发 uv `system-configuration` panic，未作为代码失败处理；本轮用 `.venv/bin/python` 完成验证。
   - admin SPA 双栏高亮、v2 compiler / Schema Freeze、RuntimeStateBus/SystemModule 仍未实现。
+
+## 6. S6/S10' admin SPA 实施追踪
+
+### B0 S6/S10' 范围确认与追踪启动
+
+**开始前拆分**
+
+1. 读取 Part A 验收后的追踪状态、迁移清单、现有 persona API、前端路由/菜单和 Calm Ops 组件规范。
+2. 确认本阶段只做 admin SPA 可用闭环：在线读取/编辑 `source.md`、触发 import、展示 `_import_report.json`、查看 draft 文件清单、执行 Pending Freeze。
+3. 明确不做范围：v2 compiler、Schema Freeze、RuntimeStateBus/SystemModule、正式 runtime persona 路径写入、完整字段级双栏行号跳转高亮。
+4. 将后续步骤拆成 B1 API、B2 前端页面、B3 验证收口，并在每一步前后更新本文档。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| admin SPA 误导用户以为 Pending Freeze 已进入正式运行时 | 高 | 页面和 API 只显示/返回 `mode=pending_freeze`、`_pending_freeze/` 路径，不写正式 runtime |
+| 在线 source 编辑 API 误写 `.draft/` 或 `_pending_freeze/` | 高 | API 只使用 `PersonaDraftWriter.source_path(persona_id)`，写入 `config/persona/<id>-v2/source.md` |
+| 现有未提交 learning/frontend 改动被混入或回滚 | 中 | 只触碰 persona API、persona 新页面、router/menu/docs/log，不清理无关文件 |
+| 页面一次性实现过大导致类型/样式不稳 | 中 | 分成 metrics、toolbar、source editor、report panel 四块；优先用 `AppPage`/`MetricCard`/`PageToolbar`/`AppPanelSection` |
+
+**回滚方式**
+
+- B1 可移除 `source` API payload/model/endpoints 与对应 API 测试，不影响已完成 import/draft/freeze。
+- B2 可移除 `/persona-importer` 路由、菜单项和 `PersonaImporterView.vue`，后端 Part A API 保持可用。
+- B3 文档/维护日志只记录里程碑，可单独 revert 本阶段新增段落。
+
+**验收证据**
+
+- Python：`tests/test_persona_importer_api.py` 覆盖 source read/write + import/draft/freeze。
+- Frontend：`cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit`。
+- Build：若前端类型通过后无阻断，执行 `npm run build` 并记录产物影响；如已有静态脏文件冲突，单独说明。
+- 文档：本文、迁移清单与维护日志同步说明 S6/S10' 状态。
+
+**完成后回填**
+
+- 实际改动：
+  - 读取 Part A 验收记录、迁移清单、persona importer API、前端路由/菜单、Omubot admin UI 规范与公共组件。
+  - 明确本阶段范围为 S6/S10' admin SPA 可用闭环，不启动 v2 compiler / Schema Freeze / RuntimeStateBus / SystemModule。
+  - 将实施拆为 B1 source API、B2 前端页面、B3 验证收口。
+- 验证证据：
+  - `rg -n "S6|S10|source.md|Pending Freeze" docs/tracking/persona-source-importer*.md docs/migrations/persona-v2-importer.md` 已定位上游合同。
+  - 已确认当前已有 `/api/admin/persona/import`、`/draft/{persona_id}`、`/freeze/{persona_id}`，缺在线 source 读写 API。
+- 遗留风险：
+  - 本阶段仍不提供正式 Schema Freeze；页面必须持续标注 Pending Freeze 语义。
+  - 工作树中存在无关 learning/frontend/static 改动，本阶段不回滚。
+
+### B1 `source.md` 读写 API + 测试
+
+**开始前拆分**
+
+1. 在 `admin/routes/api/persona_importer.py` 增加 `PersonaSourcePayload`，只接收 `content` 字段。
+2. 新增 `GET /api/admin/persona/source/{persona_id}`：读取 `PersonaDraftWriter.source_path(persona_id)`，返回 `ok/persona_id/path/content/exists`；文件不存在时返回空内容和 `exists=false`。
+3. 新增 `PUT /api/admin/persona/source/{persona_id}`：创建 `<id>-v2/` 目录并写入 `source.md`，返回写入后的内容长度、路径和 `exists=true`。
+4. 增加 API 测试：先 GET 空 source，再 PUT 写入 `MINIMAL_SOURCE`，再 POST import，确认 draft round-trip 仍可用。
+5. 运行 `ruff` 与 persona importer API pytest。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| API 写入路径可被 persona_id 注入穿越 | 中 | 沿用 `persona_namespace`，只拼接 `persona_root / <id>-v2 / source.md`；不接受任意 path |
+| GET 不存在时返回 404 导致前端无法首屏编辑 | 中 | 返回 `ok=true`、`exists=false`、`content=""`，让前端可直接创建 |
+| 写 source 后 draft 旧 report 与 source 不一致 | 中 | 本阶段只提供读写 source；前端保存后标记需重新 import，B2 处理 |
+| 测试误依赖生产鉴权 | 低 | 使用 `create_api_router(ctx=tmp)` 的既有 TestClient 模式，只验证路由行为 |
+
+**回滚方式**
+
+- 删除 `PersonaSourcePayload`、`GET/PUT /source/{persona_id}` endpoints 和新增测试断言即可回到 S5 API 面。
+
+**验收证据**
+
+- `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check admin/routes/api/persona_importer.py tests/test_persona_importer_api.py`
+- `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer_api.py`
+
+**完成后回填**
+
+- 实际改动：
+  - `admin/routes/api/persona_importer.py` 新增 `PersonaSourcePayload`。
+  - 新增 `GET /api/admin/persona/source/{persona_id}`：不存在时返回 `exists=false` 与空内容，方便 admin 首屏创建。
+  - 新增 `PUT /api/admin/persona/source/{persona_id}`：只写 `config/persona/<id>-v2/source.md`，自动创建 persona 目录。
+  - 为 import/draft/freeze/source 共用 `_valid_namespace`，拒绝空 id、路径分隔符和 `..`。
+  - `tests/test_persona_importer_api.py` 新增 source read/write/import round-trip 与路径型 persona id 拒绝测试。
+- 验证证据：
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check admin/routes/api/persona_importer.py tests/test_persona_importer_api.py` 通过。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer_api.py` 通过，`3 passed`。
+- 遗留风险：
+  - 保存 `source.md` 后旧 draft 不会自动失效；B2 前端需把保存后状态标为“需重新导入”。
+  - 生产鉴权仍依赖既有 `/api/admin` AdminAuthMiddleware，本测试只覆盖路由行为。
+
+### B2 Admin Persona Importer 页面、路由与菜单
+
+**开始前拆分**
+
+1. 新建 `admin/frontend/src/views/persona/PersonaImporterView.vue`，页面根使用 `AppPage`，复用 `MetricCard`、`PageToolbar`、`AppPanelSection`、`EmptyState`。
+2. 页面状态模型：
+   - `personaId`：默认 `fengxiaomeng`，可输入切换。
+   - `source` / `originalSource`：用于保存按钮 dirty 判断。
+   - `draft`：读取 `/api/admin/persona/draft/{id}` 的 summary。
+   - `report`：来自 import 或 draft summary 的 `_import_report.json`。
+   - loading/saving/importing/freezing/error 状态独立控制。
+3. 页面交互：
+   - `加载 source`：GET source。
+   - `保存 source`：PUT source，并标记需要 re-import。
+   - `导入 draft`：POST import 后刷新 draft。
+   - `刷新 draft`：GET draft。
+   - `Pending Freeze`：用 `NPopconfirm` 二次确认，POST freeze `{confirm:true}`。
+4. 视觉结构：
+   - 顶部 4 个 `MetricCard`：source 状态、draft 文件数、issue 数、freeze 状态。
+   - `PageToolbar` 放 persona id、加载、保存、导入、刷新、Pending Freeze。
+   - 主体双栏：左侧 source editor，右侧 report/issues + files。
+   - issue/field/file 列表用紧凑行，不使用装饰性卡片或营销说明。
+5. 路由与菜单：
+   - `admin/frontend/src/router/index.ts` 增加 `/persona-importer`。
+   - `SideMenu.vue` 在“日常”下靠近“人设编辑”加入“人设导入”，保留既有 `群聊记忆` 脏改。
+6. 运行 `vue-tsc --noEmit`，根据类型错误修正。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 前端页面把 Pending Freeze 描述成正式发布 | 高 | 所有按钮/状态使用 `Pending Freeze`，展示 `_pending_freeze/` 路径，不出现 Schema Freeze |
+| 保存 source 后直接 freeze 旧 draft | 高 | 保存后设置 `sourceDirtySinceImport=true`，Pending Freeze 按钮禁用并提示需重新导入 |
+| report 字段结构不稳定导致页面崩 | 中 | 对 `issues/fields/generated_files` 做数组归一化和可选字段读取 |
+| 新页面样式违反 Calm Ops 约束 | 中 | 使用公共组件和 token，避免渐变/orb/大量 inline style；主内容双栏可响应式堆叠 |
+| 修改菜单覆盖既有未提交 label | 中 | 只插入新菜单项，保留 `群聊记忆` |
+
+**回滚方式**
+
+- 删除 `PersonaImporterView.vue`、router `/persona-importer` 条目和 SideMenu 新菜单项即可；B1 后端 API 可独立保留。
+
+**验收证据**
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit`
+- B3 若类型通过，再跑 `npm run build` 并记录静态产物状态。
+
+**完成后回填**
+
+- 实际改动：
+  - 新增 `admin/frontend/src/views/persona/PersonaImporterView.vue`。
+  - 页面提供 persona id 输入、source 加载/保存、draft 导入/刷新、Pending Freeze 二次确认。
+  - 页面展示 4 个指标：source 状态、draft 文件数、issue 数、Pending Freeze 状态。
+  - 主体为左右双栏：左侧 `source.md` 编辑器，右侧 report 的 Issues / Fields / Files tabs。
+  - 保存 source 后设置 `sourceDirtySinceImport=true`，在重新 import 前禁用 Pending Freeze。
+  - `admin/frontend/src/router/index.ts` 新增 `/persona-importer` 路由。
+  - `admin/frontend/src/layouts/components/SideMenu.vue` 在“日常”中新增“人设导入”，并保留既有 `群聊记忆` 菜单文案。
+- 验证证据：
+  - `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过。
+  - `rg -n "Schema Freeze|正式|_pending_freeze|Pending Freeze|sourceDirtySinceImport" admin/frontend/src/views/persona/PersonaImporterView.vue ...` 确认页面只暴露 Pending Freeze 语义。
+  - `rg -n "#[0-9A-Fa-f]{3,8}|linear-gradient|radial-gradient|!important|border-radius: (4|20|22|24)" admin/frontend/src/views/persona/PersonaImporterView.vue` 无命中。
+- 遗留风险：
+  - 首版未实现点击 issue 自动滚动并高亮 source 行；当前仅展示 `source_span` 文本。
+  - 页面未做 e2e 浏览器 smoke；B3 先以类型检查和生产构建收口。
+
+### B3 S6/S10' 验证与文档收口
+
+**开始前拆分**
+
+1. 运行 Python ruff，覆盖本阶段触碰的 API 与测试。
+2. 运行 persona importer 相关 pytest，确认新增 source API 不破坏 Part A round-trip。
+3. 运行 `vue-tsc --noEmit`，确认新增页面、路由、菜单类型干净。
+4. 运行 `npm run build`，确认新页面能进入生产产物；如 build 改写 `admin/static`，记录产物状态。
+5. 同步 `docs/migrations/persona-v2-importer.md`：S6/S10' 从“后续”更新为“admin SPA 首版已实现”，并保留高亮/e2e 等未做项。
+6. 在 `maintenance-log.md` 追加 S6/S10' 里程碑。
+7. 更新本文状态和 B3 完成回填。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| build 改写已有未提交 `admin/static` 产物 | 中 | 记录为前端验证产物；不删除无关静态文件 |
+| 只跑新增 API 测试漏掉 Part A 回归 | 中 | 跑 `tests/test_persona_importer.py`、`tests/test_persona_importer_api.py` 和 LLM task 同步测试 |
+| 文档把“首版页面”夸大成完整 S10' | 中 | 明确已完成 admin SPA 首版闭环，双栏行号跳转高亮/e2e 仍待后续 |
+| 工作树已有无关改动影响 git diff 解读 | 中 | 收口报告只列本阶段触碰文件，无关 learning/.research/static 既有改动不归因 |
+
+**回滚方式**
+
+- 后端：revert B1 endpoints/tests。
+- 前端：删除 PersonaImporterView、路由、菜单项。
+- 文档：revert 本阶段 B0-B3、迁移清单与维护日志条目。
+
+**验收证据**
+
+- `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check ...`
+- `source ./scripts/dev/env.sh && .venv/bin/python -m pytest ...`
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit`
+- `cd admin/frontend && npm run build`
+
+**完成后回填**
+
+- 实际改动：
+  - 完成本阶段 Python lint、pytest、前端类型检查和生产构建。
+  - `docs/migrations/persona-v2-importer.md` 状态更新为 S6/S10' admin SPA 首版闭环已完成，Part B 未启动。
+  - 迁移清单新增 `## 4. S6/S10' admin SPA 首版迁移`，记录 source API、页面入口、Pending Freeze 交互和未完成的 issue 行号跳转高亮。
+  - `maintenance-log.md` 追加 `Persona Source Importer S6/S10' admin SPA 首版落地`。
+- 验证证据：
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check admin/routes/api/persona_importer.py tests/test_persona_importer_api.py services/persona tests/test_persona_importer.py services/llm/llm_request.py services/llm/llm_pipelines.py kernel/config.py` 通过。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py tests/test_persona_importer_api.py tests/test_llm_task_admin_sync.py tests/test_llm_pipelines.py tests/test_config_loader.py` 通过，`45 passed`。
+  - `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` 通过。
+  - `cd admin/frontend && npm run build` 通过；新增/更新产物包含 `PersonaImporterView-cbtwzOB2.js`、`PersonaImporterView-CE0hmiqa.css`。
+- 遗留风险：
+  - 首版页面只展示 `source_span` 文本，未实现点击 issue 自动滚动并高亮 source 行。
+  - 未运行浏览器 e2e smoke；本轮以 API 测试、类型检查和生产构建验收。
+  - 仍未实现 v2 compiler / Schema Freeze / RuntimeStateBus / SystemModule，Pending Freeze 不写正式 runtime persona 路径。
+  - 工作树存在本阶段外的 learning/frontend/static/.research 改动，未接管也未回滚。
+
+## 7. Part B Runtime/SystemModule 实施追踪
+
+### C0 Part B S1' 启动与范围确认
+
+**开始前拆分**
+
+1. 读取 `system-module-architecture.md` §16.1~§16.12，确认 Part B 总切片与 S1' 首步合同。
+2. 读取当前运行时入口：`kernel/types.py`、`kernel/bus.py`、`kernel/router.py`、`plugins/chat/plugin.py`、现有 prompt/state/memory 注入路径。
+3. 确认本轮只启动 S1'：`system.yaml + module.yaml schema + RuntimeStateBus 接口骨架`，不接入现有 chat/prompt 主链路，不替换 plugin/provider/store。
+4. 将 S1' 拆成 C1 契约模型与默认 catalog、C2 RuntimeStateBus 与校验、C3 测试/文档收口。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| Part B 范围过大，一步改动主链路导致 bot 行为回归 | 高 | 本轮只新增 `services/system_module/` dry-run 骨架，不让现有 runtime 消费 |
+| SystemModule 方案宣称“不兼容重做”，但仓库当前仍是 plugin/bus 架构 | 高 | 先做并行契约层和 compiler 前校验，不删除/替换 PluginBus |
+| 模块 catalog 与 v2 draft 默认 skeleton 不一致 | 中 | S1' 只定义 canonical catalog；后续 S3'/S5' 再让 importer 产 9 默认模板并校验 |
+| RuntimeStateBus 过早持久化引入存储迁移 | 中 | 首版只做内存实现 + TTL/scope/ownership 规则；persistent 仅保留 ttl 枚举 |
+| 工作树已有无关改动 | 中 | 只触碰 Part B 新 package、tests、docs/log，不回滚 learning/frontend/.research |
+
+**回滚方式**
+
+- 删除 `services/system_module/` 与新增测试，移除本文 C0-C3 和迁移/维护日志条目即可；Part A importer 与 admin SPA 不受影响。
+
+**验收证据**
+
+- `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/system_module tests/test_system_module.py`
+- `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_system_module.py`
+- 文档中 Part B 状态明确为 S1' dry-run 骨架，S2' 以后仍待后续。
+
+**完成后回填**
+
+- 实际改动：
+  - 读取 `system-module-architecture.md` 完整 Part B 方案与 S1'~S12' 切片。
+  - 核对现有 runtime：`PluginBus` 负责插件钩子，`PromptBuilder` 持有静态 identity/state_board，prompt 动态块由插件/Provider 注入。
+  - 确认 S1' 采用并行 dry-run 骨架：新增 SystemModule 契约、RuntimeStateBus 和校验工具，不替换现有 PluginBus、不让 bot 消费 v2 persona。
+- 验证证据：
+  - 已读取 `kernel/types.py`、`kernel/bus.py`、`plugins/chat/plugin.py`、`services/llm/prompt_builder.py`、`services/block_trace/*`。
+  - `rg -n "RuntimeStateBus|PromptBlock|PluginBus|prompt_builder" ...` 已定位当前主链路。
+- 遗留风险：
+  - Part B 仍是并行架构骨架，不具备正式运行时切流能力。
+  - S2' 以后需要把 importer 默认模板从 3 份扩到 9 份，并让 S5' 校验消费 C1/C2 输出。
+
+### C1 SystemModule 契约模型与默认目录
+
+**开始前拆分**
+
+1. 新建 `services/system_module/` 包，包含 `__init__.py`、`catalog.py`、`models.py`、`validator.py`、`state_bus.py`。
+2. 在 `catalog.py` 定义 canonical module catalog：
+   - 26 个首版模块；
+   - 7 个 reserved 模块；
+   - 6 个 required modules：`core.identity`、`core.guard`、`runtime.adapter`、`runtime.scheduler`、`memory.short_term`、`output.send`。
+3. 在 `models.py` 定义 Part B S1' 最小 dataclass：
+   - `ModuleContract`
+   - `StateSlotDefinition`
+   - `SwitchSurface`
+   - `DisabledBehavior`
+   - `ModuleGraphValidationResult`
+4. 支持从 dict/YAML 风格 payload 解析 `ModuleContract`，不强制引入 JSON schema 依赖。
+5. 在 `validator.py` 定义初版校验：
+   - module id 必须合法；
+   - required module 不能 disabled；
+   - 每个 `state_consumes` 必须有 owner；
+   - 每个 state slot 只能有一个 owner；
+   - `depends_on` 必须存在；
+   - DAG 无环；
+   - 下游依赖被禁用时必须声明 `on_disabled`。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 一次性实现 26 个模块类导致假实现膨胀 | 高 | S1' 只定义 catalog/contract，不写模块业务类 |
+| 过早绑定 YAML 物理格式导致后续 importer 难改 | 中 | `ModuleContract.from_dict()` 接受普通 dict，文件读取留到后续 S3'/S5' |
+| DAG 校验过严卡住 reserved 模块 | 中 | reserved 默认 disabled，不参与 required；只在 enabled 时参与依赖校验 |
+| 与现有 PluginBus 命名冲突 | 低 | 新包名 `services/system_module`，不 import kernel bus |
+
+**回滚方式**
+
+- 删除 `services/system_module/` 包和对应测试；不影响 Part A 与现有 runtime。
+
+**验收证据**
+
+- `tests/test_system_module.py` 覆盖 catalog 数量、required/reserved、contract parse、DAG missing owner / duplicate owner / cycle。
+
+**完成后回填**
+
+- 实际改动：
+  - 新增 `services/system_module/__init__.py`。
+  - 新增 `services/system_module/models.py`：定义 `ModuleContract`、`StateSlotDefinition`、`SwitchSurface`、`DisabledBehavior`、`Scope`、`SourceRef`、`ModuleIssue`、`ModuleGraphValidationResult`。
+  - 新增 `services/system_module/catalog.py`：固化 27 个首版模块、7 个 reserved 模块、6 个 required 模块，并提供 `catalog_contracts()` / `catalog_system_modules()`。
+  - 新增 `services/system_module/validator.py`：实现 module id、required enabled、reserved disabled、state owner、missing dependency、DAG cycle 等 dry-run 校验。
+  - 对方案中的重复 owner 风险做了首版消歧：`runtime.adapter.send_receipt` 归 `output.send`，learning candidates 归 `memory.consolidator`。
+- 验证证据：
+  - 待 C3 统一用 `tests/test_system_module.py` 和 ruff 验证。
+- 遗留风险：
+  - 当前 catalog 是 canonical contract，不是模块业务实现；S6'~S9' 仍未启动。
+  - `module.yaml` 物理文件读取和 JSON schema 校验未做，留到 S3'/S5'。
+
+### C2 RuntimeStateBus 骨架与 dry-run 校验
+
+**开始前拆分**
+
+1. 在 `services/system_module/state_bus.py` 实现 in-memory `RuntimeStateBus`。
+2. 构造时从 enabled `ModuleContract.state_owns` 建立 slot owner 表，重复 owner 直接 raise。
+3. `set()` 强制：
+   - slot 已注册；
+   - `SourceRef.module_id` 等于 slot owner；
+   - `SourceRef.evidence_path` 非空；
+   - confidence 在 `[0, 1]`。
+4. `get()` 按 slot TTL 与 `Scope` 取值，`per_turn/per_session/per_user/persistent` 使用不同 scope key。
+5. `clear_per_turn()` 清理指定 turn 的 per-turn slots。
+6. `snapshot_all_for_trace()` 输出 JSON-friendly snapshot，供后续 trace.yaml / BlockTrace 串联。
+7. 增加测试覆盖 owner 拒绝、source/confidence 校验、per_turn 清理和 trace snapshot。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 内存 bus 被误认为正式持久化实现 | 中 | 文档和命名持续标注 S1' dry-run；persistent TTL 只保留 scope 语义 |
+| Scope key 太复杂影响后续替换 | 中 | Scope 保持 dataclass，key 逻辑集中在 `Scope.key()` |
+| `snapshot_all_for_trace()` 结构后续和 BlockTrace 不一致 | 低 | 先输出 JSON-friendly dict，S11'/trace 接入时再适配 |
+| 同步 API 未来接异步 listener 不够 | 低 | S1' 不实现 subscribe；后续 runtime 接入再扩 |
+
+**回滚方式**
+
+- 删除 `state_bus.py` 和对应 tests，不影响 C1 contract/catalog。
+
+**验收证据**
+
+- `tests/test_system_module.py` 覆盖 RuntimeStateBus owner、TTL 和 trace snapshot。
+
+**完成后回填**
+
+- 实际改动：
+  - 新增 `services/system_module/state_bus.py`：实现 in-memory `RuntimeStateBus`、`SlotSnapshot`、`StateSlotOwnershipError`。
+  - `RuntimeStateBus` 构造时从 enabled module contracts 建立 slot owner 表，重复 owner 会拒绝。
+  - `set()` 强制 owner 写入、`SourceRef.evidence_path` 非空、confidence 在 `[0,1]`。
+  - `get()` 按 slot TTL 与 `Scope` 取值；`clear_per_turn()` 清理指定 turn 的 per-turn slot。
+  - `snapshot_all_for_trace()` 输出 JSON-friendly snapshot，为后续 trace.yaml / BlockTrace 接入预留。
+  - 新增 `tests/test_system_module.py`，覆盖 catalog、contract parse、DAG 校验、RuntimeStateBus owner/TTL/trace snapshot。
+- 验证证据：
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/system_module tests/test_system_module.py` 通过。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_system_module.py` 通过，`8 passed`。
+- 遗留风险：
+  - `RuntimeStateBus` 仍是同步内存实现；subscribe、持久化和真实 turn lifecycle 接入留给 S6'~S12'。
+  - Part B 方案标题写“首版 26 个模块”，但表格实际列出 27 个首版模块 + 7 预留；本轮按表格事实固化为 34 个 catalog 条目，并记录为后续文档修正点。
+
+### C3 S1' 验证、迁移清单与维护日志
+
+**开始前拆分**
+
+1. 运行 S1' 最小 lint/test：`services/system_module` 与 `tests/test_system_module.py`。
+2. 运行 Part A persona importer/API 回归，确认新增 Part B 包不影响已有 importer/admin SPA 后端。
+3. 更新 `docs/migrations/persona-v2-importer.md`：Part B 从“后续架构提案”改为“S1' dry-run 骨架已启动/已完成”，S2' 以后仍待后续。
+4. 维护日志追加 Part B S1' 里程碑。
+5. 更新本文 C3 完成回填与顶层状态。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 文档误读为 Part B runtime 已切流 | 高 | 明确写 S1' dry-run 骨架，不接入 chat/prompt runtime |
+| 只跑 S1' 测试漏掉 Part A 回归 | 中 | 额外跑 `test_persona_importer.py` 与 `test_persona_importer_api.py` |
+| 维护日志遗漏 26/27 计数差异 | 低 | 在日志与迁移清单中标出 canonical catalog 为 27+7 |
+
+**回滚方式**
+
+- 删除 `services/system_module/`、`tests/test_system_module.py` 与文档/维护日志条目即可。
+
+**验收证据**
+
+- `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/system_module tests/test_system_module.py services/persona tests/test_persona_importer.py tests/test_persona_importer_api.py`
+- `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_system_module.py tests/test_persona_importer.py tests/test_persona_importer_api.py`
+
+**完成后回填**
+
+- 实际改动：
+  - 完成 S1' ruff/pytest 与 Part A importer/API 回归。
+  - `docs/migrations/persona-v2-importer.md` 状态更新为 Part B S1' dry-run 骨架已完成，并新增 `## 5. Part B S1' dry-run 骨架迁移`。
+  - `maintenance-log.md` 追加 `Persona Part B S1' SystemModule dry-run 骨架落地`。
+  - 顶层状态更新为 `Part B S1' dry-run 骨架完成`。
+- 验证证据：
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/system_module tests/test_system_module.py` 通过。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_system_module.py` 通过，`8 passed`。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_system_module.py tests/test_persona_importer.py tests/test_persona_importer_api.py` 通过，`18 passed`。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/system_module tests/test_system_module.py services/persona tests/test_persona_importer.py tests/test_persona_importer_api.py` 通过。
+- 遗留风险：
+  - Part B S1' 只提供 contract/catalog/validator/state bus dry-run；正式 runtime 仍未切流。
+  - S2' source.md 模板扩展、S3' 9 默认模板、S5' importer validator 接入、S6'~S9' 模块业务实现、S11' compiler 都未启动。
+  - 现有工作树仍包含本阶段外 learning/frontend/static/.research 改动，本轮不接管也不回滚。
+
+### C4 S2'/S3' source 扩展与 9 默认模板
+
+**开始前拆分**
+
+1. 扩展 `config/persona/_defaults/v2/`：
+   - 新增 `runtime.yaml`、`state.yaml`、`thinker.yaml`、`adapter.yaml`、`capabilities.yaml`、`system.yaml`。
+   - 更新 README，将默认模板范围从 3 份改为 9 份。
+2. `system.yaml` 由 `services.system_module.catalog.catalog_system_modules()` 生成同构结构，避免文档/代码 drift。
+3. `services/persona/builder.py`：
+   - `DEFAULT_TEMPLATE_FILES` 从 3 份扩到 9 份。
+   - 保留 15 draft 文件面；9 份有默认模板，其余 `relationships/memory` 等仍可 skeleton/抽取填充。
+   - 从 source.md §12 模块开关抽取 checkbox，覆写 `system.yaml.modules.<id>.enabled`。
+   - 从 source.md §11.2 `tone_palette` 抽取 voice/thinker tone 集合。
+4. 更新 `_modules_readme()`，说明 modules 实例仍未生成，S1' 只提供 canonical catalog。
+5. 补测试覆盖 9 默认模板落盘、system.yaml modules、source §12 禁用非 required 模块、禁用 required 模块产生 error。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 默认模板扩展导致 Part A 最小 source 现有测试失败 | 中 | 默认模板只补工程默认，不增加最小 source 必填项；旧测试应继续通过 |
+| source §12 checkbox 语义误读 | 中 | 仅解析 `- [ ] module.id` 为 disabled，`- [x]` 或不出现保持默认 |
+| 禁用 required module 被悄悄写入 draft | 高 | builder 先写入，再由 C5 validator 报 error；C4 可先做本地基础 error |
+| 9 默认模板与 SystemModule catalog 漂移 | 中 | `system.yaml` 测试对齐 `catalog_system_modules()` |
+
+**回滚方式**
+
+- 删除新增默认模板，恢复 `DEFAULT_TEMPLATE_FILES` 与 README，移除新增 source 抽取逻辑和测试。
+
+**验收证据**
+
+- `tests/test_persona_importer.py` 覆盖 9 默认模板与 source §12/§11.2。
+
+**完成后回填**
+
+- 实际改动：
+  - 新增 `config/persona/_defaults/v2/runtime.yaml`、`state.yaml`、`thinker.yaml`、`adapter.yaml`、`capabilities.yaml`、`system.yaml`。
+  - 更新 `config/persona/_defaults/v2/README.md`，默认模板范围从 3 份扩到 9 份。
+  - `services/persona/builder.py` 的 `DEFAULT_TEMPLATE_FILES` 扩到 9 份。
+  - `system.yaml` 默认结构由 `services.system_module.catalog_system_modules()` 生成。
+  - 新增 source §11.2 `tone_palette` 抽取，写入 `voice.yaml.tone_palette` 与 `thinker.yaml.policy.tone_set`。
+  - 新增 source §12 模块开关 checkbox 抽取，写入 `system.yaml.modules.<id>.enabled`。
+  - required module disabled / reserved module enabled 在 importer 阶段进入 error issue。
+  - `_modules_readme()` 更新为 Part B S1' dry-run 语义。
+- 验证证据：
+  - `tests/test_persona_importer.py::test_persona_importer_loads_part_b_defaults_and_module_switches` 覆盖 9 默认模板、tone_palette、module switch 和 required/reserved issue。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py tests/test_system_module.py` 通过，`16 passed`。
+- 遗留风险：
+  - source §13 模块定制 YAML patch 尚未实现；当前只做 §12 开关与 §11.2 tone 集。
+  - 默认模板是 proposal-level dry-run，不代表正式 runtime 消费。
+
+### C5 S5' SystemModule validator 接入 importer report
+
+**开始前拆分**
+
+1. 新增 `services/persona/system_validation.py`，把 `.draft/system.yaml` 与 canonical catalog 合并成 `ModuleContract` 列表。
+2. 调用 `services.system_module.validate_module_graph()`，将 issues 写入 `_import_report.json.issues`。
+3. 在 report fields 中加入 `_system_module_validation` 默认字段，便于 admin SPA 展示。
+4. 保持 `strict=True` 行为：若 SystemModule validation 有 error，不写 `.draft/`。
+5. 测试覆盖 required disabled、reserved enabled、默认 catalog ok。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| importer 和 system_module 双方循环 import | 中 | persona 只 import system_module public API，system_module 不 import persona |
+| canonical catalog 和 system.yaml overrides 合并出错 | 中 | override 只允许改 `enabled/required/reserved`，contract 结构仍来自 catalog |
+| error 太多影响 admin 阅读 | 低 | issue code/module_id/slot_id 明确，后续 UI 可筛选 |
+
+**回滚方式**
+
+- 移除 `system_validation.py`、builder 调用和测试；默认模板仍可保留。
+
+**验收证据**
+
+- `tests/test_persona_importer.py` 覆盖 validator issues。
+
+**完成后回填**
+
+- 实际改动：
+  - 新增 `services/persona/system_validation.py`。
+  - `validate_system_modules()` 将 draft `system.yaml.modules` 与 canonical catalog 合并为 `ModuleContract`，调用 `validate_module_graph()`。
+  - SystemModule 校验结果写入 `_import_report.json.fields` 的 `_system_module_validation`。
+  - 校验 issues 进入 `_import_report.json.issues`，因此 `strict=True` 会阻止写 `.draft/`。
+  - `services/persona/builder.py` 在 Part B overrides 后调用 SystemModule validator。
+- 验证证据：
+  - `tests/test_persona_importer.py::test_strict_import_does_not_write_when_system_module_validation_fails` 覆盖 required disabled 时 strict 不写盘。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py tests/test_system_module.py` 通过，`17 passed`。
+- 遗留风险：
+  - validator 当前基于 canonical catalog + enabled overrides，不读取真实 `modules/<id>/module.yaml` 文件；物理 manifest 校验留给后续模块实现切片。
+
+### C6 S11' persona compiler dry-run
+
+**开始前拆分**
+
+1. 新增 `services/persona/compiler.py`，只做 dry-run，不写正式 runtime persona 路径。
+2. 读取 `.draft/*.yaml` 与 `_import_report.json`，若 report status/error 或 SystemModule validation error 存在则拒绝。
+3. 输出 `CompileResult`：
+   - `ok`
+   - `persona_id`
+   - `prompt_blocks`（core.identity/core.voice/core.knowledge/core.examples/core.guard 的静态草案）
+   - `module_order`
+   - `warnings`
+4. CLI 增加 `--compile-dry-run`，API 暂不扩展，避免前端新面过大。
+5. 测试覆盖成功 dry-run 与有 error 时拒绝。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| dry-run 被误认为正式 compiler | 高 | 命名和返回 mode 均为 `dry_run`，不写 config/persona/<id> 正式运行时 |
+| prompt block 草案与现有 PromptBuilder 格式冲突 | 中 | 只输出 JSON-friendly block，不接入 LLMClient |
+| 编译范围过大 | 中 | 首版只编 core 静态 prompt blocks + module order，不编 runtime hooks |
+
+**回滚方式**
+
+- 删除 `compiler.py`、CLI 参数和测试；不影响 importer 写 draft。
+
+**验收证据**
+
+- `tests/test_persona_compiler.py` 覆盖 dry-run 编译。
+
+**完成后回填**
+
+- 实际改动：
+  - 新增 `services/persona/compiler.py`，实现 `compile_persona_dry_run()`。
+  - dry-run 读取 `.draft/*.yaml` 与 `_import_report.json`，report error 时拒绝。
+  - 输出 `CompileResult`：`ok/mode/persona_id/prompt_blocks/module_order/warnings/errors`。
+  - prompt block 草案覆盖 `core.identity`、`core.voice`、`core.knowledge`、`core.examples`、`core.guard`。
+  - `services/persona/importer.py` 增加 CLI 参数 `--compile-dry-run`，仅输出 dry-run JSON，不写正式 runtime 路径。
+  - 新增 `tests/test_persona_compiler.py`。
+- 验证证据：
+  - `tests/test_persona_compiler.py` 覆盖成功 dry-run、report error 拒绝、CLI `--compile-dry-run`。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py` 通过，`20 passed`。
+- 遗留风险：
+  - compiler dry-run 只生成静态 core prompt blocks 与 module order，不编译 runtime hooks、state lifecycle 或正式 prompt injection。
+
+### C7 Part B dry-run 闭环验证与收口
+
+**开始前拆分**
+
+1. 运行 ruff 覆盖 `services/system_module`、`services/persona`、相关 tests。
+2. 运行 pytest 覆盖 system_module、persona importer/API、compiler。
+3. 更新迁移清单：Part B S2'/S3'/S5'/S11' dry-run 完成，S6'~S12' runtime 切流仍未启动。
+4. 更新维护日志。
+5. 最终检查 git status，标注无关脏文件。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 本轮范围被误读为“Part B 全部结束” | 高 | 明确只是 dry-run 闭环结束，正式模块业务实现/切流未完成 |
+| tests 只覆盖 happy path | 中 | 覆盖 required disabled、report error、compile reject |
+| 文档状态与代码状态不一致 | 中 | 迁移清单和追踪总览同步更新 |
+
+**回滚方式**
+
+- 按 C4/C5/C6 分别 revert；S1' 可保留。
+
+**验收证据**
+
+- 待执行。
+
+**完成后回填**
+
+- 实际改动：
+  - 完成 Part B dry-run 闭环：source 扩展/9 默认模板 -> SystemModule validation -> compiler dry-run。
+  - 保持正式 runtime 不切流，现有 PluginBus / PromptBuilder / chat runtime 不接入 v2 persona。
+  - 同步迁移清单与维护日志。
+- 验证证据：
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/persona services/system_module tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py` 通过。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py tests/test_persona_importer_api.py` 通过，`23 passed`。
+- 遗留风险：
+  - Part B “结束”限定为 dry-run 闭环；S6'~S9' 具体 SystemModule 业务实现、S12' feature flag 灰度切流仍未做。
+  - admin SPA 尚未接 compiler dry-run 按钮/API。
+  - source §13 模块定制 patch、真实 `modules/<id>/module.yaml` 文件生成/读取仍未做。

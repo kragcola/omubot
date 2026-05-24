@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .compiler import compile_persona_dry_run
 from .writer import PersonaDraftWriter
 
 
@@ -18,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--strict", action="store_true", help="Do not write draft when validation has errors")
     parser.add_argument("--no-write", action="store_true", help="Build and print report without writing .draft")
     parser.add_argument("--pending-freeze", action="store_true", help="Copy .draft to _pending_freeze after import")
+    parser.add_argument(
+        "--compile-dry-run",
+        action="store_true",
+        help="Compile .draft into prompt blocks without runtime cutover",
+    )
     return parser
 
 
@@ -37,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.pending_freeze and not args.no_write:
         payload["pending_freeze"] = writer.pending_freeze(result.persona_id)
+    if args.compile_dry_run and not args.no_write:
+        payload["compile"] = compile_persona_dry_run(
+            result.persona_id,
+            persona_root=args.root,
+            defaults_dir=args.defaults,
+        ).to_dict()
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 1 if result.report.has_errors and args.strict else 0
 

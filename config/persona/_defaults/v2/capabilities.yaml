@@ -1,0 +1,19 @@
+schema: omubot.capabilities.v2
+version: 2.1.0-proposal
+
+tools:
+  enabled: true
+  allowlist: []
+
+plugins:
+  slang_enabled: true
+  style_enabled: true
+  episode_enabled: true
+
+sticker:
+  mode: inherit
+  tool_enabled: true
+  library_enabled: true
+
+permissions:
+  admin_required_for_freeze: true
