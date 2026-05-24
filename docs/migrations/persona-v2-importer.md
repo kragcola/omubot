@@ -30,7 +30,7 @@
 | Part A tail #1 | `identity.md` 主体静态身份块迁移到 `persona.yaml.identity.personality` | ✅ 已实现；draft 字段，不接正式 runtime |
 | Part A tail #7 | `memory.yaml.paragraph` / `entity_index` schema + §6 seed episodes | ✅ 已实现；不读取真实 memory DB |
 | Part A tail #5 | front matter `admins` → `adapter.yaml.permissions.admins[]` | ✅ 已实现；不读取生产 `BotConfig.admins` |
-| S6/S10' | admin UI source 编辑、导入报告、draft 文件清单与 Pending Freeze 交互 | ✅ 首版已实现；issue 行号跳转高亮/e2e smoke 待后续 |
+| S6/S10' | admin UI source 编辑、导入报告、draft 文件清单与 Pending Freeze 交互 | ✅ 首版已实现；issue 行号点击双栏滚动高亮已上线（A4），e2e smoke 仍待后续 |
 | Part B S1' | SystemModule contract catalog + RuntimeStateBus dry-run 骨架 | ✅ 已实现；未接入正式 chat/prompt runtime |
 | Part B S2'/S3' | source §11.2/§12 扩展 + 9 默认模板 | ✅ dry-run 已实现；§13 patch 待后续 |
 | Part B S5' | SystemModule validator 接入 importer report | ✅ 已实现 |
@@ -53,7 +53,7 @@
 | `/api/admin/persona/*` 仅支持 import/draft/freeze | 新增 `GET/PUT /api/admin/persona/source/{id}`，只读写 `source.md` | ✅ 已实现 |
 | Pending Freeze 只能通过 API/CLI 触发 | admin SPA 通过二次确认触发 Pending Freeze；source 保存后必须重新 import 才能 freeze | ✅ 已实现 |
 | `_import_report.json` 只能读 JSON | admin SPA 展示 Issues / Fields / Files 三个视图 | ✅ 已实现 |
-| S10' 双栏点击 issue 自动滚动高亮 | 当前只显示 `source_span` 文本，不做自动滚动定位 | ⏳ 后续 |
+| S10' 双栏点击 issue 自动滚动高亮 | Issues / Fields 行号点击触发左侧 source textarea focus + setSelectionRange + scrollTop（buffer 3 行）；source dirty 时 chip 灰显，提示重新 import | ✅ 已实现 |
 
 ## 5. Part B S1' dry-run 骨架迁移
 

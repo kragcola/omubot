@@ -152,6 +152,9 @@ const parity = ref<PersonaParityResponse | null>(null)
 const parityError = ref('')
 const refreshingParity = ref(false)
 
+const sourceInputRef = ref<{ textareaElRef: HTMLTextAreaElement | null } | null>(null)
+let sourceFlashTimer: ReturnType<typeof setTimeout> | null = null
+
 const loadingSource = ref(false)
 const savingSource = ref(false)
 const importing = ref(false)
@@ -480,6 +483,89 @@ function spanLabel(span?: SourceSpan) {
   if (!Array.isArray(lines) || lines.length < 2) return '无 source span'
   return `${span?.file || 'source.md'}:${lines[0]}-${lines[1]}`
 }
+
+interface ResolvedLines {
+  start: number
+  end: number
+}
+
+function resolveSpanLines(span?: SourceSpan): ResolvedLines | null {
+  const lines = span?.lines
+  if (!Array.isArray(lines) || lines.length === 0) return null
+  const a = Number(lines[0])
+  if (!Number.isFinite(a) || a <= 0) return null
+  const second = lines.length >= 2 ? Number(lines[1]) : a
+  const b = Number.isFinite(second) && second > 0 ? second : a
+  return { start: Math.min(a, b), end: Math.max(a, b) }
+}
+
+function spanJumpLabel(span?: SourceSpan): string {
+  const range = resolveSpanLines(span)
+  if (!range) return ''
+  return range.start === range.end ? `L${range.start}` : `L${range.start}-${range.end}`
+}
+
+function lineRangeToCharOffsets(text: string, start: number, end: number): [number, number] {
+  let offset = 0
+  let startOffset = 0
+  let endOffset = text.length
+  let line = 1
+  for (let i = 0; i < text.length; i += 1) {
+    if (line === start && offset === 0) startOffset = i
+    if (text[i] === '\n') {
+      if (line === end) {
+        endOffset = i
+        return [startOffset, endOffset]
+      }
+      line += 1
+      offset = 0
+    } else {
+      offset += 1
+    }
+  }
+  if (line < start) startOffset = text.length
+  return [startOffset, endOffset]
+}
+
+function focusSourceLines(span?: SourceSpan) {
+  const range = resolveSpanLines(span)
+  if (!range) return
+  if (sourceDirty.value) {
+    message.warning('source 已修改，请保存并重新导入后再跳转')
+    return
+  }
+  const textarea = sourceInputRef.value?.textareaElRef
+  if (!textarea) return
+
+  const [startOffset, endOffset] = lineRangeToCharOffsets(source.value, range.start, range.end)
+  textarea.focus({ preventScroll: true })
+  try {
+    textarea.setSelectionRange(startOffset, endOffset)
+  } catch {
+    // browsers occasionally reject when textarea isn't ready; ignore.
+  }
+
+  const computed = window.getComputedStyle(textarea)
+  const parsed = Number.parseFloat(computed.lineHeight)
+  const lineHeight = Number.isFinite(parsed) && parsed > 0 ? parsed : 20.8
+  const buffer = 3
+  const target = Math.max(0, (range.start - 1 - buffer) * lineHeight)
+  textarea.scrollTop = target
+
+  if (sourceFlashTimer) clearTimeout(sourceFlashTimer)
+  sourceFlashTimer = setTimeout(() => {
+    if (!textarea) return
+    try {
+      textarea.setSelectionRange(endOffset, endOffset)
+    } catch {
+      // ignore
+    }
+  }, 1600)
+}
+
+onUnmounted(() => {
+  if (sourceFlashTimer) clearTimeout(sourceFlashTimer)
+})
 </script>
 
 <template>
@@ -604,6 +690,7 @@ function spanLabel(span?: SourceSpan) {
           </template>
 
           <NInput
+            ref="sourceInputRef"
             v-model:value="source"
             class="source-editor"
             type="textarea"
@@ -649,7 +736,18 @@ function spanLabel(span?: SourceSpan) {
                   <div class="persona-row__meta">
                     <span>{{ issue.file || 'draft' }}</span>
                     <span>{{ issue.key_path || '—' }}</span>
-                    <span>{{ spanLabel(issue.source_span) }}</span>
+                    <NButton
+                      v-if="spanJumpLabel(issue.source_span)"
+                      class="persona-row__jump"
+                      size="tiny"
+                      quaternary
+                      :disabled="sourceDirty"
+                      :title="sourceDirty ? '保存并重新导入后再跳转' : '跳转到 source 对应行'"
+                      @click="focusSourceLines(issue.source_span)"
+                    >
+                      {{ spanJumpLabel(issue.source_span) }}
+                    </NButton>
+                    <span v-else>{{ spanLabel(issue.source_span) }}</span>
                   </div>
                 </div>
               </div>
@@ -681,7 +779,18 @@ function spanLabel(span?: SourceSpan) {
                   <div class="persona-row__meta">
                     <span>{{ field.extractor || 'extractor' }}</span>
                     <span>{{ confidenceLabel(field.confidence) }}</span>
-                    <span>{{ spanLabel(field.source_span) }}</span>
+                    <NButton
+                      v-if="spanJumpLabel(field.source_span)"
+                      class="persona-row__jump"
+                      size="tiny"
+                      quaternary
+                      :disabled="sourceDirty"
+                      :title="sourceDirty ? '保存并重新导入后再跳转' : '跳转到 source 对应行'"
+                      @click="focusSourceLines(field.source_span)"
+                    >
+                      {{ spanJumpLabel(field.source_span) }}
+                    </NButton>
+                    <span v-else>{{ spanLabel(field.source_span) }}</span>
                   </div>
                 </div>
               </div>
@@ -902,6 +1011,15 @@ function spanLabel(span?: SourceSpan) {
   color: var(--om-text-3);
   font-size: 12px;
   text-align: right;
+}
+
+.persona-row__jump {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+}
+
+.persona-row__jump.n-button--disabled {
+  cursor: not-allowed;
 }
 
 .file-list {
