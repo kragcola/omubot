@@ -259,8 +259,8 @@ dry-run only; PromptBuilder/LLMClient/GroupChatScheduler unchanged.
 
 | 编号 | 状态 | 落地证据 |
 |---|---|---|
-| A1 | ⏳ 进行中 | — |
-| A2 | ⏳ 待启动 | — |
-| A3 | ✅ 已落地 (2026-05-24) | `admin/routes/api/persona_importer.py` GET /persona/parity/{id}；`admin/routes/api/__init__.py` 注入 identity_mgr/config/soul_dir/bot；`PersonaImporterView.vue` 新增 Parity 折叠面板；`tests/test_admin_api_persona_parity.py` 5 用例全绿；vue-tsc + npm build 通过 |
-| A4 | ⏳ 待启动 | — |
-| A5 | ⏳ 待启动 | — |
+| A1 | ✅ 已落地 (2026-05-24) | commit a0e54d1；`services/persona/parity_audit.py` GroupOverrideSnapshot 扩 15 字段 + `v2_extended` status + `group_profile.fields` axis；`tests/test_persona_parity_audit.py` 全绿 |
+| A2 | ✅ 已落地 (2026-05-24) | commit a0e54d1；source `## 8.4 行为指令 / 插话方式` schema + adapter.yaml.permissions.admins / persona.yaml.identity.proactive_rules → compiler `core.identity` / `core.guard` 注入；`tests/test_persona_compiler.py` + `tests/test_persona_parity_audit.py` 覆盖 |
+| A3 | ✅ 已落地 (2026-05-24) | commit 4711b4d；`admin/routes/api/persona_importer.py` GET /persona/parity/{id}；`admin/routes/api/__init__.py` 注入 identity_mgr/config/soul_dir/bot；`PersonaImporterView.vue` 新增 Parity 折叠面板；`tests/test_admin_api_persona_parity.py` 5 用例全绿；vue-tsc + npm build 通过 |
+| A4 | ✅ 已落地 (2026-05-24) | `PersonaImporterView.vue` Issues/Fields 行号 chip → NButton quaternary tiny；click → focusSourceLines（textarea focus + setSelectionRange + scrollTop，buffer 3 行）；sourceDirty 时灰显并 tooltip "保存并重新导入后再跳转"；vue-tsc + npm run build 通过；`docs/migrations/persona-v2-importer.md` S10' ⏳→✅ |
+| A5 | ✅ 已落地 (2026-05-24) | `docs/tracking/persona-source-importer-remediation-execution.md` §2 追加 H/I/J/K/L 行 + §9「dry-run 长尾扩展（旁支 + A 档 + 切流前清单）」段；本文 §8 状态表对齐；`maintenance-log.md` 追加「Persona A 档 dry-run 扩展 A4/A5 收口」条目 |

@@ -4,6 +4,64 @@
 
 ---
 
+## 2026-05-24 Persona A 档 dry-run 扩展 A4/A5 收口
+
+**变更类型**：admin/frontend 体验 + tracking docs / maintenance-log
+
+**内容**：按 [persona-source-importer-acard-execution.md](docs/tracking/persona-source-importer-acard-execution.md) §5/§6 收口 A4 与 A5。
+A4 — `admin/frontend/src/views/persona/PersonaImporterView.vue` 给 source NInput 暴露 `sourceInputRef`（`{ textareaElRef }`），新增 `resolveSpanLines` / `spanJumpLabel` / `lineRangeToCharOffsets` / `focusSourceLines` helpers；Issues 与 Fields 视图把原本只读的 `<span>{{ spanLabel(...) }}</span>` 升级为可点击的 NButton quaternary tiny chip（使用 tabular-nums 等宽数字），点击后 textarea focus + setSelectionRange + scrollTop（按 `getComputedStyle().lineHeight` 解析、buffer 3 行、fallback 20.8px），1.6s 后自动塌缩 selection；`sourceDirty` 时 chip 灰显，tooltip 提示“保存并重新导入后再跳转”，避免行号定位漂移；`onUnmounted` 清掉 flash timer。
+A5 — `docs/migrations/persona-v2-importer.md §2 / §4` 把 S6/S10' 与 “S10' 双栏点击 issue 自动滚动高亮” 行从 ⏳ 改为 ✅；`docs/tracking/persona-source-importer-acard-execution.md §8` 状态表更新（A1/A2 commit `a0e54d1`、A3 commit `4711b4d`、A4/A5 ✅）；`docs/tracking/persona-source-importer-remediation-execution.md` §2 步骤总览追加 H/I/J/K/L 行，§9 新增「dry-run 长尾扩展（旁支 + A 档 + 切流前清单）」段落，把 S12' parity audit / GroupOverride 完整迁移 / Legacy `instruction.md` opt-in 三条旁支与 A 档 A1-A5 全部回填到主执行文档，并落「切流前必做项」汇总。
+
+**影响**：admin Persona Importer 页面在不修改 source 时支持点击行号 chip 直接定位；`PromptBuilder` / `LLMClient` / `GroupChatScheduler` / `kernel.config.GroupOverride` / admin Soul SPA 编辑入口本轮**全部不动**——A 档全程 dry-run，纯前端体验 + tracking 文档。`admin/static` 是 bind mount（D6），仅 `npm run build` 即生效，不需 docker rebuild。
+
+**验证**：`./node_modules/.bin/vue-tsc --noEmit` 静默通过；`npm run build` 11.45s 通过，新 bundle `PersonaImporterView-KfogYrpe.js` 18.20 kB / gzip 6.14 kB；A4 无新增 pytest 范围（前端纯交互），A5 为文档变更不触发测试。
+
+**回滚路径**：revert A4 / A5 commit 各自独立——撤销 `PersonaImporterView.vue` 4 个 helpers + chip 替换 + ref 注入 + 配套 CSS、迁移清单 §2/§4 状态行、acard §8 状态表、主执行文档 §2 H/I/J/K/L 行 + §9 段落、本条维护日志即可；A1-A3 commit（`a0e54d1` / `4711b4d`）与 3 条旁支 commit 不受影响。
+
+---
+
+## 2026-05-24 Persona legacy `instruction.md` opt-in dry-run 上线
+
+**变更类型**：persona importer / tests / docs
+
+**内容**：按独立执行文档 [persona-legacy-instruction-md-execution.md](docs/tracking/persona-legacy-instruction-md-execution.md) 让 v2 importer 支持显式 opt-in 读取 legacy `config/soul/instruction.md`：`source.md` front matter 写 `legacy_instruction_md: true` + `legacy_instruction_md_path: "./instruction.md"`（相对 source.md 解析）后，writer 读取文本并以 `LegacyInstructionPayload` 透传给 builder；新增 `_extract_legacy_instruction_md()` 把 bullets 追加到 `guard.yaml.behavior_instructions.items[]` 末尾，extractor 标 `legacy_instruction_md_opt_in`、confidence=0.6、`origin_anchor` 用 legacy 文件 basename。`services/persona/parser.py` 抽出 `bullet_items_from_text()` 复用 bullet 抽取，避免在 builder 里手抠正则；缺路径 / 文件不存在分别落 warn issue `legacy_instruction_md_path_missing` / `legacy_instruction_md_file_not_found`，不阻断 import。`tests/test_persona_importer.py` 新增 4 条回归覆盖 default-off / 追加 / 缺路径 / 文件不存在。`docs/migrations/persona-v2-importer.md` 追加 §11 “Legacy `instruction.md` opt-in dry-run”。
+
+**影响**：v2 importer 在 opt-in 下能把 v1 instruction.md bullets 物化为 draft `behavior_instructions.items[]` 候选，供 compiler dry-run / parity audit 比对；正式 chat runtime 仍未切流——`PromptBuilder._instruction` 继续直接读 `config/soul/instruction.md`，admin Soul SPA 编辑入口 / `LLMClient` / 任何 reload 路径**完全不动**。默认 front matter 不写 flag 时 importer 行为 0 变化（D7 同 importer 现状无差异）。legacy 文件不在 source.md 同级目录时必须显式给路径，否则只落 warn issue 不读取（防止误读 cwd / repo root）。
+
+**验证**：targeted `pytest tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_persona_parity_audit.py tests/test_persona_importer_api.py tests/test_system_module.py -q` 通过（44 passed，从 40 增加 4 条 legacy opt-in 回归）；targeted `ruff check services/persona tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_persona_parity_audit.py tests/test_persona_importer_api.py` 通过；`git diff --check` 干净；D1 同模式扫描确认 `services/persona/` 此前没有 `legacy_*` opt-in reader，`config/soul/instruction.md` 仅被 admin Soul SPA / `BotConfig` / `PromptBuilder._instruction` 引用，本次新增对那几条路径无入侵。
+
+**回滚路径**：revert 本次 commit 即可——撤销 builder `_extract_legacy_instruction_md()`、writer `_load_legacy_instruction()`、parser `bullet_items_from_text()`、`models.LegacyInstructionPayload`、新增 4 条测试与 §11 / 当日维护日志条目；S12' parity audit / GroupOverride 完整迁移 / Part B 主战场 / Part A tail 已归档 commits 不受影响。
+
+---
+
+## 2026-05-24 Persona GroupOverride 完整迁移 dry-run
+
+**变更类型**：persona importer/compiler dry-run / tests / docs
+
+**内容**：按独立执行文档 [persona-group-override-full-execution.md](docs/tracking/persona-group-override-full-execution.md) 把 source front matter `group_profiles.<gid>` 抽取从 2 字段（`reply_style/custom_prompt`）扩展到 `kernel.config.GroupOverride` 全部 15 字段：`blocked_users` / `allowed_tools` / `blocked_tools` / `at_only` / `talk_value` / `planner_smooth` / `debounce_seconds` / `batch_size` / `history_load_count` / `reply_style` / `custom_prompt` / `tools_enabled` / `sticker_mode` / `slang_enabled` / `presence_mode`。`services/persona/builder.py` 引入 `_GROUP_PROFILE_FIELD_KINDS` 与 `_coerce_group_profile_field()`，对每个字段做类型/枚举强制转换，非法值落 `invalid_group_profile_field` warn issue 并跳过；`services/persona/compiler.py` 新增 `_GROUP_PROFILE_FIELD_ORDER`，按 `presence_mode → at_only → talk_value/planner_smooth/debounce_seconds/batch_size/history_load_count → reply_style/custom_prompt → tools_enabled → allowed_tools/blocked_tools → sticker_mode → slang_enabled → blocked_users → source` 固定顺序渲染 `runtime.group_profile` block；`tests/test_persona_importer.py` 新增 15 字段 happy path + 6 个非法值警告回归，`tests/test_persona_compiler.py` 新增 15 字段渲染 + 顺序锚点回归。`docs/migrations/persona-v2-importer.md` 追加 §10 “GroupOverride 完整迁移 dry-run”。
+
+**影响**：v2 importer/compiler 现已能完整承载 GroupOverride 15 字段映射用于离线比对；正式 chat runtime 仍未切流——`kernel.config.GroupOverride` / `LLMClient._build_group_profile_block()` / `GroupChatScheduler` 继续消费 `BotConfig.group.overrides`，本轮不改任何 runtime 代码。parity audit 当前仍只覆盖 `reply_style/custom_prompt` 两字段比对，扩展到 15 字段比对作为切流前 follow-up 留入 §9。
+
+**验证**：targeted `pytest tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_persona_parity_audit.py tests/test_persona_importer_api.py tests/test_system_module.py -q` 通过（40 passed）；targeted `ruff check services/persona tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_persona_parity_audit.py tests/test_persona_importer_api.py` 通过；`git diff --check` 干净，无非预期 storage/db 改动。
+
+**回滚路径**：revert 本次 GroupOverride 完整迁移 commit 即可——撤销 builder 15 字段抽取、compiler `_GROUP_PROFILE_FIELD_ORDER` 渲染、对应测试以及 §10 / 当日维护日志条目；S12' parity audit / Part B 主战场 / Part A tail 已归档 commits 不受影响。
+
+---
+
+## 2026-05-24 Persona S12' parity audit dry-run 上线
+
+**变更类型**：persona parity audit / tests / docs
+
+**内容**：按独立执行文档 [persona-s12-parity-audit-execution.md](docs/tracking/persona-s12-parity-audit-execution.md) 落地 v1 ↔ v2 比对工具。新增 `services/persona/parity_audit.py`，提供 `compare_v1_vs_v2_dry_run()` 与 `ParityReport`，覆盖 6 个 axis（identity_personality / bot_self_id / behavior_instruction / admins / proactive_rules / group_profile），输出 `aligned` / `divergent` / `v1_only` / `v2_only` / `not_applicable`；新增 `tests/test_persona_parity_audit.py`，并用 `test_reply_style_hints_reference_matches_runtime` 把 parity 内置 hint 表与 v1 `_GROUP_REPLY_STYLE_HINTS` 锁住，避免文案漂移。`docs/migrations/persona-v2-importer.md` 追加 §9 “S12' parity audit dry-run”。
+
+**影响**：parity 仅供离线比对，不进入 `PromptBuilder` / `LLMClient` / `LLMRequest`，不写 `_import_report.json`；`admins` 与 `proactive_rules` 当前在 v2 没有 prompt block，被 parity 显式标 `v1_only`，作为切流前 follow-up 列入 §9。本轮不接 admin SPA 视图，也不切流。
+
+**验证**：`pytest tests/test_persona_parity_audit.py tests/test_persona_compiler.py tests/test_persona_importer.py tests/test_persona_importer_api.py tests/test_system_module.py -q` 通过（38 passed）；`ruff check services/persona tests/test_persona_parity_audit.py tests/test_persona_compiler.py tests/test_persona_importer.py tests/test_persona_importer_api.py` 通过。
+
+**回滚路径**：revert 本次 commit 即可，删除 `services/persona/parity_audit.py`、`tests/test_persona_parity_audit.py`、追踪文档与 `docs/migrations/persona-v2-importer.md` §9 / 维护日志当日条目；不影响 Part A tail / Part B 主战场已归档产物。
+
+---
+
 ## 2026-05-24 Persona Part B 主战场收口 — #3/#4/#8 prompt source 映射
 
 **变更类型**：persona importer/compiler dry-run / tests / docs

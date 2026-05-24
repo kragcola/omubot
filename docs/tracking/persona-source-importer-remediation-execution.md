@@ -71,6 +71,15 @@
 | D2 | #7 全局记忆索引 schema/seed 映射 | ✅ 完成 | Codex | `11 passed` + ruff |
 | D3 | #5 admins 名单映射 | ✅ 完成 | Codex | `12 passed` + ruff |
 | D4 | Part A 完整收尾验证与文档落库 | ✅ 完成 | Codex | `40 passed` + ruff |
+| H0 | S12' parity audit dry-run | ✅ 完成 | Codex | 旁支：[persona-s12-parity-audit-execution.md](./persona-s12-parity-audit-execution.md) |
+| I0 | GroupOverride 完整迁移 dry-run（15 字段） | ✅ 完成 | Codex | 旁支：[persona-group-override-full-execution.md](./persona-group-override-full-execution.md) |
+| J0 | Legacy `instruction.md` opt-in dry-run | ✅ 完成 | Codex | 旁支：[persona-legacy-instruction-md-execution.md](./persona-legacy-instruction-md-execution.md) |
+| K1 | A 档 A1 — parity 扩展 GroupOverride 15 字段 + `v2_extended` status | ✅ 完成 | Codex | commit `a0e54d1`；§9.K |
+| K2 | A 档 A2 — admins / proactive_rules source schema + compiler block | ✅ 完成 | Codex | commit `a0e54d1`；§9.K |
+| K3 | A 档 A3 — `/api/admin/persona/parity/{id}` + SPA Parity 折叠面板 | ✅ 完成 | Codex | commit `4711b4d`；§9.K |
+| K4 | A 档 A4 — Issues / Fields 行号点击双栏滚动高亮 | ✅ 完成 | Codex | `vue-tsc` + `npm run build` 通过；§9.K |
+| K5 | A 档 A5 — 主执行文档 §2 / §9 回填 + maintenance-log | ✅ 完成 | Codex | 本节本身 |
+| L0 | 切流前必做项汇总 | ✅ 已就位 | Codex | §9.L |
 
 ---
 
@@ -1707,3 +1716,61 @@
 - 遗留风险：
   - Part A 完整收尾限定为 importer draft 面；正式 runtime 切流、`instruction.md`、bot QQ id、group profile 仍未实现。
   - 前端无新增 `.vue`，本轮 D 系列未重跑 `npm run build`。
+
+---
+
+## 9. dry-run 长尾扩展（旁支 + A 档 + 切流前清单）
+
+> 与本主文档同周期产出的 3 条旁支与 A 档 5 步全部归口 dry-run；`PromptBuilder` / `LLMClient` / `GroupChatScheduler` / `kernel.config.GroupOverride` / admin Soul SPA 编辑入口本周**全部不动**，正式切流仍然需要单独立项。
+
+### H. S12' parity audit dry-run（已落地）
+
+- 旁支文档：[persona-s12-parity-audit-execution.md](./persona-s12-parity-audit-execution.md)
+- 落地内容：`services/persona/parity_audit.py` 提供 `compare_v1_vs_v2_dry_run(...) -> ParityReport`；维度覆盖 identity_personality / bot_self_id / behavior_instruction / admins / proactive / group_profile（首版），不读真实 runtime；测试落 `tests/test_persona_parity_audit.py`。
+- 边界：parity result 不写 `_import_report.json`，不进入 `LLMRequest`；只供本主执行文档 §9.K 与 admin SPA Parity 面板消费。
+- 验证证据：`38 passed` + ruff（旁支 §1 表）。
+
+### I. GroupOverride 完整迁移 dry-run（已落地）
+
+- 旁支文档：[persona-group-override-full-execution.md](./persona-group-override-full-execution.md)
+- 落地内容：source `group_profiles` 解析与 compiler dry-run 输出全部覆盖 `GroupOverride` 15 个字段（blocked_users / allowed_tools / blocked_tools / at_only / talk_value / planner_smooth / debounce_seconds / batch_size / history_load_count / reply_style / custom_prompt / tools_enabled / sticker_mode / slang_enabled / presence_mode）。
+- 边界：仅 importer / compiler dry-run；不读取生产 `BotConfig`，不写正式 `runtime.yaml`，不接 `LLMClient` / `GroupChatScheduler` / `ToolRegistry` runtime；切流仍由 S12'+ 单独立项。
+- 验证证据：`pytest test_persona_compiler` 通过 + `ruff`（旁支 §1 表）。
+
+### J. Legacy `instruction.md` opt-in dry-run（已落地）
+
+- 旁支文档：[persona-legacy-instruction-md-execution.md](./persona-legacy-instruction-md-execution.md)
+- 落地内容：`source.md` front matter `legacy_instruction_md: true` + `legacy_instruction_md_path: <path>` 时，importer 把 legacy md bullets 追加到 `guard.yaml.behavior_instructions.items[]`，extractor 标 `legacy_instruction_md_opt_in`；缺路径 / 文件不存在 / 零 bullet 三类分别走 warn / warn / info issue。
+- 边界：default-off；不替换 v1 `PromptBuilder._instruction`；不改 admin Soul SPA；builder 仍是纯函数，I/O 由 writer 统一负责。
+- 验证证据：`tests/test_persona_importer.py` 4 条新增 case + `tests/test_persona_compiler.py` 不动通过；`docs/migrations/persona-v2-importer.md §11` 已落地。
+
+### K. A 档 dry-run 扩展（A1-A5）
+
+A 档全部归口 dry-run，扩展上述 3 条旁支的 admin / parity 面，覆盖 admins / proactive_rules prompt block 与 SPA 体验。详细方案见 [persona-source-importer-acard-execution.md](./persona-source-importer-acard-execution.md)。
+
+| 编号 | 任务 | 状态 | 验证证据 |
+|---|---|---|---|
+| A1 | parity audit 扩展 GroupOverride 15 字段 + `v2_extended` status + `group_profile.fields` axis | ✅ 完成 | commit `a0e54d1`；`services/persona/parity_audit.py`；`tests/test_persona_parity_audit.py` |
+| A2 | admins / proactive_rules source schema + compiler `core.identity` / `core.guard` 注入 | ✅ 完成 | commit `a0e54d1`；`services/persona/{builder,compiler}.py`；`tests/test_persona_compiler.py` + `tests/test_persona_parity_audit.py` |
+| A3 | `/api/admin/persona/parity/{id}` JSON API + SPA Parity 折叠面板 | ✅ 完成 | commit `4711b4d`；`admin/routes/api/persona_importer.py`、`admin/routes/api/__init__.py`、`PersonaImporterView.vue`；`tests/test_admin_api_persona_parity.py` 5 用例全绿 |
+| A4 | Issues / Fields 行号点击双栏滚动高亮 | ✅ 完成 | `PersonaImporterView.vue` Issues/Fields 行号 chip → NButton quaternary tiny；click → focusSourceLines（textarea focus + setSelectionRange + scrollTop，buffer 3 行）；sourceDirty 时灰显 + tooltip 提示重新 import；`vue-tsc --noEmit` 通过；`npm run build` 11.45s 通过；`docs/migrations/persona-v2-importer.md §4` S10' 行 ⏳→✅ |
+| A5 | 主执行文档 §2 / §9 回填 + maintenance-log 当日条目 | ✅ 完成 | 本节本身 + 本主文档 §2 步骤总览 H/I/J/K/L 行 + maintenance-log 当日条目 |
+
+### L. 切流前必做项（汇总）
+
+正式 v2 → runtime 切流仍未启动。现已就位的 dry-run 资产：
+
+- ✅ admins / proactive prompt block 在 v2 compiler 已 dry-run 输出（A2，commit `a0e54d1`）
+- ✅ parity audit 6 个 axis（含 `group_profile.fields` 扩展）全部 aligned / `v2_extended` 可达（A1，commit `a0e54d1`）
+- ✅ admin SPA Parity 面板 + 行号跳转（A3 commit `4711b4d` / A4）让人工核对路径闭环
+- ✅ GroupOverride 15 字段 dry-run（旁支 I）+ legacy `instruction.md` opt-in（旁支 J）落地
+
+切流前**仍需独立立项**的工作：
+
+1. B 档 runtime 切流（feature flag + 灰度）：`PromptBuilder` / `LLMClient` / `GroupChatScheduler` 至今未读 v2 compile 结果，需要灰度入口、回滚开关与生产 `BotConfig` 的 read 路径。
+2. parity 全 axis 在生产 persona（凤笑梦及以后）上首次跑通的人工核对记录归档。
+3. dashboard cache-pipeline 面板对 `persona_import` task 的 cache hit / miss 统计接入（spine 已就位，admin 仍用旧 LLM call 视图）。
+4. 旁支 J 的 opt-in 路径在生产 persona 是否启用，需要人工决策；当前 default-off 不影响 v1 行为。
+
+回滚路径：A1-A5 commit 各自独立可 revert；3 条旁支与 A 档之间无强耦合。任何一项回退不影响其余 dry-run 资产。
+
