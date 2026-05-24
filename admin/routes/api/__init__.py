@@ -147,7 +147,13 @@ def create_api_router(
         bus=bus,
     ))
     router.include_router(create_memos_router(card_store=card_store, ctx=ctx))
-    router.include_router(create_persona_importer_router(ctx=ctx))
+    router.include_router(create_persona_importer_router(
+        ctx=ctx,
+        soul_dir=soul_dir,
+        identity_mgr=identity_mgr,
+        config=config,
+        bot=bot,
+    ))
     router.include_router(create_dream_router(dream_agent=dream_agent))
     router.include_router(create_sandbox_router(llm_client=llm_client, identity_mgr=identity_mgr, ctx=ctx))
     router.include_router(create_slang_router(ctx=ctx, bus=bus, message_log=message_log, llm_client=llm_client))

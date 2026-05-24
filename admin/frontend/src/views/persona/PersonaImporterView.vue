@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  AnalyticsOutline,
   CheckmarkCircleOutline,
   DocumentTextOutline,
   FolderOpenOutline,
@@ -87,6 +88,48 @@ interface PersonaFreezeResponse {
   error?: string
 }
 
+type ParityStatus =
+  | 'aligned'
+  | 'divergent'
+  | 'v1_only'
+  | 'v2_only'
+  | 'v2_extended'
+  | 'not_applicable'
+
+interface ParityFinding {
+  axis: string
+  status: ParityStatus | string
+  v1_signal: string
+  v2_signal: string
+  notes?: string
+}
+
+interface ParityReportPayload {
+  persona_id: string
+  has_divergence: boolean
+  findings: ParityFinding[]
+}
+
+interface PersonaParityResponse {
+  ok: boolean
+  persona_id: string
+  as_of?: string
+  error?: string
+  compile?: {
+    ok?: boolean
+    module_order?: string[]
+    warnings?: string[]
+  }
+  v1_signals?: {
+    bot_self_id: string
+    instruction_present: boolean
+    admins_count: number
+    proactive_present: boolean
+    group_override_group_id: string | null
+  }
+  report?: ParityReportPayload
+}
+
 const DEFAULT_PERSONA_ID = 'fengxiaomeng'
 
 const message = useMessage()
@@ -104,6 +147,10 @@ const report = ref<ImportReport | null>(null)
 const lastFreeze = ref<PersonaFreezeResponse | null>(null)
 const lastAction = ref('')
 const loadError = ref('')
+
+const parity = ref<PersonaParityResponse | null>(null)
+const parityError = ref('')
+const refreshingParity = ref(false)
 
 const loadingSource = ref(false)
 const savingSource = ref(false)
@@ -172,6 +219,29 @@ const freezeMetricHint = computed(() => {
   if (hasErrors.value) return '存在 error，已阻止'
   return lastFreeze.value?.path || '_pending_freeze/'
 })
+
+const parityFindings = computed<ParityFinding[]>(() =>
+  Array.isArray(parity.value?.report?.findings) ? parity.value!.report!.findings : [],
+)
+const parityHasDivergence = computed(() => Boolean(parity.value?.report?.has_divergence))
+const parityHeadlineType = computed<NaiveTagType>(() => {
+  if (!parity.value) return 'default'
+  if (!parity.value.ok) return 'error'
+  if (parityHasDivergence.value) return 'error'
+  const statuses = parityFindings.value.map(f => f.status)
+  if (statuses.some(s => s === 'v1_only')) return 'warning'
+  if (statuses.some(s => s === 'v2_extended')) return 'info'
+  return 'success'
+})
+const parityHeadlineLabel = computed(() => {
+  if (!parity.value) return '未审计'
+  if (!parity.value.ok) return parity.value.error || '审计失败'
+  if (parityHasDivergence.value) return '存在 divergent'
+  const statuses = parityFindings.value.map(f => f.status)
+  if (statuses.some(s => s === 'v1_only')) return 'v1_only 待消化'
+  if (statuses.some(s => s === 'v2_extended')) return 'v2 扩展中'
+  return '全部 aligned'
+})
 const sourceEditorPlaceholder = computed(() => `---
 persona_id: ${personaKey.value || DEFAULT_PERSONA_ID}
 canonical_name:
@@ -192,6 +262,7 @@ onMounted(() => {
 async function loadAll(silent = false) {
   await loadSource(silent)
   await refreshDraft(true)
+  await refreshParity(true)
 }
 
 async function loadSource(silent = false) {
@@ -270,6 +341,7 @@ async function importDraft() {
     sourceDirtySinceImport.value = false
     lastFreeze.value = null
     await refreshDraft(true)
+    await refreshParity(true)
     lastAction.value = data.ok ? 'draft 已导入' : 'draft 已生成，存在 issue'
     if (data.ok) message.success('draft 已导入')
     else message.warning('draft 已生成，存在 issue')
@@ -330,6 +402,65 @@ async function pendingFreeze() {
 function explainError(error: unknown) {
   if (error instanceof Error && error.message) return error.message
   return '请求失败'
+}
+
+async function refreshParity(silent = false) {
+  if (!personaKey.value) return
+  refreshingParity.value = true
+  parityError.value = ''
+  try {
+    const data = await api<PersonaParityResponse>(
+      `/api/admin/persona/parity/${encodeURIComponent(personaKey.value)}`,
+    )
+    parity.value = data
+    if (!data.ok) {
+      parityError.value = data.error || 'parity 审计失败'
+      if (!silent) message.warning(parityError.value)
+    } else if (!silent) {
+      message.success('parity 已刷新')
+    }
+  } catch (error) {
+    parity.value = null
+    parityError.value = explainError(error)
+    if (!silent) message.error(parityError.value)
+  } finally {
+    refreshingParity.value = false
+  }
+}
+
+const PARITY_STATUS_LABELS: Record<string, string> = {
+  aligned: 'aligned',
+  divergent: 'divergent',
+  v1_only: 'v1_only',
+  v2_only: 'v2_only',
+  v2_extended: 'v2_extended',
+  not_applicable: 'n/a',
+}
+
+const PARITY_AXIS_LABELS: Record<string, string> = {
+  identity_personality: '身份',
+  bot_self_id: 'bot self id',
+  behavior_instruction: '行为指令',
+  admins: '管理员',
+  proactive_rules: '插话方式',
+  group_profile: '群档案',
+  'group_profile.fields': '群档案 · 扩展字段',
+}
+
+function parityStatusType(status: string): NaiveTagType {
+  if (status === 'aligned') return 'success'
+  if (status === 'divergent') return 'error'
+  if (status === 'v1_only') return 'warning'
+  if (status === 'v2_only' || status === 'v2_extended') return 'info'
+  return 'default'
+}
+
+function parityStatusLabel(status: string) {
+  return PARITY_STATUS_LABELS[status] ?? status
+}
+
+function parityAxisLabel(axis: string) {
+  return PARITY_AXIS_LABELS[axis] ?? axis
 }
 
 function issueType(level?: string): NaiveTagType {
@@ -589,6 +720,91 @@ function spanLabel(span?: SourceSpan) {
           />
         </AppPanelSection>
       </div>
+
+      <AppPanelSection
+        eyebrow="Parity"
+        title="v1 ↔ v2 对照"
+        :description="parity?.as_of ? `dry-run · ${parity.as_of}` : '比较 v1 prompt 来源与 v2 compile dry-run 输出'"
+      >
+        <template #aside>
+          <NTag :type="parityHeadlineType" size="small" :bordered="false">
+            {{ parityHeadlineLabel }}
+          </NTag>
+          <NButton
+            quaternary
+            size="small"
+            :loading="refreshingParity"
+            @click="refreshParity(false)"
+          >
+            <template #icon>
+              <NIcon :component="RefreshOutline" />
+            </template>
+            刷新
+          </NButton>
+        </template>
+
+        <NAlert v-if="parityError" type="warning" :bordered="false" :show-icon="false">
+          {{ parityError }}
+        </NAlert>
+
+        <div v-if="parity?.ok && parity.v1_signals" class="parity-signals">
+          <div class="parity-signal">
+            <span class="parity-signal__label">bot self id</span>
+            <span class="parity-signal__value">{{ parity.v1_signals.bot_self_id || '—' }}</span>
+          </div>
+          <div class="parity-signal">
+            <span class="parity-signal__label">行为指令</span>
+            <span class="parity-signal__value">{{ parity.v1_signals.instruction_present ? '已注入' : '未注入' }}</span>
+          </div>
+          <div class="parity-signal">
+            <span class="parity-signal__label">管理员</span>
+            <span class="parity-signal__value">{{ parity.v1_signals.admins_count }} 个</span>
+          </div>
+          <div class="parity-signal">
+            <span class="parity-signal__label">插话方式</span>
+            <span class="parity-signal__value">{{ parity.v1_signals.proactive_present ? '已注入' : '未注入' }}</span>
+          </div>
+          <div class="parity-signal">
+            <span class="parity-signal__label">GroupOverride 群</span>
+            <span class="parity-signal__value">{{ parity.v1_signals.group_override_group_id || '—' }}</span>
+          </div>
+        </div>
+
+        <div v-if="parityFindings.length" class="parity-list">
+          <div
+            v-for="finding in parityFindings"
+            :key="finding.axis"
+            class="parity-row"
+            :class="`parity-row--${finding.status}`"
+          >
+            <div class="parity-row__header">
+              <span class="parity-row__axis">{{ parityAxisLabel(finding.axis) }}</span>
+              <NTag :type="parityStatusType(finding.status)" size="small" :bordered="false">
+                {{ parityStatusLabel(finding.status) }}
+              </NTag>
+            </div>
+            <div class="parity-row__columns">
+              <div class="parity-col">
+                <span class="parity-col__label">v1</span>
+                <p>{{ finding.v1_signal || '—' }}</p>
+              </div>
+              <div class="parity-col">
+                <span class="parity-col__label">v2 dry-run</span>
+                <p>{{ finding.v2_signal || '—' }}</p>
+              </div>
+            </div>
+            <p v-if="finding.notes" class="parity-row__notes">{{ finding.notes }}</p>
+          </div>
+        </div>
+
+        <EmptyState
+          v-else-if="!parityError"
+          compact
+          title="尚无 parity 结果"
+          description="导入 draft 后会自动审计 v1 ↔ v2 一致性。"
+          :icon="AnalyticsOutline"
+        />
+      </AppPanelSection>
     </div>
   </AppPage>
 </template>
@@ -711,6 +927,113 @@ function spanLabel(span?: SourceSpan) {
   color: rgb(var(--primary-color));
 }
 
+.parity-signals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.parity-signal {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--om-border);
+  border-radius: 10px;
+  background: var(--om-surface-2);
+}
+
+.parity-signal__label {
+  color: var(--om-text-3);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.parity-signal__value {
+  color: var(--om-text-1);
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.parity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.parity-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: var(--om-surface-2);
+}
+
+.parity-row--divergent {
+  border-color: color-mix(in srgb, var(--om-danger) 45%, var(--om-border));
+}
+
+.parity-row--v1_only {
+  border-color: color-mix(in srgb, var(--om-warning) 35%, var(--om-border));
+}
+
+.parity-row__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.parity-row__axis {
+  color: var(--om-text-1);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.parity-row__columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.parity-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.parity-col__label {
+  color: var(--om-text-3);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.parity-col p {
+  margin: 0;
+  color: var(--om-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.parity-row__notes {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--om-surface-3) 80%, transparent);
+  color: var(--om-text-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 @media (max-width: 1100px) {
   .persona-importer__metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -737,6 +1060,10 @@ function spanLabel(span?: SourceSpan) {
   .persona-row__meta {
     align-items: flex-start;
     text-align: left;
+  }
+
+  .parity-row__columns {
+    grid-template-columns: 1fr;
   }
 }
 </style>
