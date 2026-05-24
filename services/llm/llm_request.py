@@ -273,6 +273,9 @@ TASK_CACHE_PROFILES: dict[str, TaskCacheProfile] = {
     # learning / extraction services.
     "style":           TaskCacheProfile(system_breakpoints=1),
     "memo":            TaskCacheProfile(system_breakpoints=1),
+    # persona_import — single static system prompt that wraps importer
+    # extraction; no plugin contributions, no message-side reuse.
+    "persona_import":  TaskCacheProfile(system_breakpoints=1),
     # chat_private — debug plugin path: low-frequency, 1-2 system blocks
     # all in static segment. Single marker on the tail is sufficient.
     "chat_private":    TaskCacheProfile(system_breakpoints=1),
