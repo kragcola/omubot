@@ -10,13 +10,14 @@ from .models import (
     ImportIssue,
     ImportReport,
     ImportResult,
+    LegacyInstructionPayload,
     ReportField,
     SourceDocument,
     SourceField,
     SourceSection,
     SourceSpan,
 )
-from .parser import bullet_items, first_prefixed_value, list_after_label
+from .parser import bullet_items, bullet_items_from_text, first_prefixed_value, list_after_label
 from .system_validation import validate_system_modules
 
 DRAFT_YAML_FILES = (
@@ -50,10 +51,52 @@ DEFAULT_TEMPLATE_FILES = (
 )
 
 
+_GROUP_REPLY_STYLE_VALUES: tuple[str, ...] = (
+    "default",
+    "gentle",
+    "playful",
+    "concise",
+    "energetic",
+    "steady",
+)
+_GROUP_STICKER_MODE_VALUES: tuple[str, ...] = (
+    "inherit",
+    "off",
+    "rarely",
+    "normal",
+    "frequently",
+)
+_GROUP_PRESENCE_MODE_VALUES: tuple[str, ...] = (
+    "active",
+    "silent_learn",
+    "off",
+)
+
+
+_GROUP_PROFILE_FIELD_KINDS: dict[str, str] = {
+    "blocked_users": "list_int",
+    "allowed_tools": "list_str",
+    "blocked_tools": "list_str",
+    "at_only": "bool",
+    "talk_value": "float",
+    "planner_smooth": "float",
+    "debounce_seconds": "float",
+    "batch_size": "int",
+    "history_load_count": "int",
+    "reply_style": "enum_reply_style",
+    "custom_prompt": "str",
+    "tools_enabled": "bool",
+    "sticker_mode": "enum_sticker_mode",
+    "slang_enabled": "bool",
+    "presence_mode": "enum_presence_mode",
+}
+
+
 def build_persona_draft(
     source: SourceDocument,
     *,
     defaults: dict[str, dict[str, Any]] | None = None,
+    legacy_instruction: LegacyInstructionPayload | None = None,
 ) -> ImportResult:
     persona_id = _frontmatter_str(source, "persona_id") or "unknown-v2"
     report = ImportReport(
@@ -86,10 +129,12 @@ def build_persona_draft(
     _extract_memory(source, draft, report)
     _extract_examples(source, draft, report)
     _extract_behavior_instructions(source, draft, report)
+    _extract_legacy_instruction_md(source, draft, report, legacy_instruction)
     _extract_part_b_overrides(source, draft, report)
     _extract_admins(source, draft, report)
     _extract_bot_identity(source, draft, report)
     _extract_group_profiles(source, draft, report)
+    _extract_proactive_rules(source, draft, report)
     validate_system_modules(draft, report)
     _validate_required(draft, report)
 
@@ -118,6 +163,7 @@ def _empty_draft(persona_id: str, source: SourceDocument) -> dict[str, dict[str,
                 "role": "",
                 "self_reference": "",
                 "personality": "",
+                "proactive_rules": "",
                 "essence": [],
                 "not_traits": [],
             },
@@ -428,6 +474,85 @@ def _extract_behavior_instructions(
     _set_list(draft, report, "guard.yaml", "behavior_instructions.items", items, "behavior_instruction_md")
 
 
+def _extract_legacy_instruction_md(
+    source: SourceDocument,
+    draft: dict[str, dict[str, Any]],
+    report: ImportReport,
+    payload: LegacyInstructionPayload | None,
+) -> None:
+    if payload is None or payload.state == "disabled":
+        return
+
+    fm_span = SourceSpan(source.path, (1, max(1, _frontmatter_end_line(source.text))))
+    if payload.state == "path_missing":
+        report.issues.append(
+            ImportIssue(
+                "warn",
+                "legacy_instruction_md_path_missing",
+                "front matter `legacy_instruction_md` 已开启，但缺少 `legacy_instruction_md_path`",
+                "guard.yaml",
+                "behavior_instructions",
+                fm_span,
+            )
+        )
+        return
+    if payload.state == "file_not_found":
+        report.issues.append(
+            ImportIssue(
+                "warn",
+                "legacy_instruction_md_file_not_found",
+                f"legacy instruction 文件不存在：{payload.display_path}",
+                "guard.yaml",
+                "behavior_instructions",
+                fm_span,
+            )
+        )
+        return
+
+    legacy_items = [
+        SourceField(
+            key="item",
+            value={
+                "text": item.value,
+                "origin_anchor": f"{item.span.file}#L{item.span.lines[0]}",
+                "review_status": "candidate",
+            },
+            span=item.span,
+        )
+        for item in bullet_items_from_text(
+            payload.text,
+            source_file=payload.display_path or "instruction.md",
+        )
+    ]
+
+    guard = draft.setdefault("guard.yaml", {})
+    instructions = guard.setdefault("behavior_instructions", {})
+    if not isinstance(instructions, dict):
+        instructions = {}
+        guard["behavior_instructions"] = instructions
+    existing_items = instructions.setdefault("items", [])
+    if not isinstance(existing_items, list):
+        existing_items = []
+        instructions["items"] = existing_items
+    instructions.setdefault("source", "source_section")
+
+    if not legacy_items:
+        return
+
+    base_index = len(existing_items)
+    for offset, field in enumerate(legacy_items):
+        existing_items.append(field.value)
+        report.fields.append(
+            ReportField(
+                "guard.yaml",
+                f"behavior_instructions.items[{base_index + offset}]",
+                field.span,
+                0.6,
+                "legacy_instruction_md_opt_in",
+            )
+        )
+
+
 def _extract_part_b_overrides(
     source: SourceDocument,
     draft: dict[str, dict[str, Any]],
@@ -503,6 +628,35 @@ def _extract_module_switches(source: SourceDocument, draft: dict[str, dict[str, 
                     item.span,
                 )
             )
+
+
+def _extract_proactive_rules(
+    source: SourceDocument,
+    draft: dict[str, dict[str, Any]],
+    report: ImportReport,
+) -> None:
+    """Land ``## 插话方式`` raw section body into ``persona.yaml.identity.proactive_rules``.
+
+    The v1 counterpart is ``Identity.proactive`` (raw text appended after
+    ``Block 1`` by ``PromptBuilder.build_static``). v2 keeps the original
+    paragraph instead of bullets so compiler can replay the same prompt block
+    text without losing line breaks.
+    """
+
+    section = source.section("插话方式", "proactive_rules", "proactive")
+    if section is None or not section.body.strip():
+        return
+    value = section.body.strip()
+    _set_path(draft["persona.yaml"], "identity.proactive_rules", value)
+    report.fields.append(
+        ReportField(
+            "persona.yaml",
+            "identity.proactive_rules",
+            SourceSpan(source.path, (section.line, section.end_line)),
+            0.9,
+            "proactive_rules_md_section",
+        )
+    )
 
 
 def _extract_admins(source: SourceDocument, draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
@@ -596,17 +750,16 @@ def _extract_group_profiles(source: SourceDocument, draft: dict[str, dict[str, A
         row = dict(payload)
         row["source"] = "source_front_matter"
         overrides[group_id] = row
-        for key in ("reply_style", "custom_prompt"):
-            if key in payload:
-                report.fields.append(
-                    ReportField(
-                        "runtime.yaml",
-                        f"per_group_overrides.{group_id}.{key}",
-                        span,
-                        1.0,
-                        "front_matter_group_profiles",
-                    )
+        for key in payload:
+            report.fields.append(
+                ReportField(
+                    "runtime.yaml",
+                    f"per_group_overrides.{group_id}.{key}",
+                    span,
+                    1.0,
+                    "front_matter_group_profiles",
                 )
+            )
 
 
 def _validate_required(draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
@@ -779,7 +932,7 @@ def _frontmatter_str_list(source: SourceDocument, key: str) -> list[str]:
 def _frontmatter_group_profiles(
     source: SourceDocument,
     report: ImportReport,
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     value = source.frontmatter.get("group_profiles")
     if value is None:
         return {}
@@ -797,7 +950,7 @@ def _frontmatter_group_profiles(
         )
         return {}
 
-    profiles: dict[str, dict[str, str]] = {}
+    profiles: dict[str, dict[str, Any]] = {}
     for raw_group_id, raw_payload in value.items():
         group_id = str(raw_group_id).strip()
         if not group_id:
@@ -824,17 +977,143 @@ def _frontmatter_group_profiles(
                 )
             )
             continue
-        payload: dict[str, str] = {}
-        for key in ("reply_style", "custom_prompt"):
-            raw_value = raw_payload.get(key)
-            if raw_value is None:
+        payload: dict[str, Any] = {}
+        for field, kind in _GROUP_PROFILE_FIELD_KINDS.items():
+            if field not in raw_payload:
                 continue
-            text = str(raw_value).strip()
-            if text:
-                payload[key] = text
+            raw_value = raw_payload[field]
+            coerced, problem = _coerce_group_profile_field(kind, raw_value)
+            if problem is not None:
+                report.issues.append(
+                    ImportIssue(
+                        "warn",
+                        "invalid_group_profile_field",
+                        (
+                            f"front matter `group_profiles.{group_id}.{field}` "
+                            f"无法解析：{problem}"
+                        ),
+                        "runtime.yaml",
+                        f"per_group_overrides.{group_id}.{field}",
+                        span,
+                    )
+                )
+                continue
+            if coerced is None:
+                continue
+            payload[field] = coerced
         if payload:
             profiles[group_id] = payload
     return profiles
+
+
+def _coerce_group_profile_field(
+    kind: str,
+    raw_value: Any,
+) -> tuple[Any, str | None]:
+    """Coerce a single GroupOverride field; return (value, error_or_none).
+
+    A return of (None, None) means "skip this field" (empty string / null).
+    """
+
+    if raw_value is None:
+        return None, None
+
+    if kind == "str":
+        text = str(raw_value).strip()
+        return (text or None, None)
+
+    if kind == "bool":
+        if isinstance(raw_value, bool):
+            return raw_value, None
+        return None, "expected boolean"
+
+    if kind == "int":
+        if isinstance(raw_value, bool):
+            return None, "expected int, got bool"
+        if isinstance(raw_value, int):
+            return raw_value, None
+        if isinstance(raw_value, float) and raw_value.is_integer():
+            return int(raw_value), None
+        if isinstance(raw_value, str):
+            text = raw_value.strip()
+            if not text:
+                return None, None
+            try:
+                return int(text), None
+            except ValueError:
+                return None, "expected int"
+        return None, "expected int"
+
+    if kind == "float":
+        if isinstance(raw_value, bool):
+            return None, "expected float, got bool"
+        if isinstance(raw_value, int | float):
+            return float(raw_value), None
+        if isinstance(raw_value, str):
+            text = raw_value.strip()
+            if not text:
+                return None, None
+            try:
+                return float(text), None
+            except ValueError:
+                return None, "expected float"
+        return None, "expected float"
+
+    if kind == "enum_reply_style":
+        return _coerce_enum(raw_value, _GROUP_REPLY_STYLE_VALUES, "reply_style")
+    if kind == "enum_sticker_mode":
+        return _coerce_enum(raw_value, _GROUP_STICKER_MODE_VALUES, "sticker_mode")
+    if kind == "enum_presence_mode":
+        return _coerce_enum(raw_value, _GROUP_PRESENCE_MODE_VALUES, "presence_mode")
+
+    if kind == "list_int":
+        if not isinstance(raw_value, list | tuple):
+            return None, "expected list of int"
+        items: list[int] = []
+        for entry in raw_value:
+            if isinstance(entry, bool):
+                return None, "expected list of int (got bool)"
+            if isinstance(entry, int):
+                items.append(entry)
+                continue
+            if isinstance(entry, str):
+                text = entry.strip()
+                if not text:
+                    continue
+                try:
+                    items.append(int(text))
+                except ValueError:
+                    return None, f"non-int element {entry!r}"
+                continue
+            return None, f"non-int element {entry!r}"
+        return items, None
+
+    if kind == "list_str":
+        if not isinstance(raw_value, list | tuple):
+            return None, "expected list of str"
+        items_str: list[str] = []
+        for entry in raw_value:
+            text = str(entry).strip()
+            if text:
+                items_str.append(text)
+        return items_str, None
+
+    return None, f"unsupported field kind {kind!r}"
+
+
+def _coerce_enum(
+    raw_value: Any,
+    allowed: tuple[str, ...],
+    label: str,
+) -> tuple[Any, str | None]:
+    if not isinstance(raw_value, str):
+        return None, f"expected {label} string"
+    text = raw_value.strip()
+    if not text:
+        return None, None
+    if text not in allowed:
+        return None, f"{label} must be one of {list(allowed)}"
+    return text, None
 
 
 def _frontmatter_end_line(text: str) -> int:

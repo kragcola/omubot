@@ -333,6 +333,101 @@ def test_persona_importer_maps_group_profiles_to_runtime_overrides(tmp_path: Pat
     )
 
 
+def test_persona_importer_maps_group_profiles_full_field_set(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE.replace(
+        "language: zh-CN\n---",
+        (
+            "language: zh-CN\n"
+            "group_profiles:\n"
+            '  "11111":\n'
+            "    blocked_users: [1001, 1002]\n"
+            "    allowed_tools: [calendar, sticker]\n"
+            "    blocked_tools: []\n"
+            "    at_only: true\n"
+            "    talk_value: 0.42\n"
+            "    planner_smooth: 2.5\n"
+            "    debounce_seconds: 7\n"
+            "    batch_size: 12\n"
+            "    history_load_count: 40\n"
+            "    reply_style: playful\n"
+            "    custom_prompt: 多接梗，少说教。\n"
+            "    tools_enabled: false\n"
+            "    sticker_mode: rarely\n"
+            "    slang_enabled: true\n"
+            "    presence_mode: silent_learn\n"
+            '  "22222":\n'
+            "    reply_style: not_a_real_style\n"
+            "    sticker_mode: rampage\n"
+            "    presence_mode: ghost\n"
+            "    at_only: \"yes\"\n"
+            "    batch_size: \"abc\"\n"
+            "    blocked_users: [\"x\"]\n"
+            "    custom_prompt: 仅保留可解析字段\n"
+            "---"
+        ),
+    )
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(source, encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    overrides = result.draft["runtime.yaml"]["per_group_overrides"]
+    assert overrides["11111"] == {
+        "blocked_users": [1001, 1002],
+        "allowed_tools": ["calendar", "sticker"],
+        "blocked_tools": [],
+        "at_only": True,
+        "talk_value": 0.42,
+        "planner_smooth": 2.5,
+        "debounce_seconds": 7.0,
+        "batch_size": 12,
+        "history_load_count": 40,
+        "reply_style": "playful",
+        "custom_prompt": "多接梗，少说教。",
+        "tools_enabled": False,
+        "sticker_mode": "rarely",
+        "slang_enabled": True,
+        "presence_mode": "silent_learn",
+        "source": "source_front_matter",
+    }
+    # Group 22222: only the parsable field should land in draft.
+    assert overrides["22222"] == {
+        "custom_prompt": "仅保留可解析字段",
+        "source": "source_front_matter",
+    }
+
+    invalid_codes = [issue.code for issue in result.report.issues]
+    assert invalid_codes.count("invalid_group_profile_field") == 6
+    invalid_paths = {
+        issue.key_path
+        for issue in result.report.issues
+        if issue.code == "invalid_group_profile_field"
+    }
+    assert invalid_paths == {
+        "per_group_overrides.22222.reply_style",
+        "per_group_overrides.22222.sticker_mode",
+        "per_group_overrides.22222.presence_mode",
+        "per_group_overrides.22222.at_only",
+        "per_group_overrides.22222.batch_size",
+        "per_group_overrides.22222.blocked_users",
+    }
+
+    # Every field that landed has its own ReportField.
+    landed_keys = {
+        field.key_path
+        for field in result.report.fields
+        if field.file == "runtime.yaml"
+        and field.key_path.startswith("per_group_overrides.11111.")
+    }
+    assert "per_group_overrides.11111.blocked_users" in landed_keys
+    assert "per_group_overrides.11111.history_load_count" in landed_keys
+    assert "per_group_overrides.11111.presence_mode" in landed_keys
+
+
 def test_persona_importer_loads_part_b_defaults_and_module_switches(tmp_path: Path) -> None:
     source = MINIMAL_SOURCE + """
 
@@ -487,3 +582,86 @@ def test_filter_items_with_source_span_drops_unanchored_items() -> None:
     ]
 
     assert filter_items_with_source_span(items) == [items[0]]
+
+
+def _write_persona_dir(tmp_path: Path, source_text: str) -> tuple[Path, Path, Path]:
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(source_text, encoding="utf-8")
+    return persona_root, defaults, source_dir
+
+
+def test_persona_importer_legacy_instruction_md_opt_out_default(tmp_path: Path) -> None:
+    persona_root, defaults, source_dir = _write_persona_dir(tmp_path, MINIMAL_SOURCE)
+    legacy_path = source_dir / "instruction.md"
+    legacy_path.write_text("- 不读这个文件\n", encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    assert all(field.extractor != "legacy_instruction_md_opt_in" for field in result.report.fields)
+    instructions = result.draft["guard.yaml"]["behavior_instructions"]
+    assert all("不读这个文件" not in (item.get("text", "")) for item in instructions["items"])
+
+
+def test_persona_importer_legacy_instruction_md_appends_items(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE.replace(
+        "language: zh-CN\n---",
+        'language: zh-CN\nlegacy_instruction_md: true\nlegacy_instruction_md_path: "./instruction.md"\n---',
+    ) + """
+
+# 8.4 行为指令
+
+- source 内的指令
+"""
+    persona_root, defaults, source_dir = _write_persona_dir(tmp_path, source)
+    legacy_path = source_dir / "instruction.md"
+    legacy_path.write_text(
+        "# 底线\n\n- 长度：默认只回一句话\n- 不用 Markdown\n",
+        encoding="utf-8",
+    )
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    items = result.draft["guard.yaml"]["behavior_instructions"]["items"]
+    assert items[0]["text"] == "source 内的指令"
+    assert [item["text"] for item in items[1:]] == ["长度：默认只回一句话", "不用 Markdown"]
+    assert items[1]["origin_anchor"].startswith("instruction.md#L")
+    assert items[1]["review_status"] == "candidate"
+
+    extractors = [field.extractor for field in result.report.fields if field.file == "guard.yaml"]
+    assert extractors.count("legacy_instruction_md_opt_in") == 2
+    assert any(field.extractor == "behavior_instruction_md" for field in result.report.fields)
+
+
+def test_persona_importer_legacy_instruction_md_path_missing(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE.replace(
+        "language: zh-CN\n---",
+        "language: zh-CN\nlegacy_instruction_md: true\n---",
+    )
+    persona_root, defaults, _ = _write_persona_dir(tmp_path, source)
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    codes = [issue.code for issue in result.report.issues]
+    assert "legacy_instruction_md_path_missing" in codes
+    assert all(field.extractor != "legacy_instruction_md_opt_in" for field in result.report.fields)
+
+
+def test_persona_importer_legacy_instruction_md_file_not_found(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE.replace(
+        "language: zh-CN\n---",
+        'language: zh-CN\nlegacy_instruction_md: true\nlegacy_instruction_md_path: "./does-not-exist.md"\n---',
+    )
+    persona_root, defaults, _ = _write_persona_dir(tmp_path, source)
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    codes = [issue.code for issue in result.report.issues]
+    assert "legacy_instruction_md_file_not_found" in codes
+    assert all(field.extractor != "legacy_instruction_md_opt_in" for field in result.report.fields)

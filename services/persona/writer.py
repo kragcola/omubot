@@ -10,7 +10,7 @@ from typing import Any
 import yaml
 
 from .builder import DEFAULT_TEMPLATE_FILES, DRAFT_YAML_FILES, build_persona_draft
-from .models import ImportResult
+from .models import ImportResult, LegacyInstructionPayload
 from .parser import parse_source_file
 
 
@@ -45,7 +45,8 @@ class PersonaDraftWriter:
         source = Path(source_path) if source_path is not None else self.persona_root / namespace / "source.md"
         document = parse_source_file(source)
         defaults = self.load_defaults()
-        result = build_persona_draft(document, defaults=defaults)
+        legacy_instruction = self._load_legacy_instruction(document.frontmatter, source)
+        result = build_persona_draft(document, defaults=defaults, legacy_instruction=legacy_instruction)
         result.persona_id = persona_namespace(result.persona_id if result.persona_id != "unknown-v2" else persona_id)
         result.report.persona_id = result.persona_id
         if strict and result.report.has_errors:
@@ -53,6 +54,31 @@ class PersonaDraftWriter:
         if write:
             self.write_draft(result)
         return result
+
+    @staticmethod
+    def _load_legacy_instruction(
+        frontmatter: dict[str, Any],
+        source_file: Path,
+    ) -> LegacyInstructionPayload:
+        flag = frontmatter.get("legacy_instruction_md")
+        if not bool(flag):
+            return LegacyInstructionPayload(state="disabled")
+
+        raw_path = frontmatter.get("legacy_instruction_md_path")
+        path_text = str(raw_path).strip() if raw_path is not None else ""
+        if not path_text:
+            return LegacyInstructionPayload(state="path_missing")
+
+        target = Path(path_text).expanduser()
+        if not target.is_absolute():
+            target = (source_file.parent / target).resolve()
+        if not target.is_file():
+            return LegacyInstructionPayload(state="file_not_found", display_path=path_text)
+        try:
+            text = target.read_text(encoding="utf-8")
+        except OSError:
+            return LegacyInstructionPayload(state="file_not_found", display_path=path_text)
+        return LegacyInstructionPayload(state="loaded", display_path=target.name, text=text)
 
     def load_defaults(self) -> dict[str, dict[str, Any]]:
         defaults: dict[str, dict[str, Any]] = {}

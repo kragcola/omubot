@@ -123,6 +123,37 @@ def bullet_items(section: SourceSection | None, *, source_file: str = "source.md
     return fields
 
 
+def bullet_items_from_text(
+    text: str,
+    *,
+    source_file: str,
+    base_line: int = 1,
+) -> list[SourceField]:
+    """Extract bullet/numbered items from a free-floating block of text.
+
+    Used for opt-in legacy markdown sources that have no parsed `SourceSection`
+    container. Line numbers are reported as `base_line + offset` against the
+    given `source_file` anchor.
+    """
+    fields: list[SourceField] = []
+    for offset, line in enumerate(normalize_text(text).split("\n")):
+        match = _BULLET_RE.match(line) or _NUMBERED_RE.match(line)
+        if not match:
+            continue
+        value = clean_inline(match.group(1))
+        if not value:
+            continue
+        line_no = base_line + offset
+        fields.append(
+            SourceField(
+                key="item",
+                value=value,
+                span=SourceSpan(source_file, (line_no, line_no)),
+            )
+        )
+    return fields
+
+
 def first_prefixed_value(
     section: SourceSection | None,
     prefix: str,

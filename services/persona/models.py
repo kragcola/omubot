@@ -137,3 +137,23 @@ class ImportResult:
     draft: dict[str, dict[str, Any]]
     modules_readme: str
     report: ImportReport
+
+
+@dataclass(frozen=True)
+class LegacyInstructionPayload:
+    """Opt-in legacy `instruction.md` content piped into the importer.
+
+    Built by the writer (or any caller) so the builder stays I/O-free. Each
+    `state` describes how the importer should treat the payload:
+
+    - `disabled` — no opt-in, builder ignores legacy entirely (default).
+    - `path_missing` — opt-in but `legacy_instruction_md_path` not provided.
+    - `file_not_found` — opt-in path provided but file does not exist.
+    - `loaded` — file present and read; bullets in `text` get appended to
+      `guard.yaml.behavior_instructions.items[]` with extractor
+      `legacy_instruction_md_opt_in`.
+    """
+
+    state: Literal["disabled", "path_missing", "file_not_found", "loaded"] = "disabled"
+    display_path: str = ""
+    text: str = ""
