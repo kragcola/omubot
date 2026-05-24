@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-05-24 Persona Runtime Cutover B1 — 协议层 + 配置层 + runtime 入口骨架
+
+**变更类型**：persona runtime cutover / config / tests / docs
+
+**内容**：按 [persona-runtime-cutover-B1-execution.md](docs/tracking/persona-runtime-cutover-B1-execution.md) 落地 B1 全部 5 个子任务，4 个 feature flag 默认全 off，`PromptBuilder` / `LLMClient` / `GroupChatScheduler` / admin Soul SPA 编辑入口本期完全不动。
+
+- B1.1（commit `12cecca` 内）— `kernel/config.py` 新增 `PersonaV2Config`：`runtime_consume=false` / `shadow_compare=false` / `runtime_groups=[]` / `fallback_on_compile_error=true` / `persona_id=”default”`；`BotConfig.persona_v2` 字段挂载（紧邻 `backup`）；`runtime_groups` 用 `field_validator(mode=”before”)` 把 int 强制 stringify + 去除空白条目；TOML 段名 `[persona_v2]` 与 Pydantic 字段名直接对齐（避免 tomllib 把 `[persona.v2]` 解成嵌套 dict）；`tests/test_persona_runtime_config.py` 新增 6 条。
+- B1.2 — `_pending_freeze/<id>/` runtime 消费协议落字：`_persona_runtime.json` schema_version=1.0 + persona_id + frozen_at + source_sha256；6 必需文件 + 8 可选；8 个 error code 中仅 `schema_version_major_mismatch` 是硬熔断，`source_sha256_drift` 仅 warn。设计文落 [B1 execution doc §3](docs/tracking/persona-runtime-cutover-B1-execution.md)，实现文落 `services/persona/runtime.py` 顶部 docstring。
+- B1.3（commit `dfc7c38`）— `services/persona/compiler.py` 抽 `_compile_internal(writer, persona_id, *, mode)` 共享主体；`compile_persona_dry_run` 读 `.draft/`、新增 `compile_persona_runtime` 读 `_pending_freeze/`，差别仅在路径解析 + mode 标记；yaml 解析失败返 `ok=False, errors=(“yaml parse error: ...”,)` 而非 raise；`tests/test_persona_compiler.py` 新增 4 条（含 dry_run vs runtime byte-equal 不变量 + yaml-error 不 raise）。
+- B1.4（commit `a9a2eb6`）— 新增 `services/persona/runtime.py::load_pending_freeze()` + `PersonaRuntimeBundle` dataclass（`persona_id` / `schema_version` / `source_sha256` / `compile_result` / `pending_freeze_dir` / `warnings` / `errors`，`ok` 属性聚合）；`writer.pending_freeze()` 同 commit 增写 `_persona_runtime.json`（meta）；7 条 loader 回归（None / happy / meta 缺失 / MAJOR mismatch / 漂移仅 warn / yaml 错 / meta 损坏均不 raise）。
+- B1.5（本 commit）— `docs/migrations/persona-v2-importer.md` 追加 §12 “Runtime Cutover B1 — 协议层 + 配置层 + runtime 入口骨架”；B1 execution doc §7 状态表 4 行从 ⏳ 改为 ✅ 并回填 commit hash；本条维护日志条目。
+
+**影响**：v2 切流入口骨架到位但 caller=0；`load_pending_freeze` / `PersonaRuntimeBundle` 仅由 `services/persona/` + `tests/` 引用，runtime 路径（`PromptBuilder` / `LLMClient` / `bot.py` / `kernel/`）零命中（D1 同模式扫描通过）。`config.toml` 缺 `[persona_v2]` 段时走 Pydantic 默认值，老用户机器升级后行为 0 变化；新增 flag 不暴露 env / CLI 映射，仅走 toml 让 D7 git hygiene 生效。`_pending_freeze/<id>/` 既有产出方式（admin SPA Pending Freeze 入口）不改，writer 在原有 yaml + source.frozen.md 之外多写一个 `_persona_runtime.json` meta，下游既有 caller（admin parity API、importer CLI）不读这个文件，对它们透明。
+
+**验证**：targeted `pytest tests/test_persona_runtime_config.py tests/test_persona_compiler.py tests/test_persona_runtime_loader.py tests/test_persona_importer.py tests/test_persona_importer_api.py tests/test_persona_parity_audit.py tests/test_system_module.py -q` 通过；targeted `ruff check kernel/config.py services/persona/ tests/test_persona_*.py` 通过；`pyright services/persona/runtime.py services/persona/writer.py` 0 errors（compiler.py 既有 25 条 `Optional[dict].get` 噪声出 B1 范围，pyright 噪声不在本 commit 引入）；D1 同模式扫描 `grep -rn 'load_pending_freeze\|PersonaRuntimeBundle' --include='*.py'` 仅命中 `services/persona/runtime.py` / `services/persona/__init__.py` / `tests/test_persona_runtime_loader.py`，runtime 路径零命中。
+
+**回滚路径**：revert B1.1 / B1.3 / B1.4 / B1.5 commits 各自独立——撤销 `kernel/config.py::PersonaV2Config`、`compiler.py::_compile_internal()`/`compile_persona_runtime`、`runtime.py`、`writer.pending_freeze()` meta 写入、对应 4 套测试、迁移清单 §12、B1 execution doc §7 状态表与本条维护日志即可；A 档已归档 commits（`a0e54d1` / `4711b4d` / S12'/GroupOverride/Legacy 三条旁支）不受影响；下游 admin parity API 与 importer CLI 不读 `_persona_runtime.json`，撤回 meta 写入对它们透明。
+
+---
+
 ## 2026-05-24 Persona A 档 dry-run 扩展 A4/A5 收口
 
 **变更类型**：admin/frontend 体验 + tracking docs / maintenance-log

@@ -156,3 +156,19 @@
 | opt-in 但缺路径 / 路径不存在时无信号 | 落 warn issue `legacy_instruction_md_path_missing` / `legacy_instruction_md_file_not_found`，不阻断 import、不读任何文件 | ✅ 已实现 |
 | compiler dry-run `core.guard` 行为指令拼接 | 自动覆盖 legacy 追加项（`behavior_instructions.items[]` 已经是统一来源） | ✅ 已实现，无需 compiler 改动 |
 | 正式 runtime 切流 | 仍由 v1 `PromptBuilder._instruction` 直接读 `config/soul/instruction.md`，不走 v2 importer | ⏳ 后续 |
+
+## 12. Runtime Cutover B1 — 协议层 + 配置层 + runtime 入口骨架
+
+> 上游：[persona-runtime-cutover-B1-execution.md](../tracking/persona-runtime-cutover-B1-execution.md)
+>
+> 本节仅记录 runtime 切流前的协议骨架；4 个 feature flag 默认全 off，`PromptBuilder` / `LLMClient` / `GroupChatScheduler` 在本期完全不动。
+
+| 旧状态 / 旧入口 | 新状态 / 新入口 | 状态 |
+|---|---|---|
+| `BotConfig` 无 v2 切流 flag | `BotConfig.persona_v2`（`PersonaV2Config`）落地：`runtime_consume=false` / `shadow_compare=false` / `runtime_groups=[]` / `fallback_on_compile_error=true` / `persona_id="default"`；TOML 段名 `[persona_v2]` 与 Pydantic 字段名直接对齐 | ✅ 已实现；`tests/test_persona_runtime_config.py` 6 条锁默认值 + TOML round-trip |
+| compiler 仅 `compile_persona_dry_run` 单入口（读 `.draft/`） | 抽 `_compile_internal(writer, persona_id, *, mode)` 共享主体，新增 `compile_persona_runtime` 读 `_pending_freeze/`；`mode` 字段 `dry_run`/`runtime` 区分日志锚点 | ✅ 已实现；`tests/test_persona_compiler.py` 锁 byte-equal 不变量 + yaml-error 不 raise |
+| `_pending_freeze/<id>/` 仅 yaml + source.frozen.md | 同 commit 增写 `_persona_runtime.json`（`schema_version=1.0` + `persona_id` + `frozen_at` + `source_sha256`），与 runtime 协议对齐 | ✅ 已实现 |
+| runtime 无 v2 入口 | 新增 `services/persona/runtime.load_pending_freeze()` + `PersonaRuntimeBundle`；MAJOR mismatch 是唯一硬熔断，source 漂移仅 warn；永不 raise | ✅ 已实现；`tests/test_persona_runtime_loader.py` 7 条锁 None / happy / meta 缺失 / MAJOR mismatch / 漂移 warn / yaml 错 / meta 损坏 |
+| Shadow compare 双算 | 暂未接入（B2 范围） | ⏳ 后续 |
+| PromptBuilder / LLMClient 注入 v2 prompt blocks | 暂未接入（B3 范围） | ⏳ 后续 |
+| 正式 runtime 切流 | 4 flag 全 off；caller=0；`grep -rn 'load_pending_freeze\|PersonaRuntimeBundle' --include='*.py'` 在 `PromptBuilder`/`LLMClient`/`bot.py`/`kernel/` 零命中（D1 同模式扫描通过） | ⏳ 后续（B2~B6） |

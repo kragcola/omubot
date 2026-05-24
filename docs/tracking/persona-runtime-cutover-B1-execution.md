@@ -391,11 +391,11 @@ flag-gated; runtime_consume defaults off; PromptBuilder/LLMClient unchanged.
 
 | 编号 | 状态 | 落地证据 |
 |---|---|---|
-| B1.1 | ⏳ 待执行 | `kernel/config.py::PersonaV2Config` + `BotConfig.persona_v2` 字段；`tests/test_persona_runtime_config.py` |
-| B1.2 | ✅ 协议设计落字（本文 §3） | runtime 消费协议章节已落；后续在 B1.4 写入 runtime.py docstring |
-| B1.3 | ⏳ 待执行 | `services/persona/compiler.py::compile_persona_runtime`；`tests/test_persona_compiler.py` 新增 4 条 |
-| B1.4 | ⏳ 待执行 | `services/persona/runtime.py::load_pending_freeze` + `PersonaRuntimeBundle`；`tests/test_persona_runtime_loader.py` |
-| B1.5 | ⏳ 待执行 | maintenance-log 当日条目 + migration doc 追加旧→新行 |
+| B1.1 | ✅ 已落地 | commit `12cecca` — `kernel/config.py::PersonaV2Config` + `BotConfig.persona_v2` 字段；`tests/test_persona_runtime_config.py` 6 条全绿 |
+| B1.2 | ✅ 协议设计落字（本文 §3） | runtime 消费协议章节已落；后续在 B1.4 写入 runtime.py docstring（已落） |
+| B1.3 | ✅ 已落地 | commit `dfc7c38` — `services/persona/compiler.py::compile_persona_runtime` + `_compile_internal()`；`tests/test_persona_compiler.py` 新增 4 条全绿（含 byte-equal 不变量 + yaml-error 不 raise） |
+| B1.4 | ✅ 已落地 | commit `a9a2eb6` — `services/persona/runtime.py::load_pending_freeze` + `PersonaRuntimeBundle`；`writer.pending_freeze()` 同 commit 增写 `_persona_runtime.json`；`tests/test_persona_runtime_loader.py` 7 条全绿 |
+| B1.5 | 🔄 进行中 | 当前 commit — maintenance-log 当日条目 + `docs/migrations/persona-v2-importer.md §12` + 本表回填 |
 
 ---
 
