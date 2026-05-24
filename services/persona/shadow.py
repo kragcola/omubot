@@ -36,22 +36,13 @@ from loguru import logger
 from kernel.config import PersonaV2Config
 from services.identity import Identity
 
-from .compiler import CompilePromptBlock
 from .parity_audit import GroupOverrideSnapshot, compare_v1_vs_v2_dry_run
 from .runtime import PersonaRuntimeBundle, load_pending_freeze
+from .runtime_selector import join_static_blocks
 
 _L = logger.bind(channel="persona_shadow")
 
 DEFAULT_SHADOW_LOG_PATH = Path("storage/persona_shadow_diff.log")
-
-_STATIC_BLOCK_ORDER: tuple[str, ...] = (
-    "core.identity",
-    "runtime.adapter",
-    "core.guard",
-    "core.voice",
-    "core.knowledge",
-    "core.examples",
-)
 
 
 @dataclass(frozen=True)
@@ -176,7 +167,7 @@ class ShadowCompareEngine:
                 v1_text_len=len(self._v1_static_text),
             )
 
-        v2_text = _join_static_blocks(bundle.compile_result.prompt_blocks)
+        v2_text = join_static_blocks(bundle)
         v1_signature = _sha256_text(self._v1_static_text)
         v2_signature = _sha256_text(v2_text)
 
@@ -275,16 +266,6 @@ class ShadowCompareEngine:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
-
-
-def _join_static_blocks(blocks: tuple[CompilePromptBlock, ...]) -> str:
-    by_id = {block.module_id: block for block in blocks if block.position == "static"}
-    parts: list[str] = []
-    for module_id in _STATIC_BLOCK_ORDER:
-        block = by_id.get(module_id)
-        if block is not None and block.text:
-            parts.append(block.text)
-    return "\n\n".join(parts)
 
 
 def _empty_identity() -> Identity:

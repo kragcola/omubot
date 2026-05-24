@@ -21,6 +21,12 @@ from .parity_audit import (
 )
 from .parser import parse_source_markdown
 from .runtime import PersonaRuntimeBundle, load_pending_freeze
+from .runtime_selector import (
+    PersonaRuntimeSelector,
+    RuntimeSelection,
+    RuntimeSelectorCounter,
+    join_static_blocks,
+)
 from .shadow import (
     DEFAULT_SHADOW_LOG_PATH,
     ShadowCompareEngine,
@@ -42,6 +48,9 @@ __all__ = [
     "PersonaDraftWriter",
     "PersonaLLMExtractor",
     "PersonaRuntimeBundle",
+    "PersonaRuntimeSelector",
+    "RuntimeSelection",
+    "RuntimeSelectorCounter",
     "ShadowCompareEngine",
     "ShadowCounter",
     "ShadowDiffReport",
@@ -51,6 +60,7 @@ __all__ = [
     "compile_persona_dry_run",
     "compile_persona_runtime",
     "filter_items_with_source_span",
+    "join_static_blocks",
     "load_pending_freeze",
     "parse_source_markdown",
 ]
