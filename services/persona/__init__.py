@@ -20,6 +20,7 @@ from .parity_audit import (
     compare_v1_vs_v2_dry_run,
 )
 from .parser import parse_source_markdown
+from .runtime import PersonaRuntimeBundle, load_pending_freeze
 from .writer import PersonaDraftWriter
 
 __all__ = [
@@ -33,11 +34,13 @@ __all__ = [
     "ParityReport",
     "PersonaDraftWriter",
     "PersonaLLMExtractor",
+    "PersonaRuntimeBundle",
     "SourceDocument",
     "build_persona_draft",
     "compare_v1_vs_v2_dry_run",
     "compile_persona_dry_run",
     "compile_persona_runtime",
     "filter_items_with_source_span",
+    "load_pending_freeze",
     "parse_source_markdown",
 ]

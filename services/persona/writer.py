@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,8 @@ import yaml
 from .builder import DEFAULT_TEMPLATE_FILES, DRAFT_YAML_FILES, build_persona_draft
 from .models import ImportResult, LegacyInstructionPayload
 from .parser import parse_source_file
+
+PENDING_FREEZE_SCHEMA_VERSION = "1.0"
 
 
 def persona_namespace(persona_id: str) -> str:
@@ -162,12 +166,27 @@ class PersonaDraftWriter:
         shutil.copytree(draft_dir, target)
 
         source = self.source_path(namespace)
+        source_sha256 = ""
         if source.is_file():
             shutil.copy2(source, target / "source.frozen.md")
+            source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+
+        meta = {
+            "schema_version": PENDING_FREEZE_SCHEMA_VERSION,
+            "persona_id": namespace,
+            "frozen_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source_sha256": source_sha256,
+        }
+        (target / "_persona_runtime.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         return {
             "ok": True,
             "mode": "pending_freeze",
             "persona_id": namespace,
             "path": str(target),
             "report": report,
+            "schema_version": PENDING_FREEZE_SCHEMA_VERSION,
+            "source_sha256": source_sha256,
         }
