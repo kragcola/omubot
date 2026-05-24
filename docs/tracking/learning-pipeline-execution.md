@@ -934,3 +934,34 @@
 - L2：memory deep link 已支持 `card_id` 定位并自动打开 Drawer。
 - L3：trimmed prompt block 已计入 hits observation，rejected 仍不计。
 - L4：extract-all 已支持 `run_id` 查询和前端进度轮询。
+
+---
+
+## NS-1 待办：noun switcher today_delta（v1.1）
+
+**状态**：v1（2026-05-24）只做前端切换器视觉重构，今日增量信号留作 v1.1。
+
+**背景**：v1 把 `NounSwitcher` 从 38px 平 chip 升级为 76px Header Tabs（eyebrow + 中文标签 + 总数 + 主色下边框），让它读起来是「主轴切换」而非「filter chip 组」。但「哪个词条今天活跃」这个发现性信号仍依赖 stage 总数，没有直观的 today-delta。
+
+**已论证不在 v1 范围**：`/api/admin/learning/pipeline` 显式不做日期切片（参见 [admin/routes/api/learning_pipeline.py:70](../../admin/routes/api/learning_pipeline.py#L70) `del date  # Stage counts are inventory snapshots`），candidates 是库存快照而非时序流。要拿 today_delta 必须要么扩 API，要么再发一组 `date=today` 二次请求——前者更干净，后者费 5×N 库查询。
+
+**v1.1 要做的事**：
+
+| 文件 | 改动 | 说明 |
+| --- | --- | --- |
+| `admin/routes/api/learning_pipeline.py` | 编辑 | `learning_pipeline()` 增加 `today_delta` 顶层字段：`{slang: int, style: int, episode: int, memory: int, fact: int, graph_relation: int}`；以 candidate 阶段的 `created_at >= today_start()` 为口径；保留现有 STAGES 库存语义不变 |
+| `admin/routes/api/learning_pipeline.py` | 编辑 | 给现有 `_collect_*_counts` 各添加一条 today-only 计数；consolidator 路径要按 domain 分桶；memory 走 cards 表（无候选态时 today_delta = 0） |
+| `admin/frontend/src/views/learning/types.ts` | 编辑 | `LearningPipelineResponse` 增加 `today_delta?: Record<LearningNounKey, number \| null>` |
+| `admin/frontend/src/views/learning/LearningView.vue` | 编辑 | 在 `:by-noun` 之外新增 `:today-delta` prop 透传给 NounSwitcher |
+| `admin/frontend/src/views/learning/components/NounSwitcher.vue` | 编辑 | tab 底部 `__body` 增加第三行「+N 今日」(空时省略)；空增量保持现 64px 高度，有增量时撑到 78px |
+| `tests/test_admin_api_learning_pipeline.py` | 编辑 | 新增 today_delta 覆盖：跨 noun、跨群、空增量、零库存 |
+
+**验证矩阵**：
+
+- `.venv/bin/python -m pytest tests/test_admin_api_learning_pipeline.py -q` → 全绿
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit && npm run build` → 通过
+- 浏览器手测：连续在群 A/B 抽取黑话，刷新 NounSwitcher，确认 SLANG tab 出现 `+N 今日`；其他 tab 不动
+
+**回滚路径**：单独 PR；后端 + 前端同 PR；rollback `git revert <hash>` 即可，不影响 v1 切换器视觉。
+
+**触发条件**：用户提示「现在切换器看不出来哪个词条今天热」或类似表达；或 v1 上线 7 天后人工巡检发现总数稳态、tab 之间区分度不够。

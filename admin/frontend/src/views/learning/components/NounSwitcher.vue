@@ -33,6 +33,16 @@ const ICONS: Record<LearningNounFilter, Component> = {
   graph_relation: GitNetworkOutline,
 }
 
+const EYEBROWS: Record<LearningNounFilter, string> = {
+  all: 'ALL',
+  slang: 'SLANG',
+  style: 'STYLE',
+  episode: 'EPISODE',
+  memory: 'MEMORY',
+  fact: 'FACT',
+  graph_relation: 'RELATION',
+}
+
 function countFor(value: LearningNounFilter): number | null {
   if (props.loading) return null
   if (value === 'all') return props.total
@@ -59,92 +69,136 @@ function handleSelect(value: LearningNounFilter) {
 
 <template>
   <nav class="noun-switcher" role="tablist" aria-label="学习管道词条">
-    <button
-      v-for="opt in options"
-      :key="opt.value"
-      type="button"
-      role="tab"
-      :aria-selected="opt.value === active"
-      class="noun-switcher__item"
-      :class="{
-        'noun-switcher__item--active': opt.value === active,
-        'noun-switcher__item--empty': isEmpty(opt.value),
-        'noun-switcher__item--all': opt.value === 'all',
-      }"
-      @click="handleSelect(opt.value)"
-    >
-      <span class="noun-switcher__icon">
-        <NIcon :component="ICONS[opt.value]" :size="16" />
-      </span>
-      <span class="noun-switcher__label">{{ opt.label }}</span>
-      <span class="noun-switcher__count">{{ formatCount(countFor(opt.value)) }}</span>
-    </button>
+    <span class="noun-switcher__eyebrow" aria-hidden="true">学习词条主轴</span>
+    <div class="noun-switcher__rail">
+      <button
+        v-for="opt in options"
+        :key="opt.value"
+        type="button"
+        role="tab"
+        :aria-selected="opt.value === active"
+        class="noun-switcher__tab"
+        :class="{
+          'noun-switcher__tab--active': opt.value === active,
+          'noun-switcher__tab--empty': isEmpty(opt.value),
+          'noun-switcher__tab--all': opt.value === 'all',
+        }"
+        @click="handleSelect(opt.value)"
+      >
+        <span class="noun-switcher__head">
+          <span class="noun-switcher__icon">
+            <NIcon :component="ICONS[opt.value]" :size="16" />
+          </span>
+          <span class="noun-switcher__tag">{{ EYEBROWS[opt.value] }}</span>
+        </span>
+        <span class="noun-switcher__body">
+          <span class="noun-switcher__label">{{ opt.label }}</span>
+          <span class="noun-switcher__count">{{ formatCount(countFor(opt.value)) }}</span>
+        </span>
+      </button>
+    </div>
   </nav>
 </template>
 
 <style scoped>
 .noun-switcher {
+  position: relative;
   display: flex;
-  flex-wrap: wrap;
-  align-items: stretch;
-  gap: 6px;
-  padding: 6px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 14px 0;
   border: 1px solid var(--om-border);
-  border-radius: 14px;
+  border-radius: 16px;
   background: var(--om-surface-2);
 }
 
-.noun-switcher__item {
+.noun-switcher__eyebrow {
+  color: var(--om-text-3);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.noun-switcher__rail {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin: 0 -4px;
+  padding: 0 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.noun-switcher__rail::-webkit-scrollbar {
+  display: none;
+}
+
+.noun-switcher__tab {
   position: relative;
   display: inline-flex;
-  align-items: center;
+  flex: 1 1 0;
+  flex-direction: column;
+  justify-content: space-between;
   gap: 8px;
-  height: 38px;
-  padding: 0 14px;
+  min-width: 124px;
+  height: 76px;
+  padding: 10px 14px 14px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-bottom: 3px solid transparent;
+  border-radius: 12px 12px 0 0;
   background: transparent;
   color: var(--om-text-2);
+  text-align: left;
   cursor: pointer;
   transition:
     background-color 160ms ease,
     border-color 160ms ease,
     color 160ms ease,
-    transform 160ms ease,
     box-shadow 160ms ease;
 }
 
-.noun-switcher__item:hover:not(.noun-switcher__item--active) {
-  border-color: var(--om-border);
-  background: color-mix(in srgb, var(--om-surface-solid) 70%, transparent);
+.noun-switcher__tab:hover:not(.noun-switcher__tab--active) {
+  background: color-mix(in srgb, var(--om-surface-solid) 60%, transparent);
   color: var(--om-text-1);
-  transform: translateY(-1px);
 }
 
-.noun-switcher__item--active {
-  border-color: color-mix(in srgb, rgb(var(--primary-color)) 28%, transparent);
+.noun-switcher__tab--active {
+  border-color: var(--om-border);
+  border-bottom-color: rgb(var(--primary-color));
   background: var(--om-surface-solid);
-  color: rgb(var(--primary-color));
-  box-shadow: var(--om-shadow-sm), inset 0 -2px 0 rgb(var(--primary-color));
+  color: var(--om-text-1);
+  box-shadow: var(--om-shadow-sm);
 }
 
-.noun-switcher__item--all::after {
+.noun-switcher__tab--all::after {
   position: absolute;
-  top: 8px;
-  right: -1px;
-  bottom: 8px;
+  top: 14px;
+  right: -3px;
+  bottom: 14px;
   width: 1px;
   background: var(--om-border);
   content: '';
 }
 
-.noun-switcher__item--all {
+.noun-switcher__tab--all {
+  flex-grow: 0;
+  flex-basis: 132px;
   margin-right: 6px;
-  padding-right: 18px;
 }
 
-.noun-switcher__item--empty:not(.noun-switcher__item--active) {
-  opacity: 0.62;
+.noun-switcher__tab--all.noun-switcher__tab--active::after {
+  display: none;
+}
+
+.noun-switcher__tab--empty:not(.noun-switcher__tab--active) {
+  opacity: 0.6;
+}
+
+.noun-switcher__head {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .noun-switcher__icon {
@@ -154,41 +208,54 @@ function handleSelect(value: LearningNounFilter) {
   color: currentColor;
 }
 
+.noun-switcher__tag {
+  color: var(--om-text-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.noun-switcher__tab--active .noun-switcher__tag {
+  color: rgb(var(--primary-color));
+}
+
+.noun-switcher__body {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .noun-switcher__label {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
   letter-spacing: 0.01em;
   white-space: nowrap;
 }
 
 .noun-switcher__count {
-  min-width: 28px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--om-text-3) 14%, transparent);
   color: var(--om-text-2);
   font-variant-numeric: tabular-nums;
-  font-size: 11.5px;
-  font-weight: 600;
-  text-align: center;
-  line-height: 1.5;
-  transition:
-    background-color 160ms ease,
-    color 160ms ease;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
 }
 
-.noun-switcher__item--active .noun-switcher__count {
-  background: color-mix(in srgb, rgb(var(--primary-color)) 16%, transparent);
+.noun-switcher__tab--active .noun-switcher__count {
   color: rgb(var(--primary-color));
 }
 
 @media (max-width: 880px) {
-  .noun-switcher {
-    overflow-x: auto;
+  .noun-switcher__rail {
     flex-wrap: nowrap;
   }
 
-  .noun-switcher__item--all::after {
+  .noun-switcher__tab {
+    flex: 0 0 132px;
+  }
+
+  .noun-switcher__tab--all::after {
     display: none;
   }
 }
