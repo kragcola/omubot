@@ -169,6 +169,6 @@
 | compiler 仅 `compile_persona_dry_run` 单入口（读 `.draft/`） | 抽 `_compile_internal(writer, persona_id, *, mode)` 共享主体，新增 `compile_persona_runtime` 读 `_pending_freeze/`；`mode` 字段 `dry_run`/`runtime` 区分日志锚点 | ✅ 已实现；`tests/test_persona_compiler.py` 锁 byte-equal 不变量 + yaml-error 不 raise |
 | `_pending_freeze/<id>/` 仅 yaml + source.frozen.md | 同 commit 增写 `_persona_runtime.json`（`schema_version=1.0` + `persona_id` + `frozen_at` + `source_sha256`），与 runtime 协议对齐 | ✅ 已实现 |
 | runtime 无 v2 入口 | 新增 `services/persona/runtime.load_pending_freeze()` + `PersonaRuntimeBundle`；MAJOR mismatch 是唯一硬熔断，source 漂移仅 warn；永不 raise | ✅ 已实现；`tests/test_persona_runtime_loader.py` 7 条锁 None / happy / meta 缺失 / MAJOR mismatch / 漂移 warn / yaml 错 / meta 损坏 |
-| Shadow compare 双算 | 暂未接入（B2 范围） | ⏳ 后续 |
+| Shadow compare 双算 | `services/persona/shadow.py::ShadowCompareEngine` + `ShadowDiffReport` + `ShadowCounter`；`kernel/router.py::_on_connect` flag-gated hook（24 行，shadow_compare=off 时零代码路径变化）；JSONL log 落 `storage/persona_shadow_diff.log`；复用 `parity_audit.compare_v1_vs_v2_dry_run` 收 `divergent_axes` | ✅ 已实现；详见 [persona-runtime-cutover-B2-execution.md](../tracking/persona-runtime-cutover-B2-execution.md)；`tests/test_persona_shadow.py` 5 条锁 flag off / happy / bundle 缺失 / divergent / cancel-path |
 | PromptBuilder / LLMClient 注入 v2 prompt blocks | 暂未接入（B3 范围） | ⏳ 后续 |
 | 正式 runtime 切流 | 4 flag 全 off；caller=0；`grep -rn 'load_pending_freeze\|PersonaRuntimeBundle' --include='*.py'` 在 `PromptBuilder`/`LLMClient`/`bot.py`/`kernel/` 零命中（D1 同模式扫描通过） | ⏳ 后续（B2~B6） |

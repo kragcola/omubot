@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-05-24 Persona Runtime Cutover B2 — Shadow Compare 双算 + diff 日志
+
+**变更类型**：persona runtime cutover / shadow / kernel hook / tests / docs
+
+**内容**：按 [persona-runtime-cutover-B2-execution.md](docs/tracking/persona-runtime-cutover-B2-execution.md) 落地 B2 全部 5 个子任务；shadow_compare flag 默认 off，`PromptBuilder` / `LLMClient` / `GroupChatScheduler` 本期完全不动，仅 `kernel/router.py::_on_connect` 一处 flag-gated hook。
+
+- B2.1+B2.2（commit `08761e9`）— 新增 `services/persona/shadow.py::ShadowCompareEngine` + `ShadowDiffReport`（frozen dataclass，11 字段含 timestamp / persona_id / source_sha256 / compile_signature / v1_signature / has_divergence / divergent_axes / v1_text_len / v2_text_len / notes / errors）+ `ShadowCounter`（ok / divergent / error / last_error / last_run_at）；`run_once()` 永不 raise，`shadow_compare=False` 时直接返回 None 不写日志、counter 全 0；happy path 调 `load_pending_freeze` 拿 v2 bundle，复用 `parity_audit.compare_v1_vs_v2_dry_run` 收 `divergent_axes`，写 JSONL 一行到 `storage/persona_shadow_diff.log`（schema 见 B2 execution doc §3）；bundle 缺失或 compile 失败时 counter.error +=1 + 写带 errors 字段的日志，**不**自动 fallback（fallback 是 B3 语义）；`services/persona/__init__.py` 导出 4 个新名；`tests/test_persona_shadow.py` 5 条（flag off / happy / bundle missing / divergent v1_only admins / cancel-path D2 — `wait_for(timeout=0)` 后 counter 与 log 文件不污染）。
+- B2.3（commit `da52391`）— `kernel/router.py::_on_connect` 在 `prompt_builder.build_static(...)` 之后插 24 行 hook：`getattr(ctx.config, "persona_v2", None)` + `persona_v2_cfg.shadow_compare` 双层守卫，flag=on 才 lazy import `ShadowCompareEngine` + 构造引擎（喂 `pb.static_block.text` / `v1_identity` / `pb._instruction` / `pb._admins` / `v1_identity.proactive` / `bot.self_id`）+ `await engine.run_once()`，外层再兜 `except Exception` warn；`kernel/types.py::PluginContext` 新增 `shadow_engine: Any = None`，B6 admin SPA Runtime 切换面板有现成接入点。
+- B2.4 — counter readonly admin API 跳过本期：B2 单 connect 一次的 counter 信息有限（一行 JSONL 已是事实索引），admin SPA 真实有用要等 B3 per-turn 之后。execution doc §5 已标 `🟡 跳过本期`，B6 SPA 上线时再补。
+- B2.5（本 commit）— 文档收口：B2 execution doc §7 状态表 4 行从 ⏳ 改 ✅ 并回填 commit hash（08761e9 / 08761e9 / da52391）+ B2.4 标 🟡 跳过 + B2.5 标 🔄 进行中→✅；`docs/migrations/persona-v2-importer.md` §12 第 5 行 "Shadow compare 双算" 从 ⏳ 改为 ✅ 指向 B2 execution doc；本条维护日志条目。
+
+**影响**：v2 shadow compare 双算骨架到位但默认 off — `BotConfig().persona_v2.shadow_compare=false`（B1.1 已锁），运行时零开销（lazy import + 双层 early return）；`grep -rn 'ShadowCompareEngine\|shadow_compare' --include='*.py'` 仅命中 `services/persona/shadow.py` / `services/persona/__init__.py` / `kernel/router.py`（一处 hook）/ `kernel/types.py`（一字段）/ `tests/test_persona_shadow.py`，`PromptBuilder` / `LLMClient` / `bot.py` / `admin/routes/` 零命中（D1 同模式扫描通过）。`storage/persona_shadow_diff.log` 仅 flag=on 时落字，文件由 shadow.py 持有，与现有 `storage/logs/` 不冲突。`kernel/types.py::PluginContext.shadow_engine` 新字段对所有现有 caller 透明（默认 None；旧 caller `getattr(ctx, 'shadow_engine', None)` 也安全）。
+
+**验证**：targeted `pytest tests/test_persona_shadow.py tests/test_persona_runtime_loader.py tests/test_persona_compiler.py tests/test_persona_runtime_config.py -q` 全绿；全量 `pytest -q` 1558 passed / 8 skipped（B2.3 commit 后实测）；`ruff check services/persona/shadow.py services/persona/__init__.py kernel/router.py kernel/types.py tests/test_persona_shadow.py` clean；`pyright services/persona/shadow.py kernel/router.py kernel/types.py` 0 errors（既有 compiler.py 25 条 `Optional[dict].get` 噪声出 B2 范围）；D1 同模式扫描结果如上；D2 cancel-path 测试在 `test_run_once_cancel_does_not_corrupt` 锁定（外部可观察证据：`log_path.stat().st_size` 与 `engine.counter` 字段在 cancel 后不变）；D6 admin SPA 不触（B2 不写前端，无需 `npm run build` / docker rebuild）；D7 git hygiene `git stash list && git status -uno` 在每个 commit 前手动核验。
+
+**回滚路径**：B2.1+B2.2（`08761e9`）/ B2.3（`da52391`）/ B2.5（本 commit）三个 commit 各自独立可 revert——撤销 `services/persona/shadow.py` + `__init__.py` 导出、`kernel/router.py::_on_connect` 24 行 hook、`kernel/types.py::shadow_engine` 字段、5 条 shadow 测试、migration §12 第 5 行回退到 ⏳ 即可；`storage/persona_shadow_diff.log` 由 .gitignore 物理拦截（既有规则覆盖 `storage/`），不入库；B1 已落地的 4 commit + A 档归档不受影响；下游 `PromptBuilder` / `LLMClient` / admin 路由本期零改动，对它们透明。
+
+---
+
 ## 2026-05-24 Persona v2 source.md 迁移 — fengxiaomeng-v2 dry-run
 
 **变更类型**：persona v2 source / dry-run import + freeze / B2 准备

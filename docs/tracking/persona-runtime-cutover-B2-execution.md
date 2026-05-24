@@ -307,11 +307,11 @@ flag-gated; shadow_compare defaults off; PromptBuilder/LLMClient unchanged.
 
 | 编号 | 状态 | 落地证据 |
 |---|---|---|
-| B2.1 | ⏳ 待落地 | `services/persona/shadow.py` + 5 tests |
-| B2.2 | ⏳ 待落地 | 同 B2.1 commit；JSONL 写入路径 |
-| B2.3 | ⏳ 待落地 | `kernel/router.py` ≤ 8 行 hook |
+| B2.1 | ✅ 已落地 | commit `08761e9` — `services/persona/shadow.py::ShadowCompareEngine` + `ShadowDiffReport` + `ShadowCounter`；`__init__.py` 导出 |
+| B2.2 | ✅ 已落地 | 同 B2.1 commit；JSONL append 写入 `storage/persona_shadow_diff.log`；schema 与 §3 对齐 |
+| B2.3 | ✅ 已落地 | commit `da52391` — `kernel/router.py::_on_connect` 24 行 hook + `kernel/types.py::PluginContext.shadow_engine`；shadow_compare flag off 时零代码路径变化 |
 | B2.4 | 🟡 跳过本期 | B6 Admin SPA 接入点；本期不落 |
-| B2.5 | ⏳ 待落地 | 本文 §7 + maintenance-log + migration §12 |
+| B2.5 | ✅ 已落地 | 当前 commit — 本文 §7 回填 + maintenance-log 当日条目 + migration §12 第 5 行 ⏳→✅ |
 
 ---
 
