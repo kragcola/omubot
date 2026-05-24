@@ -17,6 +17,11 @@ from nonebot.adapters.onebot.v11.bot import Bot
 from kernel.qq_face import face_to_text
 from kernel.types import AmadeusPlugin, PluginContext
 from services.media.image_cache import ImageCache
+from services.media.sticker_capture import (
+    DEFAULT_STICKER_USAGE_HINT,
+    is_sticker_like_segment,
+    sticker_description_from_segment,
+)
 from services.media.sticker_store import StickerStore
 from services.memory.timeline import GroupTimeline
 from services.memory.types import Content, ContentBlock, ImageRefBlock, TextBlock
@@ -41,15 +46,25 @@ async def load_group_history(
     bot_self_id: str = "",
     image_cache: ImageCache | None = None,
     sticker_store: StickerStore | None = None,
+    learn_new_stickers: set[str] | None = None,
     counts: dict[str, int] | None = None,
 ) -> None:
     """通过 OneBot WebSocket 拉取多个群的历史消息。"""
+    sticker_learn_groups = learn_new_stickers or set()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
         for gid in group_ids:
             gid_count = counts.get(gid, count) if counts else count
             try:
                 await _load_one_group(
-                    bot, session, gid, timeline, gid_count, bot_self_id, image_cache, sticker_store
+                    bot,
+                    session,
+                    gid,
+                    timeline,
+                    gid_count,
+                    bot_self_id,
+                    image_cache,
+                    sticker_store,
+                    gid in sticker_learn_groups,
                 )
             except Exception:
                 _L.warning("load_history failed | group={}", gid, exc_info=True)
@@ -64,6 +79,7 @@ async def _load_one_group(
     bot_self_id: str = "",
     image_cache: ImageCache | None = None,
     sticker_store: StickerStore | None = None,
+    learn_new_stickers: bool = False,
 ) -> None:
     from nonebot.adapters.onebot.v11.exception import ActionFailed
 
@@ -96,7 +112,13 @@ async def _load_one_group(
         if _contains_debug_command(raw_segs):
             continue
 
-        content = await _extract_content(raw_segs, session, image_cache, sticker_store)
+        content = await _extract_content(
+            raw_segs,
+            session,
+            image_cache,
+            sticker_store,
+            learn_new_stickers=learn_new_stickers,
+        )
         if not content:
             continue
 
@@ -123,10 +145,12 @@ async def _extract_content(
     session: aiohttp.ClientSession,
     image_cache: ImageCache | None,
     sticker_store: StickerStore | None = None,
+    *,
+    learn_new_stickers: bool = False,
 ) -> Content:
     """Extract text, face, and image segments into a Content value."""
     text_parts: list[str] = []
-    image_tasks: list[asyncio.Task[ImageRefBlock | None]] = []
+    image_tasks: list[tuple[dict[str, Any], asyncio.Task[ImageRefBlock | None]]] = []
 
     for seg in segments:
         seg_type = seg.get("type", "")
@@ -146,7 +170,10 @@ async def _extract_content(
             if url and file_id:
                 file_id = file_id.split(".")[0] if "." in file_id else file_id
                 image_tasks.append(
-                    asyncio.ensure_future(image_cache.save(session, url=url, file_id=file_id))
+                    (
+                        seg,
+                        asyncio.ensure_future(image_cache.save(session, url=url, file_id=file_id)),
+                    )
                 )
             else:
                 text_parts.append("«图片»")
@@ -156,8 +183,8 @@ async def _extract_content(
     images: list[ImageRefBlock] = []
     if image_tasks:
         t0 = time.perf_counter()
-        results = await asyncio.gather(*image_tasks, return_exceptions=True)
-        for r in results:
+        results = await asyncio.gather(*(task for _seg, task in image_tasks), return_exceptions=True)
+        for (seg, _task), r in zip(image_tasks, results, strict=False):
             if isinstance(r, BaseException) or r is None:
                 text_parts.append("«图片»")
             else:
@@ -181,6 +208,45 @@ async def _extract_content(
                                     "history image matched sticker | sticker_id={}", stk_id
                                 )
                                 continue
+                        if learn_new_stickers and is_sticker_like_segment(seg):
+                            description = sticker_description_from_segment(seg)
+                            try:
+                                stk_id, is_new = sticker_store.add(
+                                    image_data,
+                                    description,
+                                    DEFAULT_STICKER_USAGE_HINT,
+                                    source="history_loader_sticker_learn",
+                                )
+                            except ValueError as exc:
+                                _L.debug(
+                                    "history sticker learn skipped | reason={} file={}",
+                                    exc,
+                                    Path(r["path"]).name,
+                                )
+                            except Exception:
+                                _L.warning(
+                                    "history sticker learn failed | file={}",
+                                    Path(r["path"]).name,
+                                    exc_info=True,
+                                )
+                            else:
+                                sticker_path = sticker_store.resolve_path(stk_id)
+                                if sticker_path is not None:
+                                    cached_path.unlink(missing_ok=True)
+                                    images.append(
+                                        ImageRefBlock(
+                                            type="image_ref",
+                                            path=str(sticker_path),
+                                            media_type=r["media_type"],
+                                        )
+                                    )
+                                    if is_new:
+                                        _L.info(
+                                            "history sticker learned | sticker_id={} file={}",
+                                            stk_id,
+                                            Path(r["path"]).name,
+                                        )
+                                    continue
                 images.append(r)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         _L.debug(
@@ -217,6 +283,26 @@ class HistoryLoaderPlugin(AmadeusPlugin):
             logger.exception("failed to get group list for history loading")
             return
 
+        group_cfg = getattr(ctx.config, "group", None)
+        learn_sticker_groups: set[str] = set()
+        if group_cfg is not None and hasattr(group_cfg, "resolve"):
+            for gid in group_ids:
+                try:
+                    resolved = group_cfg.resolve(int(gid))
+                except Exception:
+                    continue
+                if resolved is None:
+                    continue
+                if str(getattr(resolved, "presence_mode", "active") or "active") != "silent_learn":
+                    continue
+                if bool(getattr(group_cfg, "tools_enabled", True)) is False:
+                    continue
+                if bool(getattr(resolved, "tools_enabled", True)) is False:
+                    continue
+                if str(getattr(resolved, "sticker_mode", "inherit") or "inherit") == "off":
+                    continue
+                learn_sticker_groups.add(gid)
+
         _L.info("loading history | groups={}", len(group_ids))
         try:
             counts = {
@@ -231,6 +317,7 @@ class HistoryLoaderPlugin(AmadeusPlugin):
                 bot_self_id=bot.self_id,
                 image_cache=ctx.image_cache if getattr(ctx, "vision_enabled", False) else None,
                 sticker_store=ctx.sticker_store,
+                learn_new_stickers=learn_sticker_groups,
                 counts=counts,
             )
         except Exception:

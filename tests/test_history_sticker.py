@@ -147,3 +147,87 @@ async def test_history_unknown_image_not_in_sticker_store_kept(
     assert _is_image_ref_block(block)
     # Path should still be in image_cache (not the sticker store)
     assert "image_cache" in block["path"]  # type: ignore[index]
+
+
+async def test_history_learn_new_stickers_writes_to_store(
+    sticker_store: StickerStore,
+    image_cache: ImageCache,
+) -> None:
+    """When learn_new_stickers=True, sticker-like segments add a new sticker
+    with source='history_loader_sticker_learn' and resolve to the sticker path."""
+    new_jpeg = b"\xff\xd8\xff\xe0" + b"\x02" * 64 + b"history-learn-new"
+    file_id = "1111aaaa2222bbbb"
+    # mface segment is recognized as sticker-like
+    segments = [
+        {
+            "type": "image",
+            "data": {
+                "url": "http://example.com/new.jpg",
+                "file": file_id,
+                "sub_type": 1,
+                "summary": "[新表情]",
+            },
+        },
+    ]
+
+    def fake_process(data: bytes, path: Path) -> ImageRefBlock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return ImageRefBlock(type="image_ref", path=str(path), media_type="image/jpeg")
+
+    image_cache._process_and_save = fake_process  # type: ignore[method-assign]
+    mock_session = _make_mock_session(new_jpeg)
+
+    before_ids = set(sticker_store._index.keys())
+    content = await _extract_content(
+        segments, mock_session, image_cache, sticker_store,  # type: ignore[arg-type]
+        learn_new_stickers=True,
+    )
+    after_ids = set(sticker_store._index.keys())
+    new_ids = after_ids - before_ids
+    assert len(new_ids) == 1, "Exactly one new sticker should have been added"
+
+    new_id = next(iter(new_ids))
+    assert sticker_store._index[new_id]["source"] == "history_loader_sticker_learn"
+
+    assert isinstance(content, list)
+    assert len(content) == 1
+    block = content[0]
+    assert _is_image_ref_block(block)
+    assert block["path"] == str(sticker_store.resolve_path(new_id))  # type: ignore[index]
+
+
+async def test_history_no_learn_flag_does_not_steal(
+    sticker_store: StickerStore,
+    image_cache: ImageCache,
+) -> None:
+    """Without learn_new_stickers=True, sticker-like segments do not add to store."""
+    new_jpeg = b"\xff\xd8\xff\xe0" + b"\x03" * 64 + b"history-no-learn"
+    segments = [
+        {
+            "type": "image",
+            "data": {
+                "url": "http://example.com/new2.jpg",
+                "file": "2222cccc3333dddd",
+                "sub_type": 1,
+                "summary": "[别的表情]",
+            },
+        },
+    ]
+
+    def fake_process(data: bytes, path: Path) -> ImageRefBlock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return ImageRefBlock(type="image_ref", path=str(path), media_type="image/jpeg")
+
+    image_cache._process_and_save = fake_process  # type: ignore[method-assign]
+    mock_session = _make_mock_session(new_jpeg)
+
+    before_count = len(sticker_store._index)
+    await _extract_content(
+        segments, mock_session, image_cache, sticker_store,  # type: ignore[arg-type]
+        # learn_new_stickers omitted -> defaults to False
+    )
+    assert len(sticker_store._index) == before_count, (
+        "No sticker should be added when learn_new_stickers is False"
+    )
