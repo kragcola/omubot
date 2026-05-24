@@ -335,11 +335,11 @@ single-group gray (993065015); fallback_on_compile_error=true preserves v1.
 
 | 编号 | 状态 | 落地证据 |
 |---|---|---|
-| B3.1 | ⏳ 待落地 | — |
-| B3.2 | ⏳ 待落地 | — |
-| B3.3 | ⏳ 待落地 | — |
-| B3.4 | ⏳ 待手动验证 | 由用户做最终验收（"我最终做上线前最后验收"） |
-| B3.5 | ⏳ 待落地 | — |
+| B3.1 | ✅ 已落地 | commit `eac2d1e` — `services/persona/runtime_selector.py::PersonaRuntimeSelector` + `RuntimeSelection` + `RuntimeSelectorCounter`；公共化 `join_static_blocks`（shadow.py 替换 `_join_static_blocks`）；`tests/test_persona_runtime_selector.py` 8 条 |
+| B3.2 | ✅ 已落地 | commit `e5881f0` — `services/llm/prompt_builder.py::PromptBuilder.set_runtime_selector` + `resolve_static_block`；`build_blocks()` 第一块改走 resolve；`services/llm/client.py` 两处 fallback 同样走 resolve；`tests/test_prompt_builder_runtime.py` 7 条 |
+| B3.3 | ✅ 已落地 | 同 B3.2 commit — `kernel/router.py::_on_connect` B3 装配 30 行（lazy import + load_pending_freeze + selector 装配）；`kernel/types.py::PluginContext.runtime_selector` 字段；shadow hook 与 runtime hook 兄弟分支独立 if 块 |
+| B3.4 | ⏳ 待手动验证 | 由用户做最终验收（"我最终做上线前最后验收"）：toml 改 `runtime_consume=true` + `runtime_groups=["993065015"]` + `restart bot` → 群 993065015 收到至少 5 轮回复且 `storage/logs/bot.log` 无 `persona_runtime` ERROR |
+| B3.5 | ✅ 已落地 | 当前 commit — 本文 §7 回填 + maintenance-log 当日条目 + migration §12 第 6 行 ⏳→✅ |
 
 ---
 
