@@ -213,6 +213,9 @@ class PluginContext:
     # Persona v2 — shadow compare engine (B2; flag-gated)
     shadow_engine: Any = None
 
+    # Persona v2 — runtime selector (B3; flag-gated; per-turn read)
+    runtime_selector: Any = None
+
 
 @dataclass
 class TriggerContext:

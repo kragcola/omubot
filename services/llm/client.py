@@ -2100,9 +2100,9 @@ class LLMClient:
                     messages = _append_tail_metadata(messages, tail_blocks)
             except Exception:
                 logger.exception("build_blocks failed, falling back to static block")
-                system_blocks = [self._prompt.static_block]
+                system_blocks = [self._prompt.resolve_static_block(group_id)]
         else:
-            system_blocks = [self._prompt.static_block]
+            system_blocks = [self._prompt.resolve_static_block(group_id)]
 
         # Inject thinker decision as final system block so the main LLM
         # knows what direction to take — placed last for highest attention.

@@ -592,6 +592,34 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 )
             ctx.shadow_engine = shadow_engine
 
+        # B3 runtime cutover — flag-gated; defaults off so this is a no-op.
+        runtime_selector = None
+        if persona_v2_cfg is not None and persona_v2_cfg.runtime_consume:
+            from services.persona.runtime import load_pending_freeze
+            from services.persona.runtime_selector import (
+                PersonaRuntimeSelector,
+                join_static_blocks,
+            )
+
+            bundle = load_pending_freeze(persona_v2_cfg.persona_id)
+            v2_text = ""
+            if bundle is not None and bundle.ok:
+                v2_text = join_static_blocks(bundle)
+            runtime_selector = PersonaRuntimeSelector(
+                cfg=persona_v2_cfg,
+                bundle=bundle,
+                v2_static_text=v2_text,
+            )
+            if bundle is None or not bundle.ok:
+                level = "warning" if persona_v2_cfg.fallback_on_compile_error else "error"
+                getattr(_base_logger.bind(channel="persona_runtime"), level)(
+                    "v2 bundle unavailable | bundle_ok={} errors={}",
+                    bundle is not None and bundle.ok,
+                    tuple(bundle.errors) if bundle else (),
+                )
+        ctx.prompt_builder.set_runtime_selector(runtime_selector)
+        ctx.runtime_selector = runtime_selector
+
         # Track whether this is the first connect (vs reconnect)
         is_first_connect = not getattr(ctx, "startup_triggered", False)
         if is_first_connect:

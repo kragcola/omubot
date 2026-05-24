@@ -22,6 +22,7 @@ from loguru import logger
 
 from services.identity import Identity
 from services.memory.state_board import GroupStateBoard
+from services.persona.runtime_selector import PersonaRuntimeSelector
 
 _L = logger.bind(channel="system")
 
@@ -52,9 +53,35 @@ class PromptBuilder:
         self._state_board = state_board
         self._retrieval_gate = retrieval_gate
         self._static_block: dict[str, Any] = {}
+        self._runtime_selector: PersonaRuntimeSelector | None = None
 
     @property
     def static_block(self) -> dict[str, Any]:
+        return self._static_block
+
+    def set_runtime_selector(
+        self, selector: PersonaRuntimeSelector | None
+    ) -> None:
+        """Wire the v2 runtime selector. Called once on bot connect.
+
+        ``None`` disables v2 substitution (turn returns ``_static_block``).
+        """
+        self._runtime_selector = selector
+
+    def resolve_static_block(self, group_id: str | None) -> dict[str, Any]:
+        """Return v1 or v2 static block based on selector decision.
+
+        Called per turn from build_blocks() and from LLMClient's fallback
+        path. Always returns a ``{"type": "text", "text": "..."}`` dict —
+        falling back to ``_static_block`` whenever v2 substitution is
+        unavailable (selector unset, flag off, group not listed, bundle
+        missing, compile error). Pure synchronous, never raises.
+        """
+        if self._runtime_selector is None:
+            return self._static_block
+        selection = self._runtime_selector.resolve_for_group(group_id)
+        if selection.use_v2 and selection.v2_static_text:
+            return {"type": "text", "text": selection.v2_static_text}
         return self._static_block
 
     def rewind_retrieval_turn(self, session_id: str) -> None:
@@ -135,7 +162,7 @@ class PromptBuilder:
             st_preview = state_board_block["text"][:80]
             logger.info("state board | chars={} preview={!r}", st_len, st_preview)
 
-        blocks: list[dict[str, Any]] = [self._static_block]
+        blocks: list[dict[str, Any]] = [self.resolve_static_block(group_id)]
         if plugin_static:
             blocks.extend(plugin_static)
         if include_state_board:
