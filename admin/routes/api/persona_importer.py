@@ -22,6 +22,10 @@ class PersonaFreezePayload(BaseModel):
     confirm: bool = False
 
 
+class PersonaSourcePayload(BaseModel):
+    content: str = ""
+
+
 def create_persona_importer_router(
     *,
     persona_root: str | Path = "config/persona",
@@ -35,12 +39,23 @@ def create_persona_importer_router(
         defaults = getattr(ctx, "persona_defaults_dir", defaults_dir) if ctx is not None else defaults_dir
         return PersonaDraftWriter(persona_root=root, defaults_dir=defaults)
 
+    def _valid_namespace(persona_id: str) -> tuple[bool, str]:
+        namespace = persona_namespace(persona_id)
+        if not persona_id.strip():
+            return False, namespace
+        if "/" in namespace or "\\" in namespace or namespace in {".", ".."}:
+            return False, namespace
+        if ".." in Path(namespace).parts:
+            return False, namespace
+        return True, namespace
+
     @router.post("/import")
     async def import_persona(payload: PersonaImportPayload, request: Request):
         del request
         persona_id = payload.persona_id.strip()
-        if not persona_id:
-            return {"ok": False, "error": "persona_id is required"}
+        valid, namespace = _valid_namespace(persona_id)
+        if not valid:
+            return {"ok": False, "persona_id": namespace, "error": "persona_id is invalid"}
         writer = _writer()
         try:
             result = writer.import_source(
@@ -62,16 +77,54 @@ def create_persona_importer_router(
             "report": result.report.to_dict(),
         }
 
+    @router.get("/source/{persona_id}")
+    async def get_source(persona_id: str):
+        valid, namespace = _valid_namespace(persona_id)
+        if not valid:
+            return {"ok": False, "persona_id": namespace, "error": "persona_id is invalid"}
+        path = _writer().source_path(namespace)
+        exists = path.is_file()
+        return {
+            "ok": True,
+            "persona_id": namespace,
+            "path": str(path),
+            "exists": exists,
+            "content": path.read_text(encoding="utf-8") if exists else "",
+        }
+
+    @router.put("/source/{persona_id}")
+    async def put_source(persona_id: str, payload: PersonaSourcePayload):
+        valid, namespace = _valid_namespace(persona_id)
+        if not valid:
+            return {"ok": False, "persona_id": namespace, "error": "persona_id is invalid"}
+        path = _writer().source_path(namespace)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload.content, encoding="utf-8")
+        return {
+            "ok": True,
+            "persona_id": namespace,
+            "path": str(path),
+            "exists": True,
+            "bytes": len(payload.content.encode("utf-8")),
+            "content": payload.content,
+        }
+
     @router.get("/draft/{persona_id}")
     async def get_draft(persona_id: str):
+        valid, namespace = _valid_namespace(persona_id)
+        if not valid:
+            return {"ok": False, "persona_id": namespace, "error": "persona_id is invalid"}
         return _writer().read_draft_summary(persona_id)
 
     @router.post("/freeze/{persona_id}")
     async def pending_freeze(persona_id: str, payload: PersonaFreezePayload):
+        valid, namespace = _valid_namespace(persona_id)
+        if not valid:
+            return {"ok": False, "persona_id": namespace, "error": "persona_id is invalid"}
         if not payload.confirm:
             return {
                 "ok": False,
-                "persona_id": persona_namespace(persona_id),
+                "persona_id": namespace,
                 "error": "confirm=true is required for Pending Freeze",
             }
         return _writer().pending_freeze(persona_id)

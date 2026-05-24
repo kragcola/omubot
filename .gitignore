@@ -51,6 +51,7 @@ napcat/config/webui.json
 napcat/config/plugins/
 .pytest_cache/
 .worktrees/
+.research/
 local/cpa/
 .claude/*
 !.claude/skills/

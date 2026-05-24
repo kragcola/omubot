@@ -29,6 +29,12 @@ const router = createRouter({
       component: () => import('../views/soul/SoulView.vue'),
     },
     {
+      path: '/persona-importer',
+      name: 'persona-importer',
+      meta: { title: '人设导入', keepAlive: true },
+      component: () => import('../views/persona/PersonaImporterView.vue'),
+    },
+    {
       path: '/soul/persona-guide',
       name: 'soul-persona-guide',
       meta: { title: 'AI 人设规则' },

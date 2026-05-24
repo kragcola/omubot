@@ -13,6 +13,7 @@ import {
   CubeOutline,
   TerminalOutline,
   AnalyticsOutline,
+  SparklesOutline,
 } from '@vicons/ionicons5'
 import { useAppStore } from '../../stores/app'
 
@@ -32,8 +33,9 @@ const menuOptions: MenuOption[] = [
     children: [
       { label: '仪表盘', key: '/', icon: renderIcon(SpeedometerOutline) },
       { label: '人设编辑', key: '/soul', icon: renderIcon(DocumentTextOutline) },
+      { label: '人设导入', key: '/persona-importer', icon: renderIcon(SparklesOutline) },
       { label: '群管理', key: '/groups', icon: renderIcon(PeopleOutline) },
-      { label: '记忆', key: '/memory', icon: renderIcon(LayersOutline) },
+      { label: '群聊记忆', key: '/memory', icon: renderIcon(LayersOutline) },
       { label: '表情包', key: '/stickers', icon: renderIcon(HappyOutline) },
     ],
   },
