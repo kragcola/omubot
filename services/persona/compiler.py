@@ -134,6 +134,7 @@ def _identity_text(persona: dict[str, Any]) -> str:
         f"名字：{identity.get('canonical_name', '')}",
         f"角色：{identity.get('role', '')}",
         f"自称：{identity.get('self_reference', '')}",
+        f"静态身份块：{identity.get('personality', '')}",
         "性格底色：" + "；".join(identity.get("essence") or []),
         "价值观：" + "；".join(constitution.get("values") or []),
     ]

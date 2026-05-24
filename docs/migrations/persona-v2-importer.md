@@ -1,6 +1,6 @@
 # Persona v2 Importer 迁移清单
 
-> 状态：2026-05-24 Part A S1-S5 后端/CLI 首版已完成；S6/S10' admin SPA 首版闭环已完成；Part B dry-run 闭环已完成。
+> 状态：2026-05-24 Part A importer 已完整收尾（含 #1/#7/#5 小尾巴）；S6/S10' admin SPA 首版闭环已完成；Part B dry-run 闭环已完成。
 >
 > 上游：[Persona Source Importer](../tracking/persona-source-importer.md)、
 > [整改执行追踪](../tracking/persona-source-importer-remediation-execution.md)。
@@ -27,11 +27,15 @@
 | S3 | `persona_import` LLMTask/profile 接入 | ✅ 已实现 |
 | S4 | draft writer + `_import_report.json` | ✅ 已实现 |
 | S5 | `/api/admin/persona/*` admin API | ✅ 已实现 |
+| Part A tail #1 | `identity.md` 主体静态身份块迁移到 `persona.yaml.identity.personality` | ✅ 已实现；draft 字段，不接正式 runtime |
+| Part A tail #7 | `memory.yaml.paragraph` / `entity_index` schema + §6 seed episodes | ✅ 已实现；不读取真实 memory DB |
+| Part A tail #5 | front matter `admins` → `adapter.yaml.permissions.admins[]` | ✅ 已实现；不读取生产 `BotConfig.admins` |
 | S6/S10' | admin UI source 编辑、导入报告、draft 文件清单与 Pending Freeze 交互 | ✅ 首版已实现；issue 行号跳转高亮/e2e smoke 待后续 |
 | Part B S1' | SystemModule contract catalog + RuntimeStateBus dry-run 骨架 | ✅ 已实现；未接入正式 chat/prompt runtime |
 | Part B S2'/S3' | source §11.2/§12 扩展 + 9 默认模板 | ✅ dry-run 已实现；§13 patch 待后续 |
 | Part B S5' | SystemModule validator 接入 importer report | ✅ 已实现 |
 | Part B S11' | persona compiler dry-run | ✅ 已实现；不写正式 runtime |
+| Part B #3/#4/#8 | `instruction.md` / bot QQ id / group profile reply style 与 custom prompt | ⏳ 单独执行文档推进 |
 | Part B S6'~S9'/S12' | 完整模块业务实现、admin 模块状态卡、灰度切流 | ⏳ 后续 |
 
 ## 3. 护栏
@@ -71,3 +75,12 @@
 | SystemModule 校验只存在于独立 S1' 测试 | importer 写 `_import_report.json.fields[].key_path="_system_module_validation"`，issues 进入 report | ✅ 已实现 |
 | compiler 只在方案中 | `services.persona.compiler.compile_persona_dry_run()` 和 CLI `--compile-dry-run` 输出 prompt block 草案 | ✅ 已实现 |
 | 正式切流 | 仍未做；dry-run 结果不进入 `PromptBuilder` / `LLMClient` | ⏳ 后续 |
+
+## 7. Part A #1/#7/#5 完整收尾迁移
+
+| 旧注入源 / 缺口 | 新 draft 落点 | 状态 |
+|---|---|---|
+| #1 `soul/identity.md` 主体静态 personality block 只有拆分字段，缺原文迁移落点 | `persona.yaml.identity.personality`，由 source §1/§1.1/§1.2/§1.3 组合，report extractor=`identity_static_md` | ✅ 已实现 |
+| #7 全局记忆索引只在 runtime DB，importer 只有 `seed_episodes` 空壳 | `memory.yaml.paragraph`、`memory.yaml.entity_index`、`retrieval_policy` + source §6 `seed_episodes[]` candidate/source anchor | ✅ 已实现 |
+| #5 admins 名单未被 source 收录 | front matter `admins` → `adapter.yaml.permissions.admins[]`，source 标记为 `source_front_matter` | ✅ 已实现 |
+| #3 `instruction.md`、#4 bot QQ id、#8 group profile | 不在 Part A 尾巴中偷跑 | ⏳ Part B 单独执行文档 |

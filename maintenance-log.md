@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-05-24 Persona Part A 完整收尾 — #1/#7/#5 小尾巴补齐
+
+**变更类型**：persona importer draft schema / tests / docs
+
+**内容**：补齐前序审计里 Part A 尚缺的三处注入源映射：#1 `identity.md` 主体静态身份块落到 `persona.yaml.identity.personality` 并写 report span；#7 `memory.yaml` 增加 `paragraph` / `entity_index` / `retrieval_policy` draft schema，并从 source §6 抽取 `seed_episodes[]` candidate + `origin_anchor`；#5 front matter `admins` 落到 `adapter.yaml.permissions.admins[]`，只标记 `source_front_matter`，不读取生产 admins。
+
+**影响**：Part A importer draft 面完成 #1/#7/#5 收尾，但仍不接入正式 `PromptBuilder` / `LLMClient` / chat runtime，不读取真实 `storage/memory_cards.db`，不投影生产 `BotConfig.admins`。#3 `instruction.md`、#4 bot QQ id、#8 group profile 留给 Part B 单独执行文档推进。
+
+**验证**：`pytest tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py tests/test_persona_importer_api.py tests/test_sticker_plugin_silent_learn.py tests/test_history_sticker.py -q` 通过；`ruff check services/persona tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py tests/test_persona_importer_api.py tests/test_sticker_plugin_silent_learn.py tests/test_history_sticker.py` 通过。
+
+**回滚路径**：revert 本次 Part A tail commit 即可；已归档的 sticker/NounSwitcher/Persona B/C commits 不受影响。
+
+---
+
 ## 2026-05-24 admin/learning — NounSwitcher 视觉重设计 v1（Header Tabs）
 
 **变更类型**：admin/frontend 视觉重构（仅前端）

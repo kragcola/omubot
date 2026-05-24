@@ -83,8 +83,10 @@ def build_persona_draft(
     _extract_identity(source, draft, report)
     _extract_voice(source, draft, report)
     _extract_knowledge(source, draft, report)
+    _extract_memory(source, draft, report)
     _extract_examples(source, draft, report)
     _extract_part_b_overrides(source, draft, report)
+    _extract_admins(source, draft, report)
     validate_system_modules(draft, report)
     _validate_required(draft, report)
 
@@ -112,6 +114,7 @@ def _empty_draft(persona_id: str, source: SourceDocument) -> dict[str, dict[str,
                 "aliases": [],
                 "role": "",
                 "self_reference": "",
+                "personality": "",
                 "essence": [],
                 "not_traits": [],
             },
@@ -150,10 +153,48 @@ def _empty_draft(persona_id: str, source: SourceDocument) -> dict[str, dict[str,
         "memory.yaml": {
             "schema": "omubot.memory.v2",
             "version": "2.1.0-proposal",
+            "workspace": {
+                "scope_fields": ["workspace_id", "platform", "channel_id", "persona_id"],
+                "hard_filter_required": True,
+            },
+            "paragraph": {
+                "enabled": True,
+                "fields": [
+                    "id",
+                    "workspace_id",
+                    "content",
+                    "summary",
+                    "event_time",
+                    "confidence",
+                    "origin_kind",
+                    "origin_ref",
+                    "anchor_msg_id_start",
+                    "anchor_msg_id_end",
+                ],
+                "inject_as": "evidence_context",
+                "never_as": "system_instruction",
+            },
+            "entity_index": {
+                "enabled": True,
+                "fields": ["entity_id", "name", "entity_type", "aliases", "paragraph_refs", "confidence"],
+                "source": "memory_cards_index",
+                "write_policy": "runtime_store_only",
+            },
+            "retrieval_policy": {
+                "required_filters": ["workspace_id"],
+                "combine": ["vector", "entity_index", "recency_weight"],
+            },
             "seed_episodes": [],
         },
         "capabilities.yaml": _skeleton("omubot.capabilities.v2", source),
-        "adapter.yaml": _skeleton("omubot.adapter.v2", source),
+        "adapter.yaml": {
+            **_skeleton("omubot.adapter.v2", source),
+            "permissions": {
+                "admin_required_for_freeze": True,
+                "source": "source_front_matter",
+                "admins": [],
+            },
+        },
         "guard.yaml": _skeleton("omubot.guard.v2", source),
         "examples.yaml": {
             "schema": "omubot.examples.v2",
@@ -267,6 +308,7 @@ def _extract_identity(source: SourceDocument, draft: dict[str, dict[str, Any]], 
             )
         )
     _set_list(draft, report, "persona.yaml", "constitution.hard_rules", hard_rules, "list_md")
+    _set_identity_personality_block(draft, report, source, (root, essence, not_traits, rules))
 
 
 def _extract_voice(source: SourceDocument, draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
@@ -306,6 +348,23 @@ def _extract_knowledge(source: SourceDocument, draft: dict[str, dict[str, Any]],
             values.append(field)
         values.extend(list_after_label(knowledge, label, source_file=source.path))
         _set_list(draft, report, filename, key_path, values, "list_md")
+
+
+def _extract_memory(source: SourceDocument, draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
+    memory = source.section("经历种子", "记忆种子")
+    seeds = [
+        SourceField(
+            key=item.key,
+            value={
+                "summary": item.value,
+                "origin_anchor": f"{item.span.file}#L{item.span.lines[0]}",
+                "review_status": "candidate",
+            },
+            span=item.span,
+        )
+        for item in bullet_items(memory, source_file=source.path)
+    ]
+    _set_list(draft, report, "memory.yaml", "seed_episodes", seeds, "memory_seed_md")
 
 
 def _extract_examples(source: SourceDocument, draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
@@ -399,6 +458,36 @@ def _extract_module_switches(source: SourceDocument, draft: dict[str, dict[str, 
             )
 
 
+def _extract_admins(source: SourceDocument, draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
+    admins = _frontmatter_admins(source)
+    if not admins:
+        permissions = draft.setdefault("adapter.yaml", {}).setdefault("permissions", {})
+        if isinstance(permissions, dict):
+            permissions.setdefault("admins", [])
+            permissions.setdefault("source", "source_front_matter")
+        return
+
+    permissions = draft.setdefault("adapter.yaml", {}).setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        permissions = {}
+        draft["adapter.yaml"]["permissions"] = permissions
+    permissions.setdefault("admin_required_for_freeze", True)
+    permissions["source"] = "source_front_matter"
+    permissions["admins"] = admins
+
+    span = SourceSpan(source.path, (1, max(1, _frontmatter_end_line(source.text))))
+    for index, _admin in enumerate(admins):
+        report.fields.append(
+            ReportField(
+                "adapter.yaml",
+                f"permissions.admins[{index}]",
+                span,
+                1.0,
+                "front_matter_admins",
+            )
+        )
+
+
 def _validate_required(draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
     required = (
         ("persona.yaml", "id", "persona_id"),
@@ -447,6 +536,36 @@ def _validate_required(draft: dict[str, dict[str, Any]], report: ImportReport) -
                     f"constitution.hard_rules[{index}]",
                 )
             )
+
+
+def _set_identity_personality_block(
+    draft: dict[str, dict[str, Any]],
+    report: ImportReport,
+    source: SourceDocument,
+    sections: tuple[SourceSection | None, ...],
+) -> None:
+    existing = [section for section in sections if section is not None and section.body.strip()]
+    if not existing:
+        return
+
+    lines: list[str] = []
+    for section in existing:
+        lines.append(f"## {section.title.strip()}")
+        lines.append(section.body.strip())
+    value = "\n\n".join(lines).strip()
+    if not value:
+        return
+
+    _set_path(draft["persona.yaml"], "identity.personality", value)
+    report.fields.append(
+        ReportField(
+            "persona.yaml",
+            "identity.personality",
+            SourceSpan(source.path, (existing[0].line, existing[-1].end_line)),
+            1.0,
+            "identity_static_md",
+        )
+    )
 
 
 def _set_field(
@@ -505,6 +624,25 @@ def _get_path(payload: dict[str, Any], key_path: str) -> Any:
 def _frontmatter_str(source: SourceDocument, key: str) -> str:
     value = source.frontmatter.get(key)
     return str(value).strip() if value is not None else ""
+
+
+def _frontmatter_admins(source: SourceDocument) -> list[dict[str, str]]:
+    value = source.frontmatter.get("admins")
+    admins: list[dict[str, str]] = []
+    if isinstance(value, dict):
+        for raw_id, raw_label in value.items():
+            admin_id = str(raw_id).strip()
+            if not admin_id:
+                continue
+            label = str(raw_label).strip() if raw_label is not None else ""
+            admins.append({"id": admin_id, "label": label})
+        return admins
+    if isinstance(value, list):
+        for raw_id in value:
+            admin_id = str(raw_id).strip()
+            if admin_id:
+                admins.append({"id": admin_id, "label": ""})
+    return admins
 
 
 def _frontmatter_end_line(text: str) -> int:

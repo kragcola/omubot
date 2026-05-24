@@ -15,3 +15,8 @@ send:
   segment_delay_seconds: 0.8
   humanizer: inherit
   reply_prefix_for_at: true
+
+permissions:
+  admin_required_for_freeze: true
+  source: source_front_matter
+  admins: []

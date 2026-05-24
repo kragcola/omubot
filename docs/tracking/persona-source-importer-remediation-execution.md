@@ -1,6 +1,6 @@
 # Persona Source Importer 整改执行追踪
 
-> 状态：Part A S1-S5 后端/CLI 首版完成；S6/S10' admin SPA 首版闭环完成；Part B dry-run 闭环完成
+> 状态：Part A S1-S5 后端/CLI 首版完成；S6/S10' admin SPA 首版闭环完成；Part B dry-run 闭环完成；Part A 小尾巴 #1/#7/#5 已完成
 > 启动时间：2026-05-24
 > 执行人：Codex
 > 上游步骤：[persona-source-importer-remediation.md](./persona-source-importer-remediation.md)
@@ -66,6 +66,11 @@
 | C5 | S5' SystemModule validator 接入 importer report | ✅ 完成 | Codex | `_system_module_validation` 写入 report |
 | C6 | S11' persona compiler dry-run | ✅ 完成 | Codex | `services/persona/compiler.py` + CLI `--compile-dry-run` |
 | C7 | Part B dry-run 闭环验证与收口 | ✅ 完成 | Codex | `23 passed` + ruff |
+| D0 | Part A 小尾巴范围确认 | ✅ 完成 | Codex | 锁定只补 #1/#7/#5，不接 runtime |
+| D1 | #1 `identity.md` 静态身份块映射 | ✅ 完成 | Codex | `13 passed` + ruff |
+| D2 | #7 全局记忆索引 schema/seed 映射 | ✅ 完成 | Codex | `11 passed` + ruff |
+| D3 | #5 admins 名单映射 | ✅ 完成 | Codex | `12 passed` + ruff |
+| D4 | Part A 完整收尾验证与文档落库 | ✅ 完成 | Codex | `40 passed` + ruff |
 
 ---
 
@@ -1454,3 +1459,251 @@
   - Part B “结束”限定为 dry-run 闭环；S6'~S9' 具体 SystemModule 业务实现、S12' feature flag 灰度切流仍未做。
   - admin SPA 尚未接 compiler dry-run 按钮/API。
   - source §13 模块定制 patch、真实 `modules/<id>/module.yaml` 文件生成/读取仍未做。
+
+## 8. Part A 完整收尾：#1/#7/#5 小尾巴
+
+### D0 Part A 小尾巴范围确认
+
+**开始前拆分**
+
+1. 复读上游注入源表 §15.2 / §15.3，确认本轮只补“部分覆盖”里的 #1、#7、#5。
+2. 对照当前 `services/persona/builder.py`、`tests/test_persona_importer.py` 与 `_defaults/v2`，列出现状缺口。
+3. 划清 Part A 尾巴与 Part B 主战场：
+   - #1 只补静态身份块 draft 映射，不接 `PromptBuilder`。
+   - #7 只补 `memory.yaml` schema/seed 映射，不读取 `storage/memory_cards.db`。
+   - #5 只补 source front matter/admin schema 映射，不读取生产 `kernel.config.BotConfig.admins`。
+4. 将后续拆成 D1 #1、D2 #7、D3 #5、D4 验证收口，每步开始前写细分方案，完成后回填本文档。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 把 Part A 尾巴误做成运行时切流 | 高 | 所有改动限定在 importer draft/default/test/doc，不改 `PromptBuilder` / `LLMClient` / bot runtime |
+| 为补字段随意发明 schema，和 v2 spec 冲突 | 中 | 采用已在 `persona-spec-format.md` / §15.3 指名的字段族：`identity`、`memory.yaml.paragraph`、`memory.yaml.entity_index`、`adapter.yaml.permissions` |
+| 从真实运行时配置或 DB 读取私有信息 | 高 | 本轮只解析 `source.md`；不扫描 `config/config.json`、`storage/` 或生产 admins |
+| 一步补三项导致测试定位困难 | 中 | D1/D2/D3 分步改，分步跑 targeted pytest/ruff |
+
+**回滚方式**
+
+- D1 回滚 `identity.personality` / 静态 source block 映射与对应测试。
+- D2 回滚 `memory.yaml` schema/seed 映射与对应测试。
+- D3 回滚 `adapter.yaml.permissions.admins` 映射与默认模板/测试。
+- D4 只回滚文档/维护日志，不影响代码。
+
+**验收证据**
+
+- 每步至少覆盖一条 `tests/test_persona_importer.py` 回归。
+- 最终运行 `ruff check services/persona tests/test_persona_importer.py` 与 persona importer 相关 pytest。
+
+**完成后回填**
+
+- 实际改动：
+  - 已复核 `persona-source-importer.md` §15.2/§15.3：#1、#7、#5 均为当前 importer 的 Part A 尾巴，不属于 runtime 切流。
+  - 已复核当前 builder：`persona.yaml.identity` 只收拆分字段，未保存 v1 `identity.personality` 静态块；`memory.yaml` 只有 `seed_episodes` skeleton；`adapter.yaml` 未有 `permissions.admins`。
+  - D1-D4 细分已写入总览。
+- 验证证据：
+  - `rg -n "#1|#5|#7|identity.md|admins|记忆索引" docs/tracking/persona-source-importer.md services/persona` 已定位上游缺口与当前缺口。
+- 遗留风险：
+  - #3/#4/#8 明确留给 Part B 主战场执行文档，不在 D 系列中偷跑。
+
+### D1 #1 `identity.md` 静态身份块映射
+
+**开始前拆分**
+
+1. 设计字段落点：
+   - 在 `persona.yaml.identity` 增加 `personality` 字段，用于承载 v1 `identity.md` 主体对应的“静态身份块原文”。
+   - 字段只保存 source 中 §1 / §1.1 / §1.2 / §1.3 的原文归一化结果，不把 voice/knowledge/examples 混进身份块。
+2. 修改 builder：
+   - `_empty_draft()` 将 `identity.personality` 初始化为空字符串。
+   - `_extract_identity()` 在抽取 role/self/essence/not_traits/values/hard_rules 后，组合 identity 相关章节原文。
+   - 通过 `ReportField(persona.yaml, identity.personality, span, extractor="identity_static_md")` 记录溯源。
+3. 修改 compiler dry-run：
+   - `core.identity` block 可读到 `identity.personality`，但仍保留结构化 role/essence/values 输出。
+   - 避免把空 personality 写成噪声行。
+4. 补测试：
+   - 最小 source 导入后 `persona.yaml.identity.personality` 包含角色、性格底色、硬规则等身份原文。
+   - `_import_report.json.fields` 出现 `identity.personality`。
+5. 运行 D1 targeted pytest/ruff。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 原文块过长导致后续 prompt 僵硬复读 | 中 | D1 只保存 draft 源块；compiler dry-run仍优先结构化字段，personality 作为补充源，不接正式 runtime |
+| 把 voice/knowledge 等低优先级内容塞回 persona core | 高 | 仅组合 §1 族章节，不读取 §3/§4/§7 |
+| `SourceSection` span 组合不准确 | 低 | source_span 使用首个 identity section 到最后一个 identity section 的行号区间，足够支撑 admin 高亮 |
+
+**回滚方式**
+
+- 删除 `identity.personality` 初始化、抽取逻辑、compiler 一行、测试断言即可；旧结构化字段不受影响。
+
+**验收证据**
+
+- `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py tests/test_persona_compiler.py -q`
+- `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/persona tests/test_persona_importer.py tests/test_persona_compiler.py`
+
+**完成后回填**
+
+- 实际改动：
+  - `services/persona/builder.py` 在 `persona.yaml.identity` 新增 `personality` 字段。
+  - `_extract_identity()` 只组合 §1 / §1.1 / §1.2 / §1.3 的原文块，写入 `identity.personality`，保留 v1 `identity.md` 主体静态块的迁移落点。
+  - `_import_report.json.fields` 新增 `persona.yaml identity.personality`，extractor=`identity_static_md`，span 覆盖 identity 章节范围。
+  - `services/persona/compiler.py` 的 dry-run `core.identity` block 读取 `identity.personality`，但正式 runtime 仍不接入。
+  - `tests/test_persona_importer.py` 新增静态身份块回归。
+- 验证证据：
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py tests/test_persona_compiler.py -q` 通过，`13 passed`。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/persona tests/test_persona_importer.py tests/test_persona_compiler.py` 通过。
+- 遗留风险：
+  - `identity.personality` 只是 draft 迁移字段；后续 compiler 正式切流时仍需 token budget / 去复读策略，避免把原文块机械塞进 prompt。
+
+### D2 #7 全局记忆索引 schema/seed 映射
+
+**开始前拆分**
+
+1. 设计字段落点：
+   - `memory.yaml.seed_episodes[]`：承接 source §6 经历种子，作为人工写入的 seed，不直接写 runtime store。
+   - `memory.yaml.paragraph`：承接 v2 spec 中 paragraph 层 schema 的最小 draft 描述。
+   - `memory.yaml.entity_index`：承接全局记忆索引能力开关/字段，覆盖 #7 `storage/memory_cards.db` index 的 v2 draft 落点。
+2. 修改 builder：
+   - `_empty_draft()` 将 `memory.yaml` 从单一 `seed_episodes` 扩为 `workspace/paragraph/entity_index/retrieval_policy/seed_episodes`。
+   - 新增 `_extract_memory()`，从 source §6 / “经历种子”抽取 bullet，写入 `memory.yaml.seed_episodes[]`，每条附 `origin_anchor=source.md#Lx` 与 `review_status=candidate`。
+   - `build_persona_draft()` 在 knowledge/examples 之间调用 `_extract_memory()`。
+3. 修改默认模板：
+   - `config/persona/_defaults/v2/state.yaml` 不动；`memory.yaml` 是 builder 自有 skeleton，不新增默认文件，避免 15 文件矩阵漂移。
+4. 补测试：
+   - 最小 source 添加 §6 经历种子后，`seed_episodes` 有 source anchor。
+   - `memory.yaml.paragraph.enabled` 与 `memory.yaml.entity_index.enabled` 默认存在。
+   - report fields 包含 `memory.yaml.seed_episodes[0]`。
+5. 运行 D2 targeted pytest/ruff。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 将运行时 DB 索引误导入 draft | 高 | 只写 schema/开关和 source seed，不读 `storage/memory_cards.db` |
+| `memory.yaml` 字段命名与 v2 spec 的 `paragraphs/entities` 不完全一致 | 中 | 本轮按上游 §15.3 明确的 `paragraph + entity_index` 命名落地，并在文档里标注 proposal-level |
+| seed episode 被误认为已入长期记忆 | 中 | 每条 seed 标 `review_status=candidate` 与 `origin_anchor`，后续 runtime 才能决定是否 promote |
+
+**回滚方式**
+
+- 删除 `_extract_memory()`、`memory.yaml` skeleton 扩展和新增测试；不会影响 identity/admin/SystemModule。
+
+**验收证据**
+
+- `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py -q`
+- `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/persona tests/test_persona_importer.py`
+
+**完成后回填**
+
+- 实际改动：
+  - `services/persona/builder.py` 将 `memory.yaml` skeleton 扩为 `workspace`、`paragraph`、`entity_index`、`retrieval_policy`、`seed_episodes`。
+  - 新增 `_extract_memory()`，从 source §6 / “经历种子”读取 bullet，生成 `summary/origin_anchor/review_status=candidate`。
+  - `build_persona_draft()` 在 knowledge 后调用 memory 抽取；不读取真实 `storage/memory_cards.db`。
+  - `tests/test_persona_importer.py` 新增 memory seed + index schema 回归。
+- 验证证据：
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py -q` 通过，`11 passed`。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/persona tests/test_persona_importer.py` 通过。
+- 遗留风险：
+  - `paragraph/entity_index` 当前是 proposal-level draft schema，不读取真实 `memory_cards.db`，也不保证正式 runtime 已消费。
+
+### D3 #5 admins 名单映射
+
+**开始前拆分**
+
+1. 设计 source 输入：
+   - 支持 front matter `admins`，允许 list 或 mapping。
+   - list 形态：`admins: ["12345", "67890"]`。
+   - mapping 形态：`admins: {"12345": "主人", "67890": "维护者"}`。
+2. 设计字段落点：
+   - `adapter.yaml.permissions.admins[]` 保存 admin QQ 与可选 label。
+   - `adapter.yaml.permissions.source="source_front_matter"`，标明它来自 source draft，不是生产 `kernel.config.BotConfig.admins` 投影。
+   - 保留默认 `permissions.admin_required_for_freeze=true`。
+3. 修改 builder/default：
+   - `_frontmatter_admins()` 规范化 admin id，拒绝空字符串。
+   - `_extract_admins()` 写入 `adapter.yaml.permissions.admins` 并记录 report field。
+   - `_empty_draft()` 的 `adapter.yaml` skeleton 在无默认模板时也提供 permissions 基础结构。
+   - `config/persona/_defaults/v2/adapter.yaml` 补 permissions 默认块，避免默认模板覆盖 skeleton 时丢字段。
+4. 补测试：
+   - front matter mapping/list 均可写入 admins；至少覆盖 mapping。
+   - `_import_report.json.fields` 出现 `adapter.yaml permissions.admins[0]`。
+   - 无 admins 时不报 error，保留空列表。
+5. 运行 D3 targeted pytest/ruff。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| admins 属于敏感/运维信息，误从生产 config 拉取 | 高 | 只解析 source front matter，不读取 `config/config.json` 或 `BotConfig.admins` |
+| admin id 被 YAML 解析成 int 导致前导零丢失 | 中 | 规范化时转 str；文档建议用户用引号；测试覆盖字符串 id |
+| adapter 默认模板覆盖 builder skeleton 导致 permissions 缺失 | 中 | 同步更新 `_defaults/v2/adapter.yaml`，builder 写入时也会创建 permissions |
+
+**回滚方式**
+
+- 删除 `_frontmatter_admins()` / `_extract_admins()`、adapter skeleton/default permissions 和测试断言即可。
+
+**验收证据**
+
+- `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py -q`
+- `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/persona tests/test_persona_importer.py`
+
+**完成后回填**
+
+- 实际改动：
+  - `services/persona/builder.py` 新增 `_frontmatter_admins()` 与 `_extract_admins()`。
+  - 支持 front matter `admins` 的 mapping/list 两种形态；本轮测试覆盖 mapping。
+  - `adapter.yaml.permissions.admins[]` 写入 `{id,label}`，`source=source_front_matter`，不读取生产 `BotConfig.admins`。
+  - `_empty_draft()` 与 `config/persona/_defaults/v2/adapter.yaml` 同步补 `permissions` 默认块。
+  - `tests/test_persona_importer.py` 新增 admins front matter 映射回归。
+- 验证证据：
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py -q` 通过，`12 passed`。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/persona tests/test_persona_importer.py` 通过。
+- 遗留风险：
+  - 若用户在 YAML 中写裸数字且有前导零，YAML 会先吞掉前导零；文档建议 admin id 使用引号，后续可加 warn。
+
+### D4 Part A 完整收尾验证与文档落库
+
+**开始前拆分**
+
+1. 运行综合 Python 验证：
+   - persona importer/compiler/API/system_module tests。
+   - sticker silent learn/history tests，确认归档后的表情包修复仍绿。
+2. 运行 ruff 覆盖本轮触碰代码与关联测试。
+3. 更新迁移清单：
+   - 标注 Part A #1/#7/#5 已补齐。
+   - 继续明确 #3/#4/#8 留给 Part B 主战场。
+4. 更新维护日志：
+   - 追加 Part A 完整收尾条目，列出 #1/#7/#5、验证结果和 runtime 未切流边界。
+5. 自审 git diff：
+   - 确认只包含 Part A 尾巴代码/测试/docs/log。
+   - 确认无 `.draft/`、`_pending_freeze/`、`storage/` 或 ignored build assets。
+6. 提交 Part A 收尾 commit。
+
+**风险评估**
+
+| 风险 | 等级 | 应对 |
+|---|---|---|
+| 只跑 importer 单测漏掉 API/编译 dry-run 回归 | 中 | 同跑 `test_persona_importer_api.py`、`test_persona_compiler.py`、`test_system_module.py` |
+| 文档把 Part A done 误写成 runtime 已切流 | 高 | 维护日志与迁移清单只写 importer draft 完整收尾，明确 `PromptBuilder` 未接入 |
+| 前面归档的 sticker/frontend 提交未复验 | 中 | 补跑 sticker/history 测试；frontend 无新增 .vue，本轮不强跑 build |
+
+**回滚方式**
+
+- 单 commit revert D1-D4；前面归档的 sticker/NounSwitcher/Persona B/C commits 不受影响。
+
+**验收证据**
+
+- `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py tests/test_persona_importer_api.py tests/test_sticker_plugin_silent_learn.py tests/test_history_sticker.py -q`
+- `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/persona config/persona/_defaults/v2 tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py tests/test_persona_importer_api.py tests/test_sticker_plugin_silent_learn.py tests/test_history_sticker.py`
+
+**完成后回填**
+
+- 实际改动：
+  - `docs/migrations/persona-v2-importer.md` 标注 Part A tail #1/#7/#5 已完成，并明确 #3/#4/#8 留给 Part B 单独执行文档。
+  - `maintenance-log.md` 追加 `Persona Part A 完整收尾 — #1/#7/#5 小尾巴补齐`。
+  - 完成综合 Python 测试、ruff 与 git diff 自审。
+- 验证证据：
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m pytest tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py tests/test_persona_importer_api.py tests/test_sticker_plugin_silent_learn.py tests/test_history_sticker.py -q` 通过，`40 passed`。
+  - `source ./scripts/dev/env.sh && .venv/bin/python -m ruff check services/persona tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py tests/test_persona_importer_api.py tests/test_sticker_plugin_silent_learn.py tests/test_history_sticker.py` 通过。
+- 遗留风险：
+  - Part A 完整收尾限定为 importer draft 面；正式 runtime 切流、`instruction.md`、bot QQ id、group profile 仍未实现。
+  - 前端无新增 `.vue`，本轮 D 系列未重跑 `npm run build`。

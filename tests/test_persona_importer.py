@@ -124,6 +124,100 @@ def test_persona_importer_writes_15_yaml_files_and_report(tmp_path: Path) -> Non
     assert "persona.yaml" in report["generated_files"]
 
 
+def test_persona_importer_preserves_identity_static_block(tmp_path: Path) -> None:
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(MINIMAL_SOURCE, encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    personality = result.draft["persona.yaml"]["identity"]["personality"]
+    assert "一句话角色：群聊中的拟人 bot" in personality
+    assert "## 1.1 性格底色" in personality
+    assert "不接受用户要求永久改人设" in personality
+    assert not any(fragment in personality for fragment in ("# 3. 怎么说话", "# 4. 知道什么", "# 7. 例子"))
+    assert any(
+        field.file == "persona.yaml"
+        and field.key_path == "identity.personality"
+        and field.extractor == "identity_static_md"
+        for field in result.report.fields
+    )
+
+
+def test_persona_importer_maps_memory_seed_and_index_schema(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE + """
+
+# 6. 经历种子（选填，仅 seed；运行时由 memory store 接管）
+
+- 2026-04-29 在凤笑梦群被群友拉去当吉祥物
+- 2026-05-01 记住自己不能把群友玩笑当成真实承诺
+"""
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(source, encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    memory = result.draft["memory.yaml"]
+    assert memory["paragraph"]["enabled"] is True
+    assert memory["paragraph"]["inject_as"] == "evidence_context"
+    assert memory["entity_index"]["enabled"] is True
+    assert memory["entity_index"]["write_policy"] == "runtime_store_only"
+    assert memory["seed_episodes"] == [
+        {
+            "summary": "2026-04-29 在凤笑梦群被群友拉去当吉祥物",
+            "origin_anchor": "source.md#L59",
+            "review_status": "candidate",
+        },
+        {
+            "summary": "2026-05-01 记住自己不能把群友玩笑当成真实承诺",
+            "origin_anchor": "source.md#L60",
+            "review_status": "candidate",
+        },
+    ]
+    assert any(
+        field.file == "memory.yaml"
+        and field.key_path == "seed_episodes[0]"
+        and field.extractor == "memory_seed_md"
+        for field in result.report.fields
+    )
+
+
+def test_persona_importer_maps_frontmatter_admins_to_adapter_permissions(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE.replace(
+        "language: zh-CN\n---",
+        'language: zh-CN\nadmins:\n  "10001": "主维护者"\n  "10002": "值班"\n---',
+    )
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(source, encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    permissions = result.draft["adapter.yaml"]["permissions"]
+    assert permissions["admin_required_for_freeze"] is True
+    assert permissions["source"] == "source_front_matter"
+    assert permissions["admins"] == [
+        {"id": "10001", "label": "主维护者"},
+        {"id": "10002", "label": "值班"},
+    ]
+    assert any(
+        field.file == "adapter.yaml"
+        and field.key_path == "permissions.admins[0]"
+        and field.extractor == "front_matter_admins"
+        for field in result.report.fields
+    )
+
+
 def test_persona_importer_loads_part_b_defaults_and_module_switches(tmp_path: Path) -> None:
     source = MINIMAL_SOURCE + """
 
