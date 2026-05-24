@@ -91,6 +91,8 @@ Fix any errors discovered during testing, even if they were pre-existing and not
 
 session 恢复（compact 之后）：若 system-reminder 已显式注入 `### Skill: omubot-admin-console` 的指南内容，可视为已加载，**不再重复 invoke**——此时只继承行为指南。**新会话**首次触及上述范围必须 invoke 一次。
 
+compact 后任务判定（重要）：system-reminder 注入的 `### Skill:` 段尾常带 `ARGUMENTS:` 字段，那是**会话早期某次 Skill 调用的历史入参**，不是当前任务。判定当前任务时以 compact summary 的 "Primary Request and Intent" 段为准；当 ARGUMENTS 与 summary 描述冲突时，**忽略 ARGUMENTS**（视作历史 invoke 的副本，仅保留 skill 行为指南）。如不确定，主动向用户确认 1 次，不要根据 ARGUMENTS 文本自动展开新工作。
+
 ## Language
 
 Chinese: user-facing strings, identity configs. English: code, comments, docstrings, logs, commits.
