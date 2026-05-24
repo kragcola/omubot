@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from services.persona import PersonaDraftWriter
-from services.persona.compiler import compile_persona_dry_run
+from services.persona.compiler import compile_persona_dry_run, compile_persona_runtime
 from services.persona.importer import main as importer_main
 from tests.test_persona_importer import MINIMAL_SOURCE, _write_defaults
 
@@ -289,3 +289,86 @@ def test_compile_persona_dry_run_skips_proactive_when_section_missing(tmp_path: 
     )
     if guard_block is not None:
         assert "插话方式：" not in guard_block.text
+
+
+# ---------------------------------------------------------------------------
+# B1.3 — compile_persona_runtime() reads from _pending_freeze/
+# ---------------------------------------------------------------------------
+
+
+def _import_and_freeze(tmp_path: Path) -> tuple[Path, Path, PersonaDraftWriter]:
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(MINIMAL_SOURCE, encoding="utf-8")
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    writer.import_source("fengxiaomeng", strict=False)
+    writer.pending_freeze("fengxiaomeng")
+    return persona_root, defaults, writer
+
+
+def test_compile_persona_runtime_happy_path(tmp_path: Path) -> None:
+    persona_root, defaults, _ = _import_and_freeze(tmp_path)
+
+    result = compile_persona_runtime(
+        "fengxiaomeng", persona_root=persona_root, defaults_dir=defaults
+    )
+
+    assert result.ok is True
+    assert result.mode == "runtime"
+    assert result.persona_id == "fengxiaomeng-v2"
+    module_ids = {block.module_id for block in result.prompt_blocks}
+    assert {"core.identity", "core.voice", "core.guard"} <= module_ids
+
+
+def test_compile_persona_runtime_returns_pending_freeze_not_found_when_missing(
+    tmp_path: Path,
+) -> None:
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(MINIMAL_SOURCE, encoding="utf-8")
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    writer.import_source("fengxiaomeng", strict=False)
+
+    result = compile_persona_runtime(
+        "fengxiaomeng", persona_root=persona_root, defaults_dir=defaults
+    )
+
+    assert result.ok is False
+    assert result.mode == "runtime"
+    assert "pending freeze not found" in result.errors
+
+
+def test_compile_persona_runtime_matches_dry_run_blocks(tmp_path: Path) -> None:
+    persona_root, defaults, _ = _import_and_freeze(tmp_path)
+
+    dry_run = compile_persona_dry_run(
+        "fengxiaomeng", persona_root=persona_root, defaults_dir=defaults
+    )
+    runtime = compile_persona_runtime(
+        "fengxiaomeng", persona_root=persona_root, defaults_dir=defaults
+    )
+
+    assert dry_run.ok and runtime.ok
+    dry_blocks = [(b.module_id, b.label, b.text, b.position) for b in dry_run.prompt_blocks]
+    rt_blocks = [(b.module_id, b.label, b.text, b.position) for b in runtime.prompt_blocks]
+    assert dry_blocks == rt_blocks
+    assert dry_run.module_order == runtime.module_order
+
+
+def test_compile_persona_runtime_does_not_raise_on_yaml_error(tmp_path: Path) -> None:
+    persona_root, defaults, writer = _import_and_freeze(tmp_path)
+
+    pending = writer.pending_freeze_dir("fengxiaomeng")
+    (pending / "persona.yaml").write_text("not: valid: yaml: [\n", encoding="utf-8")
+
+    result = compile_persona_runtime(
+        "fengxiaomeng", persona_root=persona_root, defaults_dir=defaults
+    )
+
+    assert result.ok is False
+    assert result.mode == "runtime"
+    assert any("yaml parse error" in err for err in result.errors)

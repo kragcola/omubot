@@ -5,7 +5,12 @@ directory. It deliberately does not write the runtime persona path.
 """
 
 from .builder import build_persona_draft
-from .compiler import CompilePromptBlock, CompileResult, compile_persona_dry_run
+from .compiler import (
+    CompilePromptBlock,
+    CompileResult,
+    compile_persona_dry_run,
+    compile_persona_runtime,
+)
 from .llm_extractor import PersonaLLMExtractor, filter_items_with_source_span
 from .models import ImportIssue, ImportReport, ImportResult, SourceDocument
 from .parity_audit import (
@@ -32,6 +37,7 @@ __all__ = [
     "build_persona_draft",
     "compare_v1_vs_v2_dry_run",
     "compile_persona_dry_run",
+    "compile_persona_runtime",
     "filter_items_with_source_span",
     "parse_source_markdown",
 ]

@@ -1,8 +1,18 @@
-"""Persona v2 compiler dry-run.
+"""Persona v2 compiler.
 
-This module deliberately does not write runtime persona paths. It reads an
-importer draft and returns prompt-block candidates plus SystemModule order so
-later slices can compare runtime behavior before feature-flagged cutover.
+This module reads an importer draft (or its frozen copy under
+``_pending_freeze/``) and returns prompt-block candidates plus SystemModule
+order. Two entry points share the same body:
+
+- :func:`compile_persona_dry_run` reads ``<persona_root>/<id>/.draft/`` and
+  is consumed by the admin parity API and the importer CLI.
+- :func:`compile_persona_runtime` reads
+  ``<persona_root>/<id>/_pending_freeze/`` and is consumed by
+  :mod:`services.persona.runtime` (added in B1.4) when
+  ``BotConfig.persona_v2.runtime_consume`` is on.
+
+Both entry points are read-only and never raise. Callers decide whether to
+fall back to v1 based on ``CompileResult.ok``.
 """
 
 from __future__ import annotations
@@ -63,22 +73,67 @@ def compile_persona_dry_run(
     persona_root: str | Path = "config/persona",
     defaults_dir: str | Path = "config/persona/_defaults/v2",
 ) -> CompileResult:
+    """Compile the importer draft for offline parity comparison.
+
+    Reads ``<persona_root>/<persona_id>/.draft/`` and returns a CompileResult
+    with ``mode='dry_run'``. Read-only and never raises.
+    """
     writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults_dir)
-    draft_dir = writer.draft_dir(persona_id)
+    return _compile_internal(writer, persona_id, mode="dry_run")
+
+
+def compile_persona_runtime(
+    persona_id: str,
+    *,
+    persona_root: str | Path = "config/persona",
+    defaults_dir: str | Path = "config/persona/_defaults/v2",
+) -> CompileResult:
+    """Compile a frozen persona for runtime consumption.
+
+    Reads ``<persona_root>/<persona_id>/_pending_freeze/`` and returns a
+    CompileResult with ``mode='runtime'`` on success or
+    ``ok=False, errors=[...]`` on failure. Read-only and never raises.
+
+    Callers (services/persona/runtime.py) decide whether to fall back to v1
+    based on ``BotConfig.persona_v2.fallback_on_compile_error``.
+    """
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults_dir)
+    return _compile_internal(writer, persona_id, mode="runtime")
+
+
+def _compile_internal(
+    writer: PersonaDraftWriter,
+    persona_id: str,
+    *,
+    mode: str,
+) -> CompileResult:
     namespace = persona_namespace(persona_id)
-    if not draft_dir.is_dir():
-        return CompileResult(False, "dry_run", namespace, errors=("draft not found",))
+    if mode == "dry_run":
+        source_dir = writer.draft_dir(persona_id)
+        missing_msg = "draft not found"
+    elif mode == "runtime":
+        source_dir = writer.pending_freeze_dir(persona_id)
+        missing_msg = "pending freeze not found"
+    else:
+        return CompileResult(False, mode, namespace, errors=(f"unknown mode: {mode}",))
 
-    report = _read_report(draft_dir)
+    if not source_dir.is_dir():
+        return CompileResult(False, mode, namespace, errors=(missing_msg,))
+
+    report = _read_report(source_dir)
     if report.get("status") == "error":
-        return CompileResult(False, "dry_run", namespace, errors=("import report has errors",))
+        return CompileResult(False, mode, namespace, errors=("import report has errors",))
 
-    draft = _read_draft_files(draft_dir)
+    try:
+        draft = _read_draft_files(source_dir)
+    except yaml.YAMLError as exc:
+        return CompileResult(False, mode, namespace, errors=(f"yaml parse error: {exc}",))
+
     graph = validate_module_graph(catalog_contracts())
     if not graph.ok:
         return CompileResult(
             False,
-            "dry_run",
+            mode,
             namespace,
             errors=tuple(issue.message for issue in graph.errors),
         )
@@ -89,7 +144,7 @@ def compile_persona_dry_run(
         warnings.append("no prompt blocks generated")
     return CompileResult(
         True,
-        "dry_run",
+        mode,
         namespace,
         prompt_blocks=blocks,
         module_order=graph.module_order,
