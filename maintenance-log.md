@@ -4,6 +4,70 @@
 
 ---
 
+## 2026-05-24 admin/learning — NounSwitcher 视觉重设计 v1（Header Tabs）
+
+**变更类型**：admin/frontend 视觉重构（仅前端）
+
+**背景**：用户反馈 `/learning` 页面的「黑话 / 风格 / 经验 / 记忆 / 事实 / 关系」切换器是默认 radio chip 风格，「不像主轴切换器、像表单」，要求重设计为有发现性、读起来是 primary axis 的形态。
+
+**论证**：分析 [components/NounSwitcher.vue](admin/frontend/src/views/learning/components/NounSwitcher.vue) 与紧邻的 [components/StageStrip.vue](admin/frontend/src/views/learning/components/StageStrip.vue)，问题是两者高度都 ~38px，视觉权重相当，眼睛分不清谁是主轴谁是 stage 切片。Stage card 已经有 11px/700/0.12em uppercase eyebrow + 大数字的层级，noun chip 没跟上，被读成低一级的 filter。给出 3 个方向（Header Tabs / Poster Card Grid / Side Rail），用户选 Header Tabs（改动最小、视觉跃升最大、不抢 StageStrip 版面）。
+
+**内容**：
+
+- [admin/frontend/src/views/learning/components/NounSwitcher.vue](admin/frontend/src/views/learning/components/NounSwitcher.vue) 整体重写。容器从 6px padding 14px 圆角 chip strip → 14px padding 16px 圆角 + `学习词条主轴` eyebrow 标头 + tab rail。tab 高度 38 → 76px，结构改为「icon + 大写 SLANG/STYLE/… eyebrow（与 Stage 同语汇）/ 中文标签 + 大数字（18/700）」两段式。激活态：背景换 `--om-surface-solid`、4 个边走 `--om-border`、底部 3px `rgb(var(--primary-color))` 实线下边框、`--om-shadow-sm` 轻微抬升、eyebrow 与数字双双换主色。空态保持 0.6 透明度，不走 disabled。「全部」tab 仍以右侧 1px 竖线和后面的 6 个噪词隔开，激活时竖线让位。880px 以下 rail 自动改横向滚动、强制 132px 等宽。
+- 仅前端改动；后端 API、LearningView 调用方、prop 形状（`options/active/total/byNoun/loading`）零变化；其他 noun 槽（slang/style/episode/memory）以及 StageStrip / AllOverviewDashboard / LearningTable / 抽屉链路完全不受影响。
+
+**遗留范围**：发现性主信号「+N 今日」（哪个词条今天活跃）需要 today-delta 数据，当前 `/api/admin/learning/pipeline` 显式不做日期切片（参见 [admin/routes/api/learning_pipeline.py:70](admin/routes/api/learning_pipeline.py#L70) 注释 `Stage counts are inventory snapshots; list endpoints own date filtering.`）。因此 v1 不带 today_delta，相关 API 扩展 + tab 第三行已记入 [docs/tracking/learning-pipeline-execution.md](docs/tracking/learning-pipeline-execution.md) §NS-1 作为 v1.1 ticket，单独 PR 推进。
+
+**影响**：`/learning` 页头部主轴视觉权重抬升，Stage card 自然降到次级。Tab 横排在 1280px 屏幕仍保持可读，880px 自动横向滚。深浅色双模都直接走现有 `--om-*` token（黑暗模式不需要单独覆盖）。无后端变化、无新依赖。
+
+**验证**：
+
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → 通过
+- `cd admin/frontend && npm run build` → 成功；`LearningView-BP3qRHs9.js` 171.71 KB / gzip 49.42 KB（相对前版 +0.42 KB，全在新增 eyebrow 字典 + 重排样式上）
+- 视觉自检（设计稿对位）：tab eyebrow 与 Stage eyebrow 字号/字重/letter-spacing 一致；激活下边框 3px 实线对齐 Stage card 的 `inset 0 -4px 0` 主色风格；「全部」竖线 1px / `--om-border` 与现有规则一致；空态透明度 0.62 → 0.6 微调和 Stage card empty 对齐。
+
+**回滚路径**：单文件改动，`git checkout HEAD -- admin/frontend/src/views/learning/components/NounSwitcher.vue && cd admin/frontend && npm run build` 即可还原；`docs/tracking/learning-pipeline-execution.md` §NS-1 留档不影响代码。
+
+**Handoff / 部署提示**：`admin/static` 走 bind mount（D6），`npm run build` 已写入 `admin/static/assets/`，刷新管理端即可看到新切换器，**无需 rebuild bot**。
+
+---
+
+## 2026-05-24 修复 — 表情包静默学习回路 5-21 之后失活
+
+**变更类型**：bug fix / 失踪代码恢复（D1 同模式扫描 + D4 完成证据）
+
+**症状**：用户反馈"bot 在一次更新后从未新增过表情"。`storage/stickers/index.json` 实测最近一次入库是 2026-05-14（`stk_1927b505`，source `stolen_silent_learn`），之后两周零增量。
+
+**根因**：2026-05-21 恢复提交 [3477163](https://github.com/anthropics/claude-code) 把 [services/media/sticker_capture.py](services/media/sticker_capture.py)（`DEFAULT_STICKER_USAGE_HINT` / `is_sticker_like_segment` / `sticker_description_from_segment` / `segment_value`）+52 行装回 main，但 stash@{0} 里**调用这些 helper 的两条路径**没有被恢复，导致全仓 `grep` 这四个名字 → 0 个调用方。失踪的两条调用链：
+
+- **实时捕获** — `StickerPlugin.on_message`（在 stash-1 的 385 行版本里 line 137；当前 main 134 行版本完全没有 `on_message`），silent_learn 群里 source=`stolen_silent_learn`
+- **历史回放捕获** — `HistoryLoaderPlugin._extract_content` 的 `learn_new_stickers` 分支（在 stash-1 line 211；当前 main 没有此参数），source=`history_loader_sticker_learn`
+
+之所以"管理员工具"路径补不上：[SaveStickerTool](services/tools/sticker_tools.py) 要求 `ctx.user_id` ∈ admins 或 `requested_by` ∈ admins，群聊里普通群友消息根本进不来。这是设计上的"管理员主动收图"路径，不是日常增量来源。
+
+**内容**：从 `origin/wip/stash-1-pre-erase` 把两条路径恢复到 main：
+
+- [plugins/sticker/plugin.py](plugins/sticker/plugin.py) 134 行 → 327 行：补 `on_message`（silent_learn 群里把群友发的表情进 `StickerStore.add(..., source="stolen_silent_learn")`）+ `on_tick`（pending retry 队列，最多 100 条）+ `_PendingStickerRetry` dataclass + `_ensure_segment_cached` / `_silent_sticker_learning_disabled` / `_queue_retry` helpers + 常量 `_SILENT_STEAL_MAX_IMAGES=2` / `_MAX_PENDING_RETRIES=100`。**关键**：类上加 `silent_safe = True`，否则当前 main 的消息总线会跳过 silent_learn 群的 `on_message` 调用（[kernel/types.py:464](kernel/types.py#L464) 是 stash-1 之后引入的新护栏）。
+- [plugins/history_loader/plugin.py](plugins/history_loader/plugin.py)：`_extract_content` / `_load_one_group` / `load_group_history` 各加 `learn_new_stickers` 形参（默认 False，向后兼容），新增的 `is_sticker_like_segment` 分支在 hash 未命中时调用 `sticker_store.add(..., source="history_loader_sticker_learn")`；`HistoryLoaderPlugin.on_bot_connect` 计算 `learn_sticker_groups` 集合（presence_mode==`silent_learn` ∧ tools_enabled ∧ sticker_mode!=`off`），透传给 `load_group_history`。
+- 新增 [tests/test_sticker_plugin_silent_learn.py](tests/test_sticker_plugin_silent_learn.py) 9 条回归（`silent_safe=True`、active 模式不偷、silent_learn 实捕、`sticker_mode=off` 一票否决、非表情图段忽略、空 segments、2 张/条上限、on_tick 空队列、retry 队列上限驱逐最旧）。
+- 在 [tests/test_history_sticker.py](tests/test_history_sticker.py) 加 2 条回归（`learn_new_stickers=True` 写库 + 默认 False 不偷）。
+
+**影响**：恢复表情库的两条增量来源——所有 `presence_mode=silent_learn` 群即时学习 + bot 重连时回放历史回填。`sticker_mode=off` 群和 `tools_enabled=False` 群继续不学。`active` 群路径完全不变（仍走 LLM 工具调用 / `SaveStickerTool` 管理员路径）。表情库现状 64 条不动。
+
+**验证**：
+
+- `uv run ruff check`（4 个修改/新增文件）→ All checks passed
+- `uv run pytest tests/test_sticker_plugin_silent_learn.py tests/test_history_sticker.py` → **14 passed**（含 9 条新回归 + 5 条原有）
+- `uv run pytest tests/` 全量 → 1494 passed / 1 failed（失败的 `test_cache_profile_covers_every_llm_task` 是 in-progress `persona_import` 任务漏注册 `TASK_CACHE_PROFILES`，与表情包恢复**无关**——本次未碰 LLM 任务注册）
+- pyright on touched files：2 errors，均与本次改动无关（`PluginContext.vision_client` / `register_tools` 返回类型协变），baseline 即存在。
+
+**回滚路径**：本次 4 个文件全部 `git checkout HEAD -- plugins/sticker/plugin.py plugins/history_loader/plugin.py tests/test_history_sticker.py && git rm tests/test_sticker_plugin_silent_learn.py` 即可。
+
+**Handoff / 部署提示**：`.py` 改动需要 rebuild bot（D6：admin/static 不动，napcat 不动）：`dot_clean . && docker compose up bot -d --build`。部署后 24h 内观察 `storage/stickers/index.json` 是否出现新条目（source 应为 `stolen_silent_learn` / `stolen_silent_retry` / `history_loader_sticker_learn`）；若无新增，再查 silent_learn 群是否仍有用户在发表情、`on_message` 是否被消息总线触发（grep 日志 `silent sticker learned`）。
+
+---
+
 ## 2026-05-24 fold-in PR-C 尾巴 — style/memory 槽 Drawer 收口
 
 **变更类型**：admin/frontend learning 槽抽屉补完（fold-in PR-C 遗留）
@@ -34,6 +98,30 @@
 **影响**：dev 主机磁盘从 65.99 GB 回到 2.241 GB（包含 4.477 GB volume），相当于回收掉之前 ~65 倍的镜像残留。`docker-compose.yml` bot 服务获得 mem_limit 防御红线；napcat service 行为零改动。本次未触碰任何 runtime 行为，bot 与 napcat 持续在线全程未掉线。
 
 **验证**：`docker stats` bot 282→127 MiB（recreate 后），napcat 308 MiB 不变；`docker compose config | grep mem_` 仅 bot 命中；`docker logs --tail 10 napcat` 与 bot 均显示活跃接群消息；admin `curl -s -o /dev/null -w "%{http_code}" /admin/`=200。回滚路径：删 docker-compose.yml 中 bot 的 `mem_limit/mem_reservation` 三行 + 注释（napcat 仍照原样）；`scripts/dev/docker-cleanup.sh` 是只读消费脚本，删除即可。
+
+---
+
+## 2026-05-24 Persona Part B dry-run 闭环完成
+
+**变更类型**：persona importer/runtime dry-run 扩展 + compiler dry-run
+
+**内容**：Part B 从 S1' 骨架推进到 dry-run 闭环：`config/persona/_defaults/v2/` 默认模板从 3 份扩到 9 份；`source.md` 支持 §11.2 `tone_palette` 写入 `voice.yaml`/`thinker.yaml`，支持 §12 checkbox 写入 `system.yaml.modules.<id>.enabled`；新增 `services/persona/system_validation.py` 将 SystemModule validator 接入 `_import_report.json`；新增 `services/persona/compiler.py` 与 CLI `--compile-dry-run`，可从 `.draft/` 输出 core prompt block 草案和 module order。
+
+**影响**：已具备 source → draft → SystemModule validation → compiler dry-run 的闭环，但仍不写正式 runtime persona 路径，不接入 `PromptBuilder` / `LLMClient` / chat runtime。S6'~S9' 具体模块业务实现、admin 模块状态卡、S12' feature flag 灰度切流仍是后续。
+
+**验证**：`ruff check services/persona services/system_module tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py` 通过；`pytest tests/test_persona_importer.py tests/test_persona_compiler.py tests/test_system_module.py tests/test_persona_importer_api.py` 通过（23 passed）。
+
+---
+
+## 2026-05-24 Persona Part B S1' SystemModule dry-run 骨架落地
+
+**变更类型**：services/system_module 架构骨架 + Part B 校验测试
+
+**内容**：启动 Persona Part B S1'，新增 `services/system_module/` 包：`catalog.py` 固化 SystemModule canonical catalog，`models.py` 定义 `ModuleContract` / `StateSlotDefinition` / `SwitchSurface` / `Scope` / `SourceRef`，`validator.py` 提供 module id、required/reserved、state owner、missing dependency 与 DAG cycle 校验，`state_bus.py` 提供 in-memory `RuntimeStateBus` 骨架。当前 catalog 按 §16 表格事实落为 27 个首版模块 + 7 个 reserved 模块；方案标题中“26 个一级公民模块”的计数差异已在追踪文档中记录。
+
+**影响**：这是 Part B 并行 dry-run 骨架，不接入现有 `PluginBus` / `PromptBuilder` / chat runtime，不替换 v1 soul 与 prompt provider 流。后续 S2'~S5' 可用该包校验 v2 draft / module.yaml；S6'~S12' 才进入模块业务实现、compiler 和灰度切流。
+
+**验证**：`ruff check services/system_module tests/test_system_module.py` 通过；`pytest tests/test_system_module.py` 通过（8 passed）；额外跑 `pytest tests/test_system_module.py tests/test_persona_importer.py tests/test_persona_importer_api.py` 通过（18 passed），确认 Part A importer/API 未受影响。
 
 ---
 
