@@ -210,6 +210,9 @@ class PluginContext:
     style_feedback_graph_bridge: Any = None
     fact_graph_bridge: Any = None
 
+    # Persona v2 — shadow compare engine (B2; flag-gated)
+    shadow_engine: Any = None
+
 
 @dataclass
 class TriggerContext:

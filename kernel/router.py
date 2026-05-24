@@ -568,6 +568,30 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         ctx.prompt_builder.build_static(ctx.identity_mgr.resolve(), bot_self_id=bot.self_id)
         ctx.scheduler.set_bot(bot)
 
+        # B2 shadow compare — flag-gated; defaults off so this is a no-op.
+        persona_v2_cfg = getattr(ctx.config, "persona_v2", None)
+        if persona_v2_cfg is not None and persona_v2_cfg.shadow_compare:
+            from services.persona.shadow import ShadowCompareEngine
+
+            v1_identity = ctx.identity_mgr.resolve()
+            pb = ctx.prompt_builder
+            shadow_engine = ShadowCompareEngine(
+                cfg=persona_v2_cfg,
+                v1_static_text=pb.static_block.get("text", "") if pb.static_block else "",
+                v1_identity=v1_identity,
+                v1_instruction_text=getattr(pb, "_instruction", "") or "",
+                v1_admins=getattr(pb, "_admins", None),
+                v1_proactive=v1_identity.proactive or "",
+                v1_bot_self_id=str(bot.self_id),
+            )
+            try:
+                await shadow_engine.run_once()
+            except Exception as exc:
+                _base_logger.bind(channel="persona_shadow").warning(
+                    "shadow compare unexpected error: {}", exc
+                )
+            ctx.shadow_engine = shadow_engine
+
         # Track whether this is the first connect (vs reconnect)
         is_first_connect = not getattr(ctx, "startup_triggered", False)
         if is_first_connect:
