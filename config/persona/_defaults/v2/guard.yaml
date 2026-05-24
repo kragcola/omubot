@@ -32,5 +32,9 @@ memory_write:
   default_status: candidate
   require_source_ref: true
 
+behavior_instructions:
+  source: source_section
+  items: []
+
 output_blocking:
   on_critical_failure: refuse_in_character

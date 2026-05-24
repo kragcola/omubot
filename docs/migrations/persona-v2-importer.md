@@ -1,6 +1,6 @@
 # Persona v2 Importer 迁移清单
 
-> 状态：2026-05-24 Part A importer 已完整收尾（含 #1/#7/#5 小尾巴）；S6/S10' admin SPA 首版闭环已完成；Part B dry-run 闭环已完成。
+> 状态：2026-05-24 Part A importer 已完整收尾（含 #1/#7/#5 小尾巴）；S6/S10' admin SPA 首版闭环已完成；Part B dry-run 闭环与 #3/#4/#8 prompt source 映射已完成。
 >
 > 上游：[Persona Source Importer](../tracking/persona-source-importer.md)、
 > [整改执行追踪](../tracking/persona-source-importer-remediation-execution.md)。
@@ -35,7 +35,7 @@
 | Part B S2'/S3' | source §11.2/§12 扩展 + 9 默认模板 | ✅ dry-run 已实现；§13 patch 待后续 |
 | Part B S5' | SystemModule validator 接入 importer report | ✅ 已实现 |
 | Part B S11' | persona compiler dry-run | ✅ 已实现；不写正式 runtime |
-| Part B #3/#4/#8 | `instruction.md` / bot QQ id / group profile reply style 与 custom prompt | ⏳ 单独执行文档推进 |
+| Part B #3/#4/#8 | `instruction.md` / bot QQ id / group profile reply style 与 custom prompt | ✅ dry-run 已实现；未接正式 runtime |
 | Part B S6'~S9'/S12' | 完整模块业务实现、admin 模块状态卡、灰度切流 | ⏳ 后续 |
 
 ## 3. 护栏
@@ -83,4 +83,13 @@
 | #1 `soul/identity.md` 主体静态 personality block 只有拆分字段，缺原文迁移落点 | `persona.yaml.identity.personality`，由 source §1/§1.1/§1.2/§1.3 组合，report extractor=`identity_static_md` | ✅ 已实现 |
 | #7 全局记忆索引只在 runtime DB，importer 只有 `seed_episodes` 空壳 | `memory.yaml.paragraph`、`memory.yaml.entity_index`、`retrieval_policy` + source §6 `seed_episodes[]` candidate/source anchor | ✅ 已实现 |
 | #5 admins 名单未被 source 收录 | front matter `admins` → `adapter.yaml.permissions.admins[]`，source 标记为 `source_front_matter` | ✅ 已实现 |
-| #3 `instruction.md`、#4 bot QQ id、#8 group profile | 不在 Part A 尾巴中偷跑 | ⏳ Part B 单独执行文档 |
+| #3 `instruction.md`、#4 bot QQ id、#8 group profile | 不在 Part A 尾巴中偷跑 | ✅ 已由 Part B 单独执行文档收口 |
+
+## 8. Part B #3/#4/#8 prompt source 映射迁移
+
+| 旧注入源 / 缺口 | 新 draft / dry-run 落点 | 状态 |
+|---|---|---|
+| #3 `config/soul/instruction.md` 行为指令只在 v1 static prompt 中拼接，v2 draft 没有结构化承载 | source “行为指令/回复规则/instruction” 章节 bullet → `guard.yaml.behavior_instructions.items[]`，compiler dry-run 输出 `core.guard` 行为指令摘要 | ✅ 已实现；不直接读取 legacy `instruction.md` |
+| #4 bot QQ self id 由 `PromptBuilder.build_static(..., bot_self_id)` 运行时提示，v2 source 无 hint/schema | front matter `bot_self_id_hint` / `known_bot_self_ids` → `adapter.yaml.bot_identity`，`runtime_source=adapter_connect_event`，compiler dry-run 输出 `runtime.adapter` | ✅ 已实现；运行时真实 self id 仍由 adapter connect event 提供 |
+| #8 `GroupOverride.reply_style/custom_prompt` 由 `LLMClient._build_group_profile_block()` 运行时拼入 plugin_stable，v2 source 无群级 override 映射 | front matter `group_profiles.<gid>.reply_style/custom_prompt` → `runtime.yaml.per_group_overrides.<gid>`，`source=source_front_matter`，compiler dry-run 输出 `runtime.group_profile` / `position=stable` | ✅ 已实现；只覆盖 reply_style/custom_prompt |
+| 正式 runtime 切流 | 仍由 v1 `PromptBuilder` / `LLMClient` 使用现有配置路径；v2 compiler dry-run 仅用于比对和后续灰度 | ⏳ 后续 S12' |

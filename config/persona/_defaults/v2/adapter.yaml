@@ -5,6 +5,15 @@ platform:
   kind: onebot_v11
   adapter: napcat
 
+bot_identity:
+  runtime_source: adapter_connect_event
+  self_id_hint: ""
+  known_self_ids: []
+  prompt_policy:
+    assistant_role_only: true
+    user_role_nickname_untrusted: true
+    qq_id_is_identity_key: true
+
 events:
   message_received: true
   recall_received: true

@@ -218,6 +218,121 @@ def test_persona_importer_maps_frontmatter_admins_to_adapter_permissions(tmp_pat
     )
 
 
+def test_persona_importer_maps_behavior_instructions_to_guard(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE + """
+
+# 8.4 行为指令
+
+- 默认只回一句话
+- 不用 Markdown
+"""
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(source, encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    instructions = result.draft["guard.yaml"]["behavior_instructions"]
+    assert instructions["source"] == "source_section"
+    assert instructions["items"] == [
+        {
+            "text": "默认只回一句话",
+            "origin_anchor": "source.md#L59",
+            "review_status": "candidate",
+        },
+        {
+            "text": "不用 Markdown",
+            "origin_anchor": "source.md#L60",
+            "review_status": "candidate",
+        },
+    ]
+    assert any(
+        field.file == "guard.yaml"
+        and field.key_path == "behavior_instructions.items[0]"
+        and field.extractor == "behavior_instruction_md"
+        for field in result.report.fields
+    )
+
+
+def test_persona_importer_maps_bot_identity_hints_to_adapter(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE.replace(
+        "language: zh-CN\n---",
+        'language: zh-CN\nbot_self_id_hint: "10000"\nknown_bot_self_ids: ["10000", "20000"]\n---',
+    )
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(source, encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    bot_identity = result.draft["adapter.yaml"]["bot_identity"]
+    assert bot_identity["runtime_source"] == "adapter_connect_event"
+    assert bot_identity["self_id_hint"] == "10000"
+    assert bot_identity["known_self_ids"] == ["10000", "20000"]
+    assert bot_identity["prompt_policy"]["assistant_role_only"] is True
+    assert any(
+        field.file == "adapter.yaml"
+        and field.key_path == "bot_identity.self_id_hint"
+        and field.extractor == "front_matter_bot_identity"
+        for field in result.report.fields
+    )
+
+
+def test_persona_importer_maps_group_profiles_to_runtime_overrides(tmp_path: Path) -> None:
+    source = MINIMAL_SOURCE.replace(
+        "language: zh-CN\n---",
+        (
+            "language: zh-CN\n"
+            "group_profiles:\n"
+            '  "12345":\n'
+            "    reply_style: playful\n"
+            "    custom_prompt: 多接梗，少说教。\n"
+            '  "67890":\n'
+            "    custom_prompt: 回答要更安静。\n"
+            "---"
+        ),
+    )
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(source, encoding="utf-8")
+
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    result = writer.import_source("fengxiaomeng", strict=False)
+
+    overrides = result.draft["runtime.yaml"]["per_group_overrides"]
+    assert overrides == {
+        "12345": {
+            "reply_style": "playful",
+            "custom_prompt": "多接梗，少说教。",
+            "source": "source_front_matter",
+        },
+        "67890": {
+            "custom_prompt": "回答要更安静。",
+            "source": "source_front_matter",
+        },
+    }
+    assert any(
+        field.file == "runtime.yaml"
+        and field.key_path == "per_group_overrides.12345.reply_style"
+        and field.extractor == "front_matter_group_profiles"
+        for field in result.report.fields
+    )
+    assert any(
+        field.file == "runtime.yaml"
+        and field.key_path == "per_group_overrides.12345.custom_prompt"
+        and field.extractor == "front_matter_group_profiles"
+        for field in result.report.fields
+    )
+
+
 def test_persona_importer_loads_part_b_defaults_and_module_switches(tmp_path: Path) -> None:
     source = MINIMAL_SOURCE + """
 

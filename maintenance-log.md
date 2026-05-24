@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-05-24 Persona Part B 主战场收口 — #3/#4/#8 prompt source 映射
+
+**变更类型**：persona importer/compiler dry-run / tests / docs
+
+**内容**：按独立执行文档 [persona-part-b-main-execution.md](docs/tracking/persona-part-b-main-execution.md) 完成 #3/#4/#8：source “行为指令/回复规则/instruction” 章节 bullet 落到 `guard.yaml.behavior_instructions.items[]` 并进入 compiler dry-run `core.guard`；front matter `bot_self_id_hint` / `known_bot_self_ids` 落到 `adapter.yaml.bot_identity`，`runtime_source=adapter_connect_event`，并进入 `runtime.adapter`；front matter `group_profiles.<gid>.reply_style/custom_prompt` 落到 `runtime.yaml.per_group_overrides.<gid>`，补 `source=source_front_matter`，并进入 `runtime.group_profile` / `position=stable`。
+
+**影响**：Part B #3/#4/#8 的 source → draft → compiler dry-run 映射闭合。正式 chat runtime 仍未切流：不替换 `config/soul/instruction.md`，不改 `PromptBuilder` / `LLMClient`，bot self id 运行时仍由 adapter connect event 提供，group profile 本轮只迁移 `reply_style/custom_prompt` 两个字段。
+
+**验证**：targeted `pytest tests/test_persona_importer.py tests/test_persona_compiler.py -q` 通过（21 passed）；targeted `ruff check services/persona tests/test_persona_importer.py tests/test_persona_compiler.py` 通过。综合验证见提交前 E4 追踪。
+
+**回滚路径**：revert 本次 Part B #3/#4/#8 commit，即可撤销 `guard.yaml` / `adapter.yaml` 默认字段、builder extractor、compiler dry-run block、测试和追踪/迁移文档；Part A tail 与此前 sticker/NounSwitcher/Persona B/C 归档 commits 不受影响。
+
+---
+
 ## 2026-05-24 Persona Part A 完整收尾 — #1/#7/#5 小尾巴补齐
 
 **变更类型**：persona importer draft schema / tests / docs

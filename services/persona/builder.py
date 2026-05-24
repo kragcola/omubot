@@ -85,8 +85,11 @@ def build_persona_draft(
     _extract_knowledge(source, draft, report)
     _extract_memory(source, draft, report)
     _extract_examples(source, draft, report)
+    _extract_behavior_instructions(source, draft, report)
     _extract_part_b_overrides(source, draft, report)
     _extract_admins(source, draft, report)
+    _extract_bot_identity(source, draft, report)
+    _extract_group_profiles(source, draft, report)
     validate_system_modules(draft, report)
     _validate_required(draft, report)
 
@@ -189,6 +192,16 @@ def _empty_draft(persona_id: str, source: SourceDocument) -> dict[str, dict[str,
         "capabilities.yaml": _skeleton("omubot.capabilities.v2", source),
         "adapter.yaml": {
             **_skeleton("omubot.adapter.v2", source),
+            "bot_identity": {
+                "runtime_source": "adapter_connect_event",
+                "self_id_hint": "",
+                "known_self_ids": [],
+                "prompt_policy": {
+                    "assistant_role_only": True,
+                    "user_role_nickname_untrusted": True,
+                    "qq_id_is_identity_key": True,
+                },
+            },
             "permissions": {
                 "admin_required_for_freeze": True,
                 "source": "source_front_matter",
@@ -381,6 +394,40 @@ def _extract_examples(source: SourceDocument, draft: dict[str, dict[str, Any]], 
     _set_list(draft, report, "examples.yaml", "negative", negatives, "llm_extract_stub")
 
 
+def _extract_behavior_instructions(
+    source: SourceDocument,
+    draft: dict[str, dict[str, Any]],
+    report: ImportReport,
+) -> None:
+    section = source.section("行为指令", "回复规则", "instruction", "instructions")
+    items = [
+        SourceField(
+            key=item.key,
+            value={
+                "text": item.value,
+                "origin_anchor": f"{item.span.file}#L{item.span.lines[0]}",
+                "review_status": "candidate",
+            },
+            span=item.span,
+        )
+        for item in bullet_items(section, source_file=source.path)
+    ]
+    if not items:
+        instructions = draft.setdefault("guard.yaml", {}).setdefault("behavior_instructions", {})
+        if isinstance(instructions, dict):
+            instructions.setdefault("source", "source_section")
+            instructions.setdefault("items", [])
+        return
+
+    guard = draft.setdefault("guard.yaml", {})
+    instructions = guard.setdefault("behavior_instructions", {})
+    if not isinstance(instructions, dict):
+        instructions = {}
+        guard["behavior_instructions"] = instructions
+    instructions["source"] = "source_section"
+    _set_list(draft, report, "guard.yaml", "behavior_instructions.items", items, "behavior_instruction_md")
+
+
 def _extract_part_b_overrides(
     source: SourceDocument,
     draft: dict[str, dict[str, Any]],
@@ -486,6 +533,80 @@ def _extract_admins(source: SourceDocument, draft: dict[str, dict[str, Any]], re
                 "front_matter_admins",
             )
         )
+
+
+def _extract_bot_identity(source: SourceDocument, draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
+    self_id_hint = _frontmatter_str(source, "bot_self_id_hint")
+    known_self_ids = _frontmatter_str_list(source, "known_bot_self_ids")
+    adapter = draft.setdefault("adapter.yaml", {})
+    bot_identity = adapter.setdefault("bot_identity", {})
+    if not isinstance(bot_identity, dict):
+        bot_identity = {}
+        adapter["bot_identity"] = bot_identity
+    bot_identity.setdefault("runtime_source", "adapter_connect_event")
+    bot_identity.setdefault("self_id_hint", "")
+    bot_identity.setdefault("known_self_ids", [])
+    bot_identity.setdefault(
+        "prompt_policy",
+        {
+            "assistant_role_only": True,
+            "user_role_nickname_untrusted": True,
+            "qq_id_is_identity_key": True,
+        },
+    )
+
+    span = SourceSpan(source.path, (1, max(1, _frontmatter_end_line(source.text))))
+    if self_id_hint:
+        bot_identity["self_id_hint"] = self_id_hint
+        report.fields.append(
+            ReportField(
+                "adapter.yaml",
+                "bot_identity.self_id_hint",
+                span,
+                1.0,
+                "front_matter_bot_identity",
+            )
+        )
+    if known_self_ids:
+        bot_identity["known_self_ids"] = known_self_ids
+        for index, _self_id in enumerate(known_self_ids):
+            report.fields.append(
+                ReportField(
+                    "adapter.yaml",
+                    f"bot_identity.known_self_ids[{index}]",
+                    span,
+                    1.0,
+                    "front_matter_bot_identity",
+                )
+            )
+
+
+def _extract_group_profiles(source: SourceDocument, draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
+    profiles = _frontmatter_group_profiles(source, report)
+    runtime = draft.setdefault("runtime.yaml", {})
+    overrides = runtime.setdefault("per_group_overrides", {})
+    if not isinstance(overrides, dict):
+        overrides = {}
+        runtime["per_group_overrides"] = overrides
+    if not profiles:
+        return
+
+    span = SourceSpan(source.path, (1, max(1, _frontmatter_end_line(source.text))))
+    for group_id, payload in profiles.items():
+        row = dict(payload)
+        row["source"] = "source_front_matter"
+        overrides[group_id] = row
+        for key in ("reply_style", "custom_prompt"):
+            if key in payload:
+                report.fields.append(
+                    ReportField(
+                        "runtime.yaml",
+                        f"per_group_overrides.{group_id}.{key}",
+                        span,
+                        1.0,
+                        "front_matter_group_profiles",
+                    )
+                )
 
 
 def _validate_required(draft: dict[str, dict[str, Any]], report: ImportReport) -> None:
@@ -643,6 +764,77 @@ def _frontmatter_admins(source: SourceDocument) -> list[dict[str, str]]:
             if admin_id:
                 admins.append({"id": admin_id, "label": ""})
     return admins
+
+
+def _frontmatter_str_list(source: SourceDocument, key: str) -> list[str]:
+    value = source.frontmatter.get(key)
+    if isinstance(value, str | int):
+        text = str(value).strip()
+        return [text] if text else []
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [text for item in value if (text := str(item).strip())]
+
+
+def _frontmatter_group_profiles(
+    source: SourceDocument,
+    report: ImportReport,
+) -> dict[str, dict[str, str]]:
+    value = source.frontmatter.get("group_profiles")
+    if value is None:
+        return {}
+    span = SourceSpan(source.path, (1, max(1, _frontmatter_end_line(source.text))))
+    if not isinstance(value, dict):
+        report.issues.append(
+            ImportIssue(
+                "warn",
+                "invalid_group_profiles",
+                "front matter `group_profiles` must be a mapping keyed by group id",
+                "runtime.yaml",
+                "per_group_overrides",
+                span,
+            )
+        )
+        return {}
+
+    profiles: dict[str, dict[str, str]] = {}
+    for raw_group_id, raw_payload in value.items():
+        group_id = str(raw_group_id).strip()
+        if not group_id:
+            report.issues.append(
+                ImportIssue(
+                    "warn",
+                    "invalid_group_profile_id",
+                    "front matter `group_profiles` contains an empty group id",
+                    "runtime.yaml",
+                    "per_group_overrides",
+                    span,
+                )
+            )
+            continue
+        if not isinstance(raw_payload, dict):
+            report.issues.append(
+                ImportIssue(
+                    "warn",
+                    "invalid_group_profile",
+                    f"front matter `group_profiles.{group_id}` must be a mapping",
+                    "runtime.yaml",
+                    f"per_group_overrides.{group_id}",
+                    span,
+                )
+            )
+            continue
+        payload: dict[str, str] = {}
+        for key in ("reply_style", "custom_prompt"):
+            raw_value = raw_payload.get(key)
+            if raw_value is None:
+                continue
+            text = str(raw_value).strip()
+            if text:
+                payload[key] = text
+        if payload:
+            profiles[group_id] = payload
+    return profiles
 
 
 def _frontmatter_end_line(text: str) -> int:
