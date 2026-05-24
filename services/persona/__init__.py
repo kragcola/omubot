@@ -21,9 +21,16 @@ from .parity_audit import (
 )
 from .parser import parse_source_markdown
 from .runtime import PersonaRuntimeBundle, load_pending_freeze
+from .shadow import (
+    DEFAULT_SHADOW_LOG_PATH,
+    ShadowCompareEngine,
+    ShadowCounter,
+    ShadowDiffReport,
+)
 from .writer import PersonaDraftWriter
 
 __all__ = [
+    "DEFAULT_SHADOW_LOG_PATH",
     "CompilePromptBlock",
     "CompileResult",
     "GroupOverrideSnapshot",
@@ -35,6 +42,9 @@ __all__ = [
     "PersonaDraftWriter",
     "PersonaLLMExtractor",
     "PersonaRuntimeBundle",
+    "ShadowCompareEngine",
+    "ShadowCounter",
+    "ShadowDiffReport",
     "SourceDocument",
     "build_persona_draft",
     "compare_v1_vs_v2_dry_run",
