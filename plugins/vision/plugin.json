@@ -6,7 +6,7 @@
     "en": "Vision"
   },
   "description": "视觉客户端：Qwen VL 图片描述能力，作为系统服务展示",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "priority": 8,
   "tier": "system",
   "toggle_policy": "locked",

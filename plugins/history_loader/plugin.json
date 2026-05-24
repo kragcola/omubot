@@ -6,7 +6,7 @@
     "en": "History Loader"
   },
   "description": "群聊历史加载：Bot 连接后回填近期消息",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "priority": 5,
   "tier": "system",
   "toggle_policy": "locked",

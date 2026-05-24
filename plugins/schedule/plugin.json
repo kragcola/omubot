@@ -6,7 +6,7 @@
     "en": "Schedule"
   },
   "description": "日程与心情：时间感知、心情注入、每日日程生成",
-  "version": "1.1.2",
+  "version": "1.1.5",
   "priority": 20,
   "tier": "user",
   "toggle_policy": "runtime",

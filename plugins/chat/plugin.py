@@ -55,7 +55,7 @@ def _sanitize_debug_reply(text: str, *, fallback: str = "这次没有执行到�
 
 class ChatPlugin(AmadeusPlugin):
     name = "chat"
-    version = "1.1.7"
+    version = "1.1.25"
     description = "Core chat: LLM client, group scheduler, memory, tools, identity"
     priority = 0
 

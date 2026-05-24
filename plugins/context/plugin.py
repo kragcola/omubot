@@ -39,7 +39,7 @@ class ContextConfig(BaseModel):
 class ContextPlugin(AmadeusPlugin):
     name = "context"
     description = "统一上下文：聚合记忆卡片、文档知识和图谱事实"
-    version = "0.1.0"
+    version = "0.1.9"
     priority = 7
 
     def __init__(self) -> None:

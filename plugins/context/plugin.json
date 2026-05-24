@@ -6,7 +6,7 @@
     "en": "Context"
   },
   "description": "统一聚合记忆卡片、文档知识和未来图谱事实的系统级上下文插件",
-  "version": "0.1.0",
+  "version": "0.1.9",
   "priority": 7,
   "tier": "system",
   "toggle_policy": "locked",

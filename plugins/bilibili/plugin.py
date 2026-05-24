@@ -350,7 +350,7 @@ def format_video_summary(info: dict, cover_desc: str | None = None) -> str:
 class BilibiliPlugin(AmadeusPlugin):
     name = "bilibili"
     description = "B站视频链接识别：拉取标题/封面/简介/标签，注入消息上下文"
-    version = "1.1.3"
+    version = "1.1.4"
     priority = 190
 
     async def on_startup(self, ctx: PluginContext) -> None:

@@ -117,7 +117,7 @@ class SlangLookupTool(Tool):
 class SlangPlugin(AmadeusPlugin):
     name = "slang"
     description = "群内黑话：学习候选、审核后注入当前群语境"
-    version = "0.1.0"
+    version = "0.1.17"
     priority = 42
     silent_safe = True  # on_message 仅写黑话候选库，不发消息、不改 trigger
 

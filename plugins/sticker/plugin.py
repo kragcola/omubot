@@ -92,7 +92,7 @@ _STICKER_FREQUENCY_PROMPTS: dict[str, str] = {
 class StickerPlugin(AmadeusPlugin):
     name = "sticker"
     description = "表情包工具：保存、发送、管理表情包及图片描述"
-    version = "1.1.5"
+    version = "1.1.6"
     priority = 40
     silent_safe = True
     """on_message 只读取消息 + 写表情库，不发消息也不改 trigger，可在 silent_learn 群运行。"""

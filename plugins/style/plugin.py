@@ -29,7 +29,7 @@ class StyleConfig(BaseModel):
 class StylePlugin(AmadeusPlugin):
     name = "style"
     description = "表达学习：注入已审核的表达习惯参考"
-    version = "0.1.0"
+    version = "1.0.0"
     priority = 43
 
     def __init__(self, config: StyleConfig | None = None) -> None:

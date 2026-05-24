@@ -19,7 +19,7 @@ _L = logger.bind(channel="system")
 class KnowledgePlugin(AmadeusPlugin):
     name = "knowledge"
     description = "知识库：扫描文档目录，关键词匹配注入 system prompt"
-    version = "0.1.1"
+    version = "0.1.5"
     priority = 8  # 基础设施层
 
     def __init__(self) -> None:

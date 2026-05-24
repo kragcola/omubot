@@ -6,7 +6,7 @@
     "en": "Knowledge"
   },
   "description": "知识库：扫描文档目录，关键词匹配注入对话上下文",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "priority": 8,
   "tier": "user",
   "toggle_policy": "runtime",

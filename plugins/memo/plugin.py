@@ -139,7 +139,7 @@ class MemoExtractor:
 class MemoPlugin(AmadeusPlugin):
     name = "memo"
     description = "记忆系统：卡片索引、实体记忆注入、对话后提取"
-    version = "1.1.3"
+    version = "1.1.5"
     priority = 30
 
     def __init__(self) -> None:

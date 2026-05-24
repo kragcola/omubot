@@ -5,6 +5,103 @@ All notable changes to Omubot are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-05-24
+
+聚合 v1.2.5 至今（2026-05-05 → 2026-05-24）维护日志，覆盖此前未发版的 v1.3 / v1.4 区间。版本号每条「涉及插件修改」的维护日志条目对应 +0.0.1。
+
+### Added
+
+#### 三层架构（kernel / services / admin）
+
+- **Plugin 目录化**：插件从单文件 `.py` 全面迁移到 `plugins/<name>/` 目录 + `plugin.json`（manifest_version=3）+ `config.default.json` + `config.schema.json`，统一 `manifest / display_name / capabilities / permissions / restart_required_fields` 契约；新增 `plugin.sig` 签名预留与 marketplace_id 槽位
+- **PluginBus 生命周期 hooks**：`on_startup` / `on_shutdown` / `on_bot_connect` / `on_message` / `on_pre_prompt` / `on_post_reply` / `on_tick`，钩子级耗时与异常聚合到 admin 健康面板
+- **Kahn 拓扑排序 + 循环依赖回退**：插件加载顺序按 `provides → consumes` 拓扑展开，循环依赖时回退到 manifest priority
+- **PromptBlock**：`static / stable / dynamic` 三段式 prompt 注入；插件可注册 block 而非自己拼字符串
+- **LLMRequest spine**（Phase A→D）：所有 LLM 调用收敛到统一 `LLMRequest` 契约，含 per-task cache profile / 多 provider 路由 / SSE 流解析；阶段 D-now 把 main / compact / thinker / slang_review / style / episode 全部迁过去
+- **多层学习记忆 Phase C-E**：`MemoryConsolidator` dry-run + admin 队列；Episode 候选 → approved → enabled_for_prompt promote 桥；reflection 路径（style_feedback / expressions / slang_drift 三源）；EpisodeProvider 召回路径双写 BlockTraceBus；5 条 graph edge 双写（`term_used_in_group` / `style_applies_to_situation` / `user_corrected_bot_about` / `doc_supports_fact` / `episode_supports_profile`）
+- **Knowledge 系统治本 PR1-PR6**：RRF 跨源融合 + ContextRetriever Protocol + 软指令兜底；token 多桶预算替换字符截断；Thinker `retrieve_mode` 四档分路（删 search action）；启动顺序 / admin 链路 / skip metrics 三处漏点；query 重写 / decontextualization；prompt-injection guard（`<context_data>` 包裹 + 安全前导 + 人设强化）；graph 链路可观测性（pack/extractor INFO + reject 节流 + health API）
+- **Knowledge 图谱抽取治本 PR1-PR2**：关闭 regex 自动抽取 + 清 75 条垃圾候选；LLM 抽取器 + 拆 0.85 快车道 + 重开 graph_auto_extract
+- **DeepSeek 静态前缀加固**（方案 D + E）：thinker / slang_review / slang / slang_drift / slang_semantic 五条链路前缀加固跨过 1024-token 缓存门槛
+- **黑话系统 v3**：群内黑话 v1/v2/v2.5 → v3 质量治理；黑话 alias key 与缓冲 correctness；全局词封闭群选项；语义漂移误报门控；ConversationArchive 黑话/表达 cursor 迁移
+- **多层学习记忆 Phase D 候选 admin UX**：5 域筛选 + episode payload 编辑 + 修订审计
+- **`/learning` 学习管线**（v1 → v2.1 → v3 fold-in）：
+  - PR1-PR6：只读 pipeline + 执行追踪、BudgetManager 改吃 candidate、style/episode accepted-only observations、items 列表 + LearningTable、extract-all + 轻量审核抽屉、style runner + 入口深链
+  - L1-L4 收口：slang accepted-only prompt observation、memory card_id 深链定位、trimmed prompt block 计入 hits、extract-all run_id 进度查询
+  - v2.1：F1-F5 修订 + L1-L4 折入 + 7 PR 收口上线
+  - v3 fold-in PR-A/B/C/D：三槽骨架（NounToolbar / SidePanel / DrawerHost）、slang / style / episode / memory 折入新管道、5 路由 redirect + SideMenu 收敛 + 旧页面退场
+  - 词条主切换轴 NounSwitcher v0 → v1（Header Tabs，76px 双段式 tab，与 Stage eyebrow 同语汇）
+- **Persona Source Importer Part A** — `services/persona/` parser/builder/writer/CLI/LLM extractor；source.md 一份 → 15 个 `.draft/*.yaml` partial skeleton + `_import_report.json`；Pending Freeze 复制到 `_pending_freeze/`；新增 `/api/admin/persona/import` / `/draft/{id}` / `/freeze/{id}` / `/source/{id}`；`persona_import` LLMTask + cache profile + admin provider task 同步
+- **Persona Part B dry-run 闭环**：`services/system_module/` 27 + 7 模块 catalog / models / DAG validator / RuntimeStateBus skeleton；`config/persona/_defaults/v2/` 9 份默认模板；`services/persona/system_validation.py` 接入 `_import_report.json`；`services/persona/compiler.py` `--compile-dry-run` 输出 core prompt block 草案 + module order
+- **Admin SPA 阶段 0 → 5.2**：Vue 3 + TypeScript + Naive UI + Vite manualChunks（vendor-vue / vendor-icons 拆分）；Jinja 模板退役（一刀切）；阶段 3 长尾 6 视图（BlockTrace / Episodes / MemoryConsolidator / Style / Scheduler / Sandbox / Schedule / MemosView / CrossGroup）AppPanelSection 收敛；阶段 4 月度合规脚本 `scripts/check-ui-compliance.sh`；DashboardView 信息密度 + 「今日学习收录」 + 右侧竖版日程时间线；LogsView 二轮重设计 + LogPanel；admin 静态资源缓存策略分流；admin SSE 群活动实时推送；hero 改随主体滚动；全局滚动 reset.css 修复
+- **Admin Persona Importer SPA 首版**：4 MetricCard + PageToolbar + 双栏 source/issues 视图 + sourceDirtySinceImport gate + Pending Freeze NPopconfirm 二次确认
+- **storage 切 docker named volume**（Phase 3 A/B）：`storage/` 从 bind mount 切到 docker named volume，避开 macOS 共享盘 sqlite 写入异常
+- **slang.db 损坏全栈治本 Phase 1-3**：`close_with_checkpoint` + 主机脚本守卫；DELETE journal + 完整性巡检 + admin 接线；storage 切 docker named volume；附 `external: true` 中途修复
+- **备份体系 Phase 1-4**：`services/backup/` 全库每日备份 + 服务层接线 + admin 入口
+- **Codex 协同工作流**：`.claude/handoff/*.md` 流程；codex 切回原生 DeepSeek（弃用 CPA / codeseeq 路径）；CPA fixup sidecar 处理 DeepSeek thinking 多轮 400
+- **DeepSeek V4 原生模式接入** + 本机 CPA / Codex profile 锁定修复 + 1M 上下文利用率提升
+- **Phase 1-8 治理 / 生态 / 韧性**：服务级健康聚合、关键错误聚合、健康告警降噪、维护窗口提示、配置回滚向导 + 基础备份、配置变更审计 + 保存前 diff、profile 热切换、分 profile rate limit、群 Profile 工具矩阵 + 屏蔽用户编辑 + 策略审计历史、未加载包治理队列、`plugin.sig` 签名 + 来源校验预留、mock 协议测试、历史连接记录、Phase 5 质量守卫 + 系统可视化、Phase 7 本地插件生态
+- **Context Knowledge System P1/P2** + 评测闸门 + ContextPlugin 接管前评测守卫 + 主人场景上下文评测扩充 + Prompt Pack 长度预算
+- **知识库 Web 治理台**（admin/routes/knowledge.py） + 导入指导文档 + 图谱加载失败审计
+
+### Changed
+
+- **CHANGELOG 收敛策略**：v1.2.5 之后未发布的 v1.3 / v1.4 中间版本合并到本版本，`pyproject.toml` 直跳 1.4.0 → 1.5.0
+- **维护日志治理纪律**：D1 同模式扫描 / D2 cancel-path 测试 / D3 重构带迁移清单 / D4 完成声明含证据 / D5 pytest 防孤儿 / D6 admin SPA 同步路径 / D7 部署前 git hygiene 七条入 CLAUDE.md
+- **Skill 自动触发**：`omubot-admin-console` skill 接管 admin/frontend / admin/routes / docs/tracking / maintenance-log 任意改动
+- **Docker 镜像/缓存治理**：dev 主机 65.99 GB → 2.241 GB（含 4.477 GB volume）；`docker compose up bot --build` 反复触发后的 146 张 dangling 镜像清理；compose 给 bot 服务加 `mem_limit: 2g` / `mem_reservation: 512m` 防御红线（napcat 不动 — D6 反风控）
+- **bot 配置中心化**：6 个插件配置从中央 `config.toml` 迁移至 `plugins/<name>.toml`；Config 模型从 `kernel/config.py` 搬至各插件
+- **session-start hook 重构**：外置脚本 + 维护日志索引 + 修 cwd 路径 bug
+- Bot 版本 1.2.5 → 1.5.0
+- 插件总数：v1.2.5 18 → v1.5.0 23（新增 calendar_context / context / knowledge / slang / sticker / style 等目录化产物）
+
+### Plugin version bumps（每条维护日志条目 +0.0.1）
+
+| Plugin           | v1.2.5 → v1.5.0       | 涉及条目数 |
+| ---------------- | --------------------- | ---------- |
+| chat             | 1.1.7 → 1.1.25        | 18         |
+| slang            | 0.1.0 → 0.1.17        | 17         |
+| context          | 0.1.0 → 0.1.9         | 9          |
+| knowledge        | 0.1.1 → 0.1.5         | 4          |
+| schedule         | 1.1.2 → 1.1.5         | 3          |
+| memo             | 1.1.3 → 1.1.5         | 2          |
+| sticker          | 1.1.4 → 1.1.6         | 2          |
+| style            | (新增 5-21) → 1.0.0   | 2          |
+| bilibili         | 1.1.3 → 1.1.4         | 1          |
+| calendar_context | (新增 5-21) → 1.0.0   | 1          |
+| element_detector | 1.1.2 → 1.1.3         | 1          |
+| history_loader   | 1.1.1 → 1.1.2         | 1          |
+| vision           | 1.1.1 → 1.1.2         | 1          |
+
+未触及的插件保持原版本：`affection 1.1.2` / `datetime 1.1.1` / `debug_commands 1.3.1` / `dream 1.1.3` / `echo 1.1.2` / `food 0.1.6` / `group_admin 1.1.1` / `http_api 1.1.1` / `web_fetch 1.1.1` / `web_search 1.1.1`
+
+### Fixed
+
+- **表情包静默学习回路 5-21 之后失活**：2026-05-21 恢复提交 3477163 把 `services/media/sticker_capture.py` helpers 装回 main，但 `StickerPlugin.on_message` + `HistoryLoaderPlugin.learn_new_stickers` 两条调用路径没恢复，全仓 grep helper 名 → 0 调用方；从 `wip/stash-1-pre-erase` 把 silent_learn 实捕（`stolen_silent_learn`）和历史回放（`history_loader_sticker_learn`）两条路径恢复到 main，加 `silent_safe = True` 旁路新护栏
+- **silent_learn 模式被 element_detector 击穿**：emergency hotfix
+- **黑话抽取 run 永远卡 running、计数全 0**：CancelledError 收尾漏洞
+- **AI 清池死循环**：backlog reviewer 缺 slot 幂等闸门，1075 条永远积压修复
+- **黑话复核失败回待审** + AI 复核性能修复 + alias key 与缓冲 correctness
+- **B站 JSON 卡片多 URL 遍历** + 无 scheme URL 归一化（v1.2.4 已修；本版本未触发新 bug）
+- **stage→noun-mode 跨 4 noun 全栈映射对齐**（5 处 mismatch）：slang review→`pending_human_review` + archived→`archived_only`；episode candidate / review / approved 三处错位修正
+- **noun=memory 数据源修正** + inventory stage 默认 date=all
+- **fold-in slang 槽双轴根除**：embedded 模式抑制 SummaryBar / QueueToolbar 子 tab
+- **信息速递不再截断 title** + 6 处布局/视觉补强（pill chip / flex 布局 / 注解填空 / 群号去省略号 / .feed-tail 包裹 / min-width:0）
+- **admin SPA 全局滚动**：reset.css `html, body, #app, .n-config-provider { height:100% }` 链路修复
+- **stash 全量恢复**：5 天 in-progress 工作 3-way merge 回 Phase 1+2 主线
+- **Docker 磁盘事故恢复** + 拉起修复（stale bind-mount 重建 + 前端 rebuild + napcat 重新扫码）
+- **工作区恢复**：从网络共享盘 omubot-critical-backup 恢复 config / napcat / storage
+- **deploy fix**：pyproject 补 rapidfuzz 依赖；admin SSE 群活动实时推送 + group access refactor 收尾
+- **全量 pytest 退出挂住** （aiosqlite 资源收尾）+ 7 项预存测试失败清理（975 passed / 0 failed）+ ruff E501 26 条 pre-existing 清理
+
+### Removed
+
+- **Jinja2 模板**：admin/templates 全量退役，全部走 Vue 3 SPA + Vite 构建到 admin/static
+- **5 条旧 admin 路由**：v3 fold-in 后 `/slang` / `/memory-consolidator` / `/style` / `/episodes` / `/cross-group` 全部 redirect 收敛到 `/learning?noun=...&stage=...`
+- **CPA / codeseeq DeepSeek 中间层**：codex 切回原生 DeepSeek API
+- **`MemoryConsolidator` 旧搜索 action**：被 PR5 retrieve_mode 四档分路替代
+
+[1.5.0]: https://github.com/kragcola/omubot/releases/tag/v1.5.0
+
 ## [1.2.5] — 2026-05-05
 
 ### Added
