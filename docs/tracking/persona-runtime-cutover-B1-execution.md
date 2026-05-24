@@ -116,13 +116,15 @@ persona_v2: PersonaV2Config = PersonaV2Config()
 **`config.toml` 段示例**
 
 ```toml
-[persona.v2]
+[persona_v2]
 runtime_consume = false
 runtime_groups = []
 shadow_compare = false
 fallback_on_compile_error = true
 persona_id = "default"
 ```
+
+> 表名是 `[persona_v2]` 不是 `[persona.v2]`：与 Pydantic 字段名 `BotConfig.persona_v2` 直接对齐，避免 tomllib 把 `[persona.v2]` 解成嵌套 dict 后映射不上。
 
 ### 2.2 风险
 
