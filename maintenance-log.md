@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P2.8 Sticker Decision Provider 落地
+
+**变更类型**：humanization support module / sticker decision / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 3 P2.8 新增 sticker 单决策点：
+
+- 新建 `services/sticker/__init__.py` 与 `services/sticker/decision_provider.py`；
+- `StickerDecisionProvider.decide()` 统一 frequent / kaomoji / thinker / tool_call 四路输入，输出 `StickerDecision`；
+- candidate pool 按 tool_call → kaomoji → frequent → thinker → extra 去重并 capped ≤10；
+- thinker.sticker 只作为 hint，neutral mood 下不自决发送；playful/high/close 可由 provider 提升；
+- cold/tired/withdraw mood/affection gate 阻断发送，cooldown 单点拒发；
+- `tests/test_sticker_decision_provider.py`：15 条覆盖冷启动、4 触发源互斥、mood/affection gate、cooldown、candidate cap、extra candidate 与 cancel-path。
+
+**验证**：
+
+- `uv run pytest tests/test_sticker_decision_provider.py -q` → `15 passed`
+- `uv run ruff check services/sticker/decision_provider.py services/sticker/__init__.py tests/test_sticker_decision_provider.py` → passed
+- `uv run pyright services/sticker/decision_provider.py services/sticker/__init__.py tests/test_sticker_decision_provider.py` → `0 errors`
+- `uv run python -m py_compile services/sticker/decision_provider.py services/sticker/__init__.py tests/test_sticker_decision_provider.py` → passed
+
+**影响**：P2.8 状态自主验收为 ✅；当前未接 `plugins/sticker` / `SendStickerTool` / `services/llm/client.py`，不改变线上发图行为。P2.9 / P2.10 / P2.14 / P2.12 的 sticker v2 前置已具备。
+
+**回滚**：删除 `services/sticker/` 与 `tests/test_sticker_decision_provider.py`，撤销 Part 2/3 tracking 的 P2.8 回填。
+
+---
+
 ## 2026-05-25 Humanization Part 2/3 P2.6 No-reply 阶梯阈值落地
 
 **变更类型**：humanization support module / tests
