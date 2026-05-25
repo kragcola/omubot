@@ -228,7 +228,7 @@
 | **P3.2** | 2 | ✅ | 自主验收通过：`services/group/topic_drift.py`（119 行）+ 6 条测试；last 3 user messages drift 检测与 provider fallback 验证通过 |
 | **P3.7** | 2 | ✅ | 自主验收通过：`AFFECTION_STAGE_SLOT` + `services/persona/affection_classifier.py`（146 行）+ 10 条测试；独立 sqlite store 与 24h rolling 验证通过 |
 | **P2.2** | 2 | ✅ | 自主验收通过：`services/reply_planner/binary_planner.py`（179 行）+ 12 条测试；LLMRequest `reply_gate` spine、fail-open 与 cancel-path 验证通过 |
-| **P2.6** | 2 | ⏳ | 阻塞于 P2.2 |
+| **P2.6** | 2 | ✅ | 自主验收通过：`binary_planner.py` 内置 `NoReplyCounter` / `no_reply_threshold()`（净增 +20 行）+ 3 条测试；3/5 阶梯与 cancel-path 验证通过 |
 | ~~P2.3~~ | — | ❌ | 证据不成立：已由 [Part 5 P5.2 ✅](./omubot-humanization-part5-execution.md#6) 实现，不重复 |
 | **P2.8** | 3 | ⏳ | 阻塞于 P3.6 + P3.7；v2 优先级链头 |
 | **P3.8** | 3 | ⏳ | 阻塞于 P3.6 + Part 5 P5.2 ✅ |
@@ -647,3 +647,37 @@ D2 / 回滚：cancel-path 测试通过，`asyncio.CancelledError` 发生在 clas
 - D1 grep：`rg -n "BinaryPlanner|BinaryPlannerFeatures|BinaryPlanDecision|binary_planner|reply_planner" services/reply_planner tests/test_binary_planner.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中新包、新测试与本追踪记录；无生产接线路径命中。
 
 D2 / 回滚：cancel-path 测试通过，`asyncio.CancelledError` 不被吞；回滚为删除 `services/reply_planner/`、`tests/test_binary_planner.py` 并撤销 §6 / §9 的 P2.2 回填。
+
+### P2.6 领单拆分（执行前）— Codex / 2026-05-25 23:42 CST
+
+- **任务边界**：只在 `services/reply_planner/binary_planner.py` 内新增 consecutive no_reply counter / threshold，小幅扩展 `BinaryPlanner`；新增 `tests/test_no_reply_threshold.py`。不接生产调度，不改配置。
+- **自主评估**：P2.6 依赖 P2.2，当前 P2.2 已 ✅ 并提交。因为 planner 当前未接生产，本步只把计数与阈值行为封装到 planner 内部，供后续 P3.9 / Wave 3 接线时直接消费。
+- **执行拆分**：
+  1. 新增 `no_reply_threshold(consecutive)`：0-2 → 1，3-4 → 2，≥5 → 3。
+  2. 新增 `NoReplyCounter.observe(action)`：no_reply 累加，reply 重置；阈值由 `no_reply_threshold()` 读取。
+  3. `BinaryPlanner` 支持注入 counter，成功 / fail-open 决策后更新；cancel-path 继续不写 counter。
+  4. 新增 3 条测试覆盖 3/5 阶梯、counter reset、planner 自动更新且 cancel 不污染。
+- **风险与回滚**：当前未接生产路径；回滚为撤销 `binary_planner.py` counter 改动、删除 `tests/test_no_reply_threshold.py`，并撤销 §6 / §9 P2.6 回填。
+
+### P2.6 完成记录（执行者 Codex）— 2026-05-25 23:54 CST
+
+自验结果：P2.6 完成并自主验收 ✅。`services/reply_planner/binary_planner.py` 从 179 行增至 199 行，净增 +20 行，符合 `binary_planner 内置 counter ≤ 20 行`；当前仍未接生产调度。
+
+改动内容：
+
+- `services/reply_planner/binary_planner.py` 新增 `NoReplyCounter` 与 `no_reply_threshold()`：0-2 次 no_reply → threshold 1，3-4 次 → 2，≥5 次 → 3。
+- `BinaryPlanner` 支持注入 `no_reply_counter`；成功决策 / fail-open 决策后更新 counter，`reply` 会重置连续计数。
+- `asyncio.CancelledError` 继续向上传播，cancel-path 不更新 counter。
+- `services/reply_planner/__init__.py` 导出 `NoReplyCounter` 与 `no_reply_threshold()`。
+- 新增 `tests/test_no_reply_threshold.py` 3 条，覆盖 3/5 阶梯、counter reset、planner 自动更新与 cancel 不污染。
+
+验证：
+
+- `wc -l services/reply_planner/binary_planner.py tests/test_no_reply_threshold.py` → `199` / `53`。
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_no_reply_threshold.py tests/test_binary_planner.py -q` → `15 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_no_reply_threshold.py tests/test_binary_planner.py` → `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_no_reply_threshold.py tests/test_binary_planner.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_no_reply_threshold.py` → passed。
+- D1 grep：`rg -n "NoReplyCounter|no_reply_threshold|consecutive" services/reply_planner tests/test_no_reply_threshold.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 planner、导出、新测试与本追踪记录；无生产接线路径命中。
+
+D2 / 回滚：cancel-path 测试通过，取消不更新 counter；回滚为撤销 `binary_planner.py` / `__init__.py` counter 改动、删除 `tests/test_no_reply_threshold.py` 并撤销 §6 / §9 的 P2.6 回填。

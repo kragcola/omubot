@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-05-25 Humanization Part 2/3 P2.6 No-reply 阶梯阈值落地
+
+**变更类型**：humanization support module / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 2 P2.6 在 binary planner 内新增 consecutive no_reply counter：
+
+- `services/reply_planner/binary_planner.py`：新增 `NoReplyCounter` 与 `no_reply_threshold()`，0-2 次 no_reply → threshold 1，3-4 次 → 2，≥5 次 → 3；
+- `BinaryPlanner` 支持注入 counter，成功决策 / fail-open 决策后更新；`reply` 会重置连续计数；
+- cancel-path 保持向上传播，不更新 counter；
+- `tests/test_no_reply_threshold.py`：3 条覆盖 3/5 阶梯、counter reset、planner 自动更新与 cancel 不污染。
+
+**验证**：
+
+- `uv run pytest tests/test_no_reply_threshold.py tests/test_binary_planner.py -q` → `15 passed`
+- `uv run ruff check services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_no_reply_threshold.py tests/test_binary_planner.py` → passed
+- `uv run pyright services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_no_reply_threshold.py tests/test_binary_planner.py` → `0 errors`
+- `uv run python -m py_compile services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_no_reply_threshold.py` → passed
+
+**影响**：P2.6 状态自主验收为 ✅；当前未接生产调度，不改变线上是否回复判定。Wave 2 全部任务已具备进入 Wave 3 的前置。
+
+**回滚**：撤销 `services/reply_planner/binary_planner.py` / `services/reply_planner/__init__.py` counter 改动，删除 `tests/test_no_reply_threshold.py`，撤销 Part 2/3 tracking 的 P2.6 回填。
+
+---
+
 ## 2026-05-25 Humanization Part 2/3 P2.2 Binary Planner 落地
 
 **变更类型**：humanization support module / LLMRequest spine / tests

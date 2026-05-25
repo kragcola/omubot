@@ -53,9 +53,19 @@ class BinaryPlanDecision:
         return cls("reply", 0.0, "planner fallback", reason, "fallback", raw_text)
 
 
+@dataclass(slots=True)
+class NoReplyCounter:
+    consecutive: int = 0
+
+    def observe(self, action: BinaryReplyAction) -> int:
+        self.consecutive = self.consecutive + 1 if action == "no_reply" else 0
+        return self.consecutive
+
+
 class BinaryPlanner:
-    def __init__(self, *, timeout_ms: int = 800) -> None:
+    def __init__(self, *, timeout_ms: int = 800, no_reply_counter: NoReplyCounter | None = None) -> None:
         self.timeout_ms = max(1, int(timeout_ms))
+        self.no_reply_counter = no_reply_counter
 
     async def plan(
         self, features: BinaryPlannerFeatures, *, api_call: Callable[[LLMRequest], Awaitable[dict[str, Any]]]
@@ -65,11 +75,16 @@ class BinaryPlanner:
             result = await asyncio.wait_for(api_call(request), timeout=self.timeout_ms / 1000)
         except TimeoutError as exc:
             _L.warning("binary planner failed open | error_type={} error={}", type(exc).__name__, str(exc)[:160])
-            return BinaryPlanDecision.fail_open("planner_timeout")
+            return self._record(BinaryPlanDecision.fail_open("planner_timeout"))
         except Exception as exc:
             _L.warning("binary planner failed open | error_type={} error={}", type(exc).__name__, str(exc)[:160])
-            return BinaryPlanDecision.fail_open("planner_call_failed")
-        return parse_binary_planner_output(str(result.get("text", "") or ""))
+            return self._record(BinaryPlanDecision.fail_open("planner_call_failed"))
+        return self._record(parse_binary_planner_output(str(result.get("text", "") or "")))
+
+    def _record(self, decision: BinaryPlanDecision) -> BinaryPlanDecision:
+        if self.no_reply_counter is not None:
+            self.no_reply_counter.observe(decision.action)
+        return decision
 
 
 def build_binary_planner_request(features: BinaryPlannerFeatures) -> LLMRequest:
@@ -118,6 +133,11 @@ def parse_binary_planner_output(text: str) -> BinaryPlanDecision:
         parse_mode=mode,
         raw_text=raw,
     )
+
+
+def no_reply_threshold(consecutive: int) -> int:
+    count = max(0, int(consecutive))
+    return 3 if count >= 5 else 2 if count >= 3 else 1
 
 
 def _loads_json(text: str) -> Any | None:
