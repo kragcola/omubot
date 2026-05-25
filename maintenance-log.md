@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P2.5 Force Reply 兜底收紧落地
+
+**变更类型**：humanization runtime / scheduler gate / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 3 P2.5 收紧 group `force_reply` 兜底：
+
+- `kernel/router.py`：构造 `TriggerContext(mode="at_mention")` 时，使用 P3.1 `AddresseeDetector` 补出 `extra["addressee_self"]`；
+- addressee 无法解析时，router 以 `is_addressed` 作为 fallback，避免直接 @ bot 被误压掉；
+- `services/scheduler.py`：新增 `_should_force_reply()`，仅当 `at_mention + addressee_self` 时传 `force_reply=True`；`video_always` 维持原强制回复行为；
+- `tests/test_force_reply.py`：3 条覆盖 self-target 放行、non-self 收紧、video_always 不回归。
+
+**验证**：
+
+- `uv run pytest tests/test_force_reply.py tests/test_scheduler.py -q` → `41 passed`
+- `uv run ruff check kernel/router.py services/scheduler.py tests/test_force_reply.py tests/test_scheduler.py` → passed
+- `uv run pyright services/scheduler.py tests/test_force_reply.py` → `0 errors`
+- `uv run python -m py_compile kernel/router.py services/scheduler.py tests/test_force_reply.py` → passed
+- `uv run pytest --collect-only -q` → `1828 tests collected`
+
+**影响**：P2.5 状态自主验收为 ✅；真实施工点按仓库实况订正为 `kernel/router.py` + `services/scheduler.py`，不再沿用派单原文里的 `plugins/chat/plugin.py` 路径。
+
+**备注**：`kernel/router.py` 存在既有 file-wide pyright 类型债，本次未扩散该问题；新增逻辑通过 pytest / ruff / py_compile 与任务相关 pyright 范围校验。
+
+**回滚**：撤销 router/scheduler 的 `addressee_self` 接线，删除 `tests/test_force_reply.py`，撤销 Part 2/3 tracking 的 P2.5 回填。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P3.9 Planner/Addressee Mood Gate 落地
 
 **变更类型**：humanization support module / reply planner gate / tests

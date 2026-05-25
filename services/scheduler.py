@@ -28,6 +28,16 @@ if TYPE_CHECKING:
 _L = logger.bind(channel="scheduler")
 
 
+def _should_force_reply(trigger: TriggerContext | None) -> bool:
+    if trigger is None:
+        return False
+    if trigger.mode == "video_always":
+        return True
+    if trigger.mode != "at_mention":
+        return False
+    return bool(trigger.extra.get("addressee_self", True))
+
+
 class _GroupSlot:
     __slots__ = (
         "consecutive_skip", "debounce_task", "last_fire_time",
@@ -451,7 +461,7 @@ class GroupChatScheduler:
                             target_user_id=trigger.target_user_id,
                         )
 
-                    force_reply = trigger is not None and trigger.mode in ("at_mention", "video_always")
+                    force_reply = _should_force_reply(trigger)
 
                     # @mention: prepend [CQ:reply] to the first streamed segment only.
                     # Quote-reply already identifies the target — no need for [CQ:at].

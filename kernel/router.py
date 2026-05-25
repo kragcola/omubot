@@ -178,6 +178,32 @@ def _reply_targets_bot(reply: object | None, self_id: str) -> bool:
     return str(getattr(sender, "user_id", "") or "") == str(self_id)
 
 
+async def _at_trigger_targets_self(
+    *,
+    rendered_message: str,
+    plain_text: str,
+    reply_sender_id: str,
+    self_id: str,
+    bot_nicknames: list[str] | tuple[str, ...],
+    addressed_fallback: bool,
+) -> bool:
+    if not self_id:
+        return addressed_fallback
+    from services.group import AddresseeDetector
+
+    detector = AddresseeDetector(bot_ids=(str(self_id),), bot_names=bot_nicknames)
+    result = await detector.detect({
+        "message": rendered_message,
+        "text": plain_text,
+        "reply_sender_id": reply_sender_id,
+    })
+    if str(result.target_id or "") == str(self_id):
+        return True
+    if result.target_id:
+        return False
+    return addressed_fallback
+
+
 def _runtime_state_value(runtime_state: object | None, slot_id: str, scope: Scope) -> Any:
     if runtime_state is None:
         return None
@@ -854,11 +880,21 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         trigger = msg_ctx.trigger  # set by BilibiliPlugin etc.
         if trigger is None and is_addressed:
             from kernel.types import TriggerContext
+
+            addressee_self = await _at_trigger_targets_self(
+                rendered_message=str(msg),
+                plain_text=plain_text,
+                reply_sender_id=str(getattr(getattr(event.reply, "sender", None), "user_id", "") or ""),
+                self_id=str(bot.self_id),
+                bot_nicknames=getattr(ctx, "bot_nicknames", ()),
+                addressed_fallback=is_addressed,
+            )
             trigger = TriggerContext(
                 reason="有人@了你",
                 mode="at_mention",
                 target_message_id=event.message_id,
                 target_user_id=str(event.user_id),
+                extra={"addressee_self": addressee_self},
             )
 
         # Check slash commands before timeline/scheduler.

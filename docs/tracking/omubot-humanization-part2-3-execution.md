@@ -112,7 +112,7 @@
 | **P2.8** | sticker_decision_provider 单决策点（v2 v2 优先级链头）：4 触发源统一进入；输出 `StickerDecision(should_send, candidate_pool, rerank_strategy, cooldown_ms)` | `services/sticker/__init__.py` + `services/sticker/decision_provider.py`（new ≤ 220 行） | P3.6 + P3.7 + Part 1 V12 ✅ | tests/test_sticker_decision_provider.py +14（含 4 触发源互斥 / mood gate / 冷启动 / cancel-path） |
 | **P3.8** | mood → typing + inter_segment_delay 渗透：① `services/humanizer.py` 加 5 档 mood 系数表 ≤ 20 行（cold ×1.3 / playful ×0.8）；② `services/llm/segmentation.py:inter_segment_delay` 加 mood 系数 ≤ 20 行（cold ×1.5 / playful ×0.7） | services/humanizer.py + services/llm/segmentation.py（合计 ≤ 40 行） | P3.6 + Part 5 P5.2 ✅ | tests/test_humanizer_mood.py +6 |
 | **P3.9** | mood / affection → binary_planner / addressee gate：mood=cold + addressee≠self → no_reply；affection=stranger → register 偏 neutral | binary_planner.py + addressee.py（合计 ≤ 50 行） | P3.6 + P3.7 + P2.2 + P3.1 | tests/test_planner_addressee_mood.py +8 |
-| **P2.5** | force_reply 兜底收紧（is_at + addressee=self 双条件） | `plugins/chat/plugin.py` group_listener ≤ 5 行改 | P3.1 | tests/test_force_reply.py +3 |
+| **P2.5** | force_reply 兜底收紧（is_at + addressee=self 双条件） | `kernel/router.py` + `services/scheduler.py`（实况订正） | P3.1 | tests/test_force_reply.py +3 |
 | **P3.3** | read_mark prompt 注入：在 PromptBuilder 第 2 块（group context）加 read_mark marker | `services/llm/prompt_builder.py`（≤ +15 行） | P3.2 | tests/test_prompt_read_mark.py +2 |
 
 **Wave 3 commit 顺序**：5 条独立 commit；P2.8 头单（v2 v2 优先级链头）；P3.8 / P3.9 并列；P2.5 / P3.3 末单。
@@ -233,7 +233,7 @@
 | **P2.8** | 3 | ✅ | 自主验收通过：`services/sticker/decision_provider.py`（160 行）+ 15 条测试；4 触发源单决策点、mood/affection gate、cooldown 与 cancel-path 验证通过 |
 | **P3.8** | 3 | ✅ | 自主验收通过：Humanizer + inter_segment_delay 可选 mood 系数；`tests/test_humanizer_mood.py` 6 条，相关回归 30 条通过 |
 | **P3.9** | 3 | ✅ | 自主验收通过：cold + non-self planner gate、stranger→neutral register；目标文件 +50/-1 行，8 条新测试，相关回归 30 条通过 |
-| **P2.5** | 3 | ⏳ | 阻塞于 P3.1 |
+| **P2.5** | 3 | ✅ | 自主验收通过：router 透传 `addressee_self`，scheduler 仅 self-target `at_mention` force_reply；3 条专项 + scheduler 回归 41 条通过 |
 | **P3.3** | 3 | ⏳ | 阻塞于 P3.2 |
 | **P2.9** | 4 | ⏳ | 阻塞于 P2.8 |
 | **P2.10** | 4 | ⏳ | 阻塞于 P2.8；保留 DEFAULT_STICKER_USAGE_HINT fallback |
@@ -786,3 +786,39 @@ D2 / 回滚：本任务无新增写状态 cancel-path；旧调用兼容。回滚
 - D1 grep：`rg -n "AddresseeGateResult|addressee_gate|mood_addressee_gate|planner_features_for_request|mood_label|affection_stage|test_planner_addressee_mood" services/group services/reply_planner tests/test_planner_addressee_mood.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 addressee gate、planner gate、新测试与本追踪记录；`AddresseeGateResult` / `planner_features_for_request` 无代码命中（表示已收缩为最小 API）。
 
 D2 / 回滚：cancel-path 测试通过，cold+self 进入 LLM 调用后 `asyncio.CancelledError` 向上传播且 counter 不更新；回滚为撤销 `services/group/addressee.py`、`services/group/__init__.py`、`services/reply_planner/binary_planner.py`、`services/reply_planner/__init__.py` 的 P3.9 gate 改动，删除 `tests/test_planner_addressee_mood.py` 并撤销 §6 / §9 的 P3.9 回填。
+
+### P2.5 领单拆分（执行前）— Codex / 2026-05-26 01:44 CST
+
+- **任务边界**：按派单目标收紧 force_reply 兜底，但按仓库实况落在 `kernel/router.py` + `services/scheduler.py`，并新增 `tests/test_force_reply.py`；不改 `services/llm/client.py` / thinker / semantic gate 逻辑。
+- **自主评估**：派单原文写 `plugins/chat/plugin.py group_listener ≤ 5 行改`，但当前 `group_listener` 实际定义在 `kernel/router.py`，`force_reply` 实际消费点在 `services/scheduler.py:_do_chat()`。本步按实况订正施工点：router 负责透传 `addressee_self`，scheduler 负责把 `at_mention` 兜底收紧为 `is_at + addressee_self`。
+- **执行拆分**：
+  1. router 在构造 `TriggerContext(mode="at_mention")` 时，用 P3.1 `AddresseeDetector` 补出 `extra["addressee_self"]`。
+  2. scheduler 新增最小 helper，仅在 `trigger.mode=="at_mention"` 且 `extra.addressee_self` 为真时传 `force_reply=True`；`video_always` 维持原样。
+  3. 新增 `tests/test_force_reply.py` 3 条，覆盖 self 放行、non-self 收紧、video_always 不回归。
+- **风险与回滚**：若 addressee 检测失败，router 以 `is_addressed` 作为 fallback，避免直接 @ bot 被误压掉。回滚为撤销 router/scheduler 的 `addressee_self` 接线，删除 `tests/test_force_reply.py` 并撤销 §6 / §9 P2.5 回填。
+
+### P2.5 完成记录（执行者 Codex）— 2026-05-26 01:53 CST
+
+自验结果：P2.5 完成并自主验收 ✅。派单原文的 `plugins/chat/plugin.py group_listener` 已按仓库实况订正为 `kernel/router.py` + `services/scheduler.py`；当前没有改 `services/llm/client.py` / thinker / semantic gate，线上行为变化只落在 `force_reply` 兜底判定。
+
+改动内容：
+
+- `kernel/router.py` 新增 `_at_trigger_targets_self()`，在构造 `TriggerContext(mode="at_mention")` 时用 P3.1 `AddresseeDetector` 补出 `extra["addressee_self"]`。
+- 若 addressee 无法解析，router 退回 `is_addressed` 作为 fallback，避免直接 @ bot 被误压掉。
+- `services/scheduler.py` 新增 `_should_force_reply()`：`video_always` 保持强制回复；`at_mention` 只有 `extra.addressee_self` 为真时才传 `force_reply=True`。
+- 新增 `tests/test_force_reply.py` 3 条，覆盖 self-target 放行、non-self 收紧、video_always 不回归。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_force_reply.py tests/test_scheduler.py -q` → `41 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check kernel/router.py services/scheduler.py tests/test_force_reply.py tests/test_scheduler.py` → `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright services/scheduler.py tests/test_force_reply.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile kernel/router.py services/scheduler.py tests/test_force_reply.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` → `1828 tests collected in 0.60s`。
+- D1 grep：`rg -n "_at_trigger_targets_self|addressee_self|_should_force_reply|test_force_reply" kernel/router.py services/scheduler.py tests/test_force_reply.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 router/scheduler 接线、新测试与本追踪记录。
+
+说明：
+
+- `uv run pyright kernel/router.py ...` 仍会命中该文件既有的 file-wide 类型债（与本次修改前一致）；因此本次静态类型校验收敛到可归因变更的 `services/scheduler.py` 与 `tests/test_force_reply.py`。
+
+D2 / 回滚：本任务无新增持久化写路径；回滚为撤销 `kernel/router.py` / `services/scheduler.py` 的 `addressee_self` 接线，删除 `tests/test_force_reply.py` 并撤销 §6 / §9 的 P2.5 回填。
