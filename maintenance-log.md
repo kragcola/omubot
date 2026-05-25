@@ -4,6 +4,46 @@
 
 ---
 
+## 2026-05-25 Humanization Part 2/3 调研报告 v2 扩范围重写（仅文档）
+
+**变更类型**：docs / tracking-only
+
+**内容**：在 [Part 5 P5.4 灰度上线](docs/tracking/omubot-humanization-part5-execution.md) 翻旗后的 24h 观察窗口内，用户复盘指出两类回复异常：
+
+1. bot 在不该发 sticker 的时机发出（严肃话题中插入轻松 sticker），且高度收敛于 2~3 个 id；
+2. identity.md 中关于"心情 / 关系深浅"的描写仅作 prompt 装饰，未对回复时机 / modality / 段间延迟产生实际影响。
+
+为此对 [docs/tracking/omubot-humanization-part2-3-research.md](docs/tracking/omubot-humanization-part2-3-research.md) 做 **v2 in-place 扩范围重写**（不另起 Part 7；用户明确否决新建 Part）：
+
+- §0.1 文献清单追加 16 篇 v2 论文锚点（EIGML / Int-RA / PerSRV / PEARL / IGSR / U-Sticker / STICKERCONV / PhotoChat / MMDialog / DribeR / DIAEF / Thanos / eWe-bench / ESDP / EmoDynamiX / DialogXpert / Self-Emotion / PELD / SPDA / LD-Agent / Intimacy LREC-COLING / FiSMiness / TransESC / Barber & Santuzzi 2015 / Cambier 2018 / Fang MIT/OpenAI）
+- §0.4 新建「v2 扩范围声明」：sticker 4 触发源根因 + mood 不在 RuntimeStateBus slot + affection 仅 binary 的 3 大根因 audit
+- §1.9~§1.13 MaiBot v2 取证 35 个 file:line 锚点（emoji_manager Levenshtein top-10 / RANDOM emoji_chance=0.6 / send_image-voice 接口面但 group reply 不调度 / 0 mood module / 4 触发源对比表）
+- §2.2.3 把 5-stage IM withdrawal 从「学术结论」降级为「业界传播术语」+ 替换为 telepressure 一手锚点（Barber & Santuzzi 2015 J. Occupational Health Psychology）
+- §2.3~§2.10 新增 8 张学术矩阵：SRS / modality decider / emoji misuse / cold-start / emotion-policy / persona / companion bot / affective state machine
+- §3.4~§3.7 新增 sticker / video-url / 输出能力 / mood 渗透 4 张借鉴判断表
+- §4.5~§4.6 新增 mood × addressee × topic 联动表 + affection 5-档 + RuntimeStateBus slot 设计稿（MOOD_CURRENT_SLOT / AFFECTION_STAGE_SLOT）
+- §5.6 新增 4 类接入点（sticker_decision_provider / mood slot / og:title / video adapter）
+- §6.3~§6.6 新增 12 个 v2 候选子任务（P2.8~P2.14 + P3.6~P3.10），v2 预算 ≤ 1170 行 / ≥ 87 测试，与 v1 合计 ≤ 1825 行 / ≥ 137 测试
+- §7.3 / §8 / §9 / §10 / §11 同步追加 v2 出口标准 / 6 v2 风险 / 28 篇 v2 引用 / 35 v2 MaiBot 锚点 / 7 v2 Omubot 接入锚点 / v2 状态行 / v2 边界澄清
+
+**v2 触发原话锚点**：「目前 part23 中，我没有看到表情包和视频链接等等额外信息的处理。目前 bot 有时候会触发异常的表情包回复。基于此加深研究，进一步搜索。同时增进心情好感系统的作用」
+
+**影响范围**：
+
+- **仅文档**：本次提交不动 .py / .json / .toml / 镜像 / 容器；Part 5 P5.4 灰度 24h 窗口（08:11 UTC 起）严守不动代码 / 不动 config 的纪律
+- v2 子任务 P2.8~P2.14 / P3.6~P3.10 仍 ⏳ 阻塞于 Part 1 主线 + Part 5 P5.4 灰度收尾，**不在 v2 提交内施工**
+- 原 §0~§9 的 22 篇论文 / 14 MaiBot 锚点 / 12 个 P2.x/P3.x 草案**全部保留**未删未改；只对 §2.2.3 做了学术等级降级 + 一手锚点替换
+
+**回滚**：纯文档修改，`git revert` 单 commit 即可；无运行时副作用。
+
+**Sketch & 配套**：
+
+- skill omubot-admin-console（计划 / 执行）
+- 文献深读由 4 个并行子代理完成（SRS 学术 / modality 学术 / mood-policy 学术 / MaiBot 工程取证）；其中工程深搜代理一次 Cloudflare 520 已被另 3 个代理覆盖
+- 不进 P2.x / P3.x 立项；待 Part 5 P5.4 灰度 24h 窗口收尾后由用户决策启动
+
+---
+
 ## 2026-05-25 Humanization Part 5 Wave 3 灰度上线 — natural_split_enabled=true（two-group 24h 窗口起）
 
 **变更类型**：deploy / feature flag flip / config
