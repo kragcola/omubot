@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P3.8 Mood 节奏渗透落地
+
+**变更类型**：humanization runtime / segmentation / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 3 P3.8 为 typing delay 与 natural inter-segment delay 增加可选 mood 系数：
+
+- `services/humanizer.py`：新增 5 档 mood typing 系数，cold ×1.3、tired ×1.15、neutral ×1.0、playful ×0.8、high ×0.85；
+- `services/llm/segmentation.py`：`inter_segment_delay()` 增加可选 `mood_label`，cold ×1.5、tired ×1.2、playful ×0.7、high ×0.8；
+- `reply_segment_plan()` / `_natural_split_path()` 透传可选 `mood_label`；
+- `tests/test_humanizer_mood.py`：6 条覆盖 Humanizer mood、inter_segment_delay mood 与 plan 透传。
+
+**验证**：
+
+- `uv run pytest tests/test_humanizer_mood.py tests/test_humanizer_typing.py tests/test_humanizer_register.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py -q` → `30 passed`
+- `uv run ruff check services/humanizer.py services/llm/segmentation.py tests/test_humanizer_mood.py tests/test_humanizer_typing.py tests/test_humanizer_register.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py` → passed
+- `uv run pyright services/humanizer.py services/llm/segmentation.py tests/test_humanizer_mood.py tests/test_humanizer_typing.py tests/test_humanizer_register.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py` → `0 errors`
+- `uv run python -m py_compile services/humanizer.py services/llm/segmentation.py tests/test_humanizer_mood.py` → passed
+
+**影响**：P3.8 状态自主验收为 ✅；旧调用不传 `mood` / `mood_label` 时保持旧公式，当前未改 send_queue / client 接线。
+
+**回滚**：撤销 `services/humanizer.py` 与 `services/llm/segmentation.py` 的 mood 系数改动，删除 `tests/test_humanizer_mood.py`，撤销 Part 2/3 tracking 的 P3.8 回填。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P2.8 Sticker Decision Provider 落地
 
 **变更类型**：humanization support module / sticker decision / tests

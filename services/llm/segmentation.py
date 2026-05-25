@@ -35,6 +35,13 @@ _NATURAL_DELAY_REGISTER_FACTORS: dict[str, float] = {
     "playful": 0.7,
     "snark": 0.63,
 }
+_NATURAL_DELAY_MOOD_FACTORS: dict[str, float] = {
+    "cold": 1.5,
+    "tired": 1.2,
+    "neutral": 1.0,
+    "playful": 0.7,
+    "high": 0.8,
+}
 _REGISTER_ALIASES: dict[str, str] = {
     "affectionate": "playful",
     "distant": "polite_distant",
@@ -224,6 +231,16 @@ def _register_label(register: Any | None) -> str:
     return _REGISTER_ALIASES.get(normalized, normalized)
 
 
+def _mood_label(mood: Any | None) -> str:
+    if mood is None:
+        return ""
+    if isinstance(mood, str):
+        return mood.strip().lower()
+    if isinstance(mood, dict):
+        return str(mood.get("label") or mood.get("mood") or "").strip().lower()
+    return str(getattr(mood, "label", "") or getattr(mood, "mood", "")).strip().lower()
+
+
 def _natural_register_factor(register: Any | None) -> float:
     label = _register_label(register)
     if not label:
@@ -236,6 +253,13 @@ def _natural_delay_register_factor(register: Any | None) -> float:
     if not label:
         return 1.0
     return _NATURAL_DELAY_REGISTER_FACTORS.get(label, 1.0)
+
+
+def _natural_delay_mood_factor(mood: Any | None) -> float:
+    label = _mood_label(mood)
+    if not label:
+        return 1.0
+    return _NATURAL_DELAY_MOOD_FACTORS.get(label, 1.0)
 
 
 def _natural_split_strength(text_len: int, register: Any | None) -> float:
@@ -439,12 +463,19 @@ def natural_split(
     return _natural_apply_sentence_limit(expanded, max_sentence_num)
 
 
-def inter_segment_delay(prev_segment: str, *, register: Any | None = None, slot_energy: float = 1.0) -> float:
+def inter_segment_delay(
+    prev_segment: str,
+    *,
+    register: Any | None = None,
+    slot_energy: float = 1.0,
+    mood_label: Any | None = None,
+) -> float:
     """Return adaptive pause after a visible segment, before sending the next one."""
     chinese_chars = sum("\u4e00" <= ch <= "\u9fff" for ch in prev_segment)
     ascii_chars = sum(ch.isascii() and ch.isalnum() for ch in prev_segment)
     base = chinese_chars * 0.15 + ascii_chars * 0.07
     base *= _natural_delay_register_factor(register)
+    base *= _natural_delay_mood_factor(mood_label)
     base *= max(0.5, float(slot_energy or 0.0))
     return max(0.5, min(3.0, base))
 
@@ -868,6 +899,7 @@ def _natural_split_path(
     *,
     register: Any | None,
     slot_energy: float,
+    mood_label: Any | None,
     rng: Any | None,
 ) -> ReplySegmentPlan:
     max_segment_chars = max(1, int(getattr(cfg, "max_segment_chars", 20) or 20))
@@ -884,7 +916,7 @@ def _natural_split_path(
         rng=rng,
     )
     delays = [
-        inter_segment_delay(segment, register=register, slot_energy=slot_energy)
+        inter_segment_delay(segment, register=register, slot_energy=slot_energy, mood_label=mood_label)
         for segment in segments[:-1]
     ]
     return ReplySegmentPlan(
@@ -912,6 +944,7 @@ def reply_segment_plan(
     *,
     register: Any | None = None,
     slot_energy: float = 1.0,
+    mood_label: Any | None = None,
     rng: Any | None = None,
 ) -> ReplySegmentPlan:
     """Return segment texts and the pause after each non-final segment."""
@@ -924,6 +957,7 @@ def reply_segment_plan(
             config,
             register=register,
             slot_energy=slot_energy,
+            mood_label=mood_label,
             rng=rng,
         )
     return _legacy_segment_path(reply, config)

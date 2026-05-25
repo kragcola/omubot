@@ -17,6 +17,13 @@ EMOJI_BASE_DELAY = 1.0
 THINKING_FALLBACK = 10.0
 _THINKING_FALLBACK_DELAY = 1.0
 _EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF]")
+_MOOD_DELAY_FACTOR = {
+    "cold": 1.3,
+    "tired": 1.15,
+    "neutral": 1.0,
+    "playful": 0.8,
+    "high": 0.85,
+}
 
 
 class Humanizer:
@@ -83,10 +90,10 @@ class Humanizer:
         _ = group_id
         register_label = _register_label(register)
         if register_label == "playful":
-            return 0.7
+            return 0.7 * _mood_factor(mood)
         if register_label == "quiet" and _energy(slot) < 0.3 and _energy(mood) < 0.4:
-            return 1.5
-        return 1.0
+            return 1.5 * _mood_factor(mood)
+        return _mood_factor(mood)
 
 
 def _register_label(register: object | None) -> str:
@@ -110,6 +117,21 @@ def _energy(value: object | None) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return 1.0
+
+
+def _mood_factor(value: object | None) -> float:
+    label = _mood_label(value)
+    return _MOOD_DELAY_FACTOR.get(label, 1.0)
+
+
+def _mood_label(value: object | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip().lower()
+    if isinstance(value, dict):
+        return str(value.get("label") or value.get("mood") or "").strip().lower()
+    return str(getattr(value, "label", "") or getattr(value, "mood", "")).strip().lower()
 
 
 def _has_emoji(text: str) -> bool:
