@@ -234,7 +234,7 @@
 | **P3.8** | 3 | ✅ | 自主验收通过：Humanizer + inter_segment_delay 可选 mood 系数；`tests/test_humanizer_mood.py` 6 条，相关回归 30 条通过 |
 | **P3.9** | 3 | ✅ | 自主验收通过：cold + non-self planner gate、stranger→neutral register；目标文件 +50/-1 行，8 条新测试，相关回归 30 条通过 |
 | **P2.5** | 3 | ✅ | 自主验收通过：router 透传 `addressee_self`，scheduler 仅 self-target `at_mention` force_reply；3 条专项 + scheduler 回归 41 条通过 |
-| **P3.3** | 3 | ⏳ | 阻塞于 P3.2 |
+| **P3.3** | 3 | ✅ | 自主验收通过：PromptBuilder 第 2 块 read_mark marker；2 条新测试，相关回归 22 条通过 |
 | **P2.9** | 4 | ⏳ | 阻塞于 P2.8 |
 | **P2.10** | 4 | ⏳ | 阻塞于 P2.8；保留 DEFAULT_STICKER_USAGE_HINT fallback |
 | **P2.14** | 4 | ⏳ | 阻塞于 P2.8 + P3.6；自反馈环上限 0.3 |
@@ -822,3 +822,36 @@ D2 / 回滚：cancel-path 测试通过，cold+self 进入 LLM 调用后 `asyncio
 - `uv run pyright kernel/router.py ...` 仍会命中该文件既有的 file-wide 类型债（与本次修改前一致）；因此本次静态类型校验收敛到可归因变更的 `services/scheduler.py` 与 `tests/test_force_reply.py`。
 
 D2 / 回滚：本任务无新增持久化写路径；回滚为撤销 `kernel/router.py` / `services/scheduler.py` 的 `addressee_self` 接线，删除 `tests/test_force_reply.py` 并撤销 §6 / §9 的 P2.5 回填。
+
+### P3.3 领单拆分（执行前）— Codex / 2026-05-26 02:03 CST
+
+- **任务边界**：主改 `services/llm/prompt_builder.py`，辅以 `services/llm/client.py` 传一个最小 `read_mark` 条件，并新增 `tests/test_prompt_read_mark.py`；不改 timeline merge 规则、不改 prompt provider bus、不改 retrieval / thinker 的 `conversation_text`。
+- **自主评估**：当前 `PromptBuilder.build_blocks()` 已接收 `conversation_text` 但未消费，适合补一个轻量的 group-context marker 槽位。为避免重复注入群聊正文，本步只在“已有旧 turns + 仍有 pending 新消息”时插入一条 `read_mark` 提示，不复制聊天内容本身。
+- **执行拆分**：
+  1. `PromptBuilder` 新增只读 helper，返回 `--- 以上消息是你已经看过，请关注以下未读的新消息 ---` marker。
+  2. `build_blocks()` 增加可选 `read_mark: bool = False`，仅 group turn 且为真时，把 marker 插到 static block 后、state_board 前。
+  3. `LLMClient.chat()` 在 group timeline 同时存在 `recent_text` 与 `pending_text` 时传 `read_mark=True`；`force_reply` / retrieval 路径保持原样。
+  4. 新增 `tests/test_prompt_read_mark.py` 2 条，覆盖 marker 注入与无 pending/私聊不注入。
+- **风险与回滚**：marker 只是一条提示文本，不改变消息内容与 timeline；若出现 prompt 误导，回滚为撤销 `read_mark` 参数与 helper，删除 `tests/test_prompt_read_mark.py` 并撤销 §6 / §9 P3.3 回填。
+
+### P3.3 完成记录（执行者 Codex）— 2026-05-26 02:10 CST
+
+自验结果：P3.3 完成并自主验收 ✅。本步主落 `PromptBuilder` 的 group-context marker 槽位，并由 `LLMClient` 只传一个布尔 `read_mark` 条件；没有修改 timeline merge、provider bus 或 retrieval/thinker 使用的 `conversation_text`。
+
+改动内容：
+
+- `services/llm/prompt_builder.py` 新增 `_READ_MARK_TEXT` 与 `_build_group_context_block()`。
+- `PromptBuilder.build_blocks()` 增加可选 `read_mark: bool = False`；当 `group_id` 存在且 `read_mark=True` 时，把 marker 插到 static block 后、state_board 前。
+- `services/llm/client.py` 在 group timeline 同时存在 `recent_text` 与 `pending_text` 时传 `read_mark=True`；其它路径保持原样。
+- 新增 `tests/test_prompt_read_mark.py` 2 条，覆盖 marker 注入位置与 private/no-pending 不注入。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_prompt_read_mark.py tests/test_prompt.py tests/test_prompt_builder_runtime.py tests/test_llm_client_reply_segment_plan.py -q` → `22 passed`（伴随 1 条 aiohttp/Python 3.13.2 deprecation warning，不影响结果）。
+- `source ./scripts/dev/env.sh && uv run ruff check services/llm/prompt_builder.py services/llm/client.py tests/test_prompt_read_mark.py tests/test_prompt.py tests/test_prompt_builder_runtime.py tests/test_llm_client_reply_segment_plan.py` → `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright services/llm/prompt_builder.py services/llm/client.py tests/test_prompt_read_mark.py tests/test_prompt.py tests/test_prompt_builder_runtime.py tests/test_llm_client_reply_segment_plan.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/llm/prompt_builder.py services/llm/client.py tests/test_prompt_read_mark.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` → `1830 tests collected in 0.55s`。
+- D1 grep：`rg -n "_READ_MARK_TEXT|_build_group_context_block|read_mark=|test_prompt_read_mark" services/llm/prompt_builder.py services/llm/client.py tests/test_prompt_read_mark.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 helper、client 接线、新测试与本追踪记录。
+
+D2 / 回滚：本任务无新增持久化写路径；回滚为撤销 `services/llm/prompt_builder.py` / `services/llm/client.py` 的 `read_mark` 接线，删除 `tests/test_prompt_read_mark.py` 并撤销 §6 / §9 的 P3.3 回填。

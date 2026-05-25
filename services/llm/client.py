@@ -2077,6 +2077,8 @@ class LLMClient:
             messages = self._build_private_messages(session_id)
 
         # Extract conversation text for retrieval gating
+        recent_text = ""
+        pending_text = ""
         if is_group and self._timeline is not None:
             assert group_id is not None
             pending_text = _pending_conversation_text(self._timeline, group_id)
@@ -2305,6 +2307,7 @@ class LLMClient:
                     privacy_mask=privacy_mask,
                     session_id=session_id,
                     conversation_text=conversation_text,
+                    read_mark=bool(group_id and recent_text and pending_text),
                     plugin_static=plugin_static or None,
                     plugin_stable=plugin_stable or None,
                     plugin_dynamic=None if deepseek_native_main else (plugin_dynamic or None),

@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P3.3 Read Mark Prompt 注入落地
+
+**变更类型**：humanization runtime / prompt builder / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 3 P3.3 为群聊 prompt 增加 read_mark marker：
+
+- `services/llm/prompt_builder.py`：新增 `_READ_MARK_TEXT` 与 `_build_group_context_block()`；
+- `PromptBuilder.build_blocks()` 增加可选 `read_mark` 参数，在 group turn 存在旧 turns + 新 pending 时，把 marker 插到 static block 后、state_board 前；
+- `services/llm/client.py`：仅在 `recent_text` 与 `pending_text` 同时存在时传 `read_mark=True`；
+- `tests/test_prompt_read_mark.py`：2 条覆盖 marker 注入位置与 private/no-pending 不注入。
+
+**验证**：
+
+- `uv run pytest tests/test_prompt_read_mark.py tests/test_prompt.py tests/test_prompt_builder_runtime.py tests/test_llm_client_reply_segment_plan.py -q` → `22 passed`
+- `uv run ruff check services/llm/prompt_builder.py services/llm/client.py tests/test_prompt_read_mark.py tests/test_prompt.py tests/test_prompt_builder_runtime.py tests/test_llm_client_reply_segment_plan.py` → passed
+- `uv run pyright services/llm/prompt_builder.py services/llm/client.py tests/test_prompt_read_mark.py tests/test_prompt.py tests/test_prompt_builder_runtime.py tests/test_llm_client_reply_segment_plan.py` → `0 errors`
+- `uv run python -m py_compile services/llm/prompt_builder.py services/llm/client.py tests/test_prompt_read_mark.py` → passed
+- `uv run pytest --collect-only -q` → `1830 tests collected`
+
+**影响**：P3.3 状态自主验收为 ✅；marker 只是一条提示文本，不复制群聊正文，也不改变 timeline merge、retrieval 或 thinker 的 `conversation_text`。
+
+**回滚**：撤销 `services/llm/prompt_builder.py` / `services/llm/client.py` 的 `read_mark` 接线，删除 `tests/test_prompt_read_mark.py`，撤销 Part 2/3 tracking 的 P3.3 回填。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P2.5 Force Reply 兜底收紧落地
 
 **变更类型**：humanization runtime / scheduler gate / tests

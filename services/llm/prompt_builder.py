@@ -25,6 +25,7 @@ from services.memory.state_board import GroupStateBoard
 from services.persona.runtime_selector import PersonaRuntimeSelector
 
 _L = logger.bind(channel="system")
+_READ_MARK_TEXT = "--- 以上消息是你已经看过，请关注以下未读的新消息 ---"
 
 
 def load_instruction(soul_dir: str) -> str:
@@ -144,6 +145,7 @@ class PromptBuilder:
         privacy_mask: bool = True,
         session_id: str = "",
         conversation_text: str = "",
+        read_mark: bool = False,
         plugin_static: list[dict[str, Any]] | None = None,
         plugin_stable: list[dict[str, Any]] | None = None,
         plugin_dynamic: list[dict[str, Any]] | None = None,
@@ -163,6 +165,9 @@ class PromptBuilder:
             logger.info("state board | chars={} preview={!r}", st_len, st_preview)
 
         blocks: list[dict[str, Any]] = [self.resolve_static_block(group_id)]
+        group_context_block = self._build_group_context_block(group_id, read_mark=read_mark)
+        if group_context_block is not None:
+            blocks.append(group_context_block)
         if plugin_static:
             blocks.extend(plugin_static)
         if include_state_board:
@@ -173,6 +178,16 @@ class PromptBuilder:
             blocks.extend(plugin_dynamic)
 
         return blocks
+
+    def _build_group_context_block(
+        self,
+        group_id: str | None,
+        *,
+        read_mark: bool = False,
+    ) -> dict[str, Any] | None:
+        if group_id is None or not read_mark:
+            return None
+        return {"type": "text", "text": _READ_MARK_TEXT}
 
     async def build_state_board_block(self, group_id: str | None) -> dict[str, Any]:
         """Build a fresh state_board block for group conversations.
