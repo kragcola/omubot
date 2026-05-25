@@ -227,7 +227,7 @@
 | **P2.4** | 1 | ✅ | 自主验收通过：Humanizer emoji 起步价 + thinking fallback；`services/humanizer.py` +29/-1，12 条相关测试通过 |
 | **P3.2** | 2 | ✅ | 自主验收通过：`services/group/topic_drift.py`（119 行）+ 6 条测试；last 3 user messages drift 检测与 provider fallback 验证通过 |
 | **P3.7** | 2 | ✅ | 自主验收通过：`AFFECTION_STAGE_SLOT` + `services/persona/affection_classifier.py`（146 行）+ 10 条测试；独立 sqlite store 与 24h rolling 验证通过 |
-| **P2.2** | 2 | ⏳ | 待执行：LLM planner binary（reasoning-first） |
+| **P2.2** | 2 | ✅ | 自主验收通过：`services/reply_planner/binary_planner.py`（179 行）+ 12 条测试；LLMRequest `reply_gate` spine、fail-open 与 cancel-path 验证通过 |
 | **P2.6** | 2 | ⏳ | 阻塞于 P2.2 |
 | ~~P2.3~~ | — | ❌ | 证据不成立：已由 [Part 5 P5.2 ✅](./omubot-humanization-part5-execution.md#6) 实现，不重复 |
 | **P2.8** | 3 | ⏳ | 阻塞于 P3.6 + P3.7；v2 优先级链头 |
@@ -611,3 +611,39 @@ D2 / 回滚：本任务无写状态 cancel-path；回滚为删除 `services/grou
 - D1 grep：`rg -n "AFFECTION_STAGE_SLOT|AffectionClassifier|AffectionStageStore|affection_stage" services/persona/affection_classifier.py services/humanization tests/test_affection_classifier.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中新模块、contract/export、新测试与本追踪记录；未命中 persona admin map。
 
 D2 / 回滚：cancel-path 测试通过，`asyncio.CancelledError` 发生在 classify 阶段时不写 RuntimeStateBus / sqlite；回滚为撤销 contract/__init__ 改动，删除 `services/persona/affection_classifier.py`、`tests/test_affection_classifier.py` 并撤销 §6 / §9 的 P3.7 回填。
+
+### P2.2 领单拆分（执行前）— Codex / 2026-05-25 23:18 CST
+
+- **任务边界**：新建 `services/reply_planner/__init__.py` 与 `services/reply_planner/binary_planner.py`；提供 reasoning-first 二分类 planner、LLMRequest 构造与输出解析；不接 `plugins/chat/plugin.py` / scheduler，不改变线上是否回复判定。
+- **自主评估**：P2.2 依赖 Part 1 V11 的 LLMRequest spine。现有 `LLMTask` 已有 `reply_gate`，本步不新增 `binary_planner` task，避免额外牵动 admin provider task 同步；planner 内部以 `task="reply_gate"` 复用同一 LLMRequest 框架。
+- **执行拆分**：
+  1. 定义 `BinaryPlannerFeatures` 与 `BinaryPlanDecision`，action 仅 `reply|no_reply`。
+  2. 构造 static prompt，要求输出 JSON：`reasoning` 先解释，`decision` 再给二分类；payload 读取 register / context / addressee / recent assistant 等字段。
+  3. 解析 plain JSON / fenced JSON / embedded JSON；非法或调用失败时 fail-open 为 `reply`，避免误判全沉默。
+  4. `asyncio.CancelledError` 保持向上传播，不落默认决策。
+  5. 新增 `tests/test_binary_planner.py` 12 条覆盖 request 构造、解析、fail-open、timeout、cancel-path。
+- **风险与回滚**：未接生产路径；回滚为删除 `services/reply_planner/` 与 `tests/test_binary_planner.py`，并撤销 §6 / §9 P2.2 回填。
+
+### P2.2 完成记录（执行者 Codex）— 2026-05-25 23:34 CST
+
+自验结果：P2.2 完成并自主验收 ✅。`services/reply_planner/binary_planner.py` 179 行，低于 `new ≤ 180 行`；本步未接 `plugins/chat/plugin.py` / scheduler，不改变线上是否回复判定。
+
+改动内容：
+
+- 新增 `services/reply_planner/__init__.py` 与 `services/reply_planner/binary_planner.py`。
+- `BinaryPlannerFeatures` 读取 `current_text`、`register_label`、`context`、`addressee_id`、`reply_to_bot`、recent assistant 等二分类输入。
+- `build_binary_planner_request()` 复用 `LLMRequest(task="reply_gate")`，static prompt 要求先 `reasoning` 后 `decision=reply|no_reply`。
+- `parse_binary_planner_output()` 支持 plain JSON / fenced JSON / embedded JSON；非法输出、超时、调用异常均 fail-open 为 `reply`，避免误判全沉默。
+- `asyncio.CancelledError` 保持向上传播，不落默认决策。
+- 新增 `tests/test_binary_planner.py` 12 条，覆盖 request 构造、上下文截断、解析、confidence clamp、fail-open、timeout、cancel-path。
+
+验证：
+
+- `wc -l services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_binary_planner.py` → `179` / `19` / `143`。
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_binary_planner.py -q` → `12 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_binary_planner.py` → `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_binary_planner.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_binary_planner.py` → passed。
+- D1 grep：`rg -n "BinaryPlanner|BinaryPlannerFeatures|BinaryPlanDecision|binary_planner|reply_planner" services/reply_planner tests/test_binary_planner.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中新包、新测试与本追踪记录；无生产接线路径命中。
+
+D2 / 回滚：cancel-path 测试通过，`asyncio.CancelledError` 不被吞；回滚为删除 `services/reply_planner/`、`tests/test_binary_planner.py` 并撤销 §6 / §9 的 P2.2 回填。

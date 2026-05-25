@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-05-25 Humanization Part 2/3 P2.2 Binary Planner 落地
+
+**变更类型**：humanization support module / LLMRequest spine / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 2 P2.2 新增 reasoning-first reply/no_reply 二分类 planner：
+
+- `services/reply_planner/binary_planner.py`：新增 `BinaryPlannerFeatures`、`BinaryPlanDecision`、`BinaryPlanner`、LLMRequest 构造与输出解析；
+- `build_binary_planner_request()` 复用现有 `LLMRequest(task="reply_gate")`，读取 register / context / addressee / recent assistant 等输入；
+- 输出解析支持 plain JSON / fenced JSON / embedded JSON；非法输出、调用异常、timeout 均 fail-open 为 `reply`，避免误沉默；
+- `tests/test_binary_planner.py`：12 条覆盖 request 构造、解析、截断、confidence clamp、fail-open、timeout、cancel-path。
+
+**验证**：
+
+- `uv run pytest tests/test_binary_planner.py -q` → `12 passed`
+- `uv run ruff check services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_binary_planner.py` → passed
+- `uv run pyright services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_binary_planner.py` → `0 errors`
+- `uv run python -m py_compile services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_binary_planner.py` → passed
+
+**影响**：P2.2 状态自主验收为 ✅；当前未接 `plugins/chat/plugin.py` / scheduler，不改变线上是否回复判定。P2.6 consecutive no-reply 阶梯阈值前置已具备。
+
+**回滚**：删除 `services/reply_planner/` 与 `tests/test_binary_planner.py`，撤销 Part 2/3 tracking 的 P2.2 回填。
+
+---
+
 ## 2026-05-25 Humanization Part 2/3 P3.7 Affection Stage 落地
 
 **变更类型**：humanization runtime state / persona support module / tests
