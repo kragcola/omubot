@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-05-25 Humanization Part 2/3 派单版执行追踪（仅文档）
+
+**变更类型**：docs / dispatch-only
+
+**内容**：基于已完稿的 [Part 2/3 调研 v2](docs/tracking/omubot-humanization-part2-3-research.md)，按 [Part 1 派单版](docs/tracking/omubot-humanization-part1-execution.md) / [Part 5 派单版](docs/tracking/omubot-humanization-part5-execution.md) 同款 9 段结构出 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md)，可直接交执行人：
+
+- §1 证据修正表 7 行（**P2.3 ❌ 撤项**：inter_segment_delay 已由 [Part 5 P5.2](services/llm/segmentation.py) 实现，避免重复造轮；P3.6 / P3.7 / P2.8 / P2.9 / P2.11 / P2.10 文字校正为研究文一手取证后的最终落点）
+- §2 P0 前置体检 7 步 + 10 行依赖检查表（v1 P2.1 / P3.1 / P3.4 / P5.0~P5.3 已 ✅，可直接进 Wave 1）
+- §3 7 个 Wave / 25 个生产任务（Wave 1 信号层 / Wave 2 检测层 / Wave 3 决策层 / Wave 4 sticker 收敛 / Wave 5 耦合长尾 / Wave 6 v1+v2 联合灰度 / Wave 7 文档收口），v2 主链头确定为 P2.8 sticker_decision_provider，依赖 P3.6 mood slot
+- §4 16 项灰度指标矩阵（4.1 v1 6 行 / 4.2 v2 10 行 / 4.3 用户主观 4 行）；含 sticker rate ≤25% / kaomoji_enforce ≤10% / og:title ≥60% / mood 写盘 ≥95% / sticker_prob ≤0.1 cold-start / playful & tired delay ratio ≤0.7 / affection 5 档 stranger+acquaint ≤60% / mood NOT in prompt strings 自检
+- §5 9 项验收单（含 grep 自检：identity.md 不得出现 mood/affection 装饰文本）
+- §6 25 行状态表全 ⏳，仅 P2.3 ❌ 划除
+- §7 7 项交接（含 24h 灰度窗口约束：Part 5 P5.4 灰度未满 24h 时只允许领 P0）
+- §8 4 子段（Part 1 ✅ / Part 5 P5.4 🟡 / Part 4 隔离 / 13 行风险矩阵 + 30 秒 feature-flag 回滚 bash）
+- §9 执行人逐步追踪占位
+
+**预算**：v2 ≤1170 行 / ≥87 测试，与 v1 合计 ≤1460 行 / ≥114 测试。
+
+**入场前置**：[Part 5 P5.4 灰度](docs/tracking/omubot-humanization-part5-execution.md#34-wave-3--p54-灰度--24h-体感比对) 24h 观察窗口（至 2026-05-26 08:11 UTC）必须收尾；窗口未满时执行人只能领 P0 体检，不得动 .py / .json / .toml / 镜像。
+
+**影响**：仅新增 1 个 tracking 文件 + 本日志条目，无运行时副作用。
+
+**回滚**：纯文档，`git revert` 单 commit 即可。
+
+---
+
 ## 2026-05-25 Humanization Part 2/3 调研报告 v2 扩范围重写（仅文档）
 
 **变更类型**：docs / tracking-only
