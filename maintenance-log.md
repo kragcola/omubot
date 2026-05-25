@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-05-25 Humanization Part 2/3 P3.7 Affection Stage 落地
+
+**变更类型**：humanization runtime state / persona support module / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 2 P3.7 新增 affection 5 档分类与独立 sqlite store：
+
+- `services/humanization/contract.py`：新增 `AFFECTION_STAGE_SLOT="humanization.affection.stage"`，ttl=`per_user`；
+- `services/persona/affection_classifier.py`：新增 `AffectionClassifier`、`AffectionStageStore` 与 5 档 stranger/acquaint/familiar/close/withdraw 规则；默认 sqlite 路径为 `storage/affection_stage.db`；
+- `classify_and_write()` 写 RuntimeStateBus 时使用 24h `decay_at`；`AffectionStageStore.load_recent()` 只返回 24h 内记录；
+- `tests/test_affection_classifier.py`：10 条覆盖 cold start stranger、fallback acquaint、5 档边界、store 24h rolling、bus 写入与 cancel-path。
+
+**验证**：
+
+- `uv run pytest tests/test_affection_classifier.py tests/test_humanization_contract.py -q` → `16 passed`
+- `uv run ruff check services/persona/affection_classifier.py services/humanization/contract.py services/humanization/__init__.py tests/test_affection_classifier.py tests/test_humanization_contract.py` → passed
+- `uv run pyright services/persona/affection_classifier.py services/humanization/contract.py services/humanization/__init__.py tests/test_affection_classifier.py tests/test_humanization_contract.py` → `0 errors`
+- `uv run python -m py_compile services/persona/affection_classifier.py services/humanization/contract.py services/humanization/__init__.py tests/test_affection_classifier.py` → passed
+
+**影响**：P3.7 状态自主验收为 ✅；不写 persona admin map，不改现有 `plugins/affection` JSON store / 分数 / 昵称行为。P2.8、P3.9、P3.10 的 affection stage 前置已具备。
+
+**回滚**：撤销 `services/humanization/contract.py` 与 `services/humanization/__init__.py` 的 stage slot 改动，删除 `services/persona/affection_classifier.py` 与 `tests/test_affection_classifier.py`，撤销 Part 2/3 tracking 的 P3.7 回填。
+
+---
+
 ## 2026-05-25 Humanization Part 2/3 P3.2 Topic Drift Detector 落地
 
 **变更类型**：humanization support module / tests

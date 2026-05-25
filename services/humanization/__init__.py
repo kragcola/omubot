@@ -7,6 +7,7 @@ from services.humanization.classifier import (
 )
 from services.humanization.contract import (
     AFFECTION_FAMILIARITY_SLOT,
+    AFFECTION_STAGE_SLOT,
     CLOCK_CURRENT_SLOT,
     HUMANIZATION_CONTRACT,
     HUMANIZATION_MODULE_ID,
@@ -34,6 +35,7 @@ from services.humanization.state import (
 
 __all__ = [
     "AFFECTION_FAMILIARITY_SLOT",
+    "AFFECTION_STAGE_SLOT",
     "CLOCK_CURRENT_SLOT",
     "HUMANIZATION_CONTRACT",
     "HUMANIZATION_MODULE_ID",
