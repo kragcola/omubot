@@ -142,11 +142,11 @@
 
 | 编号 | wave | 状态 | 落地证据 / 备注 |
 |---|---|---|---|
-| **P5.0** | 0 | 🟡 | 已完成待验收：4 项前置体检均达标；collect-only 基线 `1714 tests collected`；详见 §9 P5.0 完成记录 |
-| **P5.1** | 1 | 🟡 | 已完成待验收：`natural_split()` + register 5 档 + 12 条测试；详见 §9 P5.1 完成记录 |
-| **P5.2** | 1 | 🟡 | 已完成待验收：`inter_segment_delay()` + `natural_split_enabled=false` 双配置模型字段 + 8 条测试；详见 §9 P5.2 完成记录 |
-| **P5.3** | 2 | 🟡 | 已完成待验收：`reply_segment_plan()` feature flag 切流 + `LLMClient` 两处 fan-out 动态 delay + 8 条 P5.3 新测试；详见 §9 P5.3 完成记录 |
-| **P5.4** | 3 | ⏳ | 待执行：灰度群 993065015 启 natural_split + 24h 采样；阻塞于 P5.3 验收 ✅ + 用户授权进灰度 |
+| **P5.0** | 0 | ✅ | 验收通过 (2026-05-25)：4 项前置体检均达标；collect-only 基线 `1714 tests collected`；详见 §9 P5.0 完成记录 |
+| **P5.1** | 1 | ✅ | 验收通过 (2026-05-25)：`natural_split()` + register 5 档 + 12 条测试；D1 grep 收口仅命中 segmentation.py + 新测试；详见 §9 P5.1 完成记录 |
+| **P5.2** | 1 | ✅ | 验收通过 (2026-05-25)：`inter_segment_delay()` + `natural_split_enabled=false` 双配置模型字段 + 8 条测试；详见 §9 P5.2 完成记录 |
+| **P5.3** | 2 | ✅ | 验收通过 (2026-05-25)：`reply_segment_plan()` feature flag 切流 + `LLMClient` 两处 fan-out 动态 delay + 8 条 P5.3 新测试；1734 passed / pyright 0/0/0 / ruff clean；2 处 D2 cancel-path 用 monkeypatch 注入 `CancelledError` 验证外部状态不污染；详见 §9 P5.3 完成记录 |
+| **P5.4** | 3 | 🟡 | 灰度上线 (2026-05-25)：`config/config.json:reply_segmentation.natural_split_enabled=true` 已翻；当前生效群 = `allowed_groups=[984198159, 993065015]`（two-group 灰度，per-group override 通道未建，仅靠 `allowed_groups` 物理隔离）；24h 采样窗口起算见 maintenance-log 当日条目；阻塞于 24h 体感比对 + 用户主观验收 |
 | **P5.5** | 4 | ⏳ | 待执行：默认开 + 卸 fallback ≈ -200 行；阻塞于 P5.4 出口表 ≥ 5/6 项 + 用户验收 |
 | **P5.6** | 5 | ⏳ | 待执行：maintenance-log + 主线状态表 + Part 1 §13 边界表追加；阻塞于 P5.5 ✅ |
 

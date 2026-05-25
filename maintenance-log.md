@@ -4,6 +4,42 @@
 
 ---
 
+## 2026-05-25 Humanization Part 5 Wave 3 灰度上线 — natural_split_enabled=true（two-group 24h 窗口起）
+
+**变更类型**：deploy / feature flag flip / config
+
+**内容**：在 [Part 5 P5.0~P5.3 工程交付](docs/tracking/omubot-humanization-part5-execution.md) 验收通过的基础上，按 §3.4 翻 P5.4 灰度旗标：
+
+- `config/config.json:reply_segmentation.natural_split_enabled` 由 `false` 改 `true`。
+- 容器走 `--build` 重起（新增字段在 Pydantic 模型层，必须烧进镜像）：`dot_clean . && docker compose up bot -d --build`。
+- 落地校验：
+  - `docker compose exec bot /app/.venv/bin/python -c 'from kernel.config import load_config; print(load_config().reply_segmentation.natural_split_enabled)'` → `True`
+  - 直连 `reply_segment_plan('今天天气不错呢，要不要一起出去走走？嗯…大概下午3点的样子', cfg, register='playful')` → 切 3 段 / `inter_segment_delays=[0.735, 0.945]` / `limit_status=none`，自然分段路径生效。
+  - `docker compose logs bot --since 5m | grep -iE 'error|traceback|exception'` → 0 命中，启动后无异常。
+
+**灰度范围**：`config/config.json:group.allowed_groups=[984198159, 993065015]`。`natural_split_enabled` 是顶层 `reply_segmentation` 字段，无 per-group override 通道；当前生效群 = `allowed_groups` 全部 = 上述两群（与 [Part 5 派单 §3.4](docs/tracking/omubot-humanization-part5-execution.md#34-wave-3--p54-灰度--24h-体感比对) 设想的 "993065015 启 / 984198159 作对照" 有偏离，但 bot 唯一允许的群即这两个，物理范围一致）。
+
+**时间窗口**：24h 体感观察起算 = `2026-05-25 08:11 UTC`（容器 recreate 完成时刻）；出口表见 [Part 5 派单 §4](docs/tracking/omubot-humanization-part5-execution.md#4-灰度阶段出口矩阵)。
+
+**影响**：
+
+- 回复分段从 legacy `segment_reply()`（机械按 `max_segment_chars=20` 硬拆）切换到 `natural_split()`（自然断点 + 概率合并 + 段尾标点概率保留 + register 5 档）。
+- 段间 sleep 从固定 `inter_segment_delay_s=0.8` 改为按上一段中文 / ASCII 字数 × register × slot_energy 动态计算，clamp 到 `[0.5, 3.0]`。
+- 仅触及 `LLMClient` 两处 fan-out（正常 reply + tool exhausted），`send_queue.py` / 队列契约未变。
+
+**回滚（30 秒）**：
+
+```bash
+# 编辑 config/config.json：natural_split_enabled: false
+docker compose restart bot
+```
+
+回到 P5.4 灰度前的 legacy 行为。代码 / pydantic 模型未动，restart 即可，不需要 rebuild。
+
+**待办**：24h 体感比对 + 用户主观验收 → 决定是否进 P5.5（默认开 + 卸 fallback ≈ -200 行）；若发现段长 / 节奏 / register 系数失衡，按 [Part 5 派单 §8.3 风险矩阵](docs/tracking/omubot-humanization-part5-execution.md#83-风险矩阵--30-秒回滚) 调参或回滚。
+
+---
+
 ## 2026-05-25 Humanization Part 5 Wave 0-2 工程落地 — 自然分段与动态段间延迟（默认关闭）
 
 **变更类型**：humanization runtime / feature flag / tests / docs
