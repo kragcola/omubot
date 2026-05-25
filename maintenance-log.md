@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-05-25 Humanization Part 2/3 P3.2 Topic Drift Detector 落地
+
+**变更类型**：humanization support module / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 2 P3.2 新增 in-line topic drift detector：
+
+- `services/group/topic_drift.py`：新增 `TopicDriftDetector.detect()` 与 `TopicDriftResult`，读取最近 3 条 user message，输出 `topic`、`drift_score`、`is_new_topic`、`participants`；
+- 复用 `services/similarity.py` 的 similarity provider 接口，不使用 difflib；未安装 embedding provider 抛出 `RuntimeError` 时 fallback 到 ngram provider；
+- `tests/test_topic_drift.py`：6 条覆盖冷启动、低漂移、高漂移、last-3 user message、CQ/URL 清洗与 provider fallback。
+
+**验证**：
+
+- `uv run pytest tests/test_topic_drift.py -q` → `6 passed`
+- `uv run ruff check services/group/topic_drift.py tests/test_topic_drift.py` → passed
+- `uv run pyright services/group/topic_drift.py tests/test_topic_drift.py` → `0 errors`
+- `uv run python -m py_compile services/group/topic_drift.py tests/test_topic_drift.py` → passed
+
+**影响**：P3.2 状态自主验收为 ✅；当前未接 PromptBuilder / planner / 生产调度，不改变线上回复行为。P3.3 read_mark prompt 注入前置已具备。
+
+**回滚**：删除 `services/group/topic_drift.py` 与 `tests/test_topic_drift.py`，撤销 Part 2/3 tracking 的 P3.2 回填。
+
+---
+
 ## 2026-05-25 Humanization Part 2/3 P2.4 Humanizer typing 系数扩展
 
 **变更类型**：humanization runtime / tests
