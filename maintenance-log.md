@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-05-25 Humanization Part 5 Wave 0-2 工程落地 — 自然分段与动态段间延迟（默认关闭）
+
+**变更类型**：humanization runtime / feature flag / tests / docs
+
+**内容**：按 [Part 5 派单执行追踪](docs/tracking/omubot-humanization-part5-execution.md) 完成 P5.0 ~ P5.3，目标是把“机械硬拆 ≤20 字 / 固定 0.8s 段间 sleep”改造成可灰度的自然分段路径。当前仅完成工程接线，`natural_split_enabled` 默认仍为 `false`，未启动 P5.4 单群灰度。
+
+- P5.0 前置体检：确认 `services/llm/client.py` 已委托 `services.llm.segmentation`；register slot / BlockTrace provider / Humanizer register+slot 前置均存在；pytest collect-only 基线为 `1714 tests collected`。
+- P5.1：`services/llm/segmentation.py` 新增 `natural_split()`，支持 CQ / URL / ASCII / 颜文字保护、自然断点、概率合并、段尾标点概率保留、`max_sentence_num` 尾部合并、`soft_max_chars` 递归软拆与 5 档 register 系数。
+- P5.2：新增 `inter_segment_delay(prev_segment, *, register=None, slot_energy=1.0)`，按中文 / ASCII 字数、register 与 slot energy 计算 `[0.5, 3.0]` 范围内的段间停顿；`ReplySegmentationConfig` 与 `kernel.config.ReplySegmentationConfig` 新增 `natural_split_enabled=false`。
+- P5.3：新增 `ReplySegmentPlan` / `reply_segment_plan()`，将 legacy path 与 `_natural_split_path()` 分离；`enabled=false` 优先于自然分段灰度开关，保留全局关闭分段语义；register 入参兼容 RuntimeStateBus 写入的 dict/object/string，并映射 Part 1 旧标签到 Part 5 五档语义。
+- P5.3 runtime wiring：`LLMClient` 正常回复与 tool-exhausted 两处 fan-out 改为读取 `plan.inter_segment_delays[idx]`，并从 `REGISTER_LABEL_SLOT` / `CLOCK_CURRENT_SLOT.energy` 取 register 与 slot energy，缺失时降级 neutral / `1.0`。
+- `send_queue.py` 本轮未扩契约：普通 LLM fan-out 当前不走 `ReplySegmentBatch`，P5.3 先不把队列层改成 delay 数组，降低灰度前风险面。
+- 新增测试：`tests/test_natural_split.py` 12 条、`tests/test_inter_segment_delay.py` 8 条、`tests/test_reply_segments_natural.py` 7 条，并新增 `tests/test_llm_client_reply_segment_plan.py` 覆盖 runtime fan-out 动态 delay。
+
+**影响**：默认配置下线上行为仍走 legacy `segment_reply()` 与固定 `inter_segment_delay_s`，P5.3 只是把可切流路径接好。开启 `natural_split_enabled=true` 后，回复分段会走自然分段算法，段间 sleep 由上一段文本长度 / register / slot energy 决定。P5.4 仍需 P5.3 验收通过 + 用户授权后，才可对 `993065015` 开启单群 24h 灰度。
+
+**验证**：
+
+- `uv run pytest tests/test_natural_split.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py tests/test_client.py::test_chat_uses_injected_reply_segmentation_config tests/test_segmentation.py -q` → `47 passed, 2 warnings`
+- `uv run ruff check services/llm/segmentation.py services/llm/client.py kernel/config.py tests/test_natural_split.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py` → passed
+- `uv run pyright services/llm/segmentation.py services/llm/client.py tests/test_natural_split.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py` → `0 errors, 0 warnings, 0 informations`
+- `uv run python -m py_compile services/llm/segmentation.py services/llm/client.py kernel/config.py tests/test_natural_split.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py` → passed
+- D1 grep：`grep -rn 'natural_split_enabled\|_natural_split_path' --include='*.py' services tests kernel` 仅命中 `services/llm/segmentation.py`、`kernel/config.py` 与 P5.2/P5.3 测试。
+
+**回滚**：当前无需运行时回滚，因为 flag 默认关闭；若灰度后出问题，`config/config.json` 将 `natural_split_enabled` 改回 `false` 并 `docker compose restart bot`，30 秒内回 legacy path。代码级回滚为撤销 P5.1~P5.3 新函数 / plan / client fan-out 接线及新增测试。
+
+**待办**：等待 P5.3 验收；验收通过并获用户确认后，P5.4 才能单群开启 `natural_split_enabled=true`，运行 24h 采样并回填出口矩阵。
+
+---
+
 ## 2026-05-25 Humanization Part 6 调研存档 — 源头生成调度（4 方案 / 27 论文 / 7 维度决策矩阵）
 
 **变更类型**：research deposit（Part 4 模式 / 不动代码 / 不立 P 任务 / 等用户决策推进）

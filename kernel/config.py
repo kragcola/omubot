@@ -740,6 +740,16 @@ class ReplySegmentationConfig(BaseModel):
             "restart_hint": "recommended",
         },
     )
+    natural_split_enabled: bool = Field(
+        default=False,
+        description="是否启用 Part 5 自然分段算法。",
+        json_schema_extra={
+            "display_label": "自然分段灰度",
+            "help": "开启后回复会使用自然分段算法与自适应段间延迟；默认关闭，便于灰度与快速回滚。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
     max_segment_chars: int = Field(
         default=20,
         description="单段目标最大字符数。",

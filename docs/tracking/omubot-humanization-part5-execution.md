@@ -143,10 +143,10 @@
 | 编号 | wave | 状态 | 落地证据 / 备注 |
 |---|---|---|---|
 | **P5.0** | 0 | 🟡 | 已完成待验收：4 项前置体检均达标；collect-only 基线 `1714 tests collected`；详见 §9 P5.0 完成记录 |
-| **P5.1** | 1 | ⏳ | 待执行：natural_split 算法 + register 5 档；估 ≤ 220 行 net；新增测试 ≥ 12 条 |
-| **P5.2** | 1 | ⏳ | 待执行：inter_segment_delay + natural_split_enabled 字段；估 ≤ 25 行 net；新增测试 ≥ 5 条 |
-| **P5.3** | 2 | ⏳ | 待执行：reply_segments 切流 + send_queue 每段 delay；估 ≤ 48 行 net；新增测试 ≥ 4 条 |
-| **P5.4** | 3 | ⏳ | 待执行：灰度群 993065015 启 natural_split + 24h 采样；阻塞于 P5.3 ✅ + 用户授权进灰度 |
+| **P5.1** | 1 | 🟡 | 已完成待验收：`natural_split()` + register 5 档 + 12 条测试；详见 §9 P5.1 完成记录 |
+| **P5.2** | 1 | 🟡 | 已完成待验收：`inter_segment_delay()` + `natural_split_enabled=false` 双配置模型字段 + 8 条测试；详见 §9 P5.2 完成记录 |
+| **P5.3** | 2 | 🟡 | 已完成待验收：`reply_segment_plan()` feature flag 切流 + `LLMClient` 两处 fan-out 动态 delay + 8 条 P5.3 新测试；详见 §9 P5.3 完成记录 |
+| **P5.4** | 3 | ⏳ | 待执行：灰度群 993065015 启 natural_split + 24h 采样；阻塞于 P5.3 验收 ✅ + 用户授权进灰度 |
 | **P5.5** | 4 | ⏳ | 待执行：默认开 + 卸 fallback ≈ -200 行；阻塞于 P5.4 出口表 ≥ 5/6 项 + 用户验收 |
 | **P5.6** | 5 | ⏳ | 待执行：maintenance-log + 主线状态表 + Part 1 §13 边界表追加；阻塞于 P5.5 ✅ |
 
@@ -243,3 +243,130 @@ docker compose restart bot
 - `source ./scripts/dev/env.sh && uv run pytest --collect-only -q 2>&1 | tail -1` → `1714 tests collected in 1.01s`。
 
 风险与回滚：P5.0 只改追踪文档，不改运行代码；回滚为撤销本节与 §1 / §6 的 P5.0 状态回填。
+
+### P5.1 领单拆分（执行前）
+
+目标：在现有 `services/llm/segmentation.py` 内新增 `natural_split(text, *, soft_max_chars=80, max_sentence_num=8, register=None, rng=None)`，完成自然分段算法和单测；本步不接生产路径，不修改 `reply_segments()` 默认行为。
+
+详细步骤：
+
+1. 读取 `services/llm/segmentation.py` 当前实现，复用 `_clean_text` / `fix_cq_codes` / `_protected_spans` / `_safe_boundary` / `_ASCII_TOKEN_RE` / `_URL_TOKEN_RE`，避免另起新目录。
+2. 新增 register 5 档系数表与分段私有 helper：安全边界扫描、概率合并、段尾标点概率保留、段数上限尾部合并、soft_max_chars 递归拆分。
+3. 新增 `tests/test_natural_split.py`，覆盖短/中/长文本概率形态、标点保留、引号/冒号/URL/CQ/ASCII 保护、soft_max 递归、max_sentence_num、register 5 档关键差异、cancel-path。
+4. 跑 P5.1 定向测试与 D1 grep；通过后把 §6 P5.1 改 🟡 并追加完成记录。
+
+自主评估：
+
+- 边界：P5.1 只暴露新函数，不让线上默认行为变化；P5.2 再加 delay/config，P5.3 才做 feature flag 切流。
+- 风险：概率算法若直接使用全局随机会导致测试不稳定，因此必须允许注入 `random.Random` / `secrets.SystemRandom` 风格对象；测试全部固定 seed。
+- D2 cancel-path：算法本身无 I/O 和持久状态，cancel 测试通过 monkeypatch helper 在递归路径抛 `asyncio.CancelledError`，断言外部状态未被污染。
+- 回滚：删除 `natural_split()` 及其 helper、删除 `tests/test_natural_split.py`，P5.3 未接线前运行时不受影响。
+
+### P5.1 完成记录（执行者 Codex）
+
+自验结果：P5.1 完成，进入 🟡 待验收；运行时默认路径未切换，`reply_segments()` 仍走 legacy `segment_reply()`。
+
+改动内容：
+
+- `services/llm/segmentation.py` 新增 `natural_split()` 与私有 helper：CQ / URL / ASCII / 颜文字保护、自然断点扫描、register 5 档 split strength、概率合并、段尾标点概率保留、`max_sentence_num` 尾部合并、`soft_max_chars` 递归软拆。
+- URL 保护同步收窄为合法 URL 字符集，避免把中文逗号后的正文吞进 URL span；soft_max 落在长 URL / 长 token 内时保留完整 token，不硬切。
+- `tests/test_natural_split.py` 新增 12 条覆盖：短/中/长文本概率形态、标点概率、引号/冒号/URL/CQ/ASCII/颜文字保护、soft_max 递归、max_sentence_num、register 差异、未知 register 回退、cancel-path。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_natural_split.py -q` → `12 passed`
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/llm/segmentation.py tests/test_natural_split.py` → 通过
+- D1 grep：`grep -rn 'natural_split\|_TRAILING_CLAUSE\|_CLAUSE_BREAK\|_MAX_CHUNK' --include='*.py' services tests` 命中新函数与测试；同时仍命中 `services/llm/client.py:_MAX_CHUNK` / `tests/test_client.py` 的旧兼容项，属于 P5.5 明确删除目标，非 P5.1 新增路径。
+
+行数：`services/llm/segmentation.py` +227/-1，`tests/test_natural_split.py` 为新增测试文件。
+
+风险与回滚：P5.1 尚未被 feature flag 接入生产；回滚为删除 `natural_split()` 相关 helper 与 `tests/test_natural_split.py`。
+
+### P5.2 领单拆分（执行前）
+
+目标：新增 `inter_segment_delay(prev_segment, *, register=None, slot_energy=1.0) -> float` 与 `ReplySegmentationConfig.natural_split_enabled=false` 字段；本步只提供纯计算能力和配置开关，不接 `send_queue.py` / `client.py` 动态发送路径。
+
+详细步骤：
+
+1. 在 `services/llm/segmentation.py` 复用 P5.1 的 register 5 档语义，新增段间延迟纯函数：中文字 `0.15s`、ASCII 字母数字 `0.07s`、register 调整、`slot_energy=max(0.5, slot_energy)`、clamp `[0.5, 3.0]`。
+2. 在 `services/llm/segmentation.py::ReplySegmentationConfig` 与 `kernel/config.py::ReplySegmentationConfig` 新增 `natural_split_enabled: bool = False`，默认关闭，确保 P5.3 前运行时行为不变。
+3. 新增 `tests/test_inter_segment_delay.py`，覆盖 quiet/polite 更慢、playful/snark 更快、长段上限、空段下限、`slot_energy=0` 兜底与配置默认关闭。
+4. 跑 P5.2 定向测试与 D1 grep；通过后把 §6 P5.2 改 🟡 并追加完成记录。
+
+自主评估：
+
+- 边界：P5.2 不修改 `reply_segments()` 结果，也不修改 `LLMClient` sleep；P5.3 才使用 `natural_split_enabled` 切换生产路径。
+- 风险：P5.2 文档里写“函数纯计算无写入”，所以 cancel-path 不需要人为制造脏状态；以纯函数测试证明无副作用。
+- 回滚：删除 `inter_segment_delay()`、删除两个 config 字段、删除 `tests/test_inter_segment_delay.py`；由于默认 off 且未接线，运行时不受影响。
+
+### P5.2 完成记录（执行者 Codex）
+
+自验结果：P5.2 完成，进入 🟡 待验收；`natural_split_enabled` 默认关闭，P5.3 前运行时行为不变。
+
+改动内容：
+
+- `services/llm/segmentation.py` 新增 `inter_segment_delay(prev_segment, *, register=None, slot_energy=1.0)` 纯函数：中文字 `0.15s`、ASCII 字母数字 `0.07s`、register 5 档系数、`slot_energy=max(0.5, slot_energy)`、clamp `[0.5, 3.0]`。
+- `services/llm/segmentation.py::ReplySegmentationConfig` 新增 `natural_split_enabled: bool = False`。
+- `kernel/config.py::ReplySegmentationConfig` 新增同名字段，Admin 配置 schema 标为 careful / restart recommended。
+- `tests/test_inter_segment_delay.py` 新增 8 条，覆盖空段下限、quiet / polite 变慢、playful / snark 变快、长段上限、ASCII rate、`slot_energy=0` 兜底、未知 register 回退、两个 config 模型默认 off。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_inter_segment_delay.py -q` → `8 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_natural_split.py tests/test_inter_segment_delay.py -q` → `20 passed`
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/llm/segmentation.py kernel/config.py tests/test_inter_segment_delay.py` → 通过
+- D1 grep：`grep -rn 'inter_segment_delay(' --include='*.py' services tests` 仅命中 `services/llm/segmentation.py` 与 `tests/test_inter_segment_delay.py`；P5.3 前尚未接入 `send_queue.py`，符合 P5.2 边界。
+
+风险与回滚：P5.2 仍未切流；回滚为删除 `inter_segment_delay()`、两个 `natural_split_enabled` 字段和 `tests/test_inter_segment_delay.py`。
+
+### P5.3 领单拆分（执行前）
+
+目标：在 `natural_split_enabled=true` 时启用 Part 5 自然分段路径，并把按上一段计算出的动态 delay 传给发送 fan-out；默认 off 时旧 `segment_reply()` 路径和固定 `inter_segment_delay_s` 保持不变。
+
+详细步骤：
+
+1. 扩展 `services/llm/segmentation.py::reply_segments()` 返回结构，增加每段之后的 `inter_segment_delays`；为了降低改动面，新增小 dataclass / tuple helper，并同步 `LLMClient._reply_segments()` 两处调用。
+2. 在 `segmentation.py` 新增 `_natural_split_path()`：`natural_split()` 产出 segments，`inter_segment_delay()` 对 `segments[:-1]` 逐段计算 delay；缺 register / slot 时降级 neutral / 1.0。
+3. `LLMClient` 两处 fan-out 从固定单值 `segment_delay` 改为 `delays[idx]`；如果旧路径没有 per-segment delays，则继续用 `cfg.inter_segment_delay_s`。
+4. `send_queue.py` 暂保留固定 `ReplySegmentBatch.inter_segment_delay_s`，因为普通 LLM fan-out 当前没有走 `ReplySegmentBatch`；P5.4 前不扩大队列契约。若测试发现队列必须支持数组，再用兼容字段补充。
+5. 新增 `tests/test_reply_segments_natural.py`：fallback 路径不变、flag on 使用自然路径、delay 下界/逐段数量、register 缺失降级、cancel-path 不脏写。
+
+自主评估：
+
+- 边界：P5.3 只在 flag on 时改变分段与延迟；flag off 是 30 秒回滚路径。
+- 风险：`LLMClient` 有两处相同 fan-out，需要同模式同时改，避免 rewrite 后路径漏接。
+- D2 cancel-path：在 natural path 中 monkeypatch `natural_split` 抛 `CancelledError`，断言外部状态不变，异常不被吞。
+- 回滚：`natural_split_enabled=false` + restart 回旧路径；代码级回滚为撤销 P5.3 对 `reply_segments()` 返回契约和 `LLMClient` fan-out 的改动。
+
+### P5.3 完成记录（执行者 Codex）
+
+自验结果：P5.3 完成，进入 🟡 待验收；`natural_split_enabled` 默认仍为 `false`，未改线上群配置，P5.4 灰度仍阻塞于验收与用户授权。
+
+实施调整：
+
+- 未直接改坏 `reply_segments()` 的三元组兼容契约；新增 `ReplySegmentPlan` 与 `reply_segment_plan()`，旧 `reply_segments()` 继续供旧调试 / 兼容测试使用。
+- `reply_segment_plan()` 内显式分成 `_legacy_segment_path()` 与 `_natural_split_path()`；`enabled=false` 优先于 `natural_split_enabled=true`，保留全局关闭分段语义。
+- register 入参兼容 RuntimeStateBus 真实写入形态（`{"label": "playful"}` / object / string），并将 Part 1 旧标签 `affectionate` / `distant` / `serious` 映射到 Part 5 的 5 档语义。
+- `LLMClient` 两处 fan-out（正常 reply path + tool exhausted path）统一改用 `_visible_reply_segment_plan()`，从 `REGISTER_LABEL_SLOT` 读取 register、从 `CLOCK_CURRENT_SLOT` 读取 `energy`，缺失时降级 neutral / `1.0`。
+- `send_queue.py` 本步未改：普通 LLM fan-out 当前不走 `ReplySegmentBatch`，P5.3 先不扩大队列契约，避免灰度前放大风险面。
+
+改动内容：
+
+- `services/llm/segmentation.py` 新增 `ReplySegmentPlan`、`reply_segment_plan()`、`_natural_split_path()`、`_legacy_segment_path()`，并补 register 归一化 / alias。
+- `services/llm/client.py` 新增 `_reply_segment_plan()` wrapper 与 `LLMClient._visible_reply_segment_plan()`，两处发送循环按 `plan.inter_segment_delays[idx]` 逐段 sleep。
+- `tests/test_reply_segments_natural.py` 新增 7 条，覆盖 fallback 路径不变、`enabled=false` 优先、flag on 自然路径、delay 数组数量和下界、register 缺失 neutral、register dict 生效、cancel-path 不脏写。
+- `tests/test_llm_client_reply_segment_plan.py` 新增运行时 fan-out 测试，锁定 callback 发送两段后按 `[0.5, 1.25]` 动态 sleep，最后一段作为返回值。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_natural_split.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py tests/test_client.py::test_chat_uses_injected_reply_segmentation_config tests/test_segmentation.py -q` → `47 passed, 2 warnings`
+- `source ./scripts/dev/env.sh && uv run ruff check services/llm/segmentation.py services/llm/client.py kernel/config.py tests/test_natural_split.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py` → `All checks passed!`
+- `source ./scripts/dev/env.sh && uv run pyright services/llm/segmentation.py services/llm/client.py tests/test_natural_split.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py` → `0 errors, 0 warnings, 0 informations`
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/llm/segmentation.py services/llm/client.py kernel/config.py tests/test_natural_split.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py` → 通过
+- D1 grep：`grep -rn 'natural_split_enabled\|_natural_split_path' --include='*.py' services tests kernel` → 仅命中 `services/llm/segmentation.py`、`kernel/config.py` 与 P5.2/P5.3 测试；`tests/test_llm_client_reply_segment_plan.py` 仅为新增 runtime fan-out 测试。
+
+风险与回滚：运行时默认仍走 legacy path；灰度事故回滚为 `natural_split_enabled=false` + restart（当前已是 false）。代码级回滚为撤销 P5.3 中 `ReplySegmentPlan` / `reply_segment_plan()` / `LLMClient` fan-out 改动与 `tests/test_reply_segments_natural.py`、`tests/test_llm_client_reply_segment_plan.py` 新增测试。
+
+### P5.4 阻塞评估（执行前）
+
+当前不领取执行：P5.4 要求单群 `993065015` 打开 `natural_split_enabled=true` 并跑满 24h 采样，派发条件写明依赖 P5.3 验收 ✅ + 用户授权进灰度。本轮 P5.3 仅进入 🟡 待验收，且未取得新的灰度启动确认，因此不修改 `config/config.json`，不启动 24h 灰度窗口。

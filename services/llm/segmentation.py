@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 import warnings
 from dataclasses import dataclass
 from functools import lru_cache
@@ -11,11 +12,35 @@ _BLANK_LINE_RE = re.compile(r"\n{2,}")
 _CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
 _CQ_KV_FIX_RE = re.compile(r",(\w+):")
 _ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#\-+]*")
-_URL_TOKEN_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+_URL_TOKEN_RE = re.compile(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]+", re.IGNORECASE)
 _TRAILING_CLAUSE = "，；：、,;:"
 _SENTENCE_ENDING = set("。！？～…」』）”’》】\"!?~)")
 _SENTENCE_BREAK = set("。！？～…!?~")
 _CLAUSE_BREAK = set("，；：、,;:")
+_NATURAL_SEPARATORS = set("。！？～…!?~，,；;、\n")
+_NATURAL_TRAILING_PUNCTUATION = set("。！？!?，,、；;：:")
+_NATURAL_REGISTER_FACTORS: dict[str, float] = {
+    "quiet": 0.7,
+    "polite_distant": 0.63,
+    "neutral": 1.0,
+    "neutral_default": 1.0,
+    "playful": 1.2,
+    "snark": 1.32,
+}
+_NATURAL_DELAY_REGISTER_FACTORS: dict[str, float] = {
+    "quiet": 1.5,
+    "polite_distant": 1.65,
+    "neutral": 1.0,
+    "neutral_default": 1.0,
+    "playful": 0.7,
+    "snark": 0.63,
+}
+_REGISTER_ALIASES: dict[str, str] = {
+    "affectionate": "playful",
+    "distant": "polite_distant",
+    "serious": "polite_distant",
+}
+_KAOMOJI_RE = re.compile(r"[\(（][^\n()\uff08\uff09]{0,16}[｡ωд▽≧≦╥﹏‿◕✧・∀><^_-][^\n()\uff08\uff09]{0,16}[\)）]")
 _POSTFIX_CLOSERS = set("」』）”’》】)]}\"'")
 _REPEATED_PUNCTUATION = {"—", "…"}
 _CONTINUATION_PREFIX = set("，、。！？；：,.!?;:的地得了着过")
@@ -59,6 +84,7 @@ class Segment:
 @dataclass(frozen=True)
 class ReplySegmentationConfig:
     enabled: bool = True
+    natural_split_enabled: bool = False
     max_segment_chars: int = 20
     min_segment_chars: int = 6
     max_send_segments: int = 0
@@ -87,6 +113,14 @@ class ReplySegmentationResult:
         return [segment.text for segment in self.segments]
 
 
+@dataclass(frozen=True)
+class ReplySegmentPlan:
+    segments: list[str]
+    raw_count: int
+    limit_status: SegmentationLimitStatus
+    inter_segment_delays: list[float]
+
+
 def fix_cq_codes(text: str) -> str:
     """Normalize CQ code params: [CQ:reply,id:123] -> [CQ:reply,id=123]."""
     return _CQ_CODE_RE.sub(lambda m: _CQ_KV_FIX_RE.sub(r",\1=", m.group(0)), text)
@@ -103,6 +137,8 @@ def _is_ascii_token_char(ch: str) -> bool:
 def _protected_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for match in _CQ_CODE_RE.finditer(text):
+        spans.append((match.start(), match.end()))
+    for match in _KAOMOJI_RE.finditer(text):
         spans.append((match.start(), match.end()))
     for match in _URL_TOKEN_RE.finditer(text):
         spans.append((match.start(), match.end()))
@@ -170,11 +206,254 @@ def _safe_boundary(text: str, index: int, protected: list[tuple[int, int]]) -> b
     return not _inside_protected_span(index, protected) and not _inside_unclosed_enclosure_at(text, index)
 
 
+def _rng_random(rng: Any | None) -> float:
+    generator = rng if rng is not None else secrets.SystemRandom()
+    return float(generator.random())
+
+
+def _register_label(register: Any | None) -> str:
+    if register is None:
+        return ""
+    if isinstance(register, str):
+        label = register
+    elif isinstance(register, dict):
+        label = register.get("label") or register.get("register") or register.get("name") or ""
+    else:
+        label = getattr(register, "label", None) or getattr(register, "register", None) or ""
+    normalized = str(label or "").strip().lower()
+    return _REGISTER_ALIASES.get(normalized, normalized)
+
+
+def _natural_register_factor(register: Any | None) -> float:
+    label = _register_label(register)
+    if not label:
+        return 1.0
+    return _NATURAL_REGISTER_FACTORS.get(label, 1.0)
+
+
+def _natural_delay_register_factor(register: Any | None) -> float:
+    label = _register_label(register)
+    if not label:
+        return 1.0
+    return _NATURAL_DELAY_REGISTER_FACTORS.get(label, 1.0)
+
+
+def _natural_split_strength(text_len: int, register: Any | None) -> float:
+    if text_len < 12:
+        base = 0.2
+    elif text_len < 32:
+        base = 0.6
+    elif text_len < 80:
+        base = 0.7
+    else:
+        base = 0.85
+    return max(0.05, min(0.95, base * _natural_register_factor(register)))
+
+
+def _is_natural_separator_boundary(text: str, index: int) -> bool:
+    ch = text[index]
+    if ch == "\n":
+        return True
+    if ch in {"：", ":"}:
+        return False
+    if ch == " ":
+        prev = text[index - 1] if index > 0 else ""
+        nxt = text[index + 1] if index + 1 < len(text) else ""
+        return not (_is_ascii_token_char(prev) and _is_ascii_token_char(nxt))
+    return ch in _NATURAL_SEPARATORS
+
+
+def _natural_boundary_indices(text: str) -> list[int]:
+    protected = _protected_spans(text)
+    boundaries: list[int] = []
+    for index, ch in enumerate(text):
+        if ch not in _NATURAL_SEPARATORS and ch != " ":
+            continue
+        if not _is_natural_separator_boundary(text, index):
+            continue
+        boundary = index + 1
+        if ch == "\n":
+            boundary = index
+        while boundary < len(text) and text[boundary] in _POSTFIX_CLOSERS:
+            boundary += 1
+        if 0 < boundary < len(text) and _safe_boundary(text, boundary, protected):
+            boundaries.append(boundary)
+    return sorted(set(boundaries))
+
+
+def _natural_initial_segments(text: str) -> list[str]:
+    boundaries = _natural_boundary_indices(text)
+    if not boundaries:
+        return [text.strip()] if text.strip() else []
+
+    parts: list[str] = []
+    start = 0
+    for boundary in boundaries:
+        part = text[start:boundary].strip()
+        if part:
+            parts.append(part)
+        start = boundary
+        while start < len(text) and text[start].isspace():
+            start += 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts or [text.strip()]
+
+
+def _natural_cleanup_trailing_punctuation(segment: str, rng: Any | None) -> str:
+    segment = segment.strip()
+    if not segment:
+        return segment
+    ch = segment[-1]
+    if ch not in _NATURAL_TRAILING_PUNCTUATION:
+        return segment
+    if ch in {"！", "？", "!", "?", "：", ":"}:
+        return segment
+    if ch == "。":
+        return segment[:-1].rstrip() if _rng_random(rng) < 0.9 else segment
+    if ch in {"，", ","}:
+        roll = _rng_random(rng)
+        if roll < 0.7:
+            return segment
+        if roll < 0.9:
+            return segment[:-1].rstrip()
+        return segment[:-1].rstrip() + " "
+    if ch == "、":
+        return segment if _rng_random(rng) < 0.8 else segment[:-1].rstrip()
+    if ch in {"；", ";"}:
+        return segment if _rng_random(rng) < 0.9 else segment[:-1].rstrip()
+    return segment
+
+
+def _natural_merge_segments(segments: list[str], *, split_strength: float, rng: Any | None) -> list[str]:
+    if len(segments) <= 1:
+        return segments
+
+    merged: list[str] = []
+    index = 0
+    while index < len(segments):
+        current = segments[index]
+        while index + 1 < len(segments) and _rng_random(rng) > split_strength:
+            nxt = segments[index + 1]
+            if current.endswith("\n") or nxt.startswith("\n"):
+                current = current.rstrip() + "\n" + nxt.lstrip()
+            else:
+                current = current.rstrip() + nxt.lstrip()
+            index += 1
+        merged.append(current)
+        index += 1
+    return merged
+
+
+def _natural_apply_sentence_limit(segments: list[str], max_sentence_num: int) -> list[str]:
+    if max_sentence_num <= 0 or len(segments) <= max_sentence_num:
+        return segments
+    keep = max(1, max_sentence_num - 1)
+    tail = "".join(segment.strip() for segment in segments[keep:])
+    return [*segments[:keep], tail] if tail else segments[:max_sentence_num]
+
+
+def _natural_split_overlong(
+    segment: str,
+    *,
+    soft_max_chars: int,
+    max_sentence_num: int,
+    register: Any | None,
+    rng: Any | None,
+) -> list[str]:
+    if soft_max_chars <= 0 or len(segment) <= soft_max_chars:
+        return [segment]
+    boundaries = [
+        boundary
+        for boundary in _natural_boundary_indices(segment)
+        if max(1, soft_max_chars // 2) <= boundary <= soft_max_chars
+    ]
+    if boundaries:
+        cut = boundaries[-1]
+    else:
+        cut = _adjust_cut_for_ascii_token(segment, soft_max_chars)
+        protected = _protected_spans(segment)
+        for start, end in protected:
+            if start < soft_max_chars < end:
+                if start == 0 and end == len(segment):
+                    return [segment]
+                half = max(1, soft_max_chars // 2)
+                cut = start if start >= half else end
+                break
+        if cut <= 0 or cut >= len(segment):
+            cut = soft_max_chars
+    head = segment[:cut].strip()
+    tail = segment[cut:].strip()
+    if not head or not tail:
+        return [segment]
+    return [
+        *natural_split(
+            head,
+            soft_max_chars=soft_max_chars,
+            max_sentence_num=max_sentence_num,
+            register=register,
+            rng=rng,
+        ),
+        *natural_split(
+            tail,
+            soft_max_chars=soft_max_chars,
+            max_sentence_num=max_sentence_num,
+            register=register,
+            rng=rng,
+        ),
+    ]
+
+
+def natural_split(
+    text: str,
+    *,
+    soft_max_chars: int = 80,
+    max_sentence_num: int = 8,
+    register: Any | None = None,
+    rng: Any | None = None,
+) -> list[str]:
+    """Split visible replies into natural IM-style segments without hard 20-char chopping."""
+    normalized = _clean_text(fix_cq_codes(text))
+    if not normalized:
+        return []
+
+    split_strength = _natural_split_strength(len(normalized), register)
+    segments = _natural_initial_segments(normalized)
+    segments = _natural_merge_segments(segments, split_strength=split_strength, rng=rng)
+    segments = [_natural_cleanup_trailing_punctuation(segment, rng) for segment in segments]
+    segments = [segment for segment in segments if segment]
+
+    expanded: list[str] = []
+    for segment in segments:
+        expanded.extend(
+            _natural_split_overlong(
+                segment,
+                soft_max_chars=soft_max_chars,
+                max_sentence_num=max_sentence_num,
+                register=register,
+                rng=rng,
+            )
+        )
+    expanded = [segment for segment in expanded if segment]
+    return _natural_apply_sentence_limit(expanded, max_sentence_num)
+
+
+def inter_segment_delay(prev_segment: str, *, register: Any | None = None, slot_energy: float = 1.0) -> float:
+    """Return adaptive pause after a visible segment, before sending the next one."""
+    chinese_chars = sum("\u4e00" <= ch <= "\u9fff" for ch in prev_segment)
+    ascii_chars = sum(ch.isascii() and ch.isalnum() for ch in prev_segment)
+    base = chinese_chars * 0.15 + ascii_chars * 0.07
+    base *= _natural_delay_register_factor(register)
+    base *= max(0.5, float(slot_energy or 0.0))
+    return max(0.5, min(3.0, base))
+
+
 @lru_cache(maxsize=1)
 def _pysbd_segmenter() -> Any:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SyntaxWarning)
-        import pysbd
+        import pysbd  # pyright: ignore[reportMissingImports]
 
     return pysbd.Segmenter(language="zh", clean=False, char_span=True)
 
@@ -581,3 +860,70 @@ def reply_segments(
     """Return visible segment texts plus raw count for LLMClient send paths."""
     result = segment_reply(reply, cfg or ReplySegmentationConfig())
     return result.texts, result.raw_count, result.limit_status
+
+
+def _natural_split_path(
+    reply: str,
+    cfg: ReplySegmentationConfig,
+    *,
+    register: Any | None,
+    slot_energy: float,
+    rng: Any | None,
+) -> ReplySegmentPlan:
+    max_segment_chars = max(1, int(getattr(cfg, "max_segment_chars", 20) or 20))
+    max_sentence_num = (
+        int(getattr(cfg, "max_send_segments", 0) or 0)
+        or int(getattr(cfg, "soft_max_send_segments", 0) or 0)
+        or 8
+    )
+    segments = natural_split(
+        reply,
+        soft_max_chars=max_segment_chars * 4,
+        max_sentence_num=max_sentence_num,
+        register=register,
+        rng=rng,
+    )
+    delays = [
+        inter_segment_delay(segment, register=register, slot_energy=slot_energy)
+        for segment in segments[:-1]
+    ]
+    return ReplySegmentPlan(
+        segments=segments,
+        raw_count=len(segments),
+        limit_status="none",
+        inter_segment_delays=delays,
+    )
+
+
+def _legacy_segment_path(reply: str, cfg: ReplySegmentationConfig) -> ReplySegmentPlan:
+    segments, raw_count, limit_status = reply_segments(reply, cfg)
+    fixed_delay = max(0.0, float(getattr(cfg, "inter_segment_delay_s", 0.8)))
+    return ReplySegmentPlan(
+        segments=segments,
+        raw_count=raw_count,
+        limit_status=limit_status,
+        inter_segment_delays=[fixed_delay] * max(0, len(segments) - 1),
+    )
+
+
+def reply_segment_plan(
+    reply: str,
+    cfg: ReplySegmentationConfig | None = None,
+    *,
+    register: Any | None = None,
+    slot_energy: float = 1.0,
+    rng: Any | None = None,
+) -> ReplySegmentPlan:
+    """Return segment texts and the pause after each non-final segment."""
+    config = cfg or ReplySegmentationConfig()
+    if not config.enabled:
+        return _legacy_segment_path(reply, config)
+    if config.natural_split_enabled:
+        return _natural_split_path(
+            reply,
+            config,
+            register=register,
+            slot_energy=slot_energy,
+            rng=rng,
+        )
+    return _legacy_segment_path(reply, config)

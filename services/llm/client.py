@@ -19,7 +19,12 @@ from loguru import logger as _base_logger
 
 from kernel.types import PromptBlock, ReplyContext, ThinkerContext
 from services.block_trace.types import PromptBlockCandidate
-from services.humanization.contract import LAST_METRICS_SLOT, REGISTER_LABEL_SLOT, STICKER_RECENT_USED_SLOT
+from services.humanization.contract import (
+    CLOCK_CURRENT_SLOT,
+    LAST_METRICS_SLOT,
+    REGISTER_LABEL_SLOT,
+    STICKER_RECENT_USED_SLOT,
+)
 from services.humanization.scorer import HumanizationScore, StylometricScorer
 from services.humanization.state import humanization_source
 from services.identity import Identity
@@ -34,7 +39,11 @@ from services.llm.prompt_builder import PromptBuilder
 from services.llm.provider import ToolUse, create_provider, is_deepseek_v4_model, provider_mode
 from services.llm.segmentation import (
     ReplySegmentationConfig,
+    ReplySegmentPlan,
     segment_reply,
+)
+from services.llm.segmentation import (
+    reply_segment_plan as _segment_reply_segment_plan,
 )
 from services.llm.segmentation import (
     reply_segments as _segment_reply_segments,
@@ -389,6 +398,21 @@ def _reply_segments(
     cfg: ReplySegmentationConfig | None = None,
 ) -> tuple[list[str], int, str]:
     return _segment_reply_segments(fix_cq_codes(reply), cfg or ReplySegmentationConfig())
+
+
+def _reply_segment_plan(
+    reply: str,
+    cfg: ReplySegmentationConfig | None = None,
+    *,
+    register: Any | None = None,
+    slot_energy: float = 1.0,
+) -> ReplySegmentPlan:
+    return _segment_reply_segment_plan(
+        fix_cq_codes(reply),
+        cfg or ReplySegmentationConfig(),
+        register=register,
+        slot_energy=slot_energy,
+    )
 
 
 def _cached_text(text: str) -> dict[str, Any]:
@@ -1606,6 +1630,36 @@ class LLMClient:
     def _humanization_register(self, scope: Scope) -> Any:
         return self._runtime_state_value(REGISTER_LABEL_SLOT, scope)
 
+    def _current_slot_energy(self, scope: Scope) -> float:
+        value = self._runtime_state_value(CLOCK_CURRENT_SLOT, scope)
+        raw = value.get("energy", 1.0) if isinstance(value, dict) else getattr(value, "energy", 1.0)
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _visible_reply_segment_plan(
+        self,
+        reply: str,
+        *,
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        turn_id: str,
+    ) -> ReplySegmentPlan:
+        scope = self._humanization_scope(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        return _reply_segment_plan(
+            reply,
+            self._reply_segmentation_config,
+            register=self._humanization_register(scope),
+            slot_energy=self._current_slot_energy(scope),
+        )
+
     def _recent_sticker_ids(self, scope: Scope) -> list[str]:
         value = self._runtime_state_value(STICKER_RECENT_USED_SLOT, scope)
         raw_items = value.get("sticker_ids", []) if isinstance(value, dict) else []
@@ -2393,6 +2447,7 @@ class LLMClient:
                     )
                     return None
 
+                reply_turn_id = thinker_turn_id or f"{session_id}:reply:{round_i}:{int(time.monotonic() * 1000)}"
                 rewrite = await self._maybe_rewrite_humanization_reply(
                     reply=reply,
                     system_blocks=system_blocks,
@@ -2400,7 +2455,7 @@ class LLMClient:
                     session_id=session_id,
                     group_id=group_id,
                     user_id=user_id,
-                    turn_id=thinker_turn_id or f"{session_id}:reply:{round_i}:{int(time.monotonic() * 1000)}",
+                    turn_id=reply_turn_id,
                 )
                 reply = rewrite.reply
                 if rewrite.rewrite_result is not None:
@@ -2450,10 +2505,16 @@ class LLMClient:
                     _log_thinking.info("kaomoji_enforce | forcing sticker round after kaomoji detected")
                     continue
 
-                segments, raw_segment_count, limit_status = _reply_segments(
+                plan = self._visible_reply_segment_plan(
                     reply,
-                    self._reply_segmentation_config,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=reply_turn_id,
                 )
+                segments = plan.segments
+                raw_segment_count = plan.raw_count
+                limit_status = plan.limit_status
                 if raw_segment_count > len(segments):
                     _log_msg_out.debug(
                         "segments coalesced | session={} raw={} capped={}",
@@ -2465,15 +2526,15 @@ class LLMClient:
                         session_id, limit_status, raw_segment_count, len(segments),
                     )
                 send_start = time.monotonic()
-                segment_delay = max(0.0, float(getattr(
-                    self._reply_segmentation_config,
-                    "inter_segment_delay_s",
-                    _SEGMENT_DELAY,
-                )))
                 if on_segment and len(segments) > 1:
-                    for seg in segments[:-1]:
+                    for idx, seg in enumerate(segments[:-1]):
                         await on_segment(seg)
-                        await asyncio.sleep(segment_delay)
+                        delay = (
+                            plan.inter_segment_delays[idx]
+                            if idx < len(plan.inter_segment_delays)
+                            else _SEGMENT_DELAY
+                        )
+                        await asyncio.sleep(delay)
                     last_seg = segments[-1] if segments else reply
                 elif not on_segment and len(segments) > 1:
                     # No callback to send segments — rejoin so caller gets full text
@@ -2622,6 +2683,7 @@ class LLMClient:
                 tool_rounds=MAX_TOOL_ROUNDS, elapsed_s=acc_llm_elapsed,
             )
             return None
+        reply_turn_id = thinker_turn_id or f"{session_id}:tool_exhausted:{int(time.monotonic() * 1000)}"
         rewrite = await self._maybe_rewrite_humanization_reply(
             reply=reply,
             system_blocks=system_blocks,
@@ -2629,7 +2691,7 @@ class LLMClient:
             session_id=session_id,
             group_id=group_id,
             user_id=user_id,
-            turn_id=thinker_turn_id or f"{session_id}:tool_exhausted:{int(time.monotonic() * 1000)}",
+            turn_id=reply_turn_id,
         )
         reply = rewrite.reply
         if rewrite.rewrite_result is not None:
@@ -2649,10 +2711,16 @@ class LLMClient:
             acc_prompt_cache_hit += rewrite_cache_hit
             acc_prompt_cache_miss += rewrite_cache_miss
             acc_reasoning_replay += rewrite_reasoning_replay
-        segments, raw_segment_count, limit_status = _reply_segments(
+        plan = self._visible_reply_segment_plan(
             reply,
-            self._reply_segmentation_config,
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=reply_turn_id,
         )
+        segments = plan.segments
+        raw_segment_count = plan.raw_count
+        limit_status = plan.limit_status
         if raw_segment_count > len(segments):
             _log_msg_out.debug(
                 "segments coalesced | session={} raw={} capped={}",
@@ -2664,15 +2732,15 @@ class LLMClient:
                 session_id, limit_status, raw_segment_count, len(segments),
             )
         send_start = time.monotonic()
-        segment_delay = max(0.0, float(getattr(
-            self._reply_segmentation_config,
-            "inter_segment_delay_s",
-            _SEGMENT_DELAY,
-        )))
         if on_segment and len(segments) > 1:
-            for seg in segments[:-1]:
+            for idx, seg in enumerate(segments[:-1]):
                 await on_segment(seg)
-                await asyncio.sleep(segment_delay)
+                delay = (
+                    plan.inter_segment_delays[idx]
+                    if idx < len(plan.inter_segment_delays)
+                    else _SEGMENT_DELAY
+                )
+                await asyncio.sleep(delay)
             last_seg = segments[-1] if segments else reply
         elif not on_segment and len(segments) > 1:
             last_seg = "\n".join(segments)
