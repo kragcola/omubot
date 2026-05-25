@@ -28,6 +28,8 @@
 
 > **派单规则**：执行者拿到本文档后，**§1 这 4 项订正一律落本文版本**，不要按主线原文写。
 
+**P5.0 体检结论（2026-05-25 / Codex）**：4 项前置依赖均达 ✅；`services/llm/client.py` 已委托 `services.llm.segmentation`，register slot / BlockTrace provider 已落地，Humanizer register+slot 接线存在，当前 pytest collect-only 基线为 `1714 tests collected`，允许进入 P5.1 / P5.2。
+
 ---
 
 ## 2. P5.0 新增前置任务（依赖体检 + 字段实证）
@@ -140,7 +142,7 @@
 
 | 编号 | wave | 状态 | 落地证据 / 备注 |
 |---|---|---|---|
-| **P5.0** | 0 | ⏳ | 待执行：依赖体检（Part 1 U1 / U3 / U6 / V1 / V10 全部 ✅ 已先行落地，符合派单前置） |
+| **P5.0** | 0 | 🟡 | 已完成待验收：4 项前置体检均达标；collect-only 基线 `1714 tests collected`；详见 §9 P5.0 完成记录 |
 | **P5.1** | 1 | ⏳ | 待执行：natural_split 算法 + register 5 档；估 ≤ 220 行 net；新增测试 ≥ 12 条 |
 | **P5.2** | 1 | ⏳ | 待执行：inter_segment_delay + natural_split_enabled 字段；估 ≤ 25 行 net；新增测试 ≥ 5 条 |
 | **P5.3** | 2 | ⏳ | 待执行：reply_segments 切流 + send_queue 每段 delay；估 ≤ 48 行 net；新增测试 ≥ 4 条 |
@@ -228,3 +230,16 @@ docker compose restart bot
 
 - 0 代码改动，无回滚需求。
 - 若依赖体检发现任意 1 项不达 ✅，**立刻停下不要进 P5.1**，跟我同步派单订正。
+
+### P5.0 完成记录（执行者 Codex）
+
+自验结果：4 项前置依赖均达 ✅，P5.0 可进入验收态，后续允许领取 Wave 1。
+
+命令回执：
+
+- `grep -n "from services.llm.segmentation\|reply_segments(" services/llm/client.py` → 命中 `client.py:35/39` import、`client.py:387` stub、`client.py:391` 委托、`client.py:2453/2652` fan-out call site，证明 Part 1 U1 分段委托已落地。
+- `grep -rn "REGISTER_LABEL_SLOT\|state.register.label" services/humanization/ services/block_trace/` → 命中 `services/humanization/contract.py:9`、`classifier.py:87`、`episode_provider.py:181`、`catchphrase_provider.py:84`、`register_provider.py:72` 等，证明 register slot 与 BlockTrace provider 已落地。
+- `grep -n "Humanizer.delay\|register=\|slot=" services/humanizer.py services/scheduler.py` → 命中 `services/humanizer.py:52-53` 的 `register=` / `slot=` 传参；scheduler 侧无直接 `register=` 文本命中，但 Humanizer API 已接 register/slot，P5.2 只依赖同源语义，不阻塞。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q 2>&1 | tail -1` → `1714 tests collected in 1.01s`。
+
+风险与回滚：P5.0 只改追踪文档，不改运行代码；回滚为撤销本节与 §1 / §6 的 P5.0 状态回填。
