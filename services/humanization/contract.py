@@ -10,6 +10,7 @@ REGISTER_LABEL_SLOT = "state.register.label"
 REGISTER_RECENT_USED_SLOT = "state.register.recent_used"
 STICKER_RECENT_USED_SLOT = "state.sticker.recent_used"
 AFFECTION_FAMILIARITY_SLOT = "state.affection.<uid>.familiarity"
+MOOD_CURRENT_SLOT = "humanization.mood.current"
 THINKER_LAST_DECISION_SLOT = "bus.state.thinker.last_decision"
 CLOCK_CURRENT_SLOT = "bus.state.clock.current"
 LAST_METRICS_SLOT = "humanization.last_metrics"
@@ -35,6 +36,7 @@ HUMANIZATION_CONTRACT = ModuleContract(
         _slot(REGISTER_RECENT_USED_SLOT, "omubot.state.humanization_register_recent_used.v1", ttl="per_session"),
         _slot(STICKER_RECENT_USED_SLOT, "omubot.state.humanization_sticker_recent_used.v1", ttl="per_session"),
         _slot(AFFECTION_FAMILIARITY_SLOT, "omubot.state.humanization_affection_familiarity.v1", ttl="per_user"),
+        _slot(MOOD_CURRENT_SLOT, "omubot.state.humanization_mood_current.v1", ttl="per_session"),
         _slot(THINKER_LAST_DECISION_SLOT, "omubot.state.humanization_thinker_decision.v1", ttl="per_turn"),
         _slot(CLOCK_CURRENT_SLOT, "omubot.state.humanization_clock_current.v1", ttl="per_turn"),
         _slot(LAST_METRICS_SLOT, "omubot.state.humanization_metrics.v1", ttl="per_turn", privacy="admin_only"),

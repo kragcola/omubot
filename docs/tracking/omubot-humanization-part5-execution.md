@@ -119,6 +119,8 @@
 
 > 出口判定规则：5/6 项达标 + 用户主观验收 = 进入 P5.5；< 5/6 项达标 = 留 24h 再观察一轮，仍不达标则按 §8 风险矩阵回滚。
 
+> **P5.4 代验收说明（2026-05-25）**：用户明确要求忽略 24h 窗口限制并执行灰度代验收。因此本次 P5.4 ✅ 不代表 24h 样本已跑满；出口矩阵保留为后续补采样依据，不再作为 P5.5 入场阻塞。
+
 ---
 
 ## 5. 验收清单（每条任务交付时勾）
@@ -146,8 +148,8 @@
 | **P5.1** | 1 | ✅ | 验收通过 (2026-05-25)：`natural_split()` + register 5 档 + 12 条测试；D1 grep 收口仅命中 segmentation.py + 新测试；详见 §9 P5.1 完成记录 |
 | **P5.2** | 1 | ✅ | 验收通过 (2026-05-25)：`inter_segment_delay()` + `natural_split_enabled=false` 双配置模型字段 + 8 条测试；详见 §9 P5.2 完成记录 |
 | **P5.3** | 2 | ✅ | 验收通过 (2026-05-25)：`reply_segment_plan()` feature flag 切流 + `LLMClient` 两处 fan-out 动态 delay + 8 条 P5.3 新测试；1734 passed / pyright 0/0/0 / ruff clean；2 处 D2 cancel-path 用 monkeypatch 注入 `CancelledError` 验证外部状态不污染；详见 §9 P5.3 完成记录 |
-| **P5.4** | 3 | 🟡 | 灰度上线 (2026-05-25)：`config/config.json:reply_segmentation.natural_split_enabled=true` 已翻；当前生效群 = `allowed_groups=[984198159, 993065015]`（two-group 灰度，per-group override 通道未建，仅靠 `allowed_groups` 物理隔离）；24h 采样窗口起算见 maintenance-log 当日条目；阻塞于 24h 体感比对 + 用户主观验收 |
-| **P5.5** | 4 | ⏳ | 待执行：默认开 + 卸 fallback ≈ -200 行；阻塞于 P5.4 出口表 ≥ 5/6 项 + 用户验收 |
+| **P5.4** | 3 | ✅ | 用户授权代验收通过 (2026-05-25)：忽略 24h 窗口限制；`natural_split_enabled=true` 容器内外配置一致，smoke 返回自然分段 + 动态 delay；24h 出口矩阵后续补采样，不阻塞 P5.5 |
+| **P5.5** | 4 | ⏳ | 待执行：默认开 + 卸 fallback ≈ -200 行；前置 P5.4 已由用户授权代验收 ✅ |
 | **P5.6** | 5 | ⏳ | 待执行：maintenance-log + 主线状态表 + Part 1 §13 边界表追加；阻塞于 P5.5 ✅ |
 
 > 本表与 [Part 5 主线 §6 当前状态](./omubot-humanization-part5-segmentation.md#6-当前状态) 双向同步：主线 §6 当前 4 行（立项 / 取证 / 设计 / P5.1~P5.6 阻塞）已 ✅ ✅ ✅ ⏳；P5.0 ~ P5.6 完成后主线 §6 统一改 ✅。
@@ -367,6 +369,22 @@ docker compose restart bot
 
 风险与回滚：运行时默认仍走 legacy path；灰度事故回滚为 `natural_split_enabled=false` + restart（当前已是 false）。代码级回滚为撤销 P5.3 中 `ReplySegmentPlan` / `reply_segment_plan()` / `LLMClient` fan-out 改动与 `tests/test_reply_segments_natural.py`、`tests/test_llm_client_reply_segment_plan.py` 新增测试。
 
-### P5.4 阻塞评估（执行前）
+### P5.4 阻塞评估（历史记录）
 
 当前不领取执行：P5.4 要求单群 `993065015` 打开 `natural_split_enabled=true` 并跑满 24h 采样，派发条件写明依赖 P5.3 验收 ✅ + 用户授权进灰度。本轮 P5.3 仅进入 🟡 待验收，且未取得新的灰度启动确认，因此不修改 `config/config.json`，不启动 24h 灰度窗口。
+
+### P5.4 代验收记录（用户授权）— 2026-05-25 21:10 CST
+
+用户指令：忽略 24h 窗口限制，执行灰度验收；P5.4 状态表由 🟡 改 ✅。本记录是授权代验收，不声称 24h 样本已跑满。
+
+验收证据：
+
+- 当前时间：`2026-05-25 13:10:52 UTC` / `2026-05-25 21:10:52 CST`，距 maintenance-log 记录的 P5.4 起算 `2026-05-25 08:11 UTC` 未满 24h；用户明确要求忽略该限制。
+- 本地配置：`reply_segmentation.natural_split_enabled=True`，`group.allowed_groups=[984198159, 993065015]`。
+- 容器内配置：`container_natural_split_enabled=True`，`container_allowed_groups=[984198159, 993065015]`。
+- 运行状态：`docker compose ps bot` 显示 `qq-bot` 为 `Up`。
+- 分段 smoke：`reply_segment_plan("今天天气不错呢，要不要一起出去走走？嗯…大概下午3点的样子", register="playful")` → `segments=['今天天气不错呢', '要不要一起出去走走？', '嗯…', '大概下午3点的样子']`，`delays=[0.735, 0.945, 0.5]`，`limit_status=none`。
+- 日志：`docker compose logs bot --since '2026-05-25T08:11:00Z' | grep -iE 'natural_split|reply_segment|inter_segment|segmentation|segment plan|segment_plan'` 无命中；generic error grep 仅见 `slang extraction failed`，与 P5 分段 / fan-out 无关。
+- 采样缺口：仓库当前没有 `scripts/dev/measure_segmentation.sh`；`storage/messages.db` / `storage/block_trace.db` 在 P5.4 窗口内无新样本，24h 指标矩阵需后续补采样。
+
+结论：按用户授权，P5.4 代验收通过 ✅；P5.5 入场阻塞解除。风险保留：24h 统计指标未闭环，若后续体感或采样异常，仍按 §8.3 回滚 `natural_split_enabled=false`。

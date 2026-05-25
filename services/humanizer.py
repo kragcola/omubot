@@ -7,10 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 
 from loguru import logger
 
 _L = logger.bind(channel="system")
+
+EMOJI_BASE_DELAY = 1.0
+THINKING_FALLBACK = 10.0
+_THINKING_FALLBACK_DELAY = 1.0
+_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF]")
 
 
 class Humanizer:
@@ -22,11 +28,13 @@ class Humanizer:
         min_delay: float = 0.5,
         max_delay: float = 3.0,
         char_delay: float = 0.02,
+        emoji_base_s: float = EMOJI_BASE_DELAY,
     ) -> None:
         self.enabled = enabled
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.char_delay = char_delay
+        self.emoji_base_s = emoji_base_s
         if enabled:
             _L.info(
                 "humanizer enabled | delay={:.1f}s–{:.1f}s char_delay={:.0f}ms",
@@ -41,19 +49,28 @@ class Humanizer:
         register: object | None = None,
         slot: object | None = None,
         mood: object | None = None,
+        thinking_elapsed_s: float | None = None,
     ) -> None:
         """Sleep for a random interval, longer for longer messages."""
         if not self.enabled:
             return
         base = random.uniform(self.min_delay, self.max_delay)
-        extra = len(text) * self.char_delay * random.uniform(0.8, 1.2)
+        extra = self._typing_extra(text)
         total = (base + extra) * self._runtime_multiplier(
             group_id=group_id,
             register=register,
             slot=slot,
             mood=mood,
         )
+        if _thinking_elapsed(thinking_elapsed_s) >= THINKING_FALLBACK:
+            total = min(total, _THINKING_FALLBACK_DELAY)
         await asyncio.sleep(total)
+
+    def _typing_extra(self, text: str) -> float:
+        extra = len(text) * self.char_delay * random.uniform(0.8, 1.2)
+        if _has_emoji(text):
+            extra = max(extra, self.emoji_base_s)
+        return extra
 
     @staticmethod
     def _runtime_multiplier(
@@ -93,6 +110,17 @@ def _energy(value: object | None) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return 1.0
+
+
+def _has_emoji(text: str) -> bool:
+    return bool(_EMOJI_RE.search(text) or "[CQ:face" in text or "[CQ:mface" in text)
+
+
+def _thinking_elapsed(value: float | None) -> float:
+    try:
+        return 0.0 if value is None else max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # Module-level singleton — set by chat plugin at startup, imported by tools

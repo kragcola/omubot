@@ -10,6 +10,7 @@ from services.humanization import (
     HUMANIZATION_CONTRACT,
     HUMANIZATION_MODULE_ID,
     LAST_METRICS_SLOT,
+    MOOD_CURRENT_SLOT,
     REGISTER_LABEL_SLOT,
     REGISTER_RECENT_USED_SLOT,
     STICKER_RECENT_USED_SLOT,
@@ -31,6 +32,7 @@ def test_humanization_contract_owns_expected_slots_and_context_accepts_bus() -> 
     assert bus.owners[REGISTER_LABEL_SLOT] == HUMANIZATION_MODULE_ID
     assert bus.owners[REGISTER_RECENT_USED_SLOT] == HUMANIZATION_MODULE_ID
     assert bus.owners[STICKER_RECENT_USED_SLOT] == HUMANIZATION_MODULE_ID
+    assert bus.owners[MOOD_CURRENT_SLOT] == HUMANIZATION_MODULE_ID
     assert bus.owners[LAST_METRICS_SLOT] == HUMANIZATION_MODULE_ID
     assert ctx.runtime_state is bus
     assert ctx.humanization_contract is HUMANIZATION_CONTRACT

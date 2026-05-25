@@ -4,6 +4,153 @@
 
 ---
 
+## 2026-05-25 Humanization Part 2/3 P2.4 Humanizer typing 系数扩展
+
+**变更类型**：humanization runtime / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 1 P2.4 扩展发送前 typing delay：
+
+- `services/humanizer.py`：新增 `EMOJI_BASE_DELAY=1.0`、`THINKING_FALLBACK=10.0`、emoji/CQ face/CQ mface 检测；`Humanizer.__init__()` 增加 `emoji_base_s`；`delay()` 增加可选 `thinking_elapsed_s`；
+- 普通文本保持旧公式；含 emoji 的文本 typing extra 至少 1 秒；thinking 已耗时 ≥10 秒时，本次 typing delay cap 到 1 秒；
+- `tests/test_humanizer_typing.py`：4 条覆盖普通兼容、emoji 起步价、thinking fallback、disabled 不 sleep。
+
+**验证**：
+
+- `uv run pytest tests/test_humanizer_typing.py tests/test_humanizer_register.py tests/test_humanizer_runtime.py -q` → `12 passed`
+- `uv run ruff check services/humanizer.py tests/test_humanizer_typing.py tests/test_humanizer_register.py tests/test_humanizer_runtime.py` → passed
+- `uv run pyright services/humanizer.py tests/test_humanizer_typing.py` → `0 errors`
+- `uv run python -m py_compile services/humanizer.py tests/test_humanizer_typing.py` → passed
+
+**影响**：P2.4 状态改为 🟡 等验收；旧调用不传 `thinking_elapsed_s` 时兼容，普通无 emoji 文本延迟不变。
+
+**回滚**：`git restore services/humanizer.py` 并删除 `tests/test_humanizer_typing.py`，撤销 Part 2/3 tracking 的 P2.4 回填。
+
+---
+
+## 2026-05-25 Humanization Part 2/3 P3.4 Willingness 5-stage 落地
+
+**变更类型**：persona support module / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 1 P3.4 新增纯计算 willingness 分类：
+
+- `services/persona/willingness.py`：新增 `Willingness` 与 `willingness_stage()`，基于回复延迟、register 一致性、互动数、连续不回复数输出 stranger/acquaint/familiar/close/withdraw；
+- `tests/test_willingness.py`：6 条覆盖 5 档边界与 `willingness_stage` 状态值输出。
+
+**验证**：
+
+- `uv run pytest tests/test_willingness.py -q` → `6 passed`
+- `uv run ruff check services/persona/willingness.py tests/test_willingness.py` → passed
+- `uv run pyright services/persona/willingness.py tests/test_willingness.py` → `0 errors`
+
+**影响**：P3.4 状态改为 🟡 等验收；纯计算模块，不写 RuntimeStateBus / DB / persona admin map，运行时行为不变。
+
+**回滚**：删除 `services/persona/willingness.py` 与 `tests/test_willingness.py`，撤销 Part 2/3 tracking 的 P3.4 回填。
+
+---
+
+## 2026-05-25 Humanization Part 2/3 P3.6 Mood Slot + Classifier 落地
+
+**变更类型**：humanization runtime state / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 1 P3.6 新增短态 mood RuntimeStateBus slot 与分类器：
+
+- `services/humanization/contract.py`：新增 `MOOD_CURRENT_SLOT="humanization.mood.current"`，schema `omubot.state.humanization_mood_current.v1`，ttl=`per_session`；
+- `services/humanization/mood_classifier.py`：新增 122 行 FiSMiness-style 5 态 FSM（cold/tired/neutral/playful/high），信号源为用户回复间隔、短回复占比、sticker 密度、语气词命中率；
+- `services/humanization/__init__.py`：导出 mood slot 与 classifier API；
+- `tests/test_mood_classifier.py` + `tests/test_humanization_contract.py`：覆盖 5 态分类、300s decay 写入与 cancel-path 不脏写。
+
+**验证**：
+
+- `uv run pytest tests/test_mood_classifier.py tests/test_humanization_contract.py -q` → `12 passed`
+- `uv run ruff check services/humanization/contract.py services/humanization/__init__.py services/humanization/mood_classifier.py tests/test_mood_classifier.py tests/test_humanization_contract.py` → passed
+- `uv run pyright services/humanization/mood_classifier.py tests/test_mood_classifier.py` → `0 errors`
+
+**影响**：P3.6 状态改为 🟡 等验收；当前未接生产 worker，不改变线上回复行为。P3.7 / P2.8 / P3.8 的前置 mood slot 已具备。
+
+**回滚**：撤销 contract / `__init__.py` 改动，删除 `services/humanization/mood_classifier.py` 与 `tests/test_mood_classifier.py`，撤销 Part 2/3 tracking 的 P3.6 回填。
+
+---
+
+## 2026-05-25 Humanization Part 2/3 P3.1 Addressee Detector 落地
+
+**变更类型**：humanization support module / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 1 P3.1 新增独立群聊 addressee detector：
+
+- `services/group/addressee.py`：`AddresseeDetector.detect()` 按 adapter → regex → quote → @ 四层 cascade 输出 `AddresseeResult(target_id, confidence, source)`；
+- `services/group/__init__.py`：导出 detector API；
+- `tests/test_addressee_detector.py`：7 条覆盖四层优先级、无命中与 cancel-path。
+
+**验证**：
+
+- `uv run pytest tests/test_addressee_detector.py -q` → `7 passed`
+- `uv run ruff check services/group/addressee.py services/group/__init__.py tests/test_addressee_detector.py` → passed
+- `uv run pyright services/group/addressee.py tests/test_addressee_detector.py` → `0 errors`
+- `uv run python -m py_compile services/group/addressee.py services/group/__init__.py tests/test_addressee_detector.py` → passed
+
+**影响**：P3.1 状态改为 🟡 等验收；未接 `services/scheduler.py` / chat plugin / router，运行时行为不变。
+
+**回滚**：删除 `services/group/` 与 `tests/test_addressee_detector.py`，撤销 Part 2/3 tracking 的 P3.1 回填。
+
+---
+
+## 2026-05-25 Humanization Part 2/3 P2.1 节奏度量脚本落地
+
+**变更类型**：dev tooling / measurement
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 1 P2.1 新增 `scripts/dev/measure_rhythm.sh`（59 行，只读 SQLite）：
+
+- 默认读取 `storage/messages.db:group_messages`，兼容 `GROUP_MESSAGES_DB` / `MESSAGES_DB` / `GROUP_ID` / `LIMIT` / `SEGMENT_GAP_S` / `REPLY_DELAY_MAX_S`；
+- 输出 `rhythm_baseline`、200 条 reply 样本的回复延迟、段间间隔与段数分布；
+- 本仓实况订正：派单原文写 `storage/group_messages.db`，当前真实表在 `storage/messages.db`。
+
+**验证**：
+
+- `bash -n scripts/dev/measure_rhythm.sh` → passed
+- `scripts/dev/measure_rhythm.sh` → `sample_replies: 200`
+- `GROUP_ID=993065015 scripts/dev/measure_rhythm.sh` → `sample_replies: 200`
+
+**影响**：P2.1 状态改为 🟡 等验收；无运行时副作用，不写数据库。
+
+**回滚**：删除 `scripts/dev/measure_rhythm.sh` 并撤销 Part 2/3 tracking 的 P2.1 回填。
+
+---
+
+## 2026-05-25 Humanization P0 + Part 5 P5.4 用户授权代验收通过（docs-only）
+
+**变更类型**：docs / acceptance override
+
+**内容**：用户明确要求“忽略24h窗口限制，执行灰度验收”，因此本次按授权完成两个代验收回填：
+
+- [Part 2/3 P0](docs/tracking/omubot-humanization-part2-3-execution.md) 状态由 🟡 改 ✅；P0 证据闭环保持不变（segmentation / client fan-out / humanization slots / `1742 tests collected` / 施工目录缺位订正）。
+- [Part 5 P5.4](docs/tracking/omubot-humanization-part5-execution.md) 状态由 🟡 改 ✅；容器内外 `reply_segmentation.natural_split_enabled=True` 一致，`allowed_groups=[984198159, 993065015]`，`reply_segment_plan()` smoke 返回自然分段与动态 delay，P5 分段相关日志 grep 无异常命中。
+- [Part 5 主线状态表](docs/tracking/omubot-humanization-part5-segmentation.md) 同步为 P5.1~P5.4 ✅ / P5.5~P5.6 ⏳。
+
+**重要说明**：这是用户授权的代验收，不代表 24h 出口矩阵已跑满。当前仓库缺 `scripts/dev/measure_segmentation.sh`，且 `storage/messages.db` / `storage/block_trace.db` 在 P5.4 窗口内没有可采的新样本；后续若需要量化复盘，仍需补采样脚本和真实窗口数据。
+
+**影响**：Part 2/3 Wave 1 入场阻塞解除；Part 5 P5.5 入场阻塞解除。未改运行代码 / 配置 / 容器。
+
+**回滚**：纯文档状态回填可 revert；运行时灰度事故仍按既有路径将 `config/config.json:reply_segmentation.natural_split_enabled` 改回 `false` 并重启 bot。
+
+---
+
+## 2026-05-25 Humanization Part 2/3 P0 前置体检回填（仅文档）
+
+**变更类型**：docs / execution-tracking
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) 的 P0 要求完成前置体检，并在 §1 / §6 / §9 回填 Codex 执行记录：
+
+- segmentation / client fan-out / `inter_segment_delay` 证据达标；
+- humanization contract 与 block_trace provider slot 证据达标；
+- pytest collect-only 基线为 `1742 tests collected in 0.73s`（≥ 1734）；
+- 订正两处派单实况：`humanization.runtime_groups` 当前为 `["993065015"]`，双群锚点在 `persona_v2.runtime_groups`；`services/sticker/` 目录当前不存在，P2.8 后续需新建。
+
+**影响**：P0 状态改为 🟡 等验收；Part 5 P5.4 验收 ✅ 前，Part 2/3 仍只能 docs-only，不进入 Wave 1。
+
+**回滚**：纯文档，撤销本日志条目与 tracking 文档 P0 回填即可。
+
+---
+
 ## 2026-05-25 Humanization Part 2/3 派单版执行追踪（仅文档）
 
 **变更类型**：docs / dispatch-only

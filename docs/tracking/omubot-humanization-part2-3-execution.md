@@ -32,6 +32,8 @@
 
 > **派单规则**：执行者拿到本文档后，**§1 这 7 项订正一律落本文版本**，不要按调研原文写。
 
+**P0 体检结论（2026-05-25 / Codex）**：核心依赖达 ✅（segmentation / client fan-out / humanization slots / pytest 基线均已实证）；但有两处派单基线需按实况订正：`humanization.runtime_groups=["993065015"]`，双群锚点目前在 `persona_v2.runtime_groups=["993065015","984198159"]`；`services/sticker/` 目录当前不存在，P2.8 需新建该目录与 `decision_provider.py`。2026-05-25 用户授权忽略 24h 窗口限制，P0 与 Part 5 P5.4 已代验收 ✅，可进入 Wave 1 领单。
+
 ---
 
 ## 2. P0 前置体检（依赖 + 字段实证）
@@ -42,10 +44,10 @@
 |---|---|---|
 | 1 | `grep -rn "natural_split_enabled\|reply_segment_plan\|inter_segment_delay" services/llm/segmentation.py services/llm/client.py services/send_queue.py` | 命中 Part 5 P5.2 / P5.3 已落地的 segmentation 函数 + client.py 两处 fan-out + send_queue.py inter_segment_delay_s 字段 |
 | 2 | `grep -rn "REGISTER_LABEL_SLOT\|AFFECTION_FAMILIARITY_SLOT\|CLOCK_CURRENT_SLOT" services/humanization/contract.py services/block_trace/` | 命中 contract.py 7 个 slot + block_trace provider 5 处读取，证明 [Part 1 U6 + V1 + V5 + V14 ✅](./omubot-humanization-part1-execution.md#6) 已落 |
-| 3 | `grep -n "humanization\|register_classifier\|context_providers\|runtime_groups" kernel/config.py config/config.json` | `HumanizationConfig` 7 字段 + `runtime_groups=["993065015","984198159"]`，证明 V0 / V12 已收口 |
+| 3 | `grep -n "humanization\|register_classifier\|context_providers\|runtime_groups" kernel/config.py config/config.json` | `HumanizationConfig` 7 字段存在；实况为 `humanization.runtime_groups=["993065015"]`，双群锚点在 `persona_v2.runtime_groups=["993065015","984198159"]` |
 | 4 | `uv run pytest --collect-only -q 2>&1 \| tail -1` | 当前基线 ≥ 1734 tests collected（Part 5 P5.3 出口）；Part 2/3 全量出口要求 ≥ 1734 + 137 = ≥ 1871 |
 | 5 | `git status -uno` | working tree clean（避免 dirty 文件混入派单 commit） |
-| 6 | `ls services/humanization/ services/persona/ plugins/sticker/ services/media/` | 4 个目标目录存在；mood_classifier.py / affection_classifier.py / decision_provider.py 当前**不存在**（这就是 P2.8 / P3.6 / P3.7 的施工目标） |
+| 6 | `ls services/humanization/ services/persona/ plugins/sticker/ services/media/` | 4 个现有目标目录存在；mood_classifier.py / affection_classifier.py 当前**不存在**；`services/sticker/` 目录当前也不存在，P2.8 需新建该目录与 decision_provider.py |
 | 7 | 写 1 行结论到本文 §1 第 8 行（替换"待验证"） | 给 P2.x / P3.x 派单确定基线 |
 
 **P0 不是 commit；是派单前置体检**。我会先看本步骤回执再发后续单。**任意 1 项依赖未达 ✅，Part 2/3 wave 整体阻塞**。
@@ -62,7 +64,7 @@
 | critic-rewrite-loop | Part 1 V11 | ✅ |
 | Humanizer register/mood/slot | Part 1 U3 / V10 | ✅ |
 | HumanizationConfig 灰度旗标 | Part 1 V0 / V12 | ✅ |
-| natural_split + inter_segment_delay | Part 5 P5.1 / P5.2 / P5.3 | ✅（P5.4 灰度 🟡 未满 24h） |
+| natural_split + inter_segment_delay | Part 5 P5.1 / P5.2 / P5.3 / P5.4 | ✅（P5.4 用户授权代验收通过） |
 | persona_v2 灰度 | Persona B3 | ✅ |
 
 ---
@@ -217,12 +219,12 @@
 
 | 编号 | wave | 状态 | 落地证据 / 备注 |
 |---|---|---|---|
-| **P0** | 0 | ⏳ | 待执行：4 项依赖体检 + 1 项 collect-only 基线 |
-| **P2.1** | 1 | ⏳ | 待执行：节奏度量基线脚本 |
-| **P3.1** | 1 | ⏳ | 待执行：addressee detector 4 层 cascade |
-| **P3.6** | 1 | ⏳ | 待执行：MOOD_CURRENT_SLOT + mood_classifier；本任务是 v2 优先级链关键节点 |
-| **P3.4** | 1 | ⏳ | 待执行：willingness 5-stage（v1 部分） |
-| **P2.4** | 1 | ⏳ | 待执行：typing 字符系数扩展（emoji 1s + thinking 10s） |
+| **P0** | 0 | ✅ | 用户授权代验收通过；核心依赖达标，`1742 tests collected`；`humanization.runtime_groups` 单群 / `services/sticker/` 未建目录为基线订正，不阻塞 Wave 1 |
+| **P2.1** | 1 | ✅ | 自主验收通过：`scripts/dev/measure_rhythm.sh`（59 行，只读 SQLite）；dry-run 输出 200 reply 节奏基线 |
+| **P3.1** | 1 | ✅ | 自主验收通过：`services/group/addressee.py`（126 行）+ 7 条测试；4 层 cascade 与 cancel-path 验证通过 |
+| **P3.6** | 1 | ✅ | 自主验收通过：`MOOD_CURRENT_SLOT` + `MoodClassifier`（122 行）+ 6 条 mood 测试；cancel-path 不脏写 |
+| **P3.4** | 1 | ✅ | 自主验收通过：`services/persona/willingness.py`（53 行）+ 6 条边界测试；纯计算无写入 |
+| **P2.4** | 1 | ✅ | 自主验收通过：Humanizer emoji 起步价 + thinking fallback；`services/humanizer.py` +29/-1，12 条相关测试通过 |
 | **P3.2** | 2 | ⏳ | 阻塞于 P3.1 |
 | **P3.7** | 2 | ⏳ | 阻塞于 P3.6；订正后落 `storage/affection_stage.db` 独立 sqlite |
 | **P2.2** | 2 | ⏳ | 待执行：LLM planner binary（reasoning-first） |
@@ -255,7 +257,7 @@
 4. **验收提交**：把 §6 状态从 ⏳ 改 🟡 + PR 链接发我，我跑 §5 验收清单后改 ✅。
 5. **冲突冲突**：本文 §1 与调研冲突时**以本文为准**（§1 7 项订正）；其它部分以 [Part 2/3 调研 v2](./omubot-humanization-part2-3-research.md) 为准。
 6. **遇到证据不成立**：跟我同步，由我决定撤销 / 重订正。
-7. **24h 灰度窗口约束**：Part 5 P5.4 灰度未满 24h 时（窗口至 2026-05-26 ~08:11 UTC），**只允许领 P0 体检**；24h 灰度通过后才允许进 Wave 1。
+7. **24h 灰度窗口约束（已由用户授权覆盖）**：原约束为 Part 5 P5.4 灰度未满 24h 时只允许领 P0；2026-05-25 用户明确要求忽略 24h 窗口限制并代验收 P0 / P5.4，因此 Wave 1 可领单。
 
 ---
 
@@ -282,7 +284,7 @@
 | **P5.1** natural_split | P3.8 mood 渗透 inter_segment_delay 时复用 P5.1 segments 长度 | ✅ |
 | **P5.2** inter_segment_delay | **P2.3 已 ❌（被 P5.2 实现覆盖）**；P3.8 在 P5.2 公式上加 mood 系数表 | ✅ |
 | **P5.3** client.py 切流 wiring | Part 2/3 全程在 P5.3 已切的 fan-out 通道工作；不另起改造 | ✅ |
-| **P5.4** 灰度 24h 体感比对 | **当前 🟡 灰度中**——Part 2/3 派单**等 P5.4 验收 ✅ 后再领 Wave 1** | 🟡 |
+| **P5.4** 灰度 24h 体感比对 | 用户授权忽略 24h 窗口限制并代验收通过；Part 2/3 可进入 Wave 1 | ✅ |
 
 ### 8.3 Part 4 完全隔离（未立项）
 
@@ -338,4 +340,204 @@ docker compose restart bot
 
 > 本节由执行者按 P0 → Wave 1 → ... → P2/3-DOC 顺序追加；每条任务"领单拆分（执行前）" + "完成记录（执行者 GPT）" 双段，照搬 [Part 1 执行追踪 §9](./omubot-humanization-part1-execution.md#9-执行者-gpt-逐步追踪) 与 [Part 5 执行追踪 §9](./omubot-humanization-part5-execution.md#9-执行者-gpt-逐步追踪) 的格式。
 
-（待第一条任务领单后由执行者填）
+### P0 领单拆分（执行前）— Codex / 2026-05-25 19:59 CST
+
+- **任务边界**：只执行 §2 P0 前置体检与本文回填；不改 `.py` / `.json` / `.toml` / 镜像 / 容器，不进入 Wave 1。
+- **自主评估**：P0 是零代码依赖实证，当前 Part 5 P5.4 仍标记 🟡，因此唯一可执行派单就是 P0；若任一依赖不达标，Part 2/3 Wave 1+ 全部继续阻塞。
+- **执行拆分**：
+  1. grep segmentation / inter_segment_delay 证据，确认 Part 5 P5.2/P5.3 已落点。
+  2. grep humanization contract / block_trace slot 证据，确认 Part 1 U6/V1/V5/V14 基线。
+  3. grep config humanization / runtime_groups 证据，确认 V0/V12 灰度旗标基线。
+  4. `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` 采集测试基线。
+  5. `git status -uno` 与目标目录 `ls`，确认施工目录存在且目标新模块当前不存在。
+- **风险与回滚**：无运行时代码改动，无需 feature flag 回滚；仅更新追踪文档，如证据不达标则只记录阻塞原因。
+
+### P0 完成记录（执行者 Codex）— 2026-05-25 20:04 CST
+
+自验结果：P0 进入 🟡 等验收。核心前置依赖达标，测试 collect-only 基线为 `1742 tests collected in 0.73s`（≥ 1734）。本轮只改追踪文档，无运行时副作用。2026-05-25 用户后续授权代验收 P0 与 Part 5 P5.4 后，P0 状态改 ✅，Wave 1 入场阻塞解除。
+
+命令回执：
+
+- `rg -n "natural_split_enabled|reply_segment_plan|inter_segment_delay" services/llm/segmentation.py services/llm/client.py services/send_queue.py` → 命中 `segmentation.py:442 inter_segment_delay()`、`:909 reply_segment_plan()`、`client.py:2508/2714` 两处 plan 入口、`client.py:2533/2739` 两处动态 delay fan-out、`send_queue.py:32/322-323` 队列固定 delay 字段，证明 Part 5 P5.2/P5.3 已落。
+- `rg -n "REGISTER_LABEL_SLOT|AFFECTION_FAMILIARITY_SLOT|CLOCK_CURRENT_SLOT" services/humanization/contract.py services/block_trace` → 命中 `contract.py:9/12/14/34/37/39` 与 `register_provider.py` / `catchphrase_provider.py` / `episode_provider.py` 多处读取，证明 Part 1 U6/V1/V5/V14 基线已落。
+- `grep -n "humanization\|register_classifier\|context_providers\|runtime_groups" kernel/config.py config/config.json` → `HumanizationConfig` 与 `context_providers` / `register_classifier` / `runtime_groups` 字段存在；实况订正：`config/config.json` 的 `humanization.runtime_groups` 当前为 `["993065015"]`，双群 `["993065015","984198159"]` 出现在 `persona_v2.runtime_groups`。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q 2>&1 | tail -1` → `1742 tests collected in 0.73s`。
+- `git status -uno` → 执行前 clean；写入 P0 追踪后仅 `docs/tracking/omubot-humanization-part2-3-execution.md` dirty。
+- `ls services/humanization/ services/persona/ plugins/sticker/ services/media/` → 4 个目标目录存在；`services/humanization/mood_classifier.py`、`services/persona/affection_classifier.py` 不存在，符合 P3.6/P3.7 施工目标；额外实况订正：`services/sticker/` 目录当前不存在，P2.8 需新建目录。
+
+代验收与下一步：P0 已由用户授权代验收 ✅；下一步执行者需承认上述两处基线订正后再领 P2.1/P3.1/P3.6/P3.4/P2.4。
+
+### P2.1 领单拆分（执行前）— Codex / 2026-05-25 21:20 CST
+
+- **任务边界**：新增 `scripts/dev/measure_rhythm.sh`，只读 `storage/messages.db` 的 `group_messages` 与可选 `storage/block_trace.db`；不改运行代码、不改配置、不写数据库。
+- **自主评估**：P2.1 是 Wave 1 的最低风险度量基线，适合作为 P0/P5.4 代验收后的第一单。当前仓库实际没有 `storage/group_messages.db`，但 `storage/messages.db` 内已有 `group_messages` 表，因此脚本按实况使用 `GROUP_MESSAGES_DB` 覆盖入口，默认落到 `storage/messages.db`。
+- **执行拆分**：
+  1. 读取 `group_messages` schema 与 role 分布，确认可从 `role='assistant'` 或 bot 侧消息计算 reply 段数与相邻段间隔。
+  2. 新建只读 shell 脚本，输出 `rhythm_baseline`、group 过滤、样本数、回复延迟、段间间隔、段数分布。
+  3. 用 `bash -n`、脚本 dry-run、D1 grep 验证；P2.1 无 cancel-path，记录为 read-only 不适用。
+- **风险与回滚**：脚本只读 SQLite；回滚为删除 `scripts/dev/measure_rhythm.sh` 与本节 / §6 状态回填。
+
+### P2.1 完成记录（执行者 Codex）— 2026-05-25 21:30 CST
+
+自验结果：P2.1 完成，进入 🟡 等验收。新增脚本 59 行，满足 `new ≤ 60 行`；脚本只读 SQLite，不写 `storage/`，无运行时副作用。
+
+改动内容：
+
+- 新增 `scripts/dev/measure_rhythm.sh`：默认读取 `storage/messages.db:group_messages`，兼容 `GROUP_MESSAGES_DB` / `MESSAGES_DB` / `GROUP_ID` / `LIMIT` / `SEGMENT_GAP_S` / `REPLY_DELAY_MAX_S` 环境变量。
+- 输出 `rhythm_baseline`、样本 reply 数、回复延迟 avg/p50/p95、段间间隔 count/avg/p95、段数分布；`BLOCK_TRACE_DB` 仅作存在性回显，保持只读。
+- 根据本仓实况订正派单路径：当前没有 `storage/group_messages.db`，真实表在 `storage/messages.db` 的 `group_messages`。
+
+验证：
+
+- `wc -l scripts/dev/measure_rhythm.sh` → `59`。
+- `bash -n scripts/dev/measure_rhythm.sh` → passed。
+- `scripts/dev/measure_rhythm.sh` → `sample_replies: 200`，`reply_delay_s_avg: 9.758`，`inter_segment_gap_count: 135`，`segment_count_distribution: 1=128, 2=39, 3=11, 4=17, 5=2, 6=3`。
+- `GROUP_ID=993065015 scripts/dev/measure_rhythm.sh` → `sample_replies: 200`，`reply_delay_s_avg: 11.195`，`inter_segment_gap_count: 230`，`segment_count_distribution: 1=110, 2=42, 3=11, 4=18, 5=7, 6=6, 10=6`。
+- D1 grep：`rg -n "measure_rhythm|rhythm_baseline" scripts docs README.md` → 新脚本 + Part 2/3 tracking/research 中的任务定义命中；无运行时代码命中。
+
+D2 / 回滚：P2.1 是纯只读采样脚本，无 cancel-path 写状态；回滚为删除 `scripts/dev/measure_rhythm.sh` 并撤销 §6 / §9 的 P2.1 回填。
+
+### P3.1 领单拆分（执行前）— Codex / 2026-05-25 21:35 CST
+
+- **任务边界**：新建 `services/group/__init__.py` 与 `services/group/addressee.py`，提供独立 addressee detector；不修改 `services/scheduler.py` / chat plugin / router，不接生产判定。
+- **自主评估**：当前仓库无 `services/group/` 包，P3.1 可作为 Wave 1 并行任务独立落地。为降低 blast radius，本步只提供 stateless detector 与单测，feature flag 真正消费留给后续 P2.5/P3.9。
+- **执行拆分**：
+  1. 新增 `AddresseeResult(target_id, confidence, source)` 与 `AddresseeDetector.detect()`。
+  2. 按 adapter / regex / quote / @ 四层 cascade 识别：显式 adapter 字段优先，其次 bot name 呼唤，再读 quote sender，最后读 CQ/文本 @。
+  3. 新增 `tests/test_addressee_detector.py` 覆盖 4 层、无命中、cancel-path 后仍可复用 detector。
+  4. 跑定向 pytest、ruff/pyright、D1 grep。
+- **风险与回滚**：未接生产路径，运行时无行为变化；回滚为删除 `services/group/` 与 `tests/test_addressee_detector.py`，并撤销 §6 / §9 P3.1 回填。
+
+### P3.1 完成记录（执行者 Codex）— 2026-05-25 21:43 CST
+
+自验结果：P3.1 完成，进入 🟡 等验收。新增 `services/group/addressee.py` 126 行，低于 `new ≤ 150 行`；未修改 `services/scheduler.py` / chat plugin / router，运行时行为不变。
+
+改动内容：
+
+- 新增 `services/group/__init__.py` 与 `services/group/addressee.py`。
+- `AddresseeDetector.detect()` 按 adapter → regex → quote → @ 四层 cascade 返回 `AddresseeResult(target_id, confidence, source)`。
+- adapter 层读取 `target_id` / `addressee_id` / `mentioned_user_id` / `to_user_id` 与 `additional_config`；regex 层识别 bot name 呼唤；quote 层读取 `reply_sender_id` / `quote_user_id` 等；@ 层识别 CQ at / Discord-style mention / 数字 @。
+- 新增 `tests/test_addressee_detector.py` 7 条，覆盖四层优先级、无命中、cancel-path 后 detector 可复用。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_addressee_detector.py -q` → `7 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/group/addressee.py services/group/__init__.py tests/test_addressee_detector.py` → `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright services/group/addressee.py tests/test_addressee_detector.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/group/addressee.py services/group/__init__.py tests/test_addressee_detector.py` → passed。
+- D1 grep：`rg -n "class AddresseeDetector|addressee_detector|AddresseeDetector|AddresseeResult" services tests docs/tracking/omubot-humanization-part2-3-execution.md` → 命中新模块、新测试与本追踪记录；无生产接线路径命中。
+
+D2 / 回滚：cancel-path 测试通过，`asyncio.CancelledError` 不被吞且 detector 后续可复用；回滚为删除 `services/group/`、`tests/test_addressee_detector.py` 并撤销 §6 / §9 的 P3.1 回填。
+
+### P3.6 领单拆分（执行前）— Codex / 2026-05-25 21:45 CST
+
+- **任务边界**：在 humanization contract 注册 `MOOD_CURRENT_SLOT`，导出 mood classifier API，并新增 `services/humanization/mood_classifier.py`；本步不接生产调度、不写配置。
+- **自主评估**：P3.6 是后续 P3.7/P2.8/P3.8 的关键前置。当前 RuntimeStateBus 已支持 owner/ttl/decay，P3.6 可通过 `decay_at=now+300s` 实现派单要求的 300 秒短态 slot。
+- **执行拆分**：
+  1. `contract.py` 添加 `MOOD_CURRENT_SLOT="humanization.mood.current"` 与 per_session slot 注册。
+  2. `__init__.py` 导出 `MOOD_CURRENT_SLOT`、`MoodClassifier`、`MoodDecision`、`MoodLabel`、`MoodSignals`。
+  3. 新建 `MoodClassifier`，基于用户回复间隔、短回复占比、sticker 密度、语气词命中率做 5 态 FSM：cold/tired/neutral/playful/high。
+  4. 新增测试覆盖 5 态边界、slot 写入 decay、cancel-path 不脏写。
+- **风险与回滚**：未接生产 worker，运行时无行为变化；回滚为撤销 contract/__init__ 导出、新文件与测试。
+
+### P3.6 完成记录（执行者 Codex）— 2026-05-25 21:54 CST
+
+自验结果：P3.6 完成，进入 🟡 等验收。`services/humanization/mood_classifier.py` 122 行，低于 `new ≤ 180 行`；contract.py 只增加 slot 常量与注册，未改变既有 slot 语义。
+
+改动内容：
+
+- `services/humanization/contract.py` 新增 `MOOD_CURRENT_SLOT="humanization.mood.current"`，schema `omubot.state.humanization_mood_current.v1`，ttl=`per_session`。
+- `services/humanization/__init__.py` 导出 mood slot 与 classifier 类型。
+- `services/humanization/mood_classifier.py` 新增 `MoodSignals` / `MoodDecision` / `MoodClassifier`；`classify_and_write()` 写 RuntimeStateBus 时设置 `decay_at=now+300s`。
+- `tests/test_mood_classifier.py` 新增 6 条，覆盖 cold / tired / playful / high / slot 写入 / cancel-path；`tests/test_humanization_contract.py` 补 MOOD slot owner 断言。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_mood_classifier.py tests/test_humanization_contract.py -q` → `12 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/humanization/contract.py services/humanization/__init__.py services/humanization/mood_classifier.py tests/test_mood_classifier.py tests/test_humanization_contract.py` → `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright services/humanization/mood_classifier.py tests/test_mood_classifier.py` → `0 errors, 0 warnings, 0 informations`。
+- D1 grep：`rg -n "MOOD_CURRENT_SLOT|MoodClassifier" services/humanization tests docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 contract.py / mood_classifier.py / __init__.py / tests / 本追踪记录；无其它生产接线路径命中。
+
+D2 / 回滚：cancel-path 测试通过，`asyncio.CancelledError` 发生在 classify 阶段时 `MOOD_CURRENT_SLOT` 不写入；回滚为撤销 contract/__init__ 改动、删除 `mood_classifier.py` 与 `tests/test_mood_classifier.py`，并撤销 §6 / §9 的 P3.6 回填。
+
+### P3.4 领单拆分（执行前）— Codex / 2026-05-25 21:56 CST
+
+- **任务边界**：新建 `services/persona/willingness.py`，提供纯计算 willingness 5-stage；不写 RuntimeStateBus / DB / persona admin map。
+- **自主评估**：P3.4 与 P3.6/P3.1 同属 Wave 1，可并行落地。该模块后续供 binary planner / addressee gate 读取，当前只提供稳定分类 API 和边界测试。
+- **执行拆分**：
+  1. 定义 `WillingnessStage` 与 `Willingness` 结果对象。
+  2. 基于近期回复延迟、register 一致性、最近互动数、沉默计数输出 stranger/acquaint/familiar/close/withdraw。
+  3. 新增 `tests/test_willingness.py` 覆盖 5 档边界与纯计算无副作用。
+  4. 跑定向 pytest、ruff、pyright、D1 grep。
+- **风险与回滚**：纯计算模块，无 cancel-path 写入；回滚为删除 `services/persona/willingness.py` 与 `tests/test_willingness.py`，并撤销 §6 / §9 P3.4 回填。
+
+### P3.4 完成记录（执行者 Codex）— 2026-05-25 22:00 CST
+
+自验结果：P3.4 完成，进入 🟡 等验收。`services/persona/willingness.py` 53 行，低于 `new ≤ 80 行`；模块纯计算，不写 DB / RuntimeStateBus / persona admin map。
+
+改动内容：
+
+- 新增 `services/persona/willingness.py`，提供 `Willingness` dataclass 与 `willingness_stage()`。
+- 基于 `recent_reply_delay_s`、`register_consistency`、`interaction_count`、`consecutive_no_reply` 输出 stranger/acquaint/familiar/close/withdraw。
+- 新增 `tests/test_willingness.py` 6 条，覆盖 5 档边界和 `to_state_value()` 的 `willingness_stage` 输出。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_willingness.py -q` → `6 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/persona/willingness.py tests/test_willingness.py` → `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright services/persona/willingness.py tests/test_willingness.py` → `0 errors, 0 warnings, 0 informations`。
+- D1 grep：`rg -n "class Willingness|willingness_stage" services/persona tests docs/tracking/omubot-humanization-part2-3-execution.md` → 命中新模块、新测试与本追踪记录；无其它生产接线路径命中。
+
+D2 / 回滚：纯计算，无 cancel-path 写入面；回滚为删除 `services/persona/willingness.py`、`tests/test_willingness.py` 并撤销 §6 / §9 的 P3.4 回填。
+
+### P2.4 领单拆分（执行前）— Codex / 2026-05-25 22:02 CST
+
+- **任务边界**：只扩展 `services/humanizer.py` 的 typing delay 计算与测试；不改 scheduler / send_queue / config。
+- **自主评估**：P2.4 是 Wave 1 最后一条，触碰真实发送前 delay，但可通过默认参数保持旧行为。emoji 起步价采用 `max(extra, emoji_base_s)`，避免多 emoji 线性叠加；thinking 10s 兜底用可选 `thinking_elapsed_s`，旧调用不传则不触发。
+- **执行拆分**：
+  1. 新增 `EMOJI_BASE_DELAY` / `THINKING_FALLBACK` 常量与 emoji 检测。
+  2. `Humanizer.__init__` 增加 `emoji_base_s` 默认 1.0；`delay()` 增加 `thinking_elapsed_s=None`。
+  3. 长度 extra 改为 helper 计算：普通文本保持旧公式；emoji 文本至少 1s；thinking ≥10s 时 total cap 到 1s。
+  4. 新增 `tests/test_humanizer_typing.py` 覆盖普通兼容、emoji 起步价、thinking fallback、disabled 不 sleep。
+- **风险与回滚**：默认调用不传 `thinking_elapsed_s`，旧文本无 emoji 时行为不变；回滚为 `git restore services/humanizer.py` 并删除新测试。
+
+### P2.4 完成记录（执行者 Codex）— 2026-05-25 22:08 CST
+
+自验结果：P2.4 完成，进入 🟡 等验收。`services/humanizer.py` 实际 `+29/-1`，符合 `≤ +30 行`；旧调用不传 `thinking_elapsed_s` 时保持兼容。
+
+改动内容：
+
+- `services/humanizer.py` 新增 `EMOJI_BASE_DELAY=1.0`、`THINKING_FALLBACK=10.0`、emoji 检测与 `_typing_extra()`。
+- `Humanizer.__init__()` 增加 `emoji_base_s`，默认 `1.0`；emoji/CQ face/CQ mface 文本的 typing extra 至少 1 秒。
+- `Humanizer.delay()` 增加可选 `thinking_elapsed_s`；当 thinking 已耗时 ≥10 秒时，本次 typing delay cap 到 1 秒。
+- 新增 `tests/test_humanizer_typing.py` 4 条，覆盖普通兼容、emoji 起步价、thinking fallback、disabled 不 sleep。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_humanizer_typing.py tests/test_humanizer_register.py tests/test_humanizer_runtime.py -q` → `12 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/humanizer.py tests/test_humanizer_typing.py tests/test_humanizer_register.py tests/test_humanizer_runtime.py` → `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright services/humanizer.py tests/test_humanizer_typing.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/humanizer.py tests/test_humanizer_typing.py` → passed。
+- D1 grep：`rg -n "EMOJI_BASE_DELAY|THINKING_FALLBACK|emoji_base_s" services/humanizer.py tests docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 humanizer.py、新测试与本追踪记录；无其它生产路径命中。
+
+D2 / 回滚：已有 register/mood/slot 入参兼容测试通过；本任务无新增写状态 cancel-path。回滚为 `git restore services/humanizer.py`、删除 `tests/test_humanizer_typing.py` 并撤销 §6 / §9 的 P2.4 回填。
+
+### Wave 1 自主验收记录（Codex）— 2026-05-25 22:14 CST
+
+用户授权：`自主执行，自动完成，如果不出现风险项自动commit`。
+
+自主验收结论：P2.1 / P3.1 / P3.6 / P3.4 / P2.4 均通过，§6 状态由 🟡 改 ✅。未发现需要阻断的风险项：
+
+- P2.1 只读 SQLite 脚本，无运行时副作用。
+- P3.1 / P3.6 / P3.4 均未接生产路径或不写持久化状态；cancel-path / 纯计算边界已覆盖。
+- P2.4 是唯一运行时行为变更，但普通无 emoji 文本保持旧公式；新增 `thinking_elapsed_s` 为可选参数，旧调用不触发 fallback。
+
+验收命令：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_addressee_detector.py tests/test_mood_classifier.py tests/test_humanization_contract.py tests/test_willingness.py tests/test_humanizer_typing.py tests/test_humanizer_register.py tests/test_humanizer_runtime.py -q` → `37 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check ...`（Wave 1 改动范围）→ `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright ...`（Wave 1 改动范围）→ `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` → `1765 tests collected`。
+- `git diff --check` → passed。
+
+提交策略：按用户授权，本批 Wave 1 通过后自动提交；Wave 2 在该提交之后继续领单。
