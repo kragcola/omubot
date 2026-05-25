@@ -11,8 +11,9 @@ import contextlib
 import json
 import time
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 from pydantic import BaseModel
@@ -20,6 +21,9 @@ from pydantic import BaseModel
 from kernel.types import AmadeusPlugin, PluginContext
 from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
+
+if TYPE_CHECKING:
+    from services.system_module import RuntimeStateBus
 
 
 class DreamConfig(BaseModel):
@@ -222,12 +226,14 @@ class DreamAgent:
         max_rounds: int = 15,
         sticker_store: StickerStore | None = None,
         on_memo_change: Callable[[], None] | None = None,
+        runtime_state: RuntimeStateBus | None = None,
     ) -> None:
         self._store = store
         self._interval_hours = interval_hours
         self._max_rounds = max_rounds
         self._sticker_store = sticker_store
         self._on_memo_change = on_memo_change
+        self._runtime_state = runtime_state
         self._running: bool = False
         self._loop_task: asyncio.Task[None] | None = None
 
@@ -262,12 +268,20 @@ class DreamAgent:
         if exc := task.exception():
             dream_logger.error("dream loop crashed: {}", exc)
 
+    def _cleanup_runtime_state(self) -> int:
+        if self._runtime_state is None:
+            return 0
+        return self._runtime_state.clear_stale_per_session(max_age=timedelta(minutes=30))
+
     async def _run(self, api_call: ApiCaller) -> None:
         """Run the dream agent with a tool loop for card consolidation."""
         self._running = True
         t0 = time.time()
         try:
             dream_logger.info("dream starting")
+            cleaned_state = self._cleanup_runtime_state()
+            if cleaned_state:
+                dream_logger.info("dream cleaned stale humanization state | count={}", cleaned_state)
             index_text = await self._store.build_global_index()
 
             sticker_section = ""
@@ -496,6 +510,7 @@ class DreamPlugin(AmadeusPlugin):
             max_rounds=dream_cfg.max_rounds,
             sticker_store=ctx.sticker_store,
             on_memo_change=lambda: ctx.prompt_builder.invalidate(),
+            runtime_state=ctx.runtime_state,
         )
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:

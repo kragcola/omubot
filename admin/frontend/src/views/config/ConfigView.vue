@@ -7,10 +7,8 @@ import {
   CutOutline,
   DocumentTextOutline,
   FolderOpenOutline,
-  GitNetworkOutline,
   HardwareChipOutline,
   KeyOutline,
-  LayersOutline,
   PulseOutline,
   RefreshOutline,
   SaveOutline,
@@ -55,7 +53,7 @@ import type {
   ConfigSaveResult,
 } from './types'
 
-type ConfigTaskId = 'model' | 'chat' | 'rhythm' | 'segmentation' | 'concurrency' | 'connection' | 'access'
+type ConfigTaskId = 'model' | 'chat' | 'rhythm' | 'segmentation' | 'connection' | 'access'
 
 interface LegacyConfigResponse {
   path?: string
@@ -327,37 +325,6 @@ const FIELD_UI_HINTS: Record<string, FieldUiHint> = {
     recommended: '0.5 - 1.2 秒',
     restart_hint: 'recommended',
   },
-  'scheduler.concurrency.global_llm_limit': {
-    display_label: '全局生成并发',
-    help: '限制所有群同时进行的 LLM 生成数量，避免多群同时触发把模型打满。',
-    recommended: '2 起步，稳定后再调高',
-    risk_level: 'careful',
-    restart_hint: 'recommended',
-  },
-  'scheduler.concurrency.max_group_queue': {
-    display_label: '单群队列上限',
-    help: '预留给后续 actor 化调度使用；当前不建议频繁调整。',
-    recommended: '8',
-    restart_hint: 'recommended',
-  },
-  'scheduler.concurrency.max_low_priority_queue': {
-    display_label: '低优先级队列上限',
-    help: '预留给自然插话队列使用，强触发不会按这个值直接丢弃。',
-    recommended: '3',
-    restart_hint: 'recommended',
-  },
-  'scheduler.concurrency.first_segment_release': {
-    display_label: '首段后释放生成',
-    help: '实验项。开启后首段发出即可处理下一轮触发，但更容易让贴纸和尾段交错。',
-    risk_level: 'danger',
-    restart_hint: 'recommended',
-  },
-  'scheduler.concurrency.drop_stale_low_priority_after_s': {
-    display_label: '低优先级过期秒数',
-    help: '预留给自然插话过期控制使用；时间过长会让旧话题更容易滞后触发。',
-    recommended: '30 - 60 秒',
-    restart_hint: 'recommended',
-  },
 }
 
 const CONFIG_TASKS: ConfigTaskDefinition[] = [
@@ -434,22 +401,6 @@ const CONFIG_TASKS: ConfigTaskDefinition[] = [
     ],
   },
   {
-    id: 'concurrency',
-    title: '群聊并发',
-    eyebrow: 'Scheduler',
-    description: '控制多群同时触发时的生成并发和队列保护。',
-    audience: '多群同时使用、模型响应变慢、或需要压测调度器时修改。',
-    impact: '影响 LLM 生成并发、强触发排队和实验性的首段释放行为。',
-    restart: '建议保存后重启 Bot。已有运行中的调度任务不会自动改用新并发槽位。',
-    paths: [
-      'scheduler.concurrency.global_llm_limit',
-      'scheduler.concurrency.max_group_queue',
-      'scheduler.concurrency.max_low_priority_queue',
-      'scheduler.concurrency.first_segment_release',
-      'scheduler.concurrency.drop_stale_low_priority_after_s',
-    ],
-  },
-  {
     id: 'connection',
     title: '协议端连接',
     eyebrow: 'Connection',
@@ -476,8 +427,7 @@ const TASK_ICONS: Record<ConfigTaskId, Component> = {
   chat: ChatbubblesOutline,
   rhythm: PulseOutline,
   segmentation: CutOutline,
-  concurrency: LayersOutline,
-  connection: GitNetworkOutline,
+  connection: ServerOutline,
   access: HardwareChipOutline,
 }
 
@@ -2117,7 +2067,6 @@ async function restoreBackup(entry: ConfigBackupEntry) {
   }
 }
 </style>
-
 
 
 

@@ -133,7 +133,7 @@ class StickerPlugin(AmadeusPlugin):
         )
         return [
             SaveStickerTool(self._sticker_store, self._superusers),
-            SendStickerTool(self._sticker_store),
+            SendStickerTool(self._sticker_store, runtime_state=getattr(self._ctx, "runtime_state", None)),
             ManageStickerTool(self._sticker_store, self._superusers),
         ]
 

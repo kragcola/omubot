@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from services.block_trace.types import PromptBlockCandidate
 
@@ -17,6 +17,9 @@ class QueryContext:
     user_id: str
     group_id: str | None
     conversation_text: str
+    runtime_state: Any = None
+    turn_id: str = ""
+    mood_fit_target: float | None = None
 
 
 @runtime_checkable

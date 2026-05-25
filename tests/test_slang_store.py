@@ -689,6 +689,53 @@ async def test_build_prompt_block_with_refs_returns_included_term_ids(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_prompt_block_mood_fit_reranks_equal_confidence_terms(tmp_path):
+    store = SlangStore(tmp_path / "slang.db")
+    await store.init()
+    try:
+        low_fit = await store.create_term(
+            term="低适配词",
+            meaning="更适合低能量语气",
+            scope="group",
+            group_id="611",
+            confidence=0.8,
+            meta={"mood_fit": 0.1},
+        )
+        high_fit = await store.create_term(
+            term="高适配词",
+            meaning="更适合高能量语气",
+            scope="group",
+            group_id="611",
+            confidence=0.8,
+            meta={"mood_fit": 0.9},
+        )
+        await store.record_hit(low_fit.term_id, group_id="611", raw_text="低适配词")
+        await store.record_hit(low_fit.term_id, group_id="611", raw_text="低适配词 again")
+
+        _block, refs = await store.build_prompt_block_with_refs(
+            group_id="611",
+            conversation_text="低适配词 高适配词",
+            max_terms=1,
+            max_chars=2000,
+        )
+        assert refs == (low_fit.term_id,)
+
+        block, refs = await store.build_prompt_block_with_refs(
+            group_id="611",
+            conversation_text="低适配词 高适配词",
+            max_terms=1,
+            max_chars=2000,
+            mood_fit_target=0.9,
+        )
+
+        assert refs == (high_fit.term_id,)
+        assert "高适配词" in block
+        assert "低适配词" not in block
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_build_prompt_block_default_indirect_cap_is_direct_only(tmp_path):
     """Default prompt injection should only include direct-hit approved slang."""
     store = SlangStore(tmp_path / "slang.db")

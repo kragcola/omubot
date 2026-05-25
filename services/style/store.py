@@ -848,6 +848,8 @@ class StyleStore:
         include_global: bool = False,
         max_items: int = 3,
         min_confidence: float = 0.0,
+        mood_fit_target: float | None = None,
+        persona_fit_target: float | None = None,
     ) -> list[StyleExpression]:
         db = self._require_db()
         group_id = str(group_id or "").strip()
@@ -875,7 +877,15 @@ class StyleStore:
         ranked = [
             (score, expression)
             for expression in candidates
-            if (score := _expression_relevance(expression, query_key)) > 0.0
+            if (
+                score := _expression_relevance(
+                    expression,
+                    query_key,
+                    mood_fit_target=mood_fit_target,
+                    persona_fit_target=persona_fit_target,
+                )
+            )
+            > 0.0
         ]
         ranked.sort(
             key=lambda item: (
@@ -898,6 +908,8 @@ class StyleStore:
         max_items: int = 3,
         max_chars: int = 800,
         min_confidence: float = 0.0,
+        mood_fit_target: float | None = None,
+        persona_fit_target: float | None = None,
     ) -> str:
         block, _ = await self.build_prompt_block_with_refs(
             group_id=group_id,
@@ -906,6 +918,8 @@ class StyleStore:
             max_items=max_items,
             max_chars=max_chars,
             min_confidence=min_confidence,
+            mood_fit_target=mood_fit_target,
+            persona_fit_target=persona_fit_target,
         )
         return block
 
@@ -918,6 +932,8 @@ class StyleStore:
         max_items: int = 3,
         max_chars: int = 800,
         min_confidence: float = 0.0,
+        mood_fit_target: float | None = None,
+        persona_fit_target: float | None = None,
     ) -> tuple[str, tuple[str, ...]]:
         expressions = await self.get_prompt_expressions(
             group_id=group_id,
@@ -925,6 +941,8 @@ class StyleStore:
             include_global=include_global,
             max_items=max_items,
             min_confidence=min_confidence,
+            mood_fit_target=mood_fit_target,
+            persona_fit_target=persona_fit_target,
         )
         if not expressions:
             return "", ()
@@ -1823,24 +1841,41 @@ def _prompt_line(expression: StyleExpression) -> str:
     return f"- 当{situation}时，可以{style}。"
 
 
-def _expression_relevance(expression: StyleExpression, query_key: str) -> float:
+def _expression_relevance(
+    expression: StyleExpression,
+    query_key: str,
+    *,
+    mood_fit_target: float | None = None,
+    persona_fit_target: float | None = None,
+) -> float:
     situation_key = normalize_style_key(expression.situation)
     style_key = normalize_style_key(expression.style)
     if not query_key or not situation_key:
         return 0.0
     if situation_key and (situation_key in query_key or query_key in situation_key):
-        return 1.0
-    if style_key and len(style_key) >= 4 and (style_key in query_key or query_key in style_key):
-        return 0.8
+        base_score = 1.0
+    elif style_key and len(style_key) >= 4 and (style_key in query_key or query_key in style_key):
+        base_score = 0.8
+    else:
+        query_units = _key_units(query_key)
+        expression_units = _key_units(f"{situation_key}{style_key}")
+        if not query_units or not expression_units:
+            return 0.0
+        overlap = query_units & expression_units
+        if not overlap:
+            return 0.0
+        base_score = len(overlap) / max(3, min(len(query_units), len(expression_units)))
+    return (
+        base_score
+        + 0.3 * _fit_alignment(expression.mood_fit, mood_fit_target)
+        + 0.2 * _fit_alignment(expression.persona_fit, persona_fit_target)
+    )
 
-    query_units = _key_units(query_key)
-    expression_units = _key_units(f"{situation_key}{style_key}")
-    if not query_units or not expression_units:
+
+def _fit_alignment(value: float | None, target: float | None) -> float:
+    if target is None:
         return 0.0
-    overlap = query_units & expression_units
-    if not overlap:
-        return 0.0
-    return len(overlap) / max(3, min(len(query_units), len(expression_units)))
+    return 1.0 - abs(_clamp01(value if value is not None else 0.5) - _clamp01(target))
 
 
 def _style_similarity(left: str, right: str) -> float:

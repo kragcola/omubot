@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import secrets
 import time
+from typing import Any, cast
 
 import aiohttp
 from loguru import logger as _base_logger
@@ -32,10 +34,12 @@ from kernel.types import (
     PluginContext,
     TextBlock,
 )
+from services.humanization import AFFECTION_FAMILIARITY_SLOT
 from services.private_conversation import (
     get_private_conversation_actor,
     log_private_transition,
 )
+from services.system_module import Scope
 
 logger = _base_logger
 _log_msg_in = _base_logger.bind(channel="message_in")
@@ -53,6 +57,7 @@ _DIRECTED_FOLLOWUP_RE = re.compile(
     r"|^(带上?我(吗|嘛|么)?|算我一个|我也想(来|去|参加|一起|加入|玩))[。.!！?？~～\s]*$"
 )
 _DIRECTED_FOLLOWUP_WINDOW_S = 180.0
+_U13_TRACE_KEY_PREFIX = "u13_double_haiku"
 
 
 # ============================================================================
@@ -171,6 +176,65 @@ def _reply_targets_bot(reply: object | None, self_id: str) -> bool:
     if sender is None:
         return False
     return str(getattr(sender, "user_id", "") or "") == str(self_id)
+
+
+def _runtime_state_value(runtime_state: object | None, slot_id: str, scope: Scope) -> Any:
+    if runtime_state is None:
+        return None
+    try:
+        snapshot = cast(Any, runtime_state).get(slot_id, scope=scope)
+    except Exception as exc:
+        _log_reply_workflow.debug("runtime_state read failed | slot={} err={}", slot_id, exc)
+        return None
+    return snapshot.value if snapshot is not None else None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _semantic_gate_familiarity(ctx: PluginContext, user_id: str) -> float | None:
+    value = _runtime_state_value(
+        getattr(ctx, "runtime_state", None),
+        AFFECTION_FAMILIARITY_SLOT,
+        Scope(user_id=str(user_id)),
+    )
+    raw: object | None = value.get("familiarity") if isinstance(value, dict) else getattr(value, "familiarity", None)
+    return _optional_float(raw)
+
+
+def _semantic_gate_mood_energy(ctx: PluginContext, group_id: str) -> float | None:
+    mood_engine = getattr(ctx, "mood_engine", None)
+    if mood_engine is None:
+        return None
+    schedule_store = getattr(ctx, "schedule_store", None)
+    schedule = getattr(schedule_store, "current", None) if schedule_store is not None else None
+    recent_count = 0
+    timeline = getattr(ctx, "timeline", None)
+    if timeline is not None:
+        try:
+            recent_count = int(timeline.recent_interaction_count(str(group_id), window_s=60.0))
+        except Exception as exc:
+            _log_reply_workflow.debug("semantic gate timeline read failed | group={} err={}", group_id, exc)
+            recent_count = 0
+    try:
+        profile = mood_engine.evaluate(
+            schedule,
+            recent_interaction_count=recent_count,
+            group_id=group_id,
+            session_id=f"group_{group_id}",
+        )
+    except Exception as exc:
+        _log_reply_workflow.debug("semantic gate mood read failed | group={} err={}", group_id, exc)
+        return None
+    return _optional_float(cast(Any, profile).energy)
+
+
+def _u13_trace_request_id(group_id: str, message_id: int | str) -> str:
+    return f"{_U13_TRACE_KEY_PREFIX}:group_{group_id}:{message_id}:{secrets.token_hex(3)}"
 
 
 def _has_recent_assistant_reply(timeline: object, group_id: str, *, within_s: float) -> bool:
@@ -887,12 +951,15 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             reply_workflow_mode = workflow_mode(reply_workflow_config)
         semantic_result = None
         semantic_candidate_reason = ""
+        semantic_effective_threshold = float(getattr(reply_workflow_config, "semantic_force_threshold", 0.78))
+        semantic_trace_request_id = ""
         if reply_workflow_mode in {"shadow", "semantic"}:
             from services.reply_workflow import (
                 ReplyGateFeatures,
                 evaluate_group_gate_shadow,
                 evaluate_semantic_gate,
                 log_shadow_decision,
+                semantic_gate_threshold,
                 should_call_semantic_gate,
                 should_consume_semantic_gate,
             )
@@ -936,7 +1003,17 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 features,
                 max_chars=int(getattr(reply_workflow_config, "semantic_max_chars", 48)),
             )
+            semantic_threshold = semantic_gate_threshold(
+                fixed_threshold=float(getattr(reply_workflow_config, "semantic_force_threshold", 0.78)),
+                dynamic_enabled=bool(
+                    getattr(getattr(ctx.config, "humanization", None), "semantic_gate_dynamic", False),
+                ),
+                familiarity=_semantic_gate_familiarity(ctx, str(event.user_id)),
+                mood_energy=_semantic_gate_mood_energy(ctx, group_id),
+            )
+            semantic_effective_threshold = semantic_threshold.effective_threshold
             if reply_workflow_mode == "semantic" and should_call_gate:
+                semantic_trace_request_id = _u13_trace_request_id(group_id, event.message_id)
                 gate_start = time.perf_counter()
                 semantic_result = await evaluate_semantic_gate(
                     features,
@@ -947,7 +1024,29 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 )
                 consumed = should_consume_semantic_gate(
                     semantic_result,
-                    threshold=float(getattr(reply_workflow_config, "semantic_force_threshold", 0.78)),
+                    threshold=semantic_effective_threshold,
+                )
+                from services.block_trace.llm_call_trace import record_llm_call_trace
+
+                await record_llm_call_trace(
+                    getattr(ctx, "block_trace_store", None),
+                    request_id=semantic_trace_request_id,
+                    task="reply_gate",
+                    provider="semantic_gate",
+                    session_id=f"group_{group_id}",
+                    group_id=group_id,
+                    user_id=str(event.user_id),
+                    event_id=str(event.message_id),
+                    metadata={
+                        "candidate_reason": semantic_candidate_reason,
+                        "consumed": consumed,
+                        "effective_threshold": semantic_effective_threshold,
+                        "timeout_ms": int(getattr(reply_workflow_config, "semantic_timeout_ms", 600)),
+                        "correlation_key": f"group_{group_id}:{event.user_id}",
+                        "result_action": getattr(semantic_result, "action", ""),
+                        "result_confidence": getattr(semantic_result, "confidence", None),
+                        "result_intent": getattr(semantic_result, "intent", ""),
+                    },
                 )
                 if semantic_result is not None:
                     semantic_decision = semantic_result.to_decision(candidate_reason=semantic_candidate_reason)
@@ -968,7 +1067,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     event_id=str(event.message_id),
                     text=_content_to_text(content),
                     latency_ms=(time.perf_counter() - gate_start) * 1000,
-                    extra={"consumed": consumed},
+                    extra={"consumed": consumed, **semantic_threshold.log_fields()},
                 )
         semantic_consumed = False
         if reply_workflow_mode == "semantic":
@@ -976,7 +1075,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
             semantic_consumed = should_consume_semantic_gate(
                 semantic_result,
-                threshold=float(getattr(reply_workflow_config, "semantic_force_threshold", 0.78)),
+                threshold=semantic_effective_threshold,
             )
         if (
             trigger is None
@@ -990,6 +1089,9 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 mode="directed_followup",
                 target_message_id=event.message_id,
                 target_user_id=str(event.user_id),
+                extra={
+                    "u13_double_haiku_request_id": semantic_trace_request_id,
+                } if semantic_trace_request_id else {},
             )
         if not muted:
             ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))

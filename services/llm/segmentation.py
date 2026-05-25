@@ -572,3 +572,12 @@ def segment_reply(reply: str, cfg: ReplySegmentationConfig) -> ReplySegmentation
         break_reasons=[segment.reason for segment in raw_segments],
         limit_status=limit_status,
     )
+
+
+def reply_segments(
+    reply: str,
+    cfg: ReplySegmentationConfig | None = None,
+) -> tuple[list[str], int, SegmentationLimitStatus]:
+    """Return visible segment texts plus raw count for LLMClient send paths."""
+    result = segment_reply(reply, cfg or ReplySegmentationConfig())
+    return result.texts, result.raw_count, result.limit_status

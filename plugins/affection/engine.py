@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from plugins.affection.models import AffectionProfile
 from plugins.affection.store import AffectionStore
+from services.humanization import AFFECTION_FAMILIARITY_SLOT, humanization_source
+from services.system_module import Scope
 
 if TYPE_CHECKING:
     from kernel.config import GroupMemoryConfig
+    from services.system_module import RuntimeStateBus
 
 CST = ZoneInfo("Asia/Shanghai")
 
@@ -28,10 +31,15 @@ class AffectionEngine:
         self._score_increment = score_increment
         self._daily_cap = daily_cap
         self._group_memory_config: GroupMemoryConfig | None = None
+        self._runtime_state: RuntimeStateBus | None = None
 
     def set_group_memory_config(self, config: GroupMemoryConfig) -> None:
         """Inject group memory config for pool-aware nickname resolution."""
         self._group_memory_config = config
+
+    def set_runtime_state_bus(self, bus: RuntimeStateBus | None) -> None:
+        """Inject runtime state bus for short-lived humanization signals."""
+        self._runtime_state = bus
 
     # ------------------------------------------------------------------
     # Score management
@@ -49,6 +57,7 @@ class AffectionEngine:
 
         max_daily_interactions = int(self._daily_cap / self._score_increment)
         if profile.daily_count >= max_daily_interactions:
+            self._write_familiarity_state(user_id, profile)
             return profile
 
         if profile.first_interaction == "":
@@ -60,7 +69,36 @@ class AffectionEngine:
         profile.last_interaction = now.isoformat()
 
         self._store.save(profile)
+        self._write_familiarity_state(user_id, profile)
         return profile
+
+    def familiarity_score(self, user_id: str) -> float:
+        """Return short-term familiarity as a 0..1 signal."""
+        profile = self._store.get(user_id)
+        long_term = max(0.0, min(1.0, profile.score / 100.0))
+        daily = max(0.0, min(1.0, profile.daily_count / 10.0))
+        return round(min(1.0, long_term * 0.7 + daily * 0.3), 4)
+
+    def _write_familiarity_state(self, user_id: str, profile: AffectionProfile) -> None:
+        if self._runtime_state is None or not user_id:
+            return
+        familiarity = self.familiarity_score(user_id)
+        self._runtime_state.set(
+            AFFECTION_FAMILIARITY_SLOT,
+            {
+                "user_id": user_id,
+                "familiarity": familiarity,
+                "score": profile.score,
+                "tier": profile.tier,
+                "daily_count": profile.daily_count,
+                "total_interactions": profile.total_interactions,
+                "mood_bonus_valence": profile.mood_bonus_valence,
+            },
+            scope=Scope(user_id=user_id),
+            source=humanization_source("affection:familiarity"),
+            confidence=1.0,
+            decay_at=datetime.now() + timedelta(minutes=60),
+        )
 
     def set_nickname(self, user_id: str, nickname: str) -> AffectionProfile:
         """Set a custom nickname for a user (private chat)."""

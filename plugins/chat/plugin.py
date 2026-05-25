@@ -17,7 +17,7 @@ import nonebot
 from loguru import logger
 
 from kernel.config import BotConfig, load_plugin_config
-from kernel.types import AmadeusPlugin, PluginContext
+from kernel.types import AmadeusPlugin, MessageContext, PluginContext
 from services.llm.llm_request import LLMRequest
 
 _L = logger.bind(channel="system")
@@ -51,6 +51,67 @@ def _sanitize_debug_reply(text: str, *, fallback: str = "这次没有执行到�
     if not cleaned:
         return fallback
     return cleaned
+
+
+def _message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return " ".join(
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+    return str(content or "").strip()
+
+
+def _register_classifier_window(ctx: PluginContext, msg_ctx: MessageContext, current_text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    timeline = getattr(ctx, "timeline", None)
+    if timeline is not None and msg_ctx.group_id is not None:
+        try:
+            turns = list(timeline.get_turns(str(msg_ctx.group_id)))[-4:]
+        except Exception as exc:
+            _L.debug("register classifier timeline read failed | group={} err={}", msg_ctx.group_id, exc)
+            turns = []
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            text = _message_content_text(turn.get("content"))
+            if not text:
+                continue
+            rows.append({
+                "speaker": str(turn.get("speaker") or turn.get("role") or "history"),
+                "content_text": text,
+            })
+    rows.append({
+        "speaker": msg_ctx.nickname or msg_ctx.user_id,
+        "content_text": current_text,
+    })
+    return rows[-5:]
+
+
+def _humanization_runtime_groups(config: BotConfig) -> frozenset[str]:
+    return frozenset(str(group_id).strip() for group_id in config.humanization.runtime_groups if str(group_id).strip())
+
+
+def _humanization_group_allowed(config: BotConfig, group_id: str | None) -> bool:
+    groups = _humanization_runtime_groups(config)
+    if not groups:
+        return True
+    return str(group_id or "").strip() in groups
+
+
+class _ScopedHumanizationProvider:
+    def __init__(self, provider: Any, *, allowed_groups: frozenset[str]) -> None:
+        self._provider = provider
+        self._allowed_groups = allowed_groups
+        self.name = str(getattr(provider, "name", "humanization"))
+
+    async def provide(self, ctx: Any) -> list[Any]:
+        if self._allowed_groups and str(getattr(ctx, "group_id", "") or "") not in self._allowed_groups:
+            return []
+        return await self._provider.provide(ctx)
 
 
 class ChatPlugin(AmadeusPlugin):
@@ -101,6 +162,57 @@ class ChatPlugin(AmadeusPlugin):
             ),
         ]
 
+    def _wire_humanization_runtime(self, ctx: PluginContext, config: BotConfig, llm: Any) -> None:
+        if config.humanization.register_classifier:
+            from services.humanization import RegisterClassifier
+
+            ctx.humanization_register_classifier = RegisterClassifier(llm)
+            _L.info("humanization register classifier enabled")
+        else:
+            ctx.humanization_register_classifier = None
+
+    async def on_message(self, ctx: MessageContext) -> bool:
+        plugin_ctx = self._ctx
+        if plugin_ctx is None or ctx.group_id is None or ctx.is_private:
+            return False
+        if not ctx.allow_speaking:
+            return False
+        config = getattr(plugin_ctx, "config", None)
+        if not bool(getattr(getattr(config, "humanization", None), "register_classifier", False)):
+            return False
+        if not isinstance(config, BotConfig) or not _humanization_group_allowed(config, ctx.group_id):
+            return False
+        classifier = getattr(plugin_ctx, "humanization_register_classifier", None)
+        runtime_state = getattr(plugin_ctx, "runtime_state", None)
+        if classifier is None or runtime_state is None:
+            return False
+        current_text = _message_content_text(ctx.content)
+        if not current_text:
+            return False
+
+        from services.system_module import Scope
+
+        try:
+            await classifier.classify_and_write(
+                _register_classifier_window(plugin_ctx, ctx, current_text),
+                bus=runtime_state,
+                scope=Scope(
+                    session_id=ctx.session_id,
+                    group_id=ctx.group_id,
+                    user_id=ctx.user_id,
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _L.debug(
+                "humanization register classifier failed | session={} user={} err={}",
+                ctx.session_id,
+                ctx.user_id,
+                exc,
+            )
+        return False
+
     async def _handle_debug(self, cmd_ctx: Any) -> None:
         """Handle /debug command: admin-only debug mode with live state and tool execution."""
         from nonebot.adapters.onebot.v11 import Message
@@ -133,6 +245,7 @@ class ChatPlugin(AmadeusPlugin):
             bot=cmd_ctx.bot,
             user_id=str(cmd_ctx.user_id),
             group_id=str(cmd_ctx.group_id) if not cmd_ctx.is_private else None,
+            session_id=sid,
         )
 
         # ---- LLM path ----
@@ -459,6 +572,7 @@ class ChatPlugin(AmadeusPlugin):
             bot=cmd_ctx.bot,
             user_id=str(cmd_ctx.user_id),
             group_id=str(cmd_ctx.group_id) if cmd_ctx.group_id else None,
+            session_id=f"group_{cmd_ctx.group_id}" if cmd_ctx.group_id else f"private_{cmd_ctx.user_id}",
         )
         results: list[str] = []
         for idx, image_path in enumerate(image_paths):
@@ -527,13 +641,14 @@ class ChatPlugin(AmadeusPlugin):
             bot=cmd_ctx.bot,
             user_id=str(cmd_ctx.user_id),
             group_id=str(cmd_ctx.group_id) if cmd_ctx.group_id else None,
+            session_id=f"group_{cmd_ctx.group_id}" if cmd_ctx.group_id else f"private_{cmd_ctx.user_id}",
         )
 
         # stk_id in args → send specific
         match = _re.search(r"stk_[a-f0-9]{8}", args)
         if match:
             stk_id = match.group(0)
-            tool = SendStickerTool(store)
+            tool = SendStickerTool(store, runtime_state=getattr(ctx, "runtime_state", None))
             result = await tool.execute(tool_ctx_obj, sticker_id=stk_id)
             logger.info("debug direct send_sticker (by id) | id={} result={}", stk_id, result)
             await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[send_sticker] {result}"))
@@ -552,7 +667,7 @@ class ChatPlugin(AmadeusPlugin):
             candidates = all_stickers
 
         stk_id = _random.choice(list(candidates.keys()))
-        tool = SendStickerTool(store)
+        tool = SendStickerTool(store, runtime_state=getattr(ctx, "runtime_state", None))
         result = await tool.execute(tool_ctx_obj, sticker_id=stk_id)
         logger.info("debug direct send_sticker | id={} result={}", stk_id, result)
         await cmd_ctx.bot.send(cmd_ctx.event, Message(f"[send_sticker] {result}"))
@@ -792,6 +907,10 @@ class ChatPlugin(AmadeusPlugin):
             "storage/consolidator_normalizer.db"
         )
         await ctx.memory_consolidator_normalizer.init()
+        ctx.catchphrase_normalizer = None
+        if config.humanization.context_providers:
+            ctx.catchphrase_normalizer = LearningNormalizerStore("storage/learning_normalizer.db")
+            await ctx.catchphrase_normalizer.init()
 
         # Phase D singleton — episode store + promote bridge.
         ctx.episode_store = EpisodeStore("storage/episodic.db")
@@ -882,6 +1001,29 @@ class ChatPlugin(AmadeusPlugin):
             for task in llm_tasks
         }
         main_profile = task_profiles["main"]
+
+        def runtime_mood_getter(*, group_id: str | int | None = None, session_id: str = "") -> Any:
+            if ctx.mood_engine is None:
+                return None
+            schedule = ctx.schedule_store.current if ctx.schedule_store else None
+            recent_count = 0
+            if group_id is not None and ctx.timeline is not None:
+                recent_count = ctx.timeline.recent_interaction_count(str(group_id), window_s=60.0)
+            return ctx.mood_engine.evaluate(
+                schedule,
+                recent_interaction_count=recent_count,
+                group_id=group_id,
+                session_id=session_id,
+            )
+
+        def runtime_clock_getter(*, group_id: str | int | None = None, session_id: str = "") -> dict[str, Any]:
+            from plugins.schedule.calendar import get_day_context
+            from services.runtime_clock import now_cst, slot_features
+
+            now = now_cst()
+            schedule = ctx.schedule_store.current if ctx.schedule_store else None
+            return slot_features(now=now, schedule=schedule, day_context=get_day_context(now))
+
         llm = LLMClient(
             base_url=main_profile.base_url,
             api_key=main_profile.api_key,
@@ -902,27 +1044,34 @@ class ChatPlugin(AmadeusPlugin):
             affection_engine=ctx.affection_engine,
             thinker_enabled=config.thinker.enabled,
             thinker_max_tokens=config.thinker.max_tokens,
-            mood_getter=(
-                lambda: ctx.mood_engine.evaluate(
-                    ctx.schedule_store.current if ctx.schedule_store else None,
-                )
-                if ctx.mood_engine
-                else None
-            ),
+            mood_getter=runtime_mood_getter if ctx.mood_engine else None,
             bus=ctx.bus,
+            runtime_state=ctx.runtime_state,
+            clock_context_getter=runtime_clock_getter,
             task_profiles=task_profiles,
             group_config=config.group,
+            reply_segmentation_config=config.reply_segmentation,
             slang_store_getter=lambda: getattr(ctx, "slang_store", None),
             budget_manager=budget_mgr,
+            thinker_provider_enabled=(
+                config.humanization.context_providers
+                and config.humanization.thinker_provider
+            ),
+            humanization_rewrite_threshold=config.humanization.rewrite_threshold,
+            humanization_runtime_groups=config.humanization.runtime_groups,
         )
         llm.set_task_profile_names(task_profile_names)
 
         # ---- prompt provider bus (active mode — providers are sole injection path) ----
         from plugins.style.plugin import StyleConfig as _StyleConfig
+        from services.block_trace.catchphrase_provider import CatchphraseProvider
         from services.block_trace.episode_provider import EpisodeProvider
         from services.block_trace.provider_bus import PromptProviderBus
+        from services.block_trace.register_provider import RegisterProvider
         from services.block_trace.slang_provider import SlangProvider
+        from services.block_trace.sticker_register_provider import StickerRegisterProvider
         from services.block_trace.style_provider import StyleProvider
+        from services.block_trace.thinker_provider import ThinkerProvider
 
         style_cfg = load_plugin_config("plugins/style/config.default.json", _StyleConfig)
         style_global_groups = {
@@ -933,6 +1082,30 @@ class ChatPlugin(AmadeusPlugin):
 
         provider_bus = PromptProviderBus(trace_store)
         provider_bus.mode = "active"
+        humanization_groups = _humanization_runtime_groups(config)
+        if config.humanization.context_providers:
+            provider_bus.register(_ScopedHumanizationProvider(
+                RegisterProvider(),
+                allowed_groups=humanization_groups,
+            ))
+            provider_bus.register(_ScopedHumanizationProvider(
+                CatchphraseProvider(
+                    store_getter=lambda: getattr(ctx, "catchphrase_normalizer", None),
+                ),
+                allowed_groups=humanization_groups,
+            ))
+            if config.humanization.sticker_register_provider:
+                provider_bus.register(_ScopedHumanizationProvider(
+                    StickerRegisterProvider(
+                        store_getter=lambda: getattr(ctx, "sticker_store", None),
+                    ),
+                    allowed_groups=humanization_groups,
+                ))
+            if config.humanization.thinker_provider:
+                provider_bus.register(_ScopedHumanizationProvider(
+                    ThinkerProvider(),
+                    allowed_groups=humanization_groups,
+                ))
         provider_bus.register(SlangProvider(
             store_getter=lambda: getattr(ctx, "slang_store", None),
             group_config=config.group,
@@ -969,6 +1142,7 @@ class ChatPlugin(AmadeusPlugin):
             llm._usage_tracker = usage_tracker
 
         ctx.llm_client = llm
+        self._wire_humanization_runtime(ctx, config, llm)
 
         # PR2 (2026-05-21): wire LLMClient into KnowledgeGraphService for the
         # LLM-driven graph extractor. Prior to this, the regex MVP extractor
@@ -1019,13 +1193,8 @@ class ChatPlugin(AmadeusPlugin):
             group_config=config.group,
             humanizer=humanizer,
             talk_schedule=talk_schedule,
-            mood_getter=(
-                lambda: ctx.mood_engine.evaluate(
-                    ctx.schedule_store.current if ctx.schedule_store else None,
-                )
-                if ctx.mood_engine
-                else None
-            ),
+            mood_getter=runtime_mood_getter if ctx.mood_engine else None,
+            runtime_state=ctx.runtime_state,
         )
 
         _L.info("ChatPlugin startup complete")
@@ -1041,8 +1210,6 @@ class ChatPlugin(AmadeusPlugin):
             await ctx.knowledge_graph.close()
         if ctx.msg_log is not None:
             await ctx.msg_log.close()
-        if ctx.card_store is not None:
-            await ctx.card_store.close()
         if ctx.usage_tracker is not None:
             await ctx.usage_tracker.close()
         block_trace = getattr(ctx, "block_trace_store", None)
@@ -1056,6 +1223,9 @@ class ChatPlugin(AmadeusPlugin):
         consolidator_normalizer = getattr(ctx, "memory_consolidator_normalizer", None)
         if consolidator_normalizer is not None:
             await consolidator_normalizer.close()
+        catchphrase_normalizer = getattr(ctx, "catchphrase_normalizer", None)
+        if catchphrase_normalizer is not None:
+            await catchphrase_normalizer.close()
         episode_store = getattr(ctx, "episode_store", None)
         if episode_store is not None:
             await episode_store.close()

@@ -132,6 +132,19 @@ async def test_slang_provider_emits_candidate(qctx: QueryContext) -> None:
 
 
 @pytest.mark.asyncio
+async def test_slang_provider_passes_mood_fit_target(qctx: QueryContext) -> None:
+    store = _FakeSlangStore()
+    provider = SlangProvider(store_getter=lambda: store)
+    qctx_with_mood = QueryContext(
+        **{**qctx.__dict__, "mood_fit_target": 0.78},
+    )
+
+    await provider.provide(qctx_with_mood)
+
+    assert store.calls[0]["mood_fit_target"] == 0.78
+
+
+@pytest.mark.asyncio
 async def test_slang_provider_skips_when_store_none(qctx: QueryContext) -> None:
     provider = SlangProvider(store_getter=lambda: None)
     assert await provider.provide(qctx) == []

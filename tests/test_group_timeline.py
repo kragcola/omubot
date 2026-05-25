@@ -199,6 +199,19 @@ class TestGroupTimelineLifecycle:
         assert t0 > 0
         assert t1 >= t0
 
+    def test_recent_interaction_count_uses_time_window(self, tl: GroupTimeline) -> None:
+        tl.add("g1", role="user", content="Q1", speaker="A(1)")
+        tl.add("g1", role="assistant", content="A1")
+        tl.add("g1", role="user", content="Q2", speaker="A(1)")
+        tl.add("g1", role="assistant", content="A2")
+
+        state = tl._store["g1"]
+        now = state.turn_times[-1]
+        state.turn_times[0] = now - 120
+
+        assert tl.recent_interaction_count("g1", window_s=60) == 3
+        assert tl.recent_interaction_count("missing", window_s=60) == 0
+
     # -- clear preserves summary --
 
     def test_clear_preserves_summary(self, tl: GroupTimeline) -> None:

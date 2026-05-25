@@ -1,11 +1,14 @@
 """Tests for SaveStickerTool, ManageStickerTool, and SendStickerTool."""
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from services.humanization import STICKER_RECENT_USED_SLOT, create_humanization_state_bus
 from services.media.sticker_store import StickerStore
+from services.system_module import Scope
 from services.tools.context import ToolContext
 from services.tools.sticker_tools import ManageStickerTool, SaveStickerTool, SendStickerTool
 
@@ -496,6 +499,88 @@ async def test_send_sticker_records_send(
         await tool.execute(ctx, sticker_id=stk_id)
 
     assert store.get(stk_id)["send_count"] == 1  # type: ignore[index]
+
+
+async def test_send_sticker_writes_recent_runtime_state(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    bus = create_humanization_state_bus()
+    first_id, _ = store.add(_JPEG_DATA, "desc", "hint")
+    second_id, _ = store.add(_PNG_DATA, "desc2", "hint2")
+    tool = SendStickerTool(store, runtime_state=bus)
+    ctx = ToolContext(
+        bot=mock_bot,
+        user_id="123456",
+        group_id="987654",
+        session_id="group_987654",
+    )
+
+    with patch("nonebot.adapters.onebot.v11.MessageSegment.image", return_value=MagicMock()):
+        await tool.execute(ctx, sticker_id=first_id)
+        await tool.execute(ctx, sticker_id=second_id)
+
+    snapshot = bus.get(
+        STICKER_RECENT_USED_SLOT,
+        scope=Scope(session_id="group_987654", group_id="987654", user_id="123456"),
+    )
+    assert snapshot is not None
+    assert snapshot.value["sticker_ids"][:2] == [second_id, first_id]
+
+
+async def test_send_sticker_failure_does_not_write_recent_state(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    bus = create_humanization_state_bus()
+    stk_id, _ = store.add(_JPEG_DATA, "desc", "hint")
+    mock_bot.send_group_msg.side_effect = RuntimeError("network error")
+    tool = SendStickerTool(store, runtime_state=bus)
+    ctx = ToolContext(
+        bot=mock_bot,
+        user_id="123456",
+        group_id="987654",
+        session_id="group_987654",
+    )
+
+    with patch("nonebot.adapters.onebot.v11.MessageSegment.image", return_value=MagicMock()):
+        result = await tool.execute(ctx, sticker_id=stk_id)
+
+    assert "发送失败" in result
+    assert bus.get(
+        STICKER_RECENT_USED_SLOT,
+        scope=Scope(session_id="group_987654", group_id="987654", user_id="123456"),
+    ) is None
+
+
+async def test_send_sticker_cancel_path_does_not_write_recent_state(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    bus = create_humanization_state_bus()
+    stk_id, _ = store.add(_JPEG_DATA, "desc", "hint")
+
+    async def slow_send(**_kwargs) -> None:
+        await asyncio.sleep(60)
+
+    mock_bot.send_group_msg.side_effect = slow_send
+    tool = SendStickerTool(store, runtime_state=bus)
+    ctx = ToolContext(
+        bot=mock_bot,
+        user_id="123456",
+        group_id="987654",
+        session_id="group_987654",
+    )
+
+    with patch("nonebot.adapters.onebot.v11.MessageSegment.image", return_value=MagicMock()):
+        task = asyncio.create_task(tool.execute(ctx, sticker_id=stk_id))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert store.get(stk_id)["send_count"] == 0  # type: ignore[index]
+    assert bus.get(
+        STICKER_RECENT_USED_SLOT,
+        scope=Scope(session_id="group_987654", group_id="987654", user_id="123456"),
+    ) is None
 
 
 # ---------------------------------------------------------------------------

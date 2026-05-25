@@ -425,6 +425,24 @@ class TestMood:
     def _mood_getter(self, energy: float, valence: float, openness: float):
         return lambda: _FakeMood(energy=energy, valence=valence, openness=openness)
 
+    async def test_mood_getter_receives_group_session_context(self) -> None:
+        """New mood_getter path receives group/session for per-key MoodEngine cache."""
+        seen: list[tuple[str | None, str]] = []
+
+        def getter(*, group_id: str | None = None, session_id: str = "") -> _FakeMood:
+            seen.append((group_id, session_id))
+            return _FakeMood(energy=0.5, valence=0.0, openness=0.5)
+
+        scheduler = GroupChatScheduler(
+            llm=_FakeLLM(), timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+            mood_getter=getter,
+        )
+
+        assert scheduler._get_mood_multiplier("111") > 0
+        assert seen == [("111", "group_111")]
+        await scheduler.close()
+
     async def test_good_mood_boosts_reply(self) -> None:
         """Good mood (high energy/valence/openness) boosts talk_value."""
         llm = _FakeLLM(reply=None)

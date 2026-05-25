@@ -40,12 +40,14 @@ class SchedulePlugin(AmadeusPlugin):
         self._mood_engine = None
         self._schedule_store = None
         self._schedule_gen = None
+        self._timeline = None
         self._schedule_started = False
 
     async def on_startup(self, ctx: PluginContext) -> None:
         self._mood_engine = ctx.mood_engine
         self._schedule_store = ctx.schedule_store
         self._schedule_gen = ctx.schedule_gen
+        self._timeline = ctx.timeline
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:
         if not ctx.schedule_enabled or self._schedule_gen is None:
@@ -70,16 +72,21 @@ class SchedulePlugin(AmadeusPlugin):
     async def on_pre_prompt(self, ctx: PromptContext) -> None:
         if self._mood_engine is None or self._schedule_store is None:
             return
+        recent_count = 0
+        if ctx.group_id is not None and self._timeline is not None:
+            recent_count = self._timeline.recent_interaction_count(str(ctx.group_id), window_s=60.0)
         text = self._mood_engine.build_mood_block(
             self._schedule_store.current,
+            recent_interaction_count=recent_count,
+            group_id=ctx.group_id,
+            session_id=ctx.session_id,
         )
         if text:
-            profile = self._mood_engine._cache
+            profile = self._mood_engine.cached_profile(group_id=ctx.group_id, session_id=ctx.session_id)
             if profile is not None:
-                p, _ = profile
                 _L.info(
                     "label={} energy={:.2f} valence={:+.2f} openness={:.2f} tension={:.2f}{}",
-                    p.label, p.energy, p.valence, p.openness, p.tension,
-                    f" anomaly={p.anomaly_reason!r}" if p.anomaly_reason else "",
+                    profile.label, profile.energy, profile.valence, profile.openness, profile.tension,
+                    f" anomaly={profile.anomaly_reason!r}" if profile.anomaly_reason else "",
                 )
             ctx.add_block(text=text, label="当前时间", position="dynamic", priority=10, source="schedule")

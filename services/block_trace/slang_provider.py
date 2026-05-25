@@ -58,6 +58,7 @@ class SlangProvider:
                 conversation_text=ctx.conversation_text,
                 max_terms=settings.max_injected_terms,
                 max_chars=settings.max_prompt_chars,
+                mood_fit_target=ctx.mood_fit_target,
             )
         else:
             block = await store.build_prompt_block(
@@ -65,6 +66,7 @@ class SlangProvider:
                 conversation_text=ctx.conversation_text,
                 max_terms=settings.max_injected_terms,
                 max_chars=settings.max_prompt_chars,
+                mood_fit_target=ctx.mood_fit_target,
             )
         if not block:
             return []

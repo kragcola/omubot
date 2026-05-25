@@ -161,6 +161,31 @@ class SemanticGateResult:
         )
 
 
+@dataclass(frozen=True)
+class SemanticGateThreshold:
+    """Effective threshold and audit data for semantic gate consumption."""
+
+    fixed_threshold: float
+    effective_threshold: float
+    dynamic_enabled: bool
+    familiarity: float | None = None
+    mood_energy: float | None = None
+    adjustments: tuple[str, ...] = ()
+
+    def log_fields(self) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "fixed_threshold": round(self.fixed_threshold, 3),
+            "effective_threshold": round(self.effective_threshold, 3),
+            "dynamic_enabled": self.dynamic_enabled,
+            "threshold_adjustments": list(self.adjustments),
+        }
+        if self.familiarity is not None:
+            fields["familiarity"] = round(self.familiarity, 3)
+        if self.mood_energy is not None:
+            fields["mood_energy"] = round(self.mood_energy, 3)
+        return fields
+
+
 def is_shadow_mode(config: object | None) -> bool:
     """Return whether reply workflow observation should run."""
     return getattr(config, "mode", "shadow") == "shadow"
@@ -243,11 +268,69 @@ def should_consume_semantic_gate(result: SemanticGateResult | None, *, threshold
     return result.action == "force_reply" and result.confidence >= threshold
 
 
+def semantic_gate_threshold(
+    *,
+    fixed_threshold: float,
+    dynamic_enabled: bool,
+    familiarity: float | None = None,
+    mood_energy: float | None = None,
+    min_threshold: float = 0.6,
+    max_threshold: float = 0.85,
+) -> SemanticGateThreshold:
+    """Compute the effective semantic gate threshold.
+
+    Dynamic mode is deliberately small and bounded: closer users can continue
+    a recent bot reply a bit more easily, while low-energy mood makes the bot
+    slightly less eager to jump back in.
+    """
+    fixed = _coerce_confidence(fixed_threshold)
+    familiarity_value = _optional_confidence(familiarity)
+    mood_energy_value = _optional_confidence(mood_energy)
+    if not dynamic_enabled:
+        return SemanticGateThreshold(
+            fixed_threshold=fixed,
+            effective_threshold=fixed,
+            dynamic_enabled=False,
+            familiarity=familiarity_value,
+            mood_energy=mood_energy_value,
+        )
+
+    threshold = fixed
+    adjustments: list[str] = []
+    if familiarity_value is not None and familiarity_value > 0.6:
+        threshold -= 0.1
+        adjustments.append("familiarity_high:-0.10")
+    if mood_energy_value is not None and mood_energy_value < 0.3:
+        threshold += 0.05
+        adjustments.append("mood_low:+0.05")
+    effective = max(min_threshold, min(max_threshold, threshold))
+    if effective != threshold:
+        adjustments.append("clamped")
+    return SemanticGateThreshold(
+        fixed_threshold=fixed,
+        effective_threshold=round(effective, 4),
+        dynamic_enabled=True,
+        familiarity=familiarity_value,
+        mood_energy=mood_energy_value,
+        adjustments=tuple(adjustments),
+    )
+
+
 def _coerce_confidence(value: Any) -> float:
     try:
         raw = float(value)
     except (TypeError, ValueError):
         raw = 0.0
+    return max(0.0, min(1.0, raw))
+
+
+def _optional_confidence(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        return None
     return max(0.0, min(1.0, raw))
 
 

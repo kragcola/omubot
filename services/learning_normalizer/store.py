@@ -22,7 +22,7 @@ from services.learning_normalizer.normalize import (
 from services.storage import close_with_checkpoint, connect_sqlite
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
-NormalizerDomain = Literal["slang", "style", "general"]
+NormalizerDomain = Literal["slang", "style", "general", "catchphrase"]
 NormalizerScope = Literal["group", "global"]
 
 _DEFAULT_DB_PATH = "storage/learning_normalizer.db"
@@ -162,6 +162,18 @@ class LearningNormalizerRevision:
 
 
 @dataclass(slots=True)
+class LearningNormalizerPromptCandidate:
+    cluster_id: str
+    canonical_text: str
+    domain: str
+    scope: str
+    group_id: str
+    confidence: float
+    item_count: int
+    updated_at: str
+
+
+@dataclass(slots=True)
 class NormalizationResult:
     cluster_id: str
     item_id: str
@@ -260,7 +272,7 @@ class LearningNormalizerStore:
         meta: dict[str, Any] | None = None,
     ) -> NormalizationResult:
         """Attach a source candidate to an existing or new cluster."""
-        profile = profile or ("style" if domain == "style" else "slang")
+        profile = profile or _default_profile_for_domain(domain)
         raw = str(raw_text or "").strip()
         key = normalize_key(raw, profile)
         if not key:
@@ -400,6 +412,133 @@ class LearningNormalizerStore:
         )
         return [_row_to_cluster(row) for row in await cursor.fetchall()], int(total_row["cnt"] if total_row else 0)
 
+    async def reuse_stats(
+        self,
+        *,
+        domain: str,
+        scope: str = "",
+        group_id: str = "",
+    ) -> dict[str, Any]:
+        """Return coarse reuse metrics for a normalizer domain."""
+        db = self._require_db()
+        cluster_where: list[str] = ["domain = ?"]
+        cluster_values: list[Any] = [domain]
+        item_where: list[str] = ["domain = ?"]
+        item_values: list[Any] = [domain]
+        revision_where: list[str] = ["r.action = ?", "i.domain = ?"]
+        revision_values: list[Any] = ["auto_merge", domain]
+        if scope:
+            cluster_where.append("scope = ?")
+            cluster_values.append(scope)
+            item_where.append("scope = ?")
+            item_values.append(scope)
+            revision_where.append("i.scope = ?")
+            revision_values.append(scope)
+        if group_id:
+            cluster_where.append("group_id = ?")
+            cluster_values.append(group_id)
+            item_where.append("group_id = ?")
+            item_values.append(group_id)
+            revision_where.append("i.group_id = ?")
+            revision_values.append(group_id)
+        cluster_sql = f"WHERE {' AND '.join(cluster_where)}"
+        item_sql = f"WHERE {' AND '.join(item_where)}"
+        revision_sql = f"WHERE {' AND '.join(revision_where)}"
+        cluster_row = await (
+            await db.execute(
+                f"SELECT COUNT(*) AS cnt FROM learning_normalizer_clusters {cluster_sql}",
+                cluster_values,
+            )
+        ).fetchone()
+        item_row = await (
+            await db.execute(
+                f"""SELECT COUNT(*) AS item_rows, COALESCE(SUM(count), 0) AS total_items
+                    FROM learning_normalizer_items {item_sql}""",
+                item_values,
+            )
+        ).fetchone()
+        revision_row = await (
+            await db.execute(
+                f"""SELECT COUNT(*) AS auto_merged_items
+                    FROM learning_normalizer_revisions r
+                    JOIN learning_normalizer_items i ON i.item_id = r.item_id
+                    {revision_sql}""",
+                revision_values,
+            )
+        ).fetchone()
+        cluster_count = int(cluster_row["cnt"] if cluster_row else 0)
+        item_rows = int(item_row["item_rows"] if item_row else 0)
+        total_items = int(item_row["total_items"] if item_row else 0)
+        auto_merged_items = int(revision_row["auto_merged_items"] if revision_row else 0)
+        reused_items = max(0, item_rows - cluster_count)
+        return {
+            "domain": domain,
+            "scope": scope,
+            "group_id": group_id,
+            "cluster_count": cluster_count,
+            "item_rows": item_rows,
+            "total_items": total_items,
+            "auto_merged_items": auto_merged_items,
+            "reused_items": reused_items,
+            "reuse_rate": round(reused_items / item_rows, 4) if item_rows else 0.0,
+        }
+
+    async def list_prompt_candidates(
+        self,
+        *,
+        domain: str,
+        group_id: str,
+        limit: int = 8,
+        exclude_cluster_ids: list[str] | tuple[str, ...] = (),
+    ) -> list[LearningNormalizerPromptCandidate]:
+        """Return normalized clusters that may be surfaced in prompt blocks."""
+        gid = str(group_id or "").strip()
+        if not gid:
+            return []
+        db = self._require_db()
+        excluded = {str(item).strip() for item in exclude_cluster_ids if str(item).strip()}
+        cursor = await db.execute(
+            """SELECT * FROM learning_normalizer_clusters
+               WHERE domain = ? AND status IN ('active', 'locked')
+                 AND (scope = 'global' OR (scope = 'group' AND group_id = ?) OR cross_group_visible = 1)
+               ORDER BY
+                 CASE WHEN scope = 'group' AND group_id = ? THEN 0 ELSE 1 END,
+                 item_count DESC,
+                 confidence DESC,
+                 updated_at DESC
+               LIMIT ?""",
+            (domain, gid, gid, max(1, min(int(limit or 8) * 4, 80))),
+        )
+        candidates: list[LearningNormalizerPromptCandidate] = []
+        for row in await cursor.fetchall():
+            cluster = _row_to_cluster(row)
+            if cluster.cluster_id in excluded:
+                continue
+            if cluster.scope == "group" and cluster.group_id != gid and not cluster.cross_group_visible:
+                continue
+            if (
+                cluster.cross_group_visible
+                and cluster.cross_group_enabled_for_groups
+                and gid not in {str(item) for item in cluster.cross_group_enabled_for_groups}
+            ):
+                continue
+            text = str(cluster.canonical_text or "").strip()
+            if not text:
+                continue
+            candidates.append(LearningNormalizerPromptCandidate(
+                cluster_id=cluster.cluster_id,
+                canonical_text=text,
+                domain=cluster.domain,
+                scope=cluster.scope,
+                group_id=cluster.group_id,
+                confidence=cluster.confidence,
+                item_count=cluster.item_count,
+                updated_at=cluster.updated_at,
+            ))
+            if len(candidates) >= max(1, min(int(limit or 8), 20)):
+                break
+        return candidates
+
     async def list_cluster_items(self, cluster_id: str, *, limit: int = 100) -> list[LearningNormalizerItem]:
         db = self._require_db()
         cursor = await db.execute(
@@ -457,7 +596,7 @@ class LearningNormalizerStore:
         if cluster is None:
             return False
         profile = str(cluster.meta.get("profile") or cluster.domain)
-        if profile not in {"general", "slang", "style"}:
+        if profile not in {"general", "slang", "style", "catchphrase"}:
             profile = "general"
         canonical = str(canonical_text or "").strip()
         key = normalize_key(canonical, profile)  # type: ignore[arg-type]
@@ -948,6 +1087,16 @@ async def get_default_store() -> LearningNormalizerStore:
     if not _DEFAULT_STORE.initialized:
         await _DEFAULT_STORE.init()
     return _DEFAULT_STORE
+
+
+def _default_profile_for_domain(domain: str) -> NormalizationProfile:
+    if domain == "style":
+        return "style"
+    if domain == "catchphrase":
+        return "catchphrase"
+    if domain == "general":
+        return "general"
+    return "slang"
 
 
 def _allows_fuzzy(left_key: str, right_key: str, method: str, score: float) -> bool:

@@ -53,11 +53,6 @@ export const CONFIG_SECTION_LABELS: Record<string, ConfigSectionLabel> = {
     title: '回复分段',
     description: '控制长回复如何切段、排队和逐段发出。',
   },
-  scheduler_concurrency: {
-    eyebrow: 'Scheduler',
-    title: '调度并发',
-    description: '多群同时触发时的并发上限和队列保护。',
-  },
   napcat: {
     eyebrow: 'Connection',
     title: 'NapCat 协议端',
@@ -92,7 +87,6 @@ export function bucketForPath(path: string): string {
   if (path.startsWith('anti_detect.')) return 'anti_detect'
   if (path.startsWith('thinker.')) return 'thinker'
   if (path.startsWith('reply_segmentation.')) return 'reply_segmentation'
-  if (path.startsWith('scheduler.concurrency.')) return 'scheduler_concurrency'
   if (path.startsWith('napcat.')) return 'napcat'
   if (path.startsWith('vision.')) return 'vision'
   if (path === 'admins' || path === 'admin_token') return 'access'

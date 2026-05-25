@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 
 from services.block_trace.budget_manager import PromptBudgetManager
+from services.block_trace.llm_call_trace import record_llm_call_trace
 from services.block_trace.store import BlockTraceStore
-from services.block_trace.types import PromptBlockCandidate, PromptBlockTrace
+from services.block_trace.types import BudgetDecision, PromptBlockCandidate, PromptBlockTrace
 from services.episodic.store import _phase_b_unlocked
 
 
@@ -22,7 +23,7 @@ def _make_trace(
     *,
     request_id: str = "req_1",
     source: str = "slang",
-    decision: str = "accepted",
+    decision: BudgetDecision = "accepted",
     label: str = "群内黑话",
     candidate_id: str = "pbc_aaa",
     priority: int = 40,
@@ -69,6 +70,55 @@ async def test_record_and_list_for_request(store: BlockTraceStore) -> None:
     result = await store.list_for_request("req_A")
     assert len(result) == 2
     assert all(r.request_id == "req_A" for r in result)
+
+
+async def test_record_llm_call_trace_links_semantic_gate_and_thinker(
+    store: BlockTraceStore,
+) -> None:
+    request_id = "u13_double_haiku:group_100:msg_42"
+
+    await record_llm_call_trace(
+        store,
+        request_id=request_id,
+        task="reply_gate",
+        provider="semantic_gate",
+        session_id="group_100",
+        group_id="100",
+        user_id="200",
+        event_id="42",
+        metadata={"candidate_reason": "short_contextual_candidate"},
+    )
+    await record_llm_call_trace(
+        store,
+        request_id=request_id,
+        task="thinker",
+        provider="thinker",
+        session_id="group_100",
+        group_id="100",
+        user_id="200",
+        turn_id="group_100:123456",
+        metadata={"action": "speak", "source": "pre_reply_thinker"},
+    )
+
+    traces = await store.list_for_request(request_id)
+
+    assert {trace.provider for trace in traces} == {"semantic_gate", "thinker"}
+    assert {trace.decision for trace in traces} == {"shadow_only"}
+    assert {trace.metadata["session_id"] for trace in traces} == {"group_100"}
+    assert traces[0].metadata["observer"] == "u13_double_haiku_trace"
+
+
+async def test_record_llm_call_trace_is_fail_soft() -> None:
+    class _BrokenStore:
+        async def record(self, _trace: PromptBlockTrace) -> None:
+            raise RuntimeError("boom")
+
+    await record_llm_call_trace(
+        _BrokenStore(),
+        request_id="u13_double_haiku:broken",
+        task="thinker",
+        provider="thinker",
+    )
 
 
 async def test_record_batch(store: BlockTraceStore) -> None:

@@ -1,13 +1,19 @@
 """Sticker tools: save, send, and manage stickers in the library."""
 
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
+from services.humanization import STICKER_RECENT_USED_SLOT, humanization_source
 from services.media.sticker_store import StickerStore
+from services.system_module import Scope
 from services.tools.base import Tool
 from services.tools.context import ToolContext
+
+_RECENT_STICKER_LIMIT = 12
+_RECENT_STICKER_TTL = timedelta(minutes=30)
 
 
 class SaveStickerTool(Tool):
@@ -181,8 +187,9 @@ class ManageStickerTool(Tool):
 class SendStickerTool(Tool):
     """Send a sticker from the library as a standalone image message."""
 
-    def __init__(self, store: StickerStore) -> None:
+    def __init__(self, store: StickerStore, runtime_state: Any = None) -> None:
         self._store = store
+        self._runtime_state = runtime_state
 
     @property
     def name(self) -> str:
@@ -244,5 +251,47 @@ class SendStickerTool(Tool):
             return f"发送失败: {sticker_id}"
 
         self._store.record_send(sticker_id)
+        self._record_recent_sticker(ctx, sticker_id)
         logger.info("[send_sticker ok] id={}", sticker_id)
         return f"已发送 {sticker_id}"
+
+    def _record_recent_sticker(self, ctx: ToolContext, sticker_id: str) -> None:
+        if self._runtime_state is None:
+            return
+        session_id = ctx.session_id or (f"group_{ctx.group_id}" if ctx.group_id else f"private_{ctx.user_id}")
+        if not session_id:
+            return
+        scope = Scope(session_id=session_id, group_id=ctx.group_id, user_id=ctx.user_id)
+        existing: list[str] = []
+        try:
+            snapshot = self._runtime_state.get(STICKER_RECENT_USED_SLOT, scope=scope)
+            value = getattr(snapshot, "value", None)
+            raw_items = value.get("sticker_ids", []) if isinstance(value, dict) else []
+            if isinstance(raw_items, list):
+                existing = [str(item).strip() for item in raw_items if str(item).strip()]
+        except Exception:
+            existing = []
+        merged = [sticker_id, *existing]
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in merged:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+            if len(deduped) >= _RECENT_STICKER_LIMIT:
+                break
+        try:
+            self._runtime_state.set(
+                STICKER_RECENT_USED_SLOT,
+                {
+                    "sticker_ids": deduped,
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                },
+                scope=scope,
+                source=humanization_source("send_sticker:recent_used"),
+                confidence=1.0,
+                decay_at=datetime.now() + _RECENT_STICKER_TTL,
+            )
+        except Exception:
+            logger.debug("send_sticker recent-state write skipped | id={}", sticker_id)

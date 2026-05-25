@@ -860,68 +860,6 @@ class ReplySegmentationConfig(BaseModel):
     )
 
 
-class SchedulerConcurrencyConfig(BaseModel):
-    """群聊调度器并发配置。"""
-
-    global_llm_limit: int = Field(
-        default=2,
-        description="全局同时进行的群聊 LLM 调用数。",
-        json_schema_extra={
-            "display_label": "全局生成并发",
-            "help": "限制所有群同时进行的 LLM 生成数量，避免多群同时触发把模型打满。",
-            "recommended": "2 起步，稳定后再调高",
-            "risk_level": "careful",
-            "restart_hint": "recommended",
-        },
-    )
-    max_group_queue: int = Field(
-        default=8,
-        description="单群队列软上限预留配置。",
-        json_schema_extra={
-            "display_label": "单群队列上限",
-            "help": "预留给后续 actor 化调度使用；当前保留为运行参数，不建议频繁调整。",
-            "recommended": "8",
-            "restart_hint": "recommended",
-        },
-    )
-    max_low_priority_queue: int = Field(
-        default=3,
-        description="低优先级队列软上限预留配置。",
-        json_schema_extra={
-            "display_label": "低优先级队列上限",
-            "help": "预留给低优先级自然插话队列使用，强触发不会按这个值直接丢弃。",
-            "recommended": "3",
-            "restart_hint": "recommended",
-        },
-    )
-    first_segment_release: bool = Field(
-        default=False,
-        description="首段发送后释放下一轮生成的实验开关。",
-        json_schema_extra={
-            "display_label": "首段后释放生成",
-            "help": "实验项。开启后首段发出即可处理下一轮触发，但更容易让贴纸和尾段交错。",
-            "risk_level": "danger",
-            "restart_hint": "recommended",
-        },
-    )
-    drop_stale_low_priority_after_s: float = Field(
-        default=45.0,
-        description="低优先级事件过期秒数预留配置。",
-        json_schema_extra={
-            "display_label": "低优先级过期秒数",
-            "help": "预留给自然插话过期控制使用；时间过长会让旧话题更容易滞后触发。",
-            "recommended": "30 - 60 秒",
-            "restart_hint": "recommended",
-        },
-    )
-
-
-class SchedulerConfig(BaseModel):
-    """群聊调度器运行时配置。"""
-
-    concurrency: SchedulerConcurrencyConfig = SchedulerConcurrencyConfig()
-
-
 ReplyWorkflowMode = Literal["off", "shadow", "semantic", "rules"]
 
 
@@ -1073,6 +1011,99 @@ class PersonaV2Config(BaseModel):
         return normalized
 
 
+class HumanizationConfig(BaseModel):
+    """Part 1 humanization rollout flags.
+
+    All flags default off so adding the config section is behavior-neutral.
+    """
+
+    context_providers: bool = Field(
+        default=False,
+        description="Enable humanization PromptBlock providers.",
+        json_schema_extra={
+            "display_label": "启用拟人上下文 Provider",
+            "help": "开启后才允许拟人 register/catchphrase/sticker/thinker Provider 进入 PromptBlock 管线。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    register_classifier: bool = Field(
+        default=False,
+        description="Enable register classification worker.",
+        json_schema_extra={
+            "display_label": "启用语域分类",
+            "help": "开启后按最近对话窗口判断当前回复语域，并写入 humanization runtime state。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    sticker_register_provider: bool = Field(
+        default=False,
+        description="Enable sticker register PromptBlock provider.",
+        json_schema_extra={
+            "display_label": "启用表情包语域 Provider",
+            "help": "开启后按近期表情包使用记录为回复提供表情包语域提示。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    thinker_provider: bool = Field(
+        default=False,
+        description="Enable thinker decision PromptBlock provider.",
+        json_schema_extra={
+            "display_label": "启用 Thinker Provider",
+            "help": "开启后 thinker 决策可通过 PromptBlock 管线注入；关闭时保留旧旁路行为。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rewrite_threshold: float = Field(
+        default=-1.0,
+        description="Humanization rewrite score threshold; negative disables rewrite loop.",
+        json_schema_extra={
+            "display_label": "拟人重写阈值",
+            "help": "小于 0 表示关闭二次重写；灰度时再设为 0.0 - 1.0。",
+            "recommended": "-1.0 / 0.4",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    semantic_gate_dynamic: bool = Field(
+        default=False,
+        description="Enable dynamic semantic gate threshold.",
+        json_schema_extra={
+            "display_label": "启用动态语义 Gate",
+            "help": "开启后 semantic gate 阈值可按好感度和 mood 动态调整；关闭时使用 reply_workflow 固定阈值。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    runtime_groups: list[str] = Field(
+        default_factory=list,
+        description="Group ids where humanization runtime features may run; empty means all groups when flags are on.",
+        json_schema_extra={
+            "display_label": "拟人化灰度群",
+            "help": "非空时仅这些群允许拟人化 Provider、语域分类和 rewrite 生效；空列表表示开关开启后不限制群。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+
+    @field_validator("runtime_groups", mode="before")
+    @classmethod
+    def _coerce_runtime_groups(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise TypeError("runtime_groups must be a list")
+        normalized: list[str] = []
+        for raw in value:
+            text = str(raw).strip()
+            if text:
+                normalized.append(text)
+        return normalized
+
+
 # ============================================================================
 # 根配置
 # ============================================================================
@@ -1088,7 +1119,6 @@ class BotConfig(BaseModel):
     anti_detect: AntiDetectConfig = AntiDetectConfig()
     reply_segmentation: ReplySegmentationConfig = ReplySegmentationConfig()
     reply_workflow: ReplyWorkflowConfig = ReplyWorkflowConfig()
-    scheduler: SchedulerConfig = SchedulerConfig()
     llm: LLMConfig = LLMConfig()
     log: LogConfig = LogConfig()
     compact: CompactConfig = CompactConfig()
@@ -1100,6 +1130,7 @@ class BotConfig(BaseModel):
     thinker: ThinkerConfig = ThinkerConfig()
     backup: BackupConfig = Field(default_factory=BackupConfig)
     persona_v2: PersonaV2Config = Field(default_factory=PersonaV2Config)
+    humanization: HumanizationConfig = Field(default_factory=HumanizationConfig)
 
     # 管理员 & 白名单
     admins: dict[str, str] = {}

@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from rapidfuzz import fuzz
 
-NormalizationProfile = Literal["general", "slang", "style"]
+NormalizationProfile = Literal["general", "slang", "style", "catchphrase"]
 
 _URL_RE = re.compile(r"https?://\S+")
 _MD_LINK_RE = re.compile(r"\[[^\]]+\]\([^)]+\)")
@@ -55,7 +55,7 @@ class NormalizationScore:
 def normalize_key(value: str, profile: NormalizationProfile = "general") -> str:
     """Return a stable key for learning-time dedupe and fuzzy matching."""
     text = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
-    if profile in {"general", "slang"}:
+    if profile in {"general", "slang", "catchphrase"}:
         text = _URL_RE.sub("", text)
         text = _MD_LINK_RE.sub("", text)
         text = _LEADING_MARKUP_RE.sub("", text)
@@ -121,7 +121,7 @@ def score_similarity(left: str, right: str, profile: NormalizationProfile = "gen
 
 def _strip_for_profile(value: str, profile: NormalizationProfile) -> str:
     text = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
-    if profile in {"general", "slang"}:
+    if profile in {"general", "slang", "catchphrase"}:
         text = _URL_RE.sub("", text)
         text = _MD_LINK_RE.sub("", text)
         text = _LEADING_MARKUP_RE.sub("", text)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .models import ModuleContract, Scope, SourceRef, StateSlotDefinition
@@ -71,7 +71,12 @@ class RuntimeStateBus:
         slot = self._slot_defs.get(slot_id)
         if slot is None:
             return None
-        return self._values.get((slot_id, scope.key(slot.ttl)))
+        key = (slot_id, scope.key(slot.ttl))
+        snapshot = self._values.get(key)
+        if snapshot is not None and self._is_expired(snapshot):
+            self._values.pop(key, None)
+            return None
+        return snapshot
 
     def set(
         self,
@@ -116,8 +121,31 @@ class RuntimeStateBus:
         for key in keys_to_delete:
             self._values.pop(key, None)
 
+    def clear_expired(self) -> int:
+        keys_to_delete = [key for key, snapshot in self._values.items() if self._is_expired(snapshot)]
+        for key in keys_to_delete:
+            self._values.pop(key, None)
+        return len(keys_to_delete)
+
+    def clear_stale_per_session(self, *, max_age: timedelta, now: datetime | None = None) -> int:
+        cutoff = (now or datetime.now()) - max_age
+        keys_to_delete = []
+        for key, snapshot in self._values.items():
+            slot_id, _scope_key = key
+            slot = self._slot_defs[slot_id]
+            if slot.ttl == "per_session" and snapshot.updated_at <= cutoff:
+                keys_to_delete.append(key)
+        for key in keys_to_delete:
+            self._values.pop(key, None)
+        return len(keys_to_delete)
+
     def snapshot_all_for_trace(self) -> dict[str, dict[str, Any]]:
+        self.clear_expired()
         return {
             f"{slot_id}:{index}": snapshot.to_dict()
             for index, ((slot_id, _scope_key), snapshot) in enumerate(sorted(self._values.items()))
         }
+
+    @staticmethod
+    def _is_expired(snapshot: SlotSnapshot) -> bool:
+        return snapshot.decay_at is not None and snapshot.decay_at <= datetime.now()

@@ -11,6 +11,7 @@ from services.learning_normalizer.normalize import (
 from services.learning_normalizer.store import (
     LearningNormalizerCluster,
     LearningNormalizerItem,
+    LearningNormalizerPromptCandidate,
     LearningNormalizerRevision,
     LearningNormalizerStore,
     NormalizationResult,
@@ -20,6 +21,7 @@ from services.learning_normalizer.store import (
 __all__ = [
     "LearningNormalizerCluster",
     "LearningNormalizerItem",
+    "LearningNormalizerPromptCandidate",
     "LearningNormalizerRevision",
     "LearningNormalizerStore",
     "NormalizationProfile",

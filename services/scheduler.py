@@ -12,8 +12,11 @@ from loguru import logger
 
 from kernel.config import GroupConfig
 from kernel.types import TriggerContext
+from services.humanization import CLOCK_CURRENT_SLOT, REGISTER_LABEL_SLOT
 from services.llm.client import RATE_LIMIT_BASE_DELAY, RATE_LIMIT_MAX_RETRIES, RateLimitError
 from services.memory.timeline import GroupTimeline
+from services.runtime_clock import now_cst
+from services.system_module import Scope
 from services.tools.context import ToolContext
 
 if TYPE_CHECKING:
@@ -52,8 +55,9 @@ class GroupChatScheduler:
         identity_mgr: IdentityManager,
         group_config: GroupConfig,
         humanizer: Any = None,
-        mood_getter: Callable[[], Any] | None = None,
+        mood_getter: Callable[..., Any] | None = None,
         talk_schedule: Any = None,
+        runtime_state: Any = None,
     ) -> None:
         self._llm = llm
         self._timeline = timeline
@@ -62,6 +66,7 @@ class GroupChatScheduler:
         self._humanizer = humanizer
         self._mood_getter = mood_getter
         self._talk_schedule = talk_schedule
+        self._runtime_state = runtime_state
         self._slots: dict[str, _GroupSlot] = {}
         self._bot: Bot | None = None
         self._muted_groups: set[str] = set()
@@ -176,8 +181,10 @@ class GroupChatScheduler:
         # Use bilibili-specific talk_value when a video trigger is present.
         is_video_prob = trigger is not None and trigger.mode in ("video_dedicated", "video_autonomous")
         if is_video_prob:
-            base_talk_value = float(trigger.extra.get("bilibili_talk_value", resolved.talk_value))
+            trigger_extra = trigger.extra if trigger is not None else {}
+            base_talk_value = float(trigger_extra.get("bilibili_talk_value", resolved.talk_value))
         else:
+            trigger_extra = {}
             base_talk_value = resolved.talk_value
 
         threshold = base_talk_value
@@ -192,19 +199,19 @@ class GroupChatScheduler:
         # Skip when consecutive_skip >= 5 so the forced-reply guarantee holds.
         is_autonomous = trigger is not None and trigger.mode == "video_autonomous"
         if is_autonomous and slot.consecutive_skip < 5:
-            interest_score = float(trigger.extra.get("interest_score", 0.3))
+            interest_score = float(trigger_extra.get("interest_score", 0.3))
             # Blend so interest acts as a floor: 0.1 + 0.9×interest maps
             # 0.05→0.145, 0.55→0.595, 0.85→0.865, 1.0→1.0
             threshold = base_talk_value * (0.1 + 0.9 * interest_score)
 
         # Mood-adjusted probability — good mood boosts, bad mood suppresses.
-        mood_mult = self._get_mood_multiplier()
+        mood_mult = self._get_mood_multiplier(group_id)
         # Time-slot multiplier — capped at 0.7 globally.
         # High-interest videos (score >= 0.6) get a floor of 0.7 so the
         # bot can still reply during off hours, but never exceed the cap.
         time_mult = self._talk_schedule.get_time_multiplier() if self._talk_schedule else 1.0
         if is_autonomous:
-            interest_score = float(trigger.extra.get("interest_score", 0.3))
+            interest_score = float(trigger_extra.get("interest_score", 0.3))
             if interest_score >= 0.6:
                 time_mult = max(time_mult, 0.7)
         threshold = min(1.0, threshold * mood_mult * time_mult)
@@ -278,16 +285,14 @@ class GroupChatScheduler:
     # Internal
     # ------------------------------------------------------------------
 
-    def _get_mood_multiplier(self) -> float:
+    def _get_mood_multiplier(self, group_id: str) -> float:
         """Compute a mood multiplier for talk_value.
 
         Good mood (high energy, positive valence, high openness) → >1.0 boost.
         Bad mood (low energy, negative valence, low openness) → <1.0 suppression.
         Range: [0.25, 2.0]. Returns 1.0 when no mood_getter is configured.
         """
-        if self._mood_getter is None:
-            return 1.0
-        profile = self._mood_getter()
+        profile = self._get_current_mood(group_id)
         if profile is None:
             return 1.0
         happy = (getattr(profile, "valence", 0.0) + 1.0) / 2.0
@@ -297,6 +302,71 @@ class GroupChatScheduler:
             + 0.3 * happy
         )
         return 0.25 + 1.75 * mood_factor
+
+    def _get_current_mood(self, group_id: str) -> Any:
+        if self._mood_getter is None:
+            return None
+        try:
+            return self._mood_getter(group_id=group_id, session_id=f"group_{group_id}")
+        except TypeError:
+            return self._mood_getter()
+
+    def _runtime_scope(self, group_id: str, *, turn_id: str = "") -> Scope:
+        slot = self._slots.get(group_id)
+        return Scope(
+            session_id=f"group_{group_id}",
+            group_id=group_id,
+            user_id=slot.last_user_id if slot else "",
+            turn_id=turn_id,
+        )
+
+    def _runtime_state_value(self, slot_id: str, scope: Scope) -> Any:
+        if self._runtime_state is None:
+            return None
+        try:
+            snapshot = self._runtime_state.get(slot_id, scope=scope)
+        except Exception as exc:
+            _L.debug("scheduler runtime_state read failed | slot={} err={}", slot_id, exc)
+            return None
+        return snapshot.value if snapshot is not None else None
+
+    def _current_register(self, group_id: str) -> Any:
+        return self._runtime_state_value(
+            REGISTER_LABEL_SLOT,
+            self._runtime_scope(group_id),
+        )
+
+    def _current_slot_payload(self, group_id: str) -> Any:
+        value = self._runtime_state_value(
+            CLOCK_CURRENT_SLOT,
+            self._runtime_scope(group_id),
+        )
+        if value is not None:
+            return value
+        current_slot = getattr(self._talk_schedule, "current_slot", None)
+        if not callable(current_slot):
+            return None
+        try:
+            slot = current_slot(now_cst())
+        except Exception as exc:
+            _L.debug("scheduler talk_schedule slot read failed | group={} err={}", group_id, exc)
+            return None
+        if slot is None:
+            return None
+        return {
+            "slot_time": str(getattr(slot, "time", "") or ""),
+            "slot_activity": str(getattr(slot, "activity", "") or ""),
+            "slot_mood_hint": str(getattr(slot, "mood_hint", "") or ""),
+            "energy": getattr(slot, "energy", 1.0),
+        }
+
+    def _humanizer_runtime(self, group_id: str) -> dict[str, Any]:
+        return {
+            "group_id": group_id,
+            "register": self._current_register(group_id),
+            "slot": self._current_slot_payload(group_id),
+            "mood": self._get_current_mood(group_id),
+        }
 
     def _fire(self, group_id: str) -> None:
         slot = self._slots.get(group_id)
@@ -332,7 +402,7 @@ class GroupChatScheduler:
             try:
                 t_send = time.monotonic()
                 if self._humanizer is not None and humanize != "skip":
-                    await self._humanizer.delay(text)
+                    await self._humanizer.delay(text, **self._humanizer_runtime(group_id))
                 await self._bot.send_group_msg(group_id=int(group_id), message=Message(text))
                 elapsed = time.monotonic() - t_send
                 if elapsed >= 8.0:
@@ -362,11 +432,19 @@ class GroupChatScheduler:
                     identity = self._identity_mgr.resolve()
                     session_id = f"group_{group_id}"
                     uid = slot.last_user_id if slot else ""
-                    ctx = ToolContext(bot=self._bot, user_id=uid, group_id=group_id)
+                    ctx = ToolContext(
+                        bot=self._bot,
+                        user_id=uid,
+                        group_id=group_id,
+                        session_id=session_id,
+                    )
 
                     # Write trigger reason into the timeline so the LLM sees it
                     # in the pending buffer, not as transient user_content.
                     if trigger is not None:
+                        trace_request_id = str(trigger.extra.get("u13_double_haiku_request_id", "") or "")
+                        if trace_request_id:
+                            ctx.extra["u13_double_haiku_request_id"] = trace_request_id
                         self._timeline.add_pending_trigger(
                             group_id, reason=trigger.reason,
                             message_id=trigger.target_message_id,

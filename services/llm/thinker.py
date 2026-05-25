@@ -21,7 +21,9 @@ from typing import Any
 
 from loguru import logger
 
+from services.humanization import CLOCK_CURRENT_SLOT, THINKER_LAST_DECISION_SLOT, humanization_source
 from services.llm.llm_request import LLMRequest
+from services.system_module import Scope
 
 _L = logger.bind(channel="thinking")
 
@@ -317,12 +319,138 @@ def parse_think_output(text: str) -> ThinkDecision | None:
     return decision
 
 
+def write_thinker_decision_state(
+    bus: Any,
+    decision: ThinkDecision,
+    *,
+    session_id: str,
+    group_id: str | None,
+    user_id: str,
+    turn_id: str,
+) -> None:
+    """Write the latest thinker decision into RuntimeStateBus.
+
+    The plugin hook remains the extension surface; this state slot is the
+    production read path for later humanization providers.
+    """
+    if bus is None:
+        return
+    try:
+        bus.set(
+            THINKER_LAST_DECISION_SLOT,
+            {
+                "action": decision.action,
+                "thought": decision.thought,
+                "retrieve_mode": decision.retrieve_mode,
+                "rewritten_query": decision.rewritten_query,
+                "sticker": decision.sticker,
+                "tone": decision.tone,
+                "usage": dict(decision.usage),
+            },
+            scope=Scope(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=turn_id,
+            ),
+            source=humanization_source("thinker:last_decision"),
+            confidence=1.0,
+        )
+    except Exception as exc:
+        _L.warning("thinker runtime-state write failed: {}", exc)
+
+
+def build_thinker_time_text(features: dict[str, Any] | None) -> str:
+    """Render a compact runtime-clock block for the pre-reply thinker."""
+    if not features:
+        return ""
+    date = str(features.get("date", "") or "").strip()
+    hour = _coerce_int(features.get("hour"))
+    minute = _coerce_int(features.get("minute"))
+    weekday = str(features.get("weekday_cn", "") or "").strip()
+    if not date and hour is None and not weekday:
+        return ""
+
+    day_flags = ["节假日" if features.get("is_holiday") else "周末" if features.get("is_weekend") else "工作日"]
+    time_part = ""
+    if hour is not None:
+        time_part = f"{hour:02d}:{(minute or 0):02d}"
+    headline = " ".join(part for part in (date, time_part, weekday) if part)
+    lines = [f"【当前时间】{headline}（{'/'.join(day_flags)}）"]
+
+    slot_time = str(features.get("slot_time", "") or "").strip()
+    slot_activity = str(features.get("slot_activity", "") or "").strip()
+    slot_mood_hint = str(features.get("slot_mood_hint", "") or "").strip()
+    if slot_time or slot_activity or slot_mood_hint:
+        slot = " ".join(part for part in (slot_time, slot_activity) if part)
+        if slot_mood_hint:
+            slot = f"{slot}（心情提示：{slot_mood_hint}）" if slot else f"心情提示：{slot_mood_hint}"
+        lines.append(f"当前日程：{slot}")
+    return "\n".join(lines)
+
+
+def write_clock_state(
+    bus: Any,
+    features: dict[str, Any] | None,
+    *,
+    session_id: str,
+    group_id: str | None,
+    user_id: str,
+    turn_id: str,
+) -> None:
+    """Write the runtime clock snapshot for this thinker turn."""
+    if bus is None or not features:
+        return
+    value = _normalize_clock_features(features)
+    try:
+        bus.set(
+            CLOCK_CURRENT_SLOT,
+            value,
+            scope=Scope(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=turn_id,
+            ),
+            source=humanization_source("runtime_clock:current"),
+            confidence=1.0,
+        )
+    except Exception as exc:
+        _L.warning("clock runtime-state write failed: {}", exc)
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_clock_features(features: dict[str, Any]) -> dict[str, Any]:
+    hour = _coerce_int(features.get("hour"))
+    minute = _coerce_int(features.get("minute"))
+    weekday = _coerce_int(features.get("weekday"))
+    return {
+        "date": str(features.get("date", "") or ""),
+        "hour": hour if hour is not None else 0,
+        "minute": minute if minute is not None else 0,
+        "weekday": weekday if weekday is not None else 0,
+        "weekday_cn": str(features.get("weekday_cn", "") or ""),
+        "is_weekend": bool(features.get("is_weekend")),
+        "is_holiday": bool(features.get("is_holiday")),
+        "slot_time": str(features.get("slot_time", "") or ""),
+        "slot_activity": str(features.get("slot_activity", "") or ""),
+        "slot_mood_hint": str(features.get("slot_mood_hint", "") or ""),
+    }
+
+
 async def think(
     api_call: Any,
     recent_messages: list[dict[str, Any]],
     max_tokens: int = 256,
     mood_text: str = "",
     affection_text: str = "",
+    time_text: str = "",
     identity_name: str = "Bot",
     user_id: str = "",
     group_id: str | None = None,
@@ -337,6 +465,7 @@ async def think(
         max_tokens: Max tokens for the thinker call.
         mood_text: Current mood + schedule context (from MoodEngine).
         affection_text: Per-user relationship context (from AffectionEngine).
+        time_text: Current date/slot context (from runtime_clock).
         identity_name: The bot's name from its identity config.
         user_id: User id for usage attribution.
         group_id: Group id for usage attribution (None for private chat).
@@ -357,6 +486,8 @@ async def think(
     messages = [*recent_messages, {"role": "user", "content": user_msg}]
 
     dynamic_blocks: list[str] = []
+    if time_text:
+        dynamic_blocks.append(time_text)
     if mood_text:
         dynamic_blocks.append(mood_text)
     if affection_text:

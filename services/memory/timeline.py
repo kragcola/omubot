@@ -317,6 +317,13 @@ class GroupTimeline:
                         parts.append(b.get("text", ""))
         return " ".join(parts)
 
+    def recent_interaction_count(self, group_id: str, *, window_s: float = 60.0) -> int:
+        """Count finalized turns in a recent time window for mood adjustment."""
+        if group_id not in self._store:
+            return 0
+        cutoff = time.time() - max(0.0, window_s)
+        return sum(1 for ts in self._store[group_id].turn_times if ts >= cutoff)
+
     # ------------------------------------------------------------------
     # Summary & token management
     # ------------------------------------------------------------------

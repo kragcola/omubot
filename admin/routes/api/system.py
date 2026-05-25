@@ -406,14 +406,15 @@ def create_system_router(
         reload_ok = True
         reload_error = None
         try:
-            from bot import get_backup_scheduler
-            sched = get_backup_scheduler()
+            sched = getattr(ctx, "backup_scheduler", None) if ctx is not None else None
             if sched is not None:
                 sched.reload(
                     daily_time=new_config.daily_time,
                     keep_days=new_config.keep_days,
                     default_profile=new_config.default_profile,
                     enabled=new_config.enabled,
+                    quick_check_enabled=new_config.quick_check_enabled,
+                    quick_check_interval_minutes=new_config.quick_check_interval_minutes,
                 )
         except Exception as e:
             reload_ok = False

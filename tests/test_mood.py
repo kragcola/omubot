@@ -86,6 +86,22 @@ class TestMoodEngineEvaluate:
         p2 = engine.evaluate(schedule)
         assert p1 is p2  # Same object from cache
 
+    def test_cache_is_scoped_by_group_and_session(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        schedule = _make_schedule()
+        p1 = engine.evaluate(schedule, group_id="g1", session_id="group_g1")
+        p2 = engine.evaluate(schedule, group_id="g1", session_id="group_g1")
+        p3 = engine.evaluate(schedule, group_id="g2", session_id="group_g2")
+        assert p1 is p2
+        assert p3 is not p1
+
+    def test_cached_profile_reads_requested_key(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        schedule = _make_schedule()
+        p1 = engine.evaluate(schedule, group_id="g1", session_id="group_g1")
+        assert engine.cached_profile(group_id="g1", session_id="group_g1") is p1
+        assert engine.cached_profile(group_id="g2", session_id="group_g2") is None
+
     def test_anomaly_can_flip_label(self):
         random.seed(42)
         engine = MoodEngine(anomaly_chance=1.0)  # always anomaly
@@ -105,7 +121,7 @@ class TestMoodEngineEvaluate:
         schedule = _make_schedule()
         p_lonely = engine.evaluate(schedule, recent_interaction_count=0)
         # Force fresh evaluation
-        engine._cache = None
+        engine._cache.clear()
         p_busy = engine.evaluate(schedule, recent_interaction_count=10)
         # 0 interactions → openness boosted, >5 → energy penalty
         # We can't assert exact values due to random offset, but structure is valid
@@ -121,6 +137,12 @@ class TestMoodBlock:
         assert "【当前时间】" in block
         assert "【你当前的心情基调】" in block
         assert "【心情对说话的影响】" in block
+
+    def test_build_mood_block_writes_context_cache(self):
+        engine = MoodEngine(anomaly_chance=0.0)
+        schedule = _make_schedule()
+        engine.build_mood_block(schedule, group_id="g1", session_id="group_g1")
+        assert engine.cached_profile(group_id="g1", session_id="group_g1") is not None
 
     def test_build_mood_block_no_schedule(self):
         engine = MoodEngine(anomaly_chance=0.0)

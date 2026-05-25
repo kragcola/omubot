@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import random
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from plugins.schedule.calendar import get_day_context
 from plugins.schedule.calendar import get_self_name as _get_self_name
 from plugins.schedule.types import MoodProfile, Schedule
-
-CST = ZoneInfo("Asia/Shanghai")
+from services.runtime_clock import format_cn_datetime, now_cst
 
 # ------------------------------------------------------------------
 # Mood hint → base MoodProfile mapping
@@ -122,23 +119,49 @@ class MoodEngine:
     ) -> None:
         self._anomaly_chance = anomaly_chance
         self._refresh_s = refresh_minutes * 60
-        self._cache: tuple[MoodProfile, float] | None = None  # (profile, timestamp)
+        self._cache: dict[tuple[str, str], tuple[MoodProfile, float]] = {}
 
     def evaluate(
         self,
         schedule: Schedule | None,
         recent_interaction_count: int = 0,
+        *,
+        group_id: str | int | None = None,
+        session_id: str = "",
     ) -> MoodProfile:
         """Compute current mood. Results are cached for refresh_minutes."""
         now = time.monotonic()
-        if self._cache is not None:
-            cached_profile, cached_at = self._cache
+        if self._cache is None:  # backward-compatible with old tests that reset the cache directly
+            self._cache = {}
+        cache_key = self._cache_key(group_id=group_id, session_id=session_id)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            cached_profile, cached_at = cached
             if now - cached_at < self._refresh_s:
                 return cached_profile
 
         profile = self._compute(schedule, recent_interaction_count)
-        self._cache = (profile, now)
+        self._cache[cache_key] = (profile, now)
         return profile
+
+    def cached_profile(
+        self,
+        *,
+        group_id: str | int | None = None,
+        session_id: str = "",
+    ) -> MoodProfile | None:
+        """Return the cached profile for diagnostics without recomputing mood."""
+        if not self._cache:
+            return None
+        cached = self._cache.get(self._cache_key(group_id=group_id, session_id=session_id))
+        if cached is None:
+            return None
+        return cached[0]
+
+    @staticmethod
+    def _cache_key(*, group_id: str | int | None = None, session_id: str = "") -> tuple[str, str]:
+        group = "" if group_id is None else str(group_id)
+        return group, str(session_id or "")
 
     # ------------------------------------------------------------------
     # Internal
@@ -147,7 +170,7 @@ class MoodEngine:
     def _compute(self, schedule: Schedule | None, recent_interactions: int) -> MoodProfile:
         # 1. Get base mood from current schedule slot
         if schedule is not None:
-            now_dt = datetime.now(CST)
+            now_dt = now_cst()
             slot = schedule.current_slot(now_dt)
             if slot is not None:
                 profile = self._lookup_base(slot.mood_hint)
@@ -170,7 +193,7 @@ class MoodEngine:
         profile.tension += random.uniform(-0.15, 0.15)
 
         # 3. Time-of-day correction
-        now_dt = datetime.now(CST)
+        now_dt = now_cst()
         hour = now_dt.hour
         if hour >= 23 or hour < 5:
             profile.energy -= 0.2  # late night penalty
@@ -187,7 +210,7 @@ class MoodEngine:
             profile.energy -= 0.05  # social fatigue
 
         # 5. Day-type modifiers (calendar-based)
-        day_ctx = get_day_context(datetime.now(CST))
+        day_ctx = get_day_context(now_cst())
         if day_ctx.is_holiday:
             profile.valence += 0.15
             profile.energy += 0.1
@@ -272,13 +295,21 @@ class MoodEngine:
         schedule: Schedule | None,
         recent_interaction_count: int = 0,
         extra_instruction: str = "",
+        *,
+        group_id: str | int | None = None,
+        session_id: str = "",
     ) -> str:
         """Build the full mood_block text for system prompt injection."""
-        profile = self.evaluate(schedule, recent_interaction_count)
-        now = datetime.now(CST)
+        profile = self.evaluate(
+            schedule,
+            recent_interaction_count,
+            group_id=group_id,
+            session_id=session_id,
+        )
+        now = now_cst()
 
         lines = [
-            f"【当前时间】{now.strftime('%Y年%m月%d日 %H:%M')} {_weekday_cn(now.weekday())}",
+            f"【当前时间】{format_cn_datetime(now)}",
         ]
 
         if schedule is not None:
@@ -367,7 +398,3 @@ def _classify(profile: MoodProfile) -> str:
     if profile.energy < 0.5 and profile.openness < 0.4:
         return "专注"
     return "放松"
-
-
-def _weekday_cn(wd: int) -> str:
-    return ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][wd]

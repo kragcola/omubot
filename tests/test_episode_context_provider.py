@@ -23,6 +23,8 @@ from services.block_trace.episode_provider import (
 )
 from services.block_trace.providers import QueryContext
 from services.episodic.store import EpisodeStore
+from services.humanization import REGISTER_LABEL_SLOT, create_humanization_state_bus, humanization_source
+from services.system_module import Scope
 
 
 @pytest.fixture
@@ -52,6 +54,7 @@ async def _seed_enabled_episode(
     outcome_signal: str = "用户给了 negative 反馈",
     reflection: str = "下次先简短确认再展开",
     confidence: float = 0.6,
+    meta: dict | None = None,
 ) -> str:
     """Create an episode and walk it through the legal state machine."""
     ep = await store.create_episode(
@@ -61,11 +64,24 @@ async def _seed_enabled_episode(
         reflection=reflection,
         group_id=group_id,
         confidence=confidence,
+        meta=meta,
     )
     await store.transition_state(ep.episode_id, new_state="candidate")
     await store.transition_state(ep.episode_id, new_state="approved")
     await store.transition_state(ep.episode_id, new_state="enabled_for_prompt")
     return ep.episode_id
+
+
+def _state_with_register(label: str):
+    state = create_humanization_state_bus()
+    state.set(
+        REGISTER_LABEL_SLOT,
+        {"label": label, "confidence": 0.9},
+        scope=Scope(session_id="s", group_id="g1", user_id="u"),
+        source=humanization_source("episode_provider:test"),
+        confidence=0.9,
+    )
+    return state
 
 
 @pytest.mark.asyncio
@@ -137,6 +153,94 @@ async def test_provide_respects_top_k(episode_store):
     assert len(out[0].evidence_refs) == 2
     # confidence DESC ordering — last two seeded (highest confidence) win
     assert set(out[0].evidence_refs) == {ids[4], ids[3]}
+
+
+@pytest.mark.asyncio
+async def test_provide_filters_episode_by_register_meta(episode_store):
+    playful_id = await _seed_enabled_episode(
+        episode_store,
+        situation="轻松接梗",
+        reflection="可以顺手接一句",
+        confidence=0.9,
+        meta={"register_labels": ["playful", "affectionate"]},
+    )
+    serious_id = await _seed_enabled_episode(
+        episode_store,
+        situation="严肃求助",
+        reflection="先给明确判断",
+        confidence=0.95,
+        meta={"register_labels": ["serious"]},
+    )
+
+    provider = EpisodeProvider(store_getter=lambda: episode_store, top_k=2)
+    out = await provider.provide(_ctx())
+
+    assert out == []
+
+    out = await provider.provide(QueryContext(
+        request_id="req_test",
+        session_id="s",
+        user_id="u",
+        group_id="g1",
+        conversation_text="轻松聊天",
+        runtime_state=_state_with_register("playful"),
+    ))
+
+    assert playful_id in out[0].evidence_refs
+    assert serious_id not in out[0].evidence_refs
+    assert out[0].metadata["register_label"] == "playful"
+
+
+@pytest.mark.asyncio
+async def test_provide_respects_avoid_register_meta(episode_store):
+    avoid_id = await _seed_enabled_episode(
+        episode_store,
+        situation="玩笑翻车",
+        reflection="认真场景不要插科打诨",
+        confidence=0.95,
+        meta={"avoid_register_labels": ["serious", "distant"]},
+    )
+    neutral_id = await _seed_enabled_episode(
+        episode_store,
+        situation="通用反思",
+        reflection="先贴合上下文",
+        confidence=0.8,
+    )
+
+    provider = EpisodeProvider(store_getter=lambda: episode_store, top_k=2)
+    out = await provider.provide(QueryContext(
+        request_id="req_test",
+        session_id="s",
+        user_id="u",
+        group_id="g1",
+        conversation_text="严肃问题",
+        runtime_state=_state_with_register("serious"),
+    ))
+
+    assert avoid_id not in out[0].evidence_refs
+    assert neutral_id in out[0].evidence_refs
+
+
+@pytest.mark.asyncio
+async def test_provide_keeps_unannotated_episodes_without_runtime_state(episode_store):
+    first = await _seed_enabled_episode(
+        episode_store,
+        situation="通用场景1",
+        reflection="保持自然",
+        confidence=0.9,
+    )
+    second = await _seed_enabled_episode(
+        episode_store,
+        situation="通用场景2",
+        reflection="不要过度解释",
+        confidence=0.8,
+    )
+
+    provider = EpisodeProvider(store_getter=lambda: episode_store, top_k=2)
+    out = await provider.provide(_ctx())
+
+    assert len(out) == 1
+    assert set(out[0].evidence_refs) == {first, second}
 
 
 @pytest.mark.asyncio

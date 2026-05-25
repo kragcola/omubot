@@ -12,13 +12,16 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 from loguru import logger as _base_logger
 
 from kernel.types import PromptBlock, ReplyContext, ThinkerContext
 from services.block_trace.types import PromptBlockCandidate
+from services.humanization.contract import LAST_METRICS_SLOT, REGISTER_LABEL_SLOT, STICKER_RECENT_USED_SLOT
+from services.humanization.scorer import HumanizationScore, StylometricScorer
+from services.humanization.state import humanization_source
 from services.identity import Identity
 from services.llm.cache_diagnostic import (
     CacheDiagnostic,
@@ -29,6 +32,13 @@ from services.llm.cache_diagnostic import (
 from services.llm.llm_request import LLMRequest, apply_cache_breakpoints
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.provider import ToolUse, create_provider, is_deepseek_v4_model, provider_mode
+from services.llm.segmentation import (
+    ReplySegmentationConfig,
+    segment_reply,
+)
+from services.llm.segmentation import (
+    reply_segments as _segment_reply_segments,
+)
 from services.llm.usage import UsageTracker
 from services.media.image_cache import ImageCache
 from services.memory.card_store import CardStore, NewCard
@@ -36,6 +46,8 @@ from services.memory.message_log import MessageLog
 from services.memory.short_term import ChatMessage, ShortTermMemory
 from services.memory.timeline import GroupTimeline
 from services.memory.types import Content
+from services.runtime_clock import slot_features, today_key
+from services.system_module import Scope
 from services.tools.context import ToolContext
 from services.tools.registry import ToolRegistry
 
@@ -56,7 +68,6 @@ _log_debug = _base_logger.bind(channel="debug")
 
 _SEGMENT_SEP = "---cut---"
 _SEGMENT_DELAY = 0.8  # seconds between segment sends (human-like pacing)
-_MAX_SEND_SEGMENTS = 4
 _BLANK_LINE_RE = re.compile(r"\n{2,}")
 _CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
 _CQ_BROKEN_RE = re.compile(r"\[CQ:[^\]]*\]", re.DOTALL)
@@ -340,6 +351,14 @@ class ProfileRateLimitState:
         }
 
 
+@dataclass
+class HumanizationRewriteResult:
+    reply: str
+    score: HumanizationScore | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    rewrite_result: dict[str, Any] | None = None
+
+
 def _clean_text(text: str) -> str:
     """Collapse consecutive blank lines into a single newline."""
     return _BLANK_LINE_RE.sub("\n", text).strip()
@@ -356,186 +375,20 @@ def fix_cq_codes(text: str) -> str:
     return _CQ_CODE_RE.sub(lambda m: _CQ_KV_FIX_RE.sub(r",\1=", m.group(0)), text)
 
 
-def _split_segments(text: str) -> list[str]:
-    """Split reply into multiple messages by --- separator, cleaning blank lines."""
-    text = fix_cq_codes(text)
-    segments: list[str] = []
-    current: list[str] = []
-    for line in text.split("\n"):
-        if line.strip() == _SEGMENT_SEP:
-            seg = "\n".join(current).strip()
-            if seg:
-                segments.append(_clean_text(seg))
-            current = []
-        else:
-            current.append(line)
-    last = "\n".join(current).strip()
-    if last:
-        segments.append(_clean_text(last))
-    return segments or [_clean_text(text)]
-
-
-_SENTENCE_ENDING = set("。！？～…」』）\"!?~)")  # chars that terminate a thought
-_SENTENCE_BREAK = set("。！？～…!?~")  # priority 1: sentence-ending breaks
-_CLAUSE_BREAK = set("，；：、,;:")     # priority 2: clause-level breaks
 _MIN_CHUNK = 6
 _MAX_CHUNK = 20
 
 
-def _inside_cq_code(text: str, index: int) -> bool:
-    """Return True if index falls inside a [CQ:...] span."""
-    for m in _CQ_CODE_RE.finditer(text):
-        if m.start() < index < m.end():
-            return True
-        if m.start() >= index:
-            break
-    return False
-
-
-def _smart_chunk(text: str, max_len: int = _MAX_CHUNK) -> list[str]:
-    """Split text into segments ≤ max_len, preferring natural punctuation breaks.
-
-    Scans backward from max_len to find the best split point:
-    1. After sentence-ending punctuation (。！？～…) — delimiter stays with preceding text
-    2. After clause punctuation (，；：、)
-    3. At a character boundary that doesn't break an English word or CQ code
-    4. Hard split at max_len (last resort, should rarely fire)
-
-    A trailing segment shorter than _MIN_CHUNK is merged into the previous one.
-    CQ codes are never split across segments.
-    """
-    segments: list[str] = []
-    t = text
-    while t:
-        if len(t) <= max_len:
-            segments.append(t)
-            break
-
-        # If a CQ code straddles max_len, extend to include it fully.
-        effective_max = max_len
-        for m in _CQ_CODE_RE.finditer(t):
-            if m.start() < max_len <= m.end():
-                effective_max = m.end()
-                break
-            if m.start() >= max_len:
-                break
-
-        if len(t) <= effective_max:
-            segments.append(t)
-            break
-
-        best = 0
-        half = max_len // 2
-
-        # Priority 1: sentence-ending break
-        for i in range(effective_max - 1, half - 1, -1):
-            if t[i] in _SENTENCE_BREAK and not _inside_cq_code(t, i):
-                best = i + 1
-                break
-
-        # Priority 2: clause break
-        if best == 0:
-            for i in range(effective_max - 1, half - 1, -1):
-                if t[i] in _CLAUSE_BREAK and not _inside_cq_code(t, i):
-                    best = i + 1
-                    break
-
-        # Priority 3: character boundary (don't break English words or CQ codes)
-        if best == 0:
-            for i in range(effective_max, half - 1, -1):
-                if i >= len(t):
-                    continue
-                if _inside_cq_code(t, i):
-                    continue
-                if i > 0 and t[i - 1].isalpha() and (i < len(t) and t[i].isalpha()):
-                    continue
-                best = i
-                break
-
-        # Priority 4: hard split (after CQ code if possible)
-        if best == 0:
-            best = effective_max
-
-        segments.append(t[:best])
-        t = t[best:].lstrip()
-
-    # Post-process: merge trailing short segment
-    if len(segments) >= 2 and len(segments[-1]) < _MIN_CHUNK:
-        segments[-2] += segments[-1]
-        segments.pop()
-
-    return segments or [text]
-
-
 def _split_naturally(text: str) -> list[str]:
-    """Split text for human-like sequential sending.
-
-    Each newline is a split point (as told to the LLM).
-    Short consecutive lines are merged to avoid fragmentation;
-    long single lines are split on 。！？ then comma.
-    Honors explicit ---cut--- markers.
-    """
-    if any(line.strip() == _SEGMENT_SEP for line in text.split("\n")):
-        return _split_segments(text)
-
-    # Step 1: paragraphs (double newline = topic shift, always split)
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    if not paragraphs:
-        return [text]
-
-    chunks: list[str] = []
-    for para in paragraphs:
-        # Step 2: split on \n but only as a real boundary when the previous
-        # line ends with sentence-ending punctuation.  Otherwise the \n is
-        # likely a mid-sentence line-wrap from the LLM — merge the two lines.
-        lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
-        if not lines:
-            continue
-
-        merged: list[str] = []
-        for line in lines:
-            if not merged:
-                merged.append(line)
-            elif merged[-1] and merged[-1][-1] in _SENTENCE_ENDING:
-                # Previous line ended a thought → \n is intentional
-                merged.append(line)
-            elif len(line) < _MIN_CHUNK:
-                # Short line → fragment, always merge
-                merged[-1] += line
-            else:
-                # Previous line didn't end with sentence-ending punctuation
-                # and this line isn't trivially short — \n is mid-sentence.
-                # Merge without adding \n to preserve natural reading.
-                merged[-1] += line
-
-        # Step 3: split any merged line that's still too long
-        for line in merged:
-            if len(line) <= _MAX_CHUNK:
-                chunks.append(line)
-            else:
-                chunks.extend(_smart_chunk(line))
-
-    # Strip trailing clause punctuation — meaningless at end of a standalone message
-    _TRAILING_CLAUSE = "，；：、,;:"
-    chunks = [c.rstrip(_TRAILING_CLAUSE) for c in chunks]
-
-    return chunks or [text]
+    """Compatibility wrapper for old tests; production uses segmentation.py."""
+    return segment_reply(text, ReplySegmentationConfig()).texts
 
 
-def _coalesce_segments(segments: list[str], max_segments: int = _MAX_SEND_SEGMENTS) -> list[str]:
-    """Cap visible send fragments by merging overflow into the last segment."""
-    if len(segments) <= max_segments:
-        return segments
-    if max_segments <= 1:
-        return ["\n".join(segments)]
-    head = segments[: max_segments - 1]
-    tail = "\n".join(segments[max_segments - 1:])
-    return [*head, tail]
-
-
-def _reply_segments(reply: str) -> tuple[list[str], int]:
-    raw_segments = _split_naturally(fix_cq_codes(reply))
-    return _coalesce_segments(raw_segments), len(raw_segments)
+def _reply_segments(
+    reply: str,
+    cfg: ReplySegmentationConfig | None = None,
+) -> tuple[list[str], int, str]:
+    return _segment_reply_segments(fix_cq_codes(reply), cfg or ReplySegmentationConfig())
 
 
 def _cached_text(text: str) -> dict[str, Any]:
@@ -878,10 +731,7 @@ async def _build_debug_block(
     message_log: Any = None,
 ) -> str:
     """Build a system block with live debug state for the admin /debug command."""
-    from datetime import datetime, timedelta, timezone
-
-    CST = timezone(timedelta(hours=8))
-    today_str = datetime.now(CST).strftime("%Y-%m-%d")
+    today_str = today_key()
 
     lines: list[str] = [
         "【调试模式 — 最高优先级指令】",
@@ -898,9 +748,15 @@ async def _build_debug_block(
     # Mood — read from engine cache
     if mood_engine is not None:
         try:
-            cache = getattr(mood_engine, "_cache", None)
-            if cache is not None:
-                profile, _ts = cache
+            group_id = session_id.removeprefix("group_") if session_id.startswith("group_") else None
+            cached_profile = getattr(mood_engine, "cached_profile", None)
+            profile = (
+                cached_profile(group_id=group_id, session_id=session_id)
+                if callable(cached_profile)
+                else None
+            )
+            if profile is not None:
+                profile = cast(Any, profile)
                 lines.append(
                     f"心情: label={profile.label} energy={profile.energy:.2f} "
                     f"valence={profile.valence:+.2f} tension={profile.tension:.2f} "
@@ -1048,12 +904,18 @@ class LLMClient:
         affection_engine: object | None = None,
         thinker_enabled: bool = True,
         thinker_max_tokens: int = 256,
-        mood_getter: Callable[[], Any] | None = None,
+        mood_getter: Callable[..., Any] | None = None,
         bus: object | None = None,
+        runtime_state: object | None = None,
+        clock_context_getter: Callable[..., dict[str, Any] | None] | None = None,
         task_profiles: dict[str, Any] | None = None,
         group_config: Any | None = None,
+        reply_segmentation_config: Any | None = None,
         slang_store_getter: Callable[[], Any] | None = None,
         budget_manager: object | None = None,
+        thinker_provider_enabled: bool = False,
+        humanization_rewrite_threshold: float = -1.0,
+        humanization_runtime_groups: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
             enable_cleanup_closed=True,
@@ -1088,9 +950,19 @@ class LLMClient:
         self._thinker_max_tokens = thinker_max_tokens
         self._mood_getter = mood_getter
         self._bus = bus
+        self._runtime_state = runtime_state
+        self._clock_context_getter = clock_context_getter
         self._group_config = group_config
+        self._reply_segmentation_config = reply_segmentation_config
         self._slang_store_getter = slang_store_getter
         self._budget_manager = budget_manager
+        self._thinker_provider_enabled = bool(thinker_provider_enabled)
+        self._humanization_rewrite_threshold = float(humanization_rewrite_threshold)
+        self._humanization_runtime_groups = frozenset(
+            str(group_id).strip()
+            for group_id in (humanization_runtime_groups or ())
+            if str(group_id).strip()
+        )
         self._provider_bus: object | None = None
         self._task_profiles = task_profiles or {}
         self._task_profile_names = {
@@ -1107,6 +979,11 @@ class LLMClient:
 
     async def close(self) -> None:
         await self._session.close()
+
+    def _humanization_group_allowed(self, group_id: str | None) -> bool:
+        if not self._humanization_runtime_groups:
+            return True
+        return str(group_id or "").strip() in self._humanization_runtime_groups
 
     def set_group_config(self, group_config: Any | None) -> None:
         self._group_config = group_config
@@ -1634,7 +1511,8 @@ class LLMClient:
     ) -> None:
         if self._bus is None:
             return
-        await self._bus.fire_on_thinker_decision(
+        bus = cast(Any, self._bus)
+        await bus.fire_on_thinker_decision(
             ThinkerContext(
                 session_id=session_id,
                 group_id=group_id,
@@ -1661,7 +1539,8 @@ class LLMClient:
     ) -> None:
         if self._bus is None or not reply_content.strip():
             return
-        await self._bus.fire_on_post_reply(
+        bus = cast(Any, self._bus)
+        await bus.fire_on_post_reply(
             ReplyContext(
                 session_id=session_id,
                 group_id=group_id,
@@ -1704,6 +1583,194 @@ class LLMClient:
             _log_msg_out.info("reply_suppressed_empty | session={} reason=autonomous", session_id)
             return "", "suppressed"
         return normalized, "reply"
+
+    def _humanization_scope(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        turn_id: str,
+    ) -> Scope:
+        return Scope(session_id=session_id, group_id=group_id, user_id=user_id, turn_id=turn_id)
+
+    def _runtime_state_value(self, slot_id: str, scope: Scope) -> Any:
+        if self._runtime_state is None:
+            return None
+        try:
+            snapshot = cast(Any, self._runtime_state).get(slot_id, scope=scope)
+        except Exception:
+            return None
+        return getattr(snapshot, "value", None)
+
+    def _humanization_register(self, scope: Scope) -> Any:
+        return self._runtime_state_value(REGISTER_LABEL_SLOT, scope)
+
+    def _recent_sticker_ids(self, scope: Scope) -> list[str]:
+        value = self._runtime_state_value(STICKER_RECENT_USED_SLOT, scope)
+        raw_items = value.get("sticker_ids", []) if isinstance(value, dict) else []
+        if not isinstance(raw_items, list):
+            return []
+        recent: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_items:
+            sticker_id = str(raw).strip()
+            if not sticker_id or sticker_id in seen:
+                continue
+            seen.add(sticker_id)
+            recent.append(sticker_id)
+            if len(recent) >= 8:
+                break
+        return recent
+
+    def _current_humanization_mood(self, *, group_id: str | None, session_id: str) -> Any:
+        if self._mood_getter is None:
+            return None
+        try:
+            try:
+                return self._mood_getter(group_id=group_id, session_id=session_id)
+            except TypeError:
+                return self._mood_getter()
+        except Exception:
+            return None
+
+    def _score_humanization_reply(
+        self,
+        reply: str,
+        *,
+        scope: Scope,
+        group_id: str | None,
+        session_id: str,
+    ) -> HumanizationScore:
+        return StylometricScorer().score(
+            reply,
+            register=self._humanization_register(scope),
+            mood=self._current_humanization_mood(group_id=group_id, session_id=session_id),
+            recent_sticker_ids=self._recent_sticker_ids(scope),
+        )
+
+    async def _record_humanization_metrics(
+        self,
+        *,
+        request_id: str,
+        score: HumanizationScore,
+        metadata: dict[str, Any],
+        scope: Scope,
+    ) -> None:
+        if self._runtime_state is not None:
+            try:
+                value = score.to_state_value()
+                value["meta"] = {**dict(value.get("meta", {})), **metadata}
+                cast(Any, self._runtime_state).set(
+                    LAST_METRICS_SLOT,
+                    value,
+                    scope=scope,
+                    source=humanization_source("llm_client:humanization_metrics"),
+                    confidence=score.total,
+                )
+            except Exception:
+                _log_debug.debug("humanization metrics state write skipped | request={}", request_id)
+
+        store = getattr(self._budget_manager, "_store", None)
+        if store is None or not hasattr(store, "record_humanization_metrics"):
+            return
+        try:
+            await store.record_humanization_metrics(
+                request_id=request_id,
+                score=score,
+                group_id=scope.group_id or "",
+                session_id=scope.session_id,
+                turn_id=scope.turn_id,
+                metadata=metadata,
+            )
+        except Exception:
+            _log_debug.debug("humanization metrics persist skipped | request={}", request_id)
+
+    async def _maybe_rewrite_humanization_reply(
+        self,
+        *,
+        reply: str,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        turn_id: str,
+    ) -> HumanizationRewriteResult:
+        if self._humanization_rewrite_threshold < 0:
+            return HumanizationRewriteResult(reply=reply)
+        if not self._humanization_group_allowed(group_id):
+            return HumanizationRewriteResult(reply=reply)
+
+        scope = self._humanization_scope(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        initial_score = self._score_humanization_reply(
+            reply,
+            scope=scope,
+            group_id=group_id,
+            session_id=session_id,
+        )
+        request_id = f"hm_{session_id}_{int(time.monotonic() * 1000)}"
+        metadata: dict[str, Any] = {
+            "rewrite_threshold": self._humanization_rewrite_threshold,
+            "rewrite_applied": False,
+            "initial_score": initial_score.total,
+            "initial_issues": list(initial_score.issues),
+        }
+        final_reply = reply
+        final_score = initial_score
+        rewrite_result: dict[str, Any] | None = None
+
+        if initial_score.total < self._humanization_rewrite_threshold:
+            instruction = (
+                "请只改写下面这条助手回复，让它更像自然的人类聊天，但不要改变事实、数字、承诺、意图和工具结果。\n"
+                "只修正表层语言问题：减少模板腔、过硬说明、装饰符、过度人格化或不合当前语气的表达。\n"
+                "不要解释评分，不要输出分析，不要新增人设设定，只输出改写后的回复。\n\n"
+                f"原回复：\n{reply}\n\n"
+                f"需避免的问题标签：{', '.join(initial_score.issues) or 'none'}"
+            )
+            rewrite_request = LLMRequest(
+                task="main",
+                user_id=user_id,
+                group_id=group_id,
+                static_blocks=list(system_blocks),
+                user_messages=[*list(messages), {"role": "user", "content": instruction}],
+                max_tokens=max(128, min(1024, len(reply) * 3 + 64)),
+                auto_record_usage=False,
+                requires_capabilities=("chat",),
+            )
+            rewrite_result = await self._call(rewrite_request)
+            candidate, _stripped = _strip_control_tokens(_clean_reply(str(rewrite_result.get("text", "") or "")))
+            candidate = candidate.strip()
+            if candidate and candidate not in {"...", "☆", "~"}:
+                final_reply = candidate
+                final_score = self._score_humanization_reply(
+                    final_reply,
+                    scope=scope,
+                    group_id=group_id,
+                    session_id=session_id,
+                )
+                metadata["rewrite_applied"] = True
+                metadata["rewrite_score"] = final_score.total
+            else:
+                metadata["rewrite_rejected"] = "empty_or_control_only"
+
+        await self._record_humanization_metrics(
+            request_id=request_id,
+            score=final_score,
+            metadata=metadata,
+            scope=scope,
+        )
+        return HumanizationRewriteResult(
+            reply=final_reply,
+            score=final_score,
+            metadata=metadata,
+            rewrite_result=rewrite_result,
+        )
 
     def _has_visible_tool_output(self, tool_calls: list[dict[str, Any]]) -> bool:
         for call in tool_calls:
@@ -1791,12 +1858,15 @@ class LLMClient:
     # Thinker helpers
     # ------------------------------------------------------------------
 
-    def _build_thinker_mood_text(self) -> str:
+    def _build_thinker_mood_text(self, *, group_id: str | None = None, session_id: str = "") -> str:
         """Build a one-line mood summary for the pre-reply thinker."""
         if self._mood_getter is None:
             return ""
         try:
-            profile = self._mood_getter()
+            try:
+                profile = self._mood_getter(group_id=group_id, session_id=session_id)
+            except TypeError:
+                profile = self._mood_getter()
             if profile is None:
                 return ""
             mood_line = (
@@ -1809,6 +1879,27 @@ class LLMClient:
             return mood_line
         except Exception:
             return ""
+
+    def _build_provider_mood_fit_target(self, *, group_id: str | None = None, session_id: str = "") -> float | None:
+        """Compress current mood into a 0..1 fit target for prompt providers."""
+        if self._mood_getter is None:
+            return None
+        try:
+            try:
+                profile = self._mood_getter(group_id=group_id, session_id=session_id)
+            except TypeError:
+                profile = self._mood_getter()
+            if profile is None:
+                return None
+            happy = (float(getattr(profile, "valence", 0.0)) + 1.0) / 2.0
+            target = (
+                0.4 * float(getattr(profile, "openness", 0.5))
+                + 0.3 * float(getattr(profile, "energy", 0.5))
+                + 0.3 * happy
+            )
+            return max(0.0, min(1.0, target))
+        except Exception:
+            return None
 
     def _build_thinker_affection_text(self, user_id: str) -> str:
         """Build a one-line relationship summary for the pre-reply thinker."""
@@ -1830,6 +1921,19 @@ class LLMClient:
             )
         except Exception:
             return ""
+
+    def _build_thinker_clock_features(self, *, group_id: str | None = None, session_id: str = "") -> dict[str, Any]:
+        """Build runtime-clock features for the pre-reply thinker."""
+        if self._clock_context_getter is None:
+            return slot_features()
+        try:
+            try:
+                features = self._clock_context_getter(group_id=group_id, session_id=session_id)
+            except TypeError:
+                features = self._clock_context_getter()
+            return dict(features or slot_features())
+        except Exception:
+            return slot_features()
 
     async def _build_thinker_slang_hint(self, group_id: str | None, conversation_text: str) -> str:
         """Build a short slang-hit summary for the pre-reply thinker."""
@@ -1920,6 +2024,7 @@ class LLMClient:
 
         # Extract conversation text for retrieval gating
         if is_group and self._timeline is not None:
+            assert group_id is not None
             pending_text = _pending_conversation_text(self._timeline, group_id)
             recent_text = self._timeline.get_recent_text(group_id, last_n=3)
             if force_reply and pending_text:
@@ -1936,8 +2041,14 @@ class LLMClient:
         thinker_action = ""
         thinker_retrieve_mode = "hybrid"
         thinker_rewritten_query = ""
+        thinker_turn_id = ""
         if self._thinker_enabled and not force_reply:
-            from services.llm.thinker import think
+            from services.llm.thinker import (
+                build_thinker_time_text,
+                think,
+                write_clock_state,
+                write_thinker_decision_state,
+            )
 
             # Filter to text-only: image_ref blocks are not valid for the API
             # and the thinker doesn't need images for its text-based decision.
@@ -1952,7 +2063,9 @@ class LLMClient:
             recent_raw = messages[-8:] if len(messages) > 8 else messages
             recent_for_thinker = [_text_only(m) for m in recent_raw]
             recent_for_thinker = [m for m in recent_for_thinker if m.get("content")]
-            mood_text = self._build_thinker_mood_text()
+            clock_features = self._build_thinker_clock_features(group_id=group_id, session_id=session_id)
+            time_text = build_thinker_time_text(clock_features)
+            mood_text = self._build_thinker_mood_text(group_id=group_id, session_id=session_id)
             affection_text = self._build_thinker_affection_text(user_id)
             slang_hint = await self._build_thinker_slang_hint(group_id, conversation_text)
             thinker_decision = await think(
@@ -1961,6 +2074,7 @@ class LLMClient:
                 max_tokens=self._thinker_max_tokens,
                 mood_text=mood_text,
                 affection_text=affection_text,
+                time_text=time_text,
                 identity_name=identity.name,
                 user_id=user_id,
                 group_id=group_id,
@@ -1971,6 +2085,45 @@ class LLMClient:
             thinker_thought = thinker_decision.thought
             thinker_retrieve_mode = getattr(thinker_decision, "retrieve_mode", "hybrid")
             thinker_rewritten_query = getattr(thinker_decision, "rewritten_query", "")
+            thinker_turn_id = f"{session_id}:{int(time.monotonic() * 1000)}"
+            write_clock_state(
+                self._runtime_state,
+                clock_features,
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=thinker_turn_id,
+            )
+            write_thinker_decision_state(
+                self._runtime_state,
+                thinker_decision,
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=thinker_turn_id,
+            )
+            u13_trace_request_id = str(
+                (ctx.extra.get("u13_double_haiku_request_id") if ctx is not None else "") or ""
+            )
+            if u13_trace_request_id:
+                from services.block_trace.llm_call_trace import record_llm_call_trace
+
+                await record_llm_call_trace(
+                    getattr(self._budget_manager, "_store", None),
+                    request_id=u13_trace_request_id,
+                    task="thinker",
+                    provider="thinker",
+                    session_id=session_id,
+                    group_id=group_id or "",
+                    user_id=user_id,
+                    turn_id=thinker_turn_id,
+                    metadata={
+                        "action": thinker_action,
+                        "retrieve_mode": thinker_retrieve_mode,
+                        "source": "pre_reply_thinker",
+                        "correlation_key": f"{session_id}:{user_id}",
+                    },
+                )
 
             await self._fire_thinker_decision(
                 session_id=session_id,
@@ -2021,14 +2174,15 @@ class LLMClient:
                         session_id=session_id,
                         group_id=group_id,
                         user_id=user_id,
-                        identity=identity,
+                        identity=cast(Any, identity),
                         conversation_text=conversation_text,
                         force_reply=force_reply,
                         privacy_mask=privacy_mask,
                         retrieve_mode=thinker_retrieve_mode,
                         rewritten_query=thinker_rewritten_query,
                     )
-                    await self._bus.fire_on_pre_prompt(prompt_ctx)
+                    bus = cast(Any, self._bus)
+                    await bus.fire_on_pre_prompt(prompt_ctx)
                     # --- Provider + Budget management + trace ---
                     req_id = f"{session_id}_{int(time.monotonic() * 1000)}"
                     provider_candidates: list[PromptBlockCandidate] = []
@@ -2040,22 +2194,28 @@ class LLMClient:
                             user_id=user_id,
                             group_id=group_id,
                             conversation_text=conversation_text,
+                            runtime_state=self._runtime_state,
+                            turn_id=thinker_turn_id,
+                            mood_fit_target=self._build_provider_mood_fit_target(
+                                group_id=group_id,
+                                session_id=session_id,
+                            ),
                         )
-                        bus = self._provider_bus
-                        if bus.mode == "active":
+                        provider_bus = cast(Any, self._provider_bus)
+                        if provider_bus.mode == "active":
                             if self._budget_manager is not None:
-                                provider_candidates = await bus.run_all(qctx)
+                                provider_candidates = await provider_bus.run_all(qctx)
                             else:
-                                provider_blocks = await bus.run_active(qctx)
+                                provider_blocks = await provider_bus.run_active(qctx)
                                 prompt_ctx.blocks.extend(provider_blocks)
-                        elif bus.mode == "shadow":
-                            asyncio.create_task(bus.run_shadow(qctx))  # noqa: RUF006
+                        elif provider_bus.mode == "shadow":
+                            asyncio.create_task(provider_bus.run_shadow(qctx))  # noqa: RUF006
                     if self._budget_manager is not None:
                         prompt_candidates = [
                             _candidate_from_prompt_block(block, group_id=group_id)
                             for block in prompt_ctx.blocks
                         ]
-                        prompt_ctx.blocks, _accepted_decisions = self._budget_manager.process(
+                        prompt_ctx.blocks, _accepted_decisions = cast(Any, self._budget_manager).process(
                             [*prompt_candidates, *provider_candidates],
                             request_id=req_id,
                             task="main",
@@ -2106,7 +2266,11 @@ class LLMClient:
 
         # Inject thinker decision as final system block so the main LLM
         # knows what direction to take — placed last for highest attention.
-        if thinker_decision is not None and thinker_thought:
+        thinker_provider_active = (
+            self._thinker_provider_enabled
+            and self._humanization_group_allowed(group_id)
+        )
+        if thinker_decision is not None and thinker_thought and not thinker_provider_active:
             hints = [f"你决定说话：{thinker_thought}"]
             d = thinker_decision
             if d.sticker:
@@ -2229,6 +2393,36 @@ class LLMClient:
                     )
                     return None
 
+                rewrite = await self._maybe_rewrite_humanization_reply(
+                    reply=reply,
+                    system_blocks=system_blocks,
+                    messages=messages,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=thinker_turn_id or f"{session_id}:reply:{round_i}:{int(time.monotonic() * 1000)}",
+                )
+                reply = rewrite.reply
+                if rewrite.rewrite_result is not None:
+                    rewrite_usage = rewrite.rewrite_result
+                    acc_llm_elapsed += float(rewrite_usage.get("call_elapsed_s", 0.0) or 0.0)
+                    acc_input += (
+                        int(rewrite_usage.get("input_tokens", 0) or 0)
+                        - int(rewrite_usage.get("cache_read", 0) or 0)
+                        - int(rewrite_usage.get("cache_create", 0) or 0)
+                    )
+                    acc_output += int(rewrite_usage.get("output_tokens", 0) or 0)
+                    acc_cache_read += int(rewrite_usage.get("cache_read", 0) or 0)
+                    acc_cache_create += int(rewrite_usage.get("cache_create", 0) or 0)
+                    rewrite_cache_hit, rewrite_cache_miss, rewrite_reasoning_replay = _usage_observability_fields(
+                        rewrite_usage
+                    )
+                    acc_prompt_cache_hit += rewrite_cache_hit
+                    acc_prompt_cache_miss += rewrite_cache_miss
+                    acc_reasoning_replay += rewrite_reasoning_replay
+                    if rewrite.metadata.get("rewrite_applied"):
+                        text = reply
+
                 # Kaomoji enforcement: if the reply contains a kaomoji / action
                 # description but the LLM forgot to call send_sticker, inject a
                 # forced sticker-selection round (once only, and only if we have
@@ -2256,17 +2450,30 @@ class LLMClient:
                     _log_thinking.info("kaomoji_enforce | forcing sticker round after kaomoji detected")
                     continue
 
-                segments, raw_segment_count = _reply_segments(reply)
+                segments, raw_segment_count, limit_status = _reply_segments(
+                    reply,
+                    self._reply_segmentation_config,
+                )
                 if raw_segment_count > len(segments):
                     _log_msg_out.debug(
                         "segments coalesced | session={} raw={} capped={}",
                         session_id, raw_segment_count, len(segments),
                     )
+                if limit_status != "none":
+                    _log_msg_out.debug(
+                        "segmentation limit | session={} status={} raw={} capped={}",
+                        session_id, limit_status, raw_segment_count, len(segments),
+                    )
                 send_start = time.monotonic()
+                segment_delay = max(0.0, float(getattr(
+                    self._reply_segmentation_config,
+                    "inter_segment_delay_s",
+                    _SEGMENT_DELAY,
+                )))
                 if on_segment and len(segments) > 1:
                     for seg in segments[:-1]:
                         await on_segment(seg)
-                        await asyncio.sleep(_SEGMENT_DELAY)
+                        await asyncio.sleep(segment_delay)
                     last_seg = segments[-1] if segments else reply
                 elif not on_segment and len(segments) > 1:
                     # No callback to send segments — rejoin so caller gets full text
@@ -2340,7 +2547,7 @@ class LLMClient:
             messages.append({"role": "assistant", "content": assistant_content})
 
             # Execute tools in parallel
-            tool_ctx = ctx or ToolContext(user_id=user_id, group_id=group_id)
+            tool_ctx = ctx or ToolContext(user_id=user_id, group_id=group_id, session_id=session_id)
             tool_ctx.extra["image_tags"] = image_tag_map
             if self._timeline is not None:
                 tool_ctx.extra["timeline"] = self._timeline
@@ -2415,17 +2622,57 @@ class LLMClient:
                 tool_rounds=MAX_TOOL_ROUNDS, elapsed_s=acc_llm_elapsed,
             )
             return None
-        segments, raw_segment_count = _reply_segments(reply)
+        rewrite = await self._maybe_rewrite_humanization_reply(
+            reply=reply,
+            system_blocks=system_blocks,
+            messages=messages,
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=thinker_turn_id or f"{session_id}:tool_exhausted:{int(time.monotonic() * 1000)}",
+        )
+        reply = rewrite.reply
+        if rewrite.rewrite_result is not None:
+            rewrite_usage = rewrite.rewrite_result
+            acc_llm_elapsed += float(rewrite_usage.get("call_elapsed_s", 0.0) or 0.0)
+            acc_input += (
+                int(rewrite_usage.get("input_tokens", 0) or 0)
+                - int(rewrite_usage.get("cache_read", 0) or 0)
+                - int(rewrite_usage.get("cache_create", 0) or 0)
+            )
+            acc_output += int(rewrite_usage.get("output_tokens", 0) or 0)
+            acc_cache_read += int(rewrite_usage.get("cache_read", 0) or 0)
+            acc_cache_create += int(rewrite_usage.get("cache_create", 0) or 0)
+            rewrite_cache_hit, rewrite_cache_miss, rewrite_reasoning_replay = _usage_observability_fields(
+                rewrite_usage
+            )
+            acc_prompt_cache_hit += rewrite_cache_hit
+            acc_prompt_cache_miss += rewrite_cache_miss
+            acc_reasoning_replay += rewrite_reasoning_replay
+        segments, raw_segment_count, limit_status = _reply_segments(
+            reply,
+            self._reply_segmentation_config,
+        )
         if raw_segment_count > len(segments):
             _log_msg_out.debug(
                 "segments coalesced | session={} raw={} capped={}",
                 session_id, raw_segment_count, len(segments),
             )
+        if limit_status != "none":
+            _log_msg_out.debug(
+                "segmentation limit | session={} status={} raw={} capped={}",
+                session_id, limit_status, raw_segment_count, len(segments),
+            )
         send_start = time.monotonic()
+        segment_delay = max(0.0, float(getattr(
+            self._reply_segmentation_config,
+            "inter_segment_delay_s",
+            _SEGMENT_DELAY,
+        )))
         if on_segment and len(segments) > 1:
             for seg in segments[:-1]:
                 await on_segment(seg)
-                await asyncio.sleep(_SEGMENT_DELAY)
+                await asyncio.sleep(segment_delay)
             last_seg = segments[-1] if segments else reply
         elif not on_segment and len(segments) > 1:
             last_seg = "\n".join(segments)

@@ -213,6 +213,31 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
+def _clamp01_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, number))
+
+
+def _mood_fit_alignment(term: SlangTerm, target: float | None) -> float:
+    if target is None:
+        return 0.0
+    meta = term.meta if isinstance(term.meta, dict) else {}
+    raw = (
+        meta.get("mood_fit")
+        if "mood_fit" in meta
+        else meta.get("mood_fit_target", meta.get("mood_profile_fit"))
+    )
+    fit = _clamp01_or_none(raw)
+    if fit is None:
+        return 0.0
+    return max(0.0, 1.0 - abs(fit - target))
+
+
 def _row_to_term(row: aiosqlite.Row) -> SlangTerm:
     aliases = _json_loads(row["aliases_json"], [])
     unique_users = _json_loads(row["unique_users_json"], [])
@@ -2890,6 +2915,7 @@ class SlangStore:
         max_terms: int = 8,
         min_confidence: float = 0.0,
         max_indirect_terms: int | None = None,
+        mood_fit_target: float | None = None,
     ) -> list[SlangTerm]:
         if not group_id:
             return []
@@ -2911,9 +2937,17 @@ class SlangStore:
                     return True
             return False
 
-        def rank(term: SlangTerm) -> tuple[int, float, int, str]:
+        target = _clamp01_or_none(mood_fit_target)
+
+        def rank(term: SlangTerm) -> tuple[int, float, float, int, str]:
             scope_priority = 1 if term.scope == "group" else 0
-            return (scope_priority, term.confidence, term.usage_count, term.last_seen_at)
+            return (
+                scope_priority,
+                term.confidence,
+                _mood_fit_alignment(term, target),
+                term.usage_count,
+                term.last_seen_at,
+            )
 
         direct_terms: list[SlangTerm] = []
         indirect_terms: list[SlangTerm] = []
@@ -3000,6 +3034,7 @@ class SlangStore:
         max_terms: int = 8,
         max_chars: int = 1200,
         max_indirect_terms: int | None = None,
+        mood_fit_target: float | None = None,
     ) -> str:
         block, _refs = await self.build_prompt_block_with_refs(
             group_id=group_id,
@@ -3007,6 +3042,7 @@ class SlangStore:
             max_terms=max_terms,
             max_chars=max_chars,
             max_indirect_terms=max_indirect_terms,
+            mood_fit_target=mood_fit_target,
         )
         return block
 
@@ -3018,6 +3054,7 @@ class SlangStore:
         max_terms: int = 8,
         max_chars: int = 1200,
         max_indirect_terms: int | None = None,
+        mood_fit_target: float | None = None,
     ) -> tuple[str, tuple[str, ...]]:
         settings = await self.load_settings()
         if max_indirect_terms is None:
@@ -3028,6 +3065,7 @@ class SlangStore:
             max_terms=max_terms,
             min_confidence=settings.min_inject_confidence,
             max_indirect_terms=max_indirect_terms,
+            mood_fit_target=mood_fit_target,
         )
         if not terms:
             return "", ()

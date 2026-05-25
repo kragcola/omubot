@@ -184,6 +184,9 @@ class PluginContext:
     # 其他 —— UsageTracker / Humanizer / Identity
     usage_tracker: Any = None
     humanizer: Any = None
+    runtime_state: Any = None
+    humanization_contract: Any = None
+    humanization_register_classifier: Any = None
     identity: Any = None  # Identity 实例
 
     # PluginBus 引用（供 LLMClient 等需要触发钩子的服务使用）

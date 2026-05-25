@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from kernel.config import GroupConfig, GroupOverride
+from kernel.config import GroupConfig, GroupOverride, ReplySegmentationConfig
 from services.identity import Identity
 from services.llm.client import (
     LLMClient,
@@ -69,6 +69,7 @@ async def _client(
     card_store: CardStore | None = None,
     max_compact_failures: int = 3,
     group_config: GroupConfig | None = None,
+    reply_segmentation_config: ReplySegmentationConfig | None = None,
 ) -> AsyncIterator[LLMClient]:
     c = LLMClient(
         base_url="http://fake",
@@ -85,6 +86,7 @@ async def _client(
         card_store=card_store,
         thinker_enabled=False,
         group_config=group_config,
+        reply_segmentation_config=reply_segmentation_config,
     )
     try:
         yield c
@@ -110,6 +112,47 @@ MOCK_RESULT_FULL = {
     "cache_read": 50,
     "cache_create": 10,
 }
+
+
+async def test_chat_uses_injected_reply_segmentation_config(prompt, short_term, tools, timeline) -> None:
+    """Production chat path should honor config.reply_segmentation, not old client constants."""
+    cfg = ReplySegmentationConfig(
+        max_segment_chars=6,
+        max_send_segments=2,
+        inter_segment_delay_s=0.0,
+    )
+    text = "第一句很长很长。第二句很长很长。第三句很长很长。"
+    sent: list[str] = []
+
+    async def _on_segment(seg: str) -> None:
+        sent.append(seg)
+
+    async for client in _client(
+        prompt,
+        short_term,
+        tools,
+        timeline=timeline,
+        reply_segmentation_config=cfg,
+    ):
+        with patch(
+            "services.llm.client.call_api",
+            new_callable=AsyncMock,
+            return_value={**MOCK_RESULT_FULL, "text": text},
+        ):
+            result = await client.chat(
+                session_id="group_12345",
+                user_id="111",
+                user_content="hello",
+                identity=_IDENTITY,
+                group_id="12345",
+                on_segment=_on_segment,
+            )
+
+    assert len(sent) == 1
+    assert result is not None
+    assert "\n" in result
+    assert sent[0] + "\n" + result == timeline.get_turns("12345")[-1]["content"]
+    assert short_term.get("group_12345") == []
 
 
 class _StaticTool:

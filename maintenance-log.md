@@ -4,6 +4,192 @@
 
 ---
 
+## 2026-05-25 Humanization Part 6 调研存档 — 源头生成调度（4 方案 / 27 论文 / 7 维度决策矩阵）
+
+**变更类型**：research deposit（Part 4 模式 / 不动代码 / 不立 P 任务 / 等用户决策推进）
+
+**触发**：用户对 Part 5 的根本反驳——"part5 方案仍聚焦在话语分割处理上，而没有从 llm 生成的源头提供研究"。Part 5 把"LLM 一次 1024-token 输出 + 客户端切碎"作为既定前提，仅在切分策略改良；Part 6 拒绝该前提，从 LLM 调用形态本身（call 数 / 触发节奏 / 可中断性 / 计划-执行分离）寻找拟人化突破口。
+
+**产出**：[docs/tracking/omubot-humanization-part6-source-side-generation.md](docs/tracking/omubot-humanization-part6-source-side-generation.md)，10 节全填，无 TBD。
+
+- §1 代码取证：Omubot 实测 chat() 一次 3 ~ 8 LLM call（thinker + main tool loop ≤5 + rewrite + register classifier + kaomoji round），不是 single-call；V11 critic-rewrite-loop 默认 -1.0 关闭（生产冷代码）；4-breakpoint cache 唯一注入路径 [llm_request.py:303 apply_cache_breakpoints](services/llm/llm_request.py#L303)；MaiBot interrupt_flag 在 client 层有完整实现但 chat 层全仓零调用（dead code）；Anthropic SSE abort 计费（input 全付 / output 按已生成 / 漂移 5-30 token）+ prompt cache 5min TTL / Opus 4.7 prefix ≥4096 token / read 0.10× / write 1.25× 全量量化
+- §2 学术证据 27 篇 / 8 轴：Q1 ReAct·Reflexion·Self-Refine / Q2 SoT 2.39× 加速·PaS·ToT·CoVe / Q3 Full-duplex 96.7% 中断响应正确率·Baumann2012·IncrementalDM·Yarmohammadi / Q4 PySBD 97.92%·Adaptive Token Pacing / Q5 Avrahami2006 30s 窗口 90.1% 预测准确率·Avrahami2008·Nardi2000·Skantze2021 / Q6 Anthropic-cache·PagedAttention·SGLang·MCP-perf 2-30× prompt 膨胀 / Q7 PersonaGym·DriftNoMore KL<0.05·AssistantAxis·RoleplayBottlenecks / Q8 OTel-GenAI·Langfuse
+- §3 候选方案 A/B/C/D：A Plan-then-utter（1.16~1.38× cost / 7000ms 首段 / 355 行）/ B Streaming-as-segment（1.0× cost / 3100ms 首段 / 150 行）/ C Reactive replan（1.45~2.1× cost / 7000ms 首段+abort 续段 800ms / 635 行 / IM 场景无现成参考）/ D Pause-then-extend（期望 1.08× cost / 不退化 / 180 行 / 拟人化收益最低）
+- §4 决策矩阵 4×7 维度全填；推荐路径 B → A → C 三阶段，D 不进推荐
+- §6 接入点：V1 RegisterClassifier 可被 plan call 吸收省 1 次 / V8 每段独立打分 / V11 冷代码不耦合 / U6 复用同一 bus event；与 Part 5 双路径（嵌套 vs 卸载）、Part 2-3 共享 abort 触发上下文、Part 4 episode 检索前移到 plan call
+- §7 候选子任务 P6.1~P6.14（合计 A 单上 ~610 行 / B ~290 行 / C 全上 ~870 行 / D ~270 行）
+- §8 风险矩阵 9 类（token 爆炸 / latency 退化 / persona drift KL>0.05 / BlockTrace 因果链断 / V11 V8 耦合 / cache 失效 / reactive 误触 / abort 漂移 / mid-stream cancel SDK 偏离）+ 量化阈值 + 监控来源 + 缓解；4 方案 sed 一键回滚命令
+- §9 引用：27 论文按 8 轴归类 + Omubot/MaiBot 全部 file:line + Anthropic/aiohttp/vLLM/SGLang/Pipecat/OTel SDK 文档
+- §10 当前状态：调研完成 → 等用户决策推进路径
+
+**关键事实**：
+
+- Omubot 一次 chat() 不是 single-call，而是 3-8 次 LLM call —— "1024 后切"是 Part 5 视角的简化模型，Part 6 视角下生成调度本身已是 multi-call
+- MaiBot 看似支持 mid-generation interrupt，但 grep 全仓 chat 层零调用，是 LLM client 层 stub —— 开源 IM 场景目前没有 reactive abort 现成实现（仅 Pipecat audio-based）
+- Anthropic abort 不免费 —— 把 1024 全付 output 换成 N 段 × M tokens，需 M×N < 1024 才省钱
+- multi-call 不破坏 cache，反而充分利用 cache —— 前提是 system prefix byte-stable（Omubot apply_cache_breakpoints 已强制）+ Opus 4.7 prefix ≥4096 token（需抽样验证）
+- Drift No More 量化 GPT-4.1 self-divergence KL <0.05 over T=10 turns —— multi-call 不会 persona 越漂越远，定期 reminder 即可，无需每段全量重灌 system
+
+**影响**：Part 6 是研究存档，**不动 Part 1 灰度-1 进度**（2026-05-25 05:22:29 UTC 起 24h 基线仍在跑）；**不动 Part 5 工程线**（natural_split 仍兜底）；**不动 services/llm/client.py**（研究阶段不动代码）。
+
+**待办**：等用户对 §4.2 推荐路径（B → A → C 三阶段）的最终决策；如决策推进，按 §7 P6.x 列子任务进 Part 4 模式立项流程，每阶段最少 24h 基线观察 + 灰度群仅 993065015+984198159。
+
+**风险与回滚**：本条仅产生新文档（[docs/tracking/omubot-humanization-part6-source-side-generation.md](docs/tracking/omubot-humanization-part6-source-side-generation.md)）+ 本条 maintenance-log 记录，无运行时影响；回滚 = `git restore docs/tracking/omubot-humanization-part6-source-side-generation.md && git checkout HEAD -- maintenance-log.md`。
+
+---
+
+## 2026-05-25 Humanization Part 1 灰度-1 上线 — bot 镜像 rebuild + 24h 基线起跑
+
+**变更类型**：deploy / runtime / gray rollout
+
+**内容**：按 [omubot-humanization-part1-language-feel.md](docs/tracking/omubot-humanization-part1-language-feel.md) §10 出口标准，在前轮工程收口（W7/W8）基础上把 humanization Part 1 的灰度-1 真正推到运行时。
+
+- D7 前置：`git stash list` 空 / `git status -uno` dirty 文件全部属本轮 humanization 范围（services/humanization/、6 个新 BlockTrace Provider、plugins/chat/plugin.py、kernel/router.py、services/llm/client.py 等 ≈18 modified + ≈12 untracked + 24 新测试文件），无意外混入。
+- 全量 pytest（D5 前置 `pkill -9 -f pytest`）：`uv run pytest -q` → **1706 passed / 8 skipped / 0 failed / 29.32s**，超过 §10 出口阈值 ≥1676，包含 V/U 系列 30+ 条新增测试。
+- 镜像 rebuild：`docker compose up bot -d --build`（D6 不适用——humanization 改动跨 services/humanization/ + plugins/chat/plugin.py + kernel/router.py + services/llm/client.py，需重 build 而非仅 restart），#17 export+unpack ≈155s 完成，`omubot-bot:latest` sha256 `1fa00e0bb512`。
+- 容器内复核 `load_config()`：`humanization = {context_providers: true, register_classifier: true, sticker_register_provider: false, thinker_provider: false, rewrite_threshold: -1.0, semantic_gate_dynamic: false, runtime_groups: ['993065015']}`，与灰度-1 配置一致。
+- 启动日志（05:22:22 → 05:22:29 ready）关键证据：`humanization register classifier enabled` / `slang prompt injection delegated to provider bus` / `style prompt injection delegated to provider bus` / `Omubot PluginBus initialized | plugins=22` / `Bot 384801062 connected` / `[Group] allowed=[984198159, 993065015]`，无 traceback、无 import error、群消息已开始流入。
+- 灰度-1 24h 基线窗口起算时间：**2026-05-25 05:22:29 UTC**；预计 V12 measure 取数窗口 2026-05-26 05:22 UTC 之后。窗口期间仅 `993065015` 启用 register classifier + context Providers，rewrite_threshold=-1.0 关闭 rewrite-loop 二轮成本，`984198159` 保持灰度外（不调用 classifier、不写 slot）。
+
+**影响**：Part 1 工程已正式落到运行时，灰度-1 单群进入观测窗口。`984198159` 暂未纳入 humanization 灰度（仍在 persona_v2 灰度内），灰度-2/3 不动直到 24h 基线 + 7 天 ≥10/14 指标 + 用户主观验收齐全。
+
+**回滚**：`config/config.json` 把 `humanization.context_providers / register_classifier` 改 false 并清空 `runtime_groups`，`docker compose restart bot` 30 秒回到全 v1 路径；镜像层不必回退（旗标 off 后新代码路径即不被触发）。
+
+**验证**：
+
+- `git status -uno` 与 `git stash list` 已检；`pkill -9 -f pytest` 后 `ps aux | grep pytest` 无孤儿
+- `uv run pytest -q` → 1706 passed / 8 skipped
+- `docker compose up bot -d --build` exit 0 / `Container qq-bot Started`
+- `docker compose exec bot /app/.venv/bin/python -c "from kernel.config import load_config; print(load_config().humanization)"` 输出与灰度-1 配置 byte-for-byte 一致
+- `docker compose logs --tail=120 bot` 无 traceback、`Bot 就绪` 出现、`[group:993065015]` 已在 history loaded 列表中
+
+**待办（24h 后回到本日志再追加一条）**：
+
+- 跑 `scripts/dev/measure_humanization.sh` 取 humanization_metrics + register slot 命中率 + classifier 延迟 P95
+- 比对 §10 出口矩阵 ≥10/14 指标项；若过线则推进灰度-2 扩到 `984198159`，否则停手排查
+- 用户主观验收（"不再用力过猛" + admin/普通群 register 差异可感）
+
+---
+
+## 2026-05-25 Humanization Part 1 Wave 7/8 收口 — V7 seed、灰度-1、V12 度量入口
+
+**变更类型**：humanization runtime / config / scripts / tests / docs / gray rollout
+
+**内容**：按 [omubot-humanization-part1-execution.md](docs/tracking/omubot-humanization-part1-execution.md) 继续执行 Wave 7 + Wave 8，完成 Part 1 工程收口到灰度-1准备态。重点不是宣称灰度通过，而是把 seed、灰度阀、度量入口和交接文档都收实。
+
+- 灰度阀补测：`humanization.runtime_groups` 已覆盖 register classifier 与 rewrite-loop 两条新增成本路径；非灰度群不调用 classifier、不写 `REGISTER_LABEL_SLOT`，rewrite 阈值开启时非灰度群仍只打一轮主模型、不写 `LAST_METRICS_SLOT`。
+- V7 seed：新增 `scripts/dev/seed_catchphrase_pool.py`，只从 `EpisodeStore` 的真实 `enabled_for_prompt/approved/candidate` rows 抽短口头禅候选，写入 `LearningNormalizerStore(domain="catchphrase", source_table="episode")`；脚本自身做 source/raw 预检查，避免重复执行把 normalizer item count 加一。
+- 数据事实：宿主与容器 live volume 均确认 `episodic.db episodes_total=0`、`catchphrase_clusters=0`；dry-run 与真实执行均 `selected=0 written=0`。本轮没有伪造 30 条种子。
+- 灰度-1配置：`config/config.json` 与 `config/config.toml` 的 `[humanization]` 同步为单群 `runtime_groups=["993065015"]`，`context_providers=true`、`register_classifier=true`；`sticker_register_provider=false`、`thinker_provider=false`、`rewrite_threshold=-1.0`、`semantic_gate_dynamic=false` 继续关闭。灰度-2 未扩 `984198159`，灰度-3 未开 rewrite。
+- V12 度量入口：新增 `scripts/dev/measure_humanization.sh`，只读 `storage/block_trace.db`、`storage/learning_normalizer.db`、`storage/episodic.db`，输出 `humanization_metrics`、catchphrase normalizer、episode source、U13 double-haiku 和 rollout gate。当前本地输出为 metrics 表缺失、catchphrase=0、episode=0、U13 paired=0、gray-1 pending。
+- 文档同步：执行文档 §4/§6 与末尾完成记录、主方案 `omubot-humanization-part1-language-feel.md` §10/§11、`docs/migrations/persona-v2-importer.md` §12 已同步。迁移清单新增第 7 行“Part 1 humanization runtime 编排 + 灰度-1”，状态为工程收口，运行时验证待 24h。
+
+**影响**：Part 1 工程项已收口到灰度-1准备态，但当前运行容器仍需 rebuild/restart 后才会在线消费新增代码与配置。灰度-1 必须跑满 24h 出口矩阵并经用户主观验收后，才允许灰度-2/3；否则通过 `config/config.json` 关闭 `context_providers/register_classifier` 并清空 `runtime_groups` 可快速回滚。
+
+**验证**：
+
+- `pytest -q tests/test_humanization_config.py tests/test_chat_plugin_humanization_wire.py tests/test_llm_client_rewrite.py tests/test_seed_catchphrase_pool.py` → 22 passed
+- `ruff check kernel/config.py plugins/chat/plugin.py services/llm/client.py scripts/dev/seed_catchphrase_pool.py tests/test_humanization_config.py tests/test_chat_plugin_humanization_wire.py tests/test_llm_client_rewrite.py tests/test_seed_catchphrase_pool.py` → passed
+- `pyright scripts/dev/seed_catchphrase_pool.py tests/test_seed_catchphrase_pool.py tests/test_chat_plugin_humanization_wire.py tests/test_llm_client_rewrite.py tests/test_humanization_config.py` → 0 errors
+- `bash -n scripts/dev/measure_humanization.sh` → passed
+- `scripts/dev/measure_humanization.sh` → 输出 gray-1 pending、catchphrase=0、episode=0
+
+---
+
+## 2026-05-25 Humanization Part 4 调研报告沉淀（好感 / 长期记忆 / 学习管线 / 本地群聊 DB）
+
+**变更类型**：调研沉淀 / 设计 / 不施工
+
+**内容**：按用户授权"继续 part4 的调研，要求拉取相关项目和论文，不看 readme 只依据代码。附加需求，重点关注好感、长期记忆与学习管线、本地群聊数据库协同内容"，新增 [docs/tracking/omubot-humanization-part4-memory-relationship.md](docs/tracking/omubot-humanization-part4-memory-relationship.md) 10 章调研报告。延续 Part 2/3 取证原则——仅 arXiv ID + 章节锚点，禁 README / 中文综述；MaiBot 一律代码深读，不引用其文档。**仅设计 + 取证，不进施工序列**；与 v2.1 学习管线 7 个 PR (L1~L4) 已落部分形成 P4.x 扩展接力。
+
+- §0 取证原则 + 26 篇论文清单（与 Part 2/3 22 篇零重复）：长期记忆 8 篇（LongMemEval / LoCoMo / THEANINE / CAFFEINE / LiCoMemory / H-MEM / O-Mem / Structural Memory）+ 关系建模 5 篇（MetaMind / ToM-Agent / Trust No Bot / Can LLMs Friends / BDI Alignment）+ 学习管线 5 篇（Memento / ICAL / Lifelong Roadmap / SAGE / Reflective Self-improvement）+ 多智能体长记忆 5 篇（EverMemBench / INMS / Collaborative Memory / PPA / Conversation Chronicles）+ 本地 DB 协同 3 篇（Chronos / NeuSym-RAG / HybGRAG）
+- §1 取证（MaiBot 32 文件深读，1.1~1.15）：memory_system 三子系统（ChatHistory by chat_id / PersonInfo by person_id / ThinkingBack by chat_id+question）/ ReAct retrieval max_iter=5 / planner_question 短路 / dream_agent 独立 ReAct 只写 ChatHistory / PersonInfo `relation_info_block` 三处 commented out（group_generator.py:912/988/1091）/ DB schema 单 SQLite + WAL + chat_id 字符串 join + 无 FK / 同载入 ALTER 迁移 / 单 reply ≥5 LIMIT 查询 / sync peewee 阻塞 async / hot writers 无 to_thread / chinese_typo 三粒度（error_rate=0.01 单字 + 0.7^(len-1) decay / tone_error_rate=0.1 子概率 / word_replace_rate=0.006 词级）/ sticker MD5 dedup + Levenshtein 检索 + LLM 选 emotion tag + random.choice 选具体图 / 13 处新发现 dead code（GroupInfo 死表 / forget_times 未读 / make_delete_jargon 与 make_update_jargon 导入但从未 register_tool / relationship_* logger 孤儿 config 等）累计与 Part 2/3 共 22 处 surface ≠ implementation
+- §1.15 MaiBot → Omubot 现成模块映射表（`services/memory/{card,memo,message_log,migrate,retrieval,short_term,state_board,timeline}` / `services/episodic/{store,graph_bridge}` / `services/memory_consolidator/{consolidator,promoter,reflector,store,feedback_sources}` / `services/slang/*` / `services/style/*` / `services/media/sticker_store`）—— Omubot 已有覆盖度 ≥ MaiBot 同名模块约 80%，仅缺 ReAct 检索 + 关系建模两处
+- §2 学术证据矩阵 4 子节 26 篇逐篇 takeaway
+- §3 借鉴判断（4 子轴）：
+  - 长期记忆：借鉴 LongMemEval 时序索引 / THEANINE 三元组连续性 / H-MEM 4 层 hierarchy；不借鉴 LoCoMo 完整知识图（Omubot episodic graph 已够用）/ CAFFEINE 持续学习（与 v2.1 5 阶段重合）
+  - 关系建模：借鉴 MetaMind ToM 三阶段 + Trust No Bot 透明度；不借鉴 BDI 数值 desire 强度（与 MaiBot 自废的 relation_info 同模式）/ Can LLMs Friends 长程社交模拟（超出 IM 群聊场景）
+  - 学习管线：借鉴 Memento episodic + procedural 双轨 / ICAL adapt-then-store / Reflective Self-improvement 标注循环；不借鉴 SAGE 多智能体辩论（v2.1 已是 review-driven 单轨）/ Lifelong Roadmap 全图谱（与 episodic graph 重合）
+  - 本地 DB 协同：借鉴 Chronos 时序索引列 / NeuSym-RAG hybrid 神经-符号召回；不借鉴 HybGRAG 全图谱遍历（SQLite 性能不允许）
+- §4 与 Part 1/2/3/5 + learning v2.1 的接入点表（14 行 P4.x，每行标注阻塞依赖：v2.1 7 PR / Part 2/3 P3.4 / Part 1 V11/V12 / Part 5 P5.1）
+- §5 候选子任务清单 P4.1~P4.14（≤1455 行新增 / ≥103 测试 / 6 Waves A~F）：A=ReAct 检索补齐、B=关系信号去数值化、C=学习管线 episodic+procedural 双轨、D=长期记忆时序索引、E=本地 DB 协同、F=出口闭环
+- §6 出口标准 7 条 + §7 风险 R1~R10（P0 sync peewee 阻塞 async / P1 ALTER 迁移撞 D2 cancel-path / P2 hot path O(N) 群表 join 等）+ 30s feature flag 回滚
+- §8 引用：32 MaiBot 文件 + 18 Omubot 文件 + 26 论文锚点
+- §9 状态表 + §10 与既有 Part 边界（明确 P4.x 是 v2.1 7 PR 的扩展层，不是主线返工；阻塞于 v2.1 收口 + Part 2/3 P3.4 仲裁层）
+
+**影响**：本期不动代码、不动配置、不动数据库；仅 1 个 .md 沉淀。后续 Part 4 立项以本调研为依据，无需重新做 MaiBot 深读 / 论文调研。立项触发条件：v2.1 学习管线 7 PR 全部 ✅ + Part 2/3 P3.4 仲裁层落地。Part 4 与 Part 5 P5.2（句段化收口）正交，可独立排期；与 Part 1 U1/U3 主线串行。
+
+**验证**：未触代码路径，不需 pytest / 不需 ruff / 不需 vue-tsc。D6/D7 不适用。
+
+---
+
+## 2026-05-25 Humanization Part 2 + Part 3 调研报告沉淀
+
+**变更类型**：调研沉淀 / 设计 / 不施工
+
+**内容**：按用户授权"考察 part2 和 3 相关成熟项目与论文，做调研报告。要求一样，不许看 readme 和简述，所有依据来自代码深度解析和系统拆分"，新增 [docs/tracking/omubot-humanization-part2-3-research.md](docs/tracking/omubot-humanization-part2-3-research.md) 11 章调研报告。Part 1 V11/V12/U1~U14 收口后空窗期产物，**仅设计 + 取证，不进施工序列**。
+
+- §0 取证原则 + 22 篇论文清单（仅 arXiv ID + 章节锚点；无 README / 中文综述）
+- §1 取证（MaiBot 14 文件深读）：HeartFChatting `_loopbody` 主循环 + 动态阈值 3/5 / 频率门 talk_value × adjust / 硬编码 idle 10s/0.2s/0.1s/3s / `calculate_typing_time` 0.3s 中文 0.15s 英文 emoji 1s thinking 10s 兜底 / 首段 typing=False / `is_mentioned_bot_in_message` 7 层级联 / 多 @ last-wins / `force_reply_message` 后置编辑 / read_mark prompt 注入 / `ChatHistorySummarizer` 离线不参与 reply / person_info `relation_info_block` commented out / 9 处 dead code（surface ≠ implementation）
+- §2 学术对照矩阵：Part 2 维度（HUMA timeliness / Speak-or-Silent reasoning-first +7.2pp / SID-Bench K=3 / Full-Duplex-Bench v1.5 t_stop 0.23s / Semantic VAD 4 控制 token / 4-class interruption / PBR FSM / HumDial）/ Part 3 维度（Multi-Party Hangover degree centrality / TV-MMPC 3 binary roles / SS-MPC 无显式图 / EVOLVCONV K-hop / Memori 三元组 / membox Topic Loom / AdaMem 4 层 / TiMem temporal tree / Semantic Anchoring +18% / Rhea role-aware / 5-stage IM withdrawal）
+- §3 Part 2 借鉴判断（节奏 8 维度 + 仲裁 4 维度）：借鉴 reasoning-first 二分类、timeliness 时效因子、动态阈值；不借鉴 polling 主循环、零下限、dead code、PFC 状态机
+- §4 Part 3 借鉴判断（4 类 17 维度）：借鉴 4 层 cascade addressee（剥离 nickname substring）、in-line topic detector（embedding cosine 替代 difflib）、read_mark 注入；不借鉴 relation_info（MaiBot 自己关掉）、好感度数值（用 willingness 5-stage 分类替代）
+- §5 与 Part 1 U1/U3/V1/V11/V12 + Part 5 P5.1/P5.2 接入点表
+- §6 子任务草案：P2.1~P2.7 / P3.1~P3.5；预算 ≤ 655 行 + ≥ 50 测试；阻塞于 Part 1 主线 + Part 5 P5.1 收口
+- §7 出口标准（草案）+ §8 风险回滚（8 风险 + 30s feature flag）+ §9 引用 + §10 状态表 + §11 与既有 Part 边界
+
+**影响**：本期不动代码、不动配置、不动数据库；仅 1 个 .md 沉淀。后续 Part 2/3 立项以本调研为依据，无需重新做 MaiBot 深读 / 论文调研。Part 1 V11/V12/U1~U14 收口后若需推进，按 §6 任务清单与 Part 5 P5.1 串行排期。
+
+**验证**：未触代码路径，不需 pytest / 不需 ruff / 不需 vue-tsc。D6/D7 不适用。
+
+---
+
+## 2026-05-25 Humanization Part 1 Wave 1 — P0 清债收口
+
+**变更类型**：配置清理 / 运行时单实例化 / 派单证据订正
+
+**内容**：
+- `scheduler.concurrency` 确认为运行时 0 caller，已删除 `kernel.config` schema、`config/config.*` 默认值和管理端配置页入口；旧配置残留由 Pydantic 默认忽略，不阻断启动。
+- `ChatPlugin.on_shutdown()` 删除一处重复 `card_store.close()`，保留唯一关闭路径。
+- `BackupScheduler` 收口为 `PluginContext.backup_scheduler` 单实例，由 `kernel/router.py` 生命周期启动/停止；删除 `bot.py` 后半段全局 `_backup_scheduler`，并让 system backup settings reload 读同一个 ctx 实例。
+- `reply_segmentation` 9 个字段经代码实证不是死字段，保留给 U1 合并生产路径；`GroupSendQueue` 经并发追踪与回复切分研究实证为后续 `ReplySegmentBatch` 发送收口基础，评估后保留。
+
+**验证**：`git diff --check` clean；`tests/test_config_loader.py tests/test_admin_api.py` 74 passed；`admin/frontend vue-tsc --noEmit` 通过；`tests/test_chat_plugin.py tests/test_context_plugin.py` 8 passed；`tests/test_send_queue.py` 8 passed；`tests/test_backup_service.py tests/test_admin_api.py` 73 passed；`ruff check bot.py admin/routes/api/system.py admin/routes/api/backup.py kernel/router.py` clean。
+
+**影响**：后台配置页不再展示未生效的调度并发入口；备份调度避免双实例重复 daily/quick_check；分段与发送队列的已测预留能力保留给 Wave 2 U1 / Part 5。
+
+---
+
+## 2026-05-24 Persona v2 切流静默失效修复 — config.json 是运行时唯一源
+
+**变更类型**：config 修复 / 部落知识 / 运行时观测
+
+**根因**：B3 灰度配置开了 4 旗标 + `runtime_groups=["993065015","984198159"]` 写在 `config/config.toml`，但 [kernel/config.py:1232-1239](kernel/config.py#L1232-L1239) `_resolve_config_file()` 默认顺序是 **JSON 优先 → TOML 兼容**；容器里 `/app/config/config.json` 存在（10151 字节，5/14 落地），所以 `load_config()` 永远读 JSON，TOML 里的 `[persona_v2]` 段从未生效。`docker compose exec bot /app/.venv/bin/python -c "from kernel.config import load_config; print(load_config().persona_v2)"` 回报 `runtime_consume=False / shadow_compare=False / persona_id="default" / runtime_groups=[]` 全部默认 → `kernel/router.py::_on_connect` 的 B2 + B3 两个 flag-gated hook 永远不进；bot 在群 993065015 看似按"凤笑梦"人设回复，实际仍走 v1 PromptBuilder，B3 切流目标完全没达成。
+
+**内容**：
+- 把 `persona_v2` 段从 `config.toml` 平移到 `config.json` 顶层（与 `admins`/`group`/`llm` 同级）：`persona_id="fengxiaomeng-v2" / runtime_consume=true / shadow_compare=true / runtime_groups=["993065015","984198159"] / fallback_on_compile_error=true`；JSON ↔ Pydantic `PersonaV2Config` ([kernel/config.py:1046](kernel/config.py#L1046)) 字段一一对应，`runtime_groups` 由 `_coerce_runtime_groups` 统一 strip
+- `config.toml` 里删掉过期的 `[persona_v2]` 段，原位换成提示注释（"`_resolve_config_file()` 默认 JSON 优先；容器里 `config.json` 即运行时源；persona_v2 4 旗标在 JSON 顶层"）
+- 不改 `_resolve_config_file()` 优先级 —— admin 工具链（[admin/routes/api/config.py:380](admin/routes/api/config.py#L380) / [admin/routes/api/backup.py:65](admin/routes/api/backup.py#L65) / [admin/routes/api/__init__.py:25](admin/routes/api/__init__.py#L25) 7 处）已统一在 JSON 上，反向改源 blast radius 远超本次目标
+
+**影响**：`docker compose restart bot` 后 3 个证据点齐全 ——
+1. `load_config().persona_v2` 真返 `runtime_consume=True / shadow_compare=True / persona_id='fengxiaomeng-v2' / runtime_groups=['993065015','984198159']`
+2. `/app/storage/persona_shadow_diff.log` 在 `14:10:49Z` connect 时新增 1 行真比对结果（v1_text_len=14055 字节真实 PromptBuilder 输出）
+3. `kernel/router.py::_on_connect` 无 `persona_runtime` ERROR/warn → B3 selector 真装配（bundle.ok=True / v2_text 10285 字节）
+
+**parity 真分歧（4 axes，均为字面 anchor miss，不影响 LLM 实际人设语义）**：
+- `identity_personality`：v1 首行 `你是凤笑梦——Wonderlands×Showtime 的成员，凤凰奇幻乐园的守护者。…` vs v2 core.identity 起手 `名字：凤笑梦\n角色：凤笑梦——Wonderlands×Showtime 的成员…` —— importer 改写了字面，语义等价；`你是凤笑梦——…` 字串不在 v2 → divergent
+- `bot_self_id`：source.md front matter 缺 `bot_self_id_hint: 384801062` → adapter.yaml `self_id_hint=''` → runtime.adapter 缺 `bot self id hint：384801062` 锚点
+- `behavior_instruction`：v1 instruction.md 首行 `## 底线规则（每次回复前必查）` 不在 v2 core.guard `行为指令：` 段里（compiler 只搬 bullets，不带原文 H2）→ divergent
+- `admins`：source.md front matter 缺 `admins:` 段 → adapter.yaml `permissions.admins=[]` → runtime.adapter 没 `【管理员】@1416930401(工丿囗)` 段
+
+按 [docs/migrations/persona-v2-importer.md §9](docs/migrations/persona-v2-importer.md) "短期可接受 axis=v1_only/divergent，不阻断 B3 灰度" —— 4 条 anchor miss 不阻断本期；修法（遗留 follow-up）是 admin SPA 编辑 source.md front matter 加 `bot_self_id_hint`/`admins:` + 重新 import + freeze；本次不做。
+
+**验证**：D6 通过（只改 config，无 .py / 前端，restart 即生效，不需 `--build`）；D1 同模式扫描完毕（admin/ 7 处全部读写 `config.json`，TOML 无活跃 caller）；D7 git hygiene 修改前已 `git status -uno` 核对干净（28 个未提交文件均与本修复无关）；不跑 pytest（无代码路径变化，3 个 connect-time 证据点等价于 B3 端到端 smoke）。回滚 30 秒：`git restore config/config.json config/config.toml && docker compose restart bot`。
+
+**部落知识（写入此条目长期保存）**：本仓 config 优先级 JSON > TOML，admin 写盘也只写 JSON；TOML 仅作为人类可读副本，**任何运行时配置改动以 JSON 为准**。下次给运维 / 维护者交付时直接告知"改 `config/config.json`"，不要让人误改 TOML。
+
+---
+
 ## 2026-05-24 Persona Runtime Cutover B3 — 单群灰度切流（PromptBuilder/LLMClient 接 v2）
 
 **变更类型**：persona runtime cutover / prompt builder / kernel hook / tests / docs

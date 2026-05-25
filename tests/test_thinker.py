@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from services.llm.llm_request import LLMRequest
-from services.llm.thinker import THINKER_SYSTEM_PROMPT, parse_think_output, think
+from services.llm.thinker import THINKER_SYSTEM_PROMPT, build_thinker_time_text, parse_think_output, think
 
 
 def test_parse_think_output_accepts_plain_json() -> None:
@@ -184,6 +184,25 @@ def test_parse_think_output_empty_text_returns_none() -> None:
     assert parse_think_output("   ") is None
 
 
+def test_build_thinker_time_text_includes_day_flags_and_slot() -> None:
+    text = build_thinker_time_text({
+        "date": "2026-10-01",
+        "hour": 23,
+        "minute": 5,
+        "weekday_cn": "周四",
+        "is_weekend": False,
+        "is_holiday": True,
+        "slot_time": "22:30",
+        "slot_activity": "睡前刷题",
+        "slot_mood_hint": "安静",
+    })
+
+    assert "2026-10-01 23:05 周四" in text
+    assert "节假日" in text
+    assert "22:30 睡前刷题" in text
+    assert "安静" in text
+
+
 @pytest.mark.asyncio
 async def test_think_with_slang_hint_includes_hint_in_dynamic_blocks() -> None:
     captured_request: list[LLMRequest] = []
@@ -204,6 +223,29 @@ async def test_think_with_slang_hint_includes_hint_in_dynamic_blocks() -> None:
 
     assert len(captured_request) == 1
     assert hint in captured_request[0].dynamic_blocks
+
+
+@pytest.mark.asyncio
+async def test_think_with_time_text_prepends_runtime_clock_block() -> None:
+    captured_request: list[LLMRequest] = []
+
+    async def mock_api_call(req: LLMRequest) -> dict:
+        captured_request.append(req)
+        return {
+            "content": [{"type": "text", "text": '{"action":"reply","thought":"test","sticker":false,"tone":"日常"}'}],
+            "usage": {"input_tokens": 10, "output_tokens": 10},
+        }
+
+    time_text = "【当前时间】2026-05-25 02:30 周一（工作日）"
+    await think(
+        api_call=mock_api_call,
+        recent_messages=[{"role": "user", "content": "hello"}],
+        time_text=time_text,
+        mood_text="【当前心情】放松",
+    )
+
+    assert len(captured_request) == 1
+    assert captured_request[0].dynamic_blocks[:2] == [time_text, "【当前心情】放松"]
 
 
 @pytest.mark.asyncio

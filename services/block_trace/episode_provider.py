@@ -31,6 +31,8 @@ from loguru import logger
 
 from services.block_trace.providers import ContextProvider, QueryContext
 from services.block_trace.types import PromptBlockCandidate
+from services.humanization import REGISTER_LABEL_SLOT
+from services.system_module import Scope
 
 if TYPE_CHECKING:
     from services.episodic.store import Episode
@@ -110,10 +112,11 @@ class EpisodeProvider:
         store = self._get_store()
         if store is None:
             return []
+        register_label = _read_register_label(ctx)
         try:
             episodes = await store.list_for_recall(
                 group_id=str(ctx.group_id),
-                limit=self._top_k,
+                limit=max(self._top_k, self._top_k * 3),
             )
         except Exception as exc:
             _L.warning("episode recall failed | group={} err={}", ctx.group_id, exc)
@@ -124,11 +127,15 @@ class EpisodeProvider:
         lines: list[str] = []
         episode_ids: list[str] = []
         for ep in episodes:
+            if not _episode_matches_register(ep, register_label):
+                continue
             line = _render_episode_line(ep)
             if not line:
                 continue
             lines.append(f"- {line}")
             episode_ids.append(ep.episode_id)
+            if len(lines) >= self._top_k:
+                break
 
         if not lines:
             return []
@@ -161,9 +168,49 @@ class EpisodeProvider:
             hit_reason="episode_recall_enabled_for_prompt",
             char_count=len(block_text),
             evidence_refs=tuple(episode_ids),
-            metadata={"episode_count": len(episode_ids)},
+            metadata={"episode_count": len(episode_ids), "register_label": register_label},
         )
         return [candidate]
+
+
+def _read_register_label(ctx: QueryContext) -> str:
+    if ctx.runtime_state is None:
+        return "neutral"
+    try:
+        snapshot = ctx.runtime_state.get(
+            REGISTER_LABEL_SLOT,
+            scope=Scope(session_id=ctx.session_id, group_id=ctx.group_id, user_id=ctx.user_id),
+        )
+    except Exception:
+        return "neutral"
+    value = getattr(snapshot, "value", None)
+    if not isinstance(value, dict):
+        return "neutral"
+    label = str(value.get("label", "")).strip().lower()
+    return label or "neutral"
+
+
+def _episode_matches_register(ep: Episode, register_label: str) -> bool:
+    meta = getattr(ep, "meta", None)
+    if not isinstance(meta, dict):
+        return True
+    allowed = _meta_labels(meta, "register_labels", "allowed_registers", "target_registers")
+    blocked = _meta_labels(meta, "avoid_register_labels", "blocked_registers")
+    label = (register_label or "neutral").strip().lower()
+    if blocked and label in blocked:
+        return False
+    return not (allowed and label not in allowed)
+
+
+def _meta_labels(meta: dict[str, Any], *keys: str) -> set[str]:
+    labels: set[str] = set()
+    for key in keys:
+        raw = meta.get(key)
+        if isinstance(raw, str):
+            labels.update(part.strip().lower() for part in raw.split(",") if part.strip())
+        elif isinstance(raw, (list, tuple, set)):
+            labels.update(str(part).strip().lower() for part in raw if str(part).strip())
+    return labels
 
 
 assert isinstance(EpisodeProvider(store_getter=lambda: None), ContextProvider)
