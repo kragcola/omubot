@@ -125,3 +125,24 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def addressee_gate(
+    result: AddresseeResult,
+    *,
+    bot_ids: Sequence[str] = (),
+    mood_label: Any | None = None,
+    reply_to_bot: bool = False,
+) -> bool:
+    ids = {str(value) for value in bot_ids if str(value).strip()}
+    target = str(result.target_id or "")
+    addressed_to_self = bool(reply_to_bot or (target and target in ids))
+    return _label(mood_label) == "cold" and not addressed_to_self
+
+
+def _label(value: Any | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, Mapping):
+        return str(value.get("label") or value.get("mood") or "").strip().lower()
+    return str(getattr(value, "label", "") or getattr(value, "mood", "") or value).strip().lower()

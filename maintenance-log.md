@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P3.9 Planner/Addressee Mood Gate 落地
+
+**变更类型**：humanization support module / reply planner gate / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 3 P3.9 为 binary planner 与 addressee detector 增加 mood / affection gate：
+
+- `services/group/addressee.py`：新增 `addressee_gate()`，cold + 非 self 时 suppress；
+- `services/reply_planner/binary_planner.py`：`BinaryPlannerFeatures` 增加默认 mood / affection 字段；
+- `BinaryPlanner.plan()` 在 LLM 调用前短路 cold-not-self 为 `no_reply`；
+- `build_binary_planner_request()` 对 `affection_stage=stranger` 使用 neutral register，不把 mood / affection 字段写进 planner payload；
+- `tests/test_planner_addressee_mood.py`：8 条覆盖 gate、短路、self 放行、stranger register neutral 与 cancel-path。
+
+**验证**：
+
+- `git diff --numstat -- services/group/addressee.py services/reply_planner/binary_planner.py` → `21/0` + `29/1`
+- `uv run pytest tests/test_planner_addressee_mood.py tests/test_binary_planner.py tests/test_no_reply_threshold.py tests/test_addressee_detector.py -q` → `30 passed`
+- `uv run ruff check services/group/addressee.py services/group/__init__.py services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_planner_addressee_mood.py tests/test_binary_planner.py tests/test_no_reply_threshold.py tests/test_addressee_detector.py` → passed
+- `uv run pyright services/group/addressee.py services/group/__init__.py services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_planner_addressee_mood.py tests/test_binary_planner.py tests/test_no_reply_threshold.py tests/test_addressee_detector.py` → `0 errors`
+- `uv run python -m py_compile services/group/addressee.py services/group/__init__.py services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_planner_addressee_mood.py` → passed
+
+**影响**：P3.9 状态自主验收为 ✅；当前未接 `plugins/chat/plugin.py` / scheduler，不改变线上是否回复判定。后续 P2.5 可复用 addressee gate 收紧 force_reply。
+
+**回滚**：撤销 addressee / binary planner gate 改动，删除 `tests/test_planner_addressee_mood.py`，撤销 Part 2/3 tracking 的 P3.9 回填。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P3.8 Mood 节奏渗透落地
 
 **变更类型**：humanization runtime / segmentation / tests

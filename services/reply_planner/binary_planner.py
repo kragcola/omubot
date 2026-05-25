@@ -6,11 +6,12 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from loguru import logger
 
+from services.group.addressee import AddresseeResult, addressee_gate
 from services.llm.llm_request import LLMRequest
 
 BinaryReplyAction = Literal["reply", "no_reply"]
@@ -37,6 +38,8 @@ class BinaryPlannerFeatures:
     bot_id: str = ""
     reply_to_bot: bool = False
     recent_assistant_text: str = ""
+    mood_label: Any = "neutral"
+    affection_stage: Any = "acquaint"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +73,9 @@ class BinaryPlanner:
     async def plan(
         self, features: BinaryPlannerFeatures, *, api_call: Callable[[LLMRequest], Awaitable[dict[str, Any]]]
     ) -> BinaryPlanDecision:
+        gated = mood_addressee_gate(features)
+        if gated is not None:
+            return self._record(gated)
         request = build_binary_planner_request(features)
         try:
             result = await asyncio.wait_for(api_call(request), timeout=self.timeout_ms / 1000)
@@ -88,6 +94,8 @@ class BinaryPlanner:
 
 
 def build_binary_planner_request(features: BinaryPlannerFeatures) -> LLMRequest:
+    if _label(features.affection_stage) == "stranger" and _label(features.register_label) != "neutral":
+        features = replace(features, register_label="neutral")
     payload = {
         "current_text": _truncate(features.current_text, 120),
         "current_user_id": features.current_user_id,
@@ -110,6 +118,16 @@ def build_binary_planner_request(features: BinaryPlannerFeatures) -> LLMRequest:
         max_tokens=128,
         requires_capabilities=("chat", "json"),
     )
+
+
+def mood_addressee_gate(features: BinaryPlannerFeatures) -> BinaryPlanDecision | None:
+    should_suppress = addressee_gate(
+        AddresseeResult(features.addressee_id, 1.0 if features.addressee_id else 0.0, "planner_features"),
+        bot_ids=(features.bot_id,),
+        mood_label=features.mood_label,
+        reply_to_bot=features.reply_to_bot,
+    )
+    return BinaryPlanDecision("no_reply", 0.92, "gate", "cold_not_self", "gate") if should_suppress else None
 
 
 def parse_binary_planner_output(text: str) -> BinaryPlanDecision:
@@ -197,3 +215,13 @@ def _normalize(value: Any, limit: int) -> str:
 def _truncate(value: str, limit: int) -> str:
     text = re.sub(r"\s+", " ", value or "").strip()
     return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+def _label(value: Any | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return str(value.get("label") or value.get("stage") or value.get("mood") or "").strip().lower()
+    return str(
+        getattr(value, "label", "") or getattr(value, "stage", "") or getattr(value, "mood", "") or value
+    ).strip().lower()

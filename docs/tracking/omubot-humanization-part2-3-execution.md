@@ -232,7 +232,7 @@
 | ~~P2.3~~ | — | ❌ | 证据不成立：已由 [Part 5 P5.2 ✅](./omubot-humanization-part5-execution.md#6) 实现，不重复 |
 | **P2.8** | 3 | ✅ | 自主验收通过：`services/sticker/decision_provider.py`（160 行）+ 15 条测试；4 触发源单决策点、mood/affection gate、cooldown 与 cancel-path 验证通过 |
 | **P3.8** | 3 | ✅ | 自主验收通过：Humanizer + inter_segment_delay 可选 mood 系数；`tests/test_humanizer_mood.py` 6 条，相关回归 30 条通过 |
-| **P3.9** | 3 | ⏳ | 阻塞于 P3.6 + P3.7 + P2.2 + P3.1 |
+| **P3.9** | 3 | ✅ | 自主验收通过：cold + non-self planner gate、stranger→neutral register；目标文件 +50/-1 行，8 条新测试，相关回归 30 条通过 |
 | **P2.5** | 3 | ⏳ | 阻塞于 P3.1 |
 | **P3.3** | 3 | ⏳ | 阻塞于 P3.2 |
 | **P2.9** | 4 | ⏳ | 阻塞于 P2.8 |
@@ -750,3 +750,39 @@ D2 / 回滚：cancel-path 测试通过，extra candidate loader 取消时 `async
 - D1 grep：`rg -n "_MOOD_DELAY_FACTOR|_NATURAL_DELAY_MOOD_FACTORS|mood_label|test_humanizer_.*mood|inter_segment_delay.*mood" services/humanizer.py services/llm/segmentation.py tests/test_humanizer_mood.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 Humanizer / segmentation / 新测试 / 本追踪记录。
 
 D2 / 回滚：本任务无新增写状态 cancel-path；旧调用兼容。回滚为撤销 `services/humanizer.py`、`services/llm/segmentation.py` mood 系数改动，删除 `tests/test_humanizer_mood.py` 并撤销 §6 / §9 的 P3.8 回填。
+
+### P3.9 领单拆分（执行前）— Codex / 2026-05-26 00:54 CST
+
+- **任务边界**：只改 `services/reply_planner/binary_planner.py`、`services/group/addressee.py` 与对应导出/测试；不接 `plugins/chat/plugin.py`、不改配置、不把 mood / affection 文本塞入 identity 或主回复 prompt。
+- **自主评估**：P3.9 依赖 P3.6 mood、P3.7 affection、P2.2 binary planner、P3.1 addressee，当前均 ✅。本步以局部 gate 形式落地：cold + 非 self 在 planner 前短路为 `no_reply`；affection=stranger 只把 planner payload 的 register 归中性。
+- **执行拆分**：
+  1. `AddresseeDetector` 模块新增纯函数 gate：给定 addressee 结果、bot ids、mood，判断是否 self / 是否 cold-not-self suppress。
+  2. `BinaryPlannerFeatures` 增加可选 `mood_label` 与 `affection_stage`；旧调用默认 neutral / acquaint。
+  3. `BinaryPlanner.plan()` 在 LLM 调用前执行 cold-not-self 短路；cancel-path 继续向上传播且不脏写 counter。
+  4. `build_binary_planner_request()` 对 stranger 阶段使用 neutral register，不额外暴露 mood / affection 字段。
+  5. 新增 `tests/test_planner_addressee_mood.py` 8 条覆盖 gate、短路、self 放行、stranger register neutral、cancel-path。
+- **风险与回滚**：当前 binary planner 尚未接生产路径，运行时 blast radius 小；回滚为撤销 planner/addressee gate 改动、删除新测试并撤销 §6 / §9 P3.9 回填。
+
+### P3.9 完成记录（执行者 Codex）— 2026-05-26 01:11 CST
+
+自验结果：P3.9 完成并自主验收 ✅。`services/group/addressee.py` +21 行，`services/reply_planner/binary_planner.py` +29/-1 行，目标文件合计 +50/-1，符合 `≤ 50 行` 派单约束；当前仍未接 `plugins/chat/plugin.py` / scheduler，不改变线上回复判定。
+
+改动内容：
+
+- `services/group/addressee.py` 新增 `addressee_gate()`：`mood_label=cold` 且 addressee 不是 bot / `reply_to_bot` 非真时返回 suppress。
+- `services/reply_planner/binary_planner.py` 为 `BinaryPlannerFeatures` 增加默认 `mood_label="neutral"`、`affection_stage="acquaint"`。
+- `BinaryPlanner.plan()` 在 LLM 调用前执行 cold-not-self 短路，返回 `no_reply` 且更新 `NoReplyCounter`；self / `reply_to_bot` 继续调用 LLM。
+- `build_binary_planner_request()` 在 `affection_stage=stranger` 时把 `register_label` 归中性；payload 不新增 `mood_label` / `affection_stage` 字段，避免把状态文字注入 prompt。
+- `tests/test_planner_addressee_mood.py` 新增 8 条覆盖 addressee gate、cold non-self 短路、unknown addressee、self 放行、stranger register neutral 与 cancel-path。
+
+验证：
+
+- `git diff --numstat -- services/group/addressee.py services/reply_planner/binary_planner.py` → `21/0` + `29/1`。
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_planner_addressee_mood.py tests/test_binary_planner.py tests/test_no_reply_threshold.py tests/test_addressee_detector.py -q` → `30 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/group/addressee.py services/group/__init__.py services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_planner_addressee_mood.py tests/test_binary_planner.py tests/test_no_reply_threshold.py tests/test_addressee_detector.py` → `All checks passed!`。
+- `source ./scripts/dev/env.sh && uv run pyright services/group/addressee.py services/group/__init__.py services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_planner_addressee_mood.py tests/test_binary_planner.py tests/test_no_reply_threshold.py tests/test_addressee_detector.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/group/addressee.py services/group/__init__.py services/reply_planner/binary_planner.py services/reply_planner/__init__.py tests/test_planner_addressee_mood.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` → `1825 tests collected in 0.58s`。
+- D1 grep：`rg -n "AddresseeGateResult|addressee_gate|mood_addressee_gate|planner_features_for_request|mood_label|affection_stage|test_planner_addressee_mood" services/group services/reply_planner tests/test_planner_addressee_mood.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 addressee gate、planner gate、新测试与本追踪记录；`AddresseeGateResult` / `planner_features_for_request` 无代码命中（表示已收缩为最小 API）。
+
+D2 / 回滚：cancel-path 测试通过，cold+self 进入 LLM 调用后 `asyncio.CancelledError` 向上传播且 counter 不更新；回滚为撤销 `services/group/addressee.py`、`services/group/__init__.py`、`services/reply_planner/binary_planner.py`、`services/reply_planner/__init__.py` 的 P3.9 gate 改动，删除 `tests/test_planner_addressee_mood.py` 并撤销 §6 / §9 的 P3.9 回填。

@@ -7,6 +7,7 @@ from services.reply_planner.binary_planner import (
     BinaryReplyAction,
     NoReplyCounter,
     build_binary_planner_request,
+    mood_addressee_gate,
     no_reply_threshold,
     parse_binary_planner_output,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "BinaryReplyAction",
     "NoReplyCounter",
     "build_binary_planner_request",
+    "mood_addressee_gate",
     "no_reply_threshold",
     "parse_binary_planner_output",
 ]
