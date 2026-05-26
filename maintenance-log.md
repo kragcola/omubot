@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P2.11 URL OG Title 注入落地
+
+**变更类型**：prompt context / URL metadata / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 4 P2.11，为群聊 prompt 增加 URL `og:title` 轻量注入：
+
+- `services/url_meta/blacklist.py`：新增 `is_blocked_url()`，过滤非 http(s)、localhost、私网/IP、`.local/.lan/.internal/.corp/.home.arpa` 与 admin/auth/login/banking/payment/finance/wallet 域名标签；
+- `services/url_meta/og_title.py`：新增 `collect_url_titles()` 与 `build_url_title_context()`；默认 500ms timeout、24h/128 项内存 LRU、优先 `og:title` 回退 `<title>`，失败/超时/非 HTML 静默返回；
+- `services/llm/prompt_builder.py`：在 group turn + `conversation_text` 含 URL 时追加 `【链接标题】` block；私聊、无 URL、黑名单或抓取失败时不注入；
+- `tests/test_og_title.py`：新增 9 条测试覆盖 og:title、title fallback、黑名单/私网、timeout、fetch failure、LRU 与 PromptBuilder 注入/跳过。
+
+**验证**：
+
+- `uv run pytest -q tests/test_og_title.py tests/test_prompt.py tests/test_prompt_read_mark.py tests/test_prompt_builder_runtime.py` → `30 passed`
+- `uv run ruff check services/url_meta/__init__.py services/url_meta/blacklist.py services/url_meta/og_title.py services/llm/prompt_builder.py tests/test_og_title.py tests/test_prompt.py tests/test_prompt_read_mark.py tests/test_prompt_builder_runtime.py` → passed
+- `uv run pyright services/url_meta services/llm/prompt_builder.py tests/test_og_title.py tests/test_prompt.py tests/test_prompt_read_mark.py tests/test_prompt_builder_runtime.py` → `0 errors`
+- `uv run python -m py_compile services/url_meta/__init__.py services/url_meta/blacklist.py services/url_meta/og_title.py services/llm/prompt_builder.py tests/test_og_title.py` → passed
+- `uv run pytest --collect-only -q` → `1853 tests collected`
+
+**影响**：P2.11 状态自主验收为 ✅；群聊里出现普通网页链接时，prompt 会得到短标题辅助上下文，但不会复制页面正文，也不会触碰 Bilibili 专用解析和 P2.13 视频 adapter 预留范围。
+
+**回滚**：删除 `services/url_meta/` 与 `tests/test_og_title.py`，撤销 `services/llm/prompt_builder.py` 的 URL title 注入，并撤销 Part 2/3 tracking 的 P2.11 回填。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P2.14 Sticker Density Feedback 落地
 
 **变更类型**：humanization runtime / sticker feedback / tests

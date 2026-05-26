@@ -238,10 +238,10 @@
 | **P2.9** | 4 | ✅ | 自主验收通过：kaomoji 强制轮 strict gate + `humanization.kaomoji_enforce_strict` 回退旗标；6 条新测试与相关回归 16 条通过 |
 | **P2.10** | 4 | ✅ | 自主验收通过：auto-capture emotion tag helper + 离线 recaption 脚本；5 条新测试与相关回归 55 条通过 |
 | **P2.14** | 4 | ✅ | 自主验收通过：StickerDecisionProvider 写入一次性 `feedback_sticker_density=0.3`，MoodClassifier 下轮消费并清零；3 条专项 + 相关回归 30 条通过 |
-| **P2.11** | 4 | ⏳ | 阻塞于 P2.8 |
-| **P3.10** | 5 | ⏳ | 阻塞于 P3.6 + P3.7 + P3.8 + P3.9 |
-| **P2.12** | 5 | ⏳ | 阻塞于 P2.8 + P2.10 |
-| **P2.13** | 5 | ⏳ | 阻塞于 P2.11 |
+| **P2.11** | 4 | ✅ | 自主验收通过：`services/url_meta/og_title.py` 128 行 + `blacklist.py` 26 行；24h LRU、500ms timeout、黑名单与 PromptBuilder group URL title 注入；9 条新测试 |
+| **P3.10** | 5 | ⏳ | 待领；P3.6 / P3.7 / P3.8 / P3.9 均 ✅ |
+| **P2.12** | 5 | ⏳ | 待领；P2.8 / P2.10 均 ✅ |
+| **P2.13** | 5 | ⏳ | 待领；P2.11 ✅ |
 | **P2.7+P3.5+v2-灰度** | 6 | ⏳ | 阻塞于 Wave 5 全 ✅ + 用户授权进灰度 |
 | **P2/3-DOC** | 7 | ⏳ | 阻塞于 Wave 6 出口指标 ≥ 12/16 项 + 用户主观验收 |
 
@@ -948,3 +948,35 @@ D2 / 回滚：回滚为撤销 `services/media/sticker_capture.py` / `plugins/sti
 - D1 grep：`rg -n "feedback_sticker_density|_write_density_feedback|test_sticker_density_feedback" services/sticker/decision_provider.py services/humanization/mood_classifier.py tests/test_sticker_density_feedback.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 provider 写回、classifier 消费/清零、新测试与本追踪记录。
 
 D2 / 回滚：本任务没有新增 cancel-path 持久化链路；`RuntimeStateBus.set()` 仍为同步内存写，provider 写回异常会被吞掉，不阻断 sticker 决策。回滚为撤销 `services/sticker/decision_provider.py` / `services/humanization/mood_classifier.py` / `tests/test_sticker_density_feedback.py` 的 P2.14 改动，并撤销 §6 / §9 的 P2.14 回填。
+
+### P2.11 领单拆分（执行前）— Codex / 2026-05-26 08:51 CST
+
+- **任务边界**：新建 `services/url_meta/` 的通用 OG title 抓取能力，并把结果作为 group context 轻量注入 `PromptBuilder`；不改 `plugins/bilibili` 专用解析、不做视频 adapter（留给 P2.13）、不把 URL title 注入 identity/static prompt、不引入持久化存储。
+- **自主评估**：当前 `PromptBuilder.build_blocks()` 已收到 `conversation_text`，但没有解析 URL；P2.11 可在该入口上做 best-effort title 摘要块。为控制风险，抓取层必须带 24h 内存 LRU、500ms timeout、黑名单与失败静默，PromptBuilder 注入文本只列 URL host/path 与 title，不复制页面正文。
+- **执行拆分**：
+  1. 新建 `services/url_meta/blacklist.py`，封装 private/admin/banking 域名与私网 host 判定。
+  2. 新建 `services/url_meta/og_title.py`，提取 URL、过滤黑名单、用 aiohttp 500ms 抓 HTML，优先读 `og:title`，回退 `<title>`，24h LRU 缓存成功/失败结果。
+  3. `PromptBuilder.build_blocks()` 调用 `build_url_title_context()`；group turn 且 `conversation_text` 含 URL 时，把 `【链接标题】` block 插入 group context 区域。
+  4. 新增 `tests/test_og_title.py` 8 条左右，覆盖 og:title、title fallback、黑名单/私网、timeout、fetch 失败静默、LRU 命中与 PromptBuilder 注入/私聊跳过。
+- **风险与回滚**：本步主要风险是 prompt 构建时网络抓取拖慢或误抓敏感地址。实现必须满足 timeout=0.5s、黑名单优先、失败返回空、缓存命中不发网络请求。回滚为删除 `services/url_meta/`、撤销 PromptBuilder 注入与新测试，并撤销 §6 / §9 P2.11 回填。
+
+### P2.11 完成记录（执行者 Codex）— 2026-05-26 08:56 CST
+
+自验结果：P2.11 完成并自主验收 ✅。本步新增 URL metadata 服务，PromptBuilder 只在 group turn 且 `conversation_text` 含 URL 时注入 `【链接标题】` block；失败、超时、黑名单或私聊场景全部静默跳过，不改 Bilibili 专用插件与 P2.13 视频 adapter 范围。
+
+- `services/url_meta/blacklist.py`：26 行，封装 `is_blocked_url()`，过滤非 http(s)、localhost、私网/IP、`.local/.lan/.internal/.corp/.home.arpa` 与 admin/auth/login/banking/payment/finance/wallet 域名标签。
+- `services/url_meta/og_title.py`：128 行，新增 `UrlTitle`、`collect_url_titles()`、`build_url_title_context()` 与 24h/128 项内存 LRU；抓取默认 timeout=0.5s，优先 `og:title`，回退 `<title>`，失败缓存为空并静默返回。
+- `services/url_meta/__init__.py`：导出 URL title 服务入口。
+- `services/llm/prompt_builder.py`：增加 5 行注入点；group turn + `conversation_text` 时调用 `build_url_title_context()`，有结果才追加 `【链接标题】` block。
+- `tests/test_og_title.py`：新增 9 条测试，覆盖 og:title、title fallback、admin/banking 黑名单、私网 host、timeout、fetch failure、LRU、PromptBuilder group 注入与 private skip。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_og_title.py tests/test_prompt.py tests/test_prompt_read_mark.py tests/test_prompt_builder_runtime.py` → `30 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/url_meta/__init__.py services/url_meta/blacklist.py services/url_meta/og_title.py services/llm/prompt_builder.py tests/test_og_title.py tests/test_prompt.py tests/test_prompt_read_mark.py tests/test_prompt_builder_runtime.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pyright services/url_meta services/llm/prompt_builder.py tests/test_og_title.py tests/test_prompt.py tests/test_prompt_read_mark.py tests/test_prompt_builder_runtime.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/url_meta/__init__.py services/url_meta/blacklist.py services/url_meta/og_title.py services/llm/prompt_builder.py tests/test_og_title.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` → `1853 tests collected`。
+- D1 grep：`rg -n "build_url_title_context|collect_url_titles|is_blocked_url|test_og_title" services/url_meta services/llm/prompt_builder.py tests/test_og_title.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中新服务、PromptBuilder 注入、新测试与本追踪记录。
+
+D2 / 回滚：本任务无持久化写入；网络路径由 500ms timeout、黑名单优先、失败静默与空结果缓存约束，不会阻断 prompt fallback。回滚为删除 `services/url_meta/` 与 `tests/test_og_title.py`，撤销 `services/llm/prompt_builder.py` 注入，并撤销 §6 / §9 的 P2.11 回填。

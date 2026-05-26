@@ -23,6 +23,7 @@ from loguru import logger
 from services.identity import Identity
 from services.memory.state_board import GroupStateBoard
 from services.persona.runtime_selector import PersonaRuntimeSelector
+from services.url_meta import build_url_title_context
 
 _L = logger.bind(channel="system")
 _READ_MARK_TEXT = "--- 以上消息是你已经看过，请关注以下未读的新消息 ---"
@@ -168,6 +169,10 @@ class PromptBuilder:
         group_context_block = self._build_group_context_block(group_id, read_mark=read_mark)
         if group_context_block is not None:
             blocks.append(group_context_block)
+        if group_id is not None and conversation_text:
+            url_title_text = await build_url_title_context(conversation_text)
+            if url_title_text:
+                blocks.append({"type": "text", "text": url_title_text})
         if plugin_static:
             blocks.extend(plugin_static)
         if include_state_board:
