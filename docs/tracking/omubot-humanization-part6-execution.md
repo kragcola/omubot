@@ -205,7 +205,7 @@
 | **P6.0.x3** | 1 | 🟡 | 已落地并自验：`_humanization_resolve()` 接入 PromptBuilder / state_board / LLMClient 分段；focused pytest 121 passed；待用户最终审查 |
 | **P6.0.x4** | 1 | 🟡 | 已落地并自验：`HumanizationHealthGuard` 96 行，读 `llm_calls` hit/miss 口径，performance 降级到 balanced；focused pytest 19 passed；待用户最终审查 |
 | **P6.0.x5** | 1 | 🟡 | 已落地并自验：配置页 profile 下拉/只读子能力摘要、群级档位覆盖、dashboard 档位与降级 chip；focused pytest 64 passed；frontend vue-tsc/build passed；待用户最终审查 |
-| **P6.0.y1** | 2 | ⏳ | 入站 PokeNotifyEvent + NapCat raw 表情回应 hook；投递 Part 2-3 既有 group_timeline |
+| **P6.0.y1** | 2 | 🟡 | 已落地并自验：`on_notice` 桥接 PokeNotifyEvent + NapCat raw reaction NoticeEvent，显式 flag 开启时投递 `GroupTimeline.add_pending_trigger()` + scheduler；poke 60s/5 次内存 mute；focused pytest 55 passed；待用户最终审查 |
 | **P6.0.y2** | 2 | ⏳ | services/tools/interaction_tools.py；token bucket 速率门 |
 | **P6.0.y3** | 2 | ⏳ | `<quote msg_id="..."/>` 锚点解析 + MessageSegment.reply |
 | **P6.0.y4** | 2 | ⏳ | qq_interactions 子配置 + GroupOverride.qq_interactions_profile_override |
@@ -387,6 +387,25 @@ Part 2-3 已在执行中（用户原话："part2-3 已在执行"）。Part 6 与
 - **D2 cancel-path**：N/A（Admin API/SPA 读写配置与只读 dashboard 摘要；health guard 降级列表只读 helper，无新异步写路径）。
 - **回滚**：`git revert <本提交>`；或运行时把全局 `humanization.profile` 置回 `custom`，群级覆盖改回“继承全局”，刷新/重启 admin 与 bot。
 - **回填**：§6 `P6.0.x5` 已置 🟡，Wave 1 剩余灰度项继续按用户口径不阻塞后续 Wave。
+
+### P6.0.y1 领单拆分（执行前）
+
+- **目标**：新增 QQ 入站交互信号源：戳一戳与 NapCat 表情回应统一解析为 trigger signal，投递现有 `GroupTimeline.add_pending_trigger()` + scheduler，不改 Part 2-3 仲裁逻辑。
+- **代码拆分**：新增 `services/humanization/qq_interactions.py` 承载 `QQInteractionSignal`、Poke/Reaction raw NoticeEvent 解析与 poke 单用户速率护栏；`kernel/router.py` 只增 `on_notice` handler；新建 router focused tests。
+- **启用口径**：读取 `humanization.qq_interactions.poke_inbound_response_enabled / reaction_inbound_response_enabled`，字段未存在时默认 off；后续 P6.0.y4 再补 schema。
+- **D2 计划**：handler 无持久写；disabled/非 bot 目标/被速率 mute 时不碰 timeline/scheduler；速率护栏仅内存状态。
+- **验收证据计划**：跑新 router tests + scheduler/force-reply 触发回归；ruff/pyright 改动范围；grep `PokeNotifyEvent|MessageReactionEvent|on_notice|QQInteractionSignal`。
+
+### P6.0.y1 完成记录
+
+- **代码**：新增 [services/humanization/qq_interactions.py](../../services/humanization/qq_interactions.py)，负责 Poke/Reaction NoticeEvent 解析、显式 flag gate、active-group/blocked-user 过滤、poke 60s/5 次内存 mute；[kernel/router.py](../../kernel/router.py) 仅新增轻量 `on_notice` 桥接。
+- **投递路径**：开启 `poke_inbound_response_enabled` 或 `reaction_inbound_response_enabled` 后，信号写入 `GroupTimeline.add_pending_trigger()`，再以 `TriggerContext(mode="qq_interaction")` 调用 scheduler；默认字段不存在时 off。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_router_qq_interactions.py tests/test_force_reply.py tests/test_scheduler.py` → `55 passed`。
+- **ruff / pyright**：`uv run ruff check kernel/router.py services/humanization/qq_interactions.py tests/test_router_qq_interactions.py` → passed；`uv run pyright services/humanization/qq_interactions.py tests/test_router_qq_interactions.py` → `0 errors`。
+- **D1 grep**：`PokeNotifyEvent / MessageReactionEvent / on_notice / QQInteractionSignal / poke_inbound_response_enabled / reaction_inbound_response_enabled` 命中 router、qq_interactions、tests 与本追踪文档。
+- **D2 cancel-path**：测试覆盖 disabled / 非 bot 目标不碰 timeline/scheduler；速率 mute 只写内存 dict，不写 DB/config，重启即清空。
+- **回滚**：`git revert <本提交>`；运行时快速回滚保持/设置 `humanization.qq_interactions.poke_inbound_response_enabled=false` 与 `reaction_inbound_response_enabled=false` 后重启。
+- **回填**：§6 `P6.0.y1` 已置 🟡，Wave 2 可继续并列推进 y2/y3/y4。
 
 ---
 

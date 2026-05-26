@@ -22,6 +22,7 @@ from nonebot.adapters.onebot.v11 import (
     GroupMessageEvent,
     Message,
     MessageEvent,
+    NoticeEvent,
 )
 from nonebot.rule import to_me
 
@@ -35,6 +36,10 @@ from kernel.types import (
     TextBlock,
 )
 from services.humanization import AFFECTION_FAMILIARITY_SLOT
+from services.humanization.qq_interactions import (
+    dispatch_qq_interaction_signal,
+    parse_qq_interaction_signal,
+)
 from services.private_conversation import (
     get_private_conversation_actor,
     log_private_transition,
@@ -1131,6 +1136,17 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             )
         if not muted:
             ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))
+
+    # ---- QQ inbound interaction notices ----
+
+    qq_interaction_notice = on_notice(priority=1, block=False)
+
+    @qq_interaction_notice.handle()
+    async def _handle_qq_interaction_notice(bot: Bot, event: NoticeEvent) -> None:
+        signal = parse_qq_interaction_signal(event, self_id=str(bot.self_id))
+        if signal is None:
+            return
+        dispatch_qq_interaction_signal(ctx, signal, now=time.time())
 
     # ---- group ban notice ----
 
