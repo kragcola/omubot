@@ -137,7 +137,7 @@
 | **P3.11.0** | 0 | ✅ | 前置摸排完成：`notify()` / `_should_force_reply()` 命名订正、`consecutive_skip` 3 处字面量与 `directed_followup` shadow-only 现状均已 grep 实证 |
 | **P3.11.1** | 1 | ✅ | 自主验收通过：`directed_followup` 已接入 `notify()` bypass 与 `_should_force_reply()`；`services/scheduler.py` +13/-3，2 条新测试 + force-reply 回归 44 条通过 |
 | **P3.11.2a** | 1 | ✅ | 自主验收通过：`consecutive_skip` 两档阈值已升格为 `GroupConfig` / `GroupOverride` / `ResolvedGroupConfig` 字段；scheduler 裸字面量 grep 归零，相关回归 70 条通过 |
-| **P3.11.2b** | 1 | ⏳ | 30 分钟时间衰减，依赖 P3.11.2a |
+| **P3.11.2b** | 1 | ✅ | 自主验收通过：force-threshold 已叠加 30 分钟 skip 窗口；`last_skip_time` grep 命中收敛到 `__slots__` + `notify()` 两处，相关回归 74 条通过 |
 | **P3.11.3** | 1 | ⏳ | `planner_smooth` 3.0 → 2.0，未开始 |
 | **P3.12** | 2 | ⏳ | RWS scaffolding，未开始；阻塞于 Wave 1 |
 | **P3.13** | 2 | ⏳ | Hawkes 离线 cache，未开始；阻塞于 P3.12 |
@@ -273,3 +273,38 @@ D2 / 回滚：P3.11.0 为零代码摸排，无 cancel-path 写状态；回滚为
 - `tests/test_config_loader.py` `+6/-0`
 - `tests/test_scheduler.py` `+54/-1`
 - 回滚保持为单 commit `git revert <commit>`；下一步进入 `P3.11.2b` 的 30 分钟时间衰减。
+
+### P3.11.2b 领单拆分（执行前）— Codex / 2026-05-26 12:28 CST
+
+- **任务边界**：只给 `consecutive_skip force_threshold` 叠加 30 分钟时间窗口；限定在 `services/scheduler.py` 的 `_GroupSlot` / `notify()` 和 scheduler 测试。不会把 1800 秒继续抽成 config，也不改 `double_threshold` 的含义。
+- **自主评估**：P3.11.2b 的目标是“最近一次 skip 太久以前就不再强推 reply”，不是重置 `consecutive_skip` 计数本身。因此我会只在 force-threshold 判定时读 `last_skip_time`，skip 分支更新它，其他路径不扩散。
+- **执行拆分**：
+  1. 在 `_GroupSlot` 增加 `last_skip_time: float`，默认 `0.0`。
+  2. `notify()` 内 force-threshold 判定改为：`consecutive_skip >= resolved.consecutive_skip_force_threshold` 且 `now - last_skip_time < 1800` 才强制 `threshold=1.0`。
+  3. skip 分支在 `consecutive_skip += 1` 时同步写入 `last_skip_time = now`；fire 分支不额外改写该字段。
+  4. 新增 4 条边界测试：新鲜 skip 会 force、过期 skip 不会 force、skip 会刷新 `last_skip_time`、过期后一次普通 skip 刷新时间戳后下一次重新具备 force 条件。
+- **风险与回滚**：风险是把时间衰减错误地套到 double-threshold，或在 fire 路径把 `last_skip_time` 写脏导致窗口判断失真。回滚为撤销 scheduler/test 改动，并撤销本文 §6 / §9 的 P3.11.2b 回填。
+
+### P3.11.2b 完成记录（执行者 Codex）— 2026-05-26 12:31 CST
+
+自验结果：P3.11.2b 完成并自主验收 ✅。本步只给 force-threshold 叠加时间窗口，不改 `double_threshold` 的概率加倍逻辑；`consecutive_skip` 计数本身继续保留，只是“多久以前的 skip 还算新鲜”现在有了 30 分钟边界。
+
+改动内容：
+
+- `services/scheduler.py`：`_GroupSlot.__slots__` 新增 `last_skip_time`；force-threshold 判定改为“`consecutive_skip >= resolved.consecutive_skip_force_threshold` 且最近一次 skip 在 1800 秒内”；skip 分支写入 `slot.last_skip_time = now`，fire 分支不额外改写。
+- `tests/test_scheduler.py`：新增 4 条边界测试，覆盖新鲜 skip force、过期 skip 不 force、skip 刷新时间戳、以及过期 miss 后刷新窗口再触发下一次 force。
+
+验证：
+
+- D1 grep：`grep -n "last_skip_time" services/scheduler.py` → 命中 `__slots__` 1 处、`notify()` 内读 1 处、写 1 处；符合派单“slot 声明 + notify 两处”的收敛目标。
+- D2 边界 / cancel-path：`tests/test_scheduler.py::TestVideoHint::test_autonomous_force_threshold_override_preserves_cancel_path` 继续通过，证明上一单的阈值 override + cancel-path 语义未被时间衰减破坏；新增 `test_stale_skip_refreshes_window_for_next_force` 证明过期 miss 会刷新窗口，下一次重新具备 force 条件。
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_scheduler.py tests/test_force_reply.py tests/test_config_loader.py` → `74 passed in 7.44s`
+- `source ./scripts/dev/env.sh && uv run ruff check services/scheduler.py tests/test_scheduler.py tests/test_force_reply.py tests/test_config_loader.py` → passed
+- `source ./scripts/dev/env.sh && uv run pyright services/scheduler.py tests/test_scheduler.py tests/test_force_reply.py tests/test_config_loader.py` → `0 errors, 0 warnings, 0 informations`
+- `git diff --check -- docs/tracking/omubot-humanization-part3.5-execution.md services/scheduler.py tests/test_scheduler.py tests/test_force_reply.py tests/test_config_loader.py` → passed
+
+改动行数与回滚：
+
+- `services/scheduler.py` `+6/-2`
+- `tests/test_scheduler.py` `+91/-0`
+- 回滚保持为单 commit `git revert <commit>`；Wave 1 剩余 `P3.11.3` 可继续独立推进。

@@ -41,7 +41,7 @@ def _should_force_reply(trigger: TriggerContext | None) -> bool:
 class _GroupSlot:
     __slots__ = (
         "consecutive_skip", "debounce_task", "last_fire_time",
-        "last_user_id", "msg_count", "pending_at", "running_task", "trigger",
+        "last_skip_time", "last_user_id", "msg_count", "pending_at", "running_task", "trigger",
     )
 
     def __init__(self) -> None:
@@ -208,7 +208,10 @@ class GroupChatScheduler:
             base_talk_value = resolved.talk_value
 
         threshold = base_talk_value
-        if slot.consecutive_skip >= resolved.consecutive_skip_force_threshold:
+        if (
+            slot.consecutive_skip >= resolved.consecutive_skip_force_threshold
+            and now - getattr(slot, "last_skip_time", 0.0) < 1800.0
+        ):
             threshold = 1.0
         elif slot.consecutive_skip >= resolved.consecutive_skip_double_threshold:
             threshold = min(1.0, base_talk_value * 2)
@@ -248,6 +251,7 @@ class GroupChatScheduler:
             self._fire(group_id)
         else:
             slot.consecutive_skip += 1
+            slot.last_skip_time = now
             _L.info(
                 "scheduler | group={} prob skip (threshold={:.2f} mood={:.2f} time={:.2f} msgs={} skips={} mode={})",
                 group_id, threshold, mood_mult, time_mult, slot.msg_count, slot.consecutive_skip, mode_label,

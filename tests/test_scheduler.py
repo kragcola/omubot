@@ -1,6 +1,7 @@
 """GroupChatScheduler unit tests."""
 
 import asyncio
+import time
 
 from kernel.config import GroupConfig, GroupOverride
 from kernel.types import TriggerContext
@@ -111,6 +112,95 @@ class TestNotify:
         scheduler.notify("111")
         await asyncio.sleep(0.1)
 
+        assert len(llm.calls) == 1
+        assert slot.consecutive_skip == 0
+        await scheduler.close()
+
+    async def test_force_threshold_requires_recent_skip_time(self) -> None:
+        """Expired skip history no longer triggers forced reply."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(
+                talk_value=0.0,
+                consecutive_skip_force_threshold=3,
+                consecutive_skip_double_threshold=99,
+            ),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.consecutive_skip = 3
+        slot.last_skip_time = time.monotonic() - 1801.0
+
+        scheduler.notify("111")
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 0
+        assert slot.consecutive_skip == 4
+        assert slot.last_skip_time > 0.0
+        await scheduler.close()
+
+    async def test_force_threshold_fires_when_skip_time_is_recent(self) -> None:
+        """Recent skip history still triggers forced reply."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(
+                talk_value=0.0,
+                consecutive_skip_force_threshold=3,
+                consecutive_skip_double_threshold=99,
+            ),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.consecutive_skip = 3
+        slot.last_skip_time = time.monotonic() - 60.0
+
+        scheduler.notify("111")
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 1
+        assert slot.consecutive_skip == 0
+        await scheduler.close()
+
+    async def test_skip_records_last_skip_time(self) -> None:
+        """A probability skip refreshes last_skip_time for future decay checks."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+
+        scheduler.notify("111")
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 0
+        assert slot.consecutive_skip == 1
+        assert slot.last_skip_time > 0.0
+        await scheduler.close()
+
+    async def test_stale_skip_refreshes_window_for_next_force(self) -> None:
+        """A stale force-threshold miss updates the window so the next turn can force."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(
+                talk_value=0.0,
+                consecutive_skip_force_threshold=3,
+                consecutive_skip_double_threshold=99,
+            ),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.consecutive_skip = 3
+        slot.last_skip_time = time.monotonic() - 1900.0
+
+        scheduler.notify("111")
+        await asyncio.sleep(0.1)
+        first_skip_time = slot.last_skip_time
+
+        scheduler.notify("111")
+        await asyncio.sleep(0.1)
+
+        assert first_skip_time > 0.0
         assert len(llm.calls) == 1
         assert slot.consecutive_skip == 0
         await scheduler.close()
@@ -741,6 +831,7 @@ class TestVideoHint:
         )
         slot = scheduler._slots.setdefault("111", _GroupSlot())
         slot.consecutive_skip = 1
+        slot.last_skip_time = time.monotonic() - 60.0
 
         scheduler.notify("111", trigger=TriggerContext(
             reason="视频分享:《test》", mode="video_autonomous",
