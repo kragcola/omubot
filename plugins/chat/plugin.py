@@ -16,7 +16,7 @@ from typing import Any
 import nonebot
 from loguru import logger
 
-from kernel.config import BotConfig, load_plugin_config
+from kernel.config import BotConfig, ResolvedHumanization, load_plugin_config
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext
 from services.llm.llm_request import LLMRequest
 
@@ -100,6 +100,20 @@ def _humanization_group_allowed(config: BotConfig, group_id: str | None) -> bool
     if not groups:
         return True
     return str(group_id or "").strip() in groups
+
+
+def _humanization_resolve(
+    config: BotConfig,
+    group_id: str | int | None,
+) -> ResolvedHumanization:
+    profile_override = None
+    if group_id is not None:
+        try:
+            group_profile = config.group.resolve(int(group_id))
+            profile_override = group_profile.humanization_profile
+        except Exception:
+            profile_override = None
+    return config.humanization.resolve_profile(profile_override, group_id)
 
 
 class _ScopedHumanizationProvider:
@@ -943,11 +957,14 @@ class ChatPlugin(AmadeusPlugin):
         # ---- prompt builder ----
         from services.llm.prompt_builder import PromptBuilder
 
+        initial_humanization = _humanization_resolve(config, None)
         prompt_builder = PromptBuilder(
             instruction=instruction,
             admins=config.admins,
             state_board=ctx.state_board,
             retrieval_gate=ctx.retrieval,
+            state_board_layout=initial_humanization.state_board_layout,
+            state_board_granularity=initial_humanization.state_board_granularity,
         )
         prompt_builder.build_static(ctx.identity, bot_self_id="")
         ctx.prompt_builder = prompt_builder
@@ -966,6 +983,11 @@ class ChatPlugin(AmadeusPlugin):
         if config.llm.usage.enabled:
             await usage_tracker.init()
         ctx.usage_tracker = usage_tracker
+
+        from services.humanization.health_guard import HumanizationHealthGuard
+
+        ctx.humanization_health_guard = HumanizationHealthGuard(db_path="storage/usage.db")
+        ctx.humanization_health_guard.start()
 
         # ---- tool registry ----
         from services.tools.registry import ToolRegistry
@@ -990,8 +1012,9 @@ class ChatPlugin(AmadeusPlugin):
 
         # ---- LLM client ----
         from services.llm.client import LLMClient
+        from services.llm.llm_request import all_llm_tasks
 
-        llm_tasks = ("main", "thinker", "compact", "slang", "vision")
+        llm_tasks = all_llm_tasks()
         task_profiles = {
             task: config.llm.resolve_task_profile(task)
             for task in llm_tasks
@@ -1060,6 +1083,9 @@ class ChatPlugin(AmadeusPlugin):
             humanization_rewrite_threshold=config.humanization.rewrite_threshold,
             humanization_kaomoji_enforce_strict=config.humanization.kaomoji_enforce_strict,
             humanization_runtime_groups=config.humanization.runtime_groups,
+            humanization_resolver=lambda group_id: _humanization_resolve(config, group_id),
+            pass_turn_confidence_gate=config.humanization.pass_turn_confidence_gate,
+            pass_turn_confidence_threshold=config.humanization.pass_turn_confidence_threshold,
         )
         llm.set_task_profile_names(task_profile_names)
 
@@ -1181,6 +1207,19 @@ class ChatPlugin(AmadeusPlugin):
         # ---- desc cache (for vision) ----
         ctx.desc_cache: dict[str, str] = {}
 
+        # ---- scheduler Hawkes cache refresher ----
+        hawkes_cache = None
+        ctx.scheduler_hawkes_refresher = None
+        if config.humanization.rws_hawkes:
+            from services.scheduler_hawkes import HawkesCache, HawkesOfflineRefresher
+
+            hawkes_cache = HawkesCache()
+            ctx.scheduler_hawkes_refresher = HawkesOfflineRefresher(
+                message_log=message_log,
+                cache=hawkes_cache,
+            )
+            ctx.scheduler_hawkes_refresher.start()
+
         # ---- scheduler ----
         from services.scheduler import GroupChatScheduler
         from services.talk_schedule import TalkSchedule
@@ -1196,6 +1235,8 @@ class ChatPlugin(AmadeusPlugin):
             talk_schedule=talk_schedule,
             mood_getter=runtime_mood_getter if ctx.mood_engine else None,
             runtime_state=ctx.runtime_state,
+            humanization_config=config.humanization,
+            hawkes_cache=hawkes_cache,
         )
 
         _L.info("ChatPlugin startup complete")
@@ -1207,6 +1248,12 @@ class ChatPlugin(AmadeusPlugin):
             await ctx.llm_client.close()
         if ctx.scheduler is not None:
             await ctx.scheduler.close()
+        hawkes_refresher = getattr(ctx, "scheduler_hawkes_refresher", None)
+        if hawkes_refresher is not None:
+            await hawkes_refresher.stop()
+        humanization_health_guard = getattr(ctx, "humanization_health_guard", None)
+        if humanization_health_guard is not None:
+            await humanization_health_guard.stop()
         if ctx.knowledge_graph is not None:
             await ctx.knowledge_graph.close()
         if ctx.msg_log is not None:

@@ -445,6 +445,7 @@ class TestGroupConfigResolve:
         assert resolved.tools_enabled is False
         assert resolved.sticker_mode == "rarely"
         assert resolved.slang_enabled is False
+        assert resolved.humanization_profile is None
 
     def test_resolve_full_override(self) -> None:
         """Override supplies all fields — all override values win."""
@@ -461,6 +462,7 @@ class TestGroupConfigResolve:
                     debounce_seconds=10.0, batch_size=20, history_load_count=50,
                     reply_style="playful", custom_prompt="多接梗。",
                     tools_enabled=False, sticker_mode="off", slang_enabled=False,
+                    humanization_profile="performance",
                 ),
             },
         )
@@ -479,6 +481,7 @@ class TestGroupConfigResolve:
         assert resolved.tools_enabled is False
         assert resolved.sticker_mode == "off"
         assert resolved.slang_enabled is False
+        assert resolved.humanization_profile == "performance"
 
     def test_resolve_partial_override_falls_back(self) -> None:
         """Override only sets at_only — rest falls back to global."""

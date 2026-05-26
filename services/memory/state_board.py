@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -120,6 +121,7 @@ class GroupStateBoard:
     _LOOKBACK_COUNT = 30
     _TOPIC_MSG_COUNT = 20
     _ACTIVE_WINDOW_SECONDS = 300  # 5 minutes
+    _COARSE_ACTIVE_WINDOW_SECONDS = 3600  # 1 hour, stable across short shifts
     _TOP_TOPIC_COUNT = 3
 
     def __init__(
@@ -127,8 +129,14 @@ class GroupStateBoard:
     ) -> None:
         self._message_log = message_log
         self.bot_self_id = bot_self_id
+        self._topic_anchors: dict[str, tuple[str, ...]] = {}
 
-    async def query_state(self, group_id: str) -> GroupStateSnapshot:
+    async def query_state(
+        self,
+        group_id: str,
+        *,
+        granularity: str = "fine",
+    ) -> GroupStateSnapshot:
         """Return a snapshot of current group conversation state."""
         rows = await self._message_log.query_recent(
             group_id, limit=self._LOOKBACK_COUNT
@@ -138,9 +146,19 @@ class GroupStateBoard:
 
         return GroupStateSnapshot(
             active_users=self._derive_active_users(rows),
-            recent_topics=self._derive_topics(rows),
-            message_frequency=self._derive_frequency(rows),
-            recent_mentions=self._derive_mentions(rows),
+            recent_topics=self._derive_topics(
+                rows,
+                group_id=group_id,
+                granularity=granularity,
+            ),
+            message_frequency=self._derive_frequency(
+                rows,
+                granularity=granularity,
+            ),
+            recent_mentions=self._derive_mentions(
+                rows,
+                granularity=granularity,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -167,10 +185,20 @@ class GroupStateBoard:
                 break
         return "、".join(users) if users else "暂无"
 
-    def _derive_frequency(self, rows: list[dict]) -> str:
+    def _derive_frequency(
+        self,
+        rows: list[dict],
+        *,
+        granularity: str = "fine",
+    ) -> str:
         """Count messages within the active window."""
         now = time.time()
-        cutoff = now - self._ACTIVE_WINDOW_SECONDS
+        window = (
+            self._COARSE_ACTIVE_WINDOW_SECONDS
+            if granularity == "coarse"
+            else self._ACTIVE_WINDOW_SECONDS
+        )
+        cutoff = now - window
         count = sum(
             1
             for row in rows
@@ -186,9 +214,17 @@ class GroupStateBoard:
             label = "冷清"
         else:
             return "暂无消息"
+        if granularity == "coarse":
+            return label
         return f"{label}（过去5分钟 {count} 条消息）"
 
-    def _derive_topics(self, rows: list[dict]) -> str:
+    def _derive_topics(
+        self,
+        rows: list[dict],
+        *,
+        group_id: str | None = None,
+        granularity: str = "fine",
+    ) -> str:
         """Extract top bigrams from recent message content_text."""
         user_rows = [r for r in rows if r.get("role") == "user"]
         topic_rows = user_rows[-self._TOPIC_MSG_COUNT:]
@@ -208,12 +244,32 @@ class GroupStateBoard:
         qualified = [
             (bg, count) for bg, count in freq.items() if count >= 2
         ]
-        qualified.sort(key=lambda x: x[1], reverse=True)
+        if granularity == "coarse":
+            anchors = self._topic_anchors.get(str(group_id or ""), ())
+            anchor_rank = {topic: idx for idx, topic in enumerate(anchors)}
+            qualified.sort(
+                key=lambda item: (
+                    -item[1],
+                    anchor_rank.get(item[0], len(anchor_rank)),
+                    item[0],
+                )
+            )
+        else:
+            qualified.sort(key=lambda x: x[1], reverse=True)
 
         topics = [bg for bg, _ in qualified[:self._TOP_TOPIC_COUNT]]
+        if granularity == "coarse" and group_id is not None:
+            old_anchors = self._topic_anchors.get(str(group_id), ())
+            merged = [*topics, *(t for t in old_anchors if t not in topics)]
+            self._topic_anchors[str(group_id)] = tuple(merged[: self._TOP_TOPIC_COUNT * 2])
         return "、".join(topics) if topics else "暂无显著话题"
 
-    def _derive_mentions(self, rows: list[dict]) -> str:
+    def _derive_mentions(
+        self,
+        rows: list[dict],
+        *,
+        granularity: str = "fine",
+    ) -> str:
         """Find recent @mentions of the bot, grouped by speaker with timing."""
         if not self.bot_self_id:
             return "无"
@@ -241,15 +297,33 @@ class GroupStateBoard:
         for nick, timestamps in mentions.items():
             count = len(timestamps)
             latest = max(timestamps)
-            minutes_ago = int((now - latest) / 60)
-            if minutes_ago < 1:
-                time_str = "刚刚"
-            elif minutes_ago == 1:
-                time_str = "1 分钟前"
+            if granularity == "coarse":
+                time_str = self._coarse_time_bucket(latest, now)
             else:
-                time_str = f"{minutes_ago} 分钟前"
+                minutes_ago = int((now - latest) / 60)
+                if minutes_ago < 1:
+                    time_str = "刚刚"
+                elif minutes_ago == 1:
+                    time_str = "1 分钟前"
+                else:
+                    time_str = f"{minutes_ago} 分钟前"
             if count > 1:
                 parts.append(f"{nick} {time_str} @了你 {count}次")
             else:
                 parts.append(f"{nick} {time_str} @了你")
         return "、".join(parts)
+
+    def _coarse_time_bucket(self, timestamp: float, now: float) -> str:
+        """Bucket mention time without minute-level drift."""
+        age = max(0.0, now - timestamp)
+        if age < 3600:
+            return "刚刚"
+
+        mention_day = datetime.fromtimestamp(timestamp).date()
+        today = datetime.fromtimestamp(now).date()
+        delta_days = (today - mention_day).days
+        if delta_days <= 0:
+            return "今天早些"
+        if delta_days == 1:
+            return "昨天"
+        return "更早"

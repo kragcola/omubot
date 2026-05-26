@@ -98,6 +98,89 @@ async def test_build_blocks_with_plugin_blocks(identity: Identity, store: CardSt
     assert blocks[4]["text"] == "dynamic1"
 
 
+async def test_build_blocks_tail_state_board_layout(identity: Identity, store: CardStore) -> None:
+    """Part 6 tail layout keeps volatile state_board after plugin blocks."""
+    pb = PromptBuilder(instruction="", state_board_layout="tail")
+    pb.build_static(identity, bot_self_id="999")
+    blocks = await pb.build_blocks(
+        user_id="100", group_id=None, card_store=store,
+        plugin_static=[{"type": "text", "text": "static1"}],
+        plugin_stable=[{"type": "text", "text": "stable1"}],
+        plugin_dynamic=[{"type": "text", "text": "dynamic1"}],
+    )
+
+    assert [block["text"] for block in blocks[1:]] == [
+        "static1",
+        "stable1",
+        "dynamic1",
+        "",
+    ]
+
+
+async def test_build_blocks_accepts_per_turn_state_board_layout(
+    identity: Identity,
+    store: CardStore,
+) -> None:
+    pb = PromptBuilder(instruction="")
+    pb.build_static(identity, bot_self_id="999")
+
+    blocks = await pb.build_blocks(
+        user_id="100",
+        group_id=None,
+        card_store=store,
+        plugin_static=[{"type": "text", "text": "static1"}],
+        plugin_stable=[{"type": "text", "text": "stable1"}],
+        state_board_layout="tail",
+    )
+
+    assert [block["text"] for block in blocks[1:]] == ["static1", "stable1", ""]
+
+
+async def test_build_state_board_uses_configured_granularity() -> None:
+    class _Snapshot:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def to_prompt_text(self) -> str:
+            return self._text
+
+    class _StateBoard:
+        async def query_state(self, group_id: str, *, granularity: str = "fine") -> _Snapshot:
+            return _Snapshot(f"{group_id}:{granularity}")
+
+    pb = PromptBuilder(
+        instruction="",
+        state_board=_StateBoard(),  # type: ignore[arg-type]
+        state_board_granularity="coarse",
+    )
+
+    block = await pb.build_state_board_block("200")
+
+    assert block["text"] == "200:coarse"
+
+
+async def test_build_state_board_accepts_per_turn_granularity() -> None:
+    class _Snapshot:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def to_prompt_text(self) -> str:
+            return self._text
+
+    class _StateBoard:
+        async def query_state(self, group_id: str, *, granularity: str = "fine") -> _Snapshot:
+            return _Snapshot(f"{group_id}:{granularity}")
+
+    pb = PromptBuilder(instruction="", state_board=_StateBoard())  # type: ignore[arg-type]
+
+    block = await pb.build_state_board_block(
+        "200",
+        state_board_granularity="coarse",
+    )
+
+    assert block["text"] == "200:coarse"
+
+
 async def test_deepseek_native_dynamic_context_stays_out_of_stable_system_prefix(
     identity: Identity,
     store: CardStore,

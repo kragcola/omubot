@@ -112,6 +112,22 @@ async def test_derive_frequency() -> None:
     assert "活跃" in result
 
 
+def test_derive_frequency_coarse_removes_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = 1_700_000_000.0
+    monkeypatch.setattr(time, "time", lambda: base)
+    rows = [
+        _make_row("user", f"U{i}({i})", "msg", base - 60 - i)
+        for i in range(8)
+    ]
+    board = GroupStateBoard(message_log=MagicMock(), bot_self_id="999")
+
+    result = board._derive_frequency(rows, granularity="coarse")
+
+    assert result == "活跃"
+    assert "过去" not in result
+    assert "条消息" not in result
+
+
 @pytest.mark.asyncio
 async def test_derive_frequency_cold() -> None:
     now = time.time()
@@ -133,6 +149,20 @@ async def test_derive_topics() -> None:
     board = GroupStateBoard(message_log=MagicMock(), bot_self_id="999")
     result = board._derive_topics(rows)
     assert "天气" in result or "出去玩" in result or result == "暂无显著话题"
+
+
+def test_derive_topics_coarse_uses_sticky_anchor_for_ties() -> None:
+    rows = [
+        _make_row("user", "A(1)", "音游剧情音游剧情"),
+        _make_row("user", "B(2)", "剧情音游剧情音游"),
+        _make_row("user", "C(3)", "音游剧情"),
+    ]
+    board = GroupStateBoard(message_log=MagicMock(), bot_self_id="999")
+    board._topic_anchors["123"] = ("剧情",)
+
+    result = board._derive_topics(rows, group_id="123", granularity="coarse")
+
+    assert result.split("、")[0] == "剧情"
 
 
 @pytest.mark.asyncio
@@ -157,6 +187,51 @@ async def test_derive_mentions() -> None:
     result = board._derive_mentions(rows)
     assert "帆帆" in result
     assert "某人" not in result
+
+
+def test_derive_mentions_coarse_is_stable_across_10_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = 1_700_000_000.0
+    rows = [
+        _make_row("user", "帆帆(123)", "@999 你好", base - 7200),
+        _make_row("user", "某人(456)", "普通消息", base - 60),
+    ]
+    board = GroupStateBoard(message_log=MagicMock(), bot_self_id="999")
+
+    monkeypatch.setattr(time, "time", lambda: base)
+    before = board._derive_mentions(rows, granularity="coarse")
+    monkeypatch.setattr(time, "time", lambda: base + 600)
+    after = board._derive_mentions(rows, granularity="coarse")
+
+    assert before == after
+    assert "今天早些" in before
+    assert "分钟前" not in before
+
+
+@pytest.mark.asyncio
+async def test_query_state_coarse_prompt_stable_across_10_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = 1_700_000_000.0
+    rows = [
+        _make_row("user", "A(1)", "音游剧情音游剧情", base - 100),
+        _make_row("user", "B(2)", "剧情音游剧情音游", base - 200),
+        _make_row("user", "C(3)", "@999 音游剧情", base - 7200),
+        _make_row("assistant", "", "嗯嗯", base - 50),
+    ]
+    msg_log = MagicMock()
+    msg_log.query_recent = AsyncMock(return_value=rows)
+    board = GroupStateBoard(message_log=msg_log, bot_self_id="999")
+
+    monkeypatch.setattr(time, "time", lambda: base)
+    before = (await board.query_state("123", granularity="coarse")).to_prompt_text()
+    monkeypatch.setattr(time, "time", lambda: base + 600)
+    after = (await board.query_state("123", granularity="coarse")).to_prompt_text()
+
+    assert before == after
+    assert "过去5分钟" not in before
+    assert "分钟前" not in before
 
 
 @pytest.mark.asyncio

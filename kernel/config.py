@@ -14,6 +14,7 @@ import json
 import os
 import tomllib
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from types import UnionType
 from typing import Any, Literal, Self, TypeVar, Union, get_args, get_origin
@@ -55,6 +56,7 @@ class UsageConfig(BaseModel):
 
 LLMCapability = Literal["chat", "tools", "thinking", "vision", "json", "compact"]
 LLMApiFormat = Literal["anthropic", "openai", "deepseek"]
+HumanizationProfile = Literal["custom", "economy", "balanced", "performance"]
 
 
 class LLMProfile(BaseModel):
@@ -182,6 +184,8 @@ class LLMConfig(BaseModel):
             "graph_edge_classifier",
             "reflection_consolidator",
             "episode_summarizer",
+            "scheduler_eot",
+            "scheduler_replay_judge",
         ):
             self.task_profiles.setdefault(task, fallback)
         return self
@@ -340,6 +344,7 @@ class ResolvedGroupConfig(BaseModel):
     tools_enabled: bool = True
     sticker_mode: GroupStickerMode = "inherit"
     slang_enabled: bool = True
+    humanization_profile: HumanizationProfile | None = None
 
 
 class GroupOverride(BaseModel):
@@ -362,6 +367,7 @@ class GroupOverride(BaseModel):
     sticker_mode: GroupStickerMode | None = None
     slang_enabled: bool | None = None
     presence_mode: GroupPresenceMode | None = None
+    humanization_profile: HumanizationProfile | None = None
 
 
 class GroupConfig(BaseModel):
@@ -502,6 +508,7 @@ class GroupConfig(BaseModel):
                     tools_enabled=False,
                     sticker_mode="inherit",
                     slang_enabled=False,
+                    humanization_profile=None,
                 )
             return ResolvedGroupConfig(
                 access_allowed=access_allowed,
@@ -523,6 +530,7 @@ class GroupConfig(BaseModel):
                 tools_enabled=self.tools_enabled,
                 sticker_mode=self.sticker_mode,
                 slang_enabled=self.slang_enabled,
+                humanization_profile=None,
             )
         o = override
         allowed_tools = (
@@ -573,6 +581,7 @@ class GroupConfig(BaseModel):
             tools_enabled=tools_enabled,
             sticker_mode=o.sticker_mode if o.sticker_mode is not None else self.sticker_mode,
             slang_enabled=slang_enabled,
+            humanization_profile=o.humanization_profile,
         )
 
 
@@ -1041,6 +1050,122 @@ class PersonaV2Config(BaseModel):
         return normalized
 
 
+StateBoardLayout = Literal["head", "tail"]
+StateBoardGranularity = Literal["fine", "coarse"]
+
+
+class StateBoardConfig(BaseModel):
+    """State board prompt rendering controls.
+
+    Defaults preserve the legacy prompt layout. Part 6 can move the volatile
+    block to the tail for DeepSeek byte-exact prefix stability.
+    """
+
+    layout: StateBoardLayout = Field(
+        default="head",
+        description="Where the volatile group state board is inserted in prompt blocks.",
+        json_schema_extra={
+            "display_label": "群状态块位置",
+            "help": "head=保持旧顺序；tail=把 state_board 放到 plugin stable/dynamic 之后，减少 DeepSeek prefix 抖动。",
+            "recommended": "head / tail",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+    granularity: StateBoardGranularity = Field(
+        default="fine",
+        description="How much time/count detail the state board renders.",
+        json_schema_extra={
+            "display_label": "群状态块粒度",
+            "help": "fine=旧输出，保留分钟和计数；coarse=粗粒度时间/频率，减少 prompt 字符漂移。",
+            "recommended": "fine / coarse",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+
+
+class StreamingSegmentConfig(BaseModel):
+    """Streaming-as-segment profile gate."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable Part 6 streaming-as-segment generation.",
+        json_schema_extra={
+            "display_label": "Streaming 分段",
+            "help": "默认关闭；balanced/performance profile 可在决议层启用。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+
+
+class PauseThenExtendConfig(BaseModel):
+    """Pause-then-extend profile gate."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable Part 6 pause-then-extend follow-up generation.",
+        json_schema_extra={
+            "display_label": "暂停后追发",
+            "help": "默认关闭；balanced/performance profile 可在决议层启用。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+
+
+class PlanThenUtterConfig(BaseModel):
+    """Plan-then-utter profile gate."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable Part 6 plan-then-utter generation.",
+        json_schema_extra={
+            "display_label": "计划后发言",
+            "help": "默认关闭；performance profile 可在决议层启用。",
+            "risk_level": "danger",
+            "restart_hint": "required",
+        },
+    )
+    group_whitelist: list[str] = Field(
+        default_factory=list,
+        description="Optional group whitelist for plan-then-utter.",
+        json_schema_extra={
+            "display_label": "计划后发言灰度群",
+            "help": "非空时仅这些群允许 plan_then_utter 生效。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+
+    @field_validator("group_whitelist", mode="before")
+    @classmethod
+    def _coerce_group_whitelist(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise TypeError("group_whitelist must be a list")
+        normalized: list[str] = []
+        for raw in value:
+            text = str(raw).strip()
+            if text:
+                normalized.append(text)
+        return normalized
+
+
+@dataclass(frozen=True)
+class ResolvedHumanization:
+    """Profile decisions consumed by Part 6 runtime hooks."""
+
+    state_board_layout: StateBoardLayout = "head"
+    state_board_granularity: StateBoardGranularity = "fine"
+    streaming_segment_enabled: bool = False
+    pause_then_extend_enabled: bool = False
+    plan_then_utter_enabled: bool = False
+    disable_natural_split: bool = False
+
+
 class HumanizationConfig(BaseModel):
     """Part 1 humanization rollout flags.
 
@@ -1118,12 +1243,168 @@ class HumanizationConfig(BaseModel):
             "restart_hint": "recommended",
         },
     )
+    profile: HumanizationProfile = Field(
+        default="custom",
+        description="Part 6 humanization generation profile.",
+        json_schema_extra={
+            "display_label": "拟人化生成档位",
+            "help": (
+                "custom=保留显式 flag；economy=cache 稳定优先；"
+                "balanced=流式分段+追发；performance=额外启用 plan-then-utter。"
+            ),
+            "recommended": "custom / economy / balanced / performance",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
     runtime_groups: list[str] = Field(
         default_factory=list,
         description="Group ids where humanization runtime features may run; empty means all groups when flags are on.",
         json_schema_extra={
             "display_label": "拟人化灰度群",
             "help": "非空时仅这些群允许拟人化 Provider、语域分类和 rewrite 生效；空列表表示开关开启后不限制群。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    state_board: StateBoardConfig = Field(
+        default_factory=StateBoardConfig,
+        description="Part 6 state_board prompt stability controls.",
+        json_schema_extra={
+            "display_label": "群状态提示稳定化",
+            "help": "控制 state_board 在 prompt 中的位置；默认保持旧行为。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+    streaming_segment: StreamingSegmentConfig = Field(
+        default_factory=StreamingSegmentConfig,
+        description="Part 6 streaming-as-segment controls.",
+        json_schema_extra={
+            "display_label": "Streaming 分段配置",
+            "help": "默认关闭；custom profile 下显式读取。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+    pause_then_extend: PauseThenExtendConfig = Field(
+        default_factory=PauseThenExtendConfig,
+        description="Part 6 pause-then-extend controls.",
+        json_schema_extra={
+            "display_label": "暂停后追发配置",
+            "help": "默认关闭；custom profile 下显式读取。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+    plan_then_utter: PlanThenUtterConfig = Field(
+        default_factory=PlanThenUtterConfig,
+        description="Part 6 plan-then-utter controls.",
+        json_schema_extra={
+            "display_label": "计划后发言配置",
+            "help": "默认关闭；custom profile 下显式读取。",
+            "risk_level": "danger",
+            "restart_hint": "required",
+        },
+    )
+    rws_shadow: bool = Field(
+        default=False,
+        description="Run Reply Worthiness Score beside the legacy scheduler without changing decisions.",
+        json_schema_extra={
+            "display_label": "RWS 影子决策",
+            "help": "开启后调度器同时计算 RWS 并记录解释，但仍使用旧概率路径。",
+            "risk_level": "safe",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_primary: bool = Field(
+        default=False,
+        description="Let Reply Worthiness Score make probability-path reply decisions.",
+        json_schema_extra={
+            "display_label": "RWS 接管调度",
+            "help": "实验开关；开启后非强制回复路径由 RWS score 与阈值决定。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_threshold: float = Field(
+        default=0.5,
+        description="Decision threshold used when RWS primary mode is enabled.",
+        json_schema_extra={
+            "display_label": "RWS 阈值",
+            "help": "仅 RWS 接管时生效；默认 0.5。",
+            "recommended": "0.5",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_hawkes: bool = Field(
+        default=False,
+        description="Inject group heat rho from the Hawkes cache into RWS.",
+        json_schema_extra={
+            "display_label": "RWS 群热度项",
+            "help": "开启后 RWS 读取 storage/hawkes_cache.db；miss 时使用近期消息率轻量回退。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_eot: bool = Field(
+        default=False,
+        description="Inject the end-of-turn probability classifier into RWS.",
+        json_schema_extra={
+            "display_label": "RWS EOT 项",
+            "help": "开启后按群限频调用 scheduler_eot LLM task，超限或失败回退 0.5。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_bandit: bool = Field(
+        default=False,
+        description="Enable epsilon-greedy theta adaptation for RWS.",
+        json_schema_extra={
+            "display_label": "RWS Bandit",
+            "help": "仅调整 RWS 阈值 theta；默认关闭，标注数据接入前不建议打开。",
+            "risk_level": "danger",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_bandit_freeze: bool = Field(
+        default=True,
+        description="Freeze the RWS bandit theta adapter.",
+        json_schema_extra={
+            "display_label": "冻结 RWS Bandit",
+            "help": "紧急停用在线学习漂移；默认冻结。",
+            "risk_level": "safe",
+            "restart_hint": "recommended",
+        },
+    )
+    counterfactual_replay: bool = Field(
+        default=False,
+        description="Enable counterfactual scheduler replay collection and admin reporting.",
+        json_schema_extra={
+            "display_label": "反事实静默重放",
+            "help": "开启后可写入/查看 scheduler replay 报表；默认只提供只读 API。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    pass_turn_confidence_gate: bool = Field(
+        default=False,
+        description="Convert low-confidence pass_turn tool calls into a light acknowledgement.",
+        json_schema_extra={
+            "display_label": "pass_turn 信心门",
+            "help": "开启后 pass_turn confidence 低于阈值时不静默，改发轻量确认。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    pass_turn_confidence_threshold: float = Field(
+        default=0.4,
+        description="Minimum pass_turn confidence required to stay silent.",
+        json_schema_extra={
+            "display_label": "pass_turn 信心阈值",
+            "help": "低于该值时触发 light_ack；默认 0.4。",
+            "recommended": "0.4",
             "risk_level": "careful",
             "restart_hint": "recommended",
         },
@@ -1142,6 +1423,75 @@ class HumanizationConfig(BaseModel):
             if text:
                 normalized.append(text)
         return normalized
+
+    @field_validator("rws_threshold", "pass_turn_confidence_threshold")
+    @classmethod
+    def _clamp_probability(cls, value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    def resolve_profile(
+        self,
+        profile_value: HumanizationProfile | None = None,
+        group_id: int | str | None = None,
+    ) -> ResolvedHumanization:
+        """Resolve Part 6 profile into concrete generation decisions."""
+        profile = profile_value or self.profile
+        if profile == "economy":
+            return ResolvedHumanization(
+                state_board_layout="tail",
+                state_board_granularity="coarse",
+            )
+        if profile == "balanced":
+            return ResolvedHumanization(
+                state_board_layout="tail",
+                state_board_granularity="coarse",
+                streaming_segment_enabled=True,
+                pause_then_extend_enabled=True,
+                disable_natural_split=True,
+            )
+        if profile == "performance":
+            if self._performance_degraded(group_id):
+                return ResolvedHumanization(
+                    state_board_layout="tail",
+                    state_board_granularity="coarse",
+                    streaming_segment_enabled=True,
+                    pause_then_extend_enabled=True,
+                    disable_natural_split=True,
+                )
+            plan_enabled = self._plan_then_utter_allowed(group_id)
+            return ResolvedHumanization(
+                state_board_layout="tail",
+                state_board_granularity="coarse",
+                streaming_segment_enabled=True,
+                pause_then_extend_enabled=True,
+                plan_then_utter_enabled=plan_enabled,
+                disable_natural_split=True,
+            )
+
+        plan_enabled = self.plan_then_utter.enabled and self._plan_then_utter_allowed(group_id)
+        streaming_enabled = self.streaming_segment.enabled
+        return ResolvedHumanization(
+            state_board_layout=self.state_board.layout,
+            state_board_granularity=self.state_board.granularity,
+            streaming_segment_enabled=streaming_enabled,
+            pause_then_extend_enabled=self.pause_then_extend.enabled,
+            plan_then_utter_enabled=plan_enabled,
+            disable_natural_split=streaming_enabled or plan_enabled,
+        )
+
+    def _plan_then_utter_allowed(self, group_id: int | str | None) -> bool:
+        whitelist = {str(gid).strip() for gid in self.plan_then_utter.group_whitelist if str(gid).strip()}
+        if not whitelist:
+            return True
+        return str(group_id or "").strip() in whitelist
+
+    def _performance_degraded(self, group_id: int | str | None) -> bool:
+        try:
+            from services.humanization.health_guard import is_group_degraded
+
+            return is_group_degraded(group_id)
+        except Exception:
+            return False
 
 
 # ============================================================================
@@ -1194,6 +1544,22 @@ _ENV_MAP: dict[str, str] = {
     "QWEN_VL_BASE_URL": "vision.qwen.base_url",
     "QWEN_VL_MODEL": "vision.qwen.model",
     "SEARCH_API_KEY": "search.api_key",
+    "RWS_SHADOW": "humanization.rws_shadow",
+    "RWS_PRIMARY": "humanization.rws_primary",
+    "RWS_THRESHOLD": "humanization.rws_threshold",
+    "RWS_HAWKES": "humanization.rws_hawkes",
+    "RWS_EOT": "humanization.rws_eot",
+    "RWS_BANDIT": "humanization.rws_bandit",
+    "BANDIT_FREEZE": "humanization.rws_bandit_freeze",
+    "COUNTERFACTUAL_REPLAY": "humanization.counterfactual_replay",
+    "PASS_TURN_CONFIDENCE_GATE": "humanization.pass_turn_confidence_gate",
+    "PASS_TURN_CONFIDENCE_THRESHOLD": "humanization.pass_turn_confidence_threshold",
+    "HUMANIZATION_PROFILE": "humanization.profile",
+    "STATE_BOARD_LAYOUT": "humanization.state_board.layout",
+    "STATE_BOARD_GRANULARITY": "humanization.state_board.granularity",
+    "STREAMING_SEGMENT_ENABLED": "humanization.streaming_segment.enabled",
+    "PAUSE_THEN_EXTEND_ENABLED": "humanization.pause_then_extend.enabled",
+    "PLAN_THEN_UTTER_ENABLED": "humanization.plan_then_utter.enabled",
 }
 
 # CLI 参数名 → dotted key

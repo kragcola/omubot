@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -13,6 +14,7 @@ from services.llm.client import (
     LLMClient,
     RateLimitError,
     ToolUse,
+    _reply_segments,
     _split_naturally,
     content_text,
     fix_cq_codes,
@@ -112,6 +114,25 @@ MOCK_RESULT_FULL = {
     "cache_read": 50,
     "cache_create": 10,
 }
+
+
+def test_reply_segments_can_disable_natural_split() -> None:
+    cfg = ReplySegmentationConfig(
+        enabled=True,
+        natural_split_enabled=True,
+        max_segment_chars=6,
+    )
+    text = "第一句很长很长。第二句很长很长。"
+
+    segments, raw_count, limit_status = _reply_segments(
+        text,
+        cfg,
+        disable_natural_split=True,
+    )
+
+    assert segments == [text]
+    assert raw_count == 1
+    assert limit_status == "none"
 
 
 async def test_chat_uses_injected_reply_segmentation_config(prompt, short_term, tools, timeline) -> None:
@@ -721,6 +742,99 @@ class TestPassTurn:
             assert len(bus.post_reply_calls) == 1
             assert bus.post_reply_calls[0].reply_content == "我先缓一下，马上接你。"
 
+    async def test_pass_turn_tool_omitted_when_force_reply(
+        self, prompt, short_term, tools, timeline, card_store,
+    ) -> None:
+        """force_reply=True must strip pass_turn from tool_defs so the LLM cannot pick it."""
+        async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
+            captured: dict[str, Any] = {}
+
+            async def fake_call(*args: Any, _captured: dict[str, Any] = captured, **kwargs: Any) -> dict[str, Any]:
+                _captured["tools"] = kwargs.get("tools")
+                return {
+                    "text": "ok",
+                    "tool_uses": [],
+                    "input_tokens": 10, "output_tokens": 1,
+                    "cache_read": 0, "cache_create": 0,
+                }
+
+            gid = "12345"
+            timeline.add(gid, role="user", content="@我", speaker="user(111)")
+
+            with patch("services.llm.client.call_api", side_effect=fake_call):
+                await client.chat(
+                    session_id=f"group_{gid}",
+                    user_id="111",
+                    user_content="",
+                    identity=_IDENTITY,
+                    group_id=gid,
+                    ctx=None,
+                    force_reply=True,
+                )
+
+            tool_names = {t.get("name") for t in captured["tools"] or [] if isinstance(t, dict)}
+            assert "pass_turn" not in tool_names
+
+    async def test_pass_turn_overridden_when_force_reply(
+        self, prompt, short_term, tools, timeline, card_store,
+    ) -> None:
+        """If LLM still calls pass_turn under force_reply (cached toolset), override and emit a reply."""
+        async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
+            gid = "12345"
+            timeline.add(gid, role="user", content="@我", speaker="user(111)")
+
+            mock_result = {
+                "text": "",
+                "tool_uses": [ToolUse(id="tu_1", name="pass_turn", input={"reason": "群里在聊别的"})],
+                "input_tokens": 100, "output_tokens": 0,
+                "cache_read": 0, "cache_create": 0,
+            }
+            with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=mock_result):
+                result = await client.chat(
+                    session_id=f"group_{gid}",
+                    user_id="111",
+                    user_content="",
+                    identity=_IDENTITY,
+                    group_id=gid,
+                    ctx=None,
+                    force_reply=True,
+                )
+
+            assert result is not None and result.strip() != ""
+
+    async def test_low_confidence_pass_turn_light_ack_when_gate_enabled(
+        self, prompt, short_term, tools, timeline, card_store,
+    ) -> None:
+        async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
+            client._pass_turn_confidence_gate = True
+            client._pass_turn_confidence_threshold = 0.4
+            gid = "12345"
+            timeline.add(gid, role="user", content="还要不要接？", speaker="user(111)")
+
+            mock_result = {
+                "text": "",
+                "tool_uses": [ToolUse(
+                    id="tu_1",
+                    name="pass_turn",
+                    input={"reason": "不确定是否该接", "confidence": 0.2},
+                )],
+                "input_tokens": 100,
+                "output_tokens": 0,
+                "cache_read": 0,
+                "cache_create": 0,
+            }
+            with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=mock_result):
+                result = await client.chat(
+                    session_id=f"group_{gid}",
+                    user_id="111",
+                    user_content="",
+                    identity=_IDENTITY,
+                    group_id=gid,
+                    ctx=None,
+                )
+
+            assert result == "嗯，我在。"
+
     async def test_tool_calls_are_exposed_to_post_reply(self, prompt, short_term, tools) -> None:
         async for client in _client(prompt, short_term, tools):
             bus = _Bus()
@@ -1168,6 +1282,28 @@ async def test_spine_call_enforces_capabilities(prompt, short_term, tools) -> No
                 await client._call(req)
             # capability check happens before any HTTP attempt
             assert mock_api.await_count == 0
+
+
+async def test_spine_capability_check_uses_resolved_task_profile(prompt, short_term, tools) -> None:
+    """Task-profile mappings may point at a custom profile name; enforcement must use the resolved task entry."""
+    async for client in _client(prompt, short_term, tools):
+        client._task_profiles = {
+            "main": _spine_profile("chat"),
+            "scheduler_eot": _spine_profile("chat", "json"),
+        }
+        client.set_task_profile_names({"main": "main", "scheduler_eot": "haiku"})
+
+        req = LLMRequest(
+            task="scheduler_eot",
+            static_blocks=["sys"],
+            user_messages=[{"role": "user", "content": "hi"}],
+            requires_capabilities=("chat", "json"),
+        )
+
+        with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_SPINE_RESULT) as mock_api:
+            await client._call(req)
+
+        assert mock_api.await_count == 1
 
 
 async def test_spine_call_records_usage_with_task(prompt, short_term, tools, tmp_path) -> None:

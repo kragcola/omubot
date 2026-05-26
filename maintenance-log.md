@@ -4,6 +4,370 @@
 
 ---
 
+## 2026-05-26 Part 3.5 灰度 L1 切流（RWS shadow 启用）
+
+**变更类型**：image rebuild + humanization config
+
+**变更内容**：
+
+- 走 `dot_clean . && docker compose up bot -d --build` 把工作树里 P3.12+ dirty 源码（`services/scheduler_rws/`、`services/scheduler_hawkes/`、`services/scheduler_eot/`、`services/scheduler_replay/`、`kernel/config.py` 新 humanization 字段、`kernel/types.py` `ResponseClass`、`services/scheduler.py` shadow hook、`services/llm/client.py` pass_turn confidence 等）烘进 bot 镜像。
+- `config/config.json` `humanization` 段：`runtime_groups` 由 `["993065015"]` 扩到 `["993065015","984198159"]`（与 persona_v2 灰度群对齐）；新增 `rws_shadow=true`。
+- `rws_primary` / `rws_hawkes` / `rws_eot` / `rws_bandit` / `counterfactual_replay` / `pass_turn_confidence_gate` 全部保持 default=False，`rws_bandit_freeze` 保持 default=True。
+
+**关键发现（D6 反例）**：
+
+- D6「只改 config restart 即可」的前提是「代码已部署」。本次 P3.12+ 全部源码处于 dirty unstaged 状态，**未进镜像**——首次 `docker compose restart bot` 后容器内 `HumanizationConfig.model_fields` 不含 `rws_shadow`，Pydantic `extra="ignore"` 静默吞掉新字段，scheduler `_hflag_global("rws_shadow")` 走 getattr fallback `default=False`，**RWS shadow 看似已开实则未启动**。
+- 必须 `docker compose up bot -d --build` 重 build 才让新 humanization 字段进容器 schema。
+
+**验证**：
+
+- `docker compose exec -T bot python -c "from kernel.config import load_config; print(load_config().humanization.rws_shadow)"` → `True`（rebuild 前为 AttributeError）
+- 容器 `Up` 持续运行；灰度群 993065015 / 984198159 history 已加载（28/23 条）；下一条群消息进 `notify()` 时即触发 `scheduler_rws | group=... score=... primary=False` info log，并写入 `slot.last_rws`
+- 默认值清单（容器内 load_config 实测）：`rws_shadow=True / rws_primary=False / rws_threshold=0.5 / rws_hawkes=False / rws_eot=False / rws_bandit=False / rws_bandit_freeze=True / counterfactual_replay=False / pass_turn_confidence_gate=False`
+
+**回滚（30 秒级）**：
+
+```bash
+# 把 rws_shadow=true 那一行从 config/config.json 删掉，runtime_groups 可保留
+docker compose restart bot
+```
+
+回滚后行为等价于 Wave 1 状态（仅 P3.11.x 起作用）。
+
+**影响**：
+
+- 灰度群 RWS 计算同步进行，仅写日志/槽位，不接管决策；旧概率路径继续主导。
+- 容器 image 提交了 26 个 dirty 文件中的 13 个 kernel/services 改动（从 build context 进镜像，但工作树 git 仍为 dirty），**git 提交本身未做**——下次部署/回滚前需要先决定这批文件的提交方式。
+- L2/L3/L4 后续档位由用户在 24h shadow 一致性观测达标后单独决定。
+
+**handoff**：观察 `docker compose logs bot | grep scheduler_rws` 与 admin scheduler slot 里 `last_rws` 字段；用 `_humanization_group_allowed` 闭包校验非灰度群 0 条 RWS 计算。
+
+---
+
+## 2026-05-26 Part 6 Wave 0 + Wave 1 x1-x4 源头生成调度基础设施落地
+
+**变更类型**：humanization config / LLM prompt layout / runtime health guard / tracking docs
+
+**变更内容**：
+
+- `humanization.state_board.layout/granularity` 已接入 `PromptBuilder`：默认 `head/fine` 保持旧行为；`tail/coarse` 可把易抖动的 state_board 后置并移除分钟级/计数字段，降低 DeepSeek byte-exact prefix 失效。
+- 新增 `HumanizationConfig.profile` 与 `ResolvedHumanization` 决议层：`custom/economy/balanced/performance` 四档默认仍为 `custom`；群级 `GroupOverride.humanization_profile` 可覆盖全局档位。
+- `LLMClient` 每轮读取 humanization 决议，把 state_board layout/granularity 传入 prompt 构建，并在 streaming/plan 档位需要时禁用 Part 5 natural_split。
+- 新增 `services/humanization/health_guard.py`（96 行），60s 读取 `storage/usage.db` 的 `llm_calls.prompt_cache_hit_tokens / prompt_cache_miss_tokens`；performance 群 hit% < 80% 时内存降级，≥85% 持续 10min 自动解除。
+- [docs/tracking/omubot-humanization-part6-execution.md](docs/tracking/omubot-humanization-part6-execution.md) 已按“执行前拆单 / 完成后回填”记录 P6.-1、P6.0.a/b、P6.0.x1-x4。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_prompt.py tests/test_state_board.py tests/test_humanization_config.py tests/test_config_loader.py tests/test_client.py tests/test_chat_plugin_humanization_wire.py tests/test_humanization_health_guard.py` → `143 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check ...`（本轮改动范围）→ passed
+- `source ./scripts/dev/env.sh && uv run pyright kernel/config.py services/llm/prompt_builder.py services/memory/state_board.py services/humanization/health_guard.py services/llm/client.py tests/test_prompt.py tests/test_state_board.py tests/test_humanization_config.py tests/test_config_loader.py tests/test_humanization_health_guard.py` → `0 errors`
+
+**影响**：
+
+- 默认 runtime 行为保持兼容：`profile=custom`，`state_board=head/fine`，`streaming_segment/pause_then_extend/plan_then_utter` 均默认关闭。
+- `profile=economy` 仅启用 cache 稳定化决议；`balanced/performance` 会让 LLM 分段路径禁用 natural_split，等待后续 streaming / plan 实现接管。
+- health guard 只读 DB、不写持久状态；DB 缺失或查询失败时默认不降级。
+
+**交接 / 回滚**：
+
+- 快速回滚优先改配置：`humanization.profile=custom`、`state_board.layout=head`、`state_board.granularity=fine`，所有新子配置 `enabled=false`。
+- 群级回滚删除或置空 `group.overrides.<gid>.humanization_profile`。
+- performance 降级状态为内存态，重启或 `clear_degraded_groups()` 即清空。
+
+## 2026-05-26 Part 3.5 Wave 2/3 RWS 调度中间层与闭环入口落地
+
+**变更类型**：scheduler / LLM task / admin API+SPA / humanization config
+
+**变更内容**：
+
+- 新增 `services/scheduler_rws/`、`services/scheduler_hawkes/`、`services/scheduler_eot/`、`services/scheduler_replay/`，并把 RWS shadow/primary、Hawkes cache、EOT cache、replay summary 接入 `GroupChatScheduler` 与 admin；EOT 预热在排队时即 reserve per-group quota，避免高频 notify 并发打爆分类器。
+- `[humanization]` 增加 RWS、counterfactual replay、pass_turn confidence gate 等灰度开关；全部默认关闭，`RWS_*` / `BANDIT_FREEZE` 等 env 也已映射。
+- 新增 `scheduler_eot` / `scheduler_replay_judge` LLMTask，并同步 provider admin TS/Vue task 列表、cache pipeline 与默认 task profile。
+- `pass_turn` tool schema 增 `confidence`；低信心静默在 `pass_turn_confidence_gate=true` 时转轻量确认，`force_reply` 下仍剥离 pass_turn。
+- 新增 `/api/admin/replay/weekly`、`/admin/replay/weekly`、`/api/admin/bandit/rws`，并补 Vite SPA fallback `/admin/replay/` 与 `docs/migrations/scheduler-rws-package-split.md` 记录单文件 scheduler 旁路拆包策略。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest -q ...` focused 回归 → `215 passed`；provider API 选择回归 → `3 passed`
+- `uv run ruff check` 改动范围 → passed
+- `uv run pyright` 新增/核心改动范围 → `0 errors`
+- `admin/frontend`: `./node_modules/.bin/vue-tsc --noEmit` → passed；`npm run build` → passed
+
+**影响**：
+
+- 默认配置下生产行为保持 Wave 1：RWS、Hawkes、EOT、bandit、replay、confidence gate 均不接管。
+- 开启 `rws_shadow` 后 scheduler admin slot 会出现 `last_rws`；开启 `rws_primary` 后非强制概率路径由 RWS score/θ 决策。
+- 开启 `rws_hawkes` 后会启动 10 分钟 Hawkes cache refresher，写 `storage/hawkes_cache.db`。
+
+**交接 / 回滚**：
+
+- 快速回滚优先关配置：`rws_primary=false`、`rws_shadow=false`、`rws_hawkes=false`、`rws_eot=false`、`rws_bandit=false`、`pass_turn_confidence_gate=false`。
+- `plugins/chat/plugin.py` 仍有既有 `PluginContext` 动态字段 pyright 债；本轮新增代码范围 pyright 已单独过。
+
+## 2026-05-26 Part 6 v2.3 实证审计（doc-only，结论：维持 v2.3 不改）
+
+**变更类型**：tracking 文档审计（无代码 / 无 config 改动）
+
+**触发**：用户指令「审查 part6，是否有将 maibot 当成目标的问题？搜索成熟项目和论文，搜索创新性次代架构」+「禁止只凭借嫌疑定罪，需要搜索其害处并列表」。
+
+**审计结论**：
+
+- MaiBot 取景：[docs/tracking/omubot-humanization-part6-source-side-generation.md](docs/tracking/omubot-humanization-part6-source-side-generation.md) 全文 7 处 MaiBot 引用全部为 dead-code 反例 / 框架对照表 / v1→v2 映射，无「把 MaiBot 当目标」框架问题；派单文档 [docs/tracking/omubot-humanization-part6-execution.md](docs/tracking/omubot-humanization-part6-execution.md) 0 处 MaiBot 引用。
+- 5 项过度工程嫌疑 A-E（论文堆砌 / 加权矩阵伪精确 / 健康守卫自动降级 / qq_interactions 群级 override / A 方案 pilot ROI）经实证证据采集后，用户决定**维持 v2.3 不改**。
+
+**实证证据要点**（仅作未来维护参考，无 doc 改动）：
+
+- A：§2 论文约 17/27 篇仅在 §2 列表出现、无下游钩子（runtime 影响 0）。
+- B：§4.2 加权分数排序与「成本升序 + 与 RWS 耦合度倒序」简单二维 sort 一致（runtime 影响 0）。
+- C：`services/humanization/` 目录不存在；P6.0.x4 = 新建 ~100 LOC + 60s 周期任务 + 6 单测；与 P6.0.x5 SPA chip 手动控制路径功能重叠。
+- D：`config/config.json` 12 个 GroupOverride 现状仅 `presence_mode` (12/12)、`slang_enabled` (10/12) 活跃，其余 16 字段全 null；新增 `qq_interactions_profile_override` 第 19 字段按现状高概率 0/12 命中。
+- E：7 日 `usage.db` 实测 proactive 33 calls + chat 11 calls；A 方案增量成本约 $0.78/年；P6.9-10 pilot 基础设施约 250 LOC + PersonaScore 5 任务评估 + 8 单测 + 14 日观测窗口。
+
+**用户决策**：保留 v2.3 全部内容；本审计结论作为后续维护参考存档；落实节奏不变（Wave -1 → Wave 6 按 [docs/tracking/omubot-humanization-part6-execution.md](docs/tracking/omubot-humanization-part6-execution.md)）。
+
+**影响**：
+
+- 无 runtime / config / 代码改动。
+- 后续推进 Part 6 时，A-E 5 项的实证害处已留档，遇到具体子任务可直接参考此次结论判断 ROI。
+
+**交接**：
+
+- 不需要回滚。
+- 下一步：等待用户决定 Part 6 实施起点（Wave -1 P6.0.a/b/c state_board 前缀稳定化属低风险，可优先开工；Wave 1 profile 切换、Wave 2 QQ 交互需要先确认 v2.3 §4.3 三档 profile 默认值）。
+
+## 2026-05-26 Part 3.5 Wave 1 落地 P3.11.1 directed_followup bypass
+
+**变更类型**：scheduler 行为修复（[services/scheduler.py](services/scheduler.py) + scheduler/force-reply 测试）
+
+**变更内容**：
+
+- `directed_followup` 现已接入 [services/scheduler.py](services/scheduler.py) 的强触发矩阵：与 `at_mention` / `video_always` 同级绕过 `proactive=None` 与概率抽样。
+- `_should_force_reply()` 同步把 `mode="directed_followup"` 视作 force-reply，避免 follow-up 被 LLM 侧 `pass_turn` 语义稀释。
+- 新增 3 条回归：`proactive=None` bypass、cancel-path 下 `pending_at` / `consecutive_skip` 不脏写、force-reply 传递到 LLM。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_scheduler.py tests/test_force_reply.py` → `44 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/scheduler.py tests/test_scheduler.py tests/test_force_reply.py` → passed
+- `source ./scripts/dev/env.sh && uv run pyright services/scheduler.py tests/test_scheduler.py tests/test_force_reply.py` → `0 errors`
+
+**影响**：
+
+- router 已产出的 `TriggerContext(mode="directed_followup")` 不再落回普通概率抽样，而是直接回到 scheduler 的“应答跟进”路径。
+- `services/reply_workflow.py` 的 `legacy_directed_followup_would_force` shadow 逻辑保持不变，可继续作为对照证据。
+
+**交接 / 回滚**：
+
+- 标准回滚保持为单 commit `git revert <commit>`。
+- 下一步按 [docs/tracking/omubot-humanization-part3.5-execution.md](docs/tracking/omubot-humanization-part3.5-execution.md) 继续推进 `P3.11.2a` magic-number → config 字段迁移。
+
+## 2026-05-26 Part 2-3 Wave 6 进入灰度（993065015 启全部已接线 v2 旗标，984198159 作 v1 对照）
+
+**变更类型**：config 变更（[config/config.json](config/config.json) humanization 段，已 restart 生效）
+
+**触发**：用户「进入灰度」指令，对应 [docs/tracking/omubot-humanization-part2-3-execution.md §3.6 Wave 6](docs/tracking/omubot-humanization-part2-3-execution.md)。Wave 1-5 全部 ✅，§6 状态表灰度行 P2.7+P3.5+v2-灰度 由 ⏳ 转 🟡。
+
+**Wave 6 设计映射**：
+
+- 灰度群 993065015：humanization runtime_groups 锁定后开启全部已接线 v2 旗标
+- 对照群 984198159：humanization 不在 runtime_groups 内，自动走 v1 路径（无需单独开关）
+- persona_v2 双群（`["993065015", "984198159"]`）保持不变，仍在 shadow_compare 模式
+
+**实际改动**（[config/config.json:374-383](config/config.json#L374-L383)）：
+
+| 旗标 | 旧值 | 新值 | 接线点 |
+|---|---|---|---|
+| `context_providers` | true | true（不变） | [plugins/chat/plugin.py:911,1087](plugins/chat/plugin.py#L911) Provider 总闸 |
+| `register_classifier` | true | true（不变） | [plugins/chat/plugin.py:166](plugins/chat/plugin.py#L166) RegisterClassifier 启用 |
+| `sticker_register_provider` | false | **true** | [plugins/chat/plugin.py:1098](plugins/chat/plugin.py#L1098) StickerRegisterProvider 上线 |
+| `thinker_provider` | false | **true** | [plugins/chat/plugin.py:1105](plugins/chat/plugin.py#L1105) ThinkerProvider 上线 |
+| `rewrite_threshold` | -1.0 | **0.4** | [services/llm/client.py:1817](services/llm/client.py#L1817) 二次重写阈值（kernel/config.py:1076 推荐值） |
+| `semantic_gate_dynamic` | false | **true** | reply_workflow semantic gate 改用动态阈值 |
+| `kaomoji_enforce_strict` | false | **true** | [services/llm/client.py:1736](services/llm/client.py#L1736) 颜文字强制轮 strict gate |
+| `runtime_groups` | `["993065015"]` | `["993065015"]`（不变） | 保持单群 A/B |
+
+**未涉及的模块（设计性 dead-code，按 Wave 6 计划如此）**：
+
+Wave 2-5 落地的独立模块（`binary_planner`、`topic_drift`、`mood_classifier`、`affection_classifier`、`sticker_decision_provider`、`coupling`、`fairmatch`、`video_adapter`）当前**仅作为已通过测试的 standalone 模块存在**，未接入 ChatPlugin / scheduler。Part 2-3 v2 设计将其接线列为 Part 6 范围，本次灰度只覆盖 Part 1 V0 旗标系统已配置的 7 个 humanization 旗标 + 已落地无旗标的 P2.5（force_reply addressee_self）/ P2.11（og:title）/ P3.3（read_mark）/ P3.8（mood inter_segment_delay）/ P3.9（mood/affection planner gate）。
+
+**外部可观察证据（D4）**：
+
+1. **Config 真落地**（runtime introspection）：
+   ```
+   docker compose exec bot python -c "from kernel.config import load_config; print(load_config().humanization)"
+   → context_providers/register_classifier/sticker_register_provider/thinker_provider=True
+     rewrite_threshold=0.4 / semantic_gate_dynamic=True / kaomoji_enforce_strict=True
+     runtime_groups=['993065015']
+   ```
+
+2. **Bot 重启 + connect 成功**：
+   - `qq-bot | 03:04:01 系统 | humanization register classifier enabled`
+   - `qq-bot | 03:04:01 系统 | ChatPlugin startup complete`
+   - `qq-bot | 03:04:04 [INFO] nonebot | OneBot V11 | Bot 384801062 connected`
+   - `qq-bot | 03:04:07 [INFO] kernel | Bot 就绪，开始接收消息 ✓`
+
+3. **Persona shadow log connect-time 写入**：
+   - `/app/storage/persona_shadow_diff.log` 8 行（重启后 +1 行 connect-time 比对）
+   - mtime 同步至 `May 26 03:04`
+
+4. **重启日志无 error / traceback / exception**（仅 1 条 NoneBot Legacy project format 历史 WARNING + 1 条 napcat 短暂断连重连）
+
+**24h 出口指标采样路径**：
+
+按 [§4 16 项矩阵](docs/tracking/omubot-humanization-part2-3-execution.md)，灰度满 24h 后跑：
+
+```
+scripts/dev/measure_rhythm.sh        # v1 节奏采样
+scripts/dev/measure_humanization.sh  # v2 拟人化采样（脚本未落地，Wave 7 P2/3-DOC 时再落或跳过）
+```
+
+≥ 12/16 项达标 + 用户主观验收 → P2/3-DOC 文档收口。
+
+**回滚路径（30s）**：
+
+```bash
+sed -i '' 's/"sticker_register_provider": true/"sticker_register_provider": false/' config/config.json
+sed -i '' 's/"thinker_provider": true/"thinker_provider": false/' config/config.json
+sed -i '' 's/"rewrite_threshold": 0.4/"rewrite_threshold": -1.0/' config/config.json
+sed -i '' 's/"semantic_gate_dynamic": true/"semantic_gate_dynamic": false/' config/config.json
+sed -i '' 's/"kaomoji_enforce_strict": true/"kaomoji_enforce_strict": false/' config/config.json
+docker compose restart bot
+```
+
+或全段回滚：`git restore config/config.json && docker compose restart bot`。
+
+**影响范围**：
+
+- 仅 993065015 群在 [services/llm/client.py](services/llm/client.py) `humanization_runtime_groups` 命中时进入新链路
+- 984198159 与其它群（426727294 / 625618470 等 silent_learn 群）一律走 v1 路径
+- Wave 2-5 dead-code 模块不影响运行时（无 import 调用方）
+- 不动镜像、不动镜像缓存、不动 napcat（D6）
+
+---
+
+## 2026-05-26 修复 force_reply ↔ pass_turn 语义漏洞导致灰度群 @ 不回复
+
+**变更类型**：bug fix（services/llm/client.py + tests/test_client.py，已 build & deploy）
+
+**症状**：
+
+- 灰度群 993065015 / 984198159 中 @ 机器人，bot 不回复（多条消息复现）
+- 私聊和无 @ 的群里行为正常
+- 5/24 07:18 / 5/25 11:32 同一容器代码下 @ 历史上能回复（log 证据）
+
+**根因（D1 同模式扫描已完成）**：
+
+`force_reply=True` 是 scheduler 侧 "用户 @ 必须回复" 的语义信号，但 LLM 工具集仍包含 `_PASS_TURN_TOOL`（[services/llm/client.py:603](services/llm/client.py#L603)），LLM 可能选择调用 `pass_turn` 跳过本轮——pass_turn 早返回路径（[services/llm/client.py:2398](services/llm/client.py#L2398)）直接 return None，scheduler 拿到 None 视作"决定不回"，没有兜底。
+
+引入提交：4ca914e（2026-05-01 day-0），pass_turn 工具与早返回路径同时落地，**与 force_reply 语义直接冲突**。该 bug 自第一天起就在代码里。
+
+为何 5/26 才暴露：
+
+- 5/24 持续灰度 `[persona_v2]` 4 旗标（runtime_consume / shadow_compare / persona_id="fengxiaomeng-v2"）→ system block 改写
+- 5/25 humanization context_providers / register_classifier 在 993065015 启用 → 注入了人格 / 情绪上下文
+- prompt 上下文改变后，LLM 在面对 @ 输入时计算出"群里在聊别的，跳过"的概率提升
+- 代码路径完全没变；同一段代码在不同 prompt 上下文下产生不同决策（LLM 概率行为）
+
+**修复**（[services/llm/client.py](services/llm/client.py)）：
+
+1. **源头剥离** — `_build_tool_defs(group_profile, *, force_reply=False)` 当 force_reply=True 时不再注入 `_PASS_TURN_TOOL`，LLM 看不到该工具自然不会调用
+2. **下沉兜底** — pass_turn 命中分支（L2463）增加 force_reply 守门：若 LLM 因 prompt cache 仍调用了 pass_turn，剥离该 tool_use 并继续生成，记 `pass_turn_overridden` 日志
+3. 调用点（L2405）传递 `force_reply` 参数
+
+**回归测试**（[tests/test_client.py:724](tests/test_client.py#L724)）：
+
+- `test_pass_turn_tool_omitted_when_force_reply` — 断言 force_reply=True 下 tool_defs 不含 pass_turn
+- `test_pass_turn_overridden_when_force_reply` — 断言即使 LLM 强行返回 pass_turn，最终输出非空（走 `_EMPTY_VISIBLE_REPLY_FALLBACK = "我先缓一下，马上接你。"`）
+
+**外部可观察证据（D4）**：
+
+- `uv run pytest tests/test_client.py::TestPassTurn -v` → 7 passed
+- `uv run pytest` → 1871 passed, 1 failed（失败为 `test_humanizer_mood.py::test_reply_segment_plan_passes_mood_to_inter_segment_delay` 已知 RNG flaky，连跑 5 次稳定 PASSED；与本次修复无关）
+- `uv run ruff check services/llm/client.py tests/test_client.py` → All checks passed
+- `uv run pyright services/llm/client.py` → 0 errors
+- 容器内 `inspect.getsource(LLMClient._build_tool_defs)` 验证：`'force_reply' in src=True`、`'if force_reply:' and 'return tool_defs' in src=True`（fix 已活在线上）
+
+**影响范围**：
+
+- 灰度群（993065015 + 984198159）下次 @ 行为：源头不出现 pass_turn → 不再有"@ 不回"
+- 非灰度群（force_reply=False 仍是常态）行为不变，pass_turn 仍可被 LLM 调用以静默
+- 修复完全向后兼容，未改 scheduler / config / prompt
+
+**回滚路径**：
+
+```bash
+git revert <fix-commit>  # 单文件修复，整体可逆
+dot_clean . && docker compose up bot -d --build
+```
+
+**关联**：
+
+- D1 同模式扫描：grep `force_reply` 全仓 9 处命中均检查；scheduler.py:454 inline + 491-501 传递无问题；prompt_builder / humanization 无关联点
+- 旧诊断更正：先前误判过两个错误根因（"force_reply 不传"、"timeline 合并丢内容"），均被用户证伪。最终通过日志证据（5/24 07:18 / 5/25 11:32 同一容器代码下 @ 能回复）锁定为 LLM 概率行为 + prompt 漂移触发的 day-0 漏洞
+
+---
+
+## 2026-05-26 Humanization Part 6 v2.3 派单追踪文档生成
+
+**变更类型**：tracking docs（仅文档，无代码 / 配置变更）
+
+**内容**：按用户口径 "最后审计一遍 part6 相关，生成派发追踪文档，要求同 part1 一样。我会在 part2-3 结束后执行" 新建 [Part 6 v2.3 派单版执行追踪](docs/tracking/omubot-humanization-part6-execution.md)，对齐 [Part 1 派单版执行追踪](docs/tracking/omubot-humanization-part1-execution.md) 的 9 段结构：
+
+- **§1 主线自审与证据订正**（5 处主线 ↔ grep 实证更正）：
+  - `services/llm/client.py:_reply_segments` 实际行号 397（v2.2 文档误标 359）
+  - `services/llm/prompt_builder.py:build_blocks` 实际入口行号 139（v2.2 文档误标 138-180）
+  - 流式分段器路径修正：`services/llm/streaming_segmenter.py`（仓内不存在 `services/segmentation/`，但 `services/llm/segmentation.py` 存在）
+  - usage 缓存命中率：dead 字段 `cache_create_tokens` 替换为 `prompt_cache_hit_tokens / (hit + miss)`
+  - `HumanizationConfig` 当前 9 字段，v2.3 新增 `profile` 字段插入位置确定为 `runtime_groups` 之后
+- **§2 P6.-1 三步前置验证**（0 代码：grep 复核 / config.json 现状只读 / pytest collect-only baseline）
+- **§3 Wave -1 ~ Wave 6 派单表**：覆盖 P6.-1 + P6.0.a/b/c + P6.0.x1~x5 + P6.0.y1~y4 + P6.1~P6.13 共 22 个子任务，每行带 D1 同模式扫描点 / D2 cancel-path 测试 / 30 秒回滚指令
+- **§4 灰度出口指标矩阵**：15 个指标 × 3 阶段（economy 7 日 / balanced 24h / performance 14 日 pilot），含错峰 token 节省阈值、可读性指标 D7、事件回执延迟 P95
+- **§5 验收清单**（10 条）：含 config.json 是运行时源、feature flag 默认 off、灰度群仅 993065015 + 984198159、QQ 交互速率门强制启用
+- **§6 当前状态表**（26 行）：P6.-1 + 25 个子任务全部 ⏳，等 Part 2-3 派单结束后启动
+- **§7 执行者交接说明**（10 条）：含 D5 pkill pytest / D6 admin SPA bind-mount / D7 deploy git hygiene / config.json 是运行时源 / Markdownlint MD012/MD060 不静默修复
+- **§8 与 Part 5 / Part 2-3 的关系**：Part 5 自然分句与 v2.3 B+A 互斥（`disable_natural_split` 决议字段）；Part 2-3 调度仲裁不改，QQ 入站事件只接信号源
+- **§9 执行者 GPT 逐步追踪模板**：每子任务一格（grep 命中 / 改动文件 / 测试断言 / 灰度点 / 回滚指令）
+
+**为什么单独成文而不是回写 v2.3 主文档**：
+
+- Part 1 派单文档结构经过实战验证（9 段、Wave 表、出口指标、验收清单），可直接复用
+- 主文档 v2.3 是设计文档，派单文档是执行追踪——两者在 git 历史上各自独立可审计
+- 用户明确 "我会在 part2-3 结束后执行"，派单文档独立成文便于后续逐子任务回填记录而不污染主设计文档
+
+**影响**：
+
+- 仅 tracking docs，0 代码 / 0 配置 / 0 重启
+- Part 6 实际施工等 Part 2-3 派单全部 ✅ 后启动；启动信号 = 用户给出 "Part 2-3 结束，可启动 Part 6"
+- 紧急回滚：保持 `humanization.profile=economy`（默认）即 v2.3 全部能力关闭，与今日运行时完全等价
+
+**回滚路径**：`git rm docs/tracking/omubot-humanization-part6-execution.md` 并撤销本日志条目。无运行时影响。
+
+---
+
+## 2026-05-26 Humanization Part 2/3 P2.13 Video Metadata Adapter 落地
+
+**变更类型**：URL metadata / video adapter / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 5 P2.13，新增可选 Bilibili / YouTube 视频元信息 adapter：
+
+- `services/url_meta/video_adapter.py`：新增 `VideoMetadata` 与 `collect_video_metadata()`；识别 Bilibili `/video/BV...` / `/video/av...`、YouTube `watch?v=` / `shorts/` / `youtu.be/`，访问平台 metadata endpoint，失败静默返回空；
+- `services/url_meta/__init__.py`：导出 video adapter 入口，保持 P2.11 URL title 入口不变；
+- `tests/test_video_adapter.py`：新增 5 条测试覆盖默认禁用、Bilibili、YouTube、非视频 URL 与 fetch failure。
+
+**验证**：
+
+- `uv run pytest -q tests/test_video_adapter.py tests/test_og_title.py` → `14 passed`
+- `uv run ruff check services/url_meta/video_adapter.py services/url_meta/__init__.py tests/test_video_adapter.py` → passed
+- `uv run pyright services/url_meta/video_adapter.py services/url_meta/__init__.py tests/test_video_adapter.py` → `0 errors`
+- `uv run python -m py_compile services/url_meta/video_adapter.py services/url_meta/__init__.py tests/test_video_adapter.py` → passed
+- `uv run pytest --collect-only -q` → `1878 tests collected`
+
+**影响**：P2.13 状态自主验收为 ✅，Wave 5（P3.10 / P2.12 / P2.13）已全 ✅；该 adapter 默认 `enabled=False`，不接 `PromptBuilder` 或 `plugins/bilibili` 生产链路，不会新增线上网络调用。
+
+**回滚**：删除 `services/url_meta/video_adapter.py` / `tests/test_video_adapter.py`，撤销 `services/url_meta/__init__.py` 的 video adapter 导出，并撤销 Part 2/3 tracking 的 P2.13 回填。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P3.10 Mood Coupling Lookup 落地
 
 **变更类型**：humanization support module / coupling policy / tests
@@ -100,6 +464,47 @@
 **影响**：P2.12 状态自主验收为 ✅；本次只增加可选 rerank 能力，不新增统计存储，也不改变未传 `usage_counts` 的线上 sticker 决策行为。
 
 **回滚**：删除 `services/sticker/fairmatch.py` / `tests/test_fairmatch.py`，撤销 `services/sticker/decision_provider.py` 的 `usage_counts` 参数与 `services/sticker/__init__.py` 导出，并撤销 Part 2/3 tracking 的 P2.12 回填。
+
+---
+
+## 2026-05-26 Humanization Part 6 v2.3 增补（QQ 特殊交互能力并入三档 profile）
+
+**变更类型**：tracking docs（仅文档，无代码 / 配置变更）
+
+**内容**：按用户口径 "qq存在戳一戳，拍一拍，表情直接在消息回复等特殊状态，当前是否支持，是否需要单开一个part或是加补充？" + "part2-3 已在执行，尽量与 part6 同批次" 在 [Part 6 v2.2 文档](docs/tracking/omubot-humanization-part6-source-side-generation.md) 上做最小化增补，**不开 Part 7**（沿用户既有指令"不要 part7"）：
+
+- 现状审计（grep 实证 0 命中，对照 OneBot v11 标准 + NapCat 扩展）：
+  - 戳一戳 / 拍一拍 — 仓内无 `PokeNotifyEvent` / `notify.poke` / `send_poke` 处理；router 仅有 `GroupBanNoticeEvent` 一个 NoticeEvent handler
+  - 表情回应 — 仓内无 `MessageReaction` / `set_msg_emoji_like` 处理
+  - 引用回复 — `MessageSegment.reply(...)` 在 client.py 主回复路径无调用点
+- §4.4.6 新增 QQ 特殊交互三档映射：
+  - `economy` 全关 / `balanced` 入站响应 + 引用回复 / `performance` 全开（含主动 poke + 主动 react）
+  - 速率门：单群 60s `poke_out` ≤ 2 / `react_out` ≤ 3；单 user 5min `poke_out` ≤ 1
+  - 入站频率护栏：单 user 60s `poke_in` ≥ 5 → 60s mute（仅对该 user 不响应）
+  - **接入边界**：入站事件解析后投递 Part 2-3 既有 trigger 总线，**不改 Part 2-3 调度仲裁逻辑**（用户已强调 Part 2-3 在执行中）
+- §7.0.y 新增 P6.0.y1~P6.0.y4 四个子任务（与 P6.0.x1~x5 并行可施工，仅事件源 + 工具 + BaseModel 改动，无主链路）：
+  - **P6.0.y1** — 入站事件源：[kernel/router.py:1137-1149](kernel/router.py#L1137-L1149) 同级新增 `on_notice` 处理 `PokeNotifyEvent` + NapCat raw event hook（表情回应）；signal payload `{kind, actor_user_id, target_user_id, raw_message_id?, emoji_code?, is_tome}`；≥ 6 测试
+  - **P6.0.y2** — 出站工具 `services/tools/interaction_tools.py` ≤ 120 行：`poke_user` + `react_to_message`；in-mem token bucket；profile 守卫；≥ 6 测试
+  - **P6.0.y3** — 引用回复：`<quote msg_id="..."/>` 锚点解析 → `MessageSegment.reply(msg_id) + 文本`；msg_id 不存在静默 strip 兜底；≥ 4 测试
+  - **P6.0.y4** — `HumanizationConfig.qq_interactions` 子 BaseModel（5 bool flag 默认全 off）+ `resolve_profile()` 5 决议字段 + `GroupOverride.qq_interactions_profile_override`；≥ 4 测试
+- §7 合计行：18 → 22 子任务 / ≤ 1450 行 / ≥ 83 测试
+- §7.2 解锁条件表三档加 QQ 交互行为列
+- §8 风险表追加 3 行：QQ 入站轰炸 / 出站刷屏 / 引用回复 msg_id 不存在
+- §10 状态表 + 附录 A 加 v2.3 列；附录 A 改为 5 列（v1 节 / v2 处置 / v2.1 增补 / v2.2 增补 / v2.3 增补）
+
+**为什么是补充而不是开 Part 7**：
+
+- 用户已明确 "不要 part7，进一步调研深度 part23"——新交互能力按受影响子系统拆进 Part 2-3 + Part 6
+- 三类交互天然分布两端：入站感知（Part 2-3 trigger 信号源）+ 出站生成（Part 6 工具与 profile 切换）
+- Part 2-3 在执行中，本次只接事件源不改调度逻辑；profile 切换 + 工具 + 引用回复完全在 Part 6 v2.2 已搭好的 BaseModel 层 + Admin SPA 自动渲染管线上扩展
+
+**影响**：
+
+- 仅 tracking docs，0 代码 / 0 配置 / 0 重启
+- 实际施工要到 P6.0.x（v2.2 提案）+ P6.0.y（本轮）一起灰度部署
+- 紧急回滚：保持 `humanization.profile=economy`（默认）即 QQ 交互全关，与今日完全等价
+
+**回滚路径**：删除 §4.4.6 + §7.0.y + §10/附录 A 增量行 + 本日志条目。无运行时影响。
 
 ---
 

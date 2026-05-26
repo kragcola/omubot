@@ -4,10 +4,11 @@ Cache layout:
   ① tools[-1]                          — global shared
   ② system block 1: personality+instr  — global shared, built once at startup
   ③ plugin_static blocks               — plugin-contributed, rarely changed
-  ④ state_board                        — always fresh (per-group conversation state)
+  ④ state_board                        — always fresh, legacy head layout
   ⑤ plugin_stable blocks               — plugin-contributed, occasionally changed
   ⑥ plugin_dynamic blocks              — plugin-contributed, every-turn content
-  ⑦ messages[near-end]                 — per-conversation
+  ⑦ state_board                        — Part 6 tail layout option
+  ⑧ messages[near-end]                 — per-conversation
 
 Mood, affection, memo, sticker blocks are now contributed by plugins via
 bus.fire_on_pre_prompt() and arrive as plugin_static/stable/dynamic lists.
@@ -49,13 +50,25 @@ class PromptBuilder:
         admins: dict[str, str] | None = None,
         state_board: GroupStateBoard | None = None,
         retrieval_gate: object | None = None,
+        state_board_layout: str = "head",
+        state_board_granularity: str = "fine",
     ) -> None:
         self._instruction = instruction
         self._admins = admins or {}
         self._state_board = state_board
         self._retrieval_gate = retrieval_gate
+        self._state_board_layout = "tail" if state_board_layout == "tail" else "head"
+        self._state_board_granularity = (
+            "coarse" if state_board_granularity == "coarse" else "fine"
+        )
         self._static_block: dict[str, Any] = {}
         self._runtime_selector: PersonaRuntimeSelector | None = None
+
+    def _resolve_state_board_layout(self, layout: str | None = None) -> str:
+        return "tail" if (layout or self._state_board_layout) == "tail" else "head"
+
+    def _resolve_state_board_granularity(self, granularity: str | None = None) -> str:
+        return "coarse" if (granularity or self._state_board_granularity) == "coarse" else "fine"
 
     @property
     def static_block(self) -> dict[str, Any]:
@@ -151,15 +164,22 @@ class PromptBuilder:
         plugin_stable: list[dict[str, Any]] | None = None,
         plugin_dynamic: list[dict[str, Any]] | None = None,
         include_state_board: bool = True,
+        state_board_layout: str | None = None,
+        state_board_granularity: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build system prompt blocks for a conversation turn.
 
-        Layout: [static, *plugin_static, state_board, *plugin_stable, *plugin_dynamic]
+        Legacy layout: [static, *plugin_static, state_board, *plugin_stable, *plugin_dynamic]
+        Tail layout: [static, *plugin_static, *plugin_stable, *plugin_dynamic, state_board]
 
         Most blocks are now contributed by plugins via bus.fire_on_pre_prompt().
         PromptBuilder only owns the static identity block and state_board.
         """
-        state_board_block = await self.build_state_board_block(group_id)
+        layout = self._resolve_state_board_layout(state_board_layout)
+        state_board_block = await self.build_state_board_block(
+            group_id,
+            state_board_granularity=state_board_granularity,
+        )
         if include_state_board and state_board_block["text"]:
             st_len = len(state_board_block["text"])
             st_preview = state_board_block["text"][:80]
@@ -175,12 +195,14 @@ class PromptBuilder:
                 blocks.append({"type": "text", "text": url_title_text})
         if plugin_static:
             blocks.extend(plugin_static)
-        if include_state_board:
+        if include_state_board and layout == "head":
             blocks.append(state_board_block)
         if plugin_stable:
             blocks.extend(plugin_stable)
         if plugin_dynamic:
             blocks.extend(plugin_dynamic)
+        if include_state_board and layout == "tail":
+            blocks.append(state_board_block)
 
         return blocks
 
@@ -194,13 +216,21 @@ class PromptBuilder:
             return None
         return {"type": "text", "text": _READ_MARK_TEXT}
 
-    async def build_state_board_block(self, group_id: str | None) -> dict[str, Any]:
+    async def build_state_board_block(
+        self,
+        group_id: str | None,
+        *,
+        state_board_granularity: str | None = None,
+    ) -> dict[str, Any]:
         """Build a fresh state_board block for group conversations.
 
         Returns an empty block for private chats or when state_board is not configured.
         """
         if self._state_board is None or group_id is None:
             return {"type": "text", "text": ""}
-        snapshot = await self._state_board.query_state(group_id)
+        snapshot = await self._state_board.query_state(
+            group_id,
+            granularity=self._resolve_state_board_granularity(state_board_granularity),
+        )
         text = snapshot.to_prompt_text()
         return {"type": "text", "text": text}

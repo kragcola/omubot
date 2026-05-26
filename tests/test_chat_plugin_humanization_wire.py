@@ -8,7 +8,7 @@ import pytest
 
 from kernel.config import BotConfig
 from kernel.types import MessageContext, PluginContext
-from plugins.chat.plugin import ChatPlugin
+from plugins.chat.plugin import ChatPlugin, _humanization_resolve
 from services.humanization import REGISTER_LABEL_SLOT, RegisterClassifier, create_humanization_state_bus
 from services.system_module import Scope
 
@@ -91,6 +91,27 @@ def test_chat_plugin_leaves_register_classifier_unwired_by_default() -> None:
     plugin._wire_humanization_runtime(ctx, BotConfig(), object())
 
     assert ctx.humanization_register_classifier is None
+
+
+def test_humanization_resolve_honors_group_profile_override() -> None:
+    cfg = BotConfig.model_validate({
+        "humanization": {"profile": "economy"},
+        "group": {
+            "access": {"mode": "whitelist", "whitelist": [100]},
+            "overrides": {
+                "100": {
+                    "presence_mode": "active",
+                    "humanization_profile": "balanced",
+                }
+            },
+        },
+    })
+
+    resolved = _humanization_resolve(cfg, "100")
+
+    assert resolved.streaming_segment_enabled is True
+    assert resolved.pause_then_extend_enabled is True
+    assert resolved.disable_natural_split is True
 
 
 @pytest.mark.asyncio

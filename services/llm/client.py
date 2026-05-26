@@ -17,6 +17,7 @@ from typing import Any, cast
 import aiohttp
 from loguru import logger as _base_logger
 
+from kernel.config import ResolvedHumanization
 from kernel.types import PromptBlock, ReplyContext, ThinkerContext
 from services.block_trace.types import PromptBlockCandidate
 from services.humanization.contract import (
@@ -91,6 +92,7 @@ _GROUP_REPLY_STYLE_HINTS: dict[str, str] = {
 _STICKER_TOOL_NAMES = {"send_sticker", "save_sticker", "manage_sticker"}
 _DEEPSEEK_V4_COMPACT_RATIO = 0.88
 _EMPTY_VISIBLE_REPLY_FALLBACK = "我先缓一下，马上接你。"
+_PASS_TURN_LIGHT_ACK = "嗯，我在。"
 _CONTROL_TOKEN_RE = re.compile(
     r"(?is)\s*(?:\[\s*pass[_\s-]*turn\s*\]|pass[_\s-]*turn|passturn)\s*(?:[:：\-]\s*.*)?\s*"
 )
@@ -397,7 +399,11 @@ def _split_naturally(text: str) -> list[str]:
 def _reply_segments(
     reply: str,
     cfg: ReplySegmentationConfig | None = None,
+    *,
+    disable_natural_split: bool = False,
 ) -> tuple[list[str], int, str]:
+    if disable_natural_split:
+        return [fix_cq_codes(reply)], 1, "none"
     return _segment_reply_segments(fix_cq_codes(reply), cfg or ReplySegmentationConfig())
 
 
@@ -407,7 +413,15 @@ def _reply_segment_plan(
     *,
     register: Any | None = None,
     slot_energy: float = 1.0,
+    disable_natural_split: bool = False,
 ) -> ReplySegmentPlan:
+    if disable_natural_split:
+        return ReplySegmentPlan(
+            segments=[fix_cq_codes(reply)],
+            raw_count=1,
+            limit_status="none",
+            inter_segment_delays=[],
+        )
     return _segment_reply_segment_plan(
         fix_cq_codes(reply),
         cfg or ReplySegmentationConfig(),
@@ -576,6 +590,14 @@ def _hash_json(obj: Any) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:8]
 
 
+def _coerce_probability(value: object, *, default: float) -> float:
+    try:
+        raw = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raw = default
+    return max(0.0, min(1.0, raw))
+
+
 def _log_cache_debug(
     session_id: str,
     system_blocks: list[dict[str, Any]],
@@ -603,16 +625,22 @@ def _to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 _PASS_TURN_TOOL: dict[str, Any] = {
     "name": "pass_turn",
-    "description": "当你认为不需要回复时调用此工具，跳过本轮发言。",
+    "description": "当你认为不需要回复时调用此工具，跳过本轮发言；同时给出你对静默判断的 confidence。",
     "input_schema": {
         "type": "object",
         "properties": {
             "reason": {
                 "type": "string",
                 "description": "不回复的简短原因",
+            },
+            "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "你确认本轮应该静默的信心，0 到 1",
             }
         },
-        "required": ["reason"],
+        "required": ["reason", "confidence"],
     },
 }
 
@@ -942,6 +970,9 @@ class LLMClient:
         humanization_rewrite_threshold: float = -1.0,
         humanization_kaomoji_enforce_strict: bool = False,
         humanization_runtime_groups: list[str] | tuple[str, ...] | None = None,
+        pass_turn_confidence_gate: bool = False,
+        pass_turn_confidence_threshold: float = 0.4,
+        humanization_resolver: Callable[[str | None], ResolvedHumanization] | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
             enable_cleanup_closed=True,
@@ -985,6 +1016,9 @@ class LLMClient:
         self._thinker_provider_enabled = bool(thinker_provider_enabled)
         self._humanization_rewrite_threshold = float(humanization_rewrite_threshold)
         self._humanization_kaomoji_enforce_strict = bool(humanization_kaomoji_enforce_strict)
+        self._pass_turn_confidence_gate = bool(pass_turn_confidence_gate)
+        self._pass_turn_confidence_threshold = max(0.0, min(1.0, float(pass_turn_confidence_threshold)))
+        self._humanization_resolver = humanization_resolver
         self._humanization_runtime_groups = frozenset(
             str(group_id).strip()
             for group_id in (humanization_runtime_groups or ())
@@ -1011,6 +1045,15 @@ class LLMClient:
         if not self._humanization_runtime_groups:
             return True
         return str(group_id or "").strip() in self._humanization_runtime_groups
+
+    def _resolve_humanization(self, group_id: str | None) -> ResolvedHumanization:
+        if self._humanization_resolver is None:
+            return ResolvedHumanization()
+        try:
+            return self._humanization_resolver(group_id)
+        except Exception:
+            logger.exception("humanization resolve failed | group={}", group_id)
+            return ResolvedHumanization()
 
     def set_group_config(self, group_config: Any | None) -> None:
         self._group_config = group_config
@@ -1064,6 +1107,8 @@ class LLMClient:
         self,
         profile_name: str,
         requires: tuple[str, ...] | None,
+        *,
+        task: str = "",
     ) -> None:
         """Fail-fast if the resolved profile is missing any required capability.
 
@@ -1073,7 +1118,8 @@ class LLMClient:
         """
         if not requires:
             return
-        profile = self._task_profiles.get(profile_name) or self._task_profiles.get("main")
+        profile = self._task_profiles.get(task) if task else None
+        profile = profile or self._task_profiles.get(profile_name) or self._task_profiles.get("main")
         if profile is None:
             available = ("chat",)
         else:
@@ -1148,7 +1194,7 @@ class LLMClient:
     ) -> dict[str, Any]:
         profile_name, base_url, api_key, model, api_format = self._profile_for_task(task)
         if request is not None:
-            self._enforce_capabilities(profile_name, request.requires_capabilities)
+            self._enforce_capabilities(profile_name, request.requires_capabilities, task=task)
         state = self._profile_rate_state(profile_name)
         self._raise_if_profile_cooling_down(state, task=task)
         state.total_calls += 1
@@ -1356,7 +1402,12 @@ class LLMClient:
             return _DEEPSEEK_V4_COMPACT_RATIO
         return self._compact_ratio
 
-    def _build_tool_defs(self, group_profile: Any | None) -> list[dict[str, Any]]:
+    def _build_tool_defs(
+        self,
+        group_profile: Any | None,
+        *,
+        force_reply: bool = False,
+    ) -> list[dict[str, Any]]:
         openai_tools = self._tools.to_openai_tools() if not self._tools.empty else []
         if group_profile is not None:
             if not bool(getattr(group_profile, "tools_enabled", True)):
@@ -1389,6 +1440,8 @@ class LLMClient:
                     ]
 
         tool_defs = _to_anthropic_tools(openai_tools) if openai_tools else []
+        if force_reply:
+            return tool_defs
         return [*tool_defs, _PASS_TURN_TOOL]
 
     def provider_rate_limit_payload(self) -> dict[str, Any]:
@@ -1649,6 +1702,7 @@ class LLMClient:
         group_id: str | None,
         user_id: str,
         turn_id: str,
+        disable_natural_split: bool = False,
     ) -> ReplySegmentPlan:
         scope = self._humanization_scope(
             session_id=session_id,
@@ -1661,6 +1715,7 @@ class LLMClient:
             self._reply_segmentation_config,
             register=self._humanization_register(scope),
             slot_energy=self._current_slot_energy(scope),
+            disable_natural_split=disable_natural_split,
         )
 
     def _recent_sticker_ids(self, scope: Scope) -> list[str]:
@@ -2269,6 +2324,7 @@ class LLMClient:
             thinker_thought = ""
 
         group_profile = self._resolve_group_profile(group_id)
+        humanization = self._resolve_humanization(group_id)
         prompt_build_start = time.perf_counter()
         if self._card_store:
             try:
@@ -2351,7 +2407,10 @@ class LLMClient:
                             plugin_dynamic.append(block_dict)
 
                 if deepseek_native_main:
-                    state_board_block = await self._prompt.build_state_board_block(group_id)
+                    state_board_block = await self._prompt.build_state_board_block(
+                        group_id,
+                        state_board_granularity=humanization.state_board_granularity,
+                    )
                     if state_board_block.get("text"):
                         tail_blocks.append(state_board_block)
                     tail_blocks.extend(plugin_dynamic)
@@ -2368,6 +2427,8 @@ class LLMClient:
                     plugin_stable=plugin_stable or None,
                     plugin_dynamic=None if deepseek_native_main else (plugin_dynamic or None),
                     include_state_board=not deepseek_native_main,
+                    state_board_layout=humanization.state_board_layout,
+                    state_board_granularity=humanization.state_board_granularity,
                 )
                 if deepseek_native_main and tail_blocks:
                     messages = _append_tail_metadata(messages, tail_blocks)
@@ -2402,7 +2463,7 @@ class LLMClient:
 
         messages, image_tag_map = await resolve_image_refs(messages, self._image_cache)
 
-        tool_defs = self._build_tool_defs(group_profile)
+        tool_defs = self._build_tool_defs(group_profile, force_reply=force_reply)
 
         # Debug: hash system blocks and tools to diagnose cache misses
         _log_cache_debug(session_id, system_blocks, tool_defs, len(messages))
@@ -2455,29 +2516,53 @@ class LLMClient:
 
             # Check for pass_turn
             pass_turn = next((tu for tu in tool_uses if tu.name == "pass_turn"), None)
+            if pass_turn and force_reply:
+                _log_msg_out.info(
+                    "pass_turn_overridden | session={} reason={!r} round={}",
+                    session_id, pass_turn.input.get("reason", ""), round_i,
+                )
+                tool_uses = [tu for tu in tool_uses if tu.name != "pass_turn"]
+                pass_turn = None
             if pass_turn:
                 reason = pass_turn.input.get("reason", "")
-                total_elapsed = time.monotonic() - t0
-                _log_msg_out.info(
-                    "pass_turn | session={} reason={!r} llm={:.1f}s total={:.1f}s",
-                    session_id, reason, acc_llm_elapsed, total_elapsed,
-                )
-                if is_group and group_id is not None and self._timeline is not None:
-                    self._timeline.set_input_tokens(group_id, result["input_tokens"])
-                self._record_usage(
-                    call_type="proactive",
-                    user_id=user_id, group_id=group_id,
-                    model=main_model,
-                    provider_kind=str(result.get("provider_kind", main_api_format)),
-                    input_tokens=acc_input, cache_read_tokens=acc_cache_read,
-                    cache_create_tokens=acc_cache_create, output_tokens=acc_output,
-                    prompt_cache_hit_tokens=acc_prompt_cache_hit,
-                    prompt_cache_miss_tokens=acc_prompt_cache_miss,
-                    reasoning_replay_tokens=acc_reasoning_replay,
-                    tool_rounds=round_i, elapsed_s=acc_llm_elapsed,
-                )
-                return None
-
+                confidence = _coerce_probability(pass_turn.input.get("confidence"), default=0.0)
+                if (
+                    self._pass_turn_confidence_gate
+                    and self._humanization_group_allowed(group_id)
+                    and confidence < self._pass_turn_confidence_threshold
+                ):
+                    _log_msg_out.info(
+                        "pass_turn_low_confidence_light_ack | "
+                        "session={} reason={!r} confidence={:.2f} threshold={:.2f}",
+                        session_id,
+                        reason,
+                        confidence,
+                        self._pass_turn_confidence_threshold,
+                    )
+                    text = text or _PASS_TURN_LIGHT_ACK
+                    tool_uses = [tu for tu in tool_uses if tu.name != "pass_turn"]
+                    pass_turn = None
+                else:
+                    total_elapsed = time.monotonic() - t0
+                    _log_msg_out.info(
+                        "pass_turn | session={} reason={!r} confidence={:.2f} llm={:.1f}s total={:.1f}s",
+                        session_id, reason, confidence, acc_llm_elapsed, total_elapsed,
+                    )
+                    if is_group and group_id is not None and self._timeline is not None:
+                        self._timeline.set_input_tokens(group_id, result["input_tokens"])
+                    self._record_usage(
+                        call_type="proactive",
+                        user_id=user_id, group_id=group_id,
+                        model=main_model,
+                        provider_kind=str(result.get("provider_kind", main_api_format)),
+                        input_tokens=acc_input, cache_read_tokens=acc_cache_read,
+                        cache_create_tokens=acc_cache_create, output_tokens=acc_output,
+                        prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                        prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                        reasoning_replay_tokens=acc_reasoning_replay,
+                        tool_rounds=round_i, elapsed_s=acc_llm_elapsed,
+                    )
+                    return None
             if not tool_uses:
                 reply, _reply_state = self._finalize_visible_reply(
                     reply=text or "...",
@@ -2574,6 +2659,7 @@ class LLMClient:
                     group_id=group_id,
                     user_id=user_id,
                     turn_id=reply_turn_id,
+                    disable_natural_split=humanization.disable_natural_split,
                 )
                 segments = plan.segments
                 raw_segment_count = plan.raw_count
@@ -2780,6 +2866,7 @@ class LLMClient:
             group_id=group_id,
             user_id=user_id,
             turn_id=reply_turn_id,
+            disable_natural_split=humanization.disable_natural_split,
         )
         segments = plan.segments
         raw_segment_count = plan.raw_count
