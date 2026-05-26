@@ -78,6 +78,31 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P2.12 Sticker FairMatch Rerank 落地
+
+**变更类型**：sticker decision support / long-tail rerank / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 5 P2.12，为 sticker 候选池补可选 FairMatch long-tail rerank：
+
+- `services/sticker/fairmatch.py`：新增 `fairmatch_weights()` 与 `fairmatch_rerank()`；当某个 sticker_id 在调用频次直方图中占比 ≥ 0.5 时，权重降为 0.5，并在候选池内稳定后置；
+- `services/sticker/decision_provider.py`：`decide()` 增加可选 `usage_counts`，候选 `_dedupe()` 后调用 FairMatch；未传 histogram 时完全 no-op；
+- `services/sticker/__init__.py`：导出 FairMatch helper；
+- `tests/test_fairmatch.py`：新增 5 条测试覆盖权重、稳定后置、no-op、零值 histogram 与 provider 接线。
+
+**验证**：
+
+- `uv run pytest -q tests/test_fairmatch.py tests/test_sticker_decision_provider.py tests/test_sticker_density_feedback.py` → `23 passed`
+- `uv run ruff check services/sticker/fairmatch.py services/sticker/decision_provider.py services/sticker/__init__.py tests/test_fairmatch.py tests/test_sticker_decision_provider.py` → passed
+- `uv run pyright services/sticker/fairmatch.py services/sticker/decision_provider.py services/sticker/__init__.py tests/test_fairmatch.py` → `0 errors`
+- `uv run python -m py_compile services/sticker/fairmatch.py services/sticker/decision_provider.py services/sticker/__init__.py tests/test_fairmatch.py` → passed
+- `uv run pytest --collect-only -q` → `1873 tests collected`
+
+**影响**：P2.12 状态自主验收为 ✅；本次只增加可选 rerank 能力，不新增统计存储，也不改变未传 `usage_counts` 的线上 sticker 决策行为。
+
+**回滚**：删除 `services/sticker/fairmatch.py` / `tests/test_fairmatch.py`，撤销 `services/sticker/decision_provider.py` 的 `usage_counts` 参数与 `services/sticker/__init__.py` 导出，并撤销 Part 2/3 tracking 的 P2.12 回填。
+
+---
+
 ## 2026-05-26 Humanization Part 6 v2.2 增补（三档 profile 切换 + 配置流程审计）
 
 **变更类型**：tracking docs（仅文档，无代码 / 配置变更）

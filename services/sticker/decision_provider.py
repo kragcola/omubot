@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
 from services.humanization import MOOD_CURRENT_SLOT, humanization_source
+from services.sticker.fairmatch import fairmatch_rerank
 from services.system_module import RuntimeStateBus, Scope
 
 StickerTrigger = Literal["none", "tool_call", "kaomoji", "frequent", "thinker"]
@@ -52,15 +53,16 @@ class StickerDecisionProvider:
         extra_candidates: Callable[[], Awaitable[Sequence[str]]] | None = None,
         runtime_state: RuntimeStateBus | None = None,
         scope: Scope | None = None,
+        usage_counts: Mapping[str, int] | None = None,
     ) -> StickerDecision:
         extras = tuple(await extra_candidates()) if extra_candidates is not None else ()
-        pool = _dedupe([
+        pool = fairmatch_rerank(_dedupe([
             *context.tool_call_candidates,
             *context.kaomoji_candidates,
             *context.frequent_candidates,
             *context.thinker_candidates,
             *extras,
-        ])
+        ]), usage_counts)
         source = _trigger_source(context)
         probability = _send_probability(context, source, bool(pool))
         strategy = _rerank_strategy(context, source, probability)
