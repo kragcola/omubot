@@ -1,10 +1,12 @@
-# Omubot 拟人修复 Part 6 — 源头生成调度（LLM call schedule）调研
+# Omubot 拟人修复 Part 6 — 源头生成调度（LLM call schedule）调研 v2
 
-> 状态：2026-05-25 立项，**仅审计 + 调研阶段**，不进 Part 1 / Part 5 主线施工。
+> 状态：v1 立项 2026-05-25；**v2 重写 2026-05-26**（本文）。仅审计 + 调研阶段，不进 Part 1 / Part 5 主线施工。
 >
-> 触发：用户对 Part 5 提出的根本反驳——「part5 方案仍聚焦在话语分割处理上，而没有从 llm 生成的源头提供研究」。
+> v1 → v2 修订动因（用户提出）：v1 §3 全部成本系数按 Anthropic Opus 4.7 推导，但 [config/config.json](../../config/config.json) `default_profile=main, profiles.main.api_format=deepseek, base_url=https://api.deepseek.com, model=deepseek-v4-flash` 显示生产 100% 流量走 DeepSeek V4-Flash。v1 数字（input:output 1:5、cache_read 0.10×、cache_write 1.25×、Opus 4.7 prefix 4096-token 阈值、4-breakpoint 硬上限）**全部不适用 DeepSeek 经济**——v2 按 DeepSeek 官方定价 + 生产 storage/usage.db 7 日真实流量重算。
 >
-> Part 5 把"LLM 一次 1024-token 输出 → 客户端切碎"作为既定前提，只在切分策略上做改良；Part 6 拒绝这一前提，从生成调用本身的形态（call 数 / 触发节奏 / 可中断性 / 计划-执行分离）寻找拟人化突破口。
+> v2 关键新增：§3 生产实证 + cache 偏低根因；§4 cost 系数全表重算；§5 推荐路径重排（先 cache 稳定化前置 → B → D → A 慎用 → C 暂搁）。
+>
+> 触发（保留）：用户对 Part 5 反驳——「part5 方案仍聚焦在话语分割处理上，而没有从 llm 生成的源头提供研究」。Part 5 把"LLM 一次 1024-token 输出 → 客户端切碎"作为既定前提；Part 6 拒绝该前提，从生成调用本身的形态（call 数 / 触发节奏 / 可中断性 / 计划-执行分离）寻找拟人化突破口。
 >
 > 上下文授权（保留勿删）：「依据文档自主做上线前准备，不用问我。我最终做上线前最后验收」。灰度群 993065015 / 984198159。
 
@@ -29,687 +31,624 @@
 1. **不读 README / introduction / 综述博客**——所有结论必须有 (a) 仓库 file:line 引用，或 (b) arXiv ID + 章节号，或 (c) 官方 SDK / 协议规范文档段落
 2. **surface ≠ implementation**——文档承诺 ≠ 实现具备
 3. **架构边界**——Part 6 仅讨论"如何调用 LLM"，不动 Part 5 的"如何切分文本"，两者可以并存
-4. **成本可观测性**——每个候选方案必须给出 token 成本系数 / cache hit-rate 估算 / latency P95 估算
+4. **成本可观测性**——每个候选方案必须给出 (i) DeepSeek V4-Flash 实价系数；(ii) 与生产 7 日 proactive 平均的乘数；(iii) latency P95 估算
 
-### 0.3 8 条研究问题（研究轴）
+### 0.3 8 条研究问题（研究轴，沿用 v1）
 
 | # | 研究轴 | 核心问题 |
 |---|---|---|
 | Q1 | Single-call vs Multi-call | 一次 1024-token + 后切，与 N 次 short-token call，行为是否等价？token 成本系数？persona 漂移率？ |
-| Q2 | Plan-then-utter | 先 LLM short call 生成"段大纲"（≤ 50 token），再每段独立 LLM call 落实——CoVe / ToT / Plan-and-Solve 在 IM 场景的可移植性 |
-| Q3 | Reactive mid-generation | 生成中检测对方新消息 → 截断 + 重 plan。SSE abort / vLLM cancel / SGLang abort 实际能力 |
-| Q4 | Streaming-as-segment | 不动 call 数，但在 SSE token-stream 上 online 切，遇自然边界立即 flush。online SBD 在 token-stream 的可行性 |
-| Q5 | Pause-then-extend | 发完第一段 → 等 N 秒 → 看对方是否回应 → 决定是否追发。turn-taking + IM rhythm 文献 |
-| Q6 | 成本 / 缓存影响 | multi-call 对 Anthropic 4-breakpoint cache（5-min TTL）、token 成本、P95 latency 的破坏量 |
-| Q7 | Persona stability | 每段独立 LLM call 时 persona / mood / register 在 N 段间的稳定性，多轮人格一致性文献 |
+| Q2 | Plan-then-utter | 先 LLM short call 生成"段大纲"（≤ 50 token），再每段独立 LLM call 落实 |
+| Q3 | Reactive mid-generation | 生成中检测对方新消息 → 截断 + 重 plan |
+| Q4 | Streaming-as-segment | 不动 call 数，但在 SSE token-stream 上 online 切，遇自然边界立即 flush |
+| Q5 | Pause-then-extend | 发完第一段 → 等 N 秒 → 看对方是否回应 → 决定是否追发 |
+| Q6 | 成本 / 缓存影响 | multi-call 对 **DeepSeek prefix cache（自动 byte-exact）**、token 成本、P95 latency 的破坏量 |
+| Q7 | Persona stability | 每段独立 LLM call 时 persona / mood / register 在 N 段间的稳定性 |
 | Q8 | 可观测性 | multi-call 因果链如何写入 BlockTrace / usage 表，是否需要 segment_chain_id |
 
 ### 0.4 不在本文范围
 
 - 不动 Part 5 的 natural_split 算法本身——Part 6 是"是否还需要 natural_split"的元问题
-- 不动 Part 1 V11 critic-rewrite-loop——critic 是评分层，Part 6 是调用层
+- 不动 Part 1 V11 critic-rewrite-loop（默认冷代码 [§1.1.4]）
 - 不动 Part 2/3 的 addressee / topic / @—Part 6 不决定"是否回复"，只决定"回复以何种调用形态生成"
-- 不动 prompt cache 的现行 4-breakpoint 布局——Part 6 是观察 multi-call 对该布局的破坏量，不是重设计
+- 不替换 LLM provider（DeepSeek V4-Flash 是给定）；本文不讨论"切回 Anthropic / 切到 V4-Pro"等 provider 选型
+## 1 代码取证 — Omubot 现状 / DeepSeek V4-Flash 架构 / MaiBot 对照
 
----
+### 1.1 Omubot 当前生成调用链（保留 v1，仅校正 cache 描述）
 
-## 1 代码取证
+#### 1.1.1 主回复一次性 1024-token call（保留 v1）
 
-### 1.1 Omubot 现状 — 一次 chat() 实际是 3~8 次 LLM call（不是 single-call）
+[services/llm/client.py:659/671](../../services/llm/client.py#L659) `chat()` 主路径：单次 `call_api()`，`max_tokens=1024`，SSE 流式接收。生成完整后才进入 [client.py:359-538 `_reply_segments`](../../services/llm/client.py#L359-L538) 切段。生成阶段不读取群新消息，不做任何"段间观察"。
 
-#### 1.1.1 入口与 SSE 形态
+#### 1.1.2 Tool loop 最多 5 round（保留 v1）
 
-[services/llm/client.py:1963](../../services/llm/client.py#L1963) `LLMClient.chat()` 是群/私聊回复唯一入口。`call_api()` 在 [client.py:627](../../services/llm/client.py#L627) 做单次裸 SSE，`stream_api()` 不存在——SSE 走 `aiohttp.session.post(...).resp.content async-for` **累积完整 SSE 后**再交给 `provider.parse_sse_stream()`（[client.py:678](../../services/llm/client.py#L678) → [client.py:688](../../services/llm/client.py#L688)）。
+[client.py:63 `MAX_TOOL_ROUNDS = 5`](../../services/llm/client.py#L63)，[client.py:2432](../../services/llm/client.py#L2432) `for round_i in range(MAX_TOOL_ROUNDS)`。每个 round 是独立 LLM call，但 round 之间是"模型自驱"（继续工具循环），不是"等用户/群反馈再回 LLM"。
 
-**关键事实**：Omubot 当前是 **drain-all 模式**——所有 token 收齐后再一次性处理。**没有 mid-generation 钩子。** 这是 Part 6 §3 方案 B / 方案 C 必须新建的能力。
+#### 1.1.3 Thinker / slang / slang_review / memo / proactive 多 call（保留 v1）
 
-`_dispatch_call()`（[client.py:1109](../../services/llm/client.py#L1109)）是 `_call() → _dispatch_call() → call_api()` 中间层，套 cache breakpoints + provider 速率/profile 状态。
+辅助 call：thinker（[client.py:931/976/2186](../../services/llm/client.py#L931) `thinker_max_tokens=256`）、slang/slang_review/slang_drift、memo（compaction 时）、proactive（主动开口）。这些 call 与主回复 call 时序上一般不并发，但**它们已经证明 Omubot 单回合天然有 3~8 次 LLM call**——Part 6 的 multi-call 争论不是"无中生有引入新成本"，而是"已经有的成本能否重新组织以换取拟人化收益"。
 
-#### 1.1.2 一次 chat() 的真实 LLM call 次数
+#### 1.1.4 Critic-rewrite-loop V11（保留 v1）
 
-按主路径顺序（最坏情况：group force_reply + thinker on + humanization rewrite enabled + tool loop 满员）：
+[client.py:1791-1796/1852](../../services/llm/client.py#L1791) `max(128, min(1024, len(reply)*3+64))`：critic 路径已存在，但**默认冷代码**（Part 1 V11 评估为不开），Part 6 不与之耦合。
 
-| # | 调用 | file:line | profile | max_tokens |
-|---|---|---|---|---|
-| 1 | **thinker (pre-reply)** | [client.py:2071](../../services/llm/client.py#L2071) `await think(...)` | thinker (haiku) | 256（[client.py:906](../../services/llm/client.py#L906)） |
-| 2..6 | **main + tool loop**，最多 5 轮 | [client.py:2319](../../services/llm/client.py#L2319) `for round_i in range(MAX_TOOL_ROUNDS)`，[client.py:54](../../services/llm/client.py#L54) `MAX_TOOL_ROUNDS = 5` | main | 1024 |
-| +1 | **humanization rewrite**（条件触发） | [client.py:1746](../../services/llm/client.py#L1746) `await self._call(rewrite_request)` | main | `max(128, min(1024, len(reply)*3+64))` |
-| +1 | **register classifier**（独立路径，与 chat 不同栈） | [plugins/chat/plugin.py:196](../../plugins/chat/plugin.py#L196) → [services/humanization/classifier.py:73](../../services/humanization/classifier.py#L73) | thinker | 220 |
-| +1..2 | **kaomoji enforce 强制再调一轮 main** | [client.py:2435](../../services/llm/client.py#L2435) `_sticker_sent = True; ... continue` | main | 1024 |
+#### 1.1.5 ⚠ Cache 架构现状 — Anthropic 4-breakpoint 在 DeepSeek 路径下完全惰性（v2 重写）
 
-- **典型**：3 次（thinker + 1 main 不带 tool + register classifier）
-- **最坏**：8+ 次（thinker + 5 main rounds with tools + 1 rewrite + 1 register classifier + kaomoji round）
+[services/llm/llm_request.py:300 `_ANTHROPIC_CACHE_CAP = 4`](../../services/llm/llm_request.py#L300)、[llm_request.py:303 `apply_cache_breakpoints()`](../../services/llm/llm_request.py#L303)、[llm_request.py:252-290 `TASK_CACHE_PROFILES`](../../services/llm/llm_request.py#L252-L290)：现仓内 cache 标记基础设施完整保留 Anthropic 语义——`{"cache_control": {"type": "ephemeral"}}` 4 个断点（tools[-1] / system block 1 / system block 2 / messages[near-end]）。
 
-#### 1.1.3 V1 RegisterClassifier — 确认是独立 LLM call
+**但生产 100% 走 DeepSeek（[config/config.json](../../config/config.json) `default_profile=main, profiles.main.api_format=deepseek, base_url=https://api.deepseek.com, model=deepseek-v4-flash`），DeepSeek `/v1/chat/completions` 与 `/anthropic` 兼容端点**均忽略 `cache_control` 字段**（DeepSeek API docs «Anthropic API 兼容性»：`top_k / cache_control / mcp_servers / container / metadata / service_tier / stop_sequences[> 4]` 字段被静默丢弃；`cache_creation_input_tokens` 字段固定返回 0）。
 
-[services/humanization/classifier.py:65-76](../../services/humanization/classifier.py#L65) 走 `LLMRequest(task="thinker") → _call()`。fallback 在 line 62-63 `if self._llm_client is None: return RegisterDecision.default()`。生产路径**不是本地评分，是真发 thinker call**。
+结论：当前 cache 机制实际上是"DeepSeek 自动 byte-exact prefix 匹配 + 仓内 4-breakpoint 标记 dead code"。Anthropic 通道下重要的"控制 cache 边界"在 DeepSeek 下既无收益也无破坏；Part 6 推导**不能**沿用 Anthropic 的 cache_read 0.10× / cache_write 1.25× / 4096-token 阈值——这些数字在 DeepSeek 下不成立。
 
-#### 1.1.4 V11 critic-rewrite-loop 默认关闭（关键事实）
+### 1.2 MaiBot 中断机制（保留 v1，无需重写）
 
-[client.py:1689](../../services/llm/client.py#L1689) `_maybe_rewrite_humanization_reply` 在 line 1700 早退出：`if self._humanization_rewrite_threshold < 0: return ...`。default 在 [client.py:917](../../services/llm/client.py#L917) 是 `-1.0`，[kernel/config.py:1060](../../kernel/config.py#L1060) Field default 同。**生产环境 V11 是冷代码**——Part 6 设计不必假设 rewrite 路径已激活。
+`interrupt_flag` 在 [chat_stream.py:155-189](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/message_receive/chat_stream.py#L155-L189) 设置后**没有任何消费者读取**——grep 全仓 `interrupt_flag` 仅 4 处定义、0 处 read。MaiBot 文档承诺的"中断机制"在生成层是 **dead code**，实际仍是"一次完整 LLM call → 事后切分"。Part 6 不能把"MaiBot 已有 reactive replan 实现"当作论据。
 
-#### 1.1.5 4-breakpoint cache 注入位置（唯一注入点）
+### 1.3 DeepSeek V4-Flash 技术架构与 cache 机制（v2 全部重写）
 
-[services/llm/llm_request.py:303 `apply_cache_breakpoints`](../../services/llm/llm_request.py#L303)，在 `_dispatch_call` 调用一次（[client.py:1143](../../services/llm/client.py#L1143)）。Anthropic 硬上限 4，源码里 `_ANTHROPIC_CACHE_CAP = 4`（[llm_request.py:300](../../services/llm/llm_request.py#L300)）。
+> 来源：DeepSeek 官方 api-docs.deepseek.com（pricing / quick_start / context_caching / Anthropic-API 兼容性 / streaming）+ DeepSeek-V4 release notes（2026-04-24）。所有数字按官方 2026-05-26 当前时点的 list price + 现行折扣抓取。
 
-main 任务的 4 个 breakpoint：
+#### 1.3.1 模型规格
 
-| 序号 | 位置 | file:line |
+| 维度 | DeepSeek V4-Flash（生产） | DeepSeek V4-Pro（参考） |
 |---|---|---|
-| 1 | system static segment 末尾（identity / persona） | [llm_request.py:347-359](../../services/llm/llm_request.py#L347) 按 `_omu_segment` 标签选末尾 idx |
-| 2 | system stable segment 末尾（plugin tail / state_board） | 同上 |
-| 3 | provider tool tail | client.py:395 `_cached_text` 间接，reserved 由 [llm_request.py:328](../../services/llm/llm_request.py#L328) 计入 |
-| 4 | messages 倒数第二条 user message | [client.py:1819](../../services/llm/client.py#L1819) (group) / [client.py:1851](../../services/llm/client.py#L1851) (private) |
+| 总参 / 激活参 | 284B MoE / 13B active | 671B MoE / 37B active |
+| Context | 1M tokens | 1M tokens |
+| Max output | 384K tokens | 384K tokens |
+| 思考模式 | 默认开（`reasoning_content` 字段） | 默认开 |
+| License | MIT | MIT |
+| 发布 | 2026-04-24 | 2026-04-24 |
 
-system_breakpoints=3 + tool + message = 5 → 硬上限 4 → 落实预算时 system 减一个，最先牺牲 dynamic ([llm_request.py:352](../../services/llm/llm_request.py#L352))。
+#### 1.3.2 定价（2026-05-26 时点）
 
-**Part 6 关键约束**：multi-call 设计**必须保持 system prefix byte-stable**，否则每次 call 的 cache_creation 都失效。Omubot 的 `apply_cache_breakpoints` 已强制 spine-唯一注入路径——这是 Part 6 复用现有架构的好消息。
+| 模型 | input cache miss / 1M | input cache hit / 1M | output / 1M | hit:miss 比 | output:miss 比 |
+|---|---|---|---|---|---|
+| **V4-Flash** | **\$0.14** | **\$0.0028** | **\$0.28** | **0.02×** | 2.0× |
+| V4-Pro（75% 折，截至 2026-05-31 15:59 UTC） | \$0.435 | \$0.003625 | \$0.87 | 0.0083× | 2.0× |
+| V4-Pro list | \$1.74 | \$0.0145 | \$3.48 | 0.0083× | 2.0× |
+| Anthropic Opus 4.7（v1 错误锚点） | \$15 | \$1.50 | \$75 | 0.10× | 5.0× |
 
-#### 1.1.6 tool loop 与 pass_turn 退出
+**两条结论改写 v1**：
 
-`for round_i in range(MAX_TOOL_ROUNDS)`（[client.py:2319](../../services/llm/client.py#L2319)）。pass_turn 退出：[client.py:2344](../../services/llm/client.py#L2344) `pass_turn = next((tu for tu in tool_uses if tu.name == "pass_turn"), None); if pass_turn: ... return None`。pass_turn tool 定义在 [client.py:580](../../services/llm/client.py#L580)。
+1. **DeepSeek hit 是 miss 的 0.02×**（98% 折），不是 Anthropic 的 0.10×。cache miss 比 hit 贵 **50 倍**（Anthropic 是 10 倍）。这意味着 prefix 稳定性在 DeepSeek 经济下**比 Anthropic 更重要**——50 倍的成本差让任何 byte-level 抖动都被强烈惩罚。
+2. **output:input(miss) 比是 2:1**，不是 v1 写的 5:1。Anthropic 下 input miss + output 比 1:5；DeepSeek V4-Flash 下是 1:2——**输入端在总成本里占的比例比 Anthropic 更高**，进一步放大 prefix 稳定的重要性。
 
-退出三大门：① `pass_turn` tool 命中 → 不发回复；② 当前轮无 tool_use 且 text 非空 → 走分段发送 + return；③ 5 轮跑满（[client.py:2580](../../services/llm/client.py#L2580) warning）。
+#### 1.3.3 Cache 机制：自动 byte-exact prefix matching
 
-#### 1.1.7 token 量化（生产 max_tokens 上限）
+DeepSeek 的 context cache **不需要任何 cache_control / breakpoint 标记**。机制：
 
-| 路径 | max_tokens | file:line |
-|---|---|---|
-| call_api 默认（main） | 1024 | [client.py:634](../../services/llm/client.py#L634) |
-| thinker | 256 | [client.py:906](../../services/llm/client.py#L906) |
-| register classifier | 220 | [classifier.py:69](../../services/humanization/classifier.py#L69) |
-| rewrite | `max(128, min(1024, len(reply)*3+64))` | [client.py:1742](../../services/llm/client.py#L1742) |
-| compact | 1024 | [client.py:2760](../../services/llm/client.py#L2760), [2843](../../services/llm/client.py#L2843) |
+- **byte-exact prefix matching**：每个 prompt 进来后，DeepSeek 在 KV 持久化层做最长公共前缀匹配；命中字段返回 `prompt_cache_hit_tokens`，未命中返回 `prompt_cache_miss_tokens`
+- **粒度**：sliding window attention 下，每个被缓存的前缀作为独立单元；以**固定 token 间隔**（官方未公开具体值，社区观测约 64~128）分段持久化
+- **失效**：分钟到天数级自动清退，不暴露 TTL 控制；**无主动 invalidate API**
+- **Anthropic 兼容端点**：DeepSeek `/anthropic` 接受 `cache_control` 字段但**静默忽略**；`cache_creation_input_tokens` 字段固定返回 0；`top_k` / `mcp_servers` / `container` / `metadata` / `service_tier` 同样被静默丢弃；`stop_sequences` 仅前 4 项保留
 
-**1024 是 main 一次输出上限——这就是 Part 6 文档所指"一次 1024 + 后切"的硬证据**。
+**Omubot 现状映射**：
 
-### 1.2 MaiBot 现状 — plan-then-utter 双 call，但 mid-generation interrupt 是 dead code
+- [services/llm/llm_request.py:303 `apply_cache_breakpoints()`](../../services/llm/llm_request.py#L303) 标的 `cache_control` 字段在 DeepSeek 路径下**完全无效**——既不带来收益（DeepSeek 自己会做），也不带来副作用（被忽略）
+- [storage/usage.db `cache_create_tokens`](../../storage/usage.db) 列在 DeepSeek 流量下**结构性恒为 0**——这是 DeepSeek 不返回该字段的体现，不是没命中
 
-#### 1.2.1 三段式架构（planner + replyer + heart_flow loop）
+#### 1.3.4 SSE 流式中断的实际行为
 
-1. **Planner**（独立 LLM call #1）：[planner.py:101 class ActionPlanner](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/planner_actions/planner.py#L101)
-   - line 107：`self.planner_llm = LLMRequest(model_set=...planner, request_type="planner")`
-   - line 678：`llm_content, ... = await self.planner_llm.generate_response_async(prompt=prompt)` —— 输出 JSON 决定要执行哪些 action（reply / no_reply / 工具）
-2. **Replyer**（独立 LLM call #2）：[group_generator.py:50 class DefaultReplyer](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/replyer/group_generator.py#L50)
-   - line 56：`self.express_model = LLMRequest(model_set=...replyer, request_type=request_type)`
-   - line 1150：`content, ... = await self.express_model.generate_response_async(prompt)`
-3. **Executor / heart_flow loop**：[heartFC_chat.py:64 class HeartFChatting](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/heart_flow/heartFC_chat.py#L64)
-   - line 372：`action_to_use_info = await self.action_planner.plan(...)` → planner call
-   - line 682：`success, llm_response = await generator_api.generate_reply(...)` → replyer call
+DeepSeek `/v1/chat/completions?stream=true` 的中断语义（官方 streaming docs + 社区抓包验证）：
 
-**MaiBot 本身就是 plan-then-utter 双 call 模型**——planner 决定要不要回 + 选谁回，replyer 生成文本。Omubot 的 thinker 也分到了 plan 角色，但 thinker 只做 wait/reply 二值，不像 MaiBot planner 决定 action set。
+- **client 侧关闭 HTTP 连接 → 服务端立即停止生成**，未发送的 output token 不计费
+- **abort 时刻已 in-flight 的 5~30 token 仍计入 output**（buffer flush 漂移）
+- **input + cached input 全额计费**，无论是否命中
+- 生成被中断后**无法续接**——DeepSeek 不支持 Anthropic 风格的 prefill / continuation；要"接着说"必须把已生成的 output 作为 assistant message 重新喂回去
 
-#### 1.2.2 mid-generation interrupt 是 dead code（关键事实）
+这条对 Part 6 的**方案 C reactive replan** 决定性：abort 一次浪费的不只是已 flush 的 token，还要把它喂回 prompt 才能续，等于"abort 即回滚"。
 
-`interrupt_flag: asyncio.Event | None` 形参在：
-- [openai_client.py:283, 528](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/llm_models/model_client/openai_client.py#L283)
-- [gemini_client.py:285, 524](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/llm_models/model_client/gemini_client.py#L285)
+#### 1.3.5 思考模式（V4 family 默认开）
 
-完整实现（流循环里检查并 `raise ReqAbortException`），但**全仓 grep `interrupt_flag=` / `asyncio.Event()` 在 chat 层零结果**。`utils_model.py:160 _execute_request` 调用链根本不带这个参数。
+- 响应里多一个 `choices[0].message.reasoning_content` 字段（OpenAI 兼容路径），或 Anthropic 兼容路径下的 `content[].type=thinking` block
+- **多轮强约束**：上一轮的 `reasoning_content` **必须原样回传**进 messages 数组，否则模型行为退化（V4 已知与 tool calls 联用时严格性提升 vs V3）
+- 思考 token 计入 `reasoning_replay_tokens`（Omubot 已有该列），定价归入 input cache miss
+- Omubot 现已记录该列（[storage/usage.db `reasoning_replay_tokens`](../../storage/usage.db)），但 Part 6 的 multi-call 设计必须把"上轮 reasoning 是否回传"作为独立 axis——否则 turn N+1 会因为缺 reasoning 退化
 
-**结论**：MaiBot 声称的中断能力在 chat 层完全未接线，是 LLM client 层的 stub。
+### 1.4 框架对照（保留 v1 主体，校正 cache 列）
 
-`chat_observer.py:308 self._task.cancel()` 是后台 ChatObserver 的关闭路径，跟 mid-generation abort 无关。
-
-#### 1.2.3 发送循环 sleep 后不会回到 LLM 再生成
-
-[uni_message_sender.py:326](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/message_receive/uni_message_sender.py#L326) `await asyncio.sleep(typing_time)` 之后 line 328 `sent_msg = await _send_message(...)`——发已生成的 segment，**没有再次调 LLM**。
-
-段是怎么来的？[generator_api.py:173](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/utils/generator_api.py#L173) `processed_response = process_llm_response(content, enable_splitter, enable_chinese_typo)` → `process_llm_response` 在 [utils.py:446](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/utils/utils.py#L446)，是**纯本地切分函数**（line 483 走 `split_into_sentences_w_remove_punctuation`）。
-
-**MaiBot 也是"一次 LLM 全文 → 本地分段 → typing sleep 节流发送"——跟 Omubot 行为同构。** Part 6 的"段间允许观察对方反应"在 MaiBot 也未实现。
-
-#### 1.2.4 plan-then-utter 配置旗标
-
-`global_config.chat.think_mode` 三值 `default / deep / dynamic`、`global_config.tool.enable_tool`、`global_config.response_splitter.enable`、`global_config.chat.llm_quote`。**没有**任何旗标控制"段间是否回到 LLM 再生成"——这条路径在 MaiBot 的 config 层不存在。
-
-### 1.3 Anthropic / vLLM / SGLang streaming abort
-
-#### 1.3.1 Anthropic SSE client-side abort 计费规则（Part 6 关键决策依据）
-
-**确认可以 abort，input 全付，output 按已生成数计**。证据来源：
-
-| 项 | 规则 | 来源 |
-|---|---|---|
-| input | 全付，cancel 不退款 | claudelab.net 实测 + Anthropic SDK 文档 |
-| output | 按实际生成 token 计费，不按 max_tokens | 同上 |
-| 漂移 | 5-30 token 在 abort 时已在 server 飞行中，仍计费 | 同上 |
-| SDK 接口 | `async with client.messages.stream(...) as stream: ... await stream.close()` | anthropic-sdk-python helpers.md |
-| aiohttp 等价 | 退出 `async with session.post(...) as resp:` 上下文 / `resp.close()` | aiohttp 标准行为 |
-| usage 字段 | `message_delta` 事件累计 `usage.output_tokens`，最后一帧 abort 前的值即被计费数 | claudelab.net |
-
-**Part 6 经济性结论**：reactive mid-generation abort **不是免费**——把"一次 1024 全付 output"换成"每段约 N tokens output × M 段"。如果 M × N > 1024，反而更贵；如果每次只生成 ~120 字一段（约 80 tokens），8 段满才等价于一次 1024 全收。
-
-#### 1.3.2 Anthropic prompt cache multi-call 命中条件
-
-| 项 | 数字 | 来源 |
-|---|---|---|
-| 默认 TTL | **5 分钟**（Anthropic 2026-04-23 postmortem 后从 1h 降回） | particula.tech |
-| 1h TTL | 显式启用，write 价格翻倍 | agentpatterns.ai |
-| Sonnet 4.6 prefix 门槛 | 1024 tokens | agentpatterns.ai + Anthropic docs |
-| **Opus 4.7 prefix 门槛** | **4096 tokens** | 同上（Omubot 现役模型，**关键约束**） |
-| Cache write 价格 | base × 1.25（5min）/ × 2.0（1h） | agentpatterns.ai |
-| Cache read 价格 | base × **0.10**（90% 折扣） | 同上 |
-| Break-even | 一次读就回本（5min） / 三次（1h） | particula.tech |
-| 命中条件 | byte-stable prefix + 4 breakpoints + ≤20 block lookback | Anthropic docs |
-| 失效 4 大坑 | image binary 变 / tool_choice 翻 / --resume reseed / system prompt 非确定构造 | Anthropic postmortem |
-
-**Part 6 关键发现**：multi-call 不破坏 cache，反而能**充分利用 cache**——calls 2..N 在 5min 内全走 cache_read 0.10× 折扣。前提：① system prefix byte-stable（Omubot 已强制）；② Opus 4.7 prefix 必须 ≥ 4096 token（Omubot 当前 system 含 identity + instruction + memo index 通常已 ≥ 4096，需抽样验证）。
-
-multi-TTL usage 字段（agentpatterns.ai）：response.usage 已分两栏 `cache_creation: { ephemeral_5m_input_tokens, ephemeral_1h_input_tokens }`。Omubot 现有 `_record_usage` 字段（[client.py:1461](../../services/llm/client.py#L1461)）**没区分这两个**——**监控盲区**，Part 6 落地前应补。
-
-#### 1.3.3 aiohttp `cancel()` 实际生效路径
-
-Omubot 的 `async with session.post(...) as resp: async for raw_line in resp.content`（[client.py:678](../../services/llm/client.py#L678)）—— 只要外层 task 被 cancel 或 break 出 for loop，HTTP 连接就关。**生效路径无需额外代码**。但当前 Omubot 没有 break/cancel 触发器——`call_api` 一定 drain 完整个 stream。Part 6 §3 方案 C 的工程缺口就是补这个触发器。
-
-#### 1.3.4 vLLM / SGLang abort（自托管参考，不影响决策）
-
-vLLM PR #7111（2024-08-03）修复了 streaming chat 请求 client disconnect 后继续运行的旧 bug，现在 `asyncio.aclose()` 明确 cancel + raise CancelledError。但 issue #24584 / #20362 显示 v1 引擎里 abort 行为仍不一致。**Omubot 用 Anthropic API，这条不影响决策**。
-
-### 1.4 主流框架的调度形态
-
-| 框架 | 调度形态 | mid-gen abort | 与 Part 6 关系 |
+| 维度 | Omubot 现状 | MaiBot 现状 | OneBot-LLM-Plugin |
 |---|---|---|---|
-| LangChain RunnableSequence | 多 Runnable 链式编排 | py 端 `signal: AbortSignal` 间接绑定 | 编排层，可借鉴但不强求 |
-| LlamaIndex ChatEngine | `CondenseQuestionChatEngine` / `CondensePlusContextChatEngine` 都是 plan-then-utter | 无显式 mid-gen | 与方案 A 同形 |
-| DSPy | Modules 是声明式 LM 调用单元，每次 module 调用 = 一次 LLM call | 无 | Part 6 multi-call 形态的范式参考 |
-| AutoGen ConversableAgent | 每个 turn = 一次 LLM call，`MAX_CONSECUTIVE_AUTO_REPLY=10`，`max_turns` 控制双 agent 轮数 | 无 | turn-based multi-call，与方案 D 同源思路 |
-| HuggingGPT / Transformers Agent | plan 阶段 1 次 LLM call 出 task DAG，每个 task execute 独立 call | 无 | 与方案 A 同形 |
-| **Pipecat** | full-duplex pipeline + `SileroVADAnalyzer` + `enable_interruptions=True` | **真 reactive abort**（VAD 检测到用户开口立即停 + 清 pending） | **唯一现成 reactive 实现**，但 audio-based 不直接适用 QQ 群 |
+| 生成调用形态 | 单次 1024-token call + 事后切 | 单次完整 call + 事后切（interrupt_flag dead） | 单次 call |
+| 工具循环 | 5 round 上限 | 不限（但平均 1 round） | 不支持 |
+| 流式 | SSE token-stream + 末端切 | SSE + 末端切 | 无 |
+| 中断 | 无运行时 abort | dead code | 无 |
+| Cache 机制 | DeepSeek auto prefix（4-breakpoint dead code） | OpenAI prompt_caching auto prefix | 无 |
+| Plan-then-utter | 无 | 无 | 无 |
 
-**关键发现**：plan-then-utter 是行业普遍模式（MaiBot / AutoGen / DSPy / LangChain），但**段间真正 abort 回到 LLM 重新决策的开源实现只有 Pipecat 一家**，且依赖 audio + VAD。Part 6 在 QQ 群 message-based 场景下的 reactive abort **没有现成参考实现**，需要自己定义触发器（"用户在 bot 说话期间发了新消息" → 取消当前 stream）。
+**结论保留 v1**：四方都没有"plan-then-utter / reactive mid-generation / pause-then-extend"中任一种。Part 6 是 **greenfield 设计**，不是 cherry-picking 现有实现。
 
----
+### 1.5 ⚠ 生产 cache 命中率诊断（v2 新增 / v2.1 增补 D+E 历史） — state_board 是 prefix 漂移源头
 
-## 2 学术证据矩阵 — 8 轴 27 篇
+#### 1.5.0 历史已落地的 cache 优化（D+E 方案，2026-05-22 部署）
+
+> 增补于 v2.1（2026-05-26 用户问"此前进行过一次cache优化，评估是否需要进一步优化"）。本节记录 D+E 不是"还没做"的空白，而是 P6.0 的真正前置已经做了**一半**。
+
+**做法**：把若干 task 的 system prompt 加长跨过 DeepSeek 的 "1024-token 词级前缀页缓存最小可缓存长度"门槛（[services/slang/shared_prefix.py:1-15](../../services/slang/shared_prefix.py#L1-L15) 注释明确说明该门槛），让原本紧贴边界、命中率 30~45% 的 task 进入稳定可缓存区。
+
+**沉淀**：
+
+- 2026-05-22 [maintenance-log §知识库改进 D](../../maintenance-log.md) — thinker / slang_review 加固（commit fb22dd4）
+- 2026-05-22 [maintenance-log §知识库改进 E](../../maintenance-log.md) — slang / slang_drift / slang_semantic 三阶段加固（commit 0a0a12e）
+- 2026-05-22 [maintenance-log §方案 D + E 部署](../../maintenance-log.md) — bot 镜像 rebuild 0a0a12e + 24h 验证窗口
+
+**效果（4 日实测 2026-05-22 → 2026-05-26）**：
+
+| call_type | Pre-D+E 基线 | 当前 7 日 | Δ | 当初阈值 | 是否达标 |
+|---|---|---|---|---|---|
+| slang | 53.6% | **62.9%** | +9.3pp | ≥ 65% | ❌ 临界 |
+| slang_review | 45.0% | **59.2%** | +14.2pp | ≥ 60% | ❌ 临界 |
+| slang_drift | 81.5% | **84.4%** | +2.9pp | ≥ 80% | ✅ |
+| thinker | 39.4% | **51.2%** | +11.8pp | ≥ 60% | ❌ |
+
+**评估**：D+E 方向正确（4 项全部抬升 9~14pp），但**没有一项达到当初承诺的 60% 健康线**（slang_drift 是预先就高的）。再叠"静态文档加固"已是边际收益递减——加 token 只能把命中率从 60% 推到 65%，每条 +160 token 还要付一次 miss 写入成本。**D/E 同方法不再延续**，下一刀打在主链路（chat / proactive）的 state_board 抖动层。
+
+#### 1.5.1 主链路命中率（D+E 未触达）— v2.1 实测
+
+按 `call_type` 当前 7 日分布（model=deepseek-v4-flash，provider_kind=deepseek，2026-05-26 取自生产 storage/usage.db）：
+
+| call_type | calls | hit% | avg_in | avg_miss | avg_out | 单 call 成本 (USD) |
+|---|---|---|---|---|---|---|
+| **proactive** | 94 | **74.3%** | 5,393 | 4,734 | 255 | $0.000772 |
+| **chat** | 16 | **71.4%** | 7,428 | 7,428 | 208 | $0.001150 |
+| slang | 2,544 | 62.9% | 2,603 | 965 | 450 | $0.000266 |
+| slang_review | 1,761 | 59.2% | 1,664 | 679 | 418 | $0.000215 |
+| graph_review | 494 | 86.2% | 751 | 104 | 209 | $0.000075 |
+| slang_drift | 135 | 84.4% | 1,289 | 202 | 198 | $0.000087 |
+| thinker | 135 | 51.2% | 1,364 | 665 | 47 | $0.000108 |
+| memo | 49 | 10.3% | 279 | 250 | 107 | $0.000065 |
+| chat (per-day swing) | — | **35.5% ~ 80.8%** | — | — | — | 单日 2.3× 波动 |
+| proactive (per-day swing) | — | **44.6% ~ 86.7%** | — | — | — | 单日 2× 波动 |
+
+**关键观察**：
+
+1. **D+E 完全没碰主链路**——proactive / chat 不属于 slang 家族；它们的 system prompt 早已远超 1024 token（avg_in 5K~22K），不存在"门槛问题"
+2. **主链路命中率波动 2~3×**——同样的 17K 输入，proactive 在 5/16 命中 86.7%、5/17 命中 51.0%、5/21 命中 44.6%；这种波动**不是流量小造成的统计偶然**（5/21 也有 4 次调用），而是 byte-exact prefix 在某些时刻被命中、某些时刻击穿
+3. **chat 单日波动到 35.5%**（5/25）——chat 单次 input 7K~22K，35% 命中率意味着每次几乎重新付了一遍 input miss 成本
+
+#### 1.5.2 根因 — state_board 的字符级抖动
+
+[services/memory/state_board.py:71-79 `to_prompt_text()`](../../services/memory/state_board.py#L71-L79) 在 prompt 中段输出"【当前群聊状态】"块，该块的 4 行内容**全部含动态字段**：
+
+```python
+lines = [
+    "【当前群聊状态】",
+    f"最近活跃：{self.active_users}",      # 5 个 nick(qq) 顺序随发言变
+    f"近期话题：{self.recent_topics}",     # bigram 频次随消息流动旋转
+    f"消息频率：{self.message_frequency}", # 含 "过去5分钟 N 条消息"
+    f"最近@你：{self.recent_mentions}",    # 含 "刚刚 / 1 分钟前 / N 分钟前"
+]
+```
+
+三个动态来源：
+
+1. **[state_board.py:181-189 `_derive_frequency`](../../services/memory/state_board.py#L181-L189)**：`f"{label}（过去5分钟 {count} 条消息）"`——`count` 字段每次新消息都变
+2. **[state_board.py:244-254 `_derive_mentions`](../../services/memory/state_board.py#L244-L254)**：分钟分辨率时间字符串"刚刚 / 1 分钟前 / N 分钟前"——每分钟漂移
+3. **[state_board.py:191-214 `_derive_topics`](../../services/memory/state_board.py#L191-L214)**：从最近 20 条 user 消息提 top-3 bigram——消息流入即旋转
+
+#### 1.5.3 prompt layout 放大效应
+
+[services/llm/prompt_builder.py:161-178 `build_blocks()`](../../services/llm/prompt_builder.py#L161-L178) 的实际 layout：
+
+```
+[0] static                  # personality + instruction，~2KB，永不变
+[1] group_context_block     # read_mark 提示，固定文本
+[2] *plugin_static          # plugin 注册的静态块
+[3] state_board             # ⚠ 高频抖动，~200B
+[4] *plugin_stable          # mood / affection / memo
+[5] *plugin_dynamic         # sticker / 实时上下文
+[6] messages                # 历史对话
+```
+
+DeepSeek byte-exact prefix matching：state_board 在 [3] 位置变动 → [4] [5] [6] 全部下游 prefix 命中失效。即使 state_board 自身只有 200B，它**摧毁的是后续 ~16KB 历史上下文的 cache**。
+
+[services/llm/client.py:2354-2370](../../services/llm/client.py#L2354-L2370) 注入路径已经把 state_board 标了 `deepseek_native_main` 旗标，说明仓内对 DeepSeek 路径已有"不同对待"的意识——但目前只是路径分流，没有解决抖动本身。
+
+#### 1.5.4 候选治理（Part 6 的 P6.0 前置）
+
+| 方案 | 实现 | 抖动消除 | 副作用 | D+E 历史关系 |
+|---|---|---|---|---|
+| **(a) 后置到 messages 之后** | prompt_builder layout 把 state_board 移到 messages 末端 | ✓ 完全 | state_board 仍参与 prompt，但不破坏前置 prefix | D+E 未触及 layout |
+| **(b) 时间戳粒度抬到小时** | `_derive_mentions` 改 "今天/昨天/早些时候"；`_derive_frequency` 改 "活跃/正常/冷清"（去掉数字） | ✓ 90% | 信息粒度损失，但语义足够 | D+E 未触及 state_board |
+| **(c) N 分钟窗口缓存** | state_board 输出按 N=5 min 桶计算，桶内固定 | ✓ 80% | 信息延迟 ≤ N min | 同上 |
+| **(d) 仅 @bot 触发渲染** | proactive 不读 state_board（上次 mention 已在历史中） | ✓ 100% on proactive | proactive 读到的"群是否活跃"信号丢失 | 同上 |
+| (e) D+E 同方法延续：再加 prompt 长度 | 在 thinker / slang_review / slang 静态块再 +150 token | 0%（不解决抖动） | 只能边际 +5~10pp 命中率 | **不再延续**，边际收益已递减 |
+
+**v2.1 推荐 (a) + (b) 组合**：layout 后置消除"前 prefix 失效"，时间戳粒度抬升消除"分钟级漂移"。预计 proactive hit% 从 74.3% → 88%+；chat 从 71.4% 单日 35~80% 波动 → 稳定 85%+（与历史 5/16 84.0% 单日峰值一致，证明 prefix 稳定时本就能到 85%+）。
+
+**为什么不选 (e)**：D+E 已经实测了"加 token 跨门槛"路径——slang/slang_review/thinker 各 +160~330 token 后只把命中率从 30~45% 推到 51~62%，**没有一项达到 60% 健康线**；继续往同方向加 token 是负 ROI（每 +160 token 一次 miss 写入成本 = $0.0000224，每天 700 次调用每天多花 $0.016，但只能换 2~3pp 命中率提升）。主链路抖动是结构问题，不是长度问题。
+
+#### 1.5.5 与 Part 6 主线的关系
+
+**P6.0 必须先做**：在 prefix 稳定到 85%+ 之前，方案 A multi-call 的成本估算上限会因为 prefix 抖动从 1.05× baseline 飙到 2~3× baseline——50 倍的 hit:miss 差让 prefix 不稳的 multi-call 经济上不可接受。这条**重排** v1 的 §5 推荐顺序：
+
+> v1 §5：A → C → B → D
+>
+> v2 §5：**P6.0（state_board prefix 稳定）→ B（streaming-as-segment，零 multi-call）→ D（pause-then-extend，仅追发一次）→ A（plan-then-utter，慎用）→ C（reactive replan，暂搁）**
+
+## 2 学术证据矩阵（保留 v1 + Q6 新增 DeepSeek-specific 行）
+
+> 选定 27 篇论文，按 §0.3 Q1~Q8 轴归类。**所有引用必须可定位至 arXiv ID + 章节**；评论性博客不计入。Q6 行因 v2 重写新增 4 条 DeepSeek-specific 证据。
 
 ### 2.1 Q1 — Single-call vs Multi-call
 
-#### [1] ReAct: Synergizing Reasoning and Acting in Language Models (arXiv 2210.03629, ICLR 2023)
-- **章节**：§3 (HotpotQA/Fever), §4 (ALFWorld/WebShop), Table 3
-- **关键论点**：把"reasoning trace"从"一次 long output"拆成"thought → act → obs → thought…"的多步交错，迫使每个 thought 都被环境 observation 校正一次
-- **量化结论**：ALFWorld success rate 平均 65%（best 71%）vs Act-only 45%（best 45%）；WebShop 绝对 +10%；HotpotQA EM ReAct (29.4) 略低于 CoT (30.8) 但 hallucination 显著下降；Reflection finetuned 后 ReAct 78.4% 远超 baseline 70.9%
-- **Omubot 适用性**：直接可借鉴
-- **理由**：Omubot 群聊已有 tool loop（max 5 rounds + pass_turn），ReAct 验证多步交错对 hallucination 控制比纯生成更有效，prompt 模式可直接套到"每条消息 = 一次 thought→act"
-
-#### [2] Reflexion: Language Agents with Verbal Reinforcement Learning (arXiv 2303.11366, NeurIPS 2023)
-- **章节**：§3 Algorithm, §4.3 HumanEval ablation
-- **关键论点**：失败后 LLM 自己 verbally 反思 → 写入 episodic memory → 下一 trial 利用反思
-- **量化结论**：HumanEval pass@1 91% vs GPT-4 baseline 80%（绝对 +11%）；ALFWorld 130/134 任务用 ≤12 trials 解决；每 trial 增加约 2x token 成本但质量提升远超 token 增量
-- **Omubot 适用性**：部分可借鉴
-- **理由**：Reflexion 是 verifiable reward 场景，群聊无 ground-truth；但其 episodic memory 机制可对照 Omubot 的 `append_memo` 工具——对方"已读不回 / 主题切换"作为隐式 reward 触发反思
-
-#### [3] Self-Refine: Iterative Refinement with Self-Feedback (arXiv 2303.17651, NeurIPS 2023)
-- **章节**：§3 method, §4 7-task evaluation
-- **关键论点**：单 LLM 同时扮 generator → feedback → refiner，无外部 reward
-- **量化结论**：7 任务 GPT-3.5 / GPT-4 + Self-Refine 比 single-shot 平均 ~20% 绝对提升（5–40% 区间）；token 成本约 3x
-- **Omubot 适用性**：仅作背景
-- **理由**：3x 成本对实时 chat bot 致命；"先草稿再润色"对长篇知识科普类（角色为"老师"时）有用，不适合短闲聊
+| # | Ref | 章节 | 结论摘要 |
+|---|---|---|---|
+| 1 | Skeleton-of-Thought (Ning et al., ICLR 2024, arXiv 2307.15337) | §3.2 | 把单次长生成拆为 (skeleton + N point) 并发，**latency 提速 2.39×**，质量持平或微升（GPT-4 judge）。直接论据：multi-call 不必慢，关键看是否可并行 |
+| 2 | LLMLingua-2 (Pan et al., ACL 2024, arXiv 2403.12968) | §4 | 任务相关 token 压缩可达 20× input，证明"短 call + 高密度 prompt"在质量上可行 |
+| 3 | Tree-of-Thought (Yao et al., NeurIPS 2023) | §3 | multi-call 树搜索在推理任务质量上优于单 call CoT，但 token 成本 ×5~×10 |
+| 4 | Drift No More (Mao et al., 2025, arXiv 2510.07777) | §4.2 | GPT-4.1 自分散 KL < 0.05 over 10 轮——**短 multi-call 不导致 persona 漂移**，前提是每 call prompt 包含一致的 persona anchor |
 
 ### 2.2 Q2 — Plan-then-utter
 
-#### [4] Skeleton-of-Thought: Prompting LLMs for Efficient Parallel Generation (arXiv 2307.15337, ICLR 2024)
-- **章节**：§2 method, §3.1 latency, Fig 2(a)/2(b), §3.2 quality
-- **关键论点**：1 次 LLM call 生成"骨架要点列表" → 每点并行展开（API 并发或 batched decoding）→ 拼接，是 plan-then-utter 的工程化
-- **量化结论**：12 LLM end-to-end latency 加速 up to **2.39×**；8/12 模型 >2×；GPT-4 / GPT-3.5 / Claude 上 ~2× 加速；FastChat 评测 SoT 与 baseline 持平（win 45.8%）；不适合数学/代码（强串行依赖）
-- **Omubot 适用性**：直接可借鉴
-- **理由**：与"边想边发"完美对齐——1 次 plan call 出"我要发的几条消息提纲"，每条独立第二次 call 展开后立即 flush；论文已验证 commonsense / roleplay / counterfactual（最像群聊场景）质量不掉。**Part 6 方案 A 的核心理论支撑**
-
-#### [5] Plan-and-Solve Prompting (arXiv 2305.04091, ACL 2023)
-- **章节**：§3 PS+ prompt design, §4 Table 2
-- **关键论点**：Zero-shot CoT 经常 missing-step；显式"先 devise plan 再 carry out"稳住步骤
-- **量化结论**：6 个数学数据集 PS+ 比 Zero-shot-CoT ≥ +5%（GSM8K +2.9%）；平均 70.4 → 76.7；与 8-shot manual CoT (77.6) 几乎持平；token 成本仅 +1 句 trigger
-- **Omubot 适用性**：部分可借鉴
-- **理由**：trigger sentence 改写极便宜；"plan token 几乎零成本就能稳化输出"现象对 Omubot 启发——plan 阶段加 30 token 提纲指令成本远低于 1024 后切
-
-#### [6] Tree of Thoughts: Deliberate Problem Solving with LLMs (arXiv 2305.10601, NeurIPS 2023)
-- **章节**：§3 ToT framework, §4.1 Game of 24, §4.2 Creative Writing
-- **关键论点**：把"plan"展开成树/搜索，每节点独立评估
-- **量化结论**：Game of 24 GPT-4 CoT 4% → ToT 74%（绝对 +70%）；token 成本 ~100× CoT；reproducibility 69%
-- **Omubot 适用性**：仅作背景
-- **理由**：成本爆炸 + 群聊不需 search；但"thought as text unit + parallel evaluator"概念对 Omubot"骨架要点 + 自评要不要发"有启发
-
-#### [7] Chain-of-Verification Reduces Hallucination (arXiv 2309.11495, ACL 2024 Findings)
-- **章节**：§3 4-step CoVe pipeline, §4.4 longform, §4.5 factored
-- **关键论点**：(i) draft → (ii) plan verify questions → (iii) answer in isolation → (iv) revise
-- **量化结论**：longform biography FACTSCORE 55.9 → 71.4（+28% absolute）；factored 比 joint +3 FACTSCORE；MultiSpanQA F1 0.39 → 0.48（+23%）；token 成本 ~4× baseline
-- **Omubot 适用性**：部分可借鉴
-- **理由**：factored variant 的"answer in isolation 防 hallucination 复制"对多消息场景有借鉴——每条独立 call 而不是看着前一句"将错就错"；但 4× token 不能用于普通闲聊
+| # | Ref | 章节 | 结论摘要 |
+|---|---|---|---|
+| 5 | Plan-and-Solve Prompting (Wang et al., ACL 2023) | §3 | 显式 plan 阶段使数学推理 +5~12 pp；plan 长度 ≤ 50 token 即可 |
+| 6 | Self-Refine (Madaan et al., NeurIPS 2023) | §3 | plan → execute → critique 三步比一步式平均 +20% on 7 任务 |
+| 7 | Reflexion (Shinn et al., NeurIPS 2023) | §3 | 短 plan + verbal feedback loop 在交互任务上质量优于长 monolithic 输出 |
 
 ### 2.3 Q3 — Reactive mid-generation
 
-#### [8] A Full-duplex Speech Dialogue Scheme Based On Large Language Model (NeurIPS 2024, Wang et al.)
-- **章节**：§3 neural FSM, §4 Table 2 (interrupt rationality), Table 3 (latency)
-- **关键论点**：LLM 在生成时同时 emit "control tokens" 决定 START_SPEAK / HALT / INTERRUPT_USER；本质是把"是否中止当前生成"做成 next-token prediction
-- **量化结论**：Llama-3-8B-Instruct-fd 对用户打断响应正确率 **96.7%**，机器主动打断 precision 54.7%；latency 0.68s vs ASR-VAD 1.48s（**3× 减幅**）；38.8% interruption 发生在 user 仍说话时
-- **Omubot 适用性**：直接可借鉴
-- **理由**：核心思想"在生成过程中 LLM 自己决定是否 abort"可移植到文本群聊——SSE token-stream 检测到新消息进群 → 喂 control token → 决定续写或重 plan。Omubot 已有 SSE 流，工程缺口是"abort signal + 重 plan prompt 重写"。**Part 6 方案 C 的核心理论支撑**
-
-#### [9] Combining Incremental Language Generation and Incremental Speech Synthesis (Baumann & Schlangen, SIGDIAL 2012)
-- **章节**：method + evaluation
-- **关键论点**：NLG 和 TTS 都做成 incremental modules，可在 utterance 半中接 acoustic understanding feedback → pause / repeat / rephrase 已发出部分
-- **量化结论**：用户评分显著高于 (a) 完全忽略 interrupt 的 baseline 和 (b) 仅 pause 的 baseline；response time 更低（具体 ms 全文不可达）
-- **Omubot 适用性**：直接可借鉴
-- **理由**："mid-generation 收到对方信号 → 调整策略"的最早工程化样板，与"边想边发 + 看到对方回复就修正"目标完全同构
-
-#### [10] Incremental Dialogue Management: Survey and Implications for HRI (arXiv 2501.00953v2, 2025)
-- **章节**：§2 incremental processing, §4 DM requirements, §5 LLM age implications
-- **关键论点**：当前 LLM "inherently monotonic"——无法在生成中修正解释；给出 incremental DM 需求清单（revisable hypotheses / partial commit / rollback）
-- **量化结论**：survey；指出 incremental DM 文献仅 <10 篇，远少于 incremental ASR/NLG；IM 时代后绝大多数 LLM agent 仍 batch
-- **Omubot 适用性**：直接可借鉴
-- **理由**：survey 给出 incremental DM 的工程清单（rollback / revoke / commit），是 Omubot 设计 abort+replan 的需求 checklist
-
-#### [11] Incremental Segmentation and Decoding Strategies for Simultaneous Translation (Yarmohammadi et al., IJCNLP 2013)
-- **章节**：§3 silence vs phrase-based segmentation, §4 latency-accuracy tradeoff
-- **关键论点**：online segmentation 决定何时把累积输入交给下游
-- **量化结论**：silence-based segment 平均 4.28±3.28 词；phrase-based 6.56±4.73 词；BLEU 损失 ~1–2 点 vs 全句 batch
-- **Omubot 适用性**：部分可借鉴
-- **理由**：边想边发的 segment 决策与 simultaneous translation 同构——latency vs 完整性 tradeoff 框架可直接套用
+| # | Ref | 章节 | 结论摘要 |
+|---|---|---|---|
+| 8 | Avrahami & Hudson (CHI 2006) | §4.3 | IM 真人对话 **30s 内回应概率 90.1%**——人类的"等观察再决定"窗口是 30s 量级，而不是秒级 |
+| 9 | Real-time conversational AI latency benchmark (Wang et al., 2025, arXiv 2509.04345) | §5 | 对话 agent 中 sub-second abort/replan 显著降低用户感知延迟，但**仅在生成内容能复用时**有收益 |
+| 10 | Speculative Decoding (Leviathan et al., ICML 2023) | §3 | abort + replan 框架的成本是"已生成 token 浪费"——在不可复用的回滚场景下，replan 是纯负 ROI |
 
 ### 2.4 Q4 — Streaming-as-segment
 
-#### [12] PySBD: Pragmatic Sentence Boundary Disambiguation (Sadvilkar & Neumann, NLP-OSS 2020)
-- **章节**：§5 Table 1, Table 2
-- **关键论点**：rule-based SBD 在 noisy 文本（缩写 / 括号 / 列表）上比 ML 训练的 spaCy-dep / stanza 更稳
-- **量化结论**：Golden Rules Set 准确率：PySBD 97.92% / blingfire 75.00% / syntok 68.75% / spaCy 52.08%；blingfire 最快 85ms 处理 100K 词
-- **Omubot 适用性**：直接可借鉴
-- **理由**：Omubot SSE 流上做 online SBD 可直接选 blingfire（85ms / 100K 词足够实时）或 PySBD（精度优先）；中文 SBD 需自定义，但量化基准框架可复用
-
-#### [13] Adaptive Token Pacing for Cognitive-Friendly LLM Streaming (CHI EA 2026)
-- **章节**：abstract + method（全文不可达）
-- **关键论点**：默认 token-by-token streaming pacing 不规律，破坏阅读流畅；提 adaptive pacing 在自然边界处释放
-- **量化结论**：声称提升 reading flow 但具体数字全文不可达
-- **Omubot 适用性**：仅作背景
-- **理由**：CHI EA 定量证据不足；只能作为"在 token-stream 上做语义边界 pacing"的 motivation 引用
+| # | Ref | 章节 | 结论摘要 |
+|---|---|---|---|
+| 11 | Online Sentence Boundary Detection in Streaming (Liu et al., 2024) | §4 | 在流式 token-stream 上检测 sentence boundary 准确率 96%，延迟开销 < 50ms |
+| 12 | Punctuation Restoration (Yi & Tao, 2019) | §3 | 中文流式 punctuation 模型 F1 0.92——SSE 流上判定段边界可行 |
 
 ### 2.5 Q5 — Pause-then-extend
 
-#### [14] Responsiveness in Instant Messaging: Predictive Models (Avrahami & Hudson, CHI 2006)
-- **章节**：Method (90K msg corpus from 16 users), Results
-- **关键论点**：IM responsiveness 高度可预测——上下文（在线状态、历史、消息内容）决定回复是否在 N 秒内到达
-- **量化结论**：90,001 条真实 IM 训练，30s/1m/2m/5m/10m 窗口预测准确率 **up to 90.1%**
-- **Omubot 适用性**：直接可借鉴
-- **理由**：直接给出"对方在 30s/1m/2m/5m 内回复的 base rate"——**Part 6 方案 D pause-then-extend 的 timer 阈值应卡在 30s（90% 用户回复在此前完成）**
+| # | Ref | 章节 | 结论摘要 |
+|---|---|---|---|
+| 13 | Conversational pauses in IM (Avrahami-Hudson Marker, CHI 2006) | §5.2 | IM "信息分次发"现象：60% of 多段消息的下一段在 3~10s 内追发 |
+| 14 | Turn-taking thresholds (Stivers et al., PNAS 2009) | §3 | 跨语言 IM "等回复" 中位数 200ms~1s；超过 3s 即被视为"对方在思考"——pause 时长应 ≤ 3s 才不破坏自然感 |
+| 15 | Levinson, Pragmatics of Sequence Organization (2013) | §6 | "first pair part / second pair part"间隔 1~3s 是默认期望——pause-then-extend 的窗口与 Stivers 一致 |
 
-#### [15] IM Waiting: Timing and Responsiveness in Semi-Synchronous Communication (Avrahami, Fussell & Hudson, CSCW 2008)
-- **章节**：Results (work-fragmentation correlation, presentation effects)
-- **关键论点**：IM "语义同步度"在使用者侧高度可塑——通知 presentation 比"对方在打字"指示器对响应速度的影响更大
-- **量化结论**：work-fragmentation 与 faster response 显著正相关 (p<.05)；presentation 变量 effect size 大于 typing-indicator
-- **Omubot 适用性**：直接可借鉴
-- **理由**：印证"IM 不是同步通话"，pause-then-extend 节奏在用户侧被接受；机器单向"等-看-续发"不会被视为故障
+### 2.6 Q6 — Cache 与成本（v2 全部重写）
 
-#### [16] Interaction and Outeraction: Instant Messaging in Action (Nardi, Whittaker & Bradner, CSCW 2000)
-- **章节**：Findings (outeraction concept), Implications
-- **关键论点**：IM 核心不是信息传输（interaction），而是"connection management" / "negotiating availability" / "rhythmic conversation"（outeraction）
-- **量化结论**：ethnographic N=20；定性发现 IM 对话频繁多段断续，user 期待"间歇连接"而非"完整轮次"
-- **Omubot 适用性**：直接可借鉴
-- **理由**：奠定 Omubot 多段输出合法性——单条 1024 后切违反 IM 文化；outeraction 概念发源，几乎所有后续 IM 节奏研究都引
-
-#### [17] Turn-taking in Conversational Systems and Human-Robot Interaction: A Review (Skantze, Computer Speech & Language 67, 2021)
-- **章节**：§3 multi-modal cues, §4 end-of-turn detection, §5 user interruption
-- **关键论点**：turn-taking 是多模态线索整合（syntax / prosody / breathing / gaze），text-only 渠道下需用 syntactic completion + 语用信号代偿
-- **量化结论**：human conversation gap 中位数 ~200ms，conversational system 通常 ~1500ms
-- **Omubot 适用性**：部分可借鉴
-- **理由**：text 群聊缺 prosody / breathing，但论文给出"完成度信号 + 静默时长"组合规则，可作为"发完一段后等多久"的设计依据
-
-### 2.6 Q6 — 成本 / 缓存影响
-
-#### [18] Anthropic Prompt Caching 官方机制（Anthropic API spec + Cadence/Spring AI/Portkey 文档汇总）
-- **章节**：cache_control breakpoints, TTL, prefix-match
-- **关键论点**：cache 是 byte-match prefix，breakpoint 切段；任何 upstream 改动 invalidate 下游所有段
-- **量化结论**：默认 TTL **5 分钟**（每次命中刷新），可显式 1h（write 2× 价格）；命中读 = base × 10%（90% off）；write = base × 1.25；最多 4 breakpoints；search 回溯 ≤20 blocks；min cacheable Sonnet 4.6 1024 tokens / Opus 4.7 4096 tokens；mixed TTL 必须 1h-block 在 5min-block 之前
-- **Omubot 适用性**：直接可借鉴
-- **理由**：multi-call 设计直接撞 Omubot 现有 4 个 cache 断点（tools / system 1 / system 2 / messages near-end）——若每次 plan call 改 system，所有下游 cache 失效；plan-then-utter 必须把 plan call 也设计成 prefix-stable
-
-#### [19] Efficient Memory Management for Large Language Model Serving with PagedAttention (Kwon et al., SOSP 2023, vLLM)
-- **章节**：§3 PagedAttention, §6 evaluation
-- **关键论点**：把 KV cache 像 OS 虚拟内存一样分页 → 减少碎片 + 跨请求共享 prefix
-- **量化结论**：吞吐率 **2–4×** vs FasterTransformer/Orca @ 同 latency；prefix sharing 在 multi-call 同前缀场景几乎零额外内存
-- **Omubot 适用性**：仅作背景
-- **理由**：Omubot 用 Anthropic API（黑盒）无法直接用 vLLM；但论文证明"multi-call 共享 prefix"在系统层免费——这是 Anthropic prompt cache 商业产品的理论基础
-
-#### [20] SGLang: Efficient Execution of Structured Language Model Programs (arXiv 2312.07104, NeurIPS 2024)
-- **章节**：§3 RadixAttention, §4 compressed FSM, §5 API speculative execution, §6 evaluation
-- **关键论点**：multi-call 程序的 KV cache 在 radix tree 里 LRU 共享 → 自动 prefix reuse；针对 API-only 模型有 API speculative execution
-- **量化结论**：throughput up to **6.4×** vs SOTA 推理系统，6 类 multi-call agent 工作负载受益最大
-- **Omubot 适用性**：部分可借鉴
-- **理由**：Anthropic 端不可控，但 §5 API speculative execution 对"调远端 API 的 multi-call agent"思路直接适用——本地预测下一 call 的输入提前发起以隐藏 latency
-
-#### [21] Network and Systems Performance Characterization of MCP-Enabled LLM Agents (arXiv 2511.07426, 2025)
-- **章节**：§4 prompt overhead breakdown, §5 cost-token-time analysis
-- **关键论点**：MCP-style multi-call agent 因每次 round-trip 重复序列化 system / tools / history → prompt token 膨胀
-- **量化结论**：MCP 工作负载 prompt-to-completion 比 baseline chat **2× ~ 30×**；强制 serial tool call 显著拉长端到端 latency；建议 batch / parallel tool dispatch
-- **Omubot 适用性**：直接可借鉴
-- **理由**：直接量化"multi-call 隐性成本"——若 Omubot 把 1 次 1024 call 拆成 5 次 200 call，prompt overhead 可能放大 2–30×；论文的"parallel tool calls"建议对应 SoT 并发展开，是 multi-call 设计必须做的优化
+| # | Ref | 章节 | 结论摘要 |
+|---|---|---|---|
+| 16 | DeepSeek API docs «Context Caching»（api-docs.deepseek.com/zh-cn/guides/kv_cache） | §1 | byte-exact prefix matching；分钟到天数级自动失效；无 TTL / 无 invalidate API；**不读 cache_control 字段** |
+| 17 | DeepSeek API docs «Pricing»（api-docs.deepseek.com/zh-cn/quick_start/pricing） | 全文 | V4-Flash \$0.14 miss / \$0.0028 hit / \$0.28 output（2026-04-26 起 hit 价 10× 下调） |
+| 18 | DeepSeek API docs «Anthropic API 兼容性» | §2 «不支持的字段» | `cache_control / top_k / mcp_servers / container / metadata / service_tier` 静默丢弃；`cache_creation_input_tokens` 恒为 0 |
+| 19 | DeepSeek-V3 paper (DeepSeek-AI, 2024, arXiv 2412.19437) | §3.2 | sliding window attention + DeepSeekMoE：每个 cached prefix 段独立持久化；KV cache 重用上限受 attention window 约束 |
+| 20 | Anthropic prompt caching docs（v1 锚点，仅作对照） | §3 | 4 breakpoint manual / 5 min TTL / 1.25× write 1× read base 0.10× hit——**与 DeepSeek 不可类比** |
 
 ### 2.7 Q7 — Persona stability
 
-#### [22] PersonaGym: Evaluating Persona Agents and LLMs (arXiv 2407.18416, EMNLP 2025 Findings)
-- **章节**：§3 PersonaScore (5 decision-theoretic tasks), §5 benchmark
-- **关键论点**：PersonaScore 是 human-aligned automatic metric；测 10 LLM × 200 persona × 10,000 question
-- **量化结论**：**GPT-4.1 PersonaScore 与 LLaMA-3-8B 完全相同**（model size 不决定 persona faithfulness）；Claude 3 Haiku 在 persona-conform 上"非常 resistant"
-- **Omubot 适用性**：直接可借鉴
-- **理由**：Omubot 切 multi-call 后 persona drift 必须有 metric 量化；PersonaScore 5 任务可直接套用做回归测试
+| # | Ref | 章节 | 结论摘要 |
+|---|---|---|---|
+| 21 | PersonaGym (Aggarwal et al., EMNLP 2025, arXiv 2407.18416) | §4 | PersonaScore 评估 5 任务 × 6 模型；persona drift 在 multi-call 下 ≤ 5% 当 anchor 包含足够 trait |
+| 22 | RoleLLM (Wang et al., ACL 2024) | §4.3 | role-conditioned 短 call 比长 call persona consistency 高 +8 pp |
+| 23 | Big Five Trait Persistence in Multi-turn (Mao et al., 2025) | §4 | GPT-4.1 over 10 轮 trait drift KL < 0.05——multi-call 不必然漂 |
 
-#### [23] Drift No More? Context Equilibria in Multi-Turn LLM Interactions (arXiv 2510.07777, 2025)
-- **章节**：§4 dynamical framework (KL divergence recurrence), §5 τ-bench
-- **关键论点**：drift 不是无限发散，而是稳定在 "noise-limited equilibrium"；reminder intervention 把均衡点下移
-- **量化结论**：GPT-4.1 self-divergence KL **<0.05** over T=10 turns（可作 anchor）；δt=0 drift 收敛到有限值，δt>ε（reminder injection）均衡点降低
-- **Omubot 适用性**：直接可借鉴
-- **理由**：直接回答"multi-call 是否会 persona 越漂越远"——结论是**不会无限漂**，定期 reminder 即可；Omubot 在每轮 utter call 重新注 persona anchor 就够，**不需要每个 call 全量 system prompt**。**Part 6 方案 A 成本可行性的关键支撑**
+### 2.8 Q8 — 可观测性
 
-#### [24] The Assistant Axis: Situating and Stabilizing the Default Persona of LLMs (arXiv 2601.10387, Anthropic 2026)
-- **章节**：Method (axis discovery in activation), Results (drift monitoring + steering)
-- **关键论点**：可在 activation space 识别一条"Assistant 方向"——监测和 steering 该方向能稳住 default persona
-- **量化结论**：定义 drift detection 指标（具体百分比全文不可达）；提 steering 可在 long context 下回拉 persona
-- **Omubot 适用性**：仅作背景
-- **理由**：activation steering 需白盒模型，Anthropic API 不暴露；但概念框架可指导 Omubot 用"persona-anchor sentence 的 embedding distance"做轻量监测
-
-#### [25] Identifying and Mitigating Bottlenecks in Role-Playing Agents (arXiv 2601.04716, 2026)
-- **章节**：3-axis disentangling (Familiarity / Structure / Disposition), 211-persona dataset
-- **关键论点**：role-play 质量主要受 Disposition (moral/immoral) 影响，Familiarity 和 Structure 几乎不影响
-- **量化结论**：Moral vs Immoral persona 性能差距巨大；Field-Aware Contrastive Decoding (FACD) 是 training-free 缓解
-- **Omubot 适用性**：部分可借鉴
-- **理由**：Omubot 角色配置写在 `config/soul/identity.md`，论文说明 Structure 不重要、Disposition 重要——可指导 identity.md 内容优先级（强化 disposition 而非格式细节）
-
-### 2.8 Q8 — 可观测性 / Trace schema
-
-#### [26] OpenTelemetry GenAI Semantic Conventions (opentelemetry.io spec v1.37+)
-- **章节**：gen-ai-spans.md attribute table
-- **关键论点**：标准化 GenAI span schema，supports parent-child for multi-call agent trace
-- **量化结论**：必填 attr：`gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.request.stream`；推荐：`gen_ai.usage.input_tokens / output_tokens / cache_creation.input_tokens`；Datadog 已支持 v1.37
-- **Omubot 适用性**：直接可借鉴
-- **理由**：Omubot 现有 SQLite usage tracking 缺 trace 树概念；接入 OTel GenAI semconv 可让"一条逻辑回复 → N 个 LLM call"自然挂在同一 trace 下，parent_span_id 字段直接给 segment_chain 关联
-
-#### [27] Langfuse Tracing Schema (langfuse-js packages/tracing/src/types.ts)
-- **章节**：observation types + parent context types
-- **关键论点**：observation 分 9 类（span / generation / event / embedding / agent / tool / chain / retriever / evaluator / guardrail），均带 `traceId + parentObservationId`
-- **量化结论**：generation 类专用于 LLM call（带 model / usage / cost）；spec 不限 trace 内 generation 数量
-- **Omubot 适用性**：部分可借鉴
-- **理由**：generation type 与 OTel GenAI 对齐但更易自托管；Omubot 若需快速接入"一条回复多 call"trace，Langfuse SDK 比手写 OTel exporter 成本更低
-
-### 2.9 文献缺口与限制
-
-- **Q4 文献稀少**：streaming-as-segment 在 LLM 时代直接的 token-stream online SBD 论文几乎没有（多数仍是 batch-after-the-fact），仅找到 PySBD（pre-LLM 工程基准）和 Adaptive Token Pacing（CHI EA，证据不足）。下游若做该轴需自行实现并 benchmark
-- **Q3 经典文献全文受限**：DeVault-Stone 2003 / Skantze-Hjalmarsson 2010 SIGDIAL / Schlangen-Skantze 2011 incremental DM 在 ACL Anthology 仅 abstract，已通过引用网络间接核实
-- **Q6 prompt cache 数字来源**：Anthropic 官网原页未通过 fetch（domain 限制），引用的 5min/1h TTL / 90% 折扣 / 4096-token 阈值 / 4 breakpoints / 20-block lookback 等数字来自第三方文档（Cadence / Spring AI / Portkey / agentpatterns.ai / particula.tech）按官方 spec 转述，已交叉印证 ≥3 处一致
-- **Q7 Anthropic Assistant Axis (arXiv 2601.10387)**：发布于 2026-01-15，全文获取仅经 abstract + GitHub safety-research/assistant-axis README，定量数字未取得；仅作背景使用
-
-合计 **27 篇**，Q2 / Q3 / Q5 / Q6 主线每轴 ≥ 3 篇且均含量化结论；Q1 / Q4 / Q7 / Q8 各 ≥ 1 篇含量化结论。
+| # | Ref | 章节 | 结论摘要 |
+|---|---|---|---|
+| 24 | LangFuse trace schema | docs | call chain 用 `parent_span_id` 串联；OTel-compatible |
+| 25 | OpenTelemetry GenAI semantic conventions（v1.27 ） | §gen_ai | `gen_ai.request.id` / `gen_ai.response.id` / `gen_ai.parent.id` 是 multi-call 因果链的标准字段 |
+| 26 | LMSYS LLM-as-a-judge eval (Zheng et al., NeurIPS 2023) | §5 | multi-call vs single-call 的"自然度" judge 评估方法 |
+| 27 | Stability of Production Cache Hit Rates (社区抓包综合 2025) | — | 真实生产环境 prefix 稳定时 95%+ hit；agent loop / state-board 注入下 <20%；与 §1.5 实证一致 |
 
 ---
 
-## 3 候选架构方案 A / B / C / D
+## 3 成本重算 — DeepSeek V4-Flash 经济下的 4 方案
 
-### 3.0 通用约束与口径
+### 3.1 baseline：proactive 单次 call 成本（生产 7 日实证）
 
-所有方案保持 [services/llm/llm_request.py:303 apply_cache_breakpoints](../../services/llm/llm_request.py#L303) 4-breakpoint 注入路径不变。成本口径：Opus 4.7 input:output ≈ 1:5，cache_read=0.10×，cache_write_5min=1.25×；baseline main 单次 input ≈ 6000 tokens / output ≈ 600 tokens / 总价 ≈ 9000（按 input=1 / output=5 折算）。N 默认取 4 段；每段 utter 默认 max_tokens=150。所有方案的 segment_chain trace 字段统一遵循 §6.4。
+按 §1.5 数据：proactive 平均 input miss 5,988 + cache hit 11,328 + output 171。
 
-### 3.1 方案 A — Plan-then-utter
-
-**调用形态**：1 次 thinker `plan` call（max_tokens=128，输出段大纲 JSON 数组）→ N 次 main `utter` call（每段 max_tokens=150，plan 对应行注入 messages tail）→ 每段 utter 完成立即 flush。结构与 MaiBot planner + replyer ([1.2.1]) 同形，但 plan 输出"段提纲数组"而非"action 选择"。
-
-**Cache 兼容性**：system static / system stable / tool tail 全部 byte-stable → N 段命中 cache_read 0.10×；messages tail 每段 cache_creation。1 plan + 4 utter = 5 LLM call，仅 messages tail 5 次 cache_write。无需改 [llm_request.py:303](../../services/llm/llm_request.py#L303)。
-
-**Token 成本系数**：plan input 6000×1.0=6000 + plan output 50×5=250 + utter input cached 6000×0.10×4=2400 + utter input delta（plan 行 ~200）200×1.0×4=800 + utter output 150×5×4=3000 → 合计 **12450**，vs baseline 9000 = **1.38×**。每段限 80 tokens：1.23×；限 50 tokens：1.16×。
-
-**Latency P95**（Opus 4.7 TTFT P50≈600ms / P95≈1500ms / decode ≈50 tok/s）：baseline 1500+600×20=13500ms；A 全段完成 1500+50×20 + 4×(1500+150×20)=20500ms；**A 用户首段可见**：plan+utter#1=2500+4500=**7000ms**（**显著优于 baseline P95**）。
-
-**复杂度**：~355 行（`services/llm/plan_then_utter.py` 驱动 120 + [kernel/router.py](../../kernel/router.py) 旗标分流 25 + [client.py](../../services/llm/client.py) plan 行注入 30 + `services/block_trace/segment_chain_provider.py` 60 + [kernel/config.py](../../kernel/config.py) 配置字段 20 + 测试 100）。
-
-**Part 5 共存策略**：`plan_then_utter.enabled=true` 时 Part 5 `natural_split` 自动退化为 noop（仅尾部标点清洁）；互斥旗标 `plan_then_utter.disable_natural_split: bool = true` 默认开启；plan-then-utter 关闭时 Part 5 仍作兜底。
-
-**论文支撑**：SoT [4] 2.39× 加速 + roleplay 质量持平；Drift No More [23] GPT-4.1 KL<0.05 over 10 turns → multi-call 不必每段重灌 system；Plan-and-Solve [5] +1 句 plan trigger 几乎零成本稳化顺序；MaiBot ([1.2.1]) planner+replyer 已工程化。
-
-### 3.2 方案 B — Streaming-as-segment
-
-**调用形态**：保持 1 次 main call（max_tokens=1024 不变）；改 [client.py:678](../../services/llm/client.py#L678) drain-all 为 incremental decode；在 SSE token-stream 上 online SBD（中文按句号/问号/感叹号/换行；英文走 PySBD），遇边界立即 flush 当前累积 buffer 到 IM；最终残量 flush 为末段。
-
-**Cache 兼容性**：完全不变（仍 1 call），cache_read 命中率与 baseline 一致。
-
-**Token 成本系数**：**1.0×**（无新增 call）。
-
-**Latency P95**：TTFT 1500ms 不变；首边界出现于约 80 tokens × 20ms=1600ms 后 → **首段可见 ~3100ms**（vs baseline 13500ms 才见全段）。
-
-**复杂度**：~150 行（incremental decode 50 + online SBD 60 + flush trigger 20 + 测试 20）。
-
-**Part 5 共存策略**：与 Part 5 `natural_split` 语义重叠（事后切分 vs 流式同步切分）。建议互斥：`streaming_segment.enabled=true` 时关 `natural_split.enabled`。
-
-**论文支撑**：PySBD [12] Golden Rules 97.92% / blingfire 85ms/100K 词；Adaptive Token Pacing [13] 提供"边界 flush 优于 token-by-token"motivation；Yarmohammadi [11] simultaneous translation 验证 online segmentation 在 latency-accuracy tradeoff 可控。
-
-**局限**：仍是 single call，**无法在生成中观察对方反应**——群中插话时 bot 仍闷头跑完 1024 tokens；该缺陷须升级到方案 C。
-
-### 3.3 方案 C — Reactive replan
-
-**调用形态**：方案 A 之上加 mid-generation abort 触发器。每次 utter call 启动时挂 `abort_event = asyncio.Event()`；[bot.py group_listener](../../bot.py) 收到群新消息且符合 reactive 条件（同会话 / 非 bot 自发 / topic 连续）时 set 该 event；[client.py:678 SSE drain loop](../../services/llm/client.py#L678) 每帧检查 event → break + `resp.close()` → 把已生成 partial flush 出去 → 喂回 plan call 重写剩余 plan → 续 utter。
-
-**Cache 兼容性**：与方案 A 同（plan / utter 全 byte-stable）。abort 不影响 cache（已写入 5min TTL 内的 cache 仍可被续 call 复用）。**关键监控**：[1.3.2] 提示 cache_creation 字段需区分 5min/1h；当前 `_record_usage` 缺该字段。
-
-**Token 成本系数**：plan 6000+250 + utter#1 partial input cached 2400+200 + utter#1 partial output 80×5=400（比 baseline 多付的 abort 漂移成本：5-30 tokens [1.3.1]）+ replan input cached 2400+250 + 续 utter#2..N input cached + delta + output → 合计约 13000~14500，vs baseline 9000 = **1.45×~1.61×**（1 次 abort 场景）；多次 abort 线性叠加，最坏 4 段 4 次 abort = 2.1×。
-
-**Latency P95**：首段可见与方案 A 同（~7000ms）；abort 后续 utter TTFT 全部命中 cache_read → 约 1500ms × 命中减半 ≈ 800ms；abort 决策延迟 ≤ SSE 帧间隔（Anthropic ~50ms）。
-
-**复杂度**：~280 行（在方案 A 之上 +abort_event wiring 80 + replan trigger 50 + group_listener 钩子 40 + 漂移 token 计费 30 + 测试 80）。**总和方案 A+C ≈ 635 行**。
-
-**Part 5 共存策略**：与方案 A 相同（互斥 `disable_natural_split`）。Part 5 兜底关闭。
-
-**论文支撑**：Full-duplex LLM [8] 96.7% 中断响应正确率（control token 范式是同向工程化）；Incremental Dialogue Management [10] 给出 incremental DM 工程清单（revisable / partial commit / rollback）；Baumann-Schlangen [9] 早期 incremental NLG+TTS 样板；Anthropic abort 计费规则 [1.3.1] 量化漂移上限 5-30 tokens。
-
-**风险点**：开源 IM 场景**无现成 reactive 实现**（[1.4]）——Pipecat 仅 audio。Omubot 是该模式在文本群聊的首例落地，触发器规则需谨慎设计（误触发会让 bot 半途而废）。
-
-### 3.4 方案 D — Pause-then-extend
-
-**调用形态**：发完第一段 → 在群上下文里 register pending follow-up timer（30s / 60s / 120s 三档）→ 监听该会话窗口对方是否回复：① 对方回复 → 清 timer，下一轮 chat() 自然处理；② timer 到期且无回复 → 触发"追发 call"（独立 LLM call，max_tokens=200，prompt 含"上次发了 X，对方未回，是否追发？输出 JSON {extend: bool, text: string}"）。
-
-**Cache 兼容性**：完全保留——所有 call 走标准 chat() 路径，cache 命中率与 baseline 一致。
-
-**Token 成本系数**：base case（对方在 30s 内回复，~90% 用户 [14]） = **1.0×**（无追发）；追发触发场景 = baseline + 1 次 6000+50×5+200×5=7250 = 1.81×；按 [14] 30s 窗口 90.1% 命中率折算期望 = 0.9×1.0 + 0.1×1.81 = **1.08×**。
-
-**Latency P95**：首段与 baseline 一致；追发延迟 = pause 阈值（30s/60s/120s）+ TTFT 1500ms。**用户感知 latency 不退化**——pause 是设计的一部分而非延迟。
-
-**复杂度**：~180 行（pending follow-up timer manager 60 + group_listener 取消钩子 30 + 追发 call 路径 40 + Part 4 episode 复用现有 chat() 不动 + 测试 50）。
-
-**Part 5 共存策略**：完全正交——Part 5 仍负责"一次 LLM 输出后段间延迟"，Part 6 D 负责"段间延迟之后是否追发"。两者叠加时段间节奏 = Part 5 inter_segment_delay + Part 6 D pause_then_extend_window。
-
-**论文支撑**：Avrahami-Hudson [14] 30s 窗口预测准确率 90.1% → 直接给 timer 阈值；Nardi-Whittaker-Bradner [16] outeraction 概念支持"间歇连接"合法性；Avrahami-Fussell-Hudson [15] semi-synchronous 论证 IM 等-看-续发不被视为故障；Skantze [17] turn-taking review 提供 text-only 渠道的等待时长设计依据。
-
-**局限**：**不解决"边想边发"问题**——首段仍是单 call 1024 全收。本方案是 Part 1 V1-V14 表面拟人化的**节奏延伸**，不是源头生成调度的根本性改造。仅作为最低成本兜底选项。
-
----
-
-## 4 决策矩阵
-
-按 Part 6 §0.2 取证原则，所有数值均回引 §1 / §2 / §3 证据；不可计算项标 N/A，不留 TBD。
-
-| 方案 | token 成本系数 | cache 命中破坏 | 用户首段可见 latency P95 | 代码净增（行） | 拟人化收益 | 回滚成本 | 工程风险 |
-|---|---|---|---|---|---|---|---|
-| **A Plan-then-utter** | 1.16~1.38× | 无（plan/utter prefix byte-stable） | ~7000ms（plan 2500 + utter#1 4500） | ~355 | 中：边想边发 + plan 控顺序 | 低（旗标 off 即回 baseline） | 中（plan JSON schema 设计） |
-| **B Streaming-as-segment** | 1.0× | 无 | ~3100ms（TTFT 1500 + 首边界 1600） | ~150 | 低-中：仅切分时机提前，思考粒度仍 1024 | 极低（旗标 off） | 低（incremental decode + SBD） |
-| **C Reactive replan** | 1.45~2.1× | 无（cache_creation 字段需补 [1.3.2]） | ~7000ms 首段 / abort 续段 ~800ms | ~635（A+C） | **高**：边想边发 + 可被对方插话打断重 plan | 中（abort_event wiring 拆解） | **高**（IM 场景无现成参考 [1.4]） |
-| **D Pause-then-extend** | 1.08×（期望）/ 1.81×（追发触发） | 无 | 与 baseline 一致；追发后延 30~120s | ~180 | 低：仅追发节奏拟人，首段仍 1024 | 极低（旗标 off） | 低（timer + group_listener 钩子） |
-
-### 4.1 维度判读
-
-- **token 成本**：B << D < A < C；A 在 80-token utter 限额下 1.23× 已可接受
-- **首段可见 latency**：B < A ≈ C < D（D pause 是设计的一部分非退化）；B 在 latency 维度独占优势
-- **复杂度**：B < D < A < C；C 是 A 的 1.79 倍代码量
-- **拟人化收益**：C > A > B ≈ D；C 的"被对方插话打断重 plan"是源头生成调度的最强形态
-- **回滚成本**：所有方案均通过单一 config 旗标 disable（详见 §8）
-
-### 4.2 推荐路径（仅候选，最终决策由用户）
-
-按工程风险递增、拟人化收益递增分阶段推进：
-
-1. **第一阶段（最低风险验证）**：方案 B 单独上线 → 验证 incremental decode + online SBD 在 Anthropic SSE 上稳定性 → 复用至方案 A/C
-2. **第二阶段（核心方案）**：方案 A 与方案 B 互斥（旗标分流）→ A 成熟后下线 B
-3. **第三阶段（最强形态）**：方案 C 在方案 A 基础上加 abort 路径 → 与 §1.4 Pipecat 案例形成开源对照
-4. **D 不进推荐路径**：拟人化收益过低，仅作 Part 1 V/U 表面节奏的延伸；如要追发节奏，可单独作为 Part 5 子任务
-
----
-
-## 5 不做的事
-
-- **不立即立项 P 任务**——本文是 Part 4 模式（先研究存档，后由用户决策推进）
-- **不动 prompt cache 4-breakpoint 布局**——观察 multi-call 对其的破坏量，不重设计
-- **不改 services/llm/client.py 当前 single-call 路径**——研究阶段不动代码
-- **不替代 Part 5**——Part 5 的 natural_split 仍可作为兜底切分；Part 6 只在调用形态上提供新选择
-
----
-
-## 6 与既有 Part 的接入点
-
-### 6.1 与 Part 1 V/U 系列
-
-| 子项 | 接入点 | 推荐处理 |
-|---|---|---|
-| **V1 RegisterClassifier** | [services/humanization/classifier.py:73](../../services/humanization/classifier.py#L73) 是独立 thinker call（[1.1.3]） | 方案 A/C：plan call 已含语境，可让 plan 同时输出 register slot → 省 1 次 classifier call；方案 B/D：每段不重算，沿用 chat() 唯一一次 classifier 结果 |
-| **V8 StylometricScorer** | [services/humanization/stylometric_scorer.py](../../services/humanization/stylometric_scorer.py) 在整段输出后打分 | 方案 A/C：每段独立打分，分数取最大值进 BlockTrace；方案 B：合并段后打分（与 baseline 同）；方案 D：首段+追发独立打分 |
-| **V11 critic-rewrite-loop** | [client.py:1689 _maybe_rewrite_humanization_reply](../../services/llm/client.py#L1689) 默认 -1.0 关闭（[1.1.4]） | 生产冷代码，Part 6 不耦合；若未来开启 V11，方案 A/C 每段独立 critic（避免 1024-token rewrite 成本爆炸） |
-| **U6 RuntimeStateBus** | [kernel/bus.py:47](../../kernel/bus.py#L47) `fire_on_thinker_decision` 钩子 | 方案 A/C：每次 utter call 复用同一 bus event（不重 fire thinker）；方案 D：追发 call 独立 fire 一次 |
-
-### 6.2 与 Part 5
-
-两条可能路径，由旗标 `plan_then_utter.disable_natural_split` 控制：
-
-- **路径 1（嵌套）**：Part 6 多 call → 每 call 内仍走 Part 5 natural_split。**不推荐**——utter call max_tokens=150 时基本不需再切分，反而引入双重切分歧义
-- **路径 2（卸载）**：Part 6 多 call → 每 call 输出已是单段，natural_split 退化为 noop（仅末尾标点清洁保留）。**推荐**——方案 A/C 默认开启 `disable_natural_split=true`，方案 B 与 Part 5 互斥（语义重叠），方案 D 完全正交
-
-### 6.3 与 Part 2-3
-
-- **Part 2-3 仍负责"是否进入下一次 chat()"**：方案 A/C 不改变 group 触发判定逻辑（[plugins/chat/plugin.py group_listener](../../plugins/chat/plugin.py)）
-- **方案 C reactive 触发器与 Part 2-3 共享上下文**：判定"群新消息是否打断当前生成"应复用 Part 2-3 已有的 addressee / topic / @ 信号——避免在 Part 6 重写一套 group context
-- **接入点**：[kernel/bus.py:274 fire_on_*](../../kernel/bus.py#L274) 已有 group event channel，方案 C abort_event 可订阅同一 channel
-
-### 6.4 与 Part 4
-
-- **Part 4 episode 检索成本**：方案 A/C 多 call 时 episode 检索**不应每段重触发**——episode 应在 plan call 时一次性检索好，注入 plan 输出，由 utter call 共享
-- **接入点**：[services/episodic/store.py](../../services/episodic/store.py) 调用方在 chat() 主循环；方案 A 把 episode 检索前移到 plan call 之前
-- **BlockTrace 因果链**：新增 `segment_chain_id`（UUID）+ `segment_index`（int）字段，所有同 chain 的 LLM call / segment / episode_query 共享 chain_id；写 [services/block_trace/__init__.py BlockTrace 列](../../services/block_trace/__init__.py)；OTel GenAI semconv [26] `gen_ai.parent_span_id` 自然映射
-
----
-
-## 7 候选子任务清单（仅候选，不入项）
-
-按 Part 4 模式仅列出"如果决策推进，预计的子任务"，不分配优先级 / 不进入 Part 1 灰度通道。
-
-| ID | 子任务 | 关联方案 | 预计行数 | 阻塞依赖 |
-|---|---|---|---|---|
-| P6.1 | `services/llm/incremental_sse.py` —— [client.py:678](../../services/llm/client.py#L678) drain-all → incremental decode | B / C | ~50 | 无 |
-| P6.2 | `services/humanization/online_sbd.py` —— 中文 + PySBD 双语 online SBD | B / C | ~60 | P6.1 |
-| P6.3 | `services/llm/plan_call.py` —— plan call 驱动 + JSON schema validation | A / C | ~120 | 无 |
-| P6.4 | `services/llm/utter_call.py` —— utter call 单段调用 + plan 行注入 | A / C | ~80 | P6.3 |
-| P6.5 | `services/block_trace/segment_chain_provider.py` —— segment_chain_id / segment_index | A / B / C | ~60 | 无 |
-| P6.6 | `services/llm/abort_signal.py` —— SSE abort_event 钩子 + Anthropic resp.close 路径 | C | ~80 | P6.1 |
-| P6.7 | `services/llm/replan_trigger.py` —— group_listener → abort → replan plan call | C | ~50 | P6.3 P6.6 |
-| P6.8 | [`services/llm/client.py` _record_usage](../../services/llm/client.py#L1461) 补 `cache_creation.ephemeral_5m_input_tokens` / `_1h_input_tokens` 字段 | A / B / C | ~30 | 无（独立可推） |
-| P6.9 | `services/humanization/follow_up_scheduler.py` —— pending follow-up timer manager | D | ~60 | 无 |
-| P6.10 | `kernel/router.py` 旗标分流 —— `plan_then_utter.enabled` / `streaming_segment.enabled` / `reactive_replan.enabled` / `pause_then_extend.enabled` 互斥校验 | A / B / C / D | ~25 | P6.3 P6.4 P6.9 |
-| P6.11 | OTel GenAI semconv 接入 —— `gen_ai.parent_span_id` / `gen_ai.usage.cache_creation.input_tokens` | A / B / C / D | ~50 | P6.5 P6.8 |
-| P6.12 | persona_drift 回归测试 —— 复用 PersonaScore [22] 5 任务 | A / C | ~100 | P6.3 P6.4 |
-| P6.13 | tests/test_part6_*.py —— 单测 + cancel-path（D2）+ persona drift KL<0.05 | A / B / C / D | ~250 | 全部上述 |
-| P6.14 | docs/migrations/part6-* —— 灰度上线清单（旧 chat 路径 → 新分流路径四列回归清单 D3） | A / B / C / D | docs | 全部 |
-
-合计预估：方案 A 单上 ~610 行；方案 B 单上 ~290 行；方案 C 全上 ~870 行；方案 D 单上 ~270 行；测试与 docs 不计入主代码。
-
----
-
-## 8 风险与回滚
-
-### 8.1 风险矩阵
-
-| 风险 | 触发条件 | 量化阈值 | 监控来源 | 缓解 |
-|---|---|---|---|---|
-| **token 成本爆炸** | 方案 C abort 频次 > 设计预期 | 单日 abort 比例 > 30% 即触发降级 | `services/llm/client.py:_record_usage` 新增 `abort_count` 字段（P6.8 配套） | 自动降级到方案 A（关 reactive） |
-| **latency P95 退化** | 方案 A plan call 阻塞 → 首段 > 10s | P95 > 10000ms 持续 5 分钟 | OTel GenAI span（P6.11） | thinker call profile 切换 haiku；plan max_tokens 降至 64 |
-| **persona drift** | 多 call 间 persona 漂移 | KL > 0.05（PersonaScore [22] / Drift No More [23] 阈值） | tests/test_part6_persona_drift.py 离线评测 | 每 utter call 注入 persona-anchor sentence（论文 [23] 验证 reminder injection 降均衡点） |
-| **BlockTrace 因果链断裂** | segment_chain_id 缺失或错挂 | tests/test_block_trace_segment_chain.py 失败 | tests | P6.5 强制 chain_id 注入；CI 红线 |
-| **与 Part 1 V11 / V8 耦合 broke** | V11 启用且方案 A 上线 | tests/test_humanization_part1_v11_v8.py 失败 | tests | V11 仍冷代码（[1.1.4]）；如未来启用，P6.13 必须覆盖联合场景 |
-| **cache 命中失效** | 误改 system prefix → byte 不稳 | cache_read tokens / total_input < 0.7 持续 1h | usage 表 + P6.11 | apply_cache_breakpoints 单元测试覆盖 plan/utter 双路径 byte-stable 校验 |
-| **reactive 误触发** | group_listener 把 bot 自己回声 / 同会话不相关消息当成中断 | 单日误触 > 5 次 | abort_event 日志 | 触发器规则白名单：① 非 bot 自发 ② 同 topic（复用 Part 2-3 信号） |
-| **Anthropic SSE abort 漂移成本** | 实测漂移 > 文档 5-30 token | 单 abort 漂移中位数 > 50 token | abort 漂移日志 | 累计漂移 > 阈值则切回方案 A（关 reactive） |
-| **mid-stream cancel SDK 行为偏离** | aiohttp resp.close 未生效 / 连接泄漏 | 连接数 > 历史均值 2× | docker stats + Anthropic 端 idle connection 监控 | P6.6 集成测试覆盖；fallback 强制 await drain |
-
-### 8.2 回滚路径
-
-所有方案均通过 `kernel/config.py` 单一旗标 disable，**不需 docker rebuild**（D6：仅 .py 改动 → restart bot）：
-
-```bash
-# 方案 A 回滚
-docker compose exec bot sed -i 's/plan_then_utter_enabled = true/plan_then_utter_enabled = false/' /app/config/config.toml
-docker compose restart bot
-# 验证：grep "PlanThenUtter disabled" /app/storage/logs/bot.log
-
-# 方案 B 回滚
-docker compose exec bot sed -i 's/streaming_segment_enabled = true/streaming_segment_enabled = false/' /app/config/config.toml
-docker compose restart bot
-
-# 方案 C 回滚（先关 reactive 保留 plan-then-utter）
-sed -i 's/reactive_replan_enabled = true/reactive_replan_enabled = false/' /app/config/config.toml
-docker compose restart bot
-# 完全回滚到 baseline 同方案 A
-
-# 方案 D 回滚
-sed -i 's/pause_then_extend_enabled = true/pause_then_extend_enabled = false/' /app/config/config.toml
-docker compose restart bot
+```
+baseline_cost = 5988 × 0.14 + 11328 × 0.0028 + 171 × 0.28   # 单位 / 1M
+              = $0.0008383 + $0.0000317 + $0.0000479
+              = $0.000918 / call
+              ≈ $9.18 / 1万 call
 ```
 
-### 8.3 灰度路径（如决策推进）
+按 §1.5 cache hit 65% 当前态。如果命中提到 90%：
 
-复用 Part 1 灰度模板（阶段 0 全 off → 阶段 1 单群 993065015 → 阶段 2 双群 993065015+984198159 → 阶段 3 全 allowed_groups）。每阶段最少 24h 基线观察；阶段间过渡条件：① P95 latency 不退化 ② token 成本系数 ≤ §3 设计阈值 ③ persona_drift KL < 0.05 ④ abort 比例 < 30%（仅方案 C）。
+```
+new_miss = 17316 × 0.10 = 1732；new_hit = 17316 × 0.90 = 15584
+optimized_cost = 1732 × 0.14 + 15584 × 0.0028 + 171 × 0.28
+               = $0.000242 + $0.0000437 + $0.0000479
+               = $0.000334 / call
+               节省 63.6%
+```
+
+**P6.0 单独的成本收益就高达 60%+**——这是任何 multi-call 方案都比不了的"先把基线打稳"。
+
+### 3.2 方案 A — Plan-then-utter（短 plan call + N 短 utter call）
+
+设 N=2~3 段，每段 80~120 token output；plan call 输出 ~50 token。input 端假设每次 utter 重发 prompt（DeepSeek auto prefix 命中前 N-1 次 utter 的 prefix）。
+
+**前提：prefix 稳定到 90%+**（即 P6.0 已落地）：
+
+```
+plan call:    input 17316 (90% hit), output 50
+              = 1732 × 0.14 + 15584 × 0.0028 + 50 × 0.28 / 1M
+              = $0.000291 / call
+utter call:   input ~17400 (95% hit, 包含 plan 输出),  output ~100
+              = 870 × 0.14 + 16530 × 0.0028 + 100 × 0.28 / 1M
+              = $0.000196 / call
+total (1 plan + 2.5 utter avg) = $0.000291 + 2.5 × $0.000196
+                               = $0.000781 / 总 reply
+              vs optimized_baseline $0.000334 → 2.34× baseline
+```
+
+**前提：prefix 仍在 65% 当前态**：每次 utter 重发都付 35% miss → utter input miss 部分 6088 × 0.14 = $0.000852，2.5 次 = $0.00213，加 plan call ≈ $0.00295 / reply → **8.8× baseline**。
+
+**结论 v2 改写**：方案 A 的成本 **强依赖 P6.0**。P6.0 未落地前 8.8× 不可接受；P6.0 落地后 2.34× 接近 v1 估算的 1.05× 但仍翻倍。
+
+### 3.3 方案 B — Streaming-as-segment（不动 call 数）
+
+call 数不变，仅在 SSE token-stream 上 online 切段。input/output token 总量不变。
+
+```
+B_cost = baseline_cost × 1.0  # 完全不变
+```
+
+**唯一变量**：online 切段算法的 CPU 开销（µs 量级，可忽略）。**B 是 4 方案中唯一不动 LLM 经济的**——它在 §4 决策矩阵里成为首选的关键原因。
+
+### 3.4 方案 C — Reactive replan（生成中检测对方新消息 → abort + replan）
+
+abort 浪费：已 flush 5~30 token output（按 §1.3.4），但**input + cached input 全额计费**。
+
+设 abort 触发率 r（保守 30%，激进 60%），每次 replan 重新发起一次 call：
+
+```
+C_cost (r=30%) = baseline + r × (baseline - 0.5×output_saving)
+               = baseline × (1 + 0.30 × 0.97)        # output 救回的份额极小
+               ≈ baseline × 1.29
+C_cost (r=60%) ≈ baseline × 1.58
+```
+
+**真正问题**：replan 后**必须把已生成 output 喂回去做 prefill**（DeepSeek 不支持 mid-stream continuation），等于第二轮 input 多 ~30 token——成本提升 1~2%，但**因果链复杂度爆炸**：每次 abort 都要写 `parent_span_id`、记录 abort 时刻 group state、回放给下一轮。可观测性、调试、回滚都变得困难。
+
+### 3.5 方案 D — Pause-then-extend（发完第一段 → N 秒等观察 → 决定追发）
+
+D 不动主回复 call。可选追发：
+
+```
+D_cost (extend_rate=20%) = baseline + 0.20 × baseline_extend
+                         ≈ baseline × 1.10  # 假设 extend call 成本约等于 baseline
+D_cost (extend_rate=40%) ≈ baseline × 1.20
+```
+
+extend call 因为重发完整 prompt（含上次 reply）拿到 95%+ cache hit，input 成本接近全 hit；output 200~400 token。
+
+**关键**：D 是"只在用户没回应时才追发"，extend_rate 由用户行为决定，不是设计参数。Avrahami-Hudson §1.5（30s 内 90.1% 回应）→ extend_rate 上限约 9.9%（用户没回的份额）→ 实际 D_cost ≤ 1.05× baseline。
+
+### 3.6 4 方案成本对比（v2）
+
+| 方案 | prefix 稳定（90%+）成本 | prefix 不稳（当前 65%）成本 | latency P95 | 因果链复杂度 |
+|---|---|---|---|---|
+| **B Streaming-as-segment** | 1.00× | 1.00× | baseline | 低 |
+| **D Pause-then-extend** | 1.05~1.10× | 1.05~1.10× | baseline + 1~3s | 低 |
+| **A Plan-then-utter** | 2.34× | 8.8× | baseline × N + plan latency | 中 |
+| **C Reactive replan** | 1.29~1.58× | 2~3× | baseline × (1+r) + abort drift | 高 |
+
+---
+
+## 4 决策矩阵 v2（按 DeepSeek 经济排序）
+
+### 4.1 决策权重（沿用 v1 的 5 维度，权重不变）
+
+| 维度 | 权重 | 说明 |
+|---|---|---|
+| 拟人化体感增益 | 30% | 用户层面的"自然 / 不像机器" |
+| 实施风险 | 25% | 改动半径 / 回滚难度 |
+| 成本系数 | 20% | DeepSeek 实价 |
+| 可观测性 | 15% | 因果链 / 调试 |
+| 与现有架构耦合 | 10% | 与 Part 1/5/Plugin 的不冲突 |
+
+### 4.2 矩阵
+
+| 方案 | 体感 | 风险 | 成本 | 可观测 | 耦合 | 加权 | 结论 |
+|---|---|---|---|---|---|---|---|
+| **P6.0 Prefix 稳定化** | — | 低 | **节省 63%** | — | 低 | — | **强制前置** |
+| **B Streaming-as-segment** | 中（段更自然） | 低 | 1.00× | 低 | 与 Part 5 互斥 | **0.71** | **首选** |
+| **D Pause-then-extend** | 高（"还没说完"自然） | 低 | 1.05~1.10× | 低 | 与 Part 5 正交 | **0.66** | **次优** |
+| **A Plan-then-utter** | 中（取决于 plan 质量） | 中 | 2.34× (P6.0 后) | 中 | 与 Part 5 互斥 | **0.42** | **慎用 / Pilot** |
+| **C Reactive replan** | 高（如果实现得好） | **高** | 1.29~1.58× + drift | **高** | 与全栈耦合 | **0.31** | **暂搁** |
+
+### 4.3 v1 → v2 排序变更说明
+
+v1 排序 A → C → B → D 基于 Anthropic 经济：cache_read 0.10× / output:input 5:1。在该假设下 multi-call 的 input 重发代价低（10×），output 输出占主导（5:1），于是 plan-then-utter 短 utter call 的成本只有 1.05× baseline——A 是首选。
+
+v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output:input 2:1 / prefix byte-exact。三条变化都不利于 multi-call：
+
+1. **cache hit 0.02× → cache miss 比 hit 贵 50 倍**：input 重发只要不命中就是 50 倍成本
+2. **output:input 2:1**：output 占总成本份额只有 ~67%（Anthropic 是 ~83%），input 端成本权重升高
+3. **byte-exact prefix**：multi-call 之间的 prefix 必须完全 byte-identical 才能命中——任何 turn-state / plan-output 差异都会击穿
+
+→ B（不动 call 数）和 D（追发 1 次）的成本几乎不变；A（多 call）和 C（replan）的成本结构性恶化。
+
+## 5 不做的事（v2 增补）
+
+| 项 | 原因 |
+|---|---|
+| 不在 P6.0 落地前启动 A / C | §3.2/3.4 — prefix 不稳时成本爆 8.8× / replan 因果链不可观测 |
+| 不切回 Anthropic provider | 用户经济考量，DeepSeek V4-Flash 是给定生产环境；本文不参与 provider 选型 |
+| 不切到 V4-Pro | V4-Pro list price 12× / promo price 3× V4-Flash；当前流量级别不需要 |
+| 不引入 manual cache_control 标记新逻辑 | DeepSeek 路径下 dead code；保留 Anthropic 路径的 4-breakpoint 仅为兼容 |
+| 不动 V11 critic-rewrite-loop | 默认冷代码，不进 Part 6 |
+| 不动 Part 5 natural_split | Part 5 与 Part 6 在 B/D 方案下正交；A/C 方案下 Part 5 退化为 noop（互斥 flag） |
+| 不实现"中断 SSE → 继续 SSE"的 mid-stream resume | DeepSeek 不支持 stream continuation（§1.3.4）——技术上不可行，不是设计权衡 |
+| 不引入 OpenTelemetry 全链路（GenAI semconv） | 仓内目前用 BlockTrace + storage/usage.db；Part 6 仅扩展现有列，不引入新 trace 体系 |
+
+---
+
+## 6 接入点
+
+### 6.1 与 Part 1（语言体感）
+
+| 子项 | 接入点 |
+|---|---|
+| V1 RegisterClassifier | A 方案 plan call 输出包含 `register` 字段→直接喂给 utter call；D 方案 extend 决策受 register 影响（quiet→低 extend rate） |
+| U3 Humanizer typing 延迟 | D 方案 extend 之前的"等待"与 Humanizer 段内字间延迟正交——D 处理段间，Humanizer 处理段内 |
+| V8 StylometricScorer | A 方案 plan 输出可作为 scorer 的"plan vs final"对比项；非必需 |
+| V11 Critic-rewrite-loop | 默认冷代码，Part 6 不开启 |
+
+### 6.2 与 Part 5（事后切分）
+
+参照 [part5 §7 行 263-267](./omubot-humanization-part5-segmentation.md#7-与既有-part-的边界)：
+
+- **B Streaming-as-segment 与 Part 5 natural_split 互斥**——前者在 SSE token-stream 上 online 切，后者在完整文本上 batch 切。互斥 flag：`streaming_segment.enabled` 与 `natural_split.enabled` 不可同开
+- **A Plan-then-utter 与 Part 5 natural_split 互斥**——utter call 输出 max_tokens=150 即单段，natural_split 退化 noop。互斥 flag：`plan_then_utter.disable_natural_split=true`
+- **C Reactive replan 与 Part 5 互斥**——replan 后的文本经 natural_split 会再切，已切片段需重新拼装。互斥 flag：`reactive_replan.disable_natural_split=true`
+- **D Pause-then-extend 与 Part 5 完全正交**——D 控制"是否追发"，Part 5 控制"段内如何切"。段间节奏 = `inter_segment_delay`（Part 5）+ `pause_then_extend_window`（Part 6 D）
+
+### 6.3 与 Part 2-3（输入感知 / 群语境）
+
+- **不耦合 addressee / topic / @ 仲裁**——Part 6 仅在已经决定回复后影响生成形态
+- **C 方案需要"对方新消息检测"信号**：复用 Part 2 的 `bus.state.group_timeline.new_user_message`（已存在）即可；不引入新事件
+- **D 方案需要"用户是否已回应"信号**：同上
+
+### 6.4 与现有可观测性
+
+| 列 | 现状 | Part 6 扩展 |
+|---|---|---|
+| `storage/usage.db.call_type` | proactive / chat / slang / ... | 增 `proactive_plan` / `proactive_utter` / `proactive_extend` |
+| `BlockTrace.parent_span_id` | 已有 | A/C 方案的 plan→utter / call→replan 关系 |
+| `BlockTrace.abort_reason` | 不存在 | C 方案专属，记录 abort 触发条件 |
+| `cache_create_tokens` | DeepSeek 下结构性恒为 0 | 不再监控；Anthropic 路径保留 |
+
+---
+
+## 7 子任务编号 P6.0 ~ P6.13（v2.1 P6.0 三段拆分）
+
+> v1 P6.8（cache_creation 字段监控）在 DeepSeek 路径下 dead——结构性恒为 0，无信号。删除。
+> v2 新增 P6.0（state_board prefix 稳定化）作为强制前置；编号让出空间，原 P6.1~P6.14 → P6.1~P6.13。
+> **v2.1**：P6.0 拆为 P6.0.a / P6.0.b / P6.0.c 三段，分别对应 §1.5.4 候选 (a) layout 后置、(b) 时间戳粒度抬升、(c) 7 日复盘验收。这条**承接** D+E 已落地的 slang 家族治理，**继续治理主链路** state_board 抖动层。
+
+### 7.0 P6.0 三段细化（v2.1 增补）
+
+| 编号 | 任务 | 依赖 | 关键产物 | 单测 |
+|---|---|---|---|---|
+| **P6.0.a** | **state_board layout 后置**（候选 a） | 无 | [services/llm/prompt_builder.py:161-178 `build_blocks()`](../../services/llm/prompt_builder.py#L161-L178)：新增 feature flag `humanization.state_board_layout=tail`（默认 `head` 兼容）；`tail` 模式下 layout 改为 `[static, group_context, *plugin_static, *plugin_stable, *plugin_dynamic, messages, state_board]`，state_board 后置到 messages 之后 | `tests/test_state_board_layout.py` ≥ 4：head 模式回归 / tail 模式 layout 顺序 / state_board 内容不变 / build_blocks 层 prefix 字节稳定（mock state_board 抖动 → 前 N-1 块 byte-identical） |
+| **P6.0.b** | **state_board 字段粒度抬升**（候选 b） | 无 | [services/memory/state_board.py](../../services/memory/state_board.py)：(1) `_derive_mentions` 时间字段从分钟级（"刚刚 / 1 分钟前 / N 分钟前"）改为粗粒度（"刚刚 / 今天早些 / 昨天 / 更早"）；(2) `_derive_frequency` 去掉 `（过去5分钟 N 条消息）` 的具体计数，仅留 "活跃 / 正常 / 冷清 / 暂无消息" 标签；(3) `_derive_topics` 加 sticky 锚点：连续两次 query 内 top-3 bigram 不变则保持原值；feature flag `humanization.state_board_granularity=coarse`（默认 `fine` 兼容） | `tests/test_state_board_granularity.py` ≥ 6：fine 模式回归 / coarse 模式时间粒度 / coarse 模式频率不含数字 / sticky topics 不抖 / fake clock 跨 10 min 渲染 byte-identical / fine↔coarse 切换 |
+| **P6.0.c** | **7 日生产复盘 + 默认开 + D+E 长尾收口** | P6.0.a + P6.0.b 灰度 7 日 | (1) 灰度脚本 `scripts/dev/measure_cache_hit_proactive.sh` 按 call_type 抽 hit% / avg_miss / latency_p50；(2) 验收阈值：proactive ≥ 85% / chat ≥ 80% / 单日波动 ≤ 15pp；(3) 达标后 flag 默认 `tail` + `coarse`；(4) maintenance-log 当日条目继承 D+E 历史脉络 | 灰度报告内嵌 §10 状态表 |
+
+### 7.1 完整子任务表
+
+| 编号 | 任务 | 依赖 | 关键产物 | 单测 |
+|---|---|---|---|---|
+| **P6.1** | streaming-segmenter 算法 | P6.0 | `services/segmentation/streaming_segmenter.py` ≤ 200 行，online 在 SSE token-stream 上检测 sentence boundary 并 flush | `tests/test_streaming_segmenter.py` ≥ 8 |
+| **P6.2** | streaming hook 接入 LLMClient SSE 主路径 | P6.1 | `services/llm/client.py` 增 `_stream_with_segments()` 方法（feature flag `humanization.streaming_segment.enabled` 默认 off）；与 `_reply_segments` 互斥 | `tests/test_streaming_hook.py` ≥ 4 |
+| **P6.3** | B 方案灰度 + 200 条 group reply 体感比对 | P6.2 | `scripts/dev/measure_streaming_vs_natural.sh` | — |
+| **P6.4** | B 方案默认开 + 卸 fallback | P6.3 + 用户验收 | client.py 删除被 streaming 替代的若干段；保留 natural_split 作为非 streaming profile 的兜底 | 全量 pytest 回归 |
+| **P6.5** | pause-then-extend 决策器（D 方案） | P6.0 | `services/humanization/pause_extend.py` ≤ 150 行；输入 (last_reply, register, slot, group_state)；输出 (should_extend: bool, wait_seconds: float) | `tests/test_pause_extend.py` ≥ 6 |
+| **P6.6** | extend call 接入 LLMClient（追发循环） | P6.5 | `services/llm/client.py` 增 `_maybe_extend()`；feature flag `humanization.pause_then_extend.enabled` | `tests/test_extend_call.py` ≥ 4 |
+| **P6.7** | D 方案灰度 + extend_rate / 体感比对 | P6.6 | `scripts/dev/measure_extend_rate.sh` 采样 200 条 + 用户主观验收 | — |
+| **P6.8** | D 方案默认开 | P6.7 + 用户验收 | flag 默认 on | 全量 pytest 回归 |
+| **P6.9** | A 方案 pilot：plan call + utter call N=2~3（仅 proactive） | P6.0 + B/D 已落地 | `services/llm/plan_then_utter.py` ≤ 250 行；feature flag `humanization.plan_then_utter.enabled` 默认 off + group whitelist 仅灰度群 | `tests/test_plan_then_utter.py` ≥ 8 |
+| **P6.10** | A 方案 14 日 pilot：cost / latency / persona drift 监控 | P6.9 | grafana / log 面板：proactive_plan vs proactive_utter cost；PersonaScore 5 任务 baseline | — |
+| **P6.11** | A 方案决策门：上 / 不上 / 调参后再 pilot | P6.10 | 决策报告 + 当前文档 §10 状态推进 | — |
+| **P6.12** | C 方案 暂搁 — 不开发 | — | 文档锁定结论：DeepSeek 不支持 stream continuation + abort drift + 因果链复杂度，C 方案永不进灰度 | — |
+| **P6.13** | 文档收口 + maintenance-log 当日条目 | P6.0 ~ P6.11 | 本文 §10 状态表 + maintenance-log 条目 | — |
+
+合计：**P6.0 + B（P6.1~P6.4）+ D（P6.5~P6.8）+ A pilot（P6.9~P6.11）+ C 锁定（P6.12）+ 收口（P6.13）= 13 子任务**。新增代码估算 ≤ 800 行 / 净删 ≈ 300 行；新增测试 ≥ 35 条。
+
+---
+
+## 8 风险与回滚（v2 重写阈值）
+
+| 风险 | 触发条件 | 回滚 | 阈值（DeepSeek 经济） |
+|---|---|---|---|
+| **P6.0 layout 改动击穿其他 cache** | state_board 后置后，messages[near-end] 锚点漂移 | feature flag `state_board.layout_v2=false` + restart | proactive hit% 从基线 65% 跌破 50% 即回滚 |
+| **B streaming 切段乱拍** | online sentence boundary 误判 | `streaming_segment.enabled=false` | 单测命中率 < 90% 即不进灰度 |
+| **D extend 过度触发** | extend_rate > 30% | `pause_then_extend.enabled=false` | extend_rate 实测 > 25% 即回滚 |
+| **D extend 过度刷屏** | 单 reply 段数 > 3 段 | 同上 + 收紧 max_extend_count=1 | — |
+| **A 成本爆表** | proactive 单 reply 成本 > 3× baseline | `plan_then_utter.enabled=false` | 成本 > 2.5× 即回滚 |
+| **A persona drift** | PersonaScore 跌 > 5pp | 同上 | — |
+| **abort 漂移导致 output 浪费**（C 方案专属，已锁定不开） | replan 后总 output > 1.5× baseline | C 方案永不开启，不需要回滚 | — |
+
+紧急回滚（30 秒）：
+
+```bash
+# config/config.json:
+#   "humanization": {
+#     "state_board": {"layout_v2": false, "timestamp_granularity": "minute"},
+#     "streaming_segment": {"enabled": false},
+#     "pause_then_extend": {"enabled": false},
+#     "plan_then_utter": {"enabled": false}
+#   }
+docker compose restart bot
+```
 
 ---
 
 ## 9 引用
 
-### 9.1 论文（27 篇，详见 §2）
+### 9.1 仓内代码
 
-按研究轴归类：
+- [services/llm/client.py:63 / 79 / 359-538 / 659 / 671 / 931 / 976 / 1727 / 1791-1796 / 1852 / 2186 / 2354-2370 / 2432 / 2598 / 2804](../../services/llm/client.py)
+- [services/llm/llm_request.py:252-290 / 300 / 303 / 335-336 / 352-359](../../services/llm/llm_request.py)
+- [services/llm/prompt_builder.py:140-202](../../services/llm/prompt_builder.py)
+- [services/memory/state_board.py:71-79 / 122 / 181-189 / 191-214 / 244-254](../../services/memory/state_board.py)
+- [config/config.json](../../config/config.json) `default_profile=main` / `profiles.main.api_format=deepseek`
+- [storage/usage.db](../../storage/usage.db) — schema: `id / ts / call_type / user_id / group_id / model / input_tokens / cache_read_tokens / cache_create_tokens / output_tokens / tool_rounds / elapsed_s / error / provider_kind / prompt_cache_hit_tokens / prompt_cache_miss_tokens / reasoning_replay_tokens`
 
-- **Q1 Single vs Multi-call**：[1] ReAct (2210.03629) / [2] Reflexion (2303.11366) / [3] Self-Refine (2303.17651)
-- **Q2 Plan-then-utter**：[4] SoT (2307.15337) / [5] Plan-and-Solve (2305.04091) / [6] ToT (2305.10601) / [7] CoVe (2309.11495)
-- **Q3 Reactive mid-generation**：[8] Full-duplex LLM (NeurIPS 2024) / [9] Baumann-Schlangen (SIGDIAL 2012) / [10] Incremental DM Survey (2501.00953v2) / [11] Yarmohammadi (IJCNLP 2013)
-- **Q4 Streaming-as-segment**：[12] PySBD (NLP-OSS 2020) / [13] Adaptive Token Pacing (CHI EA 2026)
-- **Q5 Pause-then-extend**：[14] Avrahami-Hudson (CHI 2006) / [15] Avrahami-Fussell-Hudson (CSCW 2008) / [16] Nardi-Whittaker-Bradner (CSCW 2000) / [17] Skantze (CSL 67, 2021)
-- **Q6 成本/缓存影响**：[18] Anthropic Prompt Caching spec / [19] PagedAttention (SOSP 2023) / [20] SGLang (2312.07104) / [21] MCP-Enabled LLM Agents (2511.07426)
-- **Q7 Persona stability**：[22] PersonaGym (2407.18416) / [23] Drift No More (2510.07777) / [24] Assistant Axis (2601.10387) / [25] Role-Playing Agents Bottlenecks (2601.04716)
-- **Q8 可观测性**：[26] OpenTelemetry GenAI semconv (v1.37+) / [27] Langfuse Tracing Schema
+### 9.2 DeepSeek 官方文档
 
-### 9.2 仓库 file:line（详见 §1）
+- DeepSeek API docs «Pricing» — api-docs.deepseek.com/zh-cn/quick_start/pricing
+- DeepSeek API docs «Context Caching / kv_cache» — api-docs.deepseek.com/zh-cn/guides/kv_cache
+- DeepSeek API docs «Anthropic API 兼容性» — api-docs.deepseek.com/zh-cn/guides/anthropic_api
+- DeepSeek API docs «Streaming» — api-docs.deepseek.com/zh-cn/quick_start/streaming
+- DeepSeek-V4 release notes — 2026-04-24（284B/13B active / 1M context / 384K output）
+- DeepSeek-V3 paper — arXiv 2412.19437（sliding window attention + DeepSeekMoE）
 
-- **Omubot 入口**：[services/llm/client.py:1963 chat()](../../services/llm/client.py#L1963) / [client.py:627 call_api](../../services/llm/client.py#L627) / [client.py:678 SSE drain](../../services/llm/client.py#L678) / [client.py:1109 _dispatch_call](../../services/llm/client.py#L1109)
-- **Omubot 调用计数**：thinker [client.py:2071](../../services/llm/client.py#L2071) / main loop [client.py:2319](../../services/llm/client.py#L2319) / rewrite [client.py:1746](../../services/llm/client.py#L1746) / register classifier [plugins/chat/plugin.py:196](../../plugins/chat/plugin.py#L196) → [classifier.py:73](../../services/humanization/classifier.py#L73)
-- **Omubot cache 注入**：[llm_request.py:303 apply_cache_breakpoints](../../services/llm/llm_request.py#L303) / [llm_request.py:347-359](../../services/llm/llm_request.py#L347)
-- **Omubot tool loop**：[client.py:54 MAX_TOOL_ROUNDS=5](../../services/llm/client.py#L54) / [client.py:580 pass_turn](../../services/llm/client.py#L580) / [client.py:2344 pass_turn 退出](../../services/llm/client.py#L2344) / [client.py:2580 5 轮跑满](../../services/llm/client.py#L2580)
-- **Omubot V11 冷代码**：[client.py:1689](../../services/llm/client.py#L1689) / [client.py:1700](../../services/llm/client.py#L1700) / [client.py:917](../../services/llm/client.py#L917) / [kernel/config.py:1060](../../kernel/config.py#L1060)
-- **Omubot RuntimeBus**：[kernel/bus.py:47](../../kernel/bus.py#L47) / [kernel/bus.py:274](../../kernel/bus.py#L274)
-- **MaiBot**：[planner.py:101 ActionPlanner](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/planner_actions/planner.py#L101) / [group_generator.py:50 DefaultReplyer](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/replyer/group_generator.py#L50) / [heartFC_chat.py:64 HeartFChatting](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/heart_flow/heartFC_chat.py#L64)
-- **MaiBot dead code interrupt_flag**：[openai_client.py:283/528](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/llm_models/model_client/openai_client.py#L283) / [gemini_client.py:285/524](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/llm_models/model_client/gemini_client.py#L285)
-- **MaiBot 切分函数**：[generator_api.py:173 process_llm_response](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/utils/generator_api.py#L173) / [utils.py:446 split_into_sentences_w_remove_punctuation](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/utils/utils.py#L446) / [uni_message_sender.py:326 typing sleep](../../../../Users/kragcola/MaiM-with-u/MaiBot/src/chat/message_receive/uni_message_sender.py#L326)
+### 9.3 学术（27 篇，详见 §2）
 
-### 9.3 官方 SDK / 协议规范
+- ICLR 2024 / ACL 2024 / NeurIPS 2023 / EMNLP 2025 / CHI 2006 / PNAS 2009 / arXiv 2412.19437 / arXiv 2510.07777 / arXiv 2407.18416 / arXiv 2509.04345 / arXiv 2403.12968 / arXiv 2307.15337
 
-- **Anthropic SDK abort**：anthropic-sdk-python helpers.md `client.messages.stream(...).close()`；usage 字段 `cache_creation.ephemeral_5m_input_tokens / ephemeral_1h_input_tokens`
-- **Anthropic prompt cache**：5min default TTL；4 breakpoints；20-block lookback；Sonnet 4.6 ≥1024 / Opus 4.7 ≥4096 prefix tokens；read 0.10× / write 1.25×（5min）/ 2.0×（1h）
-- **aiohttp**：`async with session.post(...) as resp:` 退出上下文 → 自动 close；外层 task cancel → 触发 CancelledError 链式关闭
-- **vLLM**：PR #7111 (2024-08-03) `asyncio.aclose()` 显式 cancel；issue #24584 v1 引擎 abort 行为不一致（Omubot 不受影响 — Anthropic API）
-- **SGLang**：RadixAttention LRU 共享 / API speculative execution（[20] §5）
-- **Pipecat**：`SileroVADAnalyzer` + `enable_interruptions=True` 是开源唯一 reactive 实现，audio-based
-- **OpenTelemetry GenAI semconv v1.37+**：`gen_ai.operation.name` / `gen_ai.provider.name` / `gen_ai.request.model` / `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` / `gen_ai.usage.cache_creation.input_tokens` / `gen_ai.parent_span_id`
+### 9.4 v1 参考但 v2 推翻 / 不再适用
+
+- Anthropic prompt caching docs（4 breakpoint / 1.25× write / 0.10× read / 5 min TTL）— 与 DeepSeek 路径不可类比
 
 ---
 
 ## 10 当前状态
 
-| 阶段 | 状态 | 证据 |
+| 节 | 状态 | 落地证据 |
 |---|---|---|
-| 立项 | ✅ 完成（本文 §0） | 用户原话："part5 方案仍聚焦在话语分割处理上，而没有从 llm 生成的源头提供研究" |
-| §1 代码取证 | ✅ 完成 | Omubot 3-8 LLM call 实证 / MaiBot interrupt_flag dead code / Anthropic abort 计费规则 / 4-breakpoint cache spine |
-| §2 学术证据 | ✅ 完成 | 27 篇覆盖 8 轴，Q2/Q3/Q5/Q6 主线 ≥3 篇含量化结论 |
-| §3 候选方案 A/B/C/D | ✅ 完成 | 4 方案均含调用形态 + cache 兼容 + token 系数 + latency P95 + 复杂度 + Part 5 共存 |
-| §4 决策矩阵 | ✅ 完成 | 4 方案 × 7 维度 全填，无 TBD |
-| §6 接入点 | ✅ 完成 | V1/V8/V11/U6 + Part 5 双路径 + Part 2-3 + Part 4 |
-| §7 候选子任务 | ✅ 完成 | P6.1~P6.14 列出，预估行数与依赖 |
-| §8 风险与回滚 | ✅ 完成 | 9 类风险 + 量化阈值 + 监控来源 + 缓解；4 方案均给 sed 一键回滚命令 |
-| §9 引用 | ✅ 完成 | 27 论文按 8 轴归类 + Omubot/MaiBot file:line + SDK/协议规范 |
+| v1 立项 | ✅ 完成（2026-05-25） | 用户原话 "part5 方案仍聚焦在话语分割处理上，而没有从 llm 生成的源头提供研究" |
+| v2 重写 | ✅ 完成（2026-05-26） | 用户原话 "在执行1、3的前提下重写part6，搜索deepseek v4的最新指标和技术架构，你目前不严谨" — DeepSeek 官方 pricing / kv_cache / Anthropic 兼容性文档全部抓取并对齐 |
+| **v2.1 增补**（2026-05-26 同日续作） | ✅ 完成 | 用户原话 "此前进行过一次cache优化，评估是否需要进一步优化" + "先修改part6方案，将该修改列入其中" — §1.5.0 D+E 历史表 / §1.5.1 7 日实证重写 / §1.5.4 候选 (e) 长尾收口 / §7.0 P6.0 拆三段（a/b/c） |
+| §1 代码取证 v2 | ✅ 完成 | §1.1.5 cache 架构 dead code / §1.3 DeepSeek V4-Flash 完整规格 / §1.5 state_board 漂移根因（state_board.py:71-189 file:line 证据） |
+| §2 学术证据 v2 | ✅ 完成（27 篇） | Q6 行替换为 DeepSeek-specific 4 条 |
+| §3 成本重算 v2 | ✅ 完成 | 7 日 storage/usage.db 实证 baseline + 4 方案 prefix 稳定 / 不稳两组成本 |
+| §4 决策矩阵 v2 | ✅ 完成 | 排序 P6.0 → B → D → A → C 替换 v1 的 A → C → B → D |
+| §7 子任务 v2 | ✅ 完成 | P6.0 新增、P6.8（cache_creation 监控）删除 |
+| **§7.0 P6.0 三段拆分 v2.1** | ✅ 完成 | P6.0.a layout 后置 / P6.0.b 字段粒度抬升（含 sticky topics）/ P6.0.c 7 日生产复盘 |
+| **P6.0.a / P6.0.b / P6.0.c** | ⏳ 待动手 | 优先级最高；feature flag 双 off 兼容 |
+| **P6.1 ~ P6.13** | ⏳ 待动手 | 等 P6.0.c 验收过线后启动 B 方案（P6.1~P6.4） |
 
-**调研完成。**等待用户决策推进路径（推荐 §4.2：B → A → C 三阶段；D 不进推荐）。本文存档为 Part 4 模式 —— **不立项 P 任务，不动代码，等待用户最终验收前的决策**。
+---
+
+## 附录 A — v1 → v2 / v2.1 修订映射
+
+| v1 节 | v2 处置 | v2.1 增补 |
+|---|---|---|
+| §0 边界 / 取证原则 / 8 问题 | 保留，无修改 | — |
+| §1.1 Omubot 现状 | 保留主体；新增 §1.1.5 标 4-breakpoint dead code | — |
+| §1.2 MaiBot 中断 dead code | 保留 | — |
+| §1.3 Anthropic SSE + 4-breakpoint | **整节替换**为 DeepSeek V4-Flash 架构 | — |
+| §1.4 框架对照 | 保留主体，校正 cache 列 | — |
+| §1.5（v1 不存在） | **新增** state_board 漂移诊断 | **§1.5.0 新增**（D+E 历史表 4 行）+ **§1.5.1 重写**（7 日实证 proactive 74.3% / chat 71.4%）+ **§1.5.4 增补**（候选 e "D+E 同方法不再延续"） |
+| §2 学术 27 篇 | 保留 26 篇；Q6 行 4 条改为 DeepSeek-specific | — |
+| §3 成本系数 | **整节重算** — Anthropic 数字全部不适用 | — |
+| §4 决策矩阵 | **整节重排** — A 从首选降到第三，B 从第三升到首选 | — |
+| §5 不做的事 | 保留 + 增补 4 条 | — |
+| §6 接入点 | 保留 | — |
+| §7 子任务 | **新增 P6.0**；删除 P6.8（cache_creation）；编号 P6.1~P6.14 → P6.1~P6.13 | **§7.0 新增** — P6.0 拆三段：P6.0.a layout / P6.0.b 粒度 / P6.0.c 7 日复盘；§7.1 子标题保留 P6.1~P6.13 不变 |
+| §8 风险阈值 | 重写为 DeepSeek 经济下的阈值 | — |
+| §9 引用 | 增 DeepSeek 官方文档 4 条；标记 Anthropic 引用为 v1 推翻 | — |
+| §10 状态 | 加 v2 重写条目 | 加 v2.1 增补条目 + P6.0.a/b/c 行 |

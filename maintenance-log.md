@@ -4,6 +4,67 @@
 
 ---
 
+## 2026-05-26 Humanization Part 6 v2.1 增补（D+E 历史并入 + P6.0 三段拆分）
+
+**变更类型**：tracking docs（仅文档，无代码 / 配置变更）
+
+**内容**：按用户口径 "此前进行过一次cache优化，评估是否需要进一步优化" + "先修改part6方案，将该修改列入其中" 在 [Part 6 v2 文档](docs/tracking/omubot-humanization-part6-source-side-generation.md) 上做最小化增补：
+
+- §1.5.0 新增 D+E 历史 cache 优化表（2026-05-22 静态 prompt 跨 1024-token 阈值方案）— slang +9.3pp / slang_review +14.2pp / slang_drift +2.9pp / thinker +11.8pp；结论 "D/E 同方法不再延续，已达边际递减"
+- §1.5.1 用容器内 [storage/usage.db](storage/usage.db) 7 日实证重写：proactive 命中率 74.3%（单日 44.6%~86.7% 摆动 42pp）/ chat 71.4%（单日 35.5%~80.8% 摆动 45pp）/ slang 62.9% / slang_review 59.2% / slang_drift 84.4% / thinker 51.2%
+- §1.5.4 候选治理表新增列 "D+E 历史关系" + 第 5 行 (e) "D+E 同方法延续：不再延续"；明确 v2.1 选 (a)+(b) 替代 (e)
+- §7.0 新增 P6.0 三段细化（v2.1 增补）：
+  - **P6.0.a** state_board layout 后置 — feature flag `humanization.state_board_layout=tail`，[services/llm/prompt_builder.py:161-178 `build_blocks()`](services/llm/prompt_builder.py#L161-L178) 改 layout 顺序至 `[static, group_context, *plugin_static, *plugin_stable, *plugin_dynamic, messages, state_board]`
+  - **P6.0.b** state_board 字段粒度抬升 — flag `humanization.state_board_granularity=coarse`，改 [services/memory/state_board.py](services/memory/state_board.py) 的 `_derive_mentions`（"刚刚 / 今天早些 / 昨天 / 更早"）/ `_derive_frequency`（去掉数字仅留 "活跃 / 正常 / 冷清"）/ `_derive_topics`（连续两次 query top-3 不变则 sticky）
+  - **P6.0.c** 7 日生产复盘 + 默认开 + D+E 长尾收口 — 验收阈值 proactive ≥ 85% / chat ≥ 80% / 单日波动 ≤ 15pp
+- §10 状态 + 附录 A 增补 v2.1 行
+
+**验证**：
+
+- 文档结构性验证：§7.1 完整子任务表的 markdown table header 已修复（编号 / 任务 / 依赖 / 关键产物 / 单测 5 列对齐），P6.1~P6.13 行不变
+- 引用全部锚定：[services/memory/state_board.py:71-79 / 122 / 181-189 / 191-214 / 244-254](services/memory/state_board.py) 字段级行号 / 容器 sqlite 7 日实证 / D+E 历史成本-效果对照
+- 不动代码 / 配置：本次仅 tracking 文档增补；P6.0.a / P6.0.b / P6.0.c 全部待施工
+
+**影响**：
+
+- 决策升级：v2 的 "P6.0 state_board prefix 稳定化" 从一行 P6.0 拆为可独立施工的 a/b/c 三段，feature flag 双 off 兼容，不阻塞 P6.1~P6.13
+- 历史治理脉络贯通：D+E 静态 prompt 阈值方案在 slang 家族已收口，主链路（proactive/chat）的命中率瓶颈不在 1024-token 阈值而在 byte-level 抖动；P6.0 直接攻击新瓶颈
+- 不阻断 Part 1/2/3/4/5 主线施工
+
+**回滚**：本次仅文档变更，无运行时影响。如需回滚 v2.1 增补：`git restore docs/tracking/omubot-humanization-part6-source-side-generation.md`（同步退回 v2 状态）。
+
+---
+
+## 2026-05-26 Humanization Part 6 v2 重写（DeepSeek V4-Flash 经济重算）
+
+**变更类型**：tracking docs（仅文档，无代码 / 配置变更）
+
+**内容**：按用户口径 "在执行1、3的前提下重写part6，搜索deepseek v4的最新指标和技术架构，你目前不严谨" 全面重写 [Part 6 源头生成调度调研](docs/tracking/omubot-humanization-part6-source-side-generation.md)：
+
+- v1 → v2 修订动因：v1 §3 全部成本系数按 Anthropic Opus 4.7 推导，但 [config/config.json](config/config.json) `default_profile=main, profiles.main.api_format=deepseek, model=deepseek-v4-flash` 显示生产 100% 流量走 DeepSeek V4-Flash；v1 数字（input:output 1:5、cache_read 0.10×、cache_write 1.25×、Opus 4.7 prefix 4096-token 阈值、4-breakpoint 硬上限）全部不适用 DeepSeek 经济
+- v2 §1.3 新增 DeepSeek V4-Flash 完整规格（284B MoE / 13B active / 1M context / 384K output / MIT / 2026-04-24）+ 现行定价（cache miss \$0.14、cache hit \$0.0028、output \$0.28，hit:miss = 0.02× / output:miss = 2:1）+ Anthropic 兼容端点行为（`cache_control` 静默丢弃、`cache_creation_input_tokens` 恒为 0、stream 不支持 mid-stream resume）
+- v2 §1.5 新增生产 cache 命中率诊断：[storage/usage.db](storage/usage.db) 7 日数据显示 proactive 命中率 51%~84% 剧烈波动，根因为 [services/memory/state_board.py:71-79 `to_prompt_text()`](services/memory/state_board.py#L71-L79) 含 `_derive_mentions` 分钟级时间戳 / `_derive_frequency` 动态计数 / `_derive_topics` 旋转 bigram —— DeepSeek byte-exact prefix 下任意字节抖动击穿后续所有 cache
+- v2 §3 整体重算：baseline 7 日实证成本 ≈ \$0.000918 / proactive call；4 方案在 prefix 稳定（90%+）/ 不稳（当前 65%）两组下分别给出系数；A 方案在 prefix 不稳时成本飙至 8.8× baseline
+- v2 §4 决策矩阵重排：v1 A → C → B → D 改为 **P6.0（state_board 稳定）→ B（streaming-as-segment）→ D（pause-then-extend）→ A（plan-then-utter pilot）→ C（reactive replan 暂搁）**
+- v2 §7 子任务重排：新增 P6.0 强制前置（state_board 后置 + 时间戳粒度抬升），删除 v1 P6.8（cache_creation 监控 — DeepSeek 路径恒为 0），编号 P6.1~P6.13
+- 文档 §2 学术证据矩阵 27 篇保留；Q6 行 4 条全部替换为 DeepSeek-specific（kv_cache / pricing / Anthropic 兼容性 / V3 paper sliding window）
+
+**验证**：
+
+- 文档结构性验证：`wc -l docs/tracking/omubot-humanization-part6-source-side-generation.md` → 623 行（v1 715 行，净减 92 行因移除不适用的 Anthropic 数字）
+- 引用全部锚定：仓内 file:line / DeepSeek 官方 api-docs URL / arXiv ID + 章节
+- 不动代码 / 配置：本次仅 tracking 文档变更；P6.0~P6.13 全部待施工
+
+**影响**：
+
+- 调研结论翻盘：B/D 升为推荐路径，A 降为 pilot，C 锁定不开发
+- 强制前置 P6.0：在 state_board prefix 未稳定到 90%+ 之前，任何 multi-call 方案的成本估算上限会因 byte-level 抖动从 1.05× 飙到 8.8×；P6.0 单独可带来 ≈ 60% 成本节省
+- 不阻断 Part 1/2/3/4/5 主线施工
+
+**回滚**：本次仅文档变更，无运行时影响。如需回滚 v2 重写：`git restore docs/tracking/omubot-humanization-part6-source-side-generation.md`。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P2.10 Sticker Emotion Tag 重标注落地
 
 **变更类型**：sticker runtime / vision recaption / tests
