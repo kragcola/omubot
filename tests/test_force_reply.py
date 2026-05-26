@@ -76,3 +76,17 @@ async def test_video_always_keeps_force_reply() -> None:
 
     assert llm.calls[0]["force_reply"] is True
     await scheduler.close()
+
+
+async def test_directed_followup_keeps_force_reply() -> None:
+    llm = _FakeLLM()
+    scheduler = _make_scheduler(llm)
+
+    scheduler.notify(
+        "111",
+        trigger=TriggerContext(reason="继续刚才的话题", mode="directed_followup", extra={"addressee_self": False}),
+    )
+    await asyncio.sleep(0.1)
+
+    assert llm.calls[0]["force_reply"] is True
+    await scheduler.close()

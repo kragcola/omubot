@@ -165,11 +165,59 @@ class TestAtHandling:
         await scheduler.close()
 
 
+class TestDirectedFollowup:
+    async def test_directed_followup_bypasses_proactive_none(self) -> None:
+        """directed_followup fires even when proactive is None."""
+        identity = _make_identity(proactive=None)
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(identity),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0, planner_smooth=999.0),
+        )
+        scheduler.notify("111", trigger=TriggerContext(reason="继续刚才的话题", mode="directed_followup"))
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1
+        await scheduler.close()
+
+    async def test_directed_followup_cancel_path_does_not_dirty_pending_or_skip(self) -> None:
+        """Queued directed_followup can be cancelled cleanly without skip pollution."""
+        llm = _FakeLLM(reply=None, delay=1.0)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        scheduler.notify("111", user_id="42")
+        await asyncio.sleep(0.1)
+
+        slot = scheduler._slots["111"]
+        assert slot.running_task is not None
+        assert not slot.running_task.done()
+
+        scheduler.notify(
+            "111",
+            trigger=TriggerContext(reason="继续刚才的话题", mode="directed_followup"),
+            user_id="42",
+        )
+
+        assert slot.pending_at is True
+        assert slot.trigger is not None and slot.trigger.mode == "directed_followup"
+        assert slot.consecutive_skip == 0
+
+        scheduler.clear_pending("111", cancel_running=True)
+        await asyncio.sleep(0.05)
+
+        assert slot.pending_at is False
+        assert slot.trigger is None
+        assert slot.consecutive_skip == 0
+        assert len(llm.calls) == 1
+        await scheduler.close()
+
+
 class TestPendingReset:
     async def test_clear_pending_resets_trigger_and_queue(self) -> None:
         llm = _FakeLLM(reply=None, delay=0.5)
         scheduler = GroupChatScheduler(
-            llm=llm,
+            llm=llm,  # type: ignore[arg-type]
             timeline=GroupTimeline(),
             identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
@@ -192,7 +240,7 @@ class TestPendingReset:
     async def test_clear_pending_can_cancel_running_task(self) -> None:
         llm = _FakeLLM(reply=None, delay=1.0)
         scheduler = GroupChatScheduler(
-            llm=llm,
+            llm=llm,  # type: ignore[arg-type]
             timeline=GroupTimeline(),
             identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),

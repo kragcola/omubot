@@ -31,7 +31,7 @@ _L = logger.bind(channel="scheduler")
 def _should_force_reply(trigger: TriggerContext | None) -> bool:
     if trigger is None:
         return False
-    if trigger.mode == "video_always":
+    if trigger.mode in {"video_always", "directed_followup"}:
         return True
     if trigger.mode != "at_mention":
         return False
@@ -136,9 +136,10 @@ class GroupChatScheduler:
         identity = self._identity_mgr.resolve()
         is_at = trigger is not None and trigger.mode == "at_mention"
         is_video_always = trigger is not None and trigger.mode == "video_always"
-        if identity.proactive is None and not is_at and not is_video_always:
+        is_directed_followup = trigger is not None and trigger.mode == "directed_followup"
+        if identity.proactive is None and not is_at and not is_video_always and not is_directed_followup:
             # Skip non-@ messages when there are no proactive interjection rules.
-            # @ mentions and video always-reply bypass this check.
+            # @ mentions, directed followups, and video always-reply bypass this check.
             _L.info("scheduler | group={} proactive=None, skip (non-@)", group_id)
             return
 
@@ -157,6 +158,15 @@ class GroupChatScheduler:
                 _L.debug("scheduler | group={} @ queued (task running)", group_id)
                 return
             _L.info("scheduler | group={} @ -> fire", group_id)
+            self._fire(group_id)
+            return
+
+        if is_directed_followup:
+            if slot.running_task and not slot.running_task.done():
+                slot.pending_at = True
+                _L.debug("scheduler | group={} directed_followup queued (task running)", group_id)
+                return
+            _L.info("scheduler | group={} directed_followup -> fire", group_id)
             self._fire(group_id)
             return
 
