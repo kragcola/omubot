@@ -1058,6 +1058,7 @@ class ChatPlugin(AmadeusPlugin):
                 and config.humanization.thinker_provider
             ),
             humanization_rewrite_threshold=config.humanization.rewrite_threshold,
+            humanization_kaomoji_enforce_strict=config.humanization.kaomoji_enforce_strict,
             humanization_runtime_groups=config.humanization.runtime_groups,
         )
         llm.set_task_profile_names(task_profile_names)

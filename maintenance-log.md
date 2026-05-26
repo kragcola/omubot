@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P2.9 Kaomoji Enforce Gate 收紧落地
+
+**变更类型**：humanization runtime / reply gate / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 4 P2.9 收紧 kaomoji 强制表情包补发逻辑：
+
+- `kernel/config.py`：`HumanizationConfig` 新增 `kaomoji_enforce_strict: bool = False`，作为 v1 回退旗标；
+- `services/llm/client.py`：`LLMClient` 新增 `humanization_kaomoji_enforce_strict` 入参与 `_should_force_kaomoji_sticker_round()` helper；默认 strict=false 时保持旧逻辑，strict=true 时仅 `register=playful` 且 `mood in {"playful", "high"}` 才触发强制 sticker round；
+- `plugins/chat/plugin.py`：构造 `LLMClient` 时接入 `config.humanization.kaomoji_enforce_strict`；
+- `tests/test_humanization_config.py`：补 schema/default/load-config 断言；
+- `tests/test_kaomoji_enforce.py`：新增 6 条专项测试，覆盖 strict 开关、register/mood gate 与 no-kaomoji fallback；
+- 工作区本地 `config/config.toml` / `config/config.json`（git ignored）同步加入 `kaomoji_enforce_strict = false` 默认值，便于当前灰度环境就地回退。
+
+**验证**：
+
+- `uv run pytest -q tests/test_kaomoji_enforce.py tests/test_humanization_config.py tests/test_llm_client_rewrite.py` → `16 passed`
+- `uv run ruff check kernel/config.py plugins/chat/plugin.py services/llm/client.py tests/test_humanization_config.py tests/test_kaomoji_enforce.py` → passed
+- `uv run pyright services/llm/client.py tests/test_kaomoji_enforce.py` → `0 errors`
+- `uv run python -m py_compile kernel/config.py plugins/chat/plugin.py services/llm/client.py tests/test_kaomoji_enforce.py` → passed
+- `uv run python - <<'PY' ... load_config('config/config.toml') / load_config('config/config.json') ... PY` → 两份本地配置均读到 `humanization.kaomoji_enforce_strict == False`
+- `uv run pytest --collect-only -q` → `1836 tests collected`
+
+**影响**：P2.9 状态自主验收为 ✅；生产路径上的 kaomoji 强制轮现在可以按 runtime register/mood 收紧，同时保留单布尔旗标回退到 v1 行为。
+
+**备注**：`config/config.toml` 与 `config/config.json` 在本仓库是本地忽略文件；本次已同步当前工作区，但不会出现在 git commit 里。
+
+**回滚**：撤销 `kernel/config.py` / `services/llm/client.py` / `plugins/chat/plugin.py` / `tests/test_humanization_config.py` / `tests/test_kaomoji_enforce.py` 的 P2.9 改动，并把本地 `config/config.toml` / `config/config.json` 中的 `kaomoji_enforce_strict` 恢复到变更前状态。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P3.3 Read Mark Prompt 注入落地
 
 **变更类型**：humanization runtime / prompt builder / tests

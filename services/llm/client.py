@@ -95,6 +95,7 @@ _CONTROL_TOKEN_RE = re.compile(
     r"(?is)\s*(?:\[\s*pass[_\s-]*turn\s*\]|pass[_\s-]*turn|passturn)\s*(?:[:：\-]\s*.*)?\s*"
 )
 _VISIBLE_TOOL_OUTPUT_NAMES = {"send_sticker", "send_group_msg"}
+_PLAYFUL_KAOMOJI_MOODS = frozenset({"playful", "high"})
 
 
 def _candidate_from_prompt_block(
@@ -939,6 +940,7 @@ class LLMClient:
         budget_manager: object | None = None,
         thinker_provider_enabled: bool = False,
         humanization_rewrite_threshold: float = -1.0,
+        humanization_kaomoji_enforce_strict: bool = False,
         humanization_runtime_groups: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
@@ -982,6 +984,7 @@ class LLMClient:
         self._budget_manager = budget_manager
         self._thinker_provider_enabled = bool(thinker_provider_enabled)
         self._humanization_rewrite_threshold = float(humanization_rewrite_threshold)
+        self._humanization_kaomoji_enforce_strict = bool(humanization_kaomoji_enforce_strict)
         self._humanization_runtime_groups = frozenset(
             str(group_id).strip()
             for group_id in (humanization_runtime_groups or ())
@@ -1687,6 +1690,59 @@ class LLMClient:
                 return self._mood_getter()
         except Exception:
             return None
+
+    @staticmethod
+    def _humanization_state_label(
+        value: object | None,
+        *,
+        keys: tuple[str, ...],
+    ) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip().lower()
+        if isinstance(value, dict):
+            for key in keys:
+                candidate = value.get(key)
+                if candidate:
+                    return str(candidate).strip().lower()
+            return ""
+        for key in keys:
+            candidate = getattr(value, key, None)
+            if candidate:
+                return str(candidate).strip().lower()
+        return ""
+
+    def _should_force_kaomoji_sticker_round(
+        self,
+        reply: str,
+        *,
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        turn_id: str,
+        sticker_sent: bool,
+        round_i: int,
+    ) -> bool:
+        if not _text_has_kaomoji(reply) or sticker_sent or round_i >= MAX_TOOL_ROUNDS - 1:
+            return False
+        if not self._humanization_kaomoji_enforce_strict:
+            return True
+        scope = self._humanization_scope(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        register_label = self._humanization_state_label(
+            self._humanization_register(scope),
+            keys=("label", "register", "name"),
+        )
+        mood_label = self._humanization_state_label(
+            self._current_humanization_mood(group_id=group_id, session_id=session_id),
+            keys=("label", "mood", "name"),
+        )
+        return register_label == "playful" and mood_label in _PLAYFUL_KAOMOJI_MOODS
 
     def _score_humanization_reply(
         self,
@@ -2485,10 +2541,14 @@ class LLMClient:
                 # description but the LLM forgot to call send_sticker, inject a
                 # forced sticker-selection round (once only, and only if we have
                 # at least one round left).
-                if (
-                    _text_has_kaomoji(reply)
-                    and not _sticker_sent
-                    and round_i < MAX_TOOL_ROUNDS - 1
+                if self._should_force_kaomoji_sticker_round(
+                    reply,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=reply_turn_id,
+                    sticker_sent=_sticker_sent,
+                    round_i=round_i,
                 ):
                     _sticker_sent = True  # prevent re-entry
                     assistant_content = []

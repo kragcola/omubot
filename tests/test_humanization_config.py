@@ -17,6 +17,7 @@ def test_humanization_config_defaults_all_features_off() -> None:
     assert cfg.humanization.thinker_provider is False
     assert cfg.humanization.rewrite_threshold == -1.0
     assert cfg.humanization.semantic_gate_dynamic is False
+    assert cfg.humanization.kaomoji_enforce_strict is False
     assert cfg.humanization.runtime_groups == []
 
 
@@ -31,6 +32,7 @@ sticker_register_provider = true
 thinker_provider = true
 rewrite_threshold = 0.4
 semantic_gate_dynamic = true
+kaomoji_enforce_strict = true
 runtime_groups = [993065015, " 984198159 ", ""]
 """.strip(),
         encoding="utf-8",
@@ -44,6 +46,7 @@ runtime_groups = [993065015, " 984198159 ", ""]
     assert cfg.humanization.thinker_provider is True
     assert cfg.humanization.rewrite_threshold == 0.4
     assert cfg.humanization.semantic_gate_dynamic is True
+    assert cfg.humanization.kaomoji_enforce_strict is True
     assert cfg.humanization.runtime_groups == ["993065015", "984198159"]
 
 
@@ -54,6 +57,7 @@ def test_humanization_config_from_json(tmp_path: Path) -> None:
             "humanization": {
                 "context_providers": True,
                 "rewrite_threshold": 0.25,
+                "kaomoji_enforce_strict": True,
                 "runtime_groups": [993065015],
             }
         }),
@@ -64,6 +68,7 @@ def test_humanization_config_from_json(tmp_path: Path) -> None:
 
     assert cfg.humanization.context_providers is True
     assert cfg.humanization.rewrite_threshold == 0.25
+    assert cfg.humanization.kaomoji_enforce_strict is True
     assert cfg.humanization.runtime_groups == ["993065015"]
     assert cfg.humanization.register_classifier is False
     assert cfg.humanization.semantic_gate_dynamic is False
@@ -83,6 +88,7 @@ def test_humanization_config_allows_single_flag_override() -> None:
     assert cfg.humanization.sticker_register_provider is False
     assert cfg.humanization.thinker_provider is False
     assert cfg.humanization.semantic_gate_dynamic is False
+    assert cfg.humanization.kaomoji_enforce_strict is False
 
 
 def test_humanization_config_ignores_unknown_legacy_fields(tmp_path: Path) -> None:

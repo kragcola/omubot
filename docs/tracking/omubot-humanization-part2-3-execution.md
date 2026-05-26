@@ -235,7 +235,7 @@
 | **P3.9** | 3 | ✅ | 自主验收通过：cold + non-self planner gate、stranger→neutral register；目标文件 +50/-1 行，8 条新测试，相关回归 30 条通过 |
 | **P2.5** | 3 | ✅ | 自主验收通过：router 透传 `addressee_self`，scheduler 仅 self-target `at_mention` force_reply；3 条专项 + scheduler 回归 41 条通过 |
 | **P3.3** | 3 | ✅ | 自主验收通过：PromptBuilder 第 2 块 read_mark marker；2 条新测试，相关回归 22 条通过 |
-| **P2.9** | 4 | ⏳ | 阻塞于 P2.8 |
+| **P2.9** | 4 | ✅ | 自主验收通过：kaomoji 强制轮 strict gate + `humanization.kaomoji_enforce_strict` 回退旗标；6 条新测试与相关回归 16 条通过 |
 | **P2.10** | 4 | ⏳ | 阻塞于 P2.8；保留 DEFAULT_STICKER_USAGE_HINT fallback |
 | **P2.14** | 4 | ⏳ | 阻塞于 P2.8 + P3.6；自反馈环上限 0.3 |
 | **P2.11** | 4 | ⏳ | 阻塞于 P2.8 |
@@ -855,3 +855,35 @@ D2 / 回滚：本任务无新增持久化写路径；回滚为撤销 `kernel/rou
 - D1 grep：`rg -n "_READ_MARK_TEXT|_build_group_context_block|read_mark=|test_prompt_read_mark" services/llm/prompt_builder.py services/llm/client.py tests/test_prompt_read_mark.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 helper、client 接线、新测试与本追踪记录。
 
 D2 / 回滚：本任务无新增持久化写路径；回滚为撤销 `services/llm/prompt_builder.py` / `services/llm/client.py` 的 `read_mark` 接线，删除 `tests/test_prompt_read_mark.py` 并撤销 §6 / §9 的 P3.3 回填。
+
+### P2.9 领单拆分（执行前）— Codex / 2026-05-26 02:26 CST
+
+- **任务边界**：主改 `services/llm/client.py` 的 kaomoji 强制轮 gate，补最小 humanization 配置开关与专项测试；不接 `services/sticker/decision_provider.py` 到生产链路，不改 sticker library / tool loop / prompt builder。
+- **自主评估**：当前 kaomoji 强制轮只看 `_text_has_kaomoji(reply)` 与 `_sticker_sent`，会在任何语域和 mood 下触发。按派单订正，本步只在 `register=playful` 且 `mood in {"playful", "high"}` 时保留强制轮；其余场景回落为不强制发图。另补 `humanization.kaomoji_enforce_strict` 旗标，默认 `false` 以便 30 秒回退到 v1 强制轮。
+- **执行拆分**：
+  1. 在 `kernel/config.py` 的 `HumanizationConfig` 增加 `kaomoji_enforce_strict: bool = False`，并同步现有配置样例与测试口径。
+  2. 在 `services/llm/client.py` 提取最小 helper，统一读取当前 `register` / `mood` / `humanization` 配置，判断本轮是否允许触发 kaomoji 强制轮。
+  3. 仅修改现有 `if (_text_has_kaomoji(reply) and not _sticker_sent ...)` 这条路径，不改 `_text_has_kaomoji()` 函数体、不改强制轮消息内容、不改 tool round 上限。
+  4. 新增 `tests/test_kaomoji_enforce.py` 6 条，覆盖 strict=false 回退、strict=true + playful/high 放行、strict=true + non-playful 或 cold 抑制、无 kaomoji 不触发。
+- **风险与回滚**：本步直接触及生产回复路径，但改动面应收敛在一处条件判断。回滚为撤销 `kernel/config.py` / `services/llm/client.py` / 配置样例 / 新测试的 P2.9 改动，并撤销 §6 / §9 P2.9 回填。
+
+### P2.9 完成记录（执行者 Codex）— 2026-05-26 08:08 CST
+
+自验结果：P2.9 完成并自主验收 ✅。本步把 kaomoji 强制轮收口到 `LLMClient._should_force_kaomoji_sticker_round()`；默认 `humanization.kaomoji_enforce_strict=false` 时保持 v1 行为不变，只有显式开启 strict 后，才要求 `register=playful` 且 `mood in {"playful", "high"}` 才补一轮强制 `send_sticker`。
+
+- `kernel/config.py`：`HumanizationConfig` 新增 `kaomoji_enforce_strict: bool = False`。
+- `services/llm/client.py`：`LLMClient.__init__` 新增 `humanization_kaomoji_enforce_strict` 入参；新增 `_humanization_state_label()` 与 `_should_force_kaomoji_sticker_round()`，原 kaomoji 强制轮分支只改成调 helper，不动 `_text_has_kaomoji()` 与强制轮 user 提示文案。
+- `plugins/chat/plugin.py`：创建 `LLMClient` 时接入 `config.humanization.kaomoji_enforce_strict`。
+- `tests/test_humanization_config.py`：补默认值 / TOML / JSON / 单字段 override 断言。
+- `tests/test_kaomoji_enforce.py`：新增 6 条专项测试，覆盖 strict=false v1 回退、strict=true + playful/high 放行、strict=true + quiet/cold 抑制、无 kaomoji 不触发。
+- 工作区本地 `config/config.toml` / `config/config.json`（git ignored）已同步加入 `kaomoji_enforce_strict = false` / `"kaomoji_enforce_strict": false`，供当前灰度配置直接回退使用。
+
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_kaomoji_enforce.py tests/test_humanization_config.py tests/test_llm_client_rewrite.py` → `16 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check kernel/config.py plugins/chat/plugin.py services/llm/client.py tests/test_humanization_config.py tests/test_kaomoji_enforce.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pyright services/llm/client.py tests/test_kaomoji_enforce.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile kernel/config.py plugins/chat/plugin.py services/llm/client.py tests/test_kaomoji_enforce.py` → passed。
+- `source ./scripts/dev/env.sh && uv run python - <<'PY' ... load_config('config/config.toml') / load_config('config/config.json') ... PY` → 两份本地配置均读到 `humanization.kaomoji_enforce_strict == False`。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` → `1836 tests collected in 0.52s`。
+- D1 grep：`rg -n "kaomoji_enforce_strict|_should_force_kaomoji_sticker_round|humanization_kaomoji_enforce_strict|test_kaomoji_enforce" kernel/config.py plugins/chat/plugin.py services/llm/client.py tests/test_humanization_config.py tests/test_kaomoji_enforce.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 schema、ChatPlugin 接线、LLMClient helper、新旧测试与本追踪记录。
+
+D2 / 回滚：回滚为撤销 `kernel/config.py` / `services/llm/client.py` / `plugins/chat/plugin.py` / `tests/test_humanization_config.py` / `tests/test_kaomoji_enforce.py` 的 P2.9 改动，并把工作区本地 `config/config.toml` / `config/config.json` 的 `kaomoji_enforce_strict` 设回原状，再撤销 §6 / §9 P2.9 回填。

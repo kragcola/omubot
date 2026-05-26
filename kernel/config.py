@@ -1088,6 +1088,16 @@ class HumanizationConfig(BaseModel):
             "restart_hint": "recommended",
         },
     )
+    kaomoji_enforce_strict: bool = Field(
+        default=False,
+        description="Restrict kaomoji sticker enforcement to playful/high runtime state.",
+        json_schema_extra={
+            "display_label": "收紧颜文字强制表情包",
+            "help": "开启后仅 playful 语域且 mood 为 playful/high 时，颜文字回复才强制补一轮 send_sticker。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
     runtime_groups: list[str] = Field(
         default_factory=list,
         description="Group ids where humanization runtime features may run; empty means all groups when flags are on.",
