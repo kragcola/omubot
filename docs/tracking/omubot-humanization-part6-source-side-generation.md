@@ -470,6 +470,55 @@ v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output
 
 → B（不动 call 数）和 D（追发 1 次）的成本几乎不变；A（多 call）和 C（replan）的成本结构性恶化。
 
+### 4.4 三档 profile 切换设计（v2.2 新增）
+
+> 增补于 v2.2（2026-05-26 用户原话："我不要单选项进行，而是在配置提供三档切换。改进方案，追加切换，审计是否需要切换功能修改流程"）。本节把 §4.2 的方案选项物化为**用户运行时可切换的 3 档 profile**，而不是把"先 economy 后 balanced 后 performance"硬编进施工节奏里。
+
+#### 4.4.1 三档 profile 定义
+
+| profile | 含义 | 启用方案 | 互斥关系 | 7 日实测成本 vs 现状 | 体感 |
+|---|---|---|---|---|---|
+| **`economy`**（默认 / 出厂） | 仅修 cache 抖动 | P6.0.a layout 后置 + P6.0.b 字段粒度抬升 | 与 Part 5 natural_split 完全正交 | **-63%** | ≈ 0（不可见） |
+| **`balanced`**（推荐） | economy + 段层与节奏拟人化 | + B streaming-as-segment + D pause-then-extend | **B 与 Part 5 natural_split 互斥**（自动 disable）；D 与 Part 5 正交 | -58% ~ -56% | 中-高 |
+| **`performance`**（pilot） | balanced + plan-then-utter | + A plan-then-utter（仅 proactive） | **A 与 Part 5 互斥**（自动 disable）；A 解锁条件：proactive hit% ≥ 80% | -56% + pilot $0.15 / 14 日 | 高（pilot 阶段） |
+
+> 注：3 档之外保留 `custom`——直读子配置具体 flag，与目前的"flag-by-flag"行为完全等价（向后兼容）。
+
+#### 4.4.2 切换语义
+
+- **全局默认 profile**：[kernel/config.py `HumanizationConfig`](../../kernel/config.py#L1024) 新增 `profile: Literal["economy","balanced","performance","custom"] = "economy"`
+- **群级覆盖 profile**：[kernel/config.py `GroupOverride`](../../kernel/config.py#L343) 新增 `humanization_profile: Literal[...] | None = None`；None 时退回全局
+- **运行时决议**：消费者改读 `config.humanization.resolved_for(group_id)` 返回 frozen `ResolvedHumanization`，含：
+  - `state_board_layout: Literal["head","tail"]`
+  - `state_board_granularity: Literal["fine","coarse"]`
+  - `streaming_segment_enabled: bool`
+  - `pause_then_extend_enabled: bool`
+  - `plan_then_utter_enabled: bool`
+  - `disable_natural_split: bool` — 由 `resolve_profile()` 物化的互斥标志（B/A 任一开则 True）
+- **健康守卫降级**：若最近 1h proactive hit% < 80%，`performance` 运行时自动降级到 `balanced`（保留 SPA 显示值；log warning + 等阈值恢复后自动回升）。这条复用现有 [storage/usage.db](../../storage/usage.db) `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 字段，无需新数据通路
+
+#### 4.4.3 与既有 Part 1 humanization flag 的关系
+
+> 现有 9 个 Part 1 flag（`context_providers / register_classifier / sticker_register_provider / thinker_provider / rewrite_threshold / semantic_gate_dynamic / kaomoji_enforce_strict / runtime_groups / ...`）**全部保留**。三档 profile 仅控制 Part 6 引入的 4 个新 flag（state_board layout/granularity / streaming / pause_extend / plan_then_utter）；Part 1 flag 与 Part 6 profile 在 BaseModel 层正交。
+
+#### 4.4.4 切换路径（用户视角）
+
+| 路径 | 实现 | 生效粒度 | 重启需要 |
+|---|---|---|---|
+| **Admin SPA → 系统配置 → 拟人化 → profile 下拉** | [admin/routes/api/config.py:380](../../admin/routes/api/config.py#L380) `_build_schema()` 自动渲染 enum 字段（`json_schema_extra` 提供 `display_label / options / risk_level`） | 全局 | recommended |
+| **群组管理 → 单群覆盖 → humanization_profile** | 既有 GroupOverride 渲染管线 | 单群 | recommended |
+| **config.json 直改 `humanization.profile` / `group.overrides.<gid>.humanization_profile`** | BaseModel 反序列化 | 全局 / 单群 | required |
+| **运行时降级**（performance → balanced） | `resolve_profile()` 内置健康检查 | 单群 | 无需（自动） |
+
+#### 4.4.5 切换风险与守卫
+
+| 切换路径 | 风险 | 守卫 |
+|---|---|---|
+| `economy → balanced` | B 启用时 Part 5 natural_split 被 disable —— 已有 reply 段长策略变化 | `resolve_profile()` 输出 `disable_natural_split` 字段；[services/llm/client.py `_reply_segments`](../../services/llm/client.py#L359) 入口处 resolve 一次；30 秒回滚 `profile=economy` |
+| `balanced → performance` | A pilot 在 prefix 不稳时 8.8× baseline | 健康守卫：proactive hit% < 80% 则自动降级 + log warning；DB 阈值守卫 0 引入 |
+| `performance → balanced` | A 触发中切档导致单条 reply plan/utter 不一致 | profile 决议在 reply 入口 resolve 一次后冻结到 reply 完成；切档影响下一次 reply |
+| 群级覆盖 vs 全局 | 同一时刻不同群跑不同 profile，可观测混乱 | `storage/usage.db.call_type` 沿用 `proactive` / `proactive_plan` / `proactive_utter` 区分；BlockTrace 增 `profile` 字段 |
+
 ## 5 不做的事（v2 增补）
 
 | 项 | 原因 |
@@ -522,19 +571,30 @@ v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output
 
 ---
 
-## 7 子任务编号 P6.0 ~ P6.13（v2.1 P6.0 三段拆分）
+## 7 子任务编号 P6.0 ~ P6.13（v2.1 P6.0 三段拆分 / v2.2 三档 profile 切换）
 
 > v1 P6.8（cache_creation 字段监控）在 DeepSeek 路径下 dead——结构性恒为 0，无信号。删除。
 > v2 新增 P6.0（state_board prefix 稳定化）作为强制前置；编号让出空间，原 P6.1~P6.14 → P6.1~P6.13。
 > **v2.1**：P6.0 拆为 P6.0.a / P6.0.b / P6.0.c 三段，分别对应 §1.5.4 候选 (a) layout 后置、(b) 时间戳粒度抬升、(c) 7 日复盘验收。这条**承接** D+E 已落地的 slang 家族治理，**继续治理主链路** state_board 抖动层。
+> **v2.2**：新增 P6.0.x1~P6.0.x5（profile 切换基础设施），把 economy / balanced / performance / custom 四档物化到 [HumanizationConfig](../../kernel/config.py#L1024) + [GroupOverride](../../kernel/config.py#L343) + Admin SPA。施工节奏与 P6.1~P6.13 解耦——profile=custom 时全部新 flag 走原 flag-by-flag 路径，不强制升级。
 
-### 7.0 P6.0 三段细化（v2.1 增补）
+### 7.0 P6.0 三段细化（v2.1 增补 / v2.2 复用 profile=economy）
 
 | 编号 | 任务 | 依赖 | 关键产物 | 单测 |
 |---|---|---|---|---|
 | **P6.0.a** | **state_board layout 后置**（候选 a） | 无 | [services/llm/prompt_builder.py:161-178 `build_blocks()`](../../services/llm/prompt_builder.py#L161-L178)：新增 feature flag `humanization.state_board_layout=tail`（默认 `head` 兼容）；`tail` 模式下 layout 改为 `[static, group_context, *plugin_static, *plugin_stable, *plugin_dynamic, messages, state_board]`，state_board 后置到 messages 之后 | `tests/test_state_board_layout.py` ≥ 4：head 模式回归 / tail 模式 layout 顺序 / state_board 内容不变 / build_blocks 层 prefix 字节稳定（mock state_board 抖动 → 前 N-1 块 byte-identical） |
 | **P6.0.b** | **state_board 字段粒度抬升**（候选 b） | 无 | [services/memory/state_board.py](../../services/memory/state_board.py)：(1) `_derive_mentions` 时间字段从分钟级（"刚刚 / 1 分钟前 / N 分钟前"）改为粗粒度（"刚刚 / 今天早些 / 昨天 / 更早"）；(2) `_derive_frequency` 去掉 `（过去5分钟 N 条消息）` 的具体计数，仅留 "活跃 / 正常 / 冷清 / 暂无消息" 标签；(3) `_derive_topics` 加 sticky 锚点：连续两次 query 内 top-3 bigram 不变则保持原值；feature flag `humanization.state_board_granularity=coarse`（默认 `fine` 兼容） | `tests/test_state_board_granularity.py` ≥ 6：fine 模式回归 / coarse 模式时间粒度 / coarse 模式频率不含数字 / sticky topics 不抖 / fake clock 跨 10 min 渲染 byte-identical / fine↔coarse 切换 |
-| **P6.0.c** | **7 日生产复盘 + 默认开 + D+E 长尾收口** | P6.0.a + P6.0.b 灰度 7 日 | (1) 灰度脚本 `scripts/dev/measure_cache_hit_proactive.sh` 按 call_type 抽 hit% / avg_miss / latency_p50；(2) 验收阈值：proactive ≥ 85% / chat ≥ 80% / 单日波动 ≤ 15pp；(3) 达标后 flag 默认 `tail` + `coarse`；(4) maintenance-log 当日条目继承 D+E 历史脉络 | 灰度报告内嵌 §10 状态表 |
+| **P6.0.c** | **7 日生产复盘 + 默认开 + D+E 长尾收口** | P6.0.a + P6.0.b 灰度 7 日 | (1) 灰度脚本 `scripts/dev/measure_cache_hit_proactive.sh` 按 call_type 抽 hit% / avg_miss / latency_p50；(2) 验收阈值：proactive ≥ 85% / chat ≥ 80% / 单日波动 ≤ 15pp；(3) 达标后 flag 默认 `tail` + `coarse`（即 profile=economy 默认）；(4) maintenance-log 当日条目继承 D+E 历史脉络 | 灰度报告内嵌 §10 状态表 |
+
+### 7.0.x P6.0.x — Profile 切换基础设施（v2.2 新增）
+
+| 编号 | 任务 | 依赖 | 关键产物 | 单测 |
+|---|---|---|---|---|
+| **P6.0.x1** | **HumanizationConfig profile 字段 + ResolvedHumanization** | P6.0.a + P6.0.b | [kernel/config.py:1024 `HumanizationConfig`](../../kernel/config.py#L1024)：(1) 新增 `profile: Literal["economy","balanced","performance","custom"] = "economy"` 字段，含 `json_schema_extra={"display_label": "拟人化档位","options": [...], "risk_level": "careful", "restart_hint": "recommended"}`；(2) 新增嵌套 `state_board / streaming_segment / pause_then_extend / plan_then_utter` 4 个子 BaseModel（仅 `enabled` + 子参数，默认全 off）；(3) 新增 `resolve_profile(profile_value, group_id)` → `ResolvedHumanization` dataclass 含 6 个决议字段（`state_board_layout / state_board_granularity / streaming_segment_enabled / pause_then_extend_enabled / plan_then_utter_enabled / disable_natural_split`）；(4) `custom` 模式直读子字段 enabled，与原 flag 等价 | `tests/test_humanization_profile.py` ≥ 8：四档名解析 / economy → state_board only / balanced → +B+D / performance → +A / custom 等价 / B 与 Part 5 互斥写出 disable_natural_split=True / 健康守卫触发 performance→balanced 降级 / 群级 override 优先级 |
+| **P6.0.x2** | **GroupOverride humanization_profile 字段** | P6.0.x1 | [kernel/config.py:343 `GroupOverride`](../../kernel/config.py#L343)：新增 `humanization_profile: Literal["economy","balanced","performance","custom"] \| None = None`（None 时退回全局 profile）；[kernel/config.py `GroupConfig.resolve()`](../../kernel/config.py#L471) 输出的 `ResolvedGroupConfig` 增 `humanization_profile` 字段（None 表示用全局） | `tests/test_group_override_profile.py` ≥ 4：全局 economy + 群级 None → economy / 全局 economy + 群级 balanced → balanced / 群级覆盖优先级 / `humanization.runtime_groups` 与 `group.overrides[].humanization_profile` 同时存在的解析 |
+| **P6.0.x3** | **消费者改读 resolve_profile()** | P6.0.x1 | (1) [services/llm/prompt_builder.py:138-180 `build_blocks()`](../../services/llm/prompt_builder.py#L138-L180) 入口 resolve 一次 layout 决议；(2) [services/memory/state_board.py:71-79 `to_prompt_text()`](../../services/memory/state_board.py#L71-L79) 入口接受 granularity 参数；(3) [services/llm/client.py:359 `_reply_segments`](../../services/llm/client.py#L359) 入口 resolve 决议（含 disable_natural_split 互斥）；(4) [plugins/chat/plugin.py:94-114](../../plugins/chat/plugin.py#L94-L114) `_humanization_runtime_groups` 路径不动；新增 `_humanization_resolve(config, group_id)` helper | `tests/test_humanization_resolve_consumer.py` ≥ 6：build_blocks 读 layout 决议 / state_board 读 granularity / _reply_segments 读 disable_natural_split / consumer 在 custom 模式回退原 flag / per-call resolve 缓存 / reply 进行中 resolved 不漂 |
+| **P6.0.x4** | **健康守卫：performance → balanced 自动降级** | P6.0.x1 + P6.0.c | `services/humanization/health_guard.py` ≤ 100 行：(1) 周期 60s 查 [storage/usage.db](../../storage/usage.db) 最近 1h 按 group_id 的 proactive hit% / chat hit%；(2) 当 group 设置 performance 但实测 hit% < 80% → 写入 in-mem `_degraded_groups: dict[str, datetime]`；(3) `resolve_profile()` 在 performance 路径上检查该字典，若降级中则返回 balanced 决议；(4) hit% 恢复到 ≥ 85% 持续 10min 后自动解除降级 | `tests/test_humanization_health_guard.py` ≥ 6：DB 查询 / 降级触发 / 降级解除 / 多群独立降级 / SPA 显示值与运行时值不一致的 log warning / 健康守卫读不到 DB 的兜底（默认不降级，避免误伤） |
+| **P6.0.x5** | **Admin SPA 自动渲染 + 三档 chip 显示** | P6.0.x1 + P6.0.x2 | (1) [admin/routes/api/config.py:380 `_build_schema()`](../../admin/routes/api/config.py#L380) 自动渲染 enum（已有管线）；(2) [admin/frontend/src/views/](../../admin/frontend/src/views/) 系统配置页：拟人化区块加 profile 下拉 + 子配置只读卡片（profile=custom 时变可编辑）；(3) 群组管理页：群级 humanization_profile 下拉 + "继承全局" 选项；(4) 拟人化档位 chip 在 dashboard 显示当前生效档位 + 健康守卫降级红点 | `tests/test_admin_humanization_profile.py` ≥ 4 + 前端 vue-tsc + npm run build |
 
 ### 7.1 完整子任务表
 
@@ -554,7 +614,16 @@ v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output
 | **P6.12** | C 方案 暂搁 — 不开发 | — | 文档锁定结论：DeepSeek 不支持 stream continuation + abort drift + 因果链复杂度，C 方案永不进灰度 | — |
 | **P6.13** | 文档收口 + maintenance-log 当日条目 | P6.0 ~ P6.11 | 本文 §10 状态表 + maintenance-log 条目 | — |
 
-合计：**P6.0 + B（P6.1~P6.4）+ D（P6.5~P6.8）+ A pilot（P6.9~P6.11）+ C 锁定（P6.12）+ 收口（P6.13）= 13 子任务**。新增代码估算 ≤ 800 行 / 净删 ≈ 300 行；新增测试 ≥ 35 条。
+合计：**P6.0（a/b/c）+ P6.0.x（x1~x5 profile 切换基础设施）+ B（P6.1~P6.4）+ D（P6.5~P6.8）+ A pilot（P6.9~P6.11）+ C 锁定（P6.12）+ 收口（P6.13）= 18 子任务**。新增代码估算 ≤ 1100 行 / 净删 ≈ 300 行；新增测试 ≥ 63 条。
+
+### 7.2 施工节奏与 profile 解锁关系
+
+| profile | 解锁条件 | 包含子任务 |
+|---|---|---|
+| `economy`（默认） | P6.0.a + P6.0.b + P6.0.x1~x5 落地 | P6.0.a / P6.0.b / P6.0.c / P6.0.x1~x5 |
+| `balanced`（推荐） | economy 落地 + P6.0.c 阈值通过（proactive ≥ 85%）+ P6.1~P6.8 落地 | + P6.1~P6.4（B）+ P6.5~P6.8（D） |
+| `performance`（pilot） | balanced 落地 + 用户验收 + P6.9~P6.11 落地 | + P6.9~P6.11（A pilot）；运行时受 P6.0.x4 健康守卫保护 |
+| `custom`（向后兼容） | 任意子任务可独立启用 | 所有 flag 自由组合，与 v2.1 前的 flag-by-flag 行为等价 |
 
 ---
 
@@ -563,19 +632,25 @@ v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output
 | 风险 | 触发条件 | 回滚 | 阈值（DeepSeek 经济） |
 |---|---|---|---|
 | **P6.0 layout 改动击穿其他 cache** | state_board 后置后，messages[near-end] 锚点漂移 | feature flag `state_board.layout_v2=false` + restart | proactive hit% 从基线 65% 跌破 50% 即回滚 |
-| **B streaming 切段乱拍** | online sentence boundary 误判 | `streaming_segment.enabled=false` | 单测命中率 < 90% 即不进灰度 |
-| **D extend 过度触发** | extend_rate > 30% | `pause_then_extend.enabled=false` | extend_rate 实测 > 25% 即回滚 |
+| **profile=balanced 群体感跌落** | B 替代 Part 5 后段长策略偏书面 / 偏机械 | profile=economy 30 秒回滚 | 用户主观判定 + 段长方差 < 8 即回滚 |
+| **profile=performance 健康守卫频繁降级** | proactive hit% 持续 < 80% | P6.0.x4 自动降级 + log warning；人工排查 prefix 抖动新源 | 24h 内自动降级触发 ≥ 3 次即手动回 balanced |
+| **群级 profile 与全局 profile 冲突** | 同群同时配 humanization_profile + Part 1 runtime_groups | resolved_for() 内 group-level 优先；Part 1 runtime_groups 仅控 Part 1 9 个 flag，与 profile 正交 | 不需要回滚，是设计意图 |
+| **B streaming 切段乱拍** | online sentence boundary 误判 | profile=economy（关闭 B）；或 `streaming_segment.enabled=false` | 单测命中率 < 90% 即不进灰度 |
+| **D extend 过度触发** | extend_rate > 30% | profile=economy；或 `pause_then_extend.enabled=false` | extend_rate 实测 > 25% 即回滚 |
 | **D extend 过度刷屏** | 单 reply 段数 > 3 段 | 同上 + 收紧 max_extend_count=1 | — |
-| **A 成本爆表** | proactive 单 reply 成本 > 3× baseline | `plan_then_utter.enabled=false` | 成本 > 2.5× 即回滚 |
+| **A 成本爆表** | proactive 单 reply 成本 > 3× baseline | profile=balanced（关闭 A）；或 `plan_then_utter.enabled=false` | 成本 > 2.5× 即回滚；P6.0.x4 健康守卫先于人工触发 |
 | **A persona drift** | PersonaScore 跌 > 5pp | 同上 | — |
 | **abort 漂移导致 output 浪费**（C 方案专属，已锁定不开） | replan 后总 output > 1.5× baseline | C 方案永不开启，不需要回滚 | — |
 
 紧急回滚（30 秒）：
 
 ```bash
-# config/config.json:
+# config/config.json 一键回 economy 档：
+#   "humanization": {"profile": "economy"}
+# 或彻底关闭 Part 6（向后兼容 v2 前行为）：
 #   "humanization": {
-#     "state_board": {"layout_v2": false, "timestamp_granularity": "minute"},
+#     "profile": "custom",
+#     "state_board": {"layout": "head", "granularity": "fine"},
 #     "streaming_segment": {"enabled": false},
 #     "pause_then_extend": {"enabled": false},
 #     "plan_then_utter": {"enabled": false}
@@ -622,33 +697,37 @@ docker compose restart bot
 | v1 立项 | ✅ 完成（2026-05-25） | 用户原话 "part5 方案仍聚焦在话语分割处理上，而没有从 llm 生成的源头提供研究" |
 | v2 重写 | ✅ 完成（2026-05-26） | 用户原话 "在执行1、3的前提下重写part6，搜索deepseek v4的最新指标和技术架构，你目前不严谨" — DeepSeek 官方 pricing / kv_cache / Anthropic 兼容性文档全部抓取并对齐 |
 | **v2.1 增补**（2026-05-26 同日续作） | ✅ 完成 | 用户原话 "此前进行过一次cache优化，评估是否需要进一步优化" + "先修改part6方案，将该修改列入其中" — §1.5.0 D+E 历史表 / §1.5.1 7 日实证重写 / §1.5.4 候选 (e) 长尾收口 / §7.0 P6.0 拆三段（a/b/c） |
+| **v2.2 增补**（2026-05-26 同日三续） | ✅ 完成 | 用户原话 "我不要单选项进行，而是在配置提供三档切换。改进方案，追加切换，审计是否需要切换功能修改流程" — §4.4 三档 profile（economy/balanced/performance/custom）+ §7.0.x P6.0.x1~x5 切换基础设施 + §7.2 施工节奏 + §8 风险与回滚同步 |
 | §1 代码取证 v2 | ✅ 完成 | §1.1.5 cache 架构 dead code / §1.3 DeepSeek V4-Flash 完整规格 / §1.5 state_board 漂移根因（state_board.py:71-189 file:line 证据） |
 | §2 学术证据 v2 | ✅ 完成（27 篇） | Q6 行替换为 DeepSeek-specific 4 条 |
 | §3 成本重算 v2 | ✅ 完成 | 7 日 storage/usage.db 实证 baseline + 4 方案 prefix 稳定 / 不稳两组成本 |
 | §4 决策矩阵 v2 | ✅ 完成 | 排序 P6.0 → B → D → A → C 替换 v1 的 A → C → B → D |
+| **§4.4 三档 profile v2.2** | ✅ 完成 | economy/balanced/performance/custom 四档物化为 HumanizationConfig.profile + GroupOverride.humanization_profile |
 | §7 子任务 v2 | ✅ 完成 | P6.0 新增、P6.8（cache_creation 监控）删除 |
 | **§7.0 P6.0 三段拆分 v2.1** | ✅ 完成 | P6.0.a layout 后置 / P6.0.b 字段粒度抬升（含 sticky topics）/ P6.0.c 7 日生产复盘 |
-| **P6.0.a / P6.0.b / P6.0.c** | ⏳ 待动手 | 优先级最高；feature flag 双 off 兼容 |
-| **P6.1 ~ P6.13** | ⏳ 待动手 | 等 P6.0.c 验收过线后启动 B 方案（P6.1~P6.4） |
+| **§7.0.x P6.0.x profile 切换 v2.2** | ✅ 完成 | P6.0.x1 HumanizationConfig.profile + ResolvedHumanization / P6.0.x2 GroupOverride.humanization_profile / P6.0.x3 消费者改读决议 / P6.0.x4 健康守卫降级 / P6.0.x5 Admin SPA |
+| **P6.0.a / P6.0.b / P6.0.c** | ⏳ 待动手 | 优先级最高；feature flag 双 off 兼容；落地后 profile=economy 默认值生效 |
+| **P6.0.x1 ~ P6.0.x5** | ⏳ 待动手 | 与 P6.0.a/b 并行可施工（仅 BaseModel 改动）；P6.0.x4 依赖 P6.0.c 阈值定义 |
+| **P6.1 ~ P6.13** | ⏳ 待动手 | 等 P6.0.c 验收过线后启动 B 方案（P6.1~P6.4），用户切 profile=balanced 后 D 方案（P6.5~P6.8）启用 |
 
 ---
 
-## 附录 A — v1 → v2 / v2.1 修订映射
+## 附录 A — v1 → v2 / v2.1 / v2.2 修订映射
 
-| v1 节 | v2 处置 | v2.1 增补 |
-|---|---|---|
-| §0 边界 / 取证原则 / 8 问题 | 保留，无修改 | — |
-| §1.1 Omubot 现状 | 保留主体；新增 §1.1.5 标 4-breakpoint dead code | — |
-| §1.2 MaiBot 中断 dead code | 保留 | — |
-| §1.3 Anthropic SSE + 4-breakpoint | **整节替换**为 DeepSeek V4-Flash 架构 | — |
-| §1.4 框架对照 | 保留主体，校正 cache 列 | — |
-| §1.5（v1 不存在） | **新增** state_board 漂移诊断 | **§1.5.0 新增**（D+E 历史表 4 行）+ **§1.5.1 重写**（7 日实证 proactive 74.3% / chat 71.4%）+ **§1.5.4 增补**（候选 e "D+E 同方法不再延续"） |
-| §2 学术 27 篇 | 保留 26 篇；Q6 行 4 条改为 DeepSeek-specific | — |
-| §3 成本系数 | **整节重算** — Anthropic 数字全部不适用 | — |
-| §4 决策矩阵 | **整节重排** — A 从首选降到第三，B 从第三升到首选 | — |
-| §5 不做的事 | 保留 + 增补 4 条 | — |
-| §6 接入点 | 保留 | — |
-| §7 子任务 | **新增 P6.0**；删除 P6.8（cache_creation）；编号 P6.1~P6.14 → P6.1~P6.13 | **§7.0 新增** — P6.0 拆三段：P6.0.a layout / P6.0.b 粒度 / P6.0.c 7 日复盘；§7.1 子标题保留 P6.1~P6.13 不变 |
-| §8 风险阈值 | 重写为 DeepSeek 经济下的阈值 | — |
-| §9 引用 | 增 DeepSeek 官方文档 4 条；标记 Anthropic 引用为 v1 推翻 | — |
-| §10 状态 | 加 v2 重写条目 | 加 v2.1 增补条目 + P6.0.a/b/c 行 |
+| v1 节 | v2 处置 | v2.1 增补 | v2.2 增补 |
+|---|---|---|---|
+| §0 边界 / 取证原则 / 8 问题 | 保留，无修改 | — | — |
+| §1.1 Omubot 现状 | 保留主体；新增 §1.1.5 标 4-breakpoint dead code | — | — |
+| §1.2 MaiBot 中断 dead code | 保留 | — | — |
+| §1.3 Anthropic SSE + 4-breakpoint | **整节替换**为 DeepSeek V4-Flash 架构 | — | — |
+| §1.4 框架对照 | 保留主体，校正 cache 列 | — | — |
+| §1.5（v1 不存在） | **新增** state_board 漂移诊断 | **§1.5.0 新增**（D+E 历史表 4 行）+ **§1.5.1 重写**（7 日实证 proactive 74.3% / chat 71.4%）+ **§1.5.4 增补**（候选 e "D+E 同方法不再延续"） | — |
+| §2 学术 27 篇 | 保留 26 篇；Q6 行 4 条改为 DeepSeek-specific | — | — |
+| §3 成本系数 | **整节重算** — Anthropic 数字全部不适用 | — | — |
+| §4 决策矩阵 | **整节重排** — A 从首选降到第三，B 从第三升到首选 | — | **§4.4 新增** — economy/balanced/performance/custom 四档 profile 切换设计 |
+| §5 不做的事 | 保留 + 增补 4 条 | — | — |
+| §6 接入点 | 保留 | — | profile 切换通过 [HumanizationConfig](../../kernel/config.py#L1024) + [GroupOverride](../../kernel/config.py#L343) + Admin SPA 三层接入；不需要新 admin route |
+| §7 子任务 | **新增 P6.0**；删除 P6.8（cache_creation）；编号 P6.1~P6.14 → P6.1~P6.13 | **§7.0 新增** — P6.0 拆三段：P6.0.a layout / P6.0.b 粒度 / P6.0.c 7 日复盘；§7.1 子标题保留 P6.1~P6.13 不变 | **§7.0.x 新增** — P6.0.x1~P6.0.x5 profile 切换基础设施；**§7.2 新增** — profile 解锁条件表 |
+| §8 风险阈值 | 重写为 DeepSeek 经济下的阈值 | — | 增 4 行 profile 切换风险 + 紧急回滚改为 `profile=economy` 一键回退 |
+| §9 引用 | 增 DeepSeek 官方文档 4 条；标记 Anthropic 引用为 v1 推翻 | — | — |
+| §10 状态 | 加 v2 重写条目 | 加 v2.1 增补条目 + P6.0.a/b/c 行 | 加 v2.2 增补条目 + §4.4 + §7.0.x + P6.0.x1~x5 行 |

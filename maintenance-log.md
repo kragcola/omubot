@@ -78,6 +78,53 @@
 
 ---
 
+## 2026-05-26 Humanization Part 6 v2.2 增补（三档 profile 切换 + 配置流程审计）
+
+**变更类型**：tracking docs（仅文档，无代码 / 配置变更）
+
+**内容**：按用户口径 "我不要单选项进行，而是在配置提供三档切换。改进方案，追加切换，审计是否需要切换功能修改流程" 在 [Part 6 v2.1 文档](docs/tracking/omubot-humanization-part6-source-side-generation.md) 上做最小化增补：
+
+- §4.4 新增三档 profile 切换设计：
+  - **`economy`**（默认 / 出厂）— 仅 P6.0.a + P6.0.b（state_board 稳定）— 节省 -63%，体感 ≈ 0
+  - **`balanced`**（推荐）— + B streaming-as-segment + D pause-then-extend；与 Part 5 natural_split 互斥（自动 disable）— -58~-56% + 中-高体感
+  - **`performance`**（pilot）— + A plan-then-utter（仅 proactive）；解锁条件 proactive hit% ≥ 80%；运行时降级守卫 — pilot $0.15 / 14 日 + 高体感
+  - **`custom`**（向后兼容）— 直读子配置 enabled flag，与 v2.1 前的 flag-by-flag 行为完全等价
+- §4.4.4 切换路径表：Admin SPA → 系统配置 → 拟人化 → profile 下拉 / 群组管理 → 单群覆盖 → humanization_profile / config.json 直改 / 健康守卫自动降级
+- §7.0.x 新增 P6.0.x1~P6.0.x5 五个子任务（与 P6.0.a/b 并行可施工）：
+  - **P6.0.x1** [HumanizationConfig](kernel/config.py#L1024) 新增 `profile: Literal["economy","balanced","performance","custom"]` + 4 个嵌套子配置 + `resolve_profile() → ResolvedHumanization`
+  - **P6.0.x2** [GroupOverride](kernel/config.py#L343) 新增 `humanization_profile: Literal[...] | None`
+  - **P6.0.x3** 消费者改读 `resolve_profile()`（[prompt_builder.py:138-180](services/llm/prompt_builder.py#L138-L180) / [state_board.py:71-79](services/memory/state_board.py#L71-L79) / [client.py:359 _reply_segments](services/llm/client.py#L359)）
+  - **P6.0.x4** 健康守卫 `services/humanization/health_guard.py` ≤ 100 行 — 周期 60s 查 storage/usage.db 最近 1h hit%；performance 群 < 80% 自动降级 balanced
+  - **P6.0.x5** Admin SPA 自动渲染（schema 已就绪）+ 群组管理 humanization_profile 下拉 + dashboard 档位 chip
+- §7.2 新增 profile 解锁条件表（economy → balanced → performance 阶梯解锁；custom 任意子任务独立启用）
+- §8 风险表增 4 行 profile 切换专属风险 + 紧急回滚改为 `"humanization": {"profile": "economy"}` 一键回退
+- §10 状态表 + 附录 A 增补 v2.2 行
+
+**审计结论 — 是否需要修改既有配置流程**：
+
+| 接入点 | 现状 | 三档切换需要的改动 | 是否破坏现状 |
+|---|---|---|---|
+| [HumanizationConfig](kernel/config.py#L1024) | 9 个独立 flag + `runtime_groups` | + `profile` enum + 4 嵌套子配置 + `resolve_profile()` | 否（custom 模式等价 v2.1 前） |
+| [GroupOverride](kernel/config.py#L343) | 12 个群级可空 override | + `humanization_profile: Literal[...] \| None` | 否（None 时退回全局） |
+| [admin/routes/api/config.py:380](admin/routes/api/config.py#L380) `_build_schema()` | 自动扫描 BaseModel + json_schema_extra | 给新 enum 字段加 `display_label / options / risk_level` | 否（自动渲染管线现成） |
+| 消费者（prompt_builder / state_board / client._reply_segments） | 直读独立 flag | 入口处 resolve 一次，消费 `ResolvedHumanization` 字段 | 否（custom 模式可回退原 flag） |
+| Admin route / DB schema / 重启策略 | 现行 | 不动 | — |
+
+**验证**：
+
+- 文档结构性验证：4 处 Edit 操作全部命中，§4.4 / §7.0.x / §7.2 / §8 / §10 / 附录 A 已更新；MD060 警告按项目策略保留
+- 引用全部锚定：[kernel/config.py:343](kernel/config.py#L343) / [kernel/config.py:1024](kernel/config.py#L1024) / [admin/routes/api/config.py:380](admin/routes/api/config.py#L380) / [plugins/chat/plugin.py:94-114](plugins/chat/plugin.py#L94-L114) 全部 file:line 实证
+
+**影响**：
+
+- 用户控制粒度升级：从"P6.0.c 验收过线后开始施工 B → D → A"的硬节奏改为"任何时刻在 SPA 切档"的软节奏
+- 群级覆盖支持：可在灰度群跑 performance 同时主流量保持 economy，避免一刀切风险
+- 不阻断 Part 1/2/3/4/5 主线施工；与既有 9 个 Part 1 humanization flag 在 BaseModel 层正交
+
+**回滚**：本次仅文档变更，无运行时影响。如需回滚 v2.2：`git restore docs/tracking/omubot-humanization-part6-source-side-generation.md maintenance-log.md`。
+
+---
+
 ## 2026-05-26 Humanization Part 6 v2.1 增补（D+E 历史并入 + P6.0 三段拆分）
 
 **变更类型**：tracking docs（仅文档，无代码 / 配置变更）
