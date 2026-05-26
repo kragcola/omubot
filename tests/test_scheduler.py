@@ -6,7 +6,7 @@ from kernel.config import GroupConfig, GroupOverride
 from kernel.types import TriggerContext
 from services.identity import Identity
 from services.memory.timeline import GroupTimeline
-from services.scheduler import GroupChatScheduler
+from services.scheduler import GroupChatScheduler, _GroupSlot
 
 
 def _make_identity(proactive: str | None = "积极参与群聊") -> Identity:
@@ -92,6 +92,27 @@ class TestNotify:
         scheduler.notify("111")  # interval too short, should skip
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1  # still only one call
+        await scheduler.close()
+
+    async def test_consecutive_skip_double_threshold_uses_resolved_config(self) -> None:
+        """Probability doubling reads resolved config instead of hardcoded literals."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(
+                talk_value=0.6,
+                consecutive_skip_force_threshold=5,
+                consecutive_skip_double_threshold=1,
+            ),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.consecutive_skip = 1
+
+        scheduler.notify("111")
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 1
+        assert slot.consecutive_skip == 0
         await scheduler.close()
 
     async def test_running_task_blocks_new_call(self) -> None:
@@ -705,6 +726,38 @@ class TestVideoHint:
         ))
         await asyncio.sleep(0.2)
         assert len(llm.calls) >= 1  # guaranteed fire by the 6th attempt
+        await scheduler.close()
+
+    async def test_autonomous_force_threshold_override_preserves_cancel_path(self) -> None:
+        """Force threshold override still fires and leaves cancel-path clean."""
+        llm = _FakeLLM(reply=None, delay=1.0)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(
+                talk_value=0.0,
+                consecutive_skip_force_threshold=1,
+                consecutive_skip_double_threshold=1,
+            ),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.consecutive_skip = 1
+
+        scheduler.notify("111", trigger=TriggerContext(
+            reason="视频分享:《test》", mode="video_autonomous",
+            extra={"bilibili_talk_value": 0.0, "interest_score": 0.05, "video_title": "test"},
+        ))
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 1
+        assert slot.consecutive_skip == 0
+        assert slot.running_task is not None
+
+        scheduler.clear_pending("111", cancel_running=True)
+        await asyncio.sleep(0.05)
+
+        assert slot.consecutive_skip == 0
+        assert slot.pending_at is False
+        assert slot.trigger is None
         await scheduler.close()
 
     async def test_mood_mode_no_hint_is_backward_compatible(self) -> None:

@@ -329,6 +329,8 @@ class ResolvedGroupConfig(BaseModel):
     at_only: bool = False
     talk_value: float = 0.3
     planner_smooth: float = 3.0
+    consecutive_skip_force_threshold: int = 5
+    consecutive_skip_double_threshold: int = 3
     debounce_seconds: float = 5.0
     batch_size: int = 10
     history_load_count: int = 30
@@ -349,6 +351,8 @@ class GroupOverride(BaseModel):
     at_only: bool | None = None
     talk_value: float | None = None
     planner_smooth: float | None = None
+    consecutive_skip_force_threshold: int | None = None
+    consecutive_skip_double_threshold: int | None = None
     debounce_seconds: float | None = None
     batch_size: int | None = None
     history_load_count: int | None = None
@@ -371,6 +375,8 @@ class GroupConfig(BaseModel):
     allowed_groups: list[int] = []
     talk_value: float = 0.3
     planner_smooth: float = 3.0
+    consecutive_skip_force_threshold: int = 5
+    consecutive_skip_double_threshold: int = 3
     debounce_seconds: float = 5.0
     batch_size: int = 10
     at_only: bool = False
@@ -485,6 +491,8 @@ class GroupConfig(BaseModel):
                     at_only=False,
                     talk_value=0.3,
                     planner_smooth=3.0,
+                    consecutive_skip_force_threshold=5,
+                    consecutive_skip_double_threshold=3,
                     debounce_seconds=5.0,
                     batch_size=10,
                     history_load_count=self.history_load_count,
@@ -504,6 +512,8 @@ class GroupConfig(BaseModel):
                 at_only=self.at_only,
                 talk_value=self.talk_value,
                 planner_smooth=self.planner_smooth,
+                consecutive_skip_force_threshold=self.consecutive_skip_force_threshold,
+                consecutive_skip_double_threshold=self.consecutive_skip_double_threshold,
                 debounce_seconds=self.debounce_seconds,
                 batch_size=self.batch_size,
                 history_load_count=self.history_load_count,
@@ -544,6 +554,16 @@ class GroupConfig(BaseModel):
             at_only=o.at_only if o.at_only is not None else self.at_only,
             talk_value=o.talk_value if o.talk_value is not None else self.talk_value,
             planner_smooth=o.planner_smooth if o.planner_smooth is not None else self.planner_smooth,
+            consecutive_skip_force_threshold=(
+                o.consecutive_skip_force_threshold
+                if o.consecutive_skip_force_threshold is not None
+                else self.consecutive_skip_force_threshold
+            ),
+            consecutive_skip_double_threshold=(
+                o.consecutive_skip_double_threshold
+                if o.consecutive_skip_double_threshold is not None
+                else self.consecutive_skip_double_threshold
+            ),
             debounce_seconds=o.debounce_seconds if o.debounce_seconds is not None else self.debounce_seconds,
             batch_size=o.batch_size if o.batch_size is not None else self.batch_size,
             history_load_count=o.history_load_count if o.history_load_count is not None else self.history_load_count,
@@ -1402,7 +1422,7 @@ def _read_plugin_json_values(path: Path) -> dict[str, Any]:
     return data
 
 
-def load_plugin_config[T](toml_path: str | Path, model_cls: type[T]) -> T:
+def load_plugin_config[T: BaseModel](toml_path: str | Path, model_cls: type[T]) -> T:
     """加载插件配置。
 
     新主路径为 ``plugins/<name>/config.default.json`` 加

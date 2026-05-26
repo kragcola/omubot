@@ -208,17 +208,17 @@ class GroupChatScheduler:
             base_talk_value = resolved.talk_value
 
         threshold = base_talk_value
-        if slot.consecutive_skip >= 5:
+        if slot.consecutive_skip >= resolved.consecutive_skip_force_threshold:
             threshold = 1.0
-        elif slot.consecutive_skip >= 3:
+        elif slot.consecutive_skip >= resolved.consecutive_skip_double_threshold:
             threshold = min(1.0, base_talk_value * 2)
 
         # Autonomous mode: apply interest score as a floor booster.
         # High-interest videos (e.g. pjsk, 25时) should fire reliably even
         # during low-activity time slots — the bot cares about the content.
-        # Skip when consecutive_skip >= 5 so the forced-reply guarantee holds.
+        # Skip the interest floor once the force threshold is reached.
         is_autonomous = trigger is not None and trigger.mode == "video_autonomous"
-        if is_autonomous and slot.consecutive_skip < 5:
+        if is_autonomous and slot.consecutive_skip < resolved.consecutive_skip_force_threshold:
             interest_score = float(trigger_extra.get("interest_score", 0.3))
             # Blend so interest acts as a floor: 0.1 + 0.9×interest maps
             # 0.05→0.145, 0.55→0.595, 0.85→0.865, 1.0→1.0

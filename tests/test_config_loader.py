@@ -437,6 +437,8 @@ class TestGroupConfigResolve:
         assert resolved.debounce_seconds == 5.0
         assert resolved.batch_size == 10
         assert resolved.history_load_count == 30
+        assert resolved.consecutive_skip_force_threshold == 5
+        assert resolved.consecutive_skip_double_threshold == 3
         assert resolved.reply_style == "steady"
         assert resolved.custom_prompt == "保持冷静。"
         assert resolved.tools_enabled is False
@@ -453,6 +455,8 @@ class TestGroupConfigResolve:
                     allowed_tools=["lookup_cards", "send_sticker"],
                     blocked_tools=["lookup_cards"],
                     at_only=True,
+                    consecutive_skip_force_threshold=7,
+                    consecutive_skip_double_threshold=4,
                     debounce_seconds=10.0, batch_size=20, history_load_count=50,
                     reply_style="playful", custom_prompt="多接梗。",
                     tools_enabled=False, sticker_mode="off", slang_enabled=False,
@@ -467,6 +471,8 @@ class TestGroupConfigResolve:
         assert resolved.debounce_seconds == 10.0
         assert resolved.batch_size == 20
         assert resolved.history_load_count == 50
+        assert resolved.consecutive_skip_force_threshold == 7
+        assert resolved.consecutive_skip_double_threshold == 4
         assert resolved.reply_style == "playful"
         assert resolved.custom_prompt == "多接梗。"
         assert resolved.tools_enabled is False

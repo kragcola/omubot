@@ -136,7 +136,7 @@
 |---|---|---|---|
 | **P3.11.0** | 0 | ✅ | 前置摸排完成：`notify()` / `_should_force_reply()` 命名订正、`consecutive_skip` 3 处字面量与 `directed_followup` shadow-only 现状均已 grep 实证 |
 | **P3.11.1** | 1 | ✅ | 自主验收通过：`directed_followup` 已接入 `notify()` bypass 与 `_should_force_reply()`；`services/scheduler.py` +13/-3，2 条新测试 + force-reply 回归 44 条通过 |
-| **P3.11.2a** | 1 | ⏳ | magic-number → config 字段迁移，未开始 |
+| **P3.11.2a** | 1 | ✅ | 自主验收通过：`consecutive_skip` 两档阈值已升格为 `GroupConfig` / `GroupOverride` / `ResolvedGroupConfig` 字段；scheduler 裸字面量 grep 归零，相关回归 70 条通过 |
 | **P3.11.2b** | 1 | ⏳ | 30 分钟时间衰减，依赖 P3.11.2a |
 | **P3.11.3** | 1 | ⏳ | `planner_smooth` 3.0 → 2.0，未开始 |
 | **P3.12** | 2 | ⏳ | RWS scaffolding，未开始；阻塞于 Wave 1 |
@@ -234,3 +234,42 @@ D2 / 回滚：P3.11.0 为零代码摸排，无 cancel-path 写状态；回滚为
 - `tests/test_force_reply.py` `+14/-0`
 - `tests/test_scheduler.py` `+50/-2`
 - 本步按单任务 commit 提交；回滚命令保持为单 commit `git revert <commit>`。
+
+### P3.11.2a 领单拆分（执行前）— Codex / 2026-05-26 12:23 CST
+
+- **任务边界**：只做 `consecutive_skip` 两个 magic number 的配置升格，限定在 `kernel/config.py`、`services/scheduler.py` 与配置/调度测试；不改默认值 5/3、不引入时间衰减、不顺带做 `planner_smooth` 调整。
+- **自主评估**：根据 §1 订正，P3.11.2a 的关键不是“把一个 `>= 5` 改成 `>= 3`”，而是先把 `force_threshold` 与 `double_threshold` 统一收进 `GroupConfig.resolve()`，避免 scheduler 内部仍残留第二套硬编码阈值。
+- **执行拆分**：
+  1. 在 `ResolvedGroupConfig`、`GroupOverride`、`GroupConfig` 中新增 `consecutive_skip_force_threshold=5` / `consecutive_skip_double_threshold=3`。
+  2. 更新 `GroupConfig.resolve()`，确保默认分支、override 分支和 `access_allowed=False` 分支都能返回两项阈值。
+  3. 把 `services/scheduler.py` 的 `>= 5` / `>= 3` / `< 5` 全部替换为 `resolved.consecutive_skip_*`，并清掉对应注释里的裸字面量。
+  4. 新增验证：配置 resolve 默认值/override、生效阈值驱动的 scheduler 行为，以及阈值触发后的 cancel-path 不脏写。
+- **风险与回滚**：风险是只替一半阈值导致 autonomous force-reply 保证撕裂，或 override 分支漏掉新字段。回滚为撤销 config/scheduler/test 改动，并撤销本文 §6 / §9 的 P3.11.2a 回填。
+
+### P3.11.2a 完成记录（执行者 Codex）— 2026-05-26 12:26 CST
+
+自验结果：P3.11.2a 完成并自主验收 ✅。本步只完成阈值字段升格，不改默认值、不做时间衰减；`consecutive_skip` 的 force/double 两档判断现已全部经 `resolved` 配置读取。
+
+改动内容：
+
+- `kernel/config.py`：为 `ResolvedGroupConfig`、`GroupOverride`、`GroupConfig` 新增 `consecutive_skip_force_threshold=5` / `consecutive_skip_double_threshold=3`；`resolve()` 的默认分支、override 分支与 `access_allowed=False` 分支均返回这两个字段。顺手把 `load_plugin_config()` 的泛型约束收紧为 `BaseModel`，消除该文件既有 pyright 噪声。
+- `services/scheduler.py`：`>= 5` / `>= 3` / `< 5` 三处全部替换为 `resolved.consecutive_skip_*`，并把注释改成阈值语义描述，避免 grep 误报。
+- `tests/test_config_loader.py`：补默认值与 per-group override 两组 resolve 断言。
+- `tests/test_scheduler.py`：补一条 double-threshold 读取 override 的行为测试，以及一条 autonomous force-threshold override + cancel-path 清洁测试。
+
+验证：
+
+- D1 grep：`grep -nE "consecutive_skip\\s*[<>=]+\\s*[0-9]+" services/scheduler.py` → 仅剩 `slot.consecutive_skip = 0`，scheduler 裸字面量阈值 0 命中。
+- D2 cancel-path：`tests/test_scheduler.py::TestVideoHint::test_autonomous_force_threshold_override_preserves_cancel_path` 通过，验证阈值配置驱动的 force-reply 在 `clear_pending(cancel_running=True)` 后仍保持 `consecutive_skip==0`、`pending_at=False`、`trigger=None`。
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_scheduler.py tests/test_force_reply.py tests/test_config_loader.py` → `70 passed in 7.05s`
+- `source ./scripts/dev/env.sh && uv run ruff check kernel/config.py services/scheduler.py tests/test_scheduler.py tests/test_force_reply.py tests/test_config_loader.py` → passed
+- `source ./scripts/dev/env.sh && uv run pyright kernel/config.py services/scheduler.py tests/test_scheduler.py tests/test_force_reply.py tests/test_config_loader.py` → `0 errors, 0 warnings, 0 informations`
+- `git diff --check -- docs/tracking/omubot-humanization-part3.5-execution.md kernel/config.py services/scheduler.py tests/test_scheduler.py tests/test_force_reply.py tests/test_config_loader.py` → passed
+
+改动行数与回滚：
+
+- `kernel/config.py` `+21/-1`
+- `services/scheduler.py` `+4/-4`
+- `tests/test_config_loader.py` `+6/-0`
+- `tests/test_scheduler.py` `+54/-1`
+- 回滚保持为单 commit `git revert <commit>`；下一步进入 `P3.11.2b` 的 30 分钟时间衰减。
