@@ -14,6 +14,12 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from admin.routes.api.dashboard import create_dashboard_router
+from kernel.config import BotConfig
+from services.humanization.health_guard import (
+    CacheHitSample,
+    HumanizationHealthGuard,
+    clear_degraded_groups,
+)
 from services.llm.usage import UsageTracker
 
 
@@ -27,9 +33,12 @@ async def tracker(tmp_path):
         await t.close()
 
 
-def _client(usage_tracker: UsageTracker) -> TestClient:
+def _client(usage_tracker: UsageTracker, *, config: BotConfig | None = None) -> TestClient:
     app = FastAPI()
-    app.include_router(create_dashboard_router(usage_tracker=usage_tracker), prefix="/api/admin")
+    app.include_router(
+        create_dashboard_router(usage_tracker=usage_tracker, config=config),
+        prefix="/api/admin",
+    )
     return TestClient(app)
 
 
@@ -179,6 +188,31 @@ async def test_dashboard_endpoint_exposes_cache_hit_pct(tracker) -> None:
     usage = resp.json()["usage"]
     # cache_hit_pct = 900 / 1100
     assert usage["cache_hit_pct"] == pytest.approx(900 / 1100)
+
+
+async def test_dashboard_endpoint_exposes_humanization_status(tracker) -> None:
+    clear_degraded_groups()
+    guard = HumanizationHealthGuard(db_path="missing.db")
+    guard._apply_sample(CacheHitSample("123456", 0.2), now=100.0)
+    config = BotConfig.model_validate({
+        "humanization": {
+            "profile": "performance",
+            "runtime_groups": ["123456", "789"],
+        },
+    })
+
+    try:
+        client = _client(tracker, config=config)
+        resp = client.get("/api/admin/dashboard")
+        assert resp.status_code == 200
+        humanization = resp.json()["humanization"]
+        assert humanization["profile"] == "performance"
+        assert humanization["runtime_groups"] == ["123456", "789"]
+        assert humanization["runtime_group_count"] == 2
+        assert humanization["degraded_groups"] == ["123456"]
+        assert humanization["degraded_count"] == 1
+    finally:
+        clear_degraded_groups()
 
 
 async def test_recent_calls_per_pipeline_window_query(tracker) -> None:

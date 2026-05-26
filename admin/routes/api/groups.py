@@ -23,6 +23,7 @@ from kernel.config import (
     GroupOverride,
     GroupReplyStyle,
     GroupStickerMode,
+    HumanizationProfile,
 )
 from services.group_profile_audit import GroupProfileAuditStore
 
@@ -43,6 +44,7 @@ _EDITABLE_OVERRIDE_FIELDS = (
     "sticker_mode",
     "slang_enabled",
     "presence_mode",
+    "humanization_profile",
 )
 _AUDIT_LABELS = {
     "blocked_users": "群内屏蔽用户",
@@ -60,6 +62,7 @@ _AUDIT_LABELS = {
     "sticker_mode": "贴纸策略",
     "slang_enabled": "黑话系统",
     "presence_mode": "群参与模式",
+    "humanization_profile": "拟人化档位",
 }
 
 
@@ -79,6 +82,7 @@ class GroupProfilePayload(BaseModel):
     sticker_mode: GroupStickerMode = "inherit"
     slang_enabled: bool = True
     presence_mode: Literal["active", "silent_learn", "off"] | None = None
+    humanization_profile: HumanizationProfile | None = None
 
     @field_validator("custom_prompt")
     @classmethod
@@ -291,6 +295,7 @@ def _profile_audit_snapshot(group: dict[str, Any]) -> dict[str, Any]:
         "sticker_mode": str(group.get("sticker_mode", "inherit") or "inherit"),
         "slang_enabled": bool(group.get("slang_enabled", True)),
         "presence_mode": str(group.get("presence_mode", "active") or "active"),
+        "humanization_profile": str(group.get("humanization_profile", "custom") or "custom"),
     }
 
 
@@ -361,6 +366,11 @@ def create_groups_router(
     def _tool_registry():
         return tool_registry or getattr(ctx, "tool_registry", None)
 
+    def _global_humanization_profile() -> str:
+        root = _config_root()
+        humanization = getattr(root, "humanization", None) if root is not None else None
+        return str(getattr(humanization, "profile", "custom") or "custom")
+
     def _resolve_config(gid: str) -> Any:
         cfg = _cfg()
         if cfg is None:
@@ -382,6 +392,7 @@ def create_groups_router(
                 sticker_mode="inherit",
                 slang_enabled=True,
                 presence_mode="active",
+                humanization_profile=None,
             )
         return cfg.resolve(int(gid))
 
@@ -410,6 +421,11 @@ def create_groups_router(
             group_name = str(item.get("group_name", "") or "")
         act = activity or {}
         last_at = float(act.get("last_at") or 0.0)
+        global_humanization_profile = _global_humanization_profile()
+        effective_humanization_profile = str(
+            getattr(resolved, "humanization_profile", None)
+            or global_humanization_profile
+        )
         return {
             "group_id": gid,
             "group_name": group_name,
@@ -429,6 +445,8 @@ def create_groups_router(
             "privacy_mask": resolved.privacy_mask,
             "access_allowed": bool(getattr(resolved, "access_allowed", True)),
             "presence_mode": str(getattr(resolved, "presence_mode", "active") or "active"),
+            "humanization_profile": effective_humanization_profile,
+            "global_humanization_profile": global_humanization_profile,
             "blocked_users": sorted(int(item) for item in resolved.blocked_users),
             "global_blocked_users": sorted(int(item) for item in getattr(cfg, "blocked_users", []) or []),
             "allowed_tools": _sorted_str_list(getattr(resolved, "allowed_tools", set())),
@@ -625,8 +643,8 @@ def create_groups_router(
             runtime_cfg.access = policy
             if hasattr(runtime_cfg, "_legacy_allowed_groups_as_active"):
                 runtime_cfg._legacy_allowed_groups_as_active = False
-        if ctx is not None and hasattr(ctx, "config") and getattr(ctx.config, "group", None) is not None:
-            runtime_group = getattr(ctx.config, "group", None)
+        runtime_group = getattr(getattr(ctx, "config", None), "group", None) if ctx is not None else None
+        if runtime_group is not None:
             runtime_group.access = policy
             if hasattr(runtime_group, "_legacy_allowed_groups_as_active"):
                 runtime_group._legacy_allowed_groups_as_active = False

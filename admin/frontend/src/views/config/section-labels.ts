@@ -53,6 +53,11 @@ export const CONFIG_SECTION_LABELS: Record<string, ConfigSectionLabel> = {
     title: '回复分段',
     description: '控制长回复如何切段、排队和逐段发出。',
   },
+  humanization: {
+    eyebrow: 'Humanization',
+    title: '拟人化生成',
+    description: '控制 Part 6 生成档位、状态板稳定化与后续生成能力开关。',
+  },
   napcat: {
     eyebrow: 'Connection',
     title: 'NapCat 协议端',
@@ -87,6 +92,7 @@ export function bucketForPath(path: string): string {
   if (path.startsWith('anti_detect.')) return 'anti_detect'
   if (path.startsWith('thinker.')) return 'thinker'
   if (path.startsWith('reply_segmentation.')) return 'reply_segmentation'
+  if (path.startsWith('humanization.')) return 'humanization'
   if (path.startsWith('napcat.')) return 'napcat'
   if (path.startsWith('vision.')) return 'vision'
   if (path === 'admins' || path === 'admin_token') return 'access'

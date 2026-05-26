@@ -204,7 +204,7 @@
 | **P6.0.x2** | 1 | 🟡 | 已落地并自验：`GroupOverride.humanization_profile` → `ResolvedGroupConfig.humanization_profile`；focused pytest 32 passed；待用户最终审查 |
 | **P6.0.x3** | 1 | 🟡 | 已落地并自验：`_humanization_resolve()` 接入 PromptBuilder / state_board / LLMClient 分段；focused pytest 121 passed；待用户最终审查 |
 | **P6.0.x4** | 1 | 🟡 | 已落地并自验：`HumanizationHealthGuard` 96 行，读 `llm_calls` hit/miss 口径，performance 降级到 balanced；focused pytest 19 passed；待用户最终审查 |
-| **P6.0.x5** | 1 | ⏳ | Admin SPA 自动渲染；遵守 D6 admin SPA 同步路径 |
+| **P6.0.x5** | 1 | 🟡 | 已落地并自验：配置页 profile 下拉/只读子能力摘要、群级档位覆盖、dashboard 档位与降级 chip；focused pytest 64 passed；frontend vue-tsc/build passed；待用户最终审查 |
 | **P6.0.y1** | 2 | ⏳ | 入站 PokeNotifyEvent + NapCat raw 表情回应 hook；投递 Part 2-3 既有 group_timeline |
 | **P6.0.y2** | 2 | ⏳ | services/tools/interaction_tools.py；token bucket 速率门 |
 | **P6.0.y3** | 2 | ⏳ | `<quote msg_id="..."/>` 锚点解析 + MessageSegment.reply |
@@ -369,6 +369,24 @@ Part 2-3 已在执行中（用户原话："part2-3 已在执行"）。Part 6 与
 - **D2 cancel-path**：守卫只读 DB，状态仅内存；`stop()` cancel task 并 suppress `CancelledError`，不写持久状态。
 - **回滚**：关闭 bot 或调用 `clear_degraded_groups()` 清空内存；`profile=custom/balanced` 不读取 performance 降级。
 - **回填**：§6 `P6.0.x4` 已置 🟡。
+
+### P6.0.x5 领单拆分（执行前）
+
+- **目标**：把 Part 6 profile 能力露给 Admin SPA：配置页可编辑全局 profile，群管理可按群覆盖，仪表盘展示当前档位与 health guard 降级信号。
+- **后端拆分**：`admin/routes/api/groups.py` 持久化/序列化 `humanization_profile`；`admin/routes/api/dashboard.py` 返回 `humanization.profile/runtime_groups/degraded_groups`；`health_guard` 增只读降级列表 helper。
+- **前端拆分**：`ConfigView` 新增“拟人化生成”任务导航并复用 schema enum/select 自动渲染；`GroupsView` 增群级档位 radio 与差异 chip；`DashboardView` 在状态 badge 中展示当前档位和降级红点。
+- **测试拆分**：更新 groups profile API 持久化测试；新增 dashboard humanization 摘要测试；前端跑 `vue-tsc` 与 build。
+- **验收证据计划**：focused pytest + ruff/pyright 改动范围；`rg "humanization_profile|humanization\\.profile|degraded_group_ids"` 锁命中范围；回滚用 `git revert` + 全局/群级 profile 置回 `custom/继承全局`。
+
+### P6.0.x5 完成记录
+
+- **代码**：`/api/admin/groups` 与群 profile save/reset 支持 `humanization_profile`；`/api/admin/dashboard` 输出 `humanization` 摘要；配置页新增“拟人化生成”任务，群组抽屉新增“继承全局/四档” radio，dashboard 状态 badge 显示档位与降级数量。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_admin_api.py tests/test_dashboard_cache_pipelines.py tests/test_humanization_health_guard.py` → `64 passed`；`admin/frontend ./node_modules/.bin/vue-tsc --noEmit` → passed；`admin/frontend npm run build` → passed。
+- **ruff / pyright**：`uv run ruff check admin/routes/api/groups.py admin/routes/api/dashboard.py admin/routes/api/__init__.py services/humanization/health_guard.py tests/test_admin_api.py tests/test_dashboard_cache_pipelines.py` → passed；`uv run pyright admin/routes/api/groups.py admin/routes/api/dashboard.py admin/routes/api/__init__.py services/humanization/health_guard.py tests/test_dashboard_cache_pipelines.py` → `0 errors`。
+- **D1 grep**：`humanization_profile / humanization.profile / degraded_group_ids / 拟人化档位 / 拟人化生成` 命中 admin groups/dashboard、frontend config/dashboard/groups、health_guard、tests 与本追踪文档。
+- **D2 cancel-path**：N/A（Admin API/SPA 读写配置与只读 dashboard 摘要；health guard 降级列表只读 helper，无新异步写路径）。
+- **回滚**：`git revert <本提交>`；或运行时把全局 `humanization.profile` 置回 `custom`，群级覆盖改回“继承全局”，刷新/重启 admin 与 bot。
+- **回填**：§6 `P6.0.x5` 已置 🟡，Wave 1 剩余灰度项继续按用户口径不阻塞后续 Wave。
 
 ---
 

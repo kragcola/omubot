@@ -24,6 +24,9 @@ def clear_degraded_groups() -> None:
     _DEGRADED_GROUPS.clear()
     _HEALTHY_SINCE.clear()
 
+def degraded_group_ids() -> list[str]:
+    return sorted(_DEGRADED_GROUPS)
+
 class HumanizationHealthGuard:
     def __init__(
         self,

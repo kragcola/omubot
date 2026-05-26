@@ -40,6 +40,8 @@ type ReplyStyle = 'default' | 'gentle' | 'playful' | 'concise' | 'energetic' | '
 type StickerMode = 'inherit' | 'off' | 'rarely' | 'normal' | 'frequently'
 type ToolMode = 'inherit' | 'allow' | 'block'
 type PresenceMode = 'active' | 'silent_learn' | 'off'
+type HumanizationProfile = 'custom' | 'economy' | 'balanced' | 'performance'
+type HumanizationProfileDraft = 'inherit' | HumanizationProfile
 type GroupAccessMode = 'whitelist' | 'blacklist'
 type DrawerTab = 'basic' | 'rhythm' | 'advanced'
 type ChipTone = 'default' | 'info' | 'warning' | 'success' | 'error'
@@ -60,6 +62,7 @@ interface GroupProfileOverride {
   sticker_mode: StickerMode | null
   slang_enabled: boolean | null
   presence_mode: PresenceMode | null
+  humanization_profile: HumanizationProfile | null
   blocked_users?: Array<string | number>
 }
 
@@ -93,6 +96,8 @@ interface GroupItem {
   slang_enabled: boolean
   access_allowed?: boolean
   presence_mode: PresenceMode
+  humanization_profile: HumanizationProfile
+  global_humanization_profile?: HumanizationProfile
   profile_override: GroupProfileOverride
   profile_customized: boolean
 }
@@ -120,6 +125,7 @@ interface GroupProfileForm {
   sticker_mode: StickerMode
   slang_enabled: boolean
   presence_mode: PresenceMode
+  humanization_profile: HumanizationProfileDraft
 }
 
 interface GroupToolCatalogItem {
@@ -187,6 +193,13 @@ const PRESENCE_MODE_LABELS: Record<PresenceMode, string> = {
   off: '完全关闭',
 }
 
+const HUMANIZATION_PROFILE_LABELS: Record<HumanizationProfile, string> = {
+  custom: '自定义',
+  economy: '经济',
+  balanced: '均衡',
+  performance: '性能',
+}
+
 const loading = ref(true)
 const refreshing = ref(false)
 const detailRefreshing = ref(false)
@@ -243,6 +256,14 @@ const presenceModeOptions: SelectOption[] = [
   { label: '主动发言', value: 'active' },
   { label: '静默学习', value: 'silent_learn' },
   { label: '完全关闭', value: 'off' },
+]
+
+const humanizationProfileOptions: SelectOption[] = [
+  { label: '继承全局', value: 'inherit' },
+  { label: '自定义', value: 'custom' },
+  { label: '经济', value: 'economy' },
+  { label: '均衡', value: 'balanced' },
+  { label: '性能', value: 'performance' },
 ]
 
 const groupAccessModeOptions: SelectOption[] = [
@@ -362,6 +383,15 @@ const columns: DataTableColumns<GroupItem> = [
     render: row => h(StateBadge, {
       label: presenceLabel(row),
       status: presenceStatus(row),
+    }),
+  },
+  {
+    title: '拟人档位',
+    key: 'humanization_profile',
+    width: 130,
+    render: row => h(StateBadge, {
+      label: humanizationProfileLabel(row.humanization_profile),
+      status: humanizationProfileStatus(row.humanization_profile),
     }),
   },
   {
@@ -528,6 +558,23 @@ function presenceLabel(group: GroupItem): string {
   return PRESENCE_MODE_LABELS[group.presence_mode]
 }
 
+function humanizationProfileLabel(profile?: HumanizationProfile | HumanizationProfileDraft | null): string {
+  if (!profile) return HUMANIZATION_PROFILE_LABELS.custom
+  if (profile === 'inherit') return '继承全局'
+  return HUMANIZATION_PROFILE_LABELS[profile] || String(profile)
+}
+
+function globalHumanizationProfileLabel(group: GroupItem): string {
+  return humanizationProfileLabel(group.global_humanization_profile || group.humanization_profile)
+}
+
+function humanizationProfileStatus(profile?: HumanizationProfile | null): StateStatus {
+  if (profile === 'performance') return 'warning'
+  if (profile === 'balanced') return 'info'
+  if (profile === 'economy') return 'success'
+  return 'default'
+}
+
 function memberCountText(group: GroupItem): string {
   if (group.member_count === null || group.member_count === undefined) return '—'
   if (group.max_member_count && group.max_member_count > 0) {
@@ -565,6 +612,13 @@ function groupDiffChips(group: GroupItem): Array<{ label: string, type: ChipTone
     chips.push({
       label: `贴纸 ${STICKER_MODE_LABELS[group.sticker_mode]}`,
       type: group.sticker_mode === 'off' ? 'warning' : 'info',
+    })
+  }
+  const humanizationOverride = group.profile_override?.humanization_profile
+  if (humanizationOverride) {
+    chips.push({
+      label: `拟人 ${humanizationProfileLabel(humanizationOverride)}`,
+      type: humanizationOverride === 'performance' ? 'warning' : 'info',
     })
   }
   if (!group.tools_enabled) {
@@ -607,6 +661,7 @@ function profileFromGroup(group: GroupItem): GroupProfileForm {
     sticker_mode: group.sticker_mode,
     slang_enabled: Boolean(group.slang_enabled),
     presence_mode: group.presence_mode,
+    humanization_profile: group.profile_override?.humanization_profile || 'inherit',
   }
 }
 
@@ -792,6 +847,9 @@ function buildProfilePayload() {
   }
   return {
     ...profileDraft.value,
+    humanization_profile: profileDraft.value.humanization_profile === 'inherit'
+      ? null
+      : profileDraft.value.humanization_profile,
     blocked_users: rawBlockedUsers.map(value => Number(value)),
     allowed_tools: uniqueStrings(profileDraft.value.allowed_tools),
     blocked_tools: uniqueStrings(profileDraft.value.blocked_tools),
@@ -1219,6 +1277,21 @@ function resetGroupPolicyDraft() {
                     <NRadioGroup v-model:value="profileDraft.presence_mode">
                       <NRadioButton
                         v-for="opt in presenceModeOptions"
+                        :key="String(opt.value)"
+                        :value="opt.value"
+                      >
+                        {{ opt.label }}
+                      </NRadioButton>
+                    </NRadioGroup>
+                  </FieldGroup>
+
+                  <FieldGroup
+                    label="拟人化档位"
+                    :helper="`继承全局时使用 ${globalHumanizationProfileLabel(selectedGroup)}；保存后运行时按该群单独决议。`"
+                  >
+                    <NRadioGroup v-model:value="profileDraft.humanization_profile">
+                      <NRadioButton
+                        v-for="opt in humanizationProfileOptions"
                         :key="String(opt.value)"
                         :value="opt.value"
                       >

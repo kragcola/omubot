@@ -61,11 +61,20 @@ interface DashboardSchedule {
   slots: DashboardSlot[]
 }
 
+interface DashboardHumanization {
+  profile: string
+  runtime_groups?: string[]
+  runtime_group_count?: number
+  degraded_groups?: string[]
+  degraded_count?: number
+}
+
 interface DashboardData {
   uptime_seconds: number
   usage?: DashboardUsage
   mood?: DashboardMood | null
   schedule?: DashboardSchedule | null
+  humanization?: DashboardHumanization
 }
 
 interface DashboardHealth {
@@ -185,6 +194,13 @@ interface PendingItem {
   severity: 'warning' | 'error' | 'info' | 'success'
 }
 
+const HUMANIZATION_PROFILE_LABELS: Record<string, string> = {
+  custom: '自定义',
+  economy: '经济',
+  balanced: '均衡',
+  performance: '性能',
+}
+
 const router = useRouter()
 
 const data = ref<DashboardData | null>(null)
@@ -291,6 +307,7 @@ const scheduleTimelineSlots = computed(() => {
 const nextSlot = computed(() => scheduleTimelineSlots.value.find(s => !s.isPast) ?? null)
 const maintenanceWindow = computed(() => servicesHealth.value?.maintenance_window || null)
 const healthAlerts = computed(() => servicesHealth.value?.alerts || [])
+const humanizationStatus = computed(() => data.value?.humanization || null)
 
 const usageTopGroups = computed(() => {
   const rows = usageData.value?.top_groups ?? []
@@ -441,6 +458,15 @@ const statusBadges = computed(() => {
   })
   if (lastLoadedAt.value) {
     badges.push({ status: 'info', label: `更新 ${lastLoadedAt.value}` })
+  }
+  const humanization = humanizationStatus.value
+  if (humanization) {
+    const degradedCount = Number(humanization.degraded_count || 0)
+    const label = HUMANIZATION_PROFILE_LABELS[humanization.profile] || humanization.profile || '自定义'
+    badges.push({
+      status: degradedCount > 0 ? 'error' : humanization.profile === 'custom' ? 'info' : 'success',
+      label: degradedCount > 0 ? `拟人 ${label} · 降级 ${degradedCount}` : `拟人 ${label}`,
+    })
   }
   return badges
 })

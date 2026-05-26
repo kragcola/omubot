@@ -643,6 +643,9 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
     assert detail["ok"] is True
     assert detail["group"]["global_blocked_users"] == [70001]
     assert detail["group"]["allowed_tools"] == ["alpha_tool"]
+    assert detail["group"]["humanization_profile"] == "custom"
+    assert detail["group"]["global_humanization_profile"] == "custom"
+    assert detail["group"]["profile_override"]["humanization_profile"] is None
     assert {tool["name"] for tool in detail["tool_catalog"]} == {"alpha_tool", "beta_tool"}
     assert detail["audit"]["entries"] == []
 
@@ -663,6 +666,7 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
             "tools_enabled": False,
             "sticker_mode": "off",
             "slang_enabled": False,
+            "humanization_profile": "balanced",
         },
     )
     assert save_resp.status_code == 200
@@ -675,6 +679,8 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
     assert saved["group"]["reply_style"] == "playful"
     assert saved["group"]["tools_enabled"] is False
     assert saved["group"]["slang_enabled"] is False
+    assert saved["group"]["humanization_profile"] == "balanced"
+    assert saved["group"]["profile_override"]["humanization_profile"] == "balanced"
     assert saved["audit_entry"]["summary"]["changed_count"] >= 1
 
     resolved = runtime_config.group.resolve(123456)
@@ -687,6 +693,7 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
     assert resolved.tools_enabled is False
     assert resolved.sticker_mode == "off"
     assert resolved.slang_enabled is False
+    assert resolved.humanization_profile == "balanced"
 
     written = json.loads(config_path.read_text(encoding="utf-8"))
     override = written["group"]["overrides"]["123456"]
@@ -695,6 +702,7 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
     assert override["blocked_tools"] == ["alpha_tool"]
     assert override["reply_style"] == "playful"
     assert override["tools_enabled"] is False
+    assert override["humanization_profile"] == "balanced"
 
     detail_after_save = client.get("/api/admin/groups/123456/profile")
     assert detail_after_save.status_code == 200
@@ -709,12 +717,14 @@ def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) ->
     assert reset["group"]["profile_customized"] is False
     assert reset["group"]["blocked_users"] == [70001]
     assert reset["group"]["allowed_tools"] == ["alpha_tool"]
+    assert reset["group"]["humanization_profile"] == "custom"
 
     resolved_after_reset = runtime_config.group.resolve(123456)
     assert resolved_after_reset.at_only is False
     assert resolved_after_reset.blocked_users == {70001}
     assert resolved_after_reset.reply_style == "default"
     assert resolved_after_reset.tools_enabled is True
+    assert resolved_after_reset.humanization_profile is None
 
     detail_after_reset = client.get("/api/admin/groups/123456/profile")
     assert detail_after_reset.status_code == 200

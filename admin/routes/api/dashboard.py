@@ -21,6 +21,7 @@ def create_dashboard_router(
     bot_start_time: float = 0.0,
     mood_engine: Any = None,
     schedule_store: Any = None,
+    config: Any = None,
     ctx: Any = None,
 ) -> APIRouter:
     router = APIRouter()
@@ -33,6 +34,32 @@ def create_dashboard_router(
 
     def _schedule():
         return schedule_store or (getattr(ctx, "schedule_store", None) if ctx else schedule_store)
+
+    def _config():
+        return config or (getattr(ctx, "config", None) if ctx else None)
+
+    def _humanization_status() -> dict[str, Any]:
+        root = _config()
+        humanization = getattr(root, "humanization", None) if root is not None else None
+        profile = str(getattr(humanization, "profile", "custom") or "custom")
+        runtime_groups = [
+            str(group_id).strip()
+            for group_id in (getattr(humanization, "runtime_groups", []) or [])
+            if str(group_id).strip()
+        ]
+        try:
+            from services.humanization.health_guard import degraded_group_ids
+
+            degraded_groups = degraded_group_ids()
+        except Exception:
+            degraded_groups = []
+        return {
+            "profile": profile,
+            "runtime_groups": runtime_groups,
+            "runtime_group_count": len(runtime_groups),
+            "degraded_groups": degraded_groups,
+            "degraded_count": len(degraded_groups),
+        }
 
     @router.get("/dashboard")
     async def dashboard():
@@ -101,6 +128,7 @@ def create_dashboard_router(
             "usage": usage_summary,
             "mood": mood,
             "schedule": schedule,
+            "humanization": _humanization_status(),
         }
 
     @router.get("/dashboard/cache-pipelines")

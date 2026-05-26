@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-05-26 Part 6 Wave 1 x5 Admin SPA 档位治理落地
+
+**变更类型**：admin API / admin frontend / humanization profile governance
+
+**变更内容**：
+
+- `/api/admin/groups` 与群 profile save/reset 现支持 `humanization_profile`，前端群管理抽屉可选择“继承全局 / custom / economy / balanced / performance”，列表差异 chip 会显示群级覆盖。
+- `/api/admin/dashboard` 新增 `humanization` 摘要：当前全局档位、runtime_groups 与 health guard 降级群列表；仪表盘状态 badge 显示当前档位，存在降级群时显示红色降级数量。
+- 配置页新增“拟人化生成”任务导航，复用后端 schema enum 自动渲染 `humanization.profile` 下拉，并用只读摘要卡展示 state_board / streaming / pause / plan 子能力状态。
+- `services/humanization/health_guard.py` 增加只读 `degraded_group_ids()` helper，保持降级状态仍为内存态、不写持久配置。
+- [docs/tracking/omubot-humanization-part6-execution.md](docs/tracking/omubot-humanization-part6-execution.md) 已回填 `P6.0.x5` 执行前拆单、完成记录与 §6 🟡 状态。
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_admin_api.py tests/test_dashboard_cache_pipelines.py tests/test_humanization_health_guard.py` → `64 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check admin/routes/api/groups.py admin/routes/api/dashboard.py admin/routes/api/__init__.py services/humanization/health_guard.py tests/test_admin_api.py tests/test_dashboard_cache_pipelines.py` → passed
+- `source ./scripts/dev/env.sh && uv run pyright admin/routes/api/groups.py admin/routes/api/dashboard.py admin/routes/api/__init__.py services/humanization/health_guard.py tests/test_dashboard_cache_pipelines.py` → `0 errors`
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit` → passed；`npm run build` → passed
+
+**影响 / 回滚**：
+
+- 默认行为仍取决于 `humanization.profile=custom` 与群级“继承全局”；前端只是把已落地的 profile 决议暴露为可治理面。
+- 30 秒回滚：把全局 `humanization.profile` 置回 `custom`、群级覆盖改回“继承全局”，必要时 `git revert` 本提交并重新 build SPA。
+- build 产生的 `admin/static/index.html` 本轮不提交，避免引用未纳入 git 的 ignored 哈希资产；部署时按既有流程重新 `npm run build` 即可。
+
 ## 2026-05-26 Part 3.5 灰度 L1 切流（RWS shadow 启用）
 
 **变更类型**：image rebuild + humanization config

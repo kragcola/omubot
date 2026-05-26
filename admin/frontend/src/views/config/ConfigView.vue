@@ -14,6 +14,7 @@ import {
   SaveOutline,
   ServerOutline,
   SettingsOutline,
+  SparklesOutline,
   TimeOutline,
 } from '@vicons/ionicons5'
 import {
@@ -53,7 +54,7 @@ import type {
   ConfigSaveResult,
 } from './types'
 
-type ConfigTaskId = 'model' | 'chat' | 'rhythm' | 'segmentation' | 'connection' | 'access'
+type ConfigTaskId = 'model' | 'chat' | 'rhythm' | 'humanization' | 'segmentation' | 'connection' | 'access'
 
 interface LegacyConfigResponse {
   path?: string
@@ -325,6 +326,33 @@ const FIELD_UI_HINTS: Record<string, FieldUiHint> = {
     recommended: '0.5 - 1.2 秒',
     restart_hint: 'recommended',
   },
+  'humanization.profile': {
+    display_label: '拟人化生成档位',
+    help: 'custom 保持显式开关；economy 只做 cache 稳定；balanced/performance 会由后续 Part 6 能力逐步接管生成形态。',
+    recommended: 'custom / economy / balanced / performance',
+    risk_level: 'careful',
+    restart_hint: 'required',
+  },
+  'humanization.runtime_groups': {
+    display_label: '拟人化灰度群',
+    help: '非空时仅这些群允许拟人化运行能力生效；空列表表示跟随全局开关不限制群。',
+    risk_level: 'careful',
+    restart_hint: 'recommended',
+  },
+  'humanization.state_board.layout': {
+    display_label: '状态板位置',
+    help: 'head 保持旧 prompt 顺序；tail 把 state_board 后置以降低前缀缓存抖动。',
+    recommended: 'head / tail',
+    risk_level: 'careful',
+    restart_hint: 'required',
+  },
+  'humanization.state_board.granularity': {
+    display_label: '状态板粒度',
+    help: 'fine 保留分钟/计数；coarse 使用粗粒度时间和频率，提升 prompt 稳定性。',
+    recommended: 'fine / coarse',
+    risk_level: 'careful',
+    restart_hint: 'required',
+  },
 }
 
 const CONFIG_TASKS: ConfigTaskDefinition[] = [
@@ -378,6 +406,21 @@ const CONFIG_TASKS: ConfigTaskDefinition[] = [
     paths: ['anti_detect.enabled', 'anti_detect.min_delay', 'anti_detect.max_delay', 'anti_detect.char_delay', 'thinker.enabled', 'thinker.max_tokens'],
   },
   {
+    id: 'humanization',
+    title: '拟人化生成',
+    eyebrow: 'Humanization',
+    description: '切换 Part 6 的生成档位，并查看状态板、流式分段、追发和计划发言子能力。',
+    audience: '灰度 Part 6 拟人化生成、需要按成本/体感选择档位时修改。',
+    impact: '影响 state_board prompt 稳定性，以及后续 streaming / pause / plan 生成路径的启停。',
+    restart: '保存后建议在线重启，让 LLMClient、health guard 与长驻任务统一读取新档位。',
+    paths: [
+      'humanization.profile',
+      'humanization.runtime_groups',
+      'humanization.state_board.layout',
+      'humanization.state_board.granularity',
+    ],
+  },
+  {
     id: 'segmentation',
     title: '回复分段',
     eyebrow: 'Segmentation',
@@ -426,6 +469,7 @@ const TASK_ICONS: Record<ConfigTaskId, Component> = {
   model: KeyOutline,
   chat: ChatbubblesOutline,
   rhythm: PulseOutline,
+  humanization: SparklesOutline,
   segmentation: CutOutline,
   connection: ServerOutline,
   access: HardwareChipOutline,
@@ -535,6 +579,33 @@ const activeAdvanced = computed(() =>
     ? null
     : ADVANCED_NAVS.find(item => item.id === activeNav.value) || null,
 )
+const humanizationSummaryCards = computed(() => {
+  const humanization = values.value.humanization || {}
+  const stateBoard = humanization.state_board || {}
+  const streaming = humanization.streaming_segment || {}
+  const pause = humanization.pause_then_extend || {}
+  const plan = humanization.plan_then_utter || {}
+  return [
+    {
+      label: '状态板',
+      value: `${stateBoard.layout || 'head'} / ${stateBoard.granularity || 'fine'}`,
+    },
+    {
+      label: 'Streaming',
+      value: streaming.enabled ? '已显式开启' : '随档位决议',
+    },
+    {
+      label: '追发',
+      value: pause.enabled ? '已显式开启' : '随档位决议',
+    },
+    {
+      label: 'Plan',
+      value: plan.enabled
+        ? `已开启${Array.isArray(plan.group_whitelist) && plan.group_whitelist.length ? ` · ${plan.group_whitelist.length} 群` : ''}`
+        : '随档位决议',
+    },
+  ]
+})
 
 const activeTaskFields = computed(() =>
   activeTask.value
@@ -1295,6 +1366,17 @@ async function restoreBackup(entry: ConfigBackupEntry) {
                 <div class="config-task-guide__cell">
                   <span>生效建议</span>
                   <p>{{ activeTask.restart }}</p>
+                </div>
+              </div>
+
+              <div v-if="activeTask.id === 'humanization'" class="config-task-guide">
+                <div
+                  v-for="card in humanizationSummaryCards"
+                  :key="card.label"
+                  class="config-task-guide__cell"
+                >
+                  <span>{{ card.label }}</span>
+                  <p>{{ card.value }}</p>
                 </div>
               </div>
 
@@ -2067,9 +2149,6 @@ async function restoreBackup(entry: ConfigBackupEntry) {
   }
 }
 </style>
-
-
-
 
 
 
