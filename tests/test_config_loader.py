@@ -434,6 +434,7 @@ class TestGroupConfigResolve:
         assert resolved.allowed_tools == {"lookup_cards"}
         assert resolved.blocked_tools == {"web_search"}
         assert resolved.at_only is False
+        assert resolved.planner_smooth == 2.0
         assert resolved.debounce_seconds == 5.0
         assert resolved.batch_size == 10
         assert resolved.history_load_count == 30
@@ -487,6 +488,7 @@ class TestGroupConfigResolve:
         )
         resolved = cfg.resolve(123)
         assert resolved.at_only is True
+        assert resolved.planner_smooth == 2.0
         assert resolved.debounce_seconds == 5.0
         assert resolved.batch_size == 10
         assert resolved.history_load_count == 30

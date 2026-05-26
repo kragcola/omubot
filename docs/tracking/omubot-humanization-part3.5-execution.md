@@ -138,7 +138,7 @@
 | **P3.11.1** | 1 | ✅ | 自主验收通过：`directed_followup` 已接入 `notify()` bypass 与 `_should_force_reply()`；`services/scheduler.py` +13/-3，2 条新测试 + force-reply 回归 44 条通过 |
 | **P3.11.2a** | 1 | ✅ | 自主验收通过：`consecutive_skip` 两档阈值已升格为 `GroupConfig` / `GroupOverride` / `ResolvedGroupConfig` 字段；scheduler 裸字面量 grep 归零，相关回归 70 条通过 |
 | **P3.11.2b** | 1 | ✅ | 自主验收通过：force-threshold 已叠加 30 分钟 skip 窗口；`last_skip_time` grep 命中收敛到 `__slots__` + `notify()` 两处，相关回归 74 条通过 |
-| **P3.11.3** | 1 | ⏳ | `planner_smooth` 3.0 → 2.0，未开始 |
+| **P3.11.3** | 1 | ✅ | 自主验收通过：`planner_smooth` 默认值在代码默认路径已从 3.0 收敛到 2.0；`planner_smooth.*3.0` 在 `kernel/config.py` / `config/config.json` 默认位点归零，config loader 回归 24 条通过 |
 | **P3.12** | 2 | ⏳ | RWS scaffolding，未开始；阻塞于 Wave 1 |
 | **P3.13** | 2 | ⏳ | Hawkes 离线 cache，未开始；阻塞于 P3.12 |
 | **P3.14** | 2 | ⏳ | EOT classifier，未开始；阻塞于 P3.12 |
@@ -308,3 +308,38 @@ D2 / 回滚：P3.11.0 为零代码摸排，无 cancel-path 写状态；回滚为
 - `services/scheduler.py` `+6/-2`
 - `tests/test_scheduler.py` `+91/-0`
 - 回滚保持为单 commit `git revert <commit>`；Wave 1 剩余 `P3.11.3` 可继续独立推进。
+
+### P3.11.3 领单拆分（执行前）— Codex / 2026-05-26 12:32 CST
+
+- **任务边界**：只把 `planner_smooth` 默认值从 `3.0` 降到 `2.0`；限定在 `config/config.json` 与 `kernel/config.py` 的默认值/resolve fallback。不会改 override 结构、不会改测试里用来表达历史样本的显式 `3.0`。
+- **自主评估**：这一步是纯默认值收敛，风险在于只改 `GroupConfig` 默认而漏掉 `ResolvedGroupConfig` 或 `resolve(access_allowed=False)` fallback，导致不同分支仍返回 3.0。
+- **执行拆分**：
+  1. 更新 `config/config.json` 的 group 默认 `planner_smooth` 为 `2.0`。
+  2. 更新 `kernel/config.py` 中 `ResolvedGroupConfig` / `GroupConfig` 的默认值，以及 `resolve()` fallback 的 `planner_smooth=2.0`。
+  3. 用 grep 锁定仓内默认值位点：`planner_smooth.*3.0` 在目标默认路径归零，但显式测试样例保留。
+  4. 跑 config 相关静态检查与定向回归，回填本文 §6 / §9。
+- **风险与回滚**：风险是只改一半默认值导致 runtime 和默认配置文件不一致。回滚为撤销 `config/config.json` / `kernel/config.py` 与本文 §6 / §9 的 P3.11.3 回填。
+
+### P3.11.3 完成记录（执行者 Codex）— 2026-05-26 12:33 CST
+
+自验结果：P3.11.3 完成并自主验收 ✅。本步是纯默认值收敛：`GroupConfig` / `ResolvedGroupConfig` / `resolve()` fallback 的 `planner_smooth` 默认值全部改为 `2.0`；本机运行时的 `config/config.json` 也已同步改成 `2.0`，但该文件在此仓为本地 runtime 配置、未纳入 git 跟踪，因此提交只会包含代码默认值与测试回填。
+
+改动内容：
+
+- `kernel/config.py`：`ResolvedGroupConfig.planner_smooth`、`GroupConfig.planner_smooth` 与 `resolve(access_allowed=False)` fallback 的默认值统一改为 `2.0`。
+- `config/config.json`：本机运行时默认值同步改为 `2.0`（本地未跟踪文件，不进入 commit）。
+- `tests/test_config_loader.py`：补两条断言，锁定无 override / partial override 时 `resolved.planner_smooth == 2.0`。
+
+验证：
+
+- D1 grep：`rg -n "planner_smooth.*3\\.0" config/config.json kernel/config.py` → 0 命中；显式测试样例中的历史 `3.0` 保留，不在本步 D1 范围内。
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_config_loader.py` → `24 passed in 0.11s`
+- `source ./scripts/dev/env.sh && uv run ruff check kernel/config.py tests/test_config_loader.py` → passed
+- `source ./scripts/dev/env.sh && uv run pyright kernel/config.py tests/test_config_loader.py` → `0 errors, 0 warnings, 0 informations`
+- `git diff --check -- docs/tracking/omubot-humanization-part3.5-execution.md config/config.json kernel/config.py tests/test_config_loader.py` → passed
+
+改动行数与回滚：
+
+- `kernel/config.py` `+3/-3`
+- `tests/test_config_loader.py` `+2/-0`
+- `config/config.json` 为本地未跟踪 runtime 配置，不计入 commit diff；回滚命令保持为单 commit `git revert <commit>`，本地配置若需回退再手动改回 `3.0`。

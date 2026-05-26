@@ -328,7 +328,7 @@ class ResolvedGroupConfig(BaseModel):
     blocked_tools: set[str] = set()
     at_only: bool = False
     talk_value: float = 0.3
-    planner_smooth: float = 3.0
+    planner_smooth: float = 2.0
     consecutive_skip_force_threshold: int = 5
     consecutive_skip_double_threshold: int = 3
     debounce_seconds: float = 5.0
@@ -374,7 +374,7 @@ class GroupConfig(BaseModel):
     history_load_count: int = 30
     allowed_groups: list[int] = []
     talk_value: float = 0.3
-    planner_smooth: float = 3.0
+    planner_smooth: float = 2.0
     consecutive_skip_force_threshold: int = 5
     consecutive_skip_double_threshold: int = 3
     debounce_seconds: float = 5.0
@@ -490,7 +490,7 @@ class GroupConfig(BaseModel):
                     blocked_tools=base_blocked_tools,
                     at_only=False,
                     talk_value=0.3,
-                    planner_smooth=3.0,
+                    planner_smooth=2.0,
                     consecutive_skip_force_threshold=5,
                     consecutive_skip_double_threshold=3,
                     debounce_seconds=5.0,
