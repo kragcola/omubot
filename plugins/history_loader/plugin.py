@@ -19,6 +19,7 @@ from kernel.types import AmadeusPlugin, PluginContext
 from services.media.image_cache import ImageCache
 from services.media.sticker_capture import (
     DEFAULT_STICKER_USAGE_HINT,
+    emit_emotion_tag,
     is_sticker_like_segment,
     sticker_description_from_segment,
 )
@@ -46,6 +47,7 @@ async def load_group_history(
     bot_self_id: str = "",
     image_cache: ImageCache | None = None,
     sticker_store: StickerStore | None = None,
+    vision_client: Any | None = None,
     learn_new_stickers: set[str] | None = None,
     counts: dict[str, int] | None = None,
 ) -> None:
@@ -64,6 +66,7 @@ async def load_group_history(
                     bot_self_id,
                     image_cache,
                     sticker_store,
+                    vision_client,
                     gid in sticker_learn_groups,
                 )
             except Exception:
@@ -79,6 +82,7 @@ async def _load_one_group(
     bot_self_id: str = "",
     image_cache: ImageCache | None = None,
     sticker_store: StickerStore | None = None,
+    vision_client: Any | None = None,
     learn_new_stickers: bool = False,
 ) -> None:
     from nonebot.adapters.onebot.v11.exception import ActionFailed
@@ -117,6 +121,7 @@ async def _load_one_group(
             session,
             image_cache,
             sticker_store,
+            vision_client=vision_client,
             learn_new_stickers=learn_new_stickers,
         )
         if not content:
@@ -146,6 +151,7 @@ async def _extract_content(
     image_cache: ImageCache | None,
     sticker_store: StickerStore | None = None,
     *,
+    vision_client: Any | None = None,
     learn_new_stickers: bool = False,
 ) -> Content:
     """Extract text, face, and image segments into a Content value."""
@@ -232,6 +238,14 @@ async def _extract_content(
                             else:
                                 sticker_path = sticker_store.resolve_path(stk_id)
                                 if sticker_path is not None:
+                                    if is_new:
+                                        await emit_emotion_tag(
+                                            sticker_store,
+                                            stk_id,
+                                            image_data=image_data,
+                                            vision_client=vision_client,
+                                            media_type=r["media_type"],
+                                        )
                                     cached_path.unlink(missing_ok=True)
                                     images.append(
                                         ImageRefBlock(
@@ -317,6 +331,7 @@ class HistoryLoaderPlugin(AmadeusPlugin):
                 bot_self_id=bot.self_id,
                 image_cache=ctx.image_cache if getattr(ctx, "vision_enabled", False) else None,
                 sticker_store=ctx.sticker_store,
+                vision_client=getattr(ctx, "vision_client", None),
                 learn_new_stickers=learn_sticker_groups,
                 counts=counts,
             )

@@ -9,19 +9,20 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 from pydantic import BaseModel
 
-from kernel.types import AmadeusPlugin, MessageContext, PluginContext, PromptContext
+from kernel.types import AmadeusPlugin, MessageContext, PluginContext, PromptContext, Tool
 from services.media.sticker_capture import (
     DEFAULT_STICKER_USAGE_HINT,
+    emit_emotion_tag,
     is_sticker_like_segment,
     segment_value,
     sticker_description_from_segment,
+    sticker_media_type,
 )
-from services.tools.base import Tool
 
 _L = logger.bind(channel="system")
 _SILENT_STEAL_MAX_IMAGES = 2
@@ -116,7 +117,7 @@ class StickerPlugin(AmadeusPlugin):
 
         sticker_cfg = load_plugin_config("plugins/sticker/config.default.json", StickerConfig)
         self._sticker_store = ctx.sticker_store
-        self._vision_client = ctx.vision_client
+        self._vision_client = getattr(ctx, "vision_client", None)
         self._image_cache = ctx.image_cache
         self._ctx = ctx
         self._superusers = set(ctx.config.admins.keys()) | nonebot.get_driver().config.superusers
@@ -131,11 +132,11 @@ class StickerPlugin(AmadeusPlugin):
             SaveStickerTool,
             SendStickerTool,
         )
-        return [
+        return cast(list[Tool], [
             SaveStickerTool(self._sticker_store, self._superusers),
             SendStickerTool(self._sticker_store, runtime_state=getattr(self._ctx, "runtime_state", None)),
             ManageStickerTool(self._sticker_store, self._superusers),
-        ]
+        ])
 
     async def on_message(self, ctx: MessageContext) -> bool:
         """silent_learn 模式群里，把群友发的表情静默吸进表情库。
@@ -202,6 +203,13 @@ class StickerPlugin(AmadeusPlugin):
                 )
                 continue
             if is_new:
+                await emit_emotion_tag(
+                    self._sticker_store,
+                    sticker_id,
+                    image_data=image_data,
+                    vision_client=self._vision_client,
+                    media_type=sticker_media_type(path),
+                )
                 saved += 1
                 _L.info(
                     "silent sticker learned | group={} sticker_id={} file={}",
@@ -350,6 +358,13 @@ class StickerPlugin(AmadeusPlugin):
                 continue
 
             if is_new:
+                await emit_emotion_tag(
+                    self._sticker_store,
+                    sticker_id,
+                    image_data=image_data,
+                    vision_client=self._vision_client,
+                    media_type=sticker_media_type(path),
+                )
                 _L.info(
                     "silent sticker retry learned | group={} message_id={} sticker_id={} file={}",
                     retry.group_id,

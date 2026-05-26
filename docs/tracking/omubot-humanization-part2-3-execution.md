@@ -236,7 +236,7 @@
 | **P2.5** | 3 | ✅ | 自主验收通过：router 透传 `addressee_self`，scheduler 仅 self-target `at_mention` force_reply；3 条专项 + scheduler 回归 41 条通过 |
 | **P3.3** | 3 | ✅ | 自主验收通过：PromptBuilder 第 2 块 read_mark marker；2 条新测试，相关回归 22 条通过 |
 | **P2.9** | 4 | ✅ | 自主验收通过：kaomoji 强制轮 strict gate + `humanization.kaomoji_enforce_strict` 回退旗标；6 条新测试与相关回归 16 条通过 |
-| **P2.10** | 4 | ⏳ | 阻塞于 P2.8；保留 DEFAULT_STICKER_USAGE_HINT fallback |
+| **P2.10** | 4 | ✅ | 自主验收通过：auto-capture emotion tag helper + 离线 recaption 脚本；5 条新测试与相关回归 55 条通过 |
 | **P2.14** | 4 | ⏳ | 阻塞于 P2.8 + P3.6；自反馈环上限 0.3 |
 | **P2.11** | 4 | ⏳ | 阻塞于 P2.8 |
 | **P3.10** | 5 | ⏳ | 阻塞于 P3.6 + P3.7 + P3.8 + P3.9 |
@@ -887,3 +887,34 @@ D2 / 回滚：本任务无新增持久化写路径；回滚为撤销 `services/l
 - D1 grep：`rg -n "kaomoji_enforce_strict|_should_force_kaomoji_sticker_round|humanization_kaomoji_enforce_strict|test_kaomoji_enforce" kernel/config.py plugins/chat/plugin.py services/llm/client.py tests/test_humanization_config.py tests/test_kaomoji_enforce.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 schema、ChatPlugin 接线、LLMClient helper、新旧测试与本追踪记录。
 
 D2 / 回滚：回滚为撤销 `kernel/config.py` / `services/llm/client.py` / `plugins/chat/plugin.py` / `tests/test_humanization_config.py` / `tests/test_kaomoji_enforce.py` 的 P2.9 改动，并把工作区本地 `config/config.toml` / `config/config.json` 的 `kaomoji_enforce_strict` 设回原状，再撤销 §6 / §9 P2.9 回填。
+
+### P2.10 领单拆分（执行前）— Codex / 2026-05-26 08:12 CST
+
+- **任务边界**：主落 `services/media/sticker_capture.py` 的 emotion-tag helper 与离线重跑脚本；生产接线只覆盖当前默认写 `DEFAULT_STICKER_USAGE_HINT` 的自动入库路径（`plugins/sticker/plugin.py` silent learn / retry、`plugins/history_loader/plugin.py` learn_new_stickers）。不改 `StickerStore` schema，不改 prompt dump 格式，不提前接 P2.12 FairMatch 或 P2.14 density feedback。
+- **自主评估**：仓库当前自动吸纳 sticker 的 `usage_hint` 全写统一文案 `DEFAULT_STICKER_USAGE_HINT`，而人工 `SaveStickerTool` / debug save 已允许更细 usage_hint。按派单订正，本步保留默认文案作为冷启动 fallback，再补 `emit_emotion_tag()`：vision LLM 单次描述成功时，把更细的聊天场景/情绪标签回写到 `sticker_store.usage_hint`；失败时保持 fallback，不阻断入库。
+- **执行拆分**：
+  1. 在 `services/media/sticker_capture.py` 新增面向 sticker 的短提示词、输出清洗与 `emit_emotion_tag()` helper；helper 负责调用 `vision_client.describe_image()`、trim 输出、失败回落 fallback、成功时 `sticker_store.update(..., usage_hint=tag)`。
+  2. 在 `plugins/sticker/plugin.py` 的 silent learn / retry 路径，以及 `plugins/history_loader/plugin.py` 的 `learn_new_stickers` 路径，在 `add(... DEFAULT_STICKER_USAGE_HINT ...)` 后补一行 helper 调用；仅对新增 sticker 执行，失败只记日志。
+  3. 新建 `scripts/dev/sticker_recaption.py`，遍历现有 sticker 库并调用 `emit_emotion_tag()` 重跑 usage_hint；默认从本地 config 读取 vision 配置与 sticker storage_dir，支持 dry-run/limit，便于灰度后一次性回填旧库。
+  4. 新增 `tests/test_sticker_capture_emotion.py` 5 条，覆盖 success update、vision 缺失/空返回 fallback、已有非 fallback hint 不覆盖、自动路径调用 helper、脚本/cleaner 关键边界。
+- **风险与回滚**：本步只在已有自动入库成功后追加一次 best-effort vision 描述，不得让网络失败回滚 sticker 入库。回滚为撤销 `sticker_capture.py` helper、自动路径接线、新脚本与新测试，并撤销 §6 / §9 P2.10 回填。
+
+### P2.10 完成记录（执行者 Codex）— 2026-05-26 08:21 CST
+
+自验结果：P2.10 完成并自主验收 ✅。本步没有替换 `DEFAULT_STICKER_USAGE_HINT`，而是在其上补了一条 best-effort emotion-tag 通道：自动吸纳新 sticker 时先按 fallback 入库，再用 vision LLM 单次生成更细的 usage_hint 回写；离线脚本可对旧库重跑全量 recaption。
+
+- `services/media/sticker_capture.py`：新增 `_EMOTION_TAG_PROMPT`、`normalize_emotion_tag()`、`sticker_media_type()` 与 `emit_emotion_tag()`；默认不覆盖已有非 fallback hint，支持 `overwrite=True` / `dry_run=True` 供离线脚本使用。
+- `plugins/sticker/plugin.py`：silent learn 与 retry 路径在 `is_new` 后调用 `emit_emotion_tag()`，失败不影响 sticker 入库。
+- `plugins/history_loader/plugin.py`：`load_group_history()` / `_load_one_group()` / `_extract_content()` 增加可选 `vision_client` 透传；history learn-new-stickers 路径在新 sticker 入库后调用 `emit_emotion_tag()`。
+- `scripts/dev/sticker_recaption.py`：新增离线脚本，支持 `--limit`、`--only-fallback`、`--dry-run` 与 `--force`；默认读取本地 bot config 与 sticker plugin config，遍历 sticker 库重写 usage_hint。
+- `tests/test_sticker_capture_emotion.py`：新增 5 条专项测试，覆盖 helper success/fallback/overwrite、silent learn 接线与 history loader 接线。
+
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_sticker_capture_emotion.py tests/test_history_sticker.py tests/test_sticker_plugin_silent_learn.py tests/test_sticker_store.py` → `55 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/media/sticker_capture.py plugins/sticker/plugin.py plugins/history_loader/plugin.py scripts/dev/sticker_recaption.py tests/test_sticker_capture_emotion.py tests/test_history_sticker.py tests/test_sticker_plugin_silent_learn.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pyright services/media/sticker_capture.py plugins/sticker/plugin.py plugins/history_loader/plugin.py scripts/dev/sticker_recaption.py tests/test_sticker_capture_emotion.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/media/sticker_capture.py plugins/sticker/plugin.py plugins/history_loader/plugin.py scripts/dev/sticker_recaption.py tests/test_sticker_capture_emotion.py` → passed。
+- `source ./scripts/dev/env.sh && uv run python scripts/dev/sticker_recaption.py --help >/dev/null` → passed。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` → `1841 tests collected in 0.56s`。
+- D1 grep：`rg -n "emit_emotion_tag|normalize_emotion_tag|sticker_recaption|DEFAULT_STICKER_USAGE_HINT" services/media/sticker_capture.py plugins/sticker/plugin.py plugins/history_loader/plugin.py scripts/dev/sticker_recaption.py tests/test_sticker_capture_emotion.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 helper、两条自动入库接线、离线脚本、新测试与本追踪记录。
+
+D2 / 回滚：回滚为撤销 `services/media/sticker_capture.py` / `plugins/sticker/plugin.py` / `plugins/history_loader/plugin.py` / `scripts/dev/sticker_recaption.py` / `tests/test_sticker_capture_emotion.py` 的 P2.10 改动，并撤销 §6 / §9 P2.10 回填。

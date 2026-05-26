@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P2.10 Sticker Emotion Tag 重标注落地
+
+**变更类型**：sticker runtime / vision recaption / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 4 P2.10，为自动吸纳 sticker 补一条 emotion-tag usage_hint 重标注通道：
+
+- `services/media/sticker_capture.py`：保留 `DEFAULT_STICKER_USAGE_HINT` 冷启动 fallback，新增 `_EMOTION_TAG_PROMPT`、`normalize_emotion_tag()`、`sticker_media_type()` 与 `emit_emotion_tag()` helper；vision 成功时回写 `sticker_store.usage_hint`，失败时保留现有 hint；
+- `plugins/sticker/plugin.py`：silent learn / retry 两条自动入库路径仅在 `is_new` 时调用 `emit_emotion_tag()`；
+- `plugins/history_loader/plugin.py`：history `learn_new_stickers` 路径在新 sticker 入库后调用 `emit_emotion_tag()`，并透传 `vision_client`；
+- `scripts/dev/sticker_recaption.py`：新增离线全库 recaption 脚本，支持 `--limit`、`--only-fallback`、`--dry-run`、`--force`；
+- `tests/test_sticker_capture_emotion.py`：新增 5 条专项测试，覆盖 helper、overwrite 行为与两条自动入库接线。
+
+**验证**：
+
+- `uv run pytest -q tests/test_sticker_capture_emotion.py tests/test_history_sticker.py tests/test_sticker_plugin_silent_learn.py tests/test_sticker_store.py` → `55 passed`
+- `uv run ruff check services/media/sticker_capture.py plugins/sticker/plugin.py plugins/history_loader/plugin.py scripts/dev/sticker_recaption.py tests/test_sticker_capture_emotion.py tests/test_history_sticker.py tests/test_sticker_plugin_silent_learn.py` → passed
+- `uv run pyright services/media/sticker_capture.py plugins/sticker/plugin.py plugins/history_loader/plugin.py scripts/dev/sticker_recaption.py tests/test_sticker_capture_emotion.py` → `0 errors`
+- `uv run python -m py_compile services/media/sticker_capture.py plugins/sticker/plugin.py plugins/history_loader/plugin.py scripts/dev/sticker_recaption.py tests/test_sticker_capture_emotion.py` → passed
+- `uv run python scripts/dev/sticker_recaption.py --help >/dev/null` → passed
+- `uv run pytest --collect-only -q` → `1841 tests collected`
+
+**影响**：P2.10 状态自主验收为 ✅；新吸纳的 sticker 将在 fallback 入库后尝试自动补全更细 usage_hint，旧库可通过离线脚本批量回填，不阻断现有入库链路。
+
+**回滚**：撤销 `services/media/sticker_capture.py` / `plugins/sticker/plugin.py` / `plugins/history_loader/plugin.py` / `scripts/dev/sticker_recaption.py` / `tests/test_sticker_capture_emotion.py` 的 P2.10 改动，并停止使用离线 recaption 脚本。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P2.9 Kaomoji Enforce Gate 收紧落地
 
 **变更类型**：humanization runtime / reply gate / tests
