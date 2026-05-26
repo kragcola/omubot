@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P3.10 Mood Coupling Lookup 落地
+
+**变更类型**：humanization support module / coupling policy / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 5 P3.10，把调研 §4.5 的 mood × addressee × topic 联动表落成纯 lookup：
+
+- `services/humanization/coupling.py`：新增 `CouplingFeatures` / `CouplingPolicy` / `lookup_coupling()`，79 行内覆盖 cold non-self suppress、cold self short、playful topic drift elaborate、tired new-topic continue-old、playful register sticker 0.7、cold/tired sticker 0.1、stranger neutral、close self playful + sticker ×1.2、withdraw delay ×1.3 + sticker ≤0.05；
+- `services/humanization/__init__.py`：导出 coupling lookup API；
+- `tests/test_mood_coupling.py`：新增 15 条测试，覆盖 9 行联动表、默认 no-op 与 affection > mood > register 仲裁。
+
+**验证**：
+
+- `uv run pytest -q tests/test_mood_coupling.py tests/test_planner_addressee_mood.py tests/test_binary_planner.py tests/test_addressee_detector.py tests/test_topic_drift.py` → `48 passed`
+- `uv run ruff check services/humanization/coupling.py services/humanization/__init__.py tests/test_mood_coupling.py` → passed
+- `uv run pyright services/humanization/coupling.py services/humanization/__init__.py tests/test_mood_coupling.py` → `0 errors`
+- `uv run python -m py_compile services/humanization/coupling.py services/humanization/__init__.py tests/test_mood_coupling.py` → passed
+- `uv run pytest --collect-only -q` → `1868 tests collected`
+
+**影响**：P3.10 状态自主验收为 ✅；本次只提供可复用 policy lookup，不改变线上 reply gate、sticker decision、typing delay 或 segment delay 行为。
+
+**回滚**：删除 `services/humanization/coupling.py` / `tests/test_mood_coupling.py`，撤销 `services/humanization/__init__.py` 的 coupling 导出，并撤销 Part 2/3 tracking 的 P3.10 回填。
+
+---
+
 ## 2026-05-26 Humanization Part 2/3 P2.11 URL OG Title 注入落地
 
 **变更类型**：prompt context / URL metadata / tests

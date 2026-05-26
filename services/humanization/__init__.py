@@ -18,6 +18,11 @@ from services.humanization.contract import (
     STICKER_RECENT_USED_SLOT,
     THINKER_LAST_DECISION_SLOT,
 )
+from services.humanization.coupling import (
+    CouplingFeatures,
+    CouplingPolicy,
+    lookup_coupling,
+)
 from services.humanization.mood_classifier import (
     MoodClassifier,
     MoodDecision,
@@ -45,6 +50,8 @@ __all__ = [
     "REGISTER_RECENT_USED_SLOT",
     "STICKER_RECENT_USED_SLOT",
     "THINKER_LAST_DECISION_SLOT",
+    "CouplingFeatures",
+    "CouplingPolicy",
     "HumanizationScore",
     "MoodClassifier",
     "MoodDecision",
@@ -56,4 +63,5 @@ __all__ = [
     "StylometricScorer",
     "create_humanization_state_bus",
     "humanization_source",
+    "lookup_coupling",
 ]

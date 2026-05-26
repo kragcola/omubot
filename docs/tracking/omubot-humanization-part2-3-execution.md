@@ -239,7 +239,7 @@
 | **P2.10** | 4 | ✅ | 自主验收通过：auto-capture emotion tag helper + 离线 recaption 脚本；5 条新测试与相关回归 55 条通过 |
 | **P2.14** | 4 | ✅ | 自主验收通过：StickerDecisionProvider 写入一次性 `feedback_sticker_density=0.3`，MoodClassifier 下轮消费并清零；3 条专项 + 相关回归 30 条通过 |
 | **P2.11** | 4 | ✅ | 自主验收通过：`services/url_meta/og_title.py` 128 行 + `blacklist.py` 26 行；24h LRU、500ms timeout、黑名单与 PromptBuilder group URL title 注入；9 条新测试 |
-| **P3.10** | 5 | ⏳ | 待领；P3.6 / P3.7 / P3.8 / P3.9 均 ✅ |
+| **P3.10** | 5 | ✅ | 自主验收通过：`services/humanization/coupling.py` 79 行纯 lookup，覆盖 §4.5 9 行联动表与 affection > mood > register 仲裁；15 条新测试 |
 | **P2.12** | 5 | ⏳ | 待领；P2.8 / P2.10 均 ✅ |
 | **P2.13** | 5 | ⏳ | 待领；P2.11 ✅ |
 | **P2.7+P3.5+v2-灰度** | 6 | ⏳ | 阻塞于 Wave 5 全 ✅ + 用户授权进灰度 |
@@ -980,3 +980,34 @@ D2 / 回滚：本任务没有新增 cancel-path 持久化链路；`RuntimeStateB
 - D1 grep：`rg -n "build_url_title_context|collect_url_titles|is_blocked_url|test_og_title" services/url_meta services/llm/prompt_builder.py tests/test_og_title.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中新服务、PromptBuilder 注入、新测试与本追踪记录。
 
 D2 / 回滚：本任务无持久化写入；网络路径由 500ms timeout、黑名单优先、失败静默与空结果缓存约束，不会阻断 prompt fallback。回滚为删除 `services/url_meta/` 与 `tests/test_og_title.py`，撤销 `services/llm/prompt_builder.py` 注入，并撤销 §6 / §9 的 P2.11 回填。
+
+### P3.10 领单拆分（执行前）— Codex / 2026-05-26 09:00 CST
+
+- **任务边界**：只把调研 §4.5 的 9 行 mood × addressee × topic / affection 联动表落成纯 lookup 模块；不接生产 scheduler / ChatPlugin，不改 binary planner 调用时机，不改 sticker provider 既有概率公式。
+- **自主评估**：当前 P3.6/P3.7/P3.8/P3.9 已分别提供 mood slot、affection stage、节奏系数与 addressee/planner gate，但缺少一个可测试的“组合决策表”。本步用纯 dataclass + lookup 表达联动意图，后续接线可直接读取 policy 字段。
+- **执行拆分**：
+  1. 新建 `services/humanization/coupling.py` ≤ 80 行，定义 `CouplingFeatures` / `CouplingPolicy` 与 `lookup_coupling()`。
+  2. 覆盖 §4.5 9 行组合：cold non-self suppress、cold self short、playful drift elaborate、tired new-topic continue-old、playful register sticker 0.7、cold/tired sticker 0.1、stranger neutral、close self playful + sticker ×1.2、withdraw delay ×1.3 + sticker ≤0.05。
+  3. 明确冲突仲裁为 register baseline → mood patch → affection patch（最终优先级 affection > mood > register）。
+  4. 新增 `tests/test_mood_coupling.py` ≥ 6，覆盖 9 行联动条目、默认 no-op、以及 affection 覆写 mood/register 的优先级。
+- **风险与回滚**：纯计算模块，无 I/O / RuntimeStateBus 写入。回滚为删除 `services/humanization/coupling.py` / `tests/test_mood_coupling.py`，撤销 `services/humanization/__init__.py` 导出与 §6 / §9 P3.10 回填。
+
+### P3.10 完成记录（执行者 Codex）— 2026-05-26 09:03 CST
+
+自验结果：P3.10 完成并自主验收 ✅。本步只新增纯 lookup，不接生产链路；后续 ChatPlugin / scheduler / sticker 接线可读取 `CouplingPolicy` 字段，但本 commit 不改变线上是否回复、分段或 sticker 概率。
+
+- `services/humanization/coupling.py`：79 行，新增 `CouplingFeatures` / `CouplingPolicy` / `lookup_coupling()`；按 register baseline → mood patch → affection patch 顺序实现，最终仲裁优先级为 affection > mood > register。
+- `services/humanization/__init__.py`：导出 `CouplingFeatures`、`CouplingPolicy` 与 `lookup_coupling()`。
+- `tests/test_mood_coupling.py`：新增 15 条测试（参数化 9 行 + 6 个专项），覆盖 §4.5 全联动表、cold self/non-self、playful drift、stranger neutral、withdraw 覆写 sticker 概率与默认 no-op。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_mood_coupling.py tests/test_planner_addressee_mood.py tests/test_binary_planner.py tests/test_addressee_detector.py tests/test_topic_drift.py` → `48 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/humanization/coupling.py services/humanization/__init__.py tests/test_mood_coupling.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pyright services/humanization/coupling.py services/humanization/__init__.py tests/test_mood_coupling.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/humanization/coupling.py services/humanization/__init__.py tests/test_mood_coupling.py` → passed。
+- `wc -l services/humanization/coupling.py` → `79`。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` → `1868 tests collected`。
+- D1 grep：`rg -n "CouplingFeatures|CouplingPolicy|lookup_coupling|test_mood_coupling" services/humanization services/reply_planner tests/test_mood_coupling.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中新 lookup、导出、新测试与本追踪记录；未命中生产接线改动。
+
+D2 / 回滚：本任务没有 I/O、RuntimeStateBus 写入或 cancel-path；纯函数可直接删除回滚。回滚为删除 `services/humanization/coupling.py` / `tests/test_mood_coupling.py`，撤销 `services/humanization/__init__.py` 导出，并撤销 §6 / §9 的 P3.10 回填。
