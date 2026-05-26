@@ -237,7 +237,7 @@
 | **P3.3** | 3 | ✅ | 自主验收通过：PromptBuilder 第 2 块 read_mark marker；2 条新测试，相关回归 22 条通过 |
 | **P2.9** | 4 | ✅ | 自主验收通过：kaomoji 强制轮 strict gate + `humanization.kaomoji_enforce_strict` 回退旗标；6 条新测试与相关回归 16 条通过 |
 | **P2.10** | 4 | ✅ | 自主验收通过：auto-capture emotion tag helper + 离线 recaption 脚本；5 条新测试与相关回归 55 条通过 |
-| **P2.14** | 4 | ⏳ | 阻塞于 P2.8 + P3.6；自反馈环上限 0.3 |
+| **P2.14** | 4 | ✅ | 自主验收通过：StickerDecisionProvider 写入一次性 `feedback_sticker_density=0.3`，MoodClassifier 下轮消费并清零；3 条专项 + 相关回归 30 条通过 |
 | **P2.11** | 4 | ⏳ | 阻塞于 P2.8 |
 | **P3.10** | 5 | ⏳ | 阻塞于 P3.6 + P3.7 + P3.8 + P3.9 |
 | **P2.12** | 5 | ⏳ | 阻塞于 P2.8 + P2.10 |
@@ -918,3 +918,33 @@ D2 / 回滚：回滚为撤销 `kernel/config.py` / `services/llm/client.py` / `p
 - D1 grep：`rg -n "emit_emotion_tag|normalize_emotion_tag|sticker_recaption|DEFAULT_STICKER_USAGE_HINT" services/media/sticker_capture.py plugins/sticker/plugin.py plugins/history_loader/plugin.py scripts/dev/sticker_recaption.py tests/test_sticker_capture_emotion.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 helper、两条自动入库接线、离线脚本、新测试与本追踪记录。
 
 D2 / 回滚：回滚为撤销 `services/media/sticker_capture.py` / `plugins/sticker/plugin.py` / `plugins/history_loader/plugin.py` / `scripts/dev/sticker_recaption.py` / `tests/test_sticker_capture_emotion.py` 的 P2.10 改动，并撤销 §6 / §9 P2.10 回填。
+
+### P2.14 领单拆分（执行前）— Codex / 2026-05-26 08:27 CST
+
+- **任务边界**：只落 `services/sticker/decision_provider.py` 的 density feedback 写回与 `services/humanization/mood_classifier.py` 的消费点，再补专项测试；不把 `StickerDecisionProvider` 接进更多生产通道，不引入新 RuntimeStateBus slot，不改 `MoodClassifier` 的 5 态标签集合与 TTL。
+- **自主评估**：当前 `MoodClassifier` 的 `sticker_density` 只看消息文本里是否有 sticker token，完全感知不到“机器人这轮实际发了表情包”。按派单要求，本步补一条一次性反馈：当 `StickerDecisionProvider` 真正决定发 sticker 时，向 `MOOD_CURRENT_SLOT.signals.feedback_sticker_density` 写入 capped 信号；`MoodClassifier.classify_and_write()` 下轮读取并只消费一次，最大加成 0.3，避免自反馈环持续累积。
+- **执行拆分**：
+  1. 在 `services/sticker/decision_provider.py` 给 `decide()` 增加可选 `runtime_state` / `scope` 入参；当 `decision.should_send=True` 时，把 `feedback_sticker_density=0.3` best-effort 写回 `MOOD_CURRENT_SLOT`，保留已有 label/confidence/ttl 信息。
+  2. 在 `services/humanization/mood_classifier.py` 给 `MoodSignals` / `_signals()` 增加 feedback 字段；`classify_and_write()` 读取现有 slot 的 feedback 值，把它加到 live `sticker_density`（cap 0.3），写回新 mood state 时将 feedback 清零，保证只消费一次。
+  3. 新增 `tests/test_sticker_density_feedback.py` 3 条，覆盖 should_send 写回、mood classifier 单次消费并清零、未发送时不写反馈。
+- **风险与回滚**：本步风险是 mood 自反馈环导致 playful 偏置。实现必须满足“单次消费 + feedback cap=0.3 + 未发送不写回”。回滚为撤销 `decision_provider.py` / `mood_classifier.py` / 新测试与 §6 / §9 P2.14 回填。
+
+### P2.14 完成记录（执行者 Codex）— 2026-05-26 08:47 CST
+
+自验结果：P2.14 完成并自主验收 ✅。本步把“机器人本轮实际发送 sticker”的轻量反馈写回 mood slot，下一次 mood classifier 只消费一次并清零；没有新增 slot、没有改变 mood label 集合，也没有把 `StickerDecisionProvider` 接入更多生产通道。
+
+- `services/sticker/decision_provider.py`：`decide()` 增加可选 `runtime_state` / `scope`；仅当最终 `decision.should_send=True` 时，best-effort 写入 `MOOD_CURRENT_SLOT.signals.feedback_sticker_density=0.3`，并保留/补齐 label、confidence、ttl。
+- `services/humanization/mood_classifier.py`：`MoodSignals` 增加 `feedback_sticker_density`；`classify_and_write()` 从旧 mood slot 读取反馈，将 live `sticker_density` 最高加 0.3，并在写回新 state 时把 feedback 清为 `0.0`。
+- `tests/test_sticker_density_feedback.py`：新增 3 条专项测试，覆盖 should_send 写反馈、classifier 单次消费并清零、未发送不写反馈。
+- `tests/test_mood_classifier.py`：同步 cancel-path 测试子类签名，避免 runtime 代码为旧测试保留 TypeError 重试分支。
+
+验证：
+
+- `source ./scripts/dev/env.sh && uv run pytest -q tests/test_sticker_density_feedback.py tests/test_sticker_decision_provider.py tests/test_mood_classifier.py tests/test_humanization_contract.py` → `30 passed`。
+- `source ./scripts/dev/env.sh && uv run ruff check services/sticker/decision_provider.py services/humanization/mood_classifier.py tests/test_sticker_density_feedback.py tests/test_sticker_decision_provider.py tests/test_mood_classifier.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pyright services/sticker/decision_provider.py services/humanization/mood_classifier.py tests/test_sticker_density_feedback.py tests/test_mood_classifier.py` → `0 errors, 0 warnings, 0 informations`。
+- `source ./scripts/dev/env.sh && uv run python -m py_compile services/sticker/decision_provider.py services/humanization/mood_classifier.py tests/test_sticker_density_feedback.py tests/test_mood_classifier.py` → passed。
+- `source ./scripts/dev/env.sh && uv run pytest --collect-only -q` → `1844 tests collected`。
+- D1 grep：`rg -n "feedback_sticker_density|_write_density_feedback|test_sticker_density_feedback" services/sticker/decision_provider.py services/humanization/mood_classifier.py tests/test_sticker_density_feedback.py docs/tracking/omubot-humanization-part2-3-execution.md` → 命中 provider 写回、classifier 消费/清零、新测试与本追踪记录。
+
+D2 / 回滚：本任务没有新增 cancel-path 持久化链路；`RuntimeStateBus.set()` 仍为同步内存写，provider 写回异常会被吞掉，不阻断 sticker 决策。回滚为撤销 `services/sticker/decision_provider.py` / `services/humanization/mood_classifier.py` / `tests/test_sticker_density_feedback.py` 的 P2.14 改动，并撤销 §6 / §9 的 P2.14 回填。

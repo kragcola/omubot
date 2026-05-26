@@ -84,9 +84,9 @@ async def test_mood_classifier_writes_mood_slot_with_decay() -> None:
 @pytest.mark.asyncio
 async def test_cancel_during_mood_transition_does_not_dirty_slot() -> None:
     class SlowClassifier(MoodClassifier):
-        async def classify(self, messages):  # type: ignore[no-untyped-def]
+        async def classify(self, messages, *, feedback_sticker_density=0.0):  # type: ignore[no-untyped-def]
             await asyncio.sleep(60)
-            return await super().classify(messages)
+            return await super().classify(messages, feedback_sticker_density=feedback_sticker_density)
 
     bus = create_humanization_state_bus()
     task = asyncio.create_task(

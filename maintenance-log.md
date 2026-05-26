@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-05-26 Humanization Part 2/3 P2.14 Sticker Density Feedback 落地
+
+**变更类型**：humanization runtime / sticker feedback / tests
+
+**内容**：按 [Part 2/3 派单版执行追踪](docs/tracking/omubot-humanization-part2-3-execution.md) Wave 4 P2.14，为 sticker 决策与 mood classifier 补一条一次性密度反馈：
+
+- `services/sticker/decision_provider.py`：`decide()` 增加可选 `runtime_state` / `scope`；仅当最终 `decision.should_send=True` 时，best-effort 写入 `MOOD_CURRENT_SLOT.signals.feedback_sticker_density=0.3`，用于告诉下一轮 mood 分类“机器人刚发过 sticker”；
+- `services/humanization/mood_classifier.py`：`MoodSignals` 增加 `feedback_sticker_density`；`classify_and_write()` 读取旧 mood slot 的反馈，将 live `sticker_density` 最高加 0.3，并在写回新 state 时清零，避免自反馈环持续累积；
+- `tests/test_sticker_density_feedback.py`：新增 3 条专项测试，覆盖 should_send 写反馈、classifier 单次消费并清零、未发送不写反馈；
+- `tests/test_mood_classifier.py`：同步 cancel-path 测试子类签名，避免 runtime 代码为旧测试保留 TypeError 重试分支。
+
+**验证**：
+
+- `uv run pytest -q tests/test_sticker_density_feedback.py tests/test_sticker_decision_provider.py tests/test_mood_classifier.py tests/test_humanization_contract.py` → `30 passed`
+- `uv run ruff check services/sticker/decision_provider.py services/humanization/mood_classifier.py tests/test_sticker_density_feedback.py tests/test_sticker_decision_provider.py tests/test_mood_classifier.py` → passed
+- `uv run pyright services/sticker/decision_provider.py services/humanization/mood_classifier.py tests/test_sticker_density_feedback.py tests/test_mood_classifier.py` → `0 errors`
+- `uv run python -m py_compile services/sticker/decision_provider.py services/humanization/mood_classifier.py tests/test_sticker_density_feedback.py tests/test_mood_classifier.py` → passed
+- `uv run pytest --collect-only -q` → `1844 tests collected`
+
+**影响**：P2.14 状态自主验收为 ✅；mood classifier 现在能感知 bot 自己刚发过 sticker 的轻量信号，但反馈 capped at 0.3 且只消费一次，不新增 slot、不改变 5 态 mood 标签集合、不接入更多 sticker 生产通道。
+
+**回滚**：撤销 `services/sticker/decision_provider.py` / `services/humanization/mood_classifier.py` / `tests/test_sticker_density_feedback.py` 的 P2.14 改动，并撤销 Part 2/3 tracking 的 P2.14 回填。
+
+---
+
 ## 2026-05-26 Humanization Part 6 v2.1 增补（D+E 历史并入 + P6.0 三段拆分）
 
 **变更类型**：tracking docs（仅文档，无代码 / 配置变更）

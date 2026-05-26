@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Literal
+
+from services.humanization import MOOD_CURRENT_SLOT, humanization_source
+from services.system_module import RuntimeStateBus, Scope
 
 StickerTrigger = Literal["none", "tool_call", "kaomoji", "frequent", "thinker"]
 StickerRerankStrategy = Literal["none", "emotion", "intent", "persona"]
@@ -12,6 +16,8 @@ _COLD_MOODS = {"cold", "tired"}
 _PLAYFUL_MOODS = {"playful", "high"}
 _MAX_CANDIDATES = 10
 _DEFAULT_COOLDOWN_MS = 45_000
+_MOOD_TTL_S = 300
+_FEEDBACK_STICKER_DENSITY_CAP = 0.3
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +50,8 @@ class StickerDecisionProvider:
         context: StickerDecisionContext,
         *,
         extra_candidates: Callable[[], Awaitable[Sequence[str]]] | None = None,
+        runtime_state: RuntimeStateBus | None = None,
+        scope: Scope | None = None,
     ) -> StickerDecision:
         extras = tuple(await extra_candidates()) if extra_candidates is not None else ()
         pool = _dedupe([
@@ -64,7 +72,10 @@ class StickerDecisionProvider:
             return _decision(False, pool, strategy, context, source, probability, "mood_or_affection_gate")
         if source == "thinker" and probability < 0.7:
             return _decision(False, pool, strategy, context, source, probability, "thinker_hint_only")
-        return _decision(probability >= 0.5, pool, strategy, context, source, probability, "single_decision")
+        decision = _decision(probability >= 0.5, pool, strategy, context, source, probability, "single_decision")
+        if decision.should_send:
+            _write_density_feedback(runtime_state, scope)
+        return decision
 
 
 def _decision(
@@ -158,3 +169,33 @@ def _dedupe(values: Sequence[str]) -> tuple[str, ...]:
         if len(out) >= _MAX_CANDIDATES:
             break
     return tuple(out)
+
+
+def _write_density_feedback(runtime_state: RuntimeStateBus | None, scope: Scope | None) -> None:
+    if runtime_state is None or scope is None:
+        return
+    snapshot = runtime_state.get(MOOD_CURRENT_SLOT, scope=scope)
+    value = dict(snapshot.value) if snapshot is not None and isinstance(snapshot.value, dict) else {}
+    signals = dict(value.get("signals") or {})
+    signals["feedback_sticker_density"] = _FEEDBACK_STICKER_DENSITY_CAP
+    value["signals"] = signals
+    value.setdefault("label", "neutral")
+    value.setdefault("confidence", 0.0)
+    value.setdefault("reason", "sticker_density_feedback")
+    value.setdefault("ttl_s", _MOOD_TTL_S)
+    try:
+        confidence = max(0.0, min(1.0, float(value.get("confidence", 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    decay_at = snapshot.decay_at if snapshot is not None else None
+    try:
+        runtime_state.set(
+            MOOD_CURRENT_SLOT,
+            value,
+            scope=scope,
+            source=humanization_source("sticker_decision_provider:feedback"),
+            confidence=confidence,
+            decay_at=decay_at or (datetime.now() + timedelta(seconds=_MOOD_TTL_S)),
+        )
+    except Exception:
+        return
