@@ -45,7 +45,7 @@ Key design choices:
 - **Context compaction** — front half of history compressed via LLM when exceeding `max_context_tokens × compact_ratio`; circuit breaker drops oldest on repeated failures; `append_memo` tool extracts observations into long-term memory during compression
 - **Vision** — images downloaded, downscaled via pyvips, cached to disk, sent as base64 to Anthropic API; configurable per-message limit
 - **Stickers** — persistent library with SHA256 dedup; LLM can save/send stickers; Dream agent curates library
-- **Soul directory** — `config/soul/identity.md` (persona, `## 插话方式` section for proactive rules), `config/soul/instruction.md` (behavioral directives)
+- **Persona v2 (runtime source)** — `config/persona/<persona_id>/source.md` 是单文件 source；importer 编译为 `freeze/` 下的多块 prompt，`PersonaRuntime` 在 `_on_connect` 装配。修改人设走 admin SPA「人设管理」（POST `/api/admin/persona/{id}/import` → freeze → POST `/api/admin/persona/hot-reload/{id}`）。v1 `config/soul/*.md` 已退役（C 系列切换 2026-05-27）。
 - **Memory** — short-term: in-memory deque per session; long-term: `.md` files in `storage/memories/` with pending section auto-filled by compaction
 - **Group timeline** — append-only turns + pending buffer per group; SQLite message persistence via `MessageLog` for compaction queries
 - **Per-group config** — `group.overrides` maps group IDs to `GroupOverride` (at_only, debounce, batch_size, blocked_users); resolved via `GroupConfig.resolve()`

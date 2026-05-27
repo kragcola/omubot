@@ -74,7 +74,7 @@ config.toml
 | `ElementRule` | `pattern`, `reply`, `description`, `use_llm` |
 | `AntiDetectConfig` | `enabled`, `min_delay`, `max_delay`, `char_delay` |
 | `LogConfig` / `LogChannelConfig` | 日志目录 + stderr 频道开关 |
-| `SoulConfig` | 人设目录 |
+| `PersonaV2Config` | `persona_id`（C 系列 v2 only 切换 2026-05-27 后唯一字段；运行时从 `config/persona/<persona_id>/freeze/` 加载）|
 | `NapcatConfig` | NapCat HTTP API 地址 |
 
 ## BotConfig（根模型）
@@ -91,7 +91,8 @@ class BotConfig(BaseModel):
     memo: MemoConfig = MemoConfig()
     compact: CompactConfig = CompactConfig()
     dream: DreamConfig = DreamConfig()
-    soul: SoulConfig = SoulConfig()
+    soul: SoulConfig = SoulConfig()  # ⚠️ 已退役（C 系列 v2 only 切换 2026-05-27）；保留示例仅作历史参考
+    persona_v2: PersonaV2Config = PersonaV2Config()
     napcat: NapcatConfig = NapcatConfig()
     vision: VisionConfig = VisionConfig()
     sticker: StickerConfig = StickerConfig()

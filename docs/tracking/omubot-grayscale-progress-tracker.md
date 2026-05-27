@@ -11,9 +11,10 @@
 
 | 时间 | 事件 | 关联文档 |
 |---|---|---|
-| 2026-05-27 | Persona parity audit 假阳性修复 + source.md 补 `bot_self_id_hint` / `admins`，6 axes 全 aligned（待 bot 镜像 rebuild 后由 connect-time shadow log 复核） | [importer §9](../migrations/persona-v2-importer.md) / [parity_audit.py](../../services/persona/parity_audit.py) |
+| 2026-05-27 | Persona v2 only cutover (C 系列 C1/C2/C3) 三段提交完成；v1 IdentityManager / shadow / parity_audit / Soul 编辑面板全部退役，PersonaRuntime singleton + hot-reload 端点上线 | [persona-v2-only-cutover](persona-v2-only-cutover.md) |
+| 2026-05-27 | Persona parity audit 假阳性修复 + source.md 补 `bot_self_id_hint` / `admins`，6 axes 全 aligned（C 系列后已退役 parity audit；保留作历史） | [importer §9](../migrations/persona-v2-importer.md) |
 | 2026-05-27 | Part 6 balanced profile 上线后单段死锁，审查 + 派单文档已落地，Phase 0 待用户授权回滚 | [bugfix-part1](omubot-humanization-part6-bugfix-part1.md) / [-execution](omubot-humanization-part6-bugfix-part1-execution.md) |
-| 2026-05-27 | Persona v2 runtime_consume / shadow_compare 上线，灰度群双双吃 v2 | [B3-execution](persona-runtime-cutover-B3-execution.md) |
+| 2026-05-27 | Persona v2 runtime_consume / shadow_compare 上线，灰度群双双吃 v2（同日由 C 系列全量切流取代） | _archive/persona-runtime-cutover-B3-execution.md |
 | 2026-05-26 | humanization profile=balanced 切换 + 灰度群扩到 2 个 | config.json:382 |
 | 2026-05-26 | Part 4 v1 → v2 → v2-修订版 三轮迭代收敛 | [part4](omubot-humanization-part4-memory-relationship.md) |
 
@@ -43,15 +44,13 @@
 | `state_board.layout` | `"head"` | Part 6 Wave 0 默认 |
 | `state_board.granularity` | `"fine"` | Part 6 Wave 0 默认 |
 
-### 1.2 persona_v2 段（[config/config.json:405-411](../../config/config.json#L405-L411)）
+### 1.2 persona_v2 段（[config/config.json](../../config/config.json)）
 
 | 字段 | 值 | 含义 / 备注 |
 |---|---|---|
-| `persona_id` | `"fengxiaomeng-v2"` | 凤笑梦 v2 freeze artifact |
-| `runtime_consume` | `true` | B3 切流真启用 |
-| `shadow_compare` | `true` | B2 影子对比真启用 |
-| `runtime_groups` | `["993065015","984198159"]` | v2 切流的灰度群范围 |
-| `fallback_on_compile_error` | `true` | compile 失败回 v1 静态块 |
+| `persona_id` | `"fengxiaomeng-v2"` | 凤笑梦 v2 freeze artifact（C 系列 v2 only 切换后唯一字段）|
+
+> ℹ️ 2026-05-27 C 系列切换：`runtime_consume` / `shadow_compare` / `runtime_groups` / `fallback_on_compile_error` 字段全部退役。v2 默认对全部群生效，无 fallback，无影子比对。详见 [persona-v2-only-cutover](persona-v2-only-cutover.md)。
 
 ---
 
@@ -59,9 +58,9 @@
 
 | 群号 | 别名 | persona | humanization | 备注 |
 |---|---|---|---|---|
-| `993065015` | 灰度群 1 | v2 切流（B3）+ shadow | balanced（受 §1.1 全部旗标影响）| 主灰度，6 条以上 v2 回复在线 |
-| `984198159` | 灰度群 2 | v2 切流（B3）+ shadow | balanced（同上） | 第二灰度，扩量观察 |
-| 其它群 | — | v1 静态块（runtime_groups 不包含） | balanced 仍生效（profile 不受 runtime_groups 限制） | 注意：拟人 profile **对所有群生效**，仅 plan_then_utter 等子模块受 runtime_groups 收口 |
+| `993065015` | 灰度群 1 | v2 全量（C 系列退役 runtime_groups 收口） | balanced（受 §1.1 全部旗标影响）| 主灰度，6 条以上 v2 回复在线 |
+| `984198159` | 灰度群 2 | v2 全量 | balanced（同上） | 第二灰度，扩量观察 |
+| 其它群 | — | v2 全量（C 系列后无 runtime_groups 收口；v1 静态块已删） | balanced 仍生效（profile 不受 runtime_groups 限制） | 注意：拟人 profile **对所有群生效**，仅 plan_then_utter 等子模块受 runtime_groups 收口 |
 
 > ⚠️ 易错点：`humanization.runtime_groups` 不是 humanization 整体白名单，仅是「需要群级白名单的子能力」（例如 plan_then_utter）才参考它。`profile` 字段直接对全局生效。
 
@@ -69,23 +68,19 @@
 
 ## 3. Persona（人设）模块灰度进行表
 
-> 主线：source.md → import → freeze → runtime ⇒ B1 协议 / B2 影子 / B3 切流 / B4 多群灰度 / B5 全量 / B6 后台面板
-> 详见：[persona-v2-importer.md](../migrations/persona-v2-importer.md) §12 已迁移项一览
+> 主线（C 系列 v2 only 切换 2026-05-27 后）：source.md → import → freeze → PersonaRuntime → admin SPA hot-reload。
+> v1 IdentityManager / shadow / parity_audit / Soul 编辑面板已退役；B1-B3 切流/灰度/影子档位归档至 `_archive/`，不再演进 B4-B6。
+> 详见：[persona-v2-only-cutover](persona-v2-only-cutover.md) / [persona-v2-importer.md](../migrations/persona-v2-importer.md) §12
 
 | 阶段 | 状态 | 当前内容 | 阻塞 / 下一步 | 关联文档 |
 |---|---|---|---|---|
-| **B1** 协议 + 配置 + runtime entry skeleton | ✅ | `PersonaV2Config` BaseModel、`PersonaRuntimeBundle` 协议、`load_pending_freeze()` 入口已落地 | — | [persona-runtime-cutover-B1](persona-runtime-cutover-B1-execution.md) |
-| **B2** 影子比对引擎 | ✅ | `ShadowCompareEngine.run_once()` + `ShadowDiffReport` + `ShadowCounter`，`/storage/persona_shadow_diff.log` 写盘正常 | parity 6 axes 全 `aligned`（2026-05-27 修复 substring anchor 假阳性 + 补 source.md front matter `bot_self_id_hint` / `admins` 之后；shadow log 验证由下次 connect 走过新镜像后落定） | [persona-runtime-cutover-B2](persona-runtime-cutover-B2-execution.md) |
-| **B3** runtime selector + PromptBuilder 集成 | ✅ | `PersonaRuntimeSelector` + `_on_connect` 装配 + `bundle.ok=True / v2_text 10285 字节`，`runtime_consume=true` 生效中 | B3.4 用户最终人工验收 ⏳（生产已 live，待用户主动签收） | [persona-runtime-cutover-B3-execution](persona-runtime-cutover-B3-execution.md) |
-| **B4** 多群灰度扩量 | 🟡 进行中 | runtime_groups 已扩到 2 个群（993065015 / 984198159），shadow 双群在线 | 观察窗口：≥ 7 天无 divergence 升级再推 B5 | — |
-| **B5** 全量切流 | ⏳ | 计划：移除 runtime_groups 收口，全部群吃 v2 | 前置：B4 灰度无 regression + parity 6 axes 全 aligned（已达成 2026-05-27，待 bot 镜像 rebuild 后由下次 connect-time shadow log 复核）+ B4 观察窗口 ≥ 7 天 | — |
-| **B6** 后台 SPA runtime 切档面板 | ⏳ | 计划：admin/frontend 提供 persona_v2 旗标可视化切档（取代手编 JSON） | 前置：B5 完成 + admin SPA 风格统一 | — |
-
-**parity audit 现状**（[importer §9](../migrations/persona-v2-importer.md)，2026-05-27 修正）：6 axes 全 `aligned`。修正路径：
-
-- `admins` / `bot_self_id`：source.md front matter 之前缺 `admins:` / `bot_self_id_hint:`；2026-05-27 已补，importer/freeze 重跑后 `adapter.yaml` 正确落到 prompt block。
-- `identity_personality` / `behavior_instruction` / `proactive_rules`：之前 parity 用 `_first_line` 取 v1 第一行做 substring 锚点，碰到 markdown 标题（`# 1. 是谁` / `## 8.4 行为指令` / `## 插话方式`）会假阳性；2026-05-27 改为 `_meaningful_anchors`（跳过 markdown 标题与列表前缀，多取前 5 条非空业务行 any-match），新增 4 条回归（`tests/test_persona_parity_audit.py`）。
-- 容器 fallback：bot 镜像里 `services/persona/parity_audit.py` 不是 bind mount，需要 `dot_clean . && docker compose up bot -d --build`；rebuild 完成前 shadow log 仍按旧首行锚点判，最新一行（2026-05-26T19:10Z `divergent_axes: identity_personality, behavior_instruction`）即为旧算法残影。
+| **C1** PersonaRuntime singleton（additive）| ✅ | `services/persona/runtime.py` 单例 + `IdentitySnapshot` + `bind_bot_self_id` 占位符替换 + `swap_bundle` LKG | — | [persona-v2-only-cutover §2](persona-v2-only-cutover.md) |
+| **C2** 删 v1 + 切 PromptBuilder/LLMClient/router/scheduler 到 runtime | ✅ | IdentityManager / shadow.py / parity_audit.py / runtime_selector.py / build_static 全部删除；PersonaV2Config 字段缩到 `persona_id` 一个 | — | 同上 |
+| **C3** 退役 Soul 编辑面板 + 暴露 v2 hot-reload | ✅ | `admin/routes/api/soul.py` + `admin/frontend/src/views/soul/` 删除；POST `/api/admin/persona/hot-reload/{id}` confirm-gated；PersonaImporterView 标题改「人设管理」+ 加热重载按钮 | — | 同上 |
+| **最终验收** | ⏳ | 待 bot 镜像 rebuild 后由用户在灰度群签收 | rebuild + 1 轮对话验证 | 同上 |
+| ~~B4 多群灰度扩量~~ | ❌ 取消 | C 系列 v2 only 后无 runtime_groups 收口，全群已切 v2 | — | _archive/ |
+| ~~B5 全量切流~~ | ❌ 已并入 C 系列 | 同上 | — | _archive/ |
+| ~~B6 后台 SPA runtime 切档面板~~ | ⏳ 后续 | 计划在 admin SPA「人设管理」基础上扩展灰度切档可视化（v2 only 后此需求弱化为运维便利项） | 非阻塞，按需排期 | — |
 
 ---
 
@@ -176,14 +171,12 @@
 ├─ 5.4 灰度二次切回成功 → Part 6 最终验收解锁 → Part 1 灰度-2 / 灰度-3 解阻
 │
 ├─ 5.5 并行（不阻塞 bugfix）
-│   ├─ Persona B3.4 用户主动签收
-│   ├─ Persona B4 观察窗口（≥ 7 天）
+│   ├─ Persona 最终验收（用户在灰度群签收 v2 only）
 │   ├─ Humanization Part 5 P5.5 → P5.6 收口
 │   ├─ Humanization Part 2-3 Wave 7 P2/3-DOC 收口
 │   └─ Humanization Part 4 v2-修订版 进入实现 wave
 │
 └─ 5.6 中期
-    ├─ Persona B5 全量切流 → B6 后台面板
     └─ Humanization Part 4 实装
 ```
 
@@ -194,7 +187,8 @@
 | 类别 | 文档 | 维护责任 |
 |---|---|---|
 | **本表** | [omubot-grayscale-progress-tracker.md](omubot-grayscale-progress-tracker.md) | 索引 / 速览 / 跨 part 状态 |
-| **Persona 主线** | [persona-runtime-cutover-B1/B2/B3-execution.md](persona-runtime-cutover-B3-execution.md) | 每 B 段细节 wave |
+| **Persona v2 only 切换** | [persona-v2-only-cutover.md](persona-v2-only-cutover.md) | C1/C2/C3 提交记录 + 最终验收 |
+| Persona 历史档（已归档）| [_archive/persona-runtime-cutover-B1/B2/B3-execution.md](_archive/persona-runtime-cutover-B3-execution.md) | B 系列灰度档位（C 系列后退役）|
 | Persona 迁移 | [persona-v2-importer.md](../migrations/persona-v2-importer.md) | parity audit / 已迁移项 |
 | **Humanization 各 part** | `omubot-humanization-part{1,2-3,3.5,4,5,6}-execution.md` | 每 part wave 细节 |
 | Humanization bugfix | [omubot-humanization-part6-bugfix-part1.md](omubot-humanization-part6-bugfix-part1.md) + [-execution](omubot-humanization-part6-bugfix-part1-execution.md) | 故障审查 + 派单 |
@@ -214,8 +208,8 @@
 | 自审项 | 验证手段 | 结论 |
 |---|---|---|
 | config.json humanization 全字段 | Read [config/config.json:374-399](../../config/config.json#L374-L399) | 与 §1.1 表一致 |
-| config.json persona_v2 全字段 | Read [config/config.json:405-411](../../config/config.json#L405-L411) | 与 §1.2 表一致；runtime_consume=true / runtime_groups 双群 confirmed |
+| config.json persona_v2 字段 | Read [config/config.json](../../config/config.json) | C 系列后只剩 `persona_id`，与 §1.2 一致 |
 | Part 6 bugfix Phase 0 仍未执行 | config.json:382 仍 `"balanced"` | 与 §4.7 / §5.1 一致 |
-| persona-runtime-cutover-B3 §7 状态 | Read [B3-execution §7](persona-runtime-cutover-B3-execution.md) | B3.4 ⏳ 待手动验收，本表 §3 已对齐 |
+| Persona C 系列三段提交 | git log persona-v2-only-cutover.md | 208fd53 / 0f58eae / 629583d 已落地，与 §3 一致 |
 | humanization-part2-3 P2.7+P3.5 灰度时间 | Read [part2-3-execution](omubot-humanization-part2-3-execution.md) | 2026-05-26 03:04 CST 启灰度，与 §4.2 一致 |
 | Part 6 wave 状态 🟡 | Read [part6-execution §6](omubot-humanization-part6-execution.md) | 全 wave 🟡 待最终审查，与 §4.6 一致 |

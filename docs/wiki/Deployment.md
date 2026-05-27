@@ -6,8 +6,7 @@
 # 首次启动
 cp .env.example config/.env
 cp config.example.toml config/config.toml
-cp soul/identity.example.md config/soul/identity.md
-cp soul/instruction.example.md config/soul/instruction.md
+# 人设走 v2：admin SPA「人设管理」上传 source.md → import → freeze → hot-reload
 docker compose up -d
 
 # 日常运维

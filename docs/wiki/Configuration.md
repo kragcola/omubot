@@ -233,12 +233,15 @@ Omubot 现在支持“定义”和“任务映射”分离的 Provider 管理：
 
 ## 人设文件
 
-| 文件 | 内容 |
-|------|------|
-| `config/soul/identity.md` | 角色定义（姓名、性格、插话方式） |
-| `config/soul/instruction.md` | 行为指令（回复风格、工具使用、格式规则） |
+> 2026-05-27 C 系列 v2 only 切换后：原 `config/soul/identity.md` + `instruction.md` 已退役；现走 v2 source.md 单文件。
 
-修改后 `docker compose restart bot` 即可生效。
+| 路径 | 内容 |
+|------|------|
+| `config/persona/<persona_id>/source.md` | v2 单文件 source（YAML front matter + markdown 章节）|
+| `config/persona/<persona_id>/freeze/` | importer 编译产物（多块 prompt yaml + `_persona_runtime.json`）|
+| `config/config.json` 顶层 `persona_v2.persona_id` | 选择 active persona |
+
+修改路径：admin SPA「人设管理」面板 → 编辑 source.md → import → freeze → 热重载。`config.json` 改 `persona_v2.persona_id` 后 `docker compose restart bot` 即可生效。
 
 ## 黑话设置
 
@@ -278,7 +281,7 @@ Omubot 现在支持“定义”和“任务映射”分离的 Provider 管理：
 | `collect_bot_replies` | `true` | 是否采集 bot 回复弱信号 |
 | `global_enabled_group_ids` | `[]` | 参与 global 表达池的群 ID |
 
-表达学习只保存动态表达档案和样本，不会自动修改 `config/soul/identity.md` 或 `config/soul/instruction.md`。
+表达学习只保存动态表达档案和样本，不会自动修改 `config/persona/<id>/source.md`（v2 only 切换后唯一人设源）。
 
 ## 管理员
 

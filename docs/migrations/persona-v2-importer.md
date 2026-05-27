@@ -155,7 +155,7 @@
 | 行为指令 extractor 仅 `behavior_instruction_md` | 新增 `legacy_instruction_md_opt_in`（confidence=0.6）；report 中 source-section bullets 在前、legacy bullets 在后 | ✅ 已实现 |
 | opt-in 但缺路径 / 路径不存在时无信号 | 落 warn issue `legacy_instruction_md_path_missing` / `legacy_instruction_md_file_not_found`，不阻断 import、不读任何文件 | ✅ 已实现 |
 | compiler dry-run `core.guard` 行为指令拼接 | 自动覆盖 legacy 追加项（`behavior_instructions.items[]` 已经是统一来源） | ✅ 已实现，无需 compiler 改动 |
-| 正式 runtime 切流 | 仍由 v1 `PromptBuilder._instruction` 直接读 `config/soul/instruction.md`，不走 v2 importer | ⏳ 后续 |
+| 正式 runtime 切流 | C 系列 v2 only 切换（2026-05-27）已完成：v1 IdentityManager / shadow / parity_audit / runtime_selector 全部删除，PromptBuilder / LLMClient / router / scheduler 直接读 PersonaRuntime；`PersonaV2Config` 字段缩到 `persona_id` 一个 | ✅ 已实现；详见 [persona-v2-only-cutover.md](../tracking/persona-v2-only-cutover.md) |
 
 ## 12. Runtime Cutover B1 — 协议层 + 配置层 + runtime 入口骨架
 
@@ -172,4 +172,4 @@
 | Shadow compare 双算 | `services/persona/shadow.py::ShadowCompareEngine` + `ShadowDiffReport` + `ShadowCounter`；`kernel/router.py::_on_connect` flag-gated hook（24 行，shadow_compare=off 时零代码路径变化）；JSONL log 落 `storage/persona_shadow_diff.log`；复用 `parity_audit.compare_v1_vs_v2_dry_run` 收 `divergent_axes` | ✅ 已实现；详见 [persona-runtime-cutover-B2-execution.md](../tracking/persona-runtime-cutover-B2-execution.md)；`tests/test_persona_shadow.py` 5 条锁 flag off / happy / bundle 缺失 / divergent / cancel-path |
 | PromptBuilder / LLMClient 注入 v2 prompt blocks | `services/persona/runtime_selector.py::PersonaRuntimeSelector` 决定 v1↔v2 per turn；`PromptBuilder.set_runtime_selector` + `resolve_static_block(group_id)` 替换第一块；`LLMClient` 两处 fallback 同样走 resolve；`kernel/router.py::_on_connect` 装配 selector；单群灰度 `runtime_groups=["993065015"]`，私聊与未授权群继续 v1 | ✅ 已实现；详见 [persona-runtime-cutover-B3-execution.md](../tracking/persona-runtime-cutover-B3-execution.md)；`tests/test_persona_runtime_selector.py` 8 条 + `tests/test_prompt_builder_runtime.py` 7 条；运行时验证待手动验收 |
 | Part 1 humanization runtime 编排 + 灰度-1 | `services/humanization/` RuntimeStateBus owner、Register/Catchphrase/Sticker/Thinker PromptBlock Provider、StylometricScorer、critic rewrite-loop、semantic gate dynamic threshold、U13 double-haiku trace、V7 catchphrase seed 脚本、V12 measure 脚本已按派单文档收口；`config/config.json` 的 `humanization.runtime_groups=["993065015"]` 单群灰度-1 已落库，rewrite/sticker/thinker/dynamic gate 仍 off | ✅ 工程收口；详见 [omubot-humanization-part1-execution.md](../tracking/omubot-humanization-part1-execution.md)；灰度-1 仍待 rebuild/restart 后 24h 指标和用户最终验收 |
-| 正式 runtime 切流 | 4 flag 全 off；caller=0；`grep -rn 'load_pending_freeze\|PersonaRuntimeBundle' --include='*.py'` 在 `PromptBuilder`/`LLMClient`/`bot.py`/`kernel/` 零命中（D1 同模式扫描通过） | ⏳ 后续（B2~B6） |
+| 正式 runtime 切流 | C 系列 v2 only 切换（2026-05-27）：4 flag 全部退役，PersonaRuntime 单例直接读 `config/persona/<id>/freeze`；详见 [persona-v2-only-cutover.md](../tracking/persona-v2-only-cutover.md) | ✅ 已实现 |

@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-05-27 Persona v2 only cutover（C 系列三段提交）
+
+**变更类型**：代码 + 配置 + 文档；本次将 persona 全量切换到 v2 runtime，删除 v1 IdentityManager / shadow / parity_audit / Soul 编辑面板，无回滚路径。
+
+**触发**：用户明示「无需考虑 v1 兼容问题的情况下，给出全量进入 v2 的最终答复修复方案」+「依次执行四个阶段，自动审查，自动提交，自动推进」。在 B3 灰度档位运行良好且 parity audit 假阳性修复后，决定一次性收口。
+
+**三段提交**：
+
+- `208fd53` **C1** — `services/persona/runtime.py` 新增 `PersonaRuntime` 单例（线程安全）+ `IdentitySnapshot`（v2 替代 `services.identity.Identity`）+ `bind_bot_self_id()`（connect 时把 `{bot_self_id}` 占位符替换成真实 self_id）+ `swap_bundle()` 配 LKG 保护；接入 `PluginContext.persona_runtime` + `kernel/router.py::_on_connect`。**完全 additive**，不动 v1 路径。`tests/test_persona_runtime.py` 锁全部新行为。
+- `0f58eae` **C2** — 删 `services/identity/__init__.py`（IdentityManager）/ `services/persona/runtime_selector.py` / `services/persona/shadow.py` / `services/persona/parity_audit.py` / 旧 `build_static`；切换 `PromptBuilder` / `LLMClient` / `kernel/router.py` / `services/proactive/scheduler.py` 到 `PersonaRuntime.static_text()` + `identity_snapshot()`；`PersonaV2Config` 字段缩到 `persona_id` 一个；`config/config.json` / `config/config.toml` 删 `persona_v2.runtime_consume / shadow_compare / runtime_groups / fallback_on_compile_error`；`tests/conftest.py` 加共享 fixtures（`persona_runtime` / `identity_snapshot`）；重写 16 个相关测试。
+- `629583d` **C3** — 删 `admin/routes/api/soul.py`（530 行）+ `admin/frontend/src/views/soul/`（SoulView 1421 行 + SoulPersonaGuideView 375 行）；删 `SoulConfig`（`kernel/config.py` + `kernel/__init__.py`）+ bot.py soul.dir 日志；`BackupItem("soul",...)` 改 `BackupItem("persona", "config/persona", ...)`；新增 POST `/api/admin/persona/hot-reload/{persona_id}`（confirm-gated；调 `runtime.swap_bundle()`；LKG fallback 自动）；`PersonaImporterView.vue` 标题改「人设管理」+ 加 NPopconfirm 包裹的「热重载」按钮（紧邻 Pending Freeze）；`/soul` + `/soul/persona-guide` 重定向到 `/persona-importer`；侧边栏「人设编辑」条目删除，「人设导入」改名「人设管理」；`tests/test_admin_api.py` 删 5 条旧 soul 测试 + 加 4 条 hot-reload 测试（confirm-true / 缺 confirm / runtime 失败 / invalid persona_id）；`tests/test_backup_service.py` fixture 从 `config/soul/identity.md` 改成 `config/persona/fengxiaomeng-v2/source.md`；`tests/test_config_loader.py` 删 3 处 `cfg.soul.dir` 断言。
+
+**质量门**：
+
+- `uv run ruff check`：All checks passed
+- `uv run pyright`：472 errors（基线，C 系列触及文件 0 新增）
+- `uv run pytest`：1933 passed / 8 skipped
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit && npm run build`：clean；PersonaImporterView 进 bundle，SoulView/SoulPersonaGuideView 不在 bundle
+
+**影响范围**：
+
+- 全部群直接吃 v2 prompt（`runtime_groups` / `runtime_consume` 收口已删）；不再有 v1 静态块，不再有 fallback。
+- admin SPA 人设编辑入口集中到「人设管理」单页（import → freeze → hot-reload 一站式）；`/soul/*` 路径保留 redirect 30 天（router 层）。
+- `config/soul/identity.md` 与 `instruction.md` 已为 .gitignore 范围，文件本身未 git rm（保留磁盘副本以防回滚）；新部署不再生成 / 不再读取这两个文件。
+- `services/storage/backup.py` 备份注册表从 `soul` 改 `persona`（路径 `config/persona`）；旧 `soul` 备份残留不会被新代码识别，但磁盘副本仍在 `storage/backups/` 下，不影响。
+
+**部署路径**：
+
+- 仅 config 改动 → `docker compose restart bot` 即可（D6）
+- 含 .py 改动 → `dot_clean . && docker compose up bot -d --build`（本次 C1/C2/C3 均含 .py 改动，**必须 rebuild 镜像**）
+
+**回滚**：不再支持。如需回到 v1 静态块，需 revert `629583d 0f58eae 208fd53` 三个提交并修复 `conftest.py` fixture / `kernel/config.py` 的 `PersonaV2Config` schema。这条路径**未维护**，不在本次范围内。
+
+**文档收口**：
+
+- 新建 [docs/tracking/persona-v2-only-cutover.md](docs/tracking/persona-v2-only-cutover.md)（C 系列三段提交合一）
+- 归档 [docs/tracking/_archive/persona-runtime-cutover-B1/B2/B3-execution.md](docs/tracking/_archive/persona-runtime-cutover-B3-execution.md)
+- 更新 [CLAUDE.md](CLAUDE.md)「Persona v2」段落取代 Soul directory；[README.md](README.md) 删 `config/soul/*.md` 安装步骤；[docs/architecture.md](docs/architecture.md) §Soul directory 改 §Persona v2 runtime + §Pages 改「Persona Manager」+ 配置表 `soul` 行换成 `persona_v2`
+- [docs/tracking/omubot-grayscale-progress-tracker.md](docs/tracking/omubot-grayscale-progress-tracker.md) §3 Persona 主线由 B1-B6 改为 C1/C2/C3 + 最终验收；§1.2 persona_v2 段缩到 `persona_id` 一个字段；§5 next-step 删 B4/B5/B6 项
+- [docs/migrations/persona-v2-importer.md §11/§12](docs/migrations/persona-v2-importer.md) 「正式 runtime 切流」状态从 ⏳ 改 ✅
+
+**待办**：
+
+- 用户授权后跑 `dot_clean . && docker compose up bot -d --build` rebuild 镜像
+- bot connect 后用户在灰度群（993065015 / 984198159）观察 ≥ 1 轮对话签收 v2 only cutover 最终验收
+
+---
+
 ## 2026-05-27 Persona parity audit 假阳性修复 + source.md front matter 补齐
 
 **变更类型**：代码（`services/persona/parity_audit.py`、`tests/test_persona_parity_audit.py`）+ 配置（`config/persona/fengxiaomeng-v2/source.md` front matter）；无 runtime 代码改动

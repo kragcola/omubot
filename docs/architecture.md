@@ -246,7 +246,7 @@ bus.discover_plugins("plugins")
 - **Context window management** — When estimated input tokens exceed `max_context_tokens × compact_ratio`, the front half of history is compressed into a summary via a separate LLM call. During compaction, the LLM receives an `append_memo` tool to extract user traits/events into long-term memory (§ Compact Memo Extraction). A circuit breaker drops oldest messages after `max_failures` consecutive compact failures.
 - **Segmented responses** — Bot replies can contain `---cut---` separators; each segment is sent as a separate QQ message with a 0.5s delay.
 - **Tool framework** — Tools extend `services/tools/base.py:Tool` ABC (name, description, parameters as JSON Schema, async execute). Registered in `ToolRegistry`, converted to Anthropic format via OpenAI-style intermediate. `ToolContext` carries the Bot instance and event metadata. Tools are executed in parallel within each round.
-- **Soul directory** — `config/soul/` holds personality & instruction configs. `identity.md` defines a single persona (Markdown: `# Name` heading for the persona name, body for personality, optional `## 插话方式` section for proactive chat rules — exact heading match required). `instruction.md` holds behavioral directives injected into the system prompt. Templates at `soul/*.example.md`.
+- **Persona v2 runtime** — `config/persona/<persona_id>/source.md` is the single-file source; `services/persona/importer.py` compiles it into the multi-block prompt under `freeze/` (`core.identity`, `runtime.adapter`, `runtime.behavior`, `runtime.proactive`, etc.). `PersonaRuntime` (singleton) loads the freeze artifact at `_on_connect`, substitutes `{bot_self_id}` placeholders via `bind_bot_self_id`, and exposes `static_text()` to PromptBuilder. Hot-reload via POST `/api/admin/persona/hot-reload/{id}` swaps the bundle in-place with last-known-good fallback. Legacy v1 (`config/soul/identity.md` + `instruction.md` + `IdentityManager` + shadow compare + parity audit) was retired in the 2026-05-27 C-series cutover.
 - **Memory layers** — Short-term: in-memory deque per session. Long-term: typed cards in `storage/memory_cards.db` via CardStore (SQLite, 7 categories × 3 scopes, with supersedes edges). Group timeline: append-only turns + pending buffer per group (`GroupTimeline`), with summary from compaction and SQLite persistence via `MessageLog`. Max 200 groups in memory (LRU eviction).
 - **Session IDs** — `group_{group_id}` for group chats, `private_{user_id}` for DMs.
 - **History bootstrap** — On bot connect, `history_loader` pulls recent messages from NapCat HTTP API for all groups, populating the group timeline (with image caching and sticker recognition). After loading, the scheduler fires once per group to catch up on missed messages.
@@ -282,7 +282,7 @@ Key config sections:
 | `group` | `history_load_count`, `allowed_groups`, `debounce_seconds`, `batch_size`, `at_only`, `blocked_users`, `overrides` | Group chat behavior, scheduler & per-group overrides |
 | `napcat` | `api_url` | NapCat HTTP API endpoint |
 | `memo` | `dir`, `user_max_chars`, `group_max_chars`, `index_max_lines`, `history_enabled` | Long-term memo storage |
-| `soul` | `dir` | Soul config directory |
+| `persona_v2` | `persona_id` | Active persona freeze artifact under `config/persona/<persona_id>/freeze/` (loaded by `PersonaRuntime` on connect) |
 | `log` | `dir` | Log directory |
 | `vision` | `enabled`, `max_images_per_message`, `max_dimension`, `cache_dir`, `cache_max_age_hours` | Multimodal image understanding |
 | `sticker` | `enabled`, `storage_dir`, `max_count` | Sticker library |
@@ -424,7 +424,7 @@ During context compaction, the LLM receives an `append_memo` tool that allows it
 Admin panel at `/admin/` is a system service mounted directly in `bot.py` (not via a plugin):
 
 - **Authentication**: HMAC-signed cookie via `AdminAuthMiddleware`. Token from `ADMIN_TOKEN` env var or `config.toml` → `admin_token`
-- **Pages**: Dashboard (overview + uptime), Usage (Chart.js trends), Groups (overrides viewer), Config (read-only viewer), Soul (online editor for identity.md/instruction.md), Logs (tail viewer)
+- **Pages**: Dashboard (overview + uptime), Usage (Chart.js trends), Groups (overrides viewer), Config (read-only viewer), Persona Manager (源文件 import → freeze → hot-reload，C 系列 2026-05-27 取代旧 Soul 编辑器), Logs (tail viewer)
 - **Plugin routes**: plugins can declare `register_admin_routes()` → `AdminRoute` to add custom pages
 - **Location**: `admin/` (17 files, migrated from `admin/`)
 

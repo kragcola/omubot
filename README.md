@@ -44,7 +44,7 @@ uv sync
 ```bash
 cp config.example.toml config/config.toml    # 兼容 legacy TOML，首次在 /admin/config 保存后会迁移为 config/config.json
 # 创建 config/.env，填写 SUPERUSERS 和 LLM_API_KEY
-# 创建 config/soul/identity.md 和 config/soul/instruction.md
+# 人设走 v2：在 admin SPA「人设管理」面板上传 source.md → import → freeze → hot-reload
 ```
 
 配置模板见 [config.example.toml](config.example.toml)，完整文档见 [wiki/](wiki/)。
@@ -171,7 +171,7 @@ uv run pyright       # 类型检查
 kernel/         # 内核层（PluginBus、类型、配置、路由）
 services/       # 系统服务层（LLM、记忆、媒体、工具、指令、版本）
 plugins/        # 插件层（18 个可开关插件）
-admin/          # 管理面板（用量、配置、Soul 编辑、日志）
+admin/          # 管理面板（用量、配置、人设管理、日志）
 docs/           # 项目文档
 wiki/           # 框架开发文档
 config/         # 运行时配置（gitignored，Docker volume 挂载）

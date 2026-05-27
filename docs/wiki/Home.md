@@ -9,8 +9,7 @@ git clone https://github.com/kragcola/omubot.git
 cd omubot
 cp .env.example config/.env
 cp config.example.toml config/config.toml
-cp soul/identity.example.md config/soul/identity.md
-cp soul/instruction.example.md config/soul/instruction.md
+# 人设走 v2：admin SPA「人设管理」上传 source.md → import → freeze → hot-reload
 docker compose up -d
 ```
 
@@ -35,7 +34,7 @@ docker compose up -d
 - **统一上下文**：`ContextPlugin` 系统锁定，统一打包记忆卡片、文档知识库和知识图谱事实，避免重复注入。
 - **知识库**：生产扫描 `docs/knowledge`，SQLite 持久索引，本地 BM25/ngram 检索，提供上下文调试和评测指标。
 - **群内黑话**：候选学习、人工审核、每日 AI 复核、存量候选池 backlog reviewer、语义漂移治理、修订历史与 `slang_lookup` 工具。
-- **表达学习**：独立于黑话的 `style` 插件与 `/admin/style` 控制台，学习“怎么说”，不自动改 core soul。
+- **表达学习**：独立于人设的 `style` 插件与 `/admin/style` 控制台，学习“怎么说”，不自动改 persona source。
 - **对话归档底座**：`ConversationArchive` 提供消息事件流、scanner cursor、运行审计、证据引用和留存 dry-run 原语。
 - **群画像与访问控制**：按群 profile 覆盖参与模式、工具 allow/block、回复风格、表情模式、黑话学习与 `silent_learn`。
 - **系统运维**：Admin Dashboard、配置 diff/审计/快照回滚、日志、协议连接/trace、健康阈值告警、运行态错误存储。

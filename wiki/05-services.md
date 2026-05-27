@@ -29,7 +29,7 @@
 | GroupChatScheduler | `services.scheduler` | 群聊调度：@触发/debounce/batch |
 | UsageTracker | `services.llm.usage` | LLM 用量记录与统计 |
 | Humanizer | `services.humanizer` | 回复长度/延迟人性化 |
-| IdentityManager | `services.identity` | 从 config/soul/ 加载人格配置 |
+| PersonaRuntime | `services.persona.runtime` | 单例从 `config/persona/<id>/freeze` 加载 v2 prompt bundle，提供 `static_text()` / `identity_snapshot()` / `swap_bundle()` 给 PromptBuilder（C 系列 v2 only 切换 2026-05-27 取代旧 `IdentityManager`）|
 
 ## 服务接口约定
 
