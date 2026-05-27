@@ -8,7 +8,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from plugins.schedule.types import Schedule, TimeSlot
+from plugins.schedule.types import Schedule, TimeSlot, normalize_activity_label
 
 _L = logger.bind(channel="schedule")
 
@@ -39,7 +39,33 @@ class ScheduleStore:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            slots = [TimeSlot(**s) for s in data["slots"]]
+            slots_data = data["slots"]
+            if not isinstance(slots_data, list):
+                raise TypeError("slots must be a list")
+            slots: list[TimeSlot] = []
+            for raw_slot in slots_data:
+                if not isinstance(raw_slot, dict):
+                    raise TypeError("slot must be an object")
+                raw_activity = raw_slot.get("activity", "")
+                activity = normalize_activity_label(raw_activity)
+                if not activity:
+                    legacy_value = str(raw_activity or "").strip()
+                    _L.warning(
+                        "legacy schedule detected | path={} invalid_activity={!r} — deleting for regenerate",
+                        path,
+                        legacy_value,
+                    )
+                    self._invalidate_legacy_file(path)
+                    if self._current is not None and self._current.date == date_str:
+                        self._current = None
+                    return None
+                slots.append(TimeSlot(
+                    time=str(raw_slot.get("time", "") or ""),
+                    activity=activity,
+                    mood_hint=str(raw_slot.get("mood_hint", "") or ""),
+                    location=str(raw_slot.get("location", "") or ""),
+                    description=str(raw_slot.get("description", "") or ""),
+                ))
             schedule = Schedule(
                 date=data["date"],
                 day_narrative=data.get("day_narrative", ""),
@@ -66,6 +92,7 @@ class ScheduleStore:
                 {
                     "time": s.time,
                     "activity": s.activity,
+                    "description": s.description,
                     "mood_hint": s.mood_hint,
                     "location": s.location,
                 }
@@ -93,3 +120,11 @@ class ScheduleStore:
 
     def _path(self, date_str: str) -> Path:
         return self._dir / f"{date_str}.json"
+
+    @staticmethod
+    def _invalidate_legacy_file(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except TypeError:
+            if path.exists():
+                path.unlink()

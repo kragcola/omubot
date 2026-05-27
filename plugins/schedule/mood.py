@@ -315,7 +315,7 @@ class MoodEngine:
         if schedule is not None:
             slot = schedule.current_slot(now)
             if slot is not None:
-                lines.append(f"\n【你现在正在做的事】{slot.activity}")
+                lines.append(f"\n【你现在正在做的事】{slot.description or slot.activity}")
 
         # Special day / birthday hints
         day_ctx = get_day_context(now)

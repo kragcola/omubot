@@ -70,6 +70,7 @@ def _thinker_ctx() -> ThinkerContext:
         user_id="u1",
         action="reply",
         thought="ok",
+        topic_intent_label="闲聊",
     )
 
 
@@ -501,6 +502,7 @@ class TestThinkerDispatch:
             user_id="u1",
             action="wait",
             thought="先不说",
+            topic_intent_label="闲聊",
         )
         asyncio.run(bus.fire_on_thinker_decision(ctx))
         assert len(tracker.thinker_calls) == 1

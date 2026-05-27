@@ -329,6 +329,7 @@ class ThinkerContext:
     user_id: str
     action: str  # "reply" / "wait"
     thought: str  # thinker 的内心想法
+    topic_intent_label: str = "闲聊"
     elapsed_ms: float = 0.0
     retrieve_mode: str = "hybrid"  # "skip" / "doc" / "fact" / "hybrid"
 

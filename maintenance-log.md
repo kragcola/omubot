@@ -4,6 +4,50 @@
 
 ---
 
+## 2026-05-27 P0 派单 3 — C 簇 13A 字段重构收口
+
+**变更类型**：代码（thinker 字段重构 + schedule enum 化 + 类型修复）；无配置变更。
+
+**范围**：
+
+- `services/llm/thinker.py` — `ThinkDecision` 新增 `topic_intent_label` 字段（10 个枚举值），prompt 输出格式加入该字段，`_normalize_topic_intent_label` 归一化 + heuristic fallback 默认 "闲聊"
+- `services/llm/client.py` — thinker_block 注入改为 `【意图：{label}】【tone: ...】【sticker: ...】`，不再注入 `thought` 自由文本；修复 `_guardrail_metrics_metadata` 类型注解
+- `services/block_trace/thinker_provider.py` — provider block 输出 `topic_intent_label`
+- `kernel/types.py` — `ThinkerContext` 新增 `topic_intent_label` 字段
+- `plugins/schedule/types.py` — 12 个 `ALLOWED_ACTIVITY_LABELS` + `normalize_activity_label()` + `TimeSlot.description`
+- `plugins/schedule/generator.py` — prompt 要求 activity 取 enum + description 自由文本
+- `plugins/schedule/store.py` — `load()` 检测 legacy free-text activity → 删除 JSON 触发 regenerate
+- `services/tools/datetime_tool.py` + `plugins/schedule/mood.py` — 注入 `slot.description or slot.activity`（避免暴露英文 enum 标签）
+
+**Breaking change**：
+
+- thinker 输出 schema 变更：新增 `topic_intent_label` 字段；retry-on-parse-fail 兜底（1 次重试 + heuristic）
+- schedule activity 从 free-text 改 12 enum；旧 `storage/schedule/*.json` 在下次 `load()` 时自动失效删除，等待 regenerate
+- 无 kill-switch 旗标；回滚必须 `git revert` 整 PR
+
+**质量门**：
+
+- `uv run pytest`：1985 passed / 8 skipped
+- `uv run ruff check`：All checks passed
+- `uv run pyright`（C 簇 10 文件）：0 errors
+- `tests/test_c_cluster_pipeline_e2e.py`：16 passed（schema / phrase detector / retry / schedule enum / cancel-path）
+
+**回滚**：
+
+```bash
+git revert <merge_commit_hash>
+docker compose restart bot
+```
+
+旧 schedule 缓存会在 revert 后正常读取（free-text activity 兼容）。
+
+**待办**：
+
+- PR 合并到 main 后 rebuild 部署
+- 灰度群 24h 观察：bot 回复无 thinker 内部状态泄漏 + schedule 注入 enum 化 + `thinker_phrase_hits` 命中率下降 ≥ 80%
+
+---
+
 ## 2026-05-27 Persona v2 only cutover（C 系列三段提交）
 
 **变更类型**：代码 + 配置 + 文档；本次将 persona 全量切换到 v2 runtime，删除 v1 IdentityManager / shadow / parity_audit / Soul 编辑面板，无回滚路径。

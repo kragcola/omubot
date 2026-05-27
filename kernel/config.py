@@ -1570,6 +1570,83 @@ class HumanizationConfig(BaseModel):
             return False
 
 
+class SentinelGuardrailConfig(BaseModel):
+    """A-cluster visible-reply guardrail config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable sentinel / dedup / thinker-phrase guardrails before visible segmentation.",
+    )
+    dedup_ngram: int = 5
+    dedup_threshold: float = 0.4
+    dedup_action: Literal["warn", "rewrite", "block"] = "rewrite"
+    thinker_phrase_ngram: int = 4
+    thinker_phrase_threshold: float = 0.4
+    thinker_phrase_action: Literal["warn", "rewrite", "block"] = "rewrite"
+
+    @field_validator("dedup_threshold", "thinker_phrase_threshold")
+    @classmethod
+    def _clamp_guardrail_probability(cls, value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    @field_validator("dedup_ngram", "thinker_phrase_ngram")
+    @classmethod
+    def _clamp_guardrail_ngram(cls, value: int) -> int:
+        return max(1, int(value))
+
+
+class BotPairGuardConfig(BaseModel):
+    """B-cluster inbound loop guard config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Suppress reply loops between this bot and known peer bots in a group.",
+    )
+    max_per_minute: int = 3
+    cooldown_seconds: int = 60
+    known_other_bots: dict[str, list[str]] = Field(default_factory=dict)
+
+    @field_validator("max_per_minute", "cooldown_seconds")
+    @classmethod
+    def _clamp_positive_int(cls, value: int) -> int:
+        return max(1, int(value))
+
+    @field_validator("known_other_bots", mode="before")
+    @classmethod
+    def _normalize_known_other_bots(cls, value: object) -> dict[str, list[str]]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise TypeError("known_other_bots must be a mapping")
+        normalized: dict[str, list[str]] = {}
+        for raw_group_id, raw_ids in value.items():
+            group_id = str(raw_group_id).strip()
+            if not group_id:
+                continue
+            if not isinstance(raw_ids, list):
+                raise TypeError("known_other_bots values must be lists")
+            ids = [str(raw_id).strip() for raw_id in raw_ids if str(raw_id).strip()]
+            if ids:
+                normalized[group_id] = ids
+        return normalized
+
+
+class CoalesceConfig(BaseModel):
+    """B-cluster inbound scheduling coalescer config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Delay non-addressed scheduler notify calls so rapid user bursts collapse into one fire.",
+    )
+    idle_window_seconds: float = 5.0
+    max_window_seconds: float = 12.0
+
+    @field_validator("idle_window_seconds", "max_window_seconds")
+    @classmethod
+    def _clamp_positive_window(cls, value: float) -> float:
+        return max(0.1, float(value))
+
+
 # ============================================================================
 # 根配置
 # ============================================================================
@@ -1596,6 +1673,9 @@ class BotConfig(BaseModel):
     backup: BackupConfig = Field(default_factory=BackupConfig)
     persona_v2: PersonaV2Config = Field(default_factory=PersonaV2Config)
     humanization: HumanizationConfig = Field(default_factory=HumanizationConfig)
+    sentinel_guardrail: SentinelGuardrailConfig = Field(default_factory=SentinelGuardrailConfig)
+    bot_pair_guard: BotPairGuardConfig = Field(default_factory=BotPairGuardConfig)
+    coalesce: CoalesceConfig = Field(default_factory=CoalesceConfig)
 
     # 管理员 & 白名单
     admins: dict[str, str] = {}

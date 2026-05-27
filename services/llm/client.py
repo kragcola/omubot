@@ -46,6 +46,7 @@ from services.llm.segmentation import (
 from services.llm.segmentation import (
     reply_segment_plan as _segment_reply_segment_plan,
 )
+from services.llm.sentinel_registry import GuardrailHit, apply_guardrails
 from services.llm.streaming_segmenter import StreamingSegmenter
 from services.llm.usage import UsageTracker
 from services.media.image_cache import ImageCache
@@ -380,6 +381,7 @@ class HumanizationRewriteResult:
     score: HumanizationScore | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     rewrite_result: dict[str, Any] | None = None
+    guardrail_hits: tuple[GuardrailHit, ...] = ()
 
 
 def _clean_text(text: str) -> str:
@@ -1011,6 +1013,7 @@ class LLMClient:
         pass_turn_confidence_gate: bool = False,
         pass_turn_confidence_threshold: float = 0.4,
         humanization_resolver: Callable[..., ResolvedHumanization] | None = None,
+        sentinel_guardrail_config: Any | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
             enable_cleanup_closed=True,
@@ -1057,6 +1060,7 @@ class LLMClient:
         self._pass_turn_confidence_gate = bool(pass_turn_confidence_gate)
         self._pass_turn_confidence_threshold = max(0.0, min(1.0, float(pass_turn_confidence_threshold)))
         self._humanization_resolver = humanization_resolver
+        self._sentinel_guardrail_config = sentinel_guardrail_config
         self._humanization_runtime_groups = frozenset(
             str(group_id).strip()
             for group_id in (humanization_runtime_groups or ())
@@ -1075,6 +1079,8 @@ class LLMClient:
         # of the same task on every successful LLMRequest dispatch.
         self._cache_diag_ring_size: int = 200
         self._cache_diag_history: dict[str, list[tuple[CacheDiagnostic, CacheDiagnosticDiff | None]]] = {}
+        self._last_thinker_action = ""
+        self._last_thinker_thought = ""
 
     async def close(self) -> None:
         await self._session.close()
@@ -1116,6 +1122,115 @@ class LLMClient:
         except Exception:
             logger.debug("humanization health guard snapshot failed | group={}", group_id)
             return None
+
+    def _sentinel_guardrail_enabled(self, group_id: str | None) -> bool:
+        cfg = self._sentinel_guardrail_config
+        if cfg is None or not bool(getattr(cfg, "enabled", False)):
+            return False
+        if group_id is None:
+            return True
+        return self._humanization_group_allowed(group_id)
+
+    def _latest_assistant_text(self, *, session_id: str, group_id: str | None, is_group: bool) -> str:
+        if is_group and group_id is not None and self._timeline is not None:
+            for turn in reversed(list(self._timeline.get_turns(group_id))):
+                if str(turn.get("role", "")) == "assistant":
+                    return content_text(turn.get("content", ""))
+            return ""
+        for message in reversed(self._short_term.get(session_id)):
+            if message["role"] == "assistant":
+                return content_text(message["content"])
+        return ""
+
+    def _guardrail_metrics_metadata(self, hits: tuple[GuardrailHit, ...]) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "near_duplicate_hits": 0,
+            "near_duplicate_dropped": 0,
+            "near_duplicate_rewritten": 0,
+            "thinker_phrase_hits": 0,
+            "sentinel_strip_hits": 0,
+            "sentinel_redact_hits": 0,
+            "sentinel_block_hits": 0,
+        }
+        if not hits:
+            return metadata
+        metadata["guardrail_hit_names"] = [hit.name for hit in hits]
+        for hit in hits:
+            if hit.name == "near_duplicate":
+                metadata["near_duplicate_hits"] += 1
+                if hit.action == "block":
+                    metadata["near_duplicate_dropped"] += 1
+                elif hit.action == "rewrite":
+                    metadata["near_duplicate_rewritten"] += 1
+            if hit.name == "thinker_phrase":
+                metadata["thinker_phrase_hits"] += 1
+            if hit.name.startswith("sentinel_"):
+                if hit.action == "strip":
+                    metadata["sentinel_strip_hits"] += 1
+                elif hit.action == "redact":
+                    metadata["sentinel_redact_hits"] += 1
+                elif hit.action == "block":
+                    metadata["sentinel_block_hits"] += 1
+        return metadata
+
+    def _guardrail_fallback(
+        self,
+        *,
+        reply: str,
+        hits: tuple[GuardrailHit, ...],
+        thinker_thought: str,
+    ) -> str:
+        names = {hit.name for hit in hits}
+        if "near_duplicate" in names:
+            return "先不重复上一句啦。"
+        if "thinker_phrase" in names:
+            stripped = reply
+            if thinker_thought:
+                stripped = stripped.replace(thinker_thought, "").strip(" ，。！？!?")
+            return stripped or "我换个自然一点的说法。"
+        return "我重新整理一下再接。"
+
+    def _apply_visible_reply_guardrails(
+        self,
+        *,
+        reply: str,
+        session_id: str,
+        group_id: str | None,
+        is_group: bool,
+        thinker_thought: str,
+    ) -> tuple[str, dict[str, Any], tuple[GuardrailHit, ...]]:
+        if not reply.strip() or not self._sentinel_guardrail_enabled(group_id):
+            return reply, {}, ()
+        last_assistant_text = self._latest_assistant_text(
+            session_id=session_id,
+            group_id=group_id,
+            is_group=is_group,
+        )
+        result = apply_guardrails(
+            reply,
+            thinker_thought=thinker_thought,
+            last_assistant_text=last_assistant_text,
+            config=self._sentinel_guardrail_config,
+        )
+        metadata = self._guardrail_metrics_metadata(result.hits)
+        if not result.hits:
+            return result.text or reply, metadata, ()
+        if result.passed:
+            cleaned = result.text.strip()
+            if cleaned:
+                return cleaned, metadata, result.hits
+            return self._guardrail_fallback(
+                reply=reply,
+                hits=result.hits,
+                thinker_thought=thinker_thought,
+            ), metadata, result.hits
+        fallback = self._guardrail_fallback(
+            reply=reply,
+            hits=result.hits,
+            thinker_thought=thinker_thought,
+        )
+        metadata["guardrail_blocked"] = bool(result.blocked)
+        return fallback, metadata, result.hits
 
     def set_group_config(self, group_config: Any | None) -> None:
         self._group_config = group_config
@@ -1643,6 +1758,7 @@ class LLMClient:
         user_id: str,
         action: str,
         thought: str,
+        topic_intent_label: str = "闲聊",
         elapsed_ms: float,
         retrieve_mode: str = "hybrid",
     ) -> None:
@@ -1656,6 +1772,7 @@ class LLMClient:
                 user_id=user_id,
                 action=action,
                 thought=thought,
+                topic_intent_label=topic_intent_label,
                 elapsed_ms=elapsed_ms,
                 retrieve_mode=retrieve_mode,
             )
@@ -2609,11 +2726,75 @@ class LLMClient:
         group_id: str | None,
         user_id: str,
         turn_id: str,
+        extra_metadata: dict[str, Any] | None = None,
+        guardrail_hits: tuple[GuardrailHit, ...] = (),
     ) -> HumanizationRewriteResult:
+        if guardrail_hits:
+            scope = self._humanization_scope(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=turn_id,
+            )
+            score = self._score_humanization_reply(
+                reply,
+                scope=scope,
+                group_id=group_id,
+                session_id=session_id,
+            )
+            metadata = {
+                "rewrite_threshold": self._humanization_rewrite_threshold,
+                "rewrite_applied": False,
+                **dict(extra_metadata or {}),
+            }
+            request_id = f"hm_{session_id}_{int(time.monotonic() * 1000)}"
+            await self._record_humanization_metrics(
+                request_id=request_id,
+                score=score,
+                metadata=metadata,
+                scope=scope,
+            )
+            return HumanizationRewriteResult(
+                reply=reply,
+                score=score,
+                metadata=metadata,
+                guardrail_hits=guardrail_hits,
+            )
         if self._humanization_rewrite_threshold < 0:
-            return HumanizationRewriteResult(reply=reply)
+            if extra_metadata:
+                scope = self._humanization_scope(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                )
+                score = self._score_humanization_reply(
+                    reply,
+                    scope=scope,
+                    group_id=group_id,
+                    session_id=session_id,
+                )
+                request_id = f"hm_{session_id}_{int(time.monotonic() * 1000)}"
+                metadata = {
+                    "rewrite_threshold": self._humanization_rewrite_threshold,
+                    "rewrite_applied": False,
+                    **dict(extra_metadata),
+                }
+                await self._record_humanization_metrics(
+                    request_id=request_id,
+                    score=score,
+                    metadata=metadata,
+                    scope=scope,
+                )
+                return HumanizationRewriteResult(
+                    reply=reply,
+                    score=score,
+                    metadata=metadata,
+                    guardrail_hits=guardrail_hits,
+                )
+            return HumanizationRewriteResult(reply=reply, guardrail_hits=guardrail_hits)
         if not self._humanization_group_allowed(group_id):
-            return HumanizationRewriteResult(reply=reply)
+            return HumanizationRewriteResult(reply=reply, guardrail_hits=guardrail_hits)
 
         scope = self._humanization_scope(
             session_id=session_id,
@@ -2634,6 +2815,8 @@ class LLMClient:
             "initial_score": initial_score.total,
             "initial_issues": list(initial_score.issues),
         }
+        if extra_metadata:
+            metadata.update(extra_metadata)
         final_reply = reply
         final_score = initial_score
         rewrite_result: dict[str, Any] | None = None
@@ -2683,6 +2866,7 @@ class LLMClient:
             score=final_score,
             metadata=metadata,
             rewrite_result=rewrite_result,
+            guardrail_hits=guardrail_hits,
         )
 
     def _has_visible_tool_output(self, tool_calls: list[dict[str, Any]]) -> bool:
@@ -2957,6 +3141,7 @@ class LLMClient:
         thinker_action = ""
         thinker_retrieve_mode = "hybrid"
         thinker_rewritten_query = ""
+        thinker_topic_intent_label = "闲聊"
         thinker_turn_id = ""
         if self._thinker_enabled and not force_reply:
             from services.llm.thinker import (
@@ -2999,6 +3184,7 @@ class LLMClient:
             # Persist decision in prompt context so plugins can see it
             thinker_action = thinker_decision.action
             thinker_thought = thinker_decision.thought
+            thinker_topic_intent_label = getattr(thinker_decision, "topic_intent_label", "闲聊")
             thinker_retrieve_mode = getattr(thinker_decision, "retrieve_mode", "hybrid")
             thinker_rewritten_query = getattr(thinker_decision, "rewritten_query", "")
             thinker_turn_id = f"{session_id}:{int(time.monotonic() * 1000)}"
@@ -3018,6 +3204,8 @@ class LLMClient:
                 user_id=user_id,
                 turn_id=thinker_turn_id,
             )
+            self._last_thinker_action = thinker_action
+            self._last_thinker_thought = thinker_thought
             u13_trace_request_id = str(
                 (ctx.extra.get("u13_double_haiku_request_id") if ctx is not None else "") or ""
             )
@@ -3035,6 +3223,7 @@ class LLMClient:
                     turn_id=thinker_turn_id,
                     metadata={
                         "action": thinker_action,
+                        "topic_intent_label": thinker_topic_intent_label,
                         "retrieve_mode": thinker_retrieve_mode,
                         "source": "pre_reply_thinker",
                         "correlation_key": f"{session_id}:{user_id}",
@@ -3047,6 +3236,7 @@ class LLMClient:
                 user_id=user_id,
                 action=thinker_action,
                 thought=thinker_thought,
+                topic_intent_label=thinker_topic_intent_label,
                 elapsed_ms=(time.monotonic() - t0) * 1000,
                 retrieve_mode=thinker_retrieve_mode,
             )
@@ -3070,7 +3260,10 @@ class LLMClient:
                 )
                 return None
         else:
+            self._last_thinker_action = ""
             thinker_thought = ""
+            thinker_topic_intent_label = "闲聊"
+            self._last_thinker_thought = ""
 
         group_profile = self._resolve_group_profile(group_id)
         humanization = self._resolve_humanization(
@@ -3196,9 +3389,10 @@ class LLMClient:
             self._thinker_provider_enabled
             and self._humanization_group_allowed(group_id)
         )
-        if thinker_decision is not None and thinker_thought and not thinker_provider_active:
-            hints = [f"你决定说话：{thinker_thought}"]
+        if thinker_decision is not None and not thinker_provider_active:
+            hints = [f"意图：{thinker_topic_intent_label}"]
             d = thinker_decision
+            hints.append(f"tone: {d.tone}")
             if d.sticker:
                 hints.append(
                     "sticker: yes — 请在本轮同时调用 send_sticker 发送匹配的表情包，"
@@ -3206,7 +3400,6 @@ class LLMClient:
                 )
             else:
                 hints.append("sticker: no")
-            hints.append(f"tone: {d.tone}")
             thinker_block: dict[str, Any] = {
                 "type": "text",
                 "text": "【" + "】【".join(hints) + "】",
@@ -3235,6 +3428,8 @@ class LLMClient:
             is_group=is_group,
             force_reply=force_reply,
         )
+        if self._sentinel_guardrail_enabled(group_id):
+            streaming_segment = False
 
         # Token accumulators across tool rounds
         acc_input = 0
@@ -3447,14 +3642,23 @@ class LLMClient:
                     )
                     return None
 
-                rewrite = await self._maybe_rewrite_humanization_reply(
+                guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_visible_reply_guardrails(
                     reply=reply,
+                    session_id=session_id,
+                    group_id=group_id,
+                    is_group=is_group,
+                    thinker_thought=thinker_thought,
+                )
+                rewrite = await self._maybe_rewrite_humanization_reply(
+                    reply=guardrail_reply,
                     system_blocks=system_blocks,
                     messages=messages,
                     session_id=session_id,
                     group_id=group_id,
                     user_id=user_id,
                     turn_id=reply_turn_id,
+                    extra_metadata=guardrail_metadata,
+                    guardrail_hits=guardrail_hits,
                 )
                 reply = rewrite.reply
                 if rewrite.rewrite_result is not None:
@@ -3730,14 +3934,23 @@ class LLMClient:
             )
             return None
         reply_turn_id = thinker_turn_id or f"{session_id}:tool_exhausted:{int(time.monotonic() * 1000)}"
-        rewrite = await self._maybe_rewrite_humanization_reply(
+        guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_visible_reply_guardrails(
             reply=reply,
+            session_id=session_id,
+            group_id=group_id,
+            is_group=is_group,
+            thinker_thought=thinker_thought,
+        )
+        rewrite = await self._maybe_rewrite_humanization_reply(
+            reply=guardrail_reply,
             system_blocks=system_blocks,
             messages=messages,
             session_id=session_id,
             group_id=group_id,
             user_id=user_id,
             turn_id=reply_turn_id,
+            extra_metadata=guardrail_metadata,
+            guardrail_hits=guardrail_hits,
         )
         reply = rewrite.reply
         if rewrite.rewrite_result is not None:

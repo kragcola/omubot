@@ -32,6 +32,7 @@ def _seed_decision(bus, *, action: str = "reply", turn_id: str = "turn-1") -> No
         {
             "action": action,
             "thought": "顺着对方的问题轻轻接一下",
+            "topic_intent_label": "关心",
             "retrieve_mode": "skip",
             "rewritten_query": "",
             "sticker": False,
@@ -57,9 +58,10 @@ async def test_thinker_provider_reads_per_turn_state_and_emits_block() -> None:
     assert block.position == "dynamic"
     assert block.priority == 48
     assert block.metadata["retrieve_mode"] == "skip"
+    assert block.metadata["topic_intent_label"] == "关心"
     assert "本轮回复意图" in block.text
-    assert "不要复述 thinker 原句" in block.text
-    assert "顺着对方的问题轻轻接一下" in block.text
+    assert "不要把这些标签原样写给用户" in block.text
+    assert "意图标签：关心" in block.text
 
 
 @pytest.mark.asyncio

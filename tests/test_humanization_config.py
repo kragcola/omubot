@@ -36,6 +36,16 @@ def test_humanization_config_defaults_keep_only_safe_runtime_features_on() -> No
     assert cfg.humanization.counterfactual_replay is False
     assert cfg.humanization.pass_turn_confidence_gate is False
     assert cfg.humanization.pass_turn_confidence_threshold == 0.4
+    assert cfg.sentinel_guardrail.enabled is False
+    assert cfg.sentinel_guardrail.dedup_threshold == 0.4
+    assert cfg.sentinel_guardrail.thinker_phrase_threshold == 0.4
+    assert cfg.bot_pair_guard.enabled is False
+    assert cfg.bot_pair_guard.max_per_minute == 3
+    assert cfg.bot_pair_guard.cooldown_seconds == 60
+    assert cfg.bot_pair_guard.known_other_bots == {}
+    assert cfg.coalesce.enabled is False
+    assert cfg.coalesce.idle_window_seconds == 5.0
+    assert cfg.coalesce.max_window_seconds == 12.0
 
 
 def test_humanization_config_from_toml(tmp_path: Path) -> None:
@@ -118,7 +128,27 @@ def test_humanization_config_from_json(tmp_path: Path) -> None:
                 },
                 "rws_threshold": 2.0,
                 "pass_turn_confidence_threshold": -1.0,
-            }
+            },
+            "sentinel_guardrail": {
+                "enabled": True,
+                "dedup_ngram": 0,
+                "dedup_threshold": 2.0,
+                "thinker_phrase_threshold": -1.0,
+            },
+            "bot_pair_guard": {
+                "enabled": True,
+                "max_per_minute": 0,
+                "cooldown_seconds": -1,
+                "known_other_bots": {
+                    "100": ["2", " 3 ", ""],
+                    "  ": ["4"],
+                },
+            },
+            "coalesce": {
+                "enabled": True,
+                "idle_window_seconds": 0,
+                "max_window_seconds": 0.05,
+            },
         }),
         encoding="utf-8",
     )
@@ -140,6 +170,17 @@ def test_humanization_config_from_json(tmp_path: Path) -> None:
     assert cfg.humanization.pass_turn_confidence_threshold == 0.0
     assert cfg.humanization.register_classifier is False
     assert cfg.humanization.semantic_gate_dynamic is False
+    assert cfg.sentinel_guardrail.enabled is True
+    assert cfg.sentinel_guardrail.dedup_ngram == 1
+    assert cfg.sentinel_guardrail.dedup_threshold == 1.0
+    assert cfg.sentinel_guardrail.thinker_phrase_threshold == 0.0
+    assert cfg.bot_pair_guard.enabled is True
+    assert cfg.bot_pair_guard.max_per_minute == 1
+    assert cfg.bot_pair_guard.cooldown_seconds == 1
+    assert cfg.bot_pair_guard.known_other_bots == {"100": ["2", "3"]}
+    assert cfg.coalesce.enabled is True
+    assert cfg.coalesce.idle_window_seconds == 0.1
+    assert cfg.coalesce.max_window_seconds == 0.1
 
 
 def test_humanization_rewrite_threshold_negative_disables_loop() -> None:

@@ -41,6 +41,7 @@ class ThinkerProvider:
             char_count=len(text),
             metadata={
                 "action": state.get("action", ""),
+                "topic_intent_label": state.get("topic_intent_label", ""),
                 "retrieve_mode": state.get("retrieve_mode", ""),
                 "sticker": bool(state.get("sticker")),
                 "tone": state.get("tone", ""),
@@ -68,14 +69,14 @@ def _read_state(ctx: QueryContext) -> dict[str, Any]:
 
 
 def _render_block(state: dict[str, Any]) -> str:
-    thought = str(state.get("thought", "") or "").strip()
+    topic_intent_label = str(state.get("topic_intent_label", "") or "").strip()
     tone = str(state.get("tone", "") or "").strip()
     retrieve = str(state.get("retrieve_mode", "") or "hybrid").strip()
-    if not thought and not tone:
+    if not topic_intent_label and not tone:
         return ""
-    lines = ["本轮回复意图：按 thinker 的方向回应，但不要复述 thinker 原句。"]
-    if thought:
-        lines.append(f"- 意图：{thought[:120]}")
+    lines = ["本轮回复意图：按标签方向回应，不要把这些标签原样写给用户。"]
+    if topic_intent_label:
+        lines.append(f"- 意图标签：{topic_intent_label[:40]}")
     if tone:
         lines.append(f"- 语气：{tone[:40]}")
     if retrieve:
@@ -84,5 +85,5 @@ def _render_block(state: dict[str, Any]) -> str:
         lines.append("- 表情包：适合时同时调用 send_sticker，发送后不要解释已发送表情包。")
     else:
         lines.append("- 表情包：本轮不主动配图，除非后续工具规则强制要求。")
-    lines.append("把以上当作行动边界，不要把这些标签写给用户看。")
+    lines.append("把以上当作行动边界，不要复述 thinker 的内部思路。")
     return "\n".join(lines)

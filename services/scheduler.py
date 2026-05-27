@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from services.persona import PersonaRuntime
 
 _L = logger.bind(channel="scheduler")
+_CHAT_LOCK_LLM_TIMEOUT_S = 120.0
 
 
 def _should_force_reply(trigger: TriggerContext | None) -> bool:
@@ -44,9 +46,18 @@ def _should_force_reply(trigger: TriggerContext | None) -> bool:
 
 class _GroupSlot:
     __slots__ = (
-        "consecutive_skip", "debounce_task", "last_fire_time",
-        "last_response_class", "last_rws", "last_skip_time", "last_user_id",
-        "msg_count", "pending_at", "running_task", "trigger",
+        "chat_lock",
+        "consecutive_skip",
+        "debounce_task",
+        "last_fire_time",
+        "last_response_class",
+        "last_rws",
+        "last_skip_time",
+        "last_user_id",
+        "msg_count",
+        "pending_at",
+        "running_task",
+        "trigger",
     )
 
     def __init__(self) -> None:
@@ -61,6 +72,7 @@ class _GroupSlot:
         self.last_response_class: str = ResponseClass.SILENCE.value
         self.last_rws: dict[str, Any] | None = None
         self.trigger: TriggerContext | None = None
+        self.chat_lock = asyncio.Lock()
 
 
 class GroupChatScheduler:
@@ -81,6 +93,8 @@ class GroupChatScheduler:
         eot_cache: EOTCache | None = None,
         eot_classifier: EOTClassifier | None = None,
         rws_bandit: RWSBandit | None = None,
+        bot_pair_guard: Any = None,
+        block_trace_store: Any = None,
     ) -> None:
         self._llm = llm
         self._timeline = timeline
@@ -108,9 +122,14 @@ class GroupChatScheduler:
         self._slots: dict[str, _GroupSlot] = {}
         self._bot: Bot | None = None
         self._muted_groups: set[str] = set()
+        self._bot_pair_guard = bot_pair_guard
+        self._block_trace_store = block_trace_store
 
     def set_bot(self, bot: Bot) -> None:
         self._bot = bot
+        if self._bot_pair_guard is not None:
+            with contextlib.suppress(Exception):
+                self._bot_pair_guard.bind_self_id(str(getattr(bot, "self_id", "") or ""))
 
     # ------------------------------------------------------------------
     # Mute management
@@ -624,7 +643,35 @@ class GroupChatScheduler:
         slot.running_task = asyncio.create_task(self._do_chat(group_id, trigger=trigger))
         slot.running_task.add_done_callback(lambda _: None)
 
-    async def _send_to_group(self, group_id: str, text: str, *, humanize: str = "normal") -> float:
+    async def _record_runtime_metric(
+        self,
+        *,
+        metric_key: str,
+        group_id: str,
+        amount: int = 1,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        store = self._block_trace_store
+        if store is None or not hasattr(store, "record_runtime_metric"):
+            return
+        try:
+            await store.record_runtime_metric(
+                metric_key=metric_key,
+                group_id=group_id,
+                amount=amount,
+                metadata=metadata,
+            )
+        except Exception:
+            _L.debug("scheduler runtime metric skipped | key={} group={}", metric_key, group_id)
+
+    async def _send_to_group(
+        self,
+        group_id: str,
+        text: str,
+        *,
+        humanize: str = "normal",
+        target_user_id: str = "",
+    ) -> float:
         """Send a text message to a group with retry on failure."""
         if not self._bot:
             return 0.0
@@ -660,6 +707,23 @@ class GroupChatScheduler:
                         "scheduler send ok | group={} humanize={} len={} elapsed={:.1f}s",
                         group_id, humanize, len(text), elapsed,
                     )
+                if self._bot_pair_guard is not None:
+                    try:
+                        recorded = self._bot_pair_guard.record_outbound(group_id, target_user_id)
+                    except Exception as exc:
+                        _L.debug(
+                            "scheduler pair guard outbound skipped | group={} target={} err={}",
+                            group_id,
+                            target_user_id,
+                            exc,
+                        )
+                    else:
+                        if recorded:
+                            await self._record_runtime_metric(
+                                metric_key="pair_guard_outbound_recorded",
+                                group_id=group_id,
+                                metadata={"target_user_id": target_user_id},
+                            )
                 return elapsed
             except ActionFailed as e:
                 _L.warning(
@@ -672,100 +736,123 @@ class GroupChatScheduler:
     async def _do_chat(self, group_id: str, *, trigger: TriggerContext | None = None) -> None:
         slot = self._slots.get(group_id)
         try:
-            for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
-                try:
-                    identity = self._persona_runtime.identity_snapshot()
-                    session_id = f"group_{group_id}"
-                    uid = slot.last_user_id if slot else ""
-                    ctx = ToolContext(
-                        bot=self._bot,
-                        user_id=uid,
-                        group_id=group_id,
-                        session_id=session_id,
-                    )
-
-                    # Write trigger reason into the timeline so the LLM sees it
-                    # in the pending buffer, not as transient user_content.
-                    if trigger is not None:
-                        trace_request_id = str(trigger.extra.get("u13_double_haiku_request_id", "") or "")
-                        if trace_request_id:
-                            ctx.extra["u13_double_haiku_request_id"] = trace_request_id
-                        self._timeline.add_pending_trigger(
-                            group_id, reason=trigger.reason,
-                            message_id=trigger.target_message_id,
-                            target_user_id=trigger.target_user_id,
+            if slot is None:
+                return
+            async with slot.chat_lock:
+                for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+                    try:
+                        identity = self._persona_runtime.identity_snapshot()
+                        session_id = f"group_{group_id}"
+                        uid = slot.last_user_id if slot else ""
+                        ctx = ToolContext(
+                            bot=self._bot,
+                            user_id=uid,
+                            group_id=group_id,
+                            session_id=session_id,
                         )
 
-                    force_reply = _should_force_reply(trigger)
+                        # Write trigger reason into the timeline so the LLM sees it
+                        # in the pending buffer, not as transient user_content.
+                        if trigger is not None:
+                            trace_request_id = str(trigger.extra.get("u13_double_haiku_request_id", "") or "")
+                            if trace_request_id:
+                                ctx.extra["u13_double_haiku_request_id"] = trace_request_id
+                            self._timeline.add_pending_trigger(
+                                group_id, reason=trigger.reason,
+                                message_id=trigger.target_message_id,
+                                target_user_id=trigger.target_user_id,
+                            )
 
-                    # @mention: prepend [CQ:reply] to the first streamed segment only.
-                    # Quote-reply already identifies the target — no need for [CQ:at].
-                    first_segment = True
-                    sent_segments = 0
-                    send_total_elapsed = 0.0
-                    reply_prefix = ""
-                    if trigger is not None and trigger.mode == "at_mention" and trigger.target_message_id is not None:
-                        reply_prefix = f"[CQ:reply,id={trigger.target_message_id}]"
-                        _L.info("scheduler | group={} @mention prefix={}", group_id, reply_prefix)
+                        force_reply = _should_force_reply(trigger)
 
-                    async def on_segment(text: str, _prefix: str = reply_prefix) -> None:
-                        nonlocal first_segment, sent_segments, send_total_elapsed
-                        is_first = first_segment
-                        if first_segment:
-                            if _prefix:
-                                text = _prefix + text
-                            first_segment = False
-                        send_total_elapsed += await self._send_to_group(
+                        # @mention: prepend [CQ:reply] to the first streamed segment only.
+                        # Quote-reply already identifies the target — no need for [CQ:at].
+                        first_segment = True
+                        sent_segments = 0
+                        send_total_elapsed = 0.0
+                        reply_prefix = ""
+                        if (
+                            trigger is not None
+                            and trigger.mode == "at_mention"
+                            and trigger.target_message_id is not None
+                        ):
+                            reply_prefix = f"[CQ:reply,id={trigger.target_message_id}]"
+                            _L.info("scheduler | group={} @mention prefix={}", group_id, reply_prefix)
+
+                        async def on_segment(
+                            text: str,
+                            _prefix: str = reply_prefix,
+                            _target_user_id: str = uid,
+                        ) -> None:
+                            nonlocal first_segment, sent_segments, send_total_elapsed
+                            is_first = first_segment
+                            if first_segment:
+                                if _prefix:
+                                    text = _prefix + text
+                                first_segment = False
+                            send_total_elapsed += await self._send_to_group(
+                                group_id,
+                                text,
+                                humanize="skip" if is_first else "normal",
+                                target_user_id=_target_user_id,
+                            )
+                            sent_segments += 1
+
+                        resolved = self._group_config.resolve(int(group_id))
+                        reply = await asyncio.wait_for(
+                            self._llm.chat(
+                                session_id=session_id,
+                                user_id=uid,
+                                user_content="",
+                                identity=identity,
+                                group_id=group_id,
+                                ctx=ctx,
+                                on_segment=on_segment if self._bot else None,
+                                privacy_mask=resolved.privacy_mask,
+                                force_reply=force_reply,
+                            ),
+                            timeout=_CHAT_LOCK_LLM_TIMEOUT_S,
+                        )
+
+                        if reply:
+                            # Non-streaming fallback: prepend [CQ:reply] if on_segment was never called
+                            is_first = first_segment
+                            if first_segment and reply_prefix:
+                                reply = reply_prefix + reply
+                                first_segment = False
+                            send_total_elapsed += await self._send_to_group(
+                                group_id,
+                                reply,
+                                humanize="skip" if is_first else "normal",
+                                target_user_id=uid,
+                            )
+                            sent_segments += 1
+                            _L.info(
+                                "scheduler reply send complete | group={} segments={} send_total={:.1f}s",
+                                group_id, sent_segments, send_total_elapsed,
+                            )
+                        return
+
+                    except RateLimitError:
+                        if attempt >= RATE_LIMIT_MAX_RETRIES:
+                            _L.error(
+                                "scheduler | group={} rate limit exhausted after {} retries",
+                                group_id, RATE_LIMIT_MAX_RETRIES,
+                            )
+                            return
+                        delay = RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+                        _L.warning(
+                            "scheduler | group={} rate limited, retry {}/{} in {:.0f}s (will include new messages)",
+                            group_id, attempt + 1, RATE_LIMIT_MAX_RETRIES, delay,
+                        )
+                        await asyncio.sleep(delay)
+                    except TimeoutError:
+                        _L.warning(
+                            "scheduler | group={} llm chat timed out after {:.1f}s",
                             group_id,
-                            text,
-                            humanize="skip" if is_first else "normal",
-                        )
-                        sent_segments += 1
-
-                    resolved = self._group_config.resolve(int(group_id))
-                    reply = await self._llm.chat(
-                        session_id=session_id,
-                        user_id=uid,
-                        user_content="",
-                        identity=identity,
-                        group_id=group_id,
-                        ctx=ctx,
-                        on_segment=on_segment if self._bot else None,
-                        privacy_mask=resolved.privacy_mask,
-                        force_reply=force_reply,
-                    )
-
-                    if reply:
-                        # Non-streaming fallback: prepend [CQ:reply] if on_segment was never called
-                        is_first = first_segment
-                        if first_segment and reply_prefix:
-                            reply = reply_prefix + reply
-                            first_segment = False
-                        send_total_elapsed += await self._send_to_group(
-                            group_id,
-                            reply,
-                            humanize="skip" if is_first else "normal",
-                        )
-                        sent_segments += 1
-                        _L.info(
-                            "scheduler reply send complete | group={} segments={} send_total={:.1f}s",
-                            group_id, sent_segments, send_total_elapsed,
-                        )
-                    return
-
-                except RateLimitError:
-                    if attempt >= RATE_LIMIT_MAX_RETRIES:
-                        _L.error(
-                            "scheduler | group={} rate limit exhausted after {} retries",
-                            group_id, RATE_LIMIT_MAX_RETRIES,
+                            _CHAT_LOCK_LLM_TIMEOUT_S,
                         )
                         return
-                    delay = RATE_LIMIT_BASE_DELAY * (2 ** attempt)
-                    _L.warning(
-                        "scheduler | group={} rate limited, retry {}/{} in {:.0f}s (will include new messages)",
-                        group_id, attempt + 1, RATE_LIMIT_MAX_RETRIES, delay,
-                    )
-                    await asyncio.sleep(delay)
 
         except asyncio.CancelledError:
             _L.debug("scheduler | group={} chat cancelled", group_id)

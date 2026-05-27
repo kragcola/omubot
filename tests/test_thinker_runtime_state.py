@@ -86,6 +86,7 @@ def test_write_thinker_decision_state_happy_path() -> None:
     decision = ThinkDecision(
         action="reply",
         thought="查文档",
+        topic_intent_label="技术讨论",
         retrieve_mode="doc",
         rewritten_query="omubot 部署方式",
         sticker=True,
@@ -108,6 +109,7 @@ def test_write_thinker_decision_state_happy_path() -> None:
     )
     assert snapshot is not None
     assert snapshot.value["action"] == "reply"
+    assert snapshot.value["topic_intent_label"] == "技术讨论"
     assert snapshot.value["retrieve_mode"] == "doc"
     assert snapshot.value["rewritten_query"] == "omubot 部署方式"
     assert snapshot.value["sticker"] is True
@@ -176,6 +178,7 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook(
         ):
             mock_think.return_value = SimpleNamespace(
                 action="reply",
+                topic_intent_label="技术讨论",
                 retrieve_mode="doc",
                 rewritten_query="omubot 怎么部署",
                 thought="查文档",
@@ -194,6 +197,7 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook(
 
     assert result == "reply text"
     assert len(plugin_bus.thinker_calls) == 1
+    assert plugin_bus.thinker_calls[0].topic_intent_label == "技术讨论"
     assert plugin_bus.thinker_calls[0].retrieve_mode == "doc"
     trace = runtime_state.snapshot_all_for_trace()
     thinker_values = [
@@ -204,6 +208,7 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook(
     assert thinker_values == [{
         "action": "reply",
         "thought": "查文档",
+        "topic_intent_label": "技术讨论",
         "retrieve_mode": "doc",
         "rewritten_query": "omubot 怎么部署",
         "sticker": False,
@@ -241,6 +246,7 @@ async def test_llm_client_passes_runtime_state_and_turn_id_to_providers(
         ):
             mock_think.return_value = SimpleNamespace(
                 action="reply",
+                topic_intent_label="闲聊",
                 retrieve_mode="skip",
                 rewritten_query="",
                 thought="接一下",
@@ -278,6 +284,7 @@ async def test_llm_client_passes_mood_fit_target_to_providers(
         ):
             mock_think.return_value = SimpleNamespace(
                 action="reply",
+                topic_intent_label="闲聊",
                 retrieve_mode="skip",
                 rewritten_query="",
                 thought="接一下",
@@ -333,7 +340,9 @@ async def test_llm_client_keeps_legacy_thinker_block_when_provider_disabled(
         await client.close()
 
     system_text = _system_text(captured["system_blocks"])
-    assert "你决定说话：接一下" in system_text
+    assert "【意图：闲聊】" in system_text
+    assert "【tone: 日常】" in system_text
+    assert "你决定说话：" not in system_text
 
 
 @pytest.mark.asyncio
@@ -347,7 +356,7 @@ async def test_llm_client_uses_thinker_provider_without_legacy_double_injection(
         return _MAIN_RESULT
 
     block = PromptBlock(
-        text="本轮回复意图：按 thinker 的方向回应，但不要复述 thinker 原句。",
+        text="本轮回复意图：按标签方向回应，不要把这些标签原样写给用户。",
         label="本轮意图",
         position="dynamic",
         source="context",
@@ -364,6 +373,7 @@ async def test_llm_client_uses_thinker_provider_without_legacy_double_injection(
         ):
             mock_think.return_value = SimpleNamespace(
                 action="reply",
+                topic_intent_label="闲聊",
                 retrieve_mode="skip",
                 rewritten_query="",
                 thought="接一下",
@@ -384,6 +394,7 @@ async def test_llm_client_uses_thinker_provider_without_legacy_double_injection(
     system_text = _system_text(captured["system_blocks"])
     assert "【本轮意图】" in system_text
     assert "本轮回复意图" in system_text
+    assert "意图标签" not in system_text or "【本轮意图】" in system_text
     assert "你决定说话：接一下" not in system_text
 
 
@@ -450,7 +461,7 @@ def test_thinker_runtime_state_isolates_multiple_groups() -> None:
 
     write_thinker_decision_state(
         bus,
-        ThinkDecision(action="reply", thought="接一下", retrieve_mode="hybrid"),
+        ThinkDecision(action="reply", thought="接一下", topic_intent_label="闲聊", retrieve_mode="hybrid"),
         session_id=first_scope.session_id,
         group_id=first_scope.group_id,
         user_id=first_scope.user_id,
@@ -458,7 +469,7 @@ def test_thinker_runtime_state_isolates_multiple_groups() -> None:
     )
     write_thinker_decision_state(
         bus,
-        ThinkDecision(action="wait", thought="先不插话", retrieve_mode="skip"),
+        ThinkDecision(action="wait", thought="先不插话", topic_intent_label="闲聊", retrieve_mode="skip"),
         session_id=second_scope.session_id,
         group_id=second_scope.group_id,
         user_id=second_scope.user_id,

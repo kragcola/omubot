@@ -268,6 +268,158 @@ def _u13_trace_request_id(group_id: str, message_id: int | str) -> str:
     return f"{_U13_TRACE_KEY_PREFIX}:group_{group_id}:{message_id}:{secrets.token_hex(3)}"
 
 
+async def _record_runtime_metric(
+    ctx: PluginContext,
+    *,
+    metric_key: str,
+    group_id: str,
+    amount: int = 1,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    store = getattr(ctx, "block_trace_store", None)
+    if store is None or not hasattr(store, "record_runtime_metric"):
+        return
+    try:
+        await store.record_runtime_metric(
+            metric_key=metric_key,
+            group_id=group_id,
+            amount=amount,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        _log_debug.debug(
+            "router runtime metric skipped | key={} group={} err={}",
+            metric_key,
+            group_id,
+            exc,
+        )
+
+
+def _bot_pair_guard_enabled(ctx: PluginContext) -> bool:
+    config = getattr(ctx, "config", None)
+    pair_guard = getattr(config, "bot_pair_guard", None) if config is not None else None
+    return bool(getattr(pair_guard, "enabled", False))
+
+
+async def _maybe_drop_pair_guard(
+    ctx: PluginContext,
+    *,
+    group_id: str,
+    sender_id: str,
+) -> bool:
+    if not _bot_pair_guard_enabled(ctx):
+        return False
+    guard = getattr(ctx, "bot_pair_guard", None)
+    if guard is None:
+        return False
+    try:
+        if guard.is_suppressed(group_id, sender_id):
+            await _record_runtime_metric(
+                ctx,
+                metric_key="pair_guard_suppressed",
+                group_id=group_id,
+                metadata={"sender_id": sender_id},
+            )
+            return True
+        if guard.record_inbound(group_id, sender_id):
+            await _record_runtime_metric(
+                ctx,
+                metric_key="pair_guard_inbound_recorded",
+                group_id=group_id,
+                metadata={"sender_id": sender_id},
+            )
+    except Exception as exc:
+        _log_debug.debug(
+            "pair guard skipped | group={} sender={} err={}",
+            group_id,
+            sender_id,
+            exc,
+        )
+    return False
+
+
+def _coalesce_enabled(ctx: PluginContext) -> bool:
+    config = getattr(ctx, "config", None)
+    coalesce = getattr(config, "coalesce", None) if config is not None else None
+    return bool(getattr(coalesce, "enabled", False))
+
+
+def _should_bypass_coalescer(
+    *,
+    trigger: object | None,
+    is_addressed: bool,
+) -> bool:
+    return is_addressed or trigger is not None
+
+
+async def _notify_group_scheduler(
+    ctx: PluginContext,
+    *,
+    group_id: str,
+    user_id: str,
+    trigger: object | None,
+    is_addressed: bool,
+    message: Any,
+) -> None:
+    scheduler = getattr(ctx, "scheduler", None)
+    if scheduler is None:
+        return
+    coalescer = getattr(ctx, "message_coalescer", None)
+    bypass = _should_bypass_coalescer(trigger=trigger, is_addressed=is_addressed)
+    if not _coalesce_enabled(ctx) or coalescer is None:
+        scheduler.notify(group_id, trigger=cast(Any, trigger), user_id=user_id)
+        return
+
+    if bypass:
+        dropped_count = 0
+        try:
+            dropped_count = len(await coalescer.discard(group_id, user_id))
+        except Exception as exc:
+            _log_debug.debug(
+                "coalescer discard skipped | group={} user={} err={}",
+                group_id,
+                user_id,
+                exc,
+            )
+        await _record_runtime_metric(
+            ctx,
+            metric_key="coalesce_bypassed",
+            group_id=group_id,
+            metadata={
+                "sender_id": user_id,
+                "trigger_mode": str(getattr(trigger, "mode", "") or ""),
+                "discarded_messages": dropped_count,
+            },
+        )
+        scheduler.notify(group_id, trigger=cast(Any, trigger), user_id=user_id)
+        return
+
+    async def _flush(messages: list[Any]) -> None:
+        await _record_runtime_metric(
+            ctx,
+            metric_key="coalesce_flushed",
+            group_id=group_id,
+            metadata={"sender_id": user_id, "message_count": len(messages)},
+        )
+        scheduler.notify(group_id, user_id=user_id)
+
+    await coalescer.enqueue(
+        group_id,
+        user_id,
+        message,
+        on_flush=_flush,
+    )
+    await _record_runtime_metric(
+        ctx,
+        metric_key="coalesce_enqueued",
+        group_id=group_id,
+        metadata={
+            "sender_id": user_id,
+            "message_type": "content" if message else "empty",
+        },
+    )
+
+
 def _has_recent_assistant_reply(timeline: object, group_id: str, *, within_s: float) -> bool:
     try:
         turns = timeline.get_turns(group_id)
@@ -772,6 +924,12 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         if event.user_id in resolved.blocked_users:
             return
         group_id = str(event.group_id)
+        if await _maybe_drop_pair_guard(
+            ctx,
+            group_id=group_id,
+            sender_id=str(event.user_id),
+        ):
+            return
         muted = ctx.scheduler.is_muted(group_id)
         allow_speaking = ctx.config.group.allows_active_group(event.group_id) and not muted
 
@@ -899,7 +1057,14 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     message_id=event.message_id,
                 )
                 if not muted:
-                    ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))
+                    await _notify_group_scheduler(
+                        ctx,
+                        group_id=group_id,
+                        user_id=str(event.user_id),
+                        trigger=trigger,
+                        is_addressed=is_addressed,
+                        message="@我",
+                    )
             return
 
         preview = content if isinstance(content, str) else "".join(
@@ -1083,7 +1248,14 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 } if semantic_trace_request_id else {},
             )
         if not muted:
-            ctx.scheduler.notify(group_id, trigger=trigger, user_id=str(event.user_id))
+            await _notify_group_scheduler(
+                ctx,
+                group_id=group_id,
+                user_id=str(event.user_id),
+                trigger=trigger,
+                is_addressed=is_addressed,
+                message=content,
+            )
 
     # ---- QQ inbound interaction notices ----
 

@@ -16,8 +16,10 @@ from typing import Any
 import nonebot
 from loguru import logger
 
+from kernel.bot_pair_guard import BotPairLoopGuard
 from kernel.config import BotConfig, ResolvedHumanization, load_plugin_config
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext
+from services.coalesce import MessageCoalescer
 from services.llm.llm_request import LLMRequest
 
 _L = logger.bind(channel="system")
@@ -1029,6 +1031,16 @@ class ChatPlugin(AmadeusPlugin):
         trace_store = BlockTraceStore(db_path="storage/block_trace.db")
         await trace_store.init()
         ctx.block_trace_store = trace_store
+        ctx.bot_pair_guard = BotPairLoopGuard(
+            self_id="",
+            known_other_bots=config.bot_pair_guard.known_other_bots,
+            max_per_minute=config.bot_pair_guard.max_per_minute,
+            cooldown_seconds=config.bot_pair_guard.cooldown_seconds,
+        )
+        ctx.message_coalescer = MessageCoalescer(
+            idle_window_seconds=config.coalesce.idle_window_seconds,
+            max_window_seconds=config.coalesce.max_window_seconds,
+        )
         budget_mgr = PromptBudgetManager(
             trace_store,
             slang_store_getter=lambda: getattr(ctx, "slang_store", None),
@@ -1116,6 +1128,7 @@ class ChatPlugin(AmadeusPlugin):
             ),
             pass_turn_confidence_gate=config.humanization.pass_turn_confidence_gate,
             pass_turn_confidence_threshold=config.humanization.pass_turn_confidence_threshold,
+            sentinel_guardrail_config=config.sentinel_guardrail,
         )
         llm.set_task_profile_names(task_profile_names)
 
@@ -1267,6 +1280,8 @@ class ChatPlugin(AmadeusPlugin):
             runtime_state=ctx.runtime_state,
             humanization_config=config.humanization,
             hawkes_cache=hawkes_cache,
+            bot_pair_guard=ctx.bot_pair_guard if config.bot_pair_guard.enabled else None,
+            block_trace_store=trace_store,
         )
 
         _L.info("ChatPlugin startup complete")
@@ -1278,6 +1293,9 @@ class ChatPlugin(AmadeusPlugin):
             await ctx.llm_client.close()
         if ctx.scheduler is not None:
             await ctx.scheduler.close()
+        message_coalescer = getattr(ctx, "message_coalescer", None)
+        if message_coalescer is not None:
+            await message_coalescer.close()
         hawkes_refresher = getattr(ctx, "scheduler_hawkes_refresher", None)
         if hawkes_refresher is not None:
             await hawkes_refresher.stop()

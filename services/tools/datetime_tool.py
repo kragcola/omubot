@@ -65,5 +65,6 @@ class DateTimeTool(Tool):
             if schedule is not None:
                 slot = schedule.current_slot(now)
                 if slot is not None:
-                    result += f"\n你正在：{slot.activity}"
+                    desc = slot.description or slot.activity
+                    result += f"\n你正在：{desc}"
         return result

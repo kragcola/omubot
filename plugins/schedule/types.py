@@ -5,6 +5,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+ALLOWED_ACTIVITY_LABELS = (
+    "work",
+    "rest",
+    "practice",
+    "commute",
+    "meal",
+    "leisure",
+    "sleep",
+    "social",
+    "study",
+    "errand",
+    "hobby",
+    "online",
+)
+_ALLOWED_ACTIVITY_LABEL_SET = frozenset(ALLOWED_ACTIVITY_LABELS)
+
 
 @dataclass
 class TimeSlot:
@@ -12,6 +28,7 @@ class TimeSlot:
     activity: str
     mood_hint: str
     location: str = ""
+    description: str = ""
 
 
 @dataclass
@@ -70,3 +87,8 @@ def _time_to_minutes(t: str) -> int | None:
         return int(h) * 60 + int(m)
     except (ValueError, TypeError):
         return None
+
+
+def normalize_activity_label(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in _ALLOWED_ACTIVITY_LABEL_SET else ""

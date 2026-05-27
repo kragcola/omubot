@@ -31,8 +31,8 @@ class TestParseSchedule:
             "theme": "排练日",
             "day_narrative": "忙碌而充实的一天",
             "slots": [
-                {"time": "08:00", "activity": "起床", "mood_hint": "困倦", "location": "家里"},
-                {"time": "12:00", "activity": "吃午饭", "mood_hint": "放松", "location": "食堂"}
+                {"time": "08:00", "activity": "rest", "mood_hint": "困倦", "location": "家里"},
+                {"time": "12:00", "activity": "meal", "mood_hint": "放松", "location": "食堂"}
             ]
         }"""
         schedule = _parse_schedule(json_str, "2026-04-29")
@@ -42,7 +42,7 @@ class TestParseSchedule:
         assert schedule.day_narrative == "忙碌而充实的一天"
         assert len(schedule.slots) == 2
         assert schedule.slots[0].time == "08:00"
-        assert schedule.slots[0].activity == "起床"
+        assert schedule.slots[0].activity == "rest"
 
     def test_parses_code_fenced_json(self):
         json_str = """```json
@@ -50,7 +50,7 @@ class TestParseSchedule:
     "date": "2026-04-29",
     "theme": "测试",
     "day_narrative": "",
-    "slots": [{"time": "08:00", "activity": "起床", "mood_hint": "困倦", "location": ""}]
+    "slots": [{"time": "08:00", "activity": "rest", "mood_hint": "困倦", "location": ""}]
 }
 ```"""
         schedule = _parse_schedule(json_str, "2026-04-29")
@@ -63,7 +63,7 @@ class TestParseSchedule:
     "date": "2026-04-29",
     "theme": "测试",
     "day_narrative": "",
-    "slots": [{"time": "08:00", "activity": "起床", "mood_hint": "困倦", "location": ""}]
+    "slots": [{"time": "08:00", "activity": "rest", "mood_hint": "困倦", "location": ""}]
 }
 ```"""
         schedule = _parse_schedule(json_str, "2026-04-29")
@@ -80,7 +80,7 @@ class TestParseSchedule:
     def test_missing_optional_fields_defaulted(self):
         json_str = """{
             "date": "2026-04-29",
-            "slots": [{"time": "08:00", "activity": "起床", "mood_hint": "困倦"}]
+            "slots": [{"time": "08:00", "activity": "rest", "mood_hint": "困倦"}]
         }"""
         schedule = _parse_schedule(json_str, "2026-04-29")
         assert schedule is not None

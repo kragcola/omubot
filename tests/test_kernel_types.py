@@ -201,10 +201,12 @@ class TestThinkerContext:
             user_id="u1",
             action="reply",
             thought="该回复了",
+            topic_intent_label="信息同步",
             elapsed_ms=500.0,
         )
         assert ctx.action == "reply"
         assert ctx.thought == "该回复了"
+        assert ctx.topic_intent_label == "信息同步"
         assert ctx.elapsed_ms == 500.0
 
     def test_wait_decision(self) -> None:
@@ -216,6 +218,7 @@ class TestThinkerContext:
             thought="太困了不回了",
         )
         assert ctx.action == "wait"
+        assert ctx.topic_intent_label == "闲聊"
 
 
 # ============================================================================
@@ -380,6 +383,7 @@ class TestAmadeusPlugin:
                 user_id="u1",
                 action="reply",
                 thought="hello",
+                topic_intent_label="闲聊",
             )
             await plugin.on_thinker_decision(ctx)
 

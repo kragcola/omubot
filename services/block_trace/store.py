@@ -65,6 +65,40 @@ _CREATE_HUMANIZATION_METRICS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_hm_created ON humanization_metrics(created_at)",
 ]
 
+_CREATE_RUNTIME_METRICS_TABLE = """\
+CREATE TABLE IF NOT EXISTS runtime_metric_events (
+    metric_id       TEXT PRIMARY KEY,
+    metric_key      TEXT NOT NULL,
+    group_id        TEXT NOT NULL DEFAULT '',
+    amount          INTEGER NOT NULL DEFAULT 1,
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL
+)"""
+
+_CREATE_RUNTIME_METRICS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_rme_metric_key ON runtime_metric_events(metric_key, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_rme_group_key ON runtime_metric_events(group_id, metric_key, created_at)",
+]
+
+_GUARDRAIL_METRIC_KEYS = (
+    "near_duplicate_hits",
+    "near_duplicate_dropped",
+    "near_duplicate_rewritten",
+    "thinker_phrase_hits",
+    "sentinel_strip_hits",
+    "sentinel_redact_hits",
+    "sentinel_block_hits",
+)
+
+_RUNTIME_METRIC_KEYS = (
+    "pair_guard_inbound_recorded",
+    "pair_guard_outbound_recorded",
+    "pair_guard_suppressed",
+    "coalesce_enqueued",
+    "coalesce_flushed",
+    "coalesce_bypassed",
+)
+
 
 def _now_iso() -> str:
     return datetime.now(TZ_SHANGHAI).isoformat(timespec="seconds")
@@ -120,6 +154,44 @@ def _json_list(raw: str | None) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value]
+
+
+def _sum_guardrail_metrics(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {key: 0 for key in _GUARDRAIL_METRIC_KEYS}
+    for row in rows:
+        metadata = row.get("metadata", {})
+        if not isinstance(metadata, dict):
+            continue
+        for key in _GUARDRAIL_METRIC_KEYS:
+            try:
+                counts[key] += int(metadata.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+    return counts
+
+
+def _sum_runtime_metrics(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {key: 0 for key in _RUNTIME_METRIC_KEYS}
+    for row in rows:
+        key = str(row.get("metric_key", "") or "")
+        if key not in counts:
+            continue
+        try:
+            counts[key] += int(row.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    return counts
+
+
+def _row_to_runtime_metric(row: aiosqlite.Row) -> dict[str, Any]:
+    return {
+        "metric_id": row["metric_id"],
+        "metric_key": row["metric_key"],
+        "group_id": row["group_id"],
+        "amount": int(row["amount"] or 0),
+        "metadata": _json_obj(row["metadata_json"]),
+        "created_at": row["created_at"],
+    }
 
 
 def _row_to_metric(row: aiosqlite.Row) -> dict[str, Any]:
@@ -179,6 +251,9 @@ class BlockTraceStore:
             await db.execute(stmt)
         await db.execute(_CREATE_HUMANIZATION_METRICS_TABLE)
         for stmt in _CREATE_HUMANIZATION_METRICS_INDEXES:
+            await db.execute(stmt)
+        await db.execute(_CREATE_RUNTIME_METRICS_TABLE)
+        for stmt in _CREATE_RUNTIME_METRICS_INDEXES:
             await db.execute(stmt)
         await db.commit()
 
@@ -312,6 +387,58 @@ class BlockTraceStore:
         )
         return [_row_to_metric(r) for r in await cursor.fetchall()]
 
+    async def record_runtime_metric(
+        self,
+        *,
+        metric_key: str,
+        group_id: str = "",
+        amount: int = 1,
+        metadata: dict[str, Any] | None = None,
+        metric_id: str = "",
+        created_at: str = "",
+    ) -> str:
+        key = str(metric_key or "").strip()
+        if not key:
+            raise ValueError("metric_key must not be empty")
+        mid = metric_id or ("rme_" + secrets.token_hex(6))
+        await self._conn().execute(
+            """INSERT OR REPLACE INTO runtime_metric_events
+               (metric_id, metric_key, group_id, amount, metadata_json, created_at)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                mid,
+                key,
+                group_id,
+                int(amount),
+                json.dumps(metadata or {}, ensure_ascii=False),
+                created_at or _now_iso(),
+            ),
+        )
+        await self._conn().commit()
+        return mid
+
+    async def list_runtime_metrics(
+        self,
+        *,
+        metric_key: str | None = None,
+        group_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if metric_key is not None:
+            clauses.append("metric_key = ?")
+            params.append(metric_key)
+        if group_id is not None:
+            clauses.append("group_id = ?")
+            params.append(group_id)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        cursor = await self._conn().execute(
+            f"SELECT * FROM runtime_metric_events {where}ORDER BY created_at DESC LIMIT ?",
+            (*params, limit),
+        )
+        return [_row_to_runtime_metric(r) for r in await cursor.fetchall()]
+
     async def humanization_metric_stats(self, *, group_id: str | None = None) -> dict[str, Any]:
         params: tuple[Any, ...] = (group_id,) if group_id is not None else ()
         where = "WHERE group_id = ?" if group_id is not None else ""
@@ -331,6 +458,7 @@ class BlockTraceStore:
             "total": int(row["cnt"]),
             "avg_score": float(row["avg_score"] or 0.0),
             "by_issue": by_issue,
+            **_sum_guardrail_metrics(rows),
         }
 
     async def stats(self) -> dict[str, Any]:
@@ -355,11 +483,19 @@ class BlockTraceStore:
         )
         row = await cursor.fetchone()
         total = int(row["cnt"]) if row is not None else 0
+        cursor = await db.execute("SELECT * FROM humanization_metrics ORDER BY created_at DESC")
+        metric_rows = [_row_to_metric(r) for r in await cursor.fetchall()]
+        guardrail_counts = _sum_guardrail_metrics(metric_rows)
+        cursor = await db.execute("SELECT * FROM runtime_metric_events ORDER BY created_at DESC")
+        runtime_metric_rows = [_row_to_runtime_metric(r) for r in await cursor.fetchall()]
+        runtime_counts = _sum_runtime_metrics(runtime_metric_rows)
         return {
             "total": total,
             "by_decision": by_decision,
             "by_source": by_source,
             "by_position": by_position,
+            **guardrail_counts,
+            **runtime_counts,
         }
 
     async def prune(self, *, keep_days: int = 7) -> int:
@@ -373,6 +509,10 @@ class BlockTraceStore:
         )
         await db.execute(
             "DELETE FROM humanization_metrics WHERE created_at < ?",
+            (cutoff,),
+        )
+        await db.execute(
+            "DELETE FROM runtime_metric_events WHERE created_at < ?",
             (cutoff,),
         )
         await db.commit()

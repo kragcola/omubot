@@ -20,9 +20,9 @@ def _make_schedule(date_str: str = "2026-04-29") -> Schedule:
         theme="测试日",
         generated_at="2026-04-29T02:00:00+08:00",
         slots=[
-            TimeSlot(time="08:00", activity="起床", mood_hint="困倦", location="家里"),
-            TimeSlot(time="12:00", activity="吃午饭", mood_hint="放松", location="食堂"),
-            TimeSlot(time="18:00", activity="排练", mood_hint="专注", location="排练室"),
+            TimeSlot(time="08:00", activity="rest", mood_hint="困倦", location="家里"),
+            TimeSlot(time="12:00", activity="meal", mood_hint="放松", location="食堂"),
+            TimeSlot(time="18:00", activity="practice", mood_hint="专注", location="排练室"),
         ],
     )
 
@@ -39,7 +39,7 @@ class TestScheduleStore:
             assert loaded.theme == "测试日"
             assert loaded.day_narrative == "test day"
             assert len(loaded.slots) == 3
-            assert loaded.slots[0].activity == "起床"
+            assert loaded.slots[0].activity == "rest"
 
     def test_load_missing_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -105,21 +105,21 @@ class TestScheduleCurrentSlot:
         now = datetime(2026, 4, 29, 8, 0, tzinfo=CST)
         slot = s.current_slot(now)
         assert slot is not None
-        assert slot.activity == "起床"
+        assert slot.activity == "rest"
 
     def test_current_slot_between(self):
         s = _make_schedule()
         now = datetime(2026, 4, 29, 10, 0, tzinfo=CST)
         slot = s.current_slot(now)
         assert slot is not None
-        assert slot.activity == "起床"  # still in 08:00 slot
+        assert slot.activity == "rest"  # still in 08:00 slot
 
     def test_current_slot_after_last(self):
         s = _make_schedule()
         now = datetime(2026, 4, 29, 23, 0, tzinfo=CST)
         slot = s.current_slot(now)
         assert slot is not None
-        assert slot.activity == "排练"  # last slot at 18:00
+        assert slot.activity == "practice"  # last slot at 18:00
 
     def test_current_slot_before_first(self):
         s = _make_schedule()

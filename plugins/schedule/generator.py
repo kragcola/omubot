@@ -13,12 +13,13 @@ from loguru import logger
 
 from plugins.schedule.calendar import get_day_context
 from plugins.schedule.store import ScheduleStore
-from plugins.schedule.types import Schedule, TimeSlot
+from plugins.schedule.types import ALLOWED_ACTIVITY_LABELS, Schedule, TimeSlot, normalize_activity_label
 
 _L = logger.bind(channel="schedule")
 
 CST = ZoneInfo("Asia/Shanghai")
 ApiCaller = Callable[..., Awaitable[dict[str, Any]]]
+_ACTIVITY_LABEL_TEXT = " / ".join(ALLOWED_ACTIVITY_LABELS)
 
 _SCHEDULE_SYSTEM_PROMPT = """你是一个日程生成器。你需要以{name}的身份，生成一份详细的、沉浸式的每日日程。
 
@@ -38,7 +39,8 @@ _SCHEDULE_SYSTEM_PROMPT = """你是一个日程生成器。你需要以{name}的
   "slots": [
     {{
       "time": "HH:MM",
-      "activity": "具体、有画面感的正在做的事情",
+      "activity": "{activity_labels}",
+      "description": "具体、有画面感的正在做的事情",
       "mood_hint": "这个活动带来的情绪",
       "location": "地点"
     }}
@@ -47,7 +49,8 @@ _SCHEDULE_SYSTEM_PROMPT = """你是一个日程生成器。你需要以{name}的
 
 规则：
 1. slots 覆盖 06:00 ~ 次日 02:00，8~12 个时间段
-2. 每个 activity 必须**具体、有画面感**——是"正在做"的真实场景，不是笼统规划
+2. activity 必须严格从这 12 个枚举里选一个：{activity_labels}
+3. description 必须**具体、有画面感**——是"正在做"的真实场景，不是笼统规划
 3. 事件之间要有因果关系——前面的事影响后面的状态
 4. 每天随机决定主题，不要重复
 5. 情绪要有起伏——不能全天开心或全天疲惫
@@ -125,7 +128,13 @@ class ScheduleGenerator:
             _L.info("schedule already exists for {} — skipping generation", today_str)
             return
 
-        system = [{"type": "text", "text": _SCHEDULE_SYSTEM_PROMPT.format(name=self._identity_name)}]
+        system = [{
+            "type": "text",
+            "text": _SCHEDULE_SYSTEM_PROMPT.format(
+                name=self._identity_name,
+                activity_labels=_ACTIVITY_LABEL_TEXT,
+            ),
+        }]
 
         day_ctx = get_day_context(now)
         day_type_cn = {
@@ -211,7 +220,20 @@ def _parse_schedule(text: str, date_str: str) -> Schedule | None:
     except json.JSONDecodeError:
         return None
     try:
-        slots = [TimeSlot(**s) for s in data["slots"]]
+        slots: list[TimeSlot] = []
+        for raw_slot in data["slots"]:
+            if not isinstance(raw_slot, dict):
+                return None
+            activity = normalize_activity_label(raw_slot.get("activity", ""))
+            if not activity:
+                return None
+            slots.append(TimeSlot(
+                time=str(raw_slot.get("time", "") or ""),
+                activity=activity,
+                mood_hint=str(raw_slot.get("mood_hint", "") or ""),
+                location=str(raw_slot.get("location", "") or ""),
+                description=str(raw_slot.get("description", "") or ""),
+            ))
         return Schedule(
             date=date_str,
             day_narrative=data.get("day_narrative", ""),
