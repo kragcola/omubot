@@ -32,8 +32,6 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
     config = ctx.config
     group_config = getattr(config, "group", None) if config else None
     bot_start_time: float = getattr(ctx, "bot_start_time", 0.0)
-    soul_cfg = getattr(config, "soul", None) if config else None
-    soul_dir: str = soul_cfg.dir if soul_cfg else "config/soul"
     log_cfg = getattr(config, "log", None) if config else None
     log_dir: str = log_cfg.dir if log_cfg else "storage/logs"
 
@@ -136,7 +134,6 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
         config=config,
         group_config=group_config,
         bot_start_time=bot_start_time,
-        soul_dir=soul_dir,
         log_dir=log_dir,
         config_path=config_path,
         card_store=card_store,

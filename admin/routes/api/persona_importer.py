@@ -26,12 +26,16 @@ class PersonaSourcePayload(BaseModel):
     content: str = ""
 
 
+class PersonaHotReloadPayload(BaseModel):
+    confirm: bool = False
+
+
 def create_persona_importer_router(
     *,
     persona_root: str | Path = "config/persona",
     defaults_dir: str | Path = "config/persona/_defaults/v2",
-    soul_dir: str | Path = "config/soul",
     ctx: Any = None,
+    persona_runtime: Any = None,
     config: Any = None,
     bot: Any = None,
 ) -> APIRouter:
@@ -137,5 +141,31 @@ def create_persona_importer_router(
                 "error": "confirm=true is required for Pending Freeze",
             }
         return _writer().pending_freeze(persona_id)
+
+    @router.post("/hot-reload/{persona_id}")
+    async def hot_reload(persona_id: str, payload: PersonaHotReloadPayload):
+        valid, namespace = _valid_namespace(persona_id)
+        if not valid:
+            return {"ok": False, "persona_id": namespace, "error": "persona_id is invalid"}
+        if not payload.confirm:
+            return {
+                "ok": False,
+                "persona_id": namespace,
+                "error": "confirm=true is required for Hot Reload",
+            }
+        runtime = persona_runtime or (getattr(ctx, "persona_runtime", None) if ctx is not None else None)
+        if runtime is None:
+            return {"ok": False, "persona_id": namespace, "error": "persona_runtime unavailable"}
+        try:
+            runtime.swap_bundle(namespace)
+        except Exception as exc:
+            return {"ok": False, "persona_id": namespace, "error": str(exc)}
+        bundle = getattr(runtime, "bundle", None)
+        loaded_persona_id = getattr(bundle, "persona_id", "") if bundle is not None else ""
+        return {
+            "ok": True,
+            "persona_id": namespace,
+            "loaded_persona_id": loaded_persona_id,
+        }
 
     return router

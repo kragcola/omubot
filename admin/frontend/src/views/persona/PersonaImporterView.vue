@@ -88,6 +88,13 @@ interface PersonaFreezeResponse {
   error?: string
 }
 
+interface PersonaHotReloadResponse {
+  ok: boolean
+  persona_id: string
+  loaded_persona_id?: string
+  error?: string
+}
+
 type ParityStatus =
   | 'aligned'
   | 'divergent'
@@ -160,6 +167,8 @@ const savingSource = ref(false)
 const importing = ref(false)
 const refreshingDraft = ref(false)
 const freezing = ref(false)
+const reloading = ref(false)
+const lastReload = ref<PersonaHotReloadResponse | null>(null)
 
 const personaKey = computed(() => personaId.value.trim())
 const namespace = computed(() => {
@@ -402,6 +411,34 @@ async function pendingFreeze() {
   }
 }
 
+async function hotReload() {
+  if (!personaKey.value) {
+    message.warning('先填写 persona_id')
+    return
+  }
+  reloading.value = true
+  loadError.value = ''
+  try {
+    const data = await api<PersonaHotReloadResponse>(
+      `/api/admin/persona/hot-reload/${encodeURIComponent(personaKey.value)}`,
+      {
+        method: 'POST',
+        body: { confirm: true },
+      },
+    )
+    if (!data.ok) throw new Error(data.error || '热重载失败')
+    lastReload.value = data
+    const loaded = data.loaded_persona_id || data.persona_id
+    lastAction.value = `已热重载 ${loaded}`
+    message.success(`已热重载 ${loaded}`)
+  } catch (error) {
+    loadError.value = explainError(error)
+    message.error(loadError.value)
+  } finally {
+    reloading.value = false
+  }
+}
+
 function explainError(error: unknown) {
   if (error instanceof Error && error.message) return error.message
   return '请求失败'
@@ -570,8 +607,8 @@ onUnmounted(() => {
 
 <template>
   <AppPage
-    title="人设导入"
-    description="source.md 到 v2 draft 的导入、校验与 Pending Freeze。"
+    title="人设管理"
+    description="source.md 到 v2 draft 的导入、校验、Pending Freeze 与运行时热重载。"
     eyebrow="Persona Source Importer"
   >
     <template #action>
@@ -663,6 +700,17 @@ onUnmounted(() => {
               </NButton>
             </template>
             确认复制当前 draft 到 _pending_freeze/？
+          </NPopconfirm>
+          <NPopconfirm :show-icon="false" @positive-click="hotReload">
+            <template #trigger>
+              <NButton type="primary" :disabled="!personaKey || reloading" :loading="reloading">
+                <template #icon>
+                  <NIcon :component="RefreshOutline" />
+                </template>
+                热重载
+              </NButton>
+            </template>
+            将 {{ namespace }} 切换为运行时人设？
           </NPopconfirm>
         </template>
       </PageToolbar>

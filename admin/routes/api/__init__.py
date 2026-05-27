@@ -20,7 +20,6 @@ def create_api_router(
     config: Any = None,
     group_config: Any = None,
     bot_start_time: float = 0.0,
-    soul_dir: str = "config/soul",
     log_dir: str = "storage/logs",
     config_path: str = "config/config.json",
     card_store: Any = None,
@@ -82,7 +81,6 @@ def create_api_router(
     from admin.routes.api.schedule import create_schedule_router
     from admin.routes.api.scheduler import create_scheduler_router
     from admin.routes.api.slang import create_slang_router
-    from admin.routes.api.soul import create_soul_router
     from admin.routes.api.stickers import create_stickers_router
     from admin.routes.api.style import create_style_router
     from admin.routes.api.system import create_system_router
@@ -109,7 +107,6 @@ def create_api_router(
     ))
     router.include_router(create_config_router(config_path=config_path))
     router.include_router(create_context_router(ctx=ctx, bus=bus))
-    router.include_router(create_soul_router(soul_dir=soul_dir, persona_runtime=persona_runtime))
     router.include_router(create_logs_router(log_dir=log_dir))
     router.include_router(create_memory_router(
         card_store=card_store, group_memory_config=group_memory_config,
@@ -153,7 +150,7 @@ def create_api_router(
     router.include_router(create_memos_router(card_store=card_store, ctx=ctx))
     router.include_router(create_persona_importer_router(
         ctx=ctx,
-        soul_dir=soul_dir,
+        persona_runtime=persona_runtime,
         config=config,
         bot=bot,
     ))

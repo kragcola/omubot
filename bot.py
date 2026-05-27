@@ -64,8 +64,8 @@ logger.info(
     _c.admins or "无", _c.allowed_private_users or "无限制",
 )
 logger.info(
-    "[Dirs] soul={} log={}",
-    _c.soul.dir, _c.log.dir,
+    "[Dirs] log={}",
+    _c.log.dir,
 )
 logger.info("[NapCat] api_url={}", _c.napcat.api_url)
 logger.info("==================================")

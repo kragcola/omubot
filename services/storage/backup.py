@@ -68,9 +68,9 @@ BACKUP_REGISTRY: list[BackupItem] = [
                required=False, profiles=["migration"]),
     BackupItem("talk_schedule", "config/talk_schedule.json", "file",
                required=False, profiles=["migration"]),
-    BackupItem("soul", "config/soul", "directory",
+    BackupItem("persona", "config/persona", "directory",
                profiles=["daily", "migration"],
-               restore_note="人格与指令文件，丢失会导致 bot 行为异常"),
+               restore_note="人设源文件与冻结产物，丢失会导致 bot 行为异常"),
     # --- Plugin state ---
     BackupItem("plugin_state", "storage/plugins/plugin-state.json", "file",
                profiles=["daily", "migration", "pre-change"]),

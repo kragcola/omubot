@@ -18,7 +18,6 @@ from admin.routes.api.plugins import create_plugins_router
 from admin.routes.api.protocol import create_protocol_router
 from admin.routes.api.providers import create_providers_router
 from admin.routes.api.slang import create_slang_router
-from admin.routes.api.soul import create_soul_router
 from admin.routes.api.system import create_system_router
 from kernel.bus import PluginBus
 from kernel.config import BotConfig
@@ -202,8 +201,8 @@ def _msg_ctx(content: str = "hello") -> MessageContext:
     )
 
 
-class _DummyIdentityMgr:
-    """Minimal stand-in for ``PersonaRuntime`` used by the legacy soul endpoint tests."""
+class _DummyPersonaRuntime:
+    """Minimal stand-in for ``PersonaRuntime`` used by hot-reload tests."""
 
     def __init__(self, should_fail: bool = False, persona_id: str = "default") -> None:
         self.should_fail = should_fail
@@ -214,6 +213,7 @@ class _DummyIdentityMgr:
         self.loaded_paths.append(persona_id)
         if self.should_fail:
             raise RuntimeError("reload failed")
+        self.bundle = SimpleNamespace(persona_id=persona_id)
 
 
 def test_admin_events_requires_auth(monkeypatch) -> None:
@@ -2098,228 +2098,74 @@ def test_slang_api_v3_drift_and_revisions(tmp_path: Path) -> None:
     asyncio.run(store.close())
 
 
-def test_soul_endpoint_saves_legacy_files_and_reloads_identity(tmp_path: Path) -> None:
-    (tmp_path / "identity.md").write_text(
-        (
-            "# 凤笑梦\n\n开场介绍。\n\n## 基础身份\n\n| 项目 | 内容 |\n| --- | --- |\n"
-            "| 所属团体 | WxS |\n\n## 插话方式\n\n被叫名字时必须回复。\n"
-        ),
-        encoding="utf-8",
-    )
-    (tmp_path / "instruction.md").write_text(
-        "## 回复风格\n\n- 明亮\n- 主动\n\n## 工具使用\n\n1. 先判断\n2. 再调用\n",
-        encoding="utf-8",
-    )
-
-    identity_mgr = _DummyIdentityMgr(persona_id="default")
-    app = FastAPI()
-    app.include_router(
-        create_soul_router(soul_dir=str(tmp_path), persona_runtime=identity_mgr),
-        prefix="/api/admin",
-    )
-    client = TestClient(app)
-
-    initial = client.get("/api/admin/soul")
-    assert initial.status_code == 200
-    initial_data = initial.json()
-    assert initial_data["format_mode"] == "legacy"
-    assert initial_data["migration_pending"] is False
-    assert initial_data["editor"]["meta"]["display_title"] == "凤笑梦"
-    assert initial_data["editor"]["meta"]["description"] == "开场介绍。"
-    assert initial_data["editor"]["proactive"]["enabled"] is True
-    assert [section["title"] for section in initial_data["editor"]["instruction_sections"]] == ["回复风格", "工具使用"]
-
-    saved = client.post("/api/admin/soul/save", json={"editor": initial_data["editor"]})
-    assert saved.status_code == 200
-    save_data = saved.json()
-    assert save_data["ok"] is True
-    assert save_data["reload_ok"] is True
-    assert "config/soul/identity.md" in save_data["message"]
-    assert "config/soul/instruction.md" in save_data["message"]
-    assert "SKILL.md" not in save_data["message"]
-    assert not (tmp_path / "SKILL.md").exists()
-    assert (tmp_path / "identity.md").is_file()
-    assert (tmp_path / "instruction.md").is_file()
-    assert identity_mgr.loaded_paths == ["default"]
-
-    identity_text = (tmp_path / "identity.md").read_text(encoding="utf-8")
-    instruction_text = (tmp_path / "instruction.md").read_text(encoding="utf-8")
-    assert "# 凤笑梦" in identity_text
-    assert "## 基础身份" in identity_text
-    assert "## 插话方式" in identity_text
-    assert "被叫名字时必须回复。" in identity_text
-    assert "## 回复风格" in instruction_text
-    assert "## 工具使用" in instruction_text
-
-    after = client.get("/api/admin/soul")
-    assert after.status_code == 200
-    after_data = after.json()
-    assert after_data["format_mode"] == "legacy"
-    assert after_data["migration_pending"] is False
-
-
-def test_soul_endpoint_parses_and_roundtrips_legacy_blocks(tmp_path: Path) -> None:
-    (tmp_path / "identity.md").write_text(
-        """# 凤笑梦 (Emu Otori)
-
-元气少女。
-
-## 基础身份
-
-| 项目 | 内容 |
-| --- | --- |
-| 所属团体 | WxS |
-
-## 像与不像
-
-- 明亮
-- 主动
-
-## 家庭关系
-
-- **祖父**：梦想根源、价值观来源。
-- `姐姐`：日常关系亲近。
-
-## 插话方式
-
-被叫名字时必须回复。
-""",
-        encoding="utf-8",
-    )
-    (tmp_path / "instruction.md").write_text(
-        """## 回复风格
-
-1. 先观察
-2. 再回应
-
-## 工具使用
-
-### 调用前检查
-
-> 这是一段保留格式的自由文本。
-
-#### **更深小标题**
-
-这段应当被识别为同级可编辑小标题，且去掉 `Markdown` 标记。
-""",
-        encoding="utf-8",
-    )
-
-    app = FastAPI()
-    app.include_router(create_soul_router(soul_dir=str(tmp_path)), prefix="/api/admin")
-    client = TestClient(app)
-
-    resp = client.get("/api/admin/soul")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["format_mode"] == "legacy"
-    assert data["editor"]["meta"]["name"] == "凤笑梦 (Emu Otori)"
-    assert data["editor"]["meta"]["display_title"] == "凤笑梦 (Emu Otori)"
-    assert data["editor"]["meta"]["description"] == "元气少女。"
-    assert [section["title"] for section in data["editor"]["persona_sections"]] == ["基础身份", "像与不像", "家庭关系"]
-    assert [section["title"] for section in data["editor"]["instruction_sections"]] == ["回复风格", "工具使用"]
-
-    persona_blocks = data["editor"]["persona_sections"][0]["blocks"]
-    assert persona_blocks[0]["type"] == "kv_table"
-    assert persona_blocks[0]["rows"][0] == {"key": "所属团体", "value": "WxS"}
-    family_blocks = data["editor"]["persona_sections"][2]["blocks"]
-    assert family_blocks[0]["items"] == ["祖父：梦想根源、价值观来源。", "姐姐：日常关系亲近。"]
-
-    style_blocks = data["editor"]["instruction_sections"][0]["blocks"]
-    assert style_blocks[0]["type"] == "numbered_list"
-    assert style_blocks[0]["items"] == ["先观察", "再回应"]
-
-    tool_blocks = data["editor"]["instruction_sections"][1]["blocks"]
-    assert tool_blocks[0]["heading"] == "调用前检查"
-    assert tool_blocks[0]["type"] == "free_text"
-    assert tool_blocks[1]["heading"] == "更深小标题"
-    assert tool_blocks[1]["type"] == "paragraph"
-    assert tool_blocks[1]["text"] == "这段应当被识别为同级可编辑小标题，且去掉 Markdown 标记。"
-    assert data["editor"]["proactive"]["enabled"] is True
-
-    saved = client.post("/api/admin/soul/save", json={"editor": data["editor"]})
-    assert saved.status_code == 200
-    assert saved.json()["ok"] is True
-
-    roundtrip = client.get("/api/admin/soul")
-    assert roundtrip.status_code == 200
-    roundtrip_data = roundtrip.json()
-    assert [section["title"] for section in roundtrip_data["editor"]["instruction_sections"]] == [
-        "回复风格",
-        "工具使用",
-    ]
-    assert roundtrip_data["editor"]["proactive"]["text"] == "被叫名字时必须回复。"
-
-
-def test_soul_endpoint_ignores_skill_md_as_runtime_source(tmp_path: Path) -> None:
-    skill_path = tmp_path / "SKILL.md"
-    skill_text = """---
-name: 技能角色
----
-
-# 技能角色
-
-## 技能章节
-
-不应被 Soul API 当作运行时来源。
-"""
-    skill_path.write_text(
-        skill_text,
-        encoding="utf-8",
-    )
-    (tmp_path / "identity.md").write_text("# 双文件角色\n\n## 基础身份\n\n普通正文。\n", encoding="utf-8")
-    (tmp_path / "instruction.md").write_text("## 回复风格\n\n- 简洁\n", encoding="utf-8")
-
-    app = FastAPI()
-    app.include_router(create_soul_router(soul_dir=str(tmp_path)), prefix="/api/admin")
-    client = TestClient(app)
-
-    resp = client.get("/api/admin/soul")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["format_mode"] == "legacy"
-    assert data["editor"]["meta"]["name"] == "双文件角色"
-    assert data["editor"]["persona_sections"][0]["title"] == "基础身份"
-
-    saved = client.post("/api/admin/soul/save", json={"editor": data["editor"]})
-    assert saved.status_code == 200
-    save_data = saved.json()
-    assert save_data["ok"] is True
-    assert "SKILL.md" not in save_data["message"]
-    assert skill_path.read_text(encoding="utf-8") == skill_text
-
-
-def test_soul_endpoint_serves_persona_generation_guide(tmp_path: Path) -> None:
-    app = FastAPI()
-    app.include_router(create_soul_router(soul_dir=str(tmp_path)), prefix="/api/admin")
-    client = TestClient(app)
-
-    resp = client.get("/api/admin/soul/persona-guide")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "AI 自主生成" in data["title"]
-    assert "identity.md" in data["markdown"]
-    assert "instruction.md" in data["markdown"]
-
-
-def test_soul_endpoint_reports_reload_warning_without_losing_save(tmp_path: Path) -> None:
-    (tmp_path / "identity.md").write_text("# 测试\n\n内容。\n", encoding="utf-8")
-    (tmp_path / "instruction.md").write_text("## 回复风格\n\n- 简洁\n", encoding="utf-8")
+def _build_persona_importer_app(persona_runtime) -> TestClient:
+    from admin.routes.api.persona_importer import create_persona_importer_router
 
     app = FastAPI()
     app.include_router(
-        create_soul_router(soul_dir=str(tmp_path), persona_runtime=_DummyIdentityMgr(should_fail=True)),
+        create_persona_importer_router(persona_runtime=persona_runtime),
         prefix="/api/admin",
     )
-    client = TestClient(app)
+    return TestClient(app)
 
-    editor = client.get("/api/admin/soul").json()["editor"]
-    saved = client.post("/api/admin/soul/save", json={"editor": editor})
-    assert saved.status_code == 200
-    data = saved.json()
+
+def test_persona_hot_reload_swaps_bundle_when_confirmed() -> None:
+    runtime = _DummyPersonaRuntime(persona_id="default")
+    client = _build_persona_importer_app(runtime)
+
+    resp = client.post(
+        "/api/admin/persona/hot-reload/fengxiaomeng",
+        json={"confirm": True},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
     assert data["ok"] is True
-    assert data["reload_ok"] is False
-    assert "运行时同步失败" in data["message"]
-    assert not (tmp_path / "SKILL.md").exists()
-    assert (tmp_path / "identity.md").is_file()
-    assert (tmp_path / "instruction.md").is_file()
+    assert data["persona_id"] == "fengxiaomeng-v2"
+    assert data["loaded_persona_id"] == "fengxiaomeng-v2"
+    assert runtime.loaded_paths == ["fengxiaomeng-v2"]
+
+
+def test_persona_hot_reload_requires_confirm_flag() -> None:
+    runtime = _DummyPersonaRuntime(persona_id="default")
+    client = _build_persona_importer_app(runtime)
+
+    resp = client.post(
+        "/api/admin/persona/hot-reload/fengxiaomeng",
+        json={"confirm": False},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is False
+    assert "confirm=true" in data["error"]
+    assert runtime.loaded_paths == []
+
+
+def test_persona_hot_reload_reports_runtime_failure() -> None:
+    runtime = _DummyPersonaRuntime(should_fail=True, persona_id="default")
+    client = _build_persona_importer_app(runtime)
+
+    resp = client.post(
+        "/api/admin/persona/hot-reload/fengxiaomeng",
+        json={"confirm": True},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is False
+    assert "reload failed" in data["error"]
+
+
+def test_persona_hot_reload_rejects_invalid_persona_id() -> None:
+    runtime = _DummyPersonaRuntime()
+    client = _build_persona_importer_app(runtime)
+
+    resp = client.post(
+        "/api/admin/persona/hot-reload/%20",
+        json={"confirm": True},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is False
+    assert "persona_id" in data["error"]
+    assert runtime.loaded_paths == []
+
+

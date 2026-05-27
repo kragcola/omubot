@@ -28,9 +28,9 @@ def backup_env(tmp_path: Path):
     storage.mkdir()
     config = tmp_path / "config"
     config.mkdir()
-    config_soul = config / "soul"
-    config_soul.mkdir()
-    (config_soul / "identity.md").write_text("test persona")
+    config_persona = config / "persona" / "fengxiaomeng-v2"
+    config_persona.mkdir(parents=True)
+    (config_persona / "source.md").write_text("test persona")
     (config / "config.json").write_text(json.dumps({"test": True}))
 
     # Create all 8 required SQLite DBs
@@ -312,7 +312,7 @@ def test_scheduler_month_end_no_crash():
 
 def test_directory_backup_ok(backup_env):
     repo_root, storage = backup_env
-    src = repo_root / "config" / "soul"
+    src = repo_root / "config" / "persona"
     dst = storage / "test_dir_backup"
     result = _backup_directory(src, dst)
     assert result["status"] == "ok"

@@ -223,17 +223,6 @@ class LogConfig(BaseModel):
 
 
 # ============================================================================
-# 人设配置
-# ============================================================================
-
-
-class SoulConfig(BaseModel):
-    """人设与指令配置目录。"""
-
-    dir: str = "config/soul"
-
-
-# ============================================================================
 # 群聊配置
 # ============================================================================
 
@@ -1599,7 +1588,6 @@ class BotConfig(BaseModel):
     llm: LLMConfig = LLMConfig()
     log: LogConfig = LogConfig()
     compact: CompactConfig = CompactConfig()
-    soul: SoulConfig = SoulConfig()
     memory: MemoryConfig = MemoryConfig()
     group: GroupConfig = GroupConfig()
     napcat: NapcatConfig = NapcatConfig()

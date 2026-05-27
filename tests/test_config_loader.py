@@ -41,7 +41,6 @@ def test_load_defaults_without_file(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert cfg.compact.ratio == 0.7
     assert cfg.compact.compress_ratio == 0.5
     assert cfg.log.dir == "storage/logs"
-    assert cfg.soul.dir == "config/soul"
     assert cfg.group.history_load_count == 30
     assert cfg.group.debounce_seconds == 5.0
     assert cfg.group.batch_size == 10
@@ -78,9 +77,6 @@ max_context_tokens = 100_000
 ratio = 0.5
 compress_ratio = 0.3
 
-[soul]
-dir = "custom_soul"
-
 [group]
 history_load_count = 50
 debounce_seconds = 3.0
@@ -100,7 +96,6 @@ api_url = "http://napcat:29300"
     assert cfg.llm.context.max_context_tokens == 100_000
     assert cfg.compact.ratio == 0.5
     assert cfg.compact.compress_ratio == 0.3
-    assert cfg.soul.dir == "custom_soul"
     assert cfg.group.history_load_count == 50
     assert cfg.group.debounce_seconds == 3.0
     assert cfg.group.batch_size == 5

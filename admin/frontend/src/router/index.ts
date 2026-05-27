@@ -25,20 +25,18 @@ const router = createRouter({
     {
       path: '/soul',
       name: 'soul',
-      meta: { title: '人设编辑', keepAlive: true },
-      component: () => import('../views/soul/SoulView.vue'),
+      redirect: () => ({ path: '/persona-importer' }),
     },
     {
       path: '/persona-importer',
       name: 'persona-importer',
-      meta: { title: '人设导入', keepAlive: true },
+      meta: { title: '人设管理', keepAlive: true },
       component: () => import('../views/persona/PersonaImporterView.vue'),
     },
     {
       path: '/soul/persona-guide',
       name: 'soul-persona-guide',
-      meta: { title: 'AI 人设规则' },
-      component: () => import('../views/soul/SoulPersonaGuideView.vue'),
+      redirect: () => ({ path: '/persona-importer' }),
     },
     {
       path: '/schedule',
