@@ -229,6 +229,9 @@ class PluginContext:
     # Persona v2 — runtime selector (B3; flag-gated; per-turn read)
     runtime_selector: Any = None
 
+    # Persona v2 — runtime singleton (C1; owns prompt/identity for v2 cutover)
+    persona_runtime: Any = None
+
 
 @dataclass
 class TriggerContext:

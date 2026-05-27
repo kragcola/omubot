@@ -661,6 +661,9 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         ctx.llm_client._bot_self_id = bot.self_id
         ctx.state_board.bot_self_id = bot.self_id
         ctx.prompt_builder.build_static(ctx.identity_mgr.resolve(), bot_self_id=bot.self_id)
+        # C1 — bind bot_self_id into PersonaRuntime (additive; no v1 path change yet)
+        if getattr(ctx, "persona_runtime", None) is not None:
+            ctx.persona_runtime.bind_bot_self_id(str(bot.self_id))
         ctx.scheduler.set_bot(bot)
 
         # B2 shadow compare — flag-gated; defaults off so this is a no-op.

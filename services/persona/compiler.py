@@ -219,6 +219,7 @@ def _adapter_text(adapter: dict[str, Any]) -> str:
         f"bot self id hint：{bot_identity.get('self_id_hint', '')}",
         "known self ids：" + "；".join(str(item) for item in known_ids),
         f"runtime source：{bot_identity.get('runtime_source', '')}",
+        "你的QQ号：{bot_self_id}（adapter connect 时由 driver 注入）",
     ]
     if policy.get("assistant_role_only"):
         lines.append("只有 assistant role 的消息才是 bot 自己说的话")

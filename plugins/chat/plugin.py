@@ -809,6 +809,32 @@ class ChatPlugin(AmadeusPlugin):
         ctx.identity_mgr = identity_mgr
         ctx.identity = identity_mgr.resolve()
 
+        # ---- persona v2 runtime singleton (C1 — additive; v2 cutover) ----
+        from services.persona import PersonaRuntime
+
+        persona_v2_cfg = getattr(config, "persona_v2", None)
+        persona_runtime = PersonaRuntime(
+            group_config_resolver=(
+                config.group.resolve if hasattr(config, "group") else None
+            ),
+        )
+        if persona_v2_cfg is not None:
+            persona_id = getattr(persona_v2_cfg, "persona_id", "default")
+            try:
+                if not persona_runtime.load(persona_id):
+                    logger.bind(channel="persona_runtime").warning(
+                        "PersonaRuntime startup load failed | persona_id={} reason={}",
+                        persona_id,
+                        persona_runtime.last_error,
+                    )
+            except Exception as exc:
+                logger.bind(channel="persona_runtime").warning(
+                    "PersonaRuntime startup raised | persona_id={} err={}",
+                    persona_id,
+                    exc,
+                )
+        ctx.persona_runtime = persona_runtime
+
         # ---- schedule system ----
         from plugins.schedule.plugin import ScheduleConfig
 

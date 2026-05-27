@@ -27,37 +27,14 @@ from dataclasses import dataclass
 
 from kernel.config import PersonaV2Config
 
-from .runtime import PersonaRuntimeBundle
+from .runtime import PersonaRuntimeBundle, join_static_blocks
 
-_STATIC_BLOCK_ORDER: tuple[str, ...] = (
-    "core.identity",
-    "runtime.adapter",
-    "core.guard",
-    "core.voice",
-    "core.knowledge",
-    "core.examples",
-)
-
-
-def join_static_blocks(bundle: PersonaRuntimeBundle) -> str:
-    """Join the bundle's ``position == "static"`` prompt blocks into one text.
-
-    The order is fixed by :data:`_STATIC_BLOCK_ORDER` so v1↔v2 byte
-    comparison (used by B2 shadow compare) and v2 runtime substitution share
-    the exact same projection. Empty blocks and unknown module ids are
-    silently dropped.
-    """
-    by_id = {
-        block.module_id: block
-        for block in bundle.compile_result.prompt_blocks
-        if block.position == "static"
-    }
-    parts: list[str] = []
-    for module_id in _STATIC_BLOCK_ORDER:
-        block = by_id.get(module_id)
-        if block is not None and block.text:
-            parts.append(block.text)
-    return "\n\n".join(parts)
+__all__ = [
+    "PersonaRuntimeSelector",
+    "RuntimeSelection",
+    "RuntimeSelectorCounter",
+    "join_static_blocks",
+]
 
 
 @dataclass(frozen=True)
