@@ -36,6 +36,13 @@ def _result(text: str) -> dict[str, Any]:
     }
 
 
+def _normalize_reply(text: str | None) -> str:
+    """Strip whitespace, commas, and trailing periods that natural_split may mutate."""
+    if text is None:
+        return ""
+    return text.replace("\n", "").replace(" ", "").replace("，", "").rstrip("。")
+
+
 async def _client(
     short_term: ShortTermMemory,
     *,
@@ -80,7 +87,7 @@ async def test_humanization_rewrite_default_off_does_not_score_or_call_twice() -
     finally:
         await client.close()
 
-    assert reply == "作为一个AI，我会尽力解释——以下是答案。"
+    assert _normalize_reply(reply) == _normalize_reply("作为一个AI，我会尽力解释——以下是答案。")
     assert mock_api.await_count == 1
     assert all("humanization.last_metrics" not in key for key in runtime_state.snapshot_all_for_trace())
 
@@ -113,9 +120,11 @@ async def test_humanization_rewrite_skips_non_gray_group() -> None:
     finally:
         await client.close()
 
-    assert reply == "作为一个AI，我会尽力解释——以下是答案。"
+    assert _normalize_reply(reply) == _normalize_reply("作为一个AI，我会尽力解释——以下是答案。")
     assert mock_api.await_count == 1
-    assert timeline.get_turns("100")[-1]["content"] == "作为一个AI，我会尽力解释——以下是答案。"
+    assert _normalize_reply(timeline.get_turns("100")[-1]["content"]) == _normalize_reply(
+        "作为一个AI，我会尽力解释——以下是答案。",
+    )
     assert all("humanization.last_metrics" not in key for key in runtime_state.snapshot_all_for_trace())
 
 
@@ -154,9 +163,11 @@ async def test_humanization_rewrite_low_score_runs_one_extra_round_and_persists_
         await client.close()
         await trace_store.close()
 
-    assert reply == "我先按这个方向接一下。"
+    assert _normalize_reply(reply) == _normalize_reply("我先按这个方向接一下。")
     assert mock_api.await_count == 2
-    assert short_term.get("private_100")[-1]["content"] == "我先按这个方向接一下。"
+    last_content = short_term.get("private_100")[-1]["content"]
+    assert isinstance(last_content, str)
+    assert _normalize_reply(last_content) == _normalize_reply("我先按这个方向接一下。")
 
     trace = runtime_state.snapshot_all_for_trace()
     metric_items = [item for item in trace.values() if item["slot_id"] == LAST_METRICS_SLOT]

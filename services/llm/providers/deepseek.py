@@ -217,6 +217,26 @@ class DeepSeekProvider(LLMProvider):
             "reasoning_tokens": reasoning_tokens,
         }
 
+    def extract_text_delta(self, raw_line: str) -> str:
+        line = raw_line.strip()
+        if not line.startswith("data: "):
+            return ""
+        payload = line[6:]
+        if payload == "[DONE]":
+            return ""
+        try:
+            data: dict[str, Any] = json.loads(payload)
+        except json.JSONDecodeError:
+            return ""
+        choices: list[dict[str, Any]] = data.get("choices", [])
+        if not choices:
+            return ""
+        delta = choices[0].get("delta", {})
+        if not isinstance(delta, dict):
+            return ""
+        content = delta.get("content")
+        return str(content) if content else ""
+
 
 def _to_deepseek_tools(anthropic_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ds_tools: list[dict[str, Any]] = []

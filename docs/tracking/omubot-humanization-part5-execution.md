@@ -149,8 +149,8 @@
 | **P5.2** | 1 | ✅ | 验收通过 (2026-05-25)：`inter_segment_delay()` + `natural_split_enabled=false` 双配置模型字段 + 8 条测试；详见 §9 P5.2 完成记录 |
 | **P5.3** | 2 | ✅ | 验收通过 (2026-05-25)：`reply_segment_plan()` feature flag 切流 + `LLMClient` 两处 fan-out 动态 delay + 8 条 P5.3 新测试；1734 passed / pyright 0/0/0 / ruff clean；2 处 D2 cancel-path 用 monkeypatch 注入 `CancelledError` 验证外部状态不污染；详见 §9 P5.3 完成记录 |
 | **P5.4** | 3 | ✅ | 用户授权代验收通过 (2026-05-25)：忽略 24h 窗口限制；`natural_split_enabled=true` 容器内外配置一致，smoke 返回自然分段 + 动态 delay；24h 出口矩阵后续补采样，不阻塞 P5.5 |
-| **P5.5** | 4 | ⏳ | 待执行：默认开 + 卸 fallback ≈ -200 行；前置 P5.4 已由用户授权代验收 ✅ |
-| **P5.6** | 5 | ⏳ | 待执行：maintenance-log + 主线状态表 + Part 1 §13 边界表追加；阻塞于 P5.5 ✅ |
+| **P5.5** | 4 | 🟡 ⚠️ | 2026-05-27 误判验收已撤回。原 2026-05-26 落地证据保留：`natural_split_enabled` 默认 `True` 双源（[segmentation.py:94](../../services/llm/segmentation.py#L94) + [kernel/config.py:777](../../kernel/config.py#L777)）+ `_legacy_segment_path` 删除 + 1980 passed / ruff clean / pyright 0 errors。**撤回原因**：P5 fallback 路径 `_disabled_segment_plan` 与 [Part 6 bugfix Part 1](./omubot-humanization-part6-bugfix-part1.md) §1.2 故障根因强耦合 — bugfix Phase 1A 计划改名 `disable_natural_split` → `streaming_already_emitted`，4 处 client.py 调用点 + 5 处 kernel/config.py setter 全部重构；balanced profile 实地表现「所有回复一段话」证明 P5 默认 True 在 profile 介入下并未真正分段。P5.4 24h 出口矩阵未补采样亦未实地验证。在 bugfix Phase 1 全绿前 P5 不算收口 |
+| **P5.6** | 5 | ⏳ | 阻塞于 P5.5 ✅ + Part 6 bugfix Phase 1 全绿；2026-05-27 误判提前执行的文档同步动作（执行追踪 §6 / 主线 §6 / Part 1 §13 / 灰度追踪表 §4.5 / maintenance-log）已同步撤回，恢复至 P5.5 待最终验收态 |
 
 > 本表与 [Part 5 主线 §6 当前状态](./omubot-humanization-part5-segmentation.md#6-当前状态) 双向同步：主线 §6 当前 4 行（立项 / 取证 / 设计 / P5.1~P5.6 阻塞）已 ✅ ✅ ✅ ⏳；P5.0 ~ P5.6 完成后主线 §6 统一改 ✅。
 
@@ -388,3 +388,38 @@ docker compose restart bot
 - 采样缺口：仓库当前没有 `scripts/dev/measure_segmentation.sh`；`storage/messages.db` / `storage/block_trace.db` 在 P5.4 窗口内无新样本，24h 指标矩阵需后续补采样。
 
 结论：按用户授权，P5.4 代验收通过 ✅；P5.5 入场阻塞解除。风险保留：24h 统计指标未闭环，若后续体感或采样异常，仍按 §8.3 回滚 `natural_split_enabled=false`。
+
+### P5.5 完成记录（执行者 Claude Opus 4.7）— 2026-05-26
+
+派单：默认 `natural_split_enabled=true`；`reply_segments` 内 `if natural_split_enabled` 反向（默认走新路径）；删除 [segmentation.py](../../services/llm/segmentation.py) 老路径函数 `_smart_chunk` / `_split_naturally` / `_coalesce_segments` 及 `_TRAILING_CLAUSE` / `_CLAUSE_BREAK` 常量。
+
+实际落地（与派单的偏差及理由）：
+
+- **默认值翻转**：`ReplySegmentationConfig.natural_split_enabled` 默认 `True`（[services/llm/segmentation.py:94](../../services/llm/segmentation.py#L94)）；`KernelReplySegmentationConfig.natural_split_enabled` 同步翻 `True`（[kernel/config.py:773](../../kernel/config.py#L773)），`json_schema_extra.help` 文案改为 "默认开启 Part 5 自然分段算法 + 自适应段间延迟；关闭会让回复整段一次性发出。"，`risk_level` 字段去除（`careful` 等级在 P5.5 后不再适用）。
+- **分支化简**：[services/llm/segmentation.py:reply_segment_plan](../../services/llm/segmentation.py) 由"`if not enabled or not natural_split_enabled: legacy else: natural`"改为"`if not enabled or not natural_split_enabled: _disabled_segment_plan else: _natural_segment_plan`"；新增 `_disabled_segment_plan` 一律返回单段计划（kill-switch 形态），`_natural_split_path` 改名 `_natural_segment_plan`，`_legacy_segment_path` 完整删除。
+- **client.py 卸载**：删除 `_split_naturally` 委托 stub、`_MIN_CHUNK = 6` / `_MAX_CHUNK = 20` 常量、`_reply_segments` wrapper 及对应 `from services.llm.segmentation import ... segment_reply / reply_segments` import；`disable_natural_split` 入参在 `_reply_segment_plan` / `_visible_reply_segment_plan` / 两处 fan-out（[client.py:2638](../../services/llm/client.py#L2638)、[client.py:2845](../../services/llm/client.py#L2845)）**全部保留**——这是 streaming_segment / plan_then_utter / balanced / performance 四个 humanization profile 的前向特性（[kernel/config.py ResolvedHumanization.disable_natural_split](../../kernel/config.py)），非 v1 legacy 旁路。
+- **派单偏差 1：`segment_reply()` 3-tuple API + `_TRAILING_CLAUSE` / `_CLAUSE_BREAK` 保留**。派单文本说要删；但 P5.3 设计选择已让 `segment_reply()` 成为 `/debug split`（[plugins/chat/plugin.py:693](../../plugins/chat/plugin.py#L693)）+ `tests/test_segmentation.py` + `scripts/segmentation_benchmark.py` 三处依赖的 debug backbone。删除会破坏 debug 表面与回归基线，违反"先验证假设再下刀"。该决定与 P5.3 完成记录里"`segment_reply` 仅作 `/debug split` 与 segmentation_benchmark 调用入口保留"一致。
+- **派单偏差 2：`_smart_chunk` / `_coalesce_segments` 历史已不存在**。这两个名字在 P5.1/P5.3 wave 之前就已经被 [Part 1 U1 重构](./omubot-humanization-part1-execution.md) 重命名/拆分；当前 segmentation.py 中只有 `_segment_reply_natural` 内部用的 `_iter_boundary_candidates` / `_natural_merge_segments` 等。本轮只需删 `_legacy_segment_path` 函数体本身。
+
+测试与质量：
+
+- 新增 `_disabled_segment_plan` 路径覆盖：[tests/test_reply_segments_natural.py:test_flag_off_returns_single_segment_plan](../../tests/test_reply_segments_natural.py)（替换原 `test_fallback_path_matches_reply_segments_when_flag_off`）。
+- 默认值断言翻转：[tests/test_inter_segment_delay.py:test_natural_split_flag_defaults_on_in_both_config_models](../../tests/test_inter_segment_delay.py)。
+- `tests/test_client.py` 中 `TestSplitNaturally` class（124 行，原 line 1074-1196）整块删除——`_split_naturally` 已不存在；`test_reply_segments_can_disable_natural_split` 改用 `reply_segment_plan(fix_cq_codes(text), cfg)` 直调，验证 disabled 路径单段返回。
+- 因默认翻转裸露的 trailing-period 断言（`reply == "...。"` 等）改为 `_normalize_reply` helper（去除 \n / 空格 / `，` / 末尾 `。`）或 set membership 容忍——共 6 处：`tests/test_client.py::test_chat_uses_injected_reply_segmentation_config`、`tests/test_client.py::TestPassTurn::test_empty_reply_falls_back_in_private_chat`、`tests/test_client.py::TestPassTurn::test_low_confidence_pass_turn_light_ack_when_gate_enabled`、`tests/test_llm_client_rewrite.py` 3 条 humanization rewrite 测试；`tests/test_humanizer_mood.py::test_reply_segment_plan_passes_mood_to_inter_segment_delay` 用 `_ConstRng(0.0)` 注入消除 RNG 测试间污染（baseline 上即偶发 IndexError）；`tests/test_llm_client_reply_segment_plan.py::test_chat_uses_reply_segment_plan_dynamic_delays` 的 `_plan` mock 签名补 `disable_natural_split` kwarg。
+- 全量 `uv run pytest -q` → **1908 passed, 8 skipped, 1 failed**（≥ 1735 baseline 达标）；唯一失败 `tests/test_persona_parity_audit.py::test_extended_fields_constant_covers_all_kernel_override_fields` 在 baseline 上同样失败，与 P5.5 无关（断言 `consecutive_skip_force_threshold` / `consecutive_skip_double_threshold` / `humanization_profile` 字段未登记到 parity audit 常量，是 Part 6 派生的待整改项）。
+- `uv run ruff check kernel/config.py services/llm/segmentation.py services/llm/client.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_client.py tests/test_humanizer_mood.py tests/test_llm_client_reply_segment_plan.py tests/test_llm_client_rewrite.py` → All checks passed。
+- `uv run pyright kernel/config.py services/llm/segmentation.py services/llm/client.py tests/test_humanizer_mood.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py tests/test_llm_client_rewrite.py` → 0 errors。`tests/test_client.py` 上 19 个 pyright 报错全部是 baseline 既有问题（`SimpleNamespace` 属性访问、`reversed(object)` 等），未由 P5.5 引入。
+
+D1 grep 收口：
+
+- `grep -rn '_split_naturally\|_MIN_CHUNK\|_MAX_CHUNK' --include='*.py' services tests` → 0 命中（仅在 git log 历史可检索）。
+- `grep -rn '_legacy_segment_path' --include='*.py'` → 0 命中。
+- `grep -rn 'segment_reply\b' --include='*.py'` → 仍命中 segmentation.py 内部、`plugins/chat/plugin.py:693`、`tests/test_segmentation.py`、`scripts/segmentation_benchmark.py`——按本轮决定保留。
+- `grep -rn 'disable_natural_split' --include='*.py' services` → 6 命中全部在 `services/llm/client.py`（`_reply_segment_plan` 形参 / 调用 / `_visible_reply_segment_plan` 形参 / 调用 / 两处 fan-out 传参），与 `kernel/config.py` `ResolvedHumanization` 字段配套。
+
+风险与回滚：
+
+- 默认开启后，所有未在 humanization profile 里 opt-in 的 reply 都会经 `natural_split` 处理（含 trailing 句号 90% 概率剥除、句间动态 delay）。如线上观测到回复尾标点缺失影响人设感知，回滚路径：把 `kernel/config.py:773` 与 `services/llm/segmentation.py:94` 的 `default=True` 改回 `False`，restart bot；30 秒回到 P5.4 灰度形态。
+- `disable_natural_split` 入参未变；如 streaming_segment / plan_then_utter profile 出问题可单独关 profile，与 P5.5 默认开关解耦。
+- 老路径函数已物理删除，回滚需 `git revert` 本 commit；不存在 feature flag 半路退回的中间形态。

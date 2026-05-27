@@ -16,6 +16,22 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
+    def register_interaction_tools(
+        self,
+        *,
+        resolved_humanization: Any | None = None,
+        profile: str | None = None,
+        passive: bool = False,
+    ) -> None:
+        from services.tools.interaction_tools import build_interaction_tools
+
+        for tool in build_interaction_tools(
+            resolved_humanization=resolved_humanization,
+            profile=profile,
+            passive=passive,
+        ):
+            self.register(tool)
+
     def clear(self) -> None:
         self._tools.clear()
 

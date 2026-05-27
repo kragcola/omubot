@@ -119,6 +119,8 @@ export type ProviderTaskKey =
   | 'graph_edge_classifier'
   | 'reflection_consolidator'
   | 'episode_summarizer'
+  | 'scheduler_eot'
+  | 'scheduler_replay_judge'
 
 export interface ProviderTaskProfile {
   task: ProviderTaskKey | string

@@ -50,6 +50,6 @@ def test_unknown_register_matches_neutral() -> None:
     )
 
 
-def test_natural_split_flag_defaults_off_in_both_config_models() -> None:
-    assert ReplySegmentationConfig().natural_split_enabled is False
-    assert KernelReplySegmentationConfig().natural_split_enabled is False
+def test_natural_split_flag_defaults_on_in_both_config_models() -> None:
+    assert ReplySegmentationConfig().natural_split_enabled is True
+    assert KernelReplySegmentationConfig().natural_split_enabled is True

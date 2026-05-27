@@ -11,7 +11,6 @@ from services.llm.segmentation import (
     inter_segment_delay,
     natural_split,
     reply_segment_plan,
-    reply_segments,
 )
 
 
@@ -30,22 +29,16 @@ def _rng(value: float) -> SequenceRng:
     return SequenceRng(*repeat(value, 200), fallback=value)
 
 
-def test_fallback_path_matches_reply_segments_when_flag_off() -> None:
+def test_flag_off_returns_single_segment_plan() -> None:
     text = "第一句很长很长。第二句很长很长。第三句很长很长。"
-    cfg = ReplySegmentationConfig(
-        natural_split_enabled=False,
-        max_segment_chars=6,
-        max_send_segments=2,
-        inter_segment_delay_s=0.0,
-    )
+    cfg = ReplySegmentationConfig(natural_split_enabled=False)
 
-    segments, raw_count, limit_status = reply_segments(text, cfg)
     plan = reply_segment_plan(text, cfg)
 
-    assert plan.segments == segments
-    assert plan.raw_count == raw_count
-    assert plan.limit_status == limit_status
-    assert plan.inter_segment_delays == [0.0] * max(0, len(segments) - 1)
+    assert plan.segments == [text]
+    assert plan.raw_count == 1
+    assert plan.limit_status == "none"
+    assert plan.inter_segment_delays == []
 
 
 def test_disabled_config_overrides_natural_flag() -> None:

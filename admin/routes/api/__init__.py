@@ -53,6 +53,7 @@ def create_api_router(
     from admin.routes.api.affection import create_affection_router
     from admin.routes.api.auth import create_auth_router
     from admin.routes.api.backup import create_backup_router
+    from admin.routes.api.bandit import create_bandit_router
     from admin.routes.api.block_trace import create_block_trace_router
     from admin.routes.api.config import create_config_router
     from admin.routes.api.context import create_context_router
@@ -76,6 +77,7 @@ def create_api_router(
     from admin.routes.api.plugins import create_plugins_router
     from admin.routes.api.protocol import create_protocol_router
     from admin.routes.api.providers import create_providers_router
+    from admin.routes.api.replay import create_replay_router
     from admin.routes.api.sandbox import create_sandbox_router
     from admin.routes.api.schedule import create_schedule_router
     from admin.routes.api.scheduler import create_scheduler_router
@@ -87,6 +89,7 @@ def create_api_router(
     from admin.routes.api.usage import create_usage_router
 
     router.include_router(create_auth_router())
+    router.include_router(create_bandit_router(scheduler=scheduler, ctx=ctx))
     router.include_router(create_dashboard_router(
         usage_tracker=usage_tracker, bot_start_time=bot_start_time,
         mood_engine=mood_engine, schedule_store=schedule_store, ctx=ctx,
@@ -135,6 +138,7 @@ def create_api_router(
     ))
     router.include_router(create_protocol_router(config=config, ctx=ctx, bot=bot))
     router.include_router(create_scheduler_router(scheduler=scheduler, ctx=ctx))
+    router.include_router(create_replay_router(ctx=ctx))
     router.include_router(create_system_router(
         config=config,
         short_term_memory=short_term_memory, humanizer=humanizer,

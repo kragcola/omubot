@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -34,6 +35,15 @@ ContentBlock = TextBlock | ImageRefBlock
 
 Content = str | list[ContentBlock]
 """消息内容：纯文本（向后兼容）或多模态块列表。"""
+
+
+class ResponseClass(StrEnum):
+    """Scheduler response class for explicit reply-shape decisions."""
+
+    SILENCE = "silence"
+    LIGHT_ACK = "light_ack"
+    FULL_REPLY = "full_reply"
+    STICKER_ONLY = "sticker_only"
 
 
 # ============================================================================

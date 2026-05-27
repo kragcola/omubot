@@ -42,6 +42,8 @@ GROUP_PROFILE_EXTENDED_FIELDS: tuple[str, ...] = (
     "at_only",
     "talk_value",
     "planner_smooth",
+    "consecutive_skip_force_threshold",
+    "consecutive_skip_double_threshold",
     "debounce_seconds",
     "batch_size",
     "history_load_count",
@@ -50,6 +52,8 @@ GROUP_PROFILE_EXTENDED_FIELDS: tuple[str, ...] = (
     "blocked_tools",
     "sticker_mode",
     "slang_enabled",
+    "humanization_profile",
+    "qq_interactions_profile_override",
     "blocked_users",
 )
 
@@ -172,12 +176,50 @@ def _first_line(text: str) -> str:
     return ""
 
 
+def _meaningful_anchors(
+    text: str,
+    *,
+    max_count: int = 5,
+    min_chars: int = 6,
+) -> tuple[str, ...]:
+    """Pick up to ``max_count`` non-trivial substring anchors from ``text``.
+
+    Skips entire markdown header lines (``# … `` / ``## … `` ...), bullet
+    markers (``- `` / ``* `` / ``1. ``) keep the body, and lines shorter than
+    ``min_chars`` after stripping. Returns the cleaned bodies in document
+    order.
+    """
+
+    anchors: list[str] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Markdown headers carry section labels rather than content; skip the
+        # whole line so v2 prompt blocks (which are yaml-rendered, header-free)
+        # don't get a false-positive divergence on the section title.
+        if stripped.startswith("#"):
+            continue
+        for prefix in ("- ", "* ", "+ "):
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix):].strip()
+                break
+        if len(stripped) > 2 and stripped[0].isdigit() and stripped[1:3] in (". ", "、"):
+            stripped = stripped.split(maxsplit=1)[-1].strip()
+        if len(stripped) < min_chars:
+            continue
+        anchors.append(stripped)
+        if len(anchors) >= max_count:
+            break
+    return tuple(anchors)
+
+
 def _evaluate_identity(
     identity: Identity,
     block: CompilePromptBlock | None,
 ) -> ParityFinding:
-    v1_anchor = _first_line(identity.personality)
-    if not v1_anchor:
+    anchors = _meaningful_anchors(identity.personality)
+    if not anchors:
         return ParityFinding(
             "identity_personality",
             "not_applicable",
@@ -185,27 +227,30 @@ def _evaluate_identity(
             v2_signal=block.text if block else "",
             notes="v1 identity.personality 为空",
         )
+    primary = anchors[0]
     if block is None or not block.text.strip():
         return ParityFinding(
             "identity_personality",
             "v1_only",
-            v1_signal=v1_anchor,
+            v1_signal=primary,
             v2_signal="",
             notes="v2 缺少 core.identity prompt block",
         )
-    if v1_anchor in block.text:
+    text = block.text
+    matched = next((a for a in anchors if a in text), "")
+    if matched:
         return ParityFinding(
             "identity_personality",
             "aligned",
-            v1_signal=v1_anchor,
+            v1_signal=matched,
             v2_signal="core.identity 含 personality 锚点",
         )
     return ParityFinding(
         "identity_personality",
         "divergent",
-        v1_signal=v1_anchor,
-        v2_signal=_first_line(block.text),
-        notes="v2 core.identity 没有出现 v1 personality 首行锚点",
+        v1_signal=primary,
+        v2_signal=_first_line(text),
+        notes="v2 core.identity 未覆盖 v1 personality 任一前 5 行锚点",
     )
 
 
@@ -257,8 +302,8 @@ def _evaluate_instruction(
     instruction_text: str,
     block: CompilePromptBlock | None,
 ) -> ParityFinding:
-    anchor = _first_line(instruction_text)
-    if not anchor:
+    anchors = _meaningful_anchors(instruction_text)
+    if not anchors:
         return ParityFinding(
             "behavior_instruction",
             "not_applicable",
@@ -266,11 +311,12 @@ def _evaluate_instruction(
             v2_signal=block.text if block else "",
             notes="v1 instruction.md 为空",
         )
+    primary = anchors[0]
     if block is None or not block.text.strip():
         return ParityFinding(
             "behavior_instruction",
             "v1_only",
-            v1_signal=anchor,
+            v1_signal=primary,
             v2_signal="",
             notes="v2 缺少 core.guard prompt block",
         )
@@ -280,23 +326,24 @@ def _evaluate_instruction(
         return ParityFinding(
             "behavior_instruction",
             "divergent",
-            v1_signal=anchor,
+            v1_signal=primary,
             v2_signal=_first_line(text),
             notes="v2 core.guard 缺『行为指令：』段",
         )
-    if anchor in text:
+    matched = next((a for a in anchors if a in text), "")
+    if matched:
         return ParityFinding(
             "behavior_instruction",
             "aligned",
-            v1_signal=anchor,
-            v2_signal="core.guard 行为指令含 v1 首行锚点",
+            v1_signal=matched,
+            v2_signal="core.guard 行为指令含 v1 锚点",
         )
     return ParityFinding(
         "behavior_instruction",
         "divergent",
-        v1_signal=anchor,
+        v1_signal=primary,
         v2_signal=_first_line(text),
-        notes="v2 core.guard 行为指令未覆盖 v1 首行锚点",
+        notes="v2 core.guard 行为指令未覆盖 v1 前 5 条锚点",
     )
 
 
@@ -368,12 +415,13 @@ def _evaluate_proactive(
             v2_signal=block.text if block else "",
             notes="v1 identity.proactive 为空",
         )
-    anchor = _first_line(text_v1)
+    anchors = _meaningful_anchors(text_v1)
+    primary = anchors[0] if anchors else _first_line(text_v1)
     if block is None or not block.text.strip():
         return ParityFinding(
             "proactive_rules",
             "v1_only",
-            v1_signal=anchor,
+            v1_signal=primary,
             v2_signal="",
             notes="v2 缺少 core.guard prompt block",
         )
@@ -382,23 +430,24 @@ def _evaluate_proactive(
         return ParityFinding(
             "proactive_rules",
             "v1_only",
-            v1_signal=anchor,
+            v1_signal=primary,
             v2_signal=text,
             notes="v2 core.guard 没有 『插话方式：』 段（identity.proactive_rules 为空？）",
         )
-    if anchor in text:
+    matched = next((a for a in anchors if a in text), "")
+    if matched:
         return ParityFinding(
             "proactive_rules",
             "aligned",
-            v1_signal=anchor,
-            v2_signal="core.guard 插话方式段含 v1 首行锚点",
+            v1_signal=matched,
+            v2_signal="core.guard 插话方式段含 v1 锚点",
         )
     return ParityFinding(
         "proactive_rules",
         "divergent",
-        v1_signal=anchor,
+        v1_signal=primary,
         v2_signal=_first_line(text),
-        notes="v2 core.guard 插话方式段未覆盖 v1 首行锚点",
+        notes="v2 core.guard 插话方式段未覆盖 v1 前 5 条锚点",
     )
 
 

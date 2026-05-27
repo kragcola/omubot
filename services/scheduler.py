@@ -5,17 +5,21 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
 from kernel.config import GroupConfig
-from kernel.types import TriggerContext
+from kernel.types import ResponseClass, TriggerContext
 from services.humanization import CLOCK_CURRENT_SLOT, REGISTER_LABEL_SLOT
 from services.llm.client import RATE_LIMIT_BASE_DELAY, RATE_LIMIT_MAX_RETRIES, RateLimitError
 from services.memory.timeline import GroupTimeline
 from services.runtime_clock import now_cst
+from services.scheduler_eot import EOTCache, EOTClassifier
+from services.scheduler_hawkes import HawkesCache, estimate_rho_from_times
+from services.scheduler_rws import RWSBandit, RWSExplanation, RWSFeatures, compute_rws
 from services.system_module import Scope
 from services.tools.context import ToolContext
 
@@ -31,7 +35,7 @@ _L = logger.bind(channel="scheduler")
 def _should_force_reply(trigger: TriggerContext | None) -> bool:
     if trigger is None:
         return False
-    if trigger.mode in {"video_always", "directed_followup"}:
+    if trigger.mode in {"video_always", "directed_followup", "qq_interaction"}:
         return True
     if trigger.mode != "at_mention":
         return False
@@ -41,7 +45,8 @@ def _should_force_reply(trigger: TriggerContext | None) -> bool:
 class _GroupSlot:
     __slots__ = (
         "consecutive_skip", "debounce_task", "last_fire_time",
-        "last_skip_time", "last_user_id", "msg_count", "pending_at", "running_task", "trigger",
+        "last_response_class", "last_rws", "last_skip_time", "last_user_id",
+        "msg_count", "pending_at", "running_task", "trigger",
     )
 
     def __init__(self) -> None:
@@ -51,7 +56,10 @@ class _GroupSlot:
         self.msg_count: int = 0
         self.pending_at: bool = False
         self.last_fire_time: float = 0.0
+        self.last_skip_time: float = 0.0
         self.last_user_id: str = ""
+        self.last_response_class: str = ResponseClass.SILENCE.value
+        self.last_rws: dict[str, Any] | None = None
         self.trigger: TriggerContext | None = None
 
 
@@ -68,6 +76,11 @@ class GroupChatScheduler:
         mood_getter: Callable[..., Any] | None = None,
         talk_schedule: Any = None,
         runtime_state: Any = None,
+        humanization_config: Any = None,
+        hawkes_cache: HawkesCache | None = None,
+        eot_cache: EOTCache | None = None,
+        eot_classifier: EOTClassifier | None = None,
+        rws_bandit: RWSBandit | None = None,
     ) -> None:
         self._llm = llm
         self._timeline = timeline
@@ -77,6 +90,21 @@ class GroupChatScheduler:
         self._mood_getter = mood_getter
         self._talk_schedule = talk_schedule
         self._runtime_state = runtime_state
+        self._humanization_config = humanization_config
+        self._hawkes_cache = hawkes_cache if self._hflag_global("rws_hawkes") else None
+        if self._hflag_global("rws_hawkes") and self._hawkes_cache is None:
+            self._hawkes_cache = HawkesCache()
+        self._eot_cache = eot_cache if self._hflag_global("rws_eot") else None
+        self._eot_classifier = eot_classifier if self._hflag_global("rws_eot") else None
+        if self._hflag_global("rws_eot"):
+            self._eot_cache = self._eot_cache or EOTCache()
+            self._eot_classifier = self._eot_classifier or EOTClassifier()
+        self._rws_bandit = rws_bandit
+        if self._hflag_global("rws_bandit") and self._rws_bandit is None:
+            self._rws_bandit = RWSBandit(
+                theta=self._hfloat_global("rws_threshold", 0.5),
+                frozen=self._hflag_global("rws_bandit_freeze", default=True),
+            )
         self._slots: dict[str, _GroupSlot] = {}
         self._bot: Bot | None = None
         self._muted_groups: set[str] = set()
@@ -108,6 +136,28 @@ class GroupChatScheduler:
     def is_muted(self, group_id: str) -> bool:
         return group_id in self._muted_groups
 
+    def get_rws_bandit_state(self) -> dict[str, object]:
+        if self._rws_bandit is None:
+            return {"available": False}
+        return {
+            "available": True,
+            "theta": self._rws_bandit.theta,
+            "epsilon": self._rws_bandit.epsilon,
+            "learning_rate": self._rws_bandit.learning_rate,
+            "min_theta": self._rws_bandit.min_theta,
+            "max_theta": self._rws_bandit.max_theta,
+            "frozen": self._rws_bandit.frozen,
+            "observations": self._rws_bandit.observations,
+            "last_reward": self._rws_bandit.last_reward,
+            "history": list(self._rws_bandit.history),
+        }
+
+    def observe_rws_bandit(self, *, decision: bool, reward: float) -> dict[str, object]:
+        if self._rws_bandit is None:
+            return {"ok": False, "error": "RWS bandit not configured"}
+        theta = self._rws_bandit.observe(decision=decision, reward=reward)
+        return {"ok": True, "theta": theta, "state": self.get_rws_bandit_state()}
+
     def get_all_slots(self) -> dict[str, dict[str, object]]:
         """Return public state for all group slots (admin API)."""
         result: dict[str, dict[str, object]] = {}
@@ -117,7 +167,10 @@ class GroupChatScheduler:
                 "msg_count": slot.msg_count,
                 "pending_at": slot.pending_at,
                 "last_fire_time": slot.last_fire_time,
+                "last_skip_time": slot.last_skip_time,
                 "last_user_id": slot.last_user_id,
+                "last_response_class": slot.last_response_class,
+                "last_rws": slot.last_rws,
                 "has_trigger": slot.trigger is not None,
                 "is_muted": gid in self._muted_groups,
                 "has_running_task": slot.running_task is not None and not slot.running_task.done(),
@@ -241,20 +294,54 @@ class GroupChatScheduler:
 
         mode_label = trigger.mode if trigger else "none"
 
-        if random.random() < threshold:
+        roll = random.random()
+        old_decision = roll < threshold
+        decision = old_decision
+        rws = self._maybe_compute_rws(
+            group_id,
+            slot=slot,
+            trigger=trigger,
+            threshold=threshold,
+            mood_mult=mood_mult,
+            time_mult=time_mult,
+            old_decision=old_decision,
+            roll=roll,
+        )
+        if rws is not None and self._rws_primary(group_id):
+            decision = rws.decision
+
+        if decision:
             _L.info(
-                "scheduler | group={} prob fire (threshold={:.2f} mood={:.2f} time={:.2f} msgs={} skips={} mode={})",
-                group_id, threshold, mood_mult, time_mult, slot.msg_count, slot.consecutive_skip, mode_label,
+                "scheduler | group={} prob fire "
+                "(threshold={:.2f} mood={:.2f} time={:.2f} msgs={} skips={} mode={} rws={})",
+                group_id,
+                threshold,
+                mood_mult,
+                time_mult,
+                slot.msg_count,
+                slot.consecutive_skip,
+                mode_label,
+                f"{rws.score:.2f}" if rws is not None else "--",
             )
             slot.consecutive_skip = 0
             slot.last_fire_time = now
+            slot.last_response_class = ResponseClass.FULL_REPLY.value
             self._fire(group_id)
         else:
             slot.consecutive_skip += 1
             slot.last_skip_time = now
+            slot.last_response_class = ResponseClass.SILENCE.value
             _L.info(
-                "scheduler | group={} prob skip (threshold={:.2f} mood={:.2f} time={:.2f} msgs={} skips={} mode={})",
-                group_id, threshold, mood_mult, time_mult, slot.msg_count, slot.consecutive_skip, mode_label,
+                "scheduler | group={} prob skip "
+                "(threshold={:.2f} mood={:.2f} time={:.2f} msgs={} skips={} mode={} rws={})",
+                group_id,
+                threshold,
+                mood_mult,
+                time_mult,
+                slot.msg_count,
+                slot.consecutive_skip,
+                mode_label,
+                f"{rws.score:.2f}" if rws is not None else "--",
             )
             slot.trigger = None  # clear trigger on skip — prevent leak
 
@@ -392,6 +479,139 @@ class GroupChatScheduler:
             "mood": self._get_current_mood(group_id),
         }
 
+    def _hflag_global(self, name: str, *, default: bool = False) -> bool:
+        return bool(getattr(self._humanization_config, name, default))
+
+    def _hfloat_global(self, name: str, default: float) -> float:
+        try:
+            return float(getattr(self._humanization_config, name, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _humanization_group_allowed(self, group_id: str) -> bool:
+        groups = {
+            str(gid).strip()
+            for gid in (getattr(self._humanization_config, "runtime_groups", None) or [])
+            if str(gid).strip()
+        }
+        return not groups or str(group_id).strip() in groups
+
+    def _rws_enabled(self, group_id: str) -> bool:
+        return self._humanization_group_allowed(group_id) and (
+            self._hflag_global("rws_shadow") or self._hflag_global("rws_primary")
+        )
+
+    def _rws_primary(self, group_id: str) -> bool:
+        return self._humanization_group_allowed(group_id) and self._hflag_global("rws_primary")
+
+    def _rws_theta(self) -> float:
+        if self._rws_bandit is not None and self._hflag_global("rws_bandit"):
+            self._rws_bandit.frozen = self._hflag_global("rws_bandit_freeze", default=True)
+            return self._rws_bandit.current_theta()
+        return max(0.0, min(1.0, self._hfloat_global("rws_threshold", 0.5)))
+
+    def _maybe_compute_rws(
+        self,
+        group_id: str,
+        *,
+        slot: _GroupSlot,
+        trigger: TriggerContext | None,
+        threshold: float,
+        mood_mult: float,
+        time_mult: float,
+        old_decision: bool,
+        roll: float,
+    ) -> RWSExplanation | None:
+        if not self._rws_enabled(group_id):
+            slot.last_rws = None
+            return None
+        addressee_self = bool(trigger.extra.get("addressee_self", True)) if trigger is not None else True
+        eot_probability = self._eot_probability(group_id) if self._hflag_global("rws_eot") else 0.5
+        features = RWSFeatures(
+            mode=trigger.mode if trigger else "none",
+            addressee_self=addressee_self,
+            old_threshold=threshold,
+            mood_mult=mood_mult,
+            time_mult=time_mult,
+            consecutive_skip=slot.consecutive_skip,
+            force_threshold=self._group_config.resolve(int(group_id)).consecutive_skip_force_threshold,
+            double_threshold=self._group_config.resolve(int(group_id)).consecutive_skip_double_threshold,
+            hawkes_rho=self._hawkes_rho(group_id) if self._hflag_global("rws_hawkes") else 0.0,
+            eot_probability=eot_probability,
+        )
+        explanation = replace(
+            compute_rws(features, theta=self._rws_theta()),
+            old_decision=old_decision,
+        )
+        probabilistic_decision = roll < explanation.score
+        payload = explanation.to_dict()
+        payload["probabilistic_decision"] = probabilistic_decision
+        payload["roll"] = round(roll, 4)
+        slot.last_rws = payload
+        _L.info(
+            "scheduler_rws | group={} score={:.3f} theta={:.3f} old={} prob={} primary={}",
+            group_id,
+            explanation.score,
+            explanation.theta,
+            old_decision,
+            probabilistic_decision,
+            self._rws_primary(group_id),
+        )
+        return explanation
+
+    def _hawkes_rho(self, group_id: str) -> float:
+        if self._hawkes_cache is not None:
+            snapshot = self._hawkes_cache.load(group_id)
+            if snapshot is not None:
+                return snapshot.rho
+        turns = self._timeline.get_turns(group_id)
+        times = [
+            self._timeline.get_turn_time(group_id, idx)
+            for idx in range(len(turns))
+            if self._timeline.get_turn_time(group_id, idx) > 0
+        ]
+        return estimate_rho_from_times(times, window_s=1800.0)
+
+    def _eot_probability(self, group_id: str) -> float:
+        if self._eot_cache is None:
+            return 0.5
+        cached = self._eot_cache.get(group_id)
+        if cached is not None:
+            return cached.probability
+        if self._eot_classifier is not None and self._eot_cache.can_call(group_id):
+            messages = self._recent_message_rows(group_id, limit=5)
+            if messages:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    return 0.5
+                if self._eot_cache.reserve_call(group_id):
+                    task = loop.create_task(self._refresh_eot(group_id, messages))
+                    task.add_done_callback(lambda _: None)
+        return 0.5
+
+    async def _refresh_eot(self, group_id: str, messages: list[dict[str, Any]]) -> None:
+        if self._eot_cache is None or self._eot_classifier is None:
+            return
+        api_call = getattr(self._llm, "_call", None)
+        if not callable(api_call):
+            return
+        typed_api_call = cast(Callable[[Any], Awaitable[dict[str, Any]]], api_call)
+        decision = await self._eot_classifier.classify(messages, group_id=group_id, api_call=typed_api_call)
+        self._eot_cache.put(group_id, decision)
+
+    def _recent_message_rows(self, group_id: str, *, limit: int) -> list[dict[str, Any]]:
+        turns = list(self._timeline.get_turns(group_id))[-limit:]
+        pending = [
+            {"role": row.get("role", "user"), "content": row.get("content", "")}
+            for row in self._timeline.get_pending(group_id)[-limit:]
+        ]
+        rows = [
+            {"role": row.get("role", ""), "content": row.get("content", "")}
+            for row in turns
+        ]
+        return (rows + pending)[-limit:]
+
     def _fire(self, group_id: str) -> None:
         slot = self._slots.get(group_id)
         if not slot:
@@ -400,6 +620,7 @@ class GroupChatScheduler:
         trigger = slot.trigger
         slot.trigger = None
         slot.msg_count = 0
+        slot.last_response_class = ResponseClass.FULL_REPLY.value
         slot.running_task = asyncio.create_task(self._do_chat(group_id, trigger=trigger))
         slot.running_task.add_done_callback(lambda _: None)
 

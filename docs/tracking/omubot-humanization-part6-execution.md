@@ -206,22 +206,22 @@
 | **P6.0.x4** | 1 | 🟡 | 已落地并自验：`HumanizationHealthGuard` 96 行，读 `llm_calls` hit/miss 口径，performance 降级到 balanced；focused pytest 19 passed；待用户最终审查 |
 | **P6.0.x5** | 1 | 🟡 | 已落地并自验：配置页 profile 下拉/只读子能力摘要、群级档位覆盖、dashboard 档位与降级 chip；focused pytest 64 passed；frontend vue-tsc/build passed；待用户最终审查 |
 | **P6.0.y1** | 2 | 🟡 | 已落地并自验：`on_notice` 桥接 PokeNotifyEvent + NapCat raw reaction NoticeEvent，显式 flag 开启时投递 `GroupTimeline.add_pending_trigger()` + scheduler；poke 60s/5 次内存 mute；focused pytest 55 passed；待用户最终审查 |
-| **P6.0.y2** | 2 | ⏳ | services/tools/interaction_tools.py；token bucket 速率门 |
-| **P6.0.y3** | 2 | ⏳ | `<quote msg_id="..."/>` 锚点解析 + MessageSegment.reply |
-| **P6.0.y4** | 2 | ⏳ | qq_interactions 子配置 + GroupOverride.qq_interactions_profile_override |
-| **P6.1** | 3 | ⏳ | streaming_segmenter.py；订正路径见 §1 表 |
-| **P6.2** | 3 | ⏳ | _stream_with_segments hook 进 client.py |
-| **P6.3** | 3 | ⏳ | 灰度脚本 + 200 条比对 |
-| **P6.4** | 3 | ⏳ | B 方案默认开 + 卸 fallback |
-| **P6.5** | 4 | ⏳ | pause_extend.py 决策器 |
-| **P6.6** | 4 | ⏳ | _maybe_extend 接入 |
-| **P6.7** | 4 | ⏳ | D 方案灰度 |
-| **P6.8** | 4 | ⏳ | D 方案默认开 |
-| **P6.9** | 5 | ⏳ | plan_then_utter.py + group whitelist 仅灰度群 |
-| **P6.10** | 5 | ⏳ | 14 日 pilot |
-| **P6.11** | 5 | ⏳ | A 方案决策门 |
-| **P6.12** | 6 | ⏳ | C 方案锁定（仅文档） |
-| **P6.13** | 6 | ⏳ | 文档收口 + measure 脚本 |
+| **P6.0.y2** | 2 | 🟡 | 已落地并自验：`poke_user` / `react_to_message` NapCat action、profile 守卫、in-memory token bucket 与取消路径释放；focused pytest 35 passed；待用户最终审查 |
+| **P6.0.y3** | 2 | 🟡 | 已落地并自验：`<quote msg_id="..."/>` 解析、非法/关闭 strip、OneBot `[CQ:reply,id=...]` 首段前缀；focused pytest 6 passed；待用户最终审查 |
+| **P6.0.y4** | 2 | 🟡 | 已落地并自验：`QQInteractionsConfig` 5 flag、ResolvedHumanization 5 决议字段、三档映射与群级 override schema；focused pytest 53 passed；待用户最终审查 |
+| **P6.1** | 3 | 🟡 | 已落地并自验：`services/llm/streaming_segmenter.py` 179 行，支持 online boundary flush、register/mood target、finish/cancel drain、CQ/URL/ASCII 保护；focused pytest 36 passed；待用户最终审查 |
+| **P6.2** | 3 | 🟡 | 已落地并自验：provider 逐行 `extract_text_delta()`、`call_api/_call/_dispatch_call on_text_delta` 透传、`LLMClient._stream_with_segments()` 安全门控接入；focused pytest 25 passed；ruff passed；pyright 0 errors；待用户最终审查 |
+| **P6.3** | 3 | 🟡 | 已落地并自验：新增 `scripts/dev/measure_streaming_vs_natural.sh`，只读 immutable messages.db，采样 200 条 group reply 对比 streaming vs natural；all/984198159 达标，993065015 短回复样本未达段长方差与 delay p50 目标；待用户最终审查 |
+| **P6.4** | 3 | 🟡 | 已落地并自验：balanced/performance/custom streaming 启用时默认走 `_stream_with_segments()`；streaming path 支持 quote anchor 首段 CQ reply、provider 无 delta 时 fallback result text；natural_split 仅保留给 economy/custom 非 streaming 路径；focused pytest 27 passed；待用户最终审查 |
+| **P6.5** | 4 | 🟡 | 已落地并自验：`services/humanization/pause_extend.py` 143 行 pure decisioner，输出 `should_extend/wait_seconds/reasons`；focused pytest 8 passed；ruff passed；pyright 0 errors；待用户最终审查 |
+| **P6.6** | 4 | 🟡 | 已落地并自验：`LLMClient._maybe_extend()` 接入群聊追发循环，开关默认 off，等待期用户插话/取消均 drop；usage 写 `proactive_extend`，BlockTrace 观测 extend 事件；focused pytest 20 passed；ruff passed；pyright 0 errors；待用户最终审查 |
+| **P6.7** | 4 | 🟡 | 已落地并自验：新增 `scripts/dev/measure_extend_rate.sh`，只读 usage/messages DB；actual usage 与离线估算双口径采样 200 条，all/984198159/993065015 extend_rate 均 0%，gray gate yes；待用户最终审查 |
+| **P6.8** | 4 | 🟡 | 已落地并自验：`pause_then_extend.enabled` schema/runtime config 默认 on；extend_rate guard all/984198159/993065015 均 0%，gray gate yes；全量 pytest `1964 passed, 8 skipped`；待用户最终审查 |
+| **P6.9** | 5 | 🟡 | 已落地并自验：`services/llm/plan_then_utter.py` 189 行；默认 off + whitelist/profile gate；主动群聊无业务工具路径写 `proactive_plan/proactive_utter` usage 与 BlockTrace parent_span_id；focused pytest 30 passed；ruff passed；pyright 0 errors；待用户最终审查 |
+| **P6.10** | 5 | 🟡 | 已落地并自验：新增 `scripts/dev/measure_plan_then_utter_pilot.sh`，只读 usage/block_trace DB，按单 proactive reply 汇总 `plan+utter` token 成本、latency、BlockTrace parent_span 与 PersonaScore baseline；当前 14 日窗口无 `proactive_plan/proactive_utter` 样本，决策为继续收样；focused pytest 2 passed；待用户最终审查 |
+| **P6.11** | 5 | 🟡 | 已完成决策门：当前不上默认、不永久关闭，结论为“继续 pilot collect samples / 调参后再 pilot”；硬阈值仍为成本 >2.5× 或 PersonaScore 跌 >5pp 即回滚 `plan_then_utter.enabled=false`；待用户最终审查 |
+| **P6.12** | 6 | 🟡 | 已文档锁定：C 方案不开发、不灰度；理由为 DeepSeek 不支持 stream continuation、abort 后 reasoning/prompt 因果链漂移、输出浪费与复杂度不可控；待用户最终审查 |
+| **P6.13** | 6 | 🟡 | 已收口：新增 `scripts/dev/measure_humanization_part6.sh` 串联 P6.3/P6.7/P6.10 只读测量；追踪文档回填至 P6.13；`maintenance-log.md` 因共享脏改本轮不触碰；待用户最终审查 |
 
 ---
 
@@ -406,6 +406,308 @@ Part 2-3 已在执行中（用户原话："part2-3 已在执行"）。Part 6 与
 - **D2 cancel-path**：测试覆盖 disabled / 非 bot 目标不碰 timeline/scheduler；速率 mute 只写内存 dict，不写 DB/config，重启即清空。
 - **回滚**：`git revert <本提交>`；运行时快速回滚保持/设置 `humanization.qq_interactions.poke_inbound_response_enabled=false` 与 `reaction_inbound_response_enabled=false` 后重启。
 - **回填**：§6 `P6.0.y1` 已置 🟡，Wave 2 可继续并列推进 y2/y3/y4。
+
+### P6.0.y2 领单拆分（执行前）
+
+- **目标**：新增 QQ 出站交互工具 `poke_user` / `react_to_message`，通过 NapCat action 发送戳一戳与消息表情回应。
+- **代码拆分**：新增 `services/tools/interaction_tools.py`，封装 profile 守卫、NapCat `send_poke` / `set_msg_emoji_like` 调用与 in-memory token bucket；`ToolRegistry` 增交互工具注册 helper，默认失败关闭，等待 P6.0.y4 resolved flag 接入。
+- **速率规则**：单群 60s `poke_out <= 2` / `react_out <= 3`；单 user 5min `poke_out <= 1`；取消或异常路径释放 reservation，不写 DB/config。
+- **profile 口径**：`economy/custom/字段缺失` 默认不注册；`performance` 可注册双工具；`balanced` 仅 passive 上下文允许执行主动 poke/react。
+- **测试拆分**：新建 `tests/test_qq_interaction_tools.py`，覆盖 poke 调用、react 调用、群级/用户级限流、economy 不注册、balanced 主动拒绝、取消路径不消耗 token。
+- **验收证据计划**：focused pytest + ruff/pyright 改动范围；grep 锁 `poke_user / react_to_message / interaction_tools`。
+
+### P6.0.y2 完成记录
+
+- **代码**：新增 [services/tools/interaction_tools.py](../../services/tools/interaction_tools.py)，提供 `poke_user` / `react_to_message` 两个 QQ 出站工具；[services/tools/registry.py](../../services/tools/registry.py) 增 `register_interaction_tools()`，默认失败关闭，支持后续 resolved flags 接入。
+- **行为**：`send_poke` action 传 `user_id/group_id`；`set_msg_emoji_like` action 传 `message_id/emoji_id`；单群 60s `poke_out <= 2` / `react_out <= 3`，单 user 5min `poke_out <= 1`；`economy/custom/缺字段` 不注册，`balanced` 仅 passive 上下文可执行，`performance` 可执行。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_qq_interaction_tools.py tests/test_tools.py` → `35 passed`。
+- **ruff / pyright**：`uv run ruff check services/tools/interaction_tools.py services/tools/registry.py tests/test_qq_interaction_tools.py` → passed；`uv run pyright services/tools/interaction_tools.py services/tools/registry.py tests/test_qq_interaction_tools.py` → `0 errors`。
+- **D1 grep**：`poke_user / react_to_message / interaction_tools / send_poke / set_msg_emoji_like` 命中 interaction_tools、registry helper、tests 与本追踪文档。
+- **D2 cancel-path**：测试覆盖 `asyncio.CancelledError` 时释放 token bucket reservation，同一 user/group 随后可重新成功执行；所有速率状态仅内存，不写 DB/config。
+- **回滚**：`git revert <本提交>`；运行时不调用 `register_interaction_tools()` 或保持后续 `qq_interactions.*_outbound_enabled=false` 即工具不可见。
+- **回填**：§6 `P6.0.y2` 已置 🟡；`maintenance-log.md` 当前含他人未提交 Part 5 变更，本单只回填追踪文档，避免混入共享脏文件。
+
+### P6.0.y3 领单拆分（执行前）
+
+- **目标**：支持模型输出 `<quote msg_id="..."/>` 引用锚点，出站时转为 OneBot reply segment 语义；非法或关闭时静默 strip 回纯文本。
+- **代码拆分**：在 `services/llm/client.py` 增 `_extract_quote_anchor()` / `_apply_quote_reply_anchor()`；在主回复路径与 tool-exhausted 兜底回复路径中，先 strip 锚点再 rewrite，最终给首段加 `[CQ:reply,id=...]` 前缀，由现有 `Message(text)` 发送层解析。
+- **profile 口径**：显式读取后续 P6.0.y4 的 `qq_interactions_quote_reply_enabled`；字段缺失时仅对 balanced/performance 形态启用，economy/custom 默认 strip。
+- **测试拆分**：新建 `tests/test_quote_reply_segment.py`，覆盖合法锚点、非法 msg_id、关闭时 strip、多锚点取第一个。
+- **验收证据计划**：focused pytest + ruff/pyright 改动范围；grep 锁 `<quote msg_id / _extract_quote_anchor / CQ:reply`。
+
+### P6.0.y3 完成记录
+
+- **代码**：在 [services/llm/client.py](../../services/llm/client.py) 新增 `_extract_quote_anchor()`、`_quote_reply_enabled()`、`_apply_quote_reply_anchor()`；主回复路径与 tool-exhausted 兜底路径均在 rewrite 前 strip 锚点，发送前为首段加 `[CQ:reply,id=...]`。
+- **行为**：合法 `<quote msg_id="123"/>` 转 OneBot CQ reply 前缀；非法 / 不存在可解析 msg_id / profile 关闭时静默移除 quote tag 并回退纯文本；多锚点取第一个并 strip 全部 tag。
+- **兼容说明**：当前出站层由 scheduler/router 统一 `Message(text)` 发送，OneBot 会解析 `[CQ:reply,id=...]` 为 reply segment；未改 LLMClient 返回类型，避免冲击分段管线。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_quote_reply_segment.py tests/test_llm_client_reply_segment_plan.py` → `6 passed`。
+- **ruff / pyright**：`uv run ruff check services/llm/client.py tests/test_quote_reply_segment.py` → passed；`uv run pyright services/llm/client.py tests/test_quote_reply_segment.py` → `0 errors`。
+- **D1 grep**：`<quote msg_id / _extract_quote_anchor / _apply_quote_reply_anchor / CQ:reply / qq_interactions_quote_reply_enabled` 命中 client、quote tests 与本追踪文档。
+- **D2 cancel-path**：锚点解析只在内存字符串上操作，无 DB/config 写入；reply 被取消时 quote tag 已在本地 reply 文本中 strip，不残留持久半状态。
+- **回滚**：`git revert <本提交>`；运行时后续 `qq_interactions.quote_reply_enabled=false` 或 economy/custom 档会 strip 锚点回纯文本。
+- **回填**：§6 `P6.0.y3` 已置 🟡。注意 `services/llm/client.py` 在接手前已有他人未提交分段重构 diff，本单仅在其当前版本上追加 quote 锚点逻辑。
+
+### P6.0.y4 领单拆分（执行前）
+
+- **目标**：补齐 `humanization.qq_interactions` 子配置、`ResolvedHumanization` 5 个 QQ 交互决议字段，以及群级 `qq_interactions_profile_override` schema。
+- **代码拆分**：`kernel/config.py` 新增 `QQInteractionsConfig`；`HumanizationConfig` 挂载 `qq_interactions`；`resolve_profile()` custom 读显式 flag，economy 全关，balanced 开入站/quote 关主动出站，performance 全开；GroupOverride/ResolvedGroupConfig 透传 `qq_interactions_profile_override`。
+- **测试拆分**：新建 `tests/test_humanization_qq_interactions.py`，覆盖 economy、balanced、performance、custom 显式 flag 与 group override schema。
+- **验收证据计划**：focused pytest + ruff/pyright 改动范围；grep 锁 `qq_interactions / QQInteractionsConfig / qq_interactions_profile_override`。
+
+### P6.0.y4 完成记录
+
+- **代码**：[kernel/config.py](../../kernel/config.py) 新增 `QQInteractionsConfig`（5 个 bool flag 默认全 off），`HumanizationConfig.qq_interactions`，`ResolvedHumanization` 5 个 `qq_interactions_*` 决议字段；`GroupOverride` / `ResolvedGroupConfig` 透传 `qq_interactions_profile_override`。
+- **三档决议**：`economy` 全 off；`balanced` 开 `poke_inbound / reaction_inbound / quote_reply`，主动 `poke_outbound / reaction_outbound` 仍 off；`performance` 全 on；`custom` 直读 `humanization.qq_interactions.*`。
+- **联动验证**：y1 入站 gate 现在能读到 schema 字段；y2 注册 helper 可读取 resolved outbound 字段；y3 quote helper 可读取 resolved quote 字段。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_humanization_qq_interactions.py tests/test_humanization_config.py tests/test_config_loader.py tests/test_quote_reply_segment.py tests/test_qq_interaction_tools.py` → `53 passed`。
+- **ruff / pyright**：`uv run ruff check kernel/config.py services/llm/client.py services/tools/interaction_tools.py services/tools/registry.py tests/test_humanization_qq_interactions.py tests/test_quote_reply_segment.py tests/test_qq_interaction_tools.py` → passed；`uv run pyright kernel/config.py services/llm/client.py tests/test_humanization_qq_interactions.py tests/test_quote_reply_segment.py tests/test_qq_interaction_tools.py` → `0 errors`。
+- **D1 grep**：`qq_interactions / QQInteractionsConfig / qq_interactions_profile_override` 命中 config、QQ interaction tests、quote/tool tests 与本追踪文档。
+- **D2 cancel-path**：N/A（pure data / BaseModel 决议）；无 IO、无 DB/config 写入副作用。
+- **回滚**：`git revert <本提交>`；运行时保持 `profile=custom` 且 `qq_interactions.*=false` 等价于 QQ 特殊交互全关。
+- **回填**：§6 `P6.0.y4` 已置 🟡，Wave 2 四条 y1-y4 均已进入待最终审查状态。
+
+### P6.1 领单拆分（执行前）
+
+- **目标**：新增 `services/llm/streaming_segmenter.py`，提供可在 SSE token/chunk 流上在线切段的 `StreamingSegmenter`，不接主链路。
+- **代码拆分**：实现 `StreamingSegmenterConfig`、`StreamingSegmenter.push()`、`finish()`、`cancel()`；按句末标点优先、软上限按分句标点、硬上限兜底；接受 register / mood 调整目标段长。
+- **D2 计划**：`cancel()` drain 并清空 buffer，下一条 reply 不串上一次未发尾巴；算法不写 DB/config。
+- **测试拆分**：新建 `tests/test_streaming_segmenter.py`，覆盖句末 flush、min chars、hard limit、finish drain、cancel reset、register/mood 调整、CQ code 保护、URL/ASCII token 保护。
+- **验收证据计划**：focused pytest + ruff/pyright 改动范围；grep 锁 `class StreamingSegmenter / streaming_segmenter`。
+
+### P6.1 完成记录
+
+- **代码**：新增 [services/llm/streaming_segmenter.py](../../services/llm/streaming_segmenter.py)（179 行），提供 `StreamingSegmenterConfig` 与 `StreamingSegmenter.push()/finish()/cancel()`；按句末标点、分句软边界、硬上限兜底在线 flush。
+- **行为**：支持 register/mood 调整目标段长；`finish()` drain 尾段；`cancel()` drain 并清空 buffer，避免下一条 reply 串上一次残留；保护 CQ code、URL 与 ASCII token，不在保护区内硬切。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_streaming_segmenter.py tests/test_segmentation.py tests/test_inter_segment_delay.py` → `36 passed`。
+- **ruff / pyright**：`uv run ruff check services/llm/streaming_segmenter.py tests/test_streaming_segmenter.py` → passed；`uv run pyright services/llm/streaming_segmenter.py tests/test_streaming_segmenter.py` → `0 errors`。
+- **D1 grep**：`class StreamingSegmenter / StreamingSegmenterConfig / streaming_segmenter` 命中 streaming_segmenter、tests 与本追踪文档。
+- **D2 cancel-path**：`test_cancel_drains_and_prevents_next_reply_contamination` 覆盖 cancel drain + 清 buffer；算法无 IO、无持久写。
+- **回滚**：`git rm services/llm/streaming_segmenter.py tests/test_streaming_segmenter.py`；P6.2 未接入前运行时行为不变。
+- **回填**：§6 `P6.1` 已置 🟡。
+
+### P6.2 领单拆分（执行前）
+
+- **目标**：把 P6.1 的 `StreamingSegmenter` 接入 LLM SSE 主路径，支持 token 到达时在线 flush 给 `on_segment`；feature flag 仍由 `humanization.streaming_segment.enabled/profile` 控制，默认关闭。
+- **代码拆分**：`LLMProvider` 新增逐行 `extract_text_delta()`；DeepSeek/OpenAI/Anthropic provider 按各自 SSE 格式提取文本 delta；`call_api()` / `LLMClient._dispatch_call()` / `_call()` 透传可选 `on_text_delta`；`LLMClient` 新增 `_stream_with_segments()` 封装 segmenter。
+- **安全口径**：只在 `on_segment` 存在、`streaming_segment_enabled=True`、当前 round 无真实工具（允许仅 `pass_turn` 被 `force_reply` 移除）且关闭 rewrite/quote/kaomoji 二次路径时在线发送；否则仅保留 hook 能力，不改变原完整文本后处理。
+- **D2 计划**：`on_segment` 抛 `CancelledError` 时调用 `segmenter.cancel()` 清空 buffer 后重新抛出；provider token hook 不写 DB/config；取消不污染下一条 reply。
+- **测试拆分**：新增 `tests/test_streaming_hook.py`，覆盖 provider delta 抽取、`call_api(on_text_delta)`、client `_dispatch_call()` 透传、streaming cancel 清 buffer、chat 安全门控下在线发段并避免重复发送已流出的段。
+- **验收证据计划**：focused pytest + ruff/pyright 改动范围；grep 锁 `_stream_with_segments / extract_text_delta / on_text_delta / streaming_segment`。
+
+### P6.2 完成记录
+
+- **代码**：[services/llm/provider.py](../../services/llm/provider.py) 新增默认 `extract_text_delta()`；DeepSeek/OpenAI/Anthropic provider 按各自 SSE 行解析 visible text delta；[services/llm/client.py](../../services/llm/client.py) 透传 `on_text_delta` 并新增 `_stream_with_segments()`，在群聊强制回复、无工具、streaming profile 开启、rewrite/quote 关闭时在线发段。
+- **行为**：安全门控外仍走旧完整文本后处理；安全门控内每个 ready segment 经 `_clean_reply` / `_strip_control_tokens` / `fix_cq_codes` 后调用 `on_segment`，并返回空字符串避免 scheduler 二次发送。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_streaming_hook.py tests/test_call_api.py tests/test_streaming_segmenter.py tests/test_llm_client_reply_segment_plan.py tests/test_quote_reply_segment.py` → `25 passed`。
+- **ruff / pyright**：`uv run ruff check services/llm/client.py services/llm/provider.py services/llm/providers/deepseek.py services/llm/providers/openai.py services/llm/providers/anthropic.py services/llm/streaming_segmenter.py tests/test_streaming_hook.py tests/test_call_api.py tests/test_streaming_segmenter.py tests/test_llm_client_reply_segment_plan.py` → passed；`uv run pyright ...` → `0 errors`。
+- **D1 grep**：`_stream_with_segments / extract_text_delta / on_text_delta / streaming_segment` 命中 client、provider 三实现、streaming hook tests 与本追踪文档。
+- **D2 cancel-path**：`tests/test_streaming_hook.py::test_stream_with_segments_cleans_buffer_on_cancel` 覆盖 `CancelledError` 时调用 segmenter.cancel 清 buffer，下一次 streaming 不串入旧内容；无 DB/config 写入。
+- **回滚**：`humanization.profile=custom/economy` 或 `humanization.streaming_segment.enabled=false` 后重启；安全门控外自动回退旧完整文本分段路径。
+- **回填**：§6 `P6.2` 已置 🟡；P6.3 继续推进脚本与 200 条对比采样。
+
+### P6.3 领单拆分（执行前）
+
+- **目标**：新增只读灰度测量脚本，采样 200 条 group assistant reply，比对 `StreamingSegmenter` 与 Part 5 `reply_segment_plan()` 的段数、段长、段间延迟和体感代理指标。
+- **代码拆分**：新增 `scripts/dev/measure_streaming_vs_natural.sh`；默认读取 `storage/messages.db`，支持 `GROUP_ID / LIMIT / REGISTER / MOOD / STREAM_* / NATURAL_MAX_SEGMENT_CHARS` 环境变量；SQLite 使用 `mode=ro&immutable=1` 避免锁住运行中 bot。
+- **指标拆分**：输出 sample window、segment count distribution、segment length mean/p50/p95/variance、delay avg/p50/p95、文本保真率、>3 段比例、灰度阈值是否命中。
+- **验收证据计划**：`bash -n` + 实跑 all/灰度群 200 条；P6.3 无代码主链路改动，D2 N/A。
+
+### P6.3 完成记录
+
+- **代码**：新增 [scripts/dev/measure_streaming_vs_natural.sh](../../scripts/dev/measure_streaming_vs_natural.sh)，用现有 `group_messages.content_text` 离线重放；natural 路径调用 `reply_segment_plan()`，streaming 路径按 chunk 模拟 SSE 并调用 `StreamingSegmenter.push()/finish()`。
+- **只读口径**：`sqlite3.connect("file:...mode=ro&immutable=1", uri=True)`，不写 DB/config；缺表或缺样本时明确输出状态。
+- **灰度结果**：all groups 200 条：streaming variance `124.955`、delay p50 `2.75s`、文本保真率 `1.0`，命中 P6.3 阈值；`984198159` 200 条：variance `101.2829`、delay p50 `2.76s`，命中阈值；`993065015` 近 200 条短回复占比高，variance `17.8034`、delay p50 `1.05s`，不命中体感收益阈值。
+- **自验**：`bash -n scripts/dev/measure_streaming_vs_natural.sh` → passed；`source ./scripts/dev/env.sh && GROUP_ID=984198159 LIMIT=200 scripts/dev/measure_streaming_vs_natural.sh` → sample 200 且 gray gate yes。
+- **D1 grep**：`measure_streaming_vs_natural / Streaming vs Natural Measurement / StreamingSegmenter` 命中脚本与本追踪文档。
+- **D2 cancel-path**：N/A（灰度测量脚本只读 DB + 纯本地分段模拟，无异步运行状态）。
+- **回滚**：删除脚本或忽略报告；运行时回滚仍为 `profile=economy` 或 `humanization.streaming_segment.enabled=false` 后重启。
+- **回填**：§6 `P6.3` 已置 🟡。
+
+### P6.4 领单拆分（执行前）
+
+- **目标**：让 B 方案在 balanced/performance/custom streaming 启用时成为真实默认路径，同时保留 economy/custom 非 streaming 的 Part 5 natural fallback。
+- **代码拆分**：收口 `_streaming_segment_enabled()`，不再因 rewrite/quote 开启而把 balanced 默认 streaming 全挡掉；`_stream_with_segments()` 自己处理 quote anchor 首段 CQ reply；provider 没有 text delta 时用最终 result text fallback 发段。
+- **安全口径**：仍要求 `on_segment` 存在、群聊、`force_reply=True`、无工具定义、`streaming_segment_enabled=True`；pass_turn/tool 复杂路径继续走完整文本 fallback。
+- **测试拆分**：扩展 `tests/test_streaming_hook.py`，覆盖 balanced quote+rewrite 开启时仍 streaming、无 delta fallback result text；保留 cancel buffer 测试。
+- **验收证据计划**：focused pytest + ruff/pyright；脚本跑 200 条灰度群确认 P6.3 指标仍可复现。
+
+### P6.4 完成记录
+
+- **代码**：[services/llm/client.py](../../services/llm/client.py) 的 streaming gate 现在只保留 `on_segment/group/force_reply/no tools/profile enabled` 关键条件；`_stream_with_segments()` 增 `quote_reply_enabled`，首个有效 `<quote msg_id="..."/>` 转 `[CQ:reply,id=...]` 前缀，只作用于首个可见段。
+- **fallback 收口**：当 provider 不提供逐 token text delta 时，streaming path 会用 `result["text"]` 再跑一次 segmenter；economy/custom 非 streaming path 继续使用完整文本 `reply_segment_plan()`，`natural_split` 未被删除。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_streaming_hook.py tests/test_call_api.py tests/test_streaming_segmenter.py tests/test_llm_client_reply_segment_plan.py tests/test_quote_reply_segment.py` → `27 passed`。
+- **ruff / pyright**：`uv run ruff check services/llm/client.py tests/test_streaming_hook.py tests/test_call_api.py tests/test_streaming_segmenter.py tests/test_llm_client_reply_segment_plan.py tests/test_quote_reply_segment.py` → passed；`uv run pyright ...` → `0 errors`。
+- **灰度复测**：`GROUP_ID=984198159 LIMIT=200 scripts/dev/measure_streaming_vs_natural.sh` → sample 200，streaming variance `101.2829`、delay p50 `2.76s`、文本保真率 `1.0`，gray gate yes。
+- **D1 grep**：`_stream_with_segments / _streaming_segment_enabled / quote_reply_enabled / measure_streaming_vs_natural` 命中 client、streaming hook tests、脚本与本追踪文档。
+- **D2 cancel-path**：沿用 `test_stream_with_segments_cleans_buffer_on_cancel`，`CancelledError` 时 `segmenter.cancel()` 清 buffer；新增 quote/fallback 不写 DB/config。
+- **回滚**：`profile=economy` 或 `humanization.streaming_segment.enabled=false` 后重启；若需代码级回滚，恢复 `_streaming_segment_enabled()` 对 streaming 的保守门控。
+- **回填**：§6 `P6.4` 已置 🟡，Wave 3 完成，继续 Wave 4 P6.5。
+
+### P6.5 领单拆分（执行前）
+
+- **目标**：新增 pause-then-extend 纯决策器，输入上一条回复、register、slot 与群状态，输出是否追发与等待秒数。
+- **代码拆分**：新建 `services/humanization/pause_extend.py`，控制在 150 行内；实现 `PauseExtendConfig`、`PauseExtendDecision`、`PauseExtend.decide()`，不读取 DB/config，不写运行态。
+- **决策规则**：空文本、过短、过长、用户已插话直接拒绝；开放尾巴、延续词、未完成表面提升追发概率；疑问句、低能量、礼貌疏离、热群降低追发概率；等待秒数按 register/energy/group heat 调整并 clamp。
+- **测试拆分**：新增 `tests/test_pause_extend.py`，覆盖开放尾巴、疑问拒绝、用户插话拒绝、register/slot/群热度、长度边界与等待 clamp。
+- **验收证据计划**：`wc -l` 确认 ≤150 行；focused pytest + ruff/pyright；grep 锁 `class PauseExtend / should_extend`。
+
+### P6.5 完成记录
+
+- **代码**：新增 [services/humanization/pause_extend.py](../../services/humanization/pause_extend.py)，143 行 pure decisioner；无 IO、无全局状态、无 DB/config 写入。
+- **行为**：输出 `PauseExtendDecision(should_extend, wait_seconds, reasons)`；支持 register/slot/group_state 字典或对象输入；等待秒数稳定 clamp 到配置上下限。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_pause_extend.py` → `8 passed`。
+- **ruff / pyright**：`uv run ruff check services/humanization/pause_extend.py tests/test_pause_extend.py` → passed；`uv run pyright services/humanization/pause_extend.py tests/test_pause_extend.py` → `0 errors`。
+- **D1 grep**：`class PauseExtend / should_extend / PauseExtendDecision` 命中 `services/humanization/pause_extend.py`、`tests/test_pause_extend.py` 与本追踪文档。
+- **D2 cancel-path**：N/A（纯决策，无异步等待，无持久写）。
+- **回滚**：删除 `services/humanization/pause_extend.py` 与对应测试；P6.6 未开启前运行时无行为变化。
+- **回填**：§6 `P6.5` 已置 🟡，继续 P6.6。
+
+### P6.6 领单拆分（执行前）
+
+- **目标**：把 P6.5 决策器接入 `LLMClient` 出站后追发链路；仅在 `humanization.pause_then_extend_enabled=True`、群聊、存在 `on_segment` 时启用，默认 off。
+- **代码拆分**：`services/llm/client.py` 增 `_maybe_extend()`、追发 gate、群状态读取与 BlockTrace 观测；普通分段/streaming/tool-exhausted 成功出站后调用；追发 LLM call 复用 main profile，usage `call_type=proactive_extend`。
+- **安全口径**：最多追发 2 次；等待期间 `GroupTimeline.get_pending(group_id)` 出现新用户消息则 drop；`CancelledError` 在 wait/call/send 三段均重新抛出，不写 timeline/usage；BlockTrace 仅做观测。
+- **测试拆分**：新增 `tests/test_extend_call.py`，覆盖 feature off 不调用、feature on 先发送首轮再追发、等待期间用户插话 drop、取消期间不写 timeline/usage。
+- **验收证据计划**：focused pytest + ruff/pyright；grep 锁 `_maybe_extend / proactive_extend / pause_then_extend_enabled`。
+
+### P6.6 完成记录
+
+- **代码**：[services/llm/client.py](../../services/llm/client.py) 新增 `_maybe_extend()`、`_pause_extend_enabled()`、`_pause_extend_group_state()` 与 `proactive_extend` 观测/usage；主回复 normal、streaming、tool-exhausted 三个成功出站点均接入。
+- **行为**：开关关闭或无 `on_segment` 时完全旁路；开关开启时先把首轮回复完整送出，再按 `PauseExtend` 等待并追发；等待期间检测到群 pending 新用户消息则放弃追发；最多追发 2 次。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_extend_call.py tests/test_pause_extend.py tests/test_streaming_hook.py tests/test_llm_client_reply_segment_plan.py` → `20 passed`。
+- **ruff / pyright**：`uv run ruff check services/llm/client.py services/humanization/pause_extend.py tests/test_extend_call.py` → passed；`uv run pyright services/llm/client.py services/humanization/pause_extend.py tests/test_extend_call.py` → `0 errors`。
+- **D1 grep**：`_maybe_extend / proactive_extend / pause_then_extend_enabled / PauseExtend` 命中 client、pause decisioner、extend tests 与本追踪文档。
+- **D2 cancel-path**：`tests/test_extend_call.py::test_maybe_extend_cancel_during_wait_re_raises_without_extension` 覆盖等待期取消重新抛出且不写 timeline；`test_maybe_extend_user_reply_during_wait_drops_extension` 覆盖用户插话后不发追发、不调用 LLM。
+- **回滚**：运行时保持 `humanization.pause_then_extend.enabled=false` 或 `profile=economy/custom` 后重启；代码级回滚移除 `_maybe_extend()` 调用与 `tests/test_extend_call.py`。
+- **回填**：§6 `P6.6` 已置 🟡，继续 Wave 4 P6.7。
+
+### P6.7 领单拆分（执行前）
+
+- **目标**：新增 D 方案灰度脚本，输出真实 usage 追发率与历史消息离线估算追发率，验证 `extend_rate <= 25%` gate。
+- **代码拆分**：新增 `scripts/dev/measure_extend_rate.sh`；只读 `storage/usage.db` 与 `storage/messages.db`；支持 `GROUP_ID / LIMIT / USAGE_LIMIT / EXTEND_RATE_MAX / REGISTER / SLOT_ENERGY`。
+- **口径拆分**：`actual_usage` 统计 `llm_calls` 中 `proactive_extend / proactive|main`；`offline_estimate` 抽最近 200 条 assistant reply，单文件加载 P6.5 `PauseExtend` 决策器，并按等待窗口内是否有下一条 user 消息估算实际会被打断的追发量。
+- **测试拆分**：脚本 `bash -n`；实跑 all/984198159/993065015 三组 200 条采样；P6.7 无主链路代码改动。
+- **验收证据计划**：三组 `gray_gate.overall_gate=yes`，并把 actual/offline 结果回填本追踪文档。
+
+### P6.7 完成记录
+
+- **代码**：新增 [scripts/dev/measure_extend_rate.sh](../../scripts/dev/measure_extend_rate.sh)，SQLite 均使用 `mode=ro&immutable=1`，不写 DB/config；为避免包级重依赖，脚本按文件路径加载 `services/humanization/pause_extend.py`。
+- **actual usage**：all 最近 usage 500 行：primary 500、extend 0、extend_rate `0.00%`；`984198159` primary 125、extend 0、extend_rate `0.00%`；`993065015` primary 438、extend 0、extend_rate `0.00%`。
+- **offline estimate**：all 最近 200 条 assistant reply：decision_rate `3.00%`、interrupted `100.00%`、estimated_extend_rate `0.00%`；`984198159`：decision_rate `3.00%`、interrupted `100.00%`、estimated_extend_rate `0.00%`；`993065015`：decision_rate `0.00%`、estimated_extend_rate `0.00%`。
+- **自验**：`bash -n scripts/dev/measure_extend_rate.sh` → passed；`scripts/dev/measure_extend_rate.sh`、`GROUP_ID=984198159 LIMIT=200 scripts/dev/measure_extend_rate.sh`、`GROUP_ID=993065015 LIMIT=200 scripts/dev/measure_extend_rate.sh` → 三组 `overall_gate: yes`。
+- **D1 grep**：`measure_extend_rate / Pause Extend Rate Measurement / proactive_extend / extend_rate` 命中脚本、client 观测/usage 与本追踪文档。
+- **D2 cancel-path**：N/A（灰度测量脚本只读 DB + 离线决策模拟，无异步追发状态）。
+- **回滚**：删除脚本或忽略报告；运行时回滚仍为 `profile=economy` 或 `humanization.pause_then_extend.enabled=false` 后重启。
+- **回填**：§6 `P6.7` 已置 🟡，继续 P6.8。
+
+### P6.8 领单拆分（执行前）
+
+- **目标**：将 D 方案 pause-then-extend 从灰度开关推进为默认开启，并保留 `profile=economy` / 显式关闭开关的快速回滚路径。
+- **代码拆分**：`kernel/config.py` 将 `PauseThenExtendConfig.enabled` 默认值改为 `true` 并同步 help；`config/config.json` 同步运行时源；`tests/test_humanization_config.py` 更新默认值断言。
+- **守卫拆分**：复跑 `scripts/dev/measure_extend_rate.sh`，确认默认开启后实际/离线 `extend_rate <= 25%`；复跑全量 pytest。
+- **验收证据计划**：focused config/extend/streaming 测试 + ruff/pyright + 全量 pytest + extend_rate 三组 gate。
+
+### P6.8 完成记录
+
+- **代码**：[kernel/config.py](../../kernel/config.py) `PauseThenExtendConfig.enabled=True`，help 明确默认开启与回滚方式；[config/config.json](../../config/config.json) 运行时源同步 `humanization.pause_then_extend.enabled=true`；[tests/test_humanization_config.py](../../tests/test_humanization_config.py) 默认配置断言同步。
+- **守卫结果**：`scripts/dev/measure_extend_rate.sh` 默认开启后 all / `984198159` / `993065015` 三组均为 `overall_gate: yes`，actual usage 与 offline estimate 的 extend_rate 均为 `0.00%`。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q` → `1964 passed, 8 skipped`。
+- **ruff / pyright**：Python 相关文件 focused ruff passed；`uv run pyright kernel/config.py services/llm/client.py services/humanization/pause_extend.py tests/test_extend_call.py tests/test_humanization_config.py` → `0 errors`。
+- **D1 grep**：`PauseThenExtendConfig / pause_then_extend.enabled / proactive_extend` 命中 schema、运行时 config、LLMClient、extend tests 与本追踪文档。
+- **D2 cancel-path**：沿用 P6.6 覆盖；等待期取消重新抛出且不写 timeline/usage，用户插话后 drop 追发。
+- **回滚**：设置 `humanization.pause_then_extend.enabled=false` 或切 `humanization.profile=economy` 后重启；无需 DB migration。
+- **回填**：§6 `P6.8` 已置 🟡，继续 Wave 5 P6.9。
+
+### P6.9 领单拆分（执行前）
+
+- **目标**：落地 A 方案 pilot：先短 plan call 生成 2~3 段大纲，再逐段 utter call 生成并发送；仅主动群聊灰度路径生效。
+- **代码拆分**：新增 `services/llm/plan_then_utter.py`，控制在 250 行内；`LLMClient` 增 `_maybe_plan_then_utter()`、gate、usage 与 BlockTrace 观测；`kernel/config.py` 确认 `humanization.plan_then_utter.enabled` 默认 off，performance 也必须显式开 flag 才启用。
+- **安全口径**：仅 `on_segment` 存在、群聊、非 `force_reply`、runtime group 允许、`plan_then_utter_enabled=True`、无业务工具时启用；内置 `pass_turn` 不算业务工具；plan 无效或 utter 空/重复时 fallback 旧 main 路径；取消路径重新抛出，不写半截 timeline。
+- **测试拆分**：新增 `tests/test_plan_then_utter.py`，覆盖 plan 解析、token caps、默认关闭、灰度命中、多段发送、BlockTrace parent_span_id、无效 plan fallback、取消路径、业务工具阻断。
+- **验收证据计划**：focused pytest + ruff/pyright；`wc -l services/llm/plan_then_utter.py` ≤250；grep 锁 `class PlanThenUtter / proactive_plan / proactive_utter`。
+
+### P6.9 完成记录
+
+- **代码**：新增 [services/llm/plan_then_utter.py](../../services/llm/plan_then_utter.py) 189 行，提供 `PlanThenUtter`、plan JSON/bullet 解析、plan request `max_tokens=80`、utter request `max_tokens=150`；[services/llm/client.py](../../services/llm/client.py) 接入主动群聊早期分支。
+- **gate 行为**：默认 off；`performance` profile 仍要求 `humanization.plan_then_utter.enabled=true` 且 group whitelist 命中；仅非 @/非强制的 proactive 群聊、存在 `on_segment`、无业务工具时触发；`pass_turn` 被视为内置静默工具，不阻断 pilot。
+- **观测**：plan call 写 usage `proactive_plan`；每段 utter call 写 usage `proactive_utter`；BlockTrace 记录 `proactive_plan` / `proactive_utter`，metadata 带统一 `parent_span_id`、status、outline 与 utter_index。
+- **fallback / cancel**：plan 无效或 utter 空/重复时回到旧 main path；plan/utter/send 任一阶段 `CancelledError` 重新抛出，未完成前不写 timeline；取消 trace 异步 best-effort 写 `status=cancelled`。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_plan_then_utter.py tests/test_humanization_config.py tests/test_extend_call.py tests/test_streaming_hook.py tests/test_llm_client_reply_segment_plan.py tests/test_client.py::test_main_chat_aggregated_usage_with_per_round_diagnostic` → `30 passed`。
+- **ruff / pyright**：`uv run ruff check services/llm/plan_then_utter.py services/llm/client.py tests/test_plan_then_utter.py kernel/config.py tests/test_humanization_config.py` → passed；`uv run pyright services/llm/plan_then_utter.py services/llm/client.py tests/test_plan_then_utter.py kernel/config.py tests/test_humanization_config.py` → `0 errors`。
+- **D1 grep**：`class PlanThenUtter / proactive_plan / proactive_utter / _maybe_plan_then_utter / plan_then_utter_enabled` 命中 plan 模块、client、config、tests 与本追踪文档。
+- **D2 cancel-path**：`tests/test_plan_then_utter.py::test_chat_plan_then_utter_plan_cancel_re_raises_without_dirty_write` 覆盖 plan call 取消重新抛出、无发送、无 usage、无 timeline 写入。
+- **回滚**：运行时设置 `humanization.plan_then_utter.enabled=false` 或切 `profile=balanced/economy` 后重启；代码级回滚移除 `_maybe_plan_then_utter()` 分支与 `tests/test_plan_then_utter.py`。
+- **回填**：§6 `P6.9` 已置 🟡，继续 P6.10。
+
+### P6.10 领单拆分（执行前）
+
+- **目标**：补齐 A 方案 14 日 pilot 监控入口，覆盖 cost、latency、BlockTrace 配对与 PersonaScore baseline，不依赖 Grafana 即可本地复核。
+- **代码拆分**：新增 `scripts/dev/measure_plan_then_utter_pilot.sh`，只读 `storage/usage.db` 与 `storage/block_trace.db`；支持 `GROUP_ID / DAYS / COST_RATIO_MAX / PERSONA_DRIFT_MAX_PP / MIN_PILOT_PARENTS`。
+- **指标口径**：baseline 按 `proactive/main` 单 reply 平均 token；pilot 按 `proactive_plan` 次数聚合 `proactive_plan + proactive_utter` 总 token，避免把一条主动回复拆成多 call 后低估成本。
+- **PersonaScore**：优先读 `humanization_metrics` 表；缺表/缺 pilot 样本时输出 `no_sample`，不伪造结论。
+- **验收证据计划**：`bash -n`、真实 DB all/灰度群实跑；新增临时 SQLite pytest 锁住 per-reply 成本口径与 no-sample 口径。
+
+### P6.10 完成记录
+
+- **代码**：新增 [scripts/dev/measure_plan_then_utter_pilot.sh](../../scripts/dev/measure_plan_then_utter_pilot.sh)，输出 `usage_cost_latency`、`block_trace_pairing`、`persona_score_baseline`、`rollout_gate` 四段。
+- **测试**：新增 [tests/test_plan_then_utter_pilot_measure.py](../../tests/test_plan_then_utter_pilot_measure.py)，用临时 SQLite 覆盖有样本时 `avg_pilot_tokens_per_reply=(plan+utter)/plan_count`、配对 gate、persona gate，以及无样本时 `continue_pilot_collect_samples`。
+- **实测**：14 日 all groups baseline `129` 个 proactive/main reply，pilot plan/utter `0/0`；`993065015` baseline `122`、pilot `0/0`；`984198159` baseline `5`、pilot `0/0`。
+- **决策输出**：三组均为 `decision: continue_pilot_collect_samples`；`cost_gate/pairing_gate/persona_gate` 均为 `no_sample`，说明当前是未产生 A pilot 样本，不是 A 方案已失败。
+- **自验**：`source ./scripts/dev/env.sh && uv run pytest -q tests/test_plan_then_utter_pilot_measure.py` → `2 passed`；`uv run ruff check tests/test_plan_then_utter_pilot_measure.py` → passed；`bash -n scripts/dev/measure_plan_then_utter_pilot.sh` → passed。
+- **D1 grep**：`measure_plan_then_utter_pilot / proactive_plan / proactive_utter / avg_pilot_tokens_per_reply` 命中脚本、测试与本追踪文档。
+- **D2 cancel-path**：N/A（只读 SQLite + 本地聚合，无异步运行状态和持久写）。
+- **回滚**：删除/忽略脚本；运行时回滚仍为 `humanization.plan_then_utter.enabled=false` 或切 `profile=balanced/economy`。
+- **回填**：§6 `P6.10` 已置 🟡，继续 P6.11。
+
+### P6.11 领单拆分（执行前）
+
+- **目标**：基于 P6.10 输出完成 A 方案决策门：上 / 不上 / 调参后再 pilot。
+- **决策规则**：成本 > 2.5× baseline、BlockTrace 配对失败、PersonaScore 跌幅 > 5pp 任一命中则关闭 A；样本不足则不上默认也不永久关闭，继续 pilot 收集。
+- **文档拆分**：回填本执行文档 §6 / §9，并推进主线 §10 状态说明。
+- **验收证据计划**：复用 P6.10 脚本输出作为报告回执，D2 N/A。
+
+### P6.11 完成记录
+
+- **结论**：当前选择 **调参后再 pilot / 继续收集样本**。不把 A 方案升为默认，也不判定永久失败。
+- **依据**：P6.10 真实 DB 14 日窗口中 `proactive_plan=0`、`proactive_utter=0`，缺少成本、latency、PersonaScore pilot 样本；`rollout_gate.decision=continue_pilot_collect_samples`。
+- **执行口径**：保持 `humanization.plan_then_utter.enabled=false` 为默认；若后续开启灰度，必须先看到 `MIN_PILOT_PARENTS>=20` 且 cost/persona/pairing 三 gate 通过，再进入“上默认”讨论。
+- **失败阈值**：单 reply `plan+utter` token 成本 > baseline 2.5×、PersonaScore 跌 >5pp、或 parent_span 配对失败，即回滚 `humanization.plan_then_utter.enabled=false` / `profile=balanced`。
+- **D1 grep**：`P6.11 / continue_pilot_collect_samples / plan_then_utter.enabled=false` 命中本执行文档与主线 §10 状态。
+- **D2 cancel-path**：N/A（决策文档，无运行时代码）。
+- **回填**：§6 `P6.11` 已置 🟡，继续 P6.12。
+
+### P6.12 领单拆分（执行前）
+
+- **目标**：锁定 C reactive replan 暂搁，不开发、不灰度。
+- **文档拆分**：在主线 §10 和执行文档记录锁定理由，保持 §5 “不实现 mid-stream resume” 结论不变。
+- **锁定理由**：DeepSeek 不支持 stream continuation；abort 后已输出 token 与 reasoning replay 会引入因果链漂移；Part 5 / B / A 已覆盖主要拟人收益，C 的复杂度和浪费不成比例。
+- **验收证据计划**：grep `C 方案 / stream continuation / 永不进灰度`；D2 N/A。
+
+### P6.12 完成记录
+
+- **结论**：C 方案继续锁定为 **不开发 / 不灰度**。
+- **依据**：主线 §5 已写明 DeepSeek 不支持 “中断 SSE → 继续 SSE” 的 mid-stream resume；§1.3.4/§1.4 的 abort 成本分析显示 replan 后需要回填已见文本和 reasoning 上下文，因果链复杂度高。
+- **边界**：后续如需“被打断后再说”，只走 D pause-then-extend 或 A plan-then-utter 的多 call 边界，不实现真正 mid-stream abort/resume。
+- **D1 grep**：`C 方案 / DeepSeek 不支持 stream continuation / 永不进灰度` 命中主线与本执行文档。
+- **D2 cancel-path**：N/A（仅文档锁定）。
+- **回填**：§6 `P6.12` 已置 🟡，继续 P6.13。
+
+### P6.13 领单拆分（执行前）
+
+- **目标**：Part 6 执行收口，提供一键只读测量入口，并回填本执行追踪。
+- **代码拆分**：新增 `scripts/dev/measure_humanization_part6.sh`，串联 P6.3 streaming、P6.7 pause-extend、P6.10 plan-then-utter 三个测量脚本。
+- **文档拆分**：更新 §6 状态表和主线 §10；`maintenance-log.md` 当前共享脏改，本轮不触碰，避免混入其他人的未提交内容。
+- **验收证据计划**：`bash -n` + 小 limit 实跑总览脚本；D2 N/A。
+
+### P6.13 完成记录
+
+- **代码**：新增 [scripts/dev/measure_humanization_part6.sh](../../scripts/dev/measure_humanization_part6.sh)，按顺序输出 P6.3 / P6.7 / P6.10 三个测量结果，每段带 `section_status`。
+- **收口状态**：P6.9~P6.13 均已进入 🟡 待最终审查；P6.0.c 仍按用户口径“忽略前项未完成灰度内容”保留 ⏳，不阻塞本次 Part 6 后续交付。
+- **自验**：`bash -n scripts/dev/measure_humanization_part6.sh` → passed；`LIMIT=5 bash scripts/dev/measure_humanization_part6.sh` → 三段均执行完成。
+- **D1 grep**：`measure_humanization_part6 / P6.13 / section_status` 命中脚本与本追踪文档。
+- **D2 cancel-path**：N/A（只读测量脚本，无运行态）。
+- **回滚**：删除/忽略总览脚本；所有运行时回滚仍由各子功能 flag 控制。
+- **回填**：§6 `P6.13` 已置 🟡。`maintenance-log.md` 因共享脏改未触碰，交由后续拆分提交时单独补条目。
 
 ---
 

@@ -62,10 +62,18 @@ def test_pipeline_keys_are_unique_and_stable() -> None:
 
 
 def test_pipeline_for_task_returns_owner() -> None:
-    assert pipeline_for_task("main").key == "core_chat"
-    assert pipeline_for_task("slang_review").key == "slang"
-    assert pipeline_for_task("memo").key == "learning"
-    assert pipeline_for_task("graph_review").key == "memory_graph"
+    main_pipeline = pipeline_for_task("main")
+    slang_pipeline = pipeline_for_task("slang_review")
+    memo_pipeline = pipeline_for_task("memo")
+    graph_pipeline = pipeline_for_task("graph_review")
+    assert main_pipeline is not None
+    assert slang_pipeline is not None
+    assert memo_pipeline is not None
+    assert graph_pipeline is not None
+    assert main_pipeline.key == "core_chat"
+    assert slang_pipeline.key == "slang"
+    assert memo_pipeline.key == "learning"
+    assert graph_pipeline.key == "memory_graph"
     assert pipeline_for_task("unknown_task") is None
 
 

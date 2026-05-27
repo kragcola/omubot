@@ -91,7 +91,7 @@ class Segment:
 @dataclass(frozen=True)
 class ReplySegmentationConfig:
     enabled: bool = True
-    natural_split_enabled: bool = False
+    natural_split_enabled: bool = True
     max_segment_chars: int = 20
     min_segment_chars: int = 6
     max_send_segments: int = 0
@@ -893,7 +893,7 @@ def reply_segments(
     return result.texts, result.raw_count, result.limit_status
 
 
-def _natural_split_path(
+def _natural_segment_plan(
     reply: str,
     cfg: ReplySegmentationConfig,
     *,
@@ -927,14 +927,13 @@ def _natural_split_path(
     )
 
 
-def _legacy_segment_path(reply: str, cfg: ReplySegmentationConfig) -> ReplySegmentPlan:
-    segments, raw_count, limit_status = reply_segments(reply, cfg)
-    fixed_delay = max(0.0, float(getattr(cfg, "inter_segment_delay_s", 0.8)))
+def _disabled_segment_plan(reply: str) -> ReplySegmentPlan:
+    text = _clean_text(fix_cq_codes(reply))
     return ReplySegmentPlan(
-        segments=segments,
-        raw_count=raw_count,
-        limit_status=limit_status,
-        inter_segment_delays=[fixed_delay] * max(0, len(segments) - 1),
+        segments=[text],
+        raw_count=1,
+        limit_status="none",
+        inter_segment_delays=[],
     )
 
 
@@ -949,15 +948,13 @@ def reply_segment_plan(
 ) -> ReplySegmentPlan:
     """Return segment texts and the pause after each non-final segment."""
     config = cfg or ReplySegmentationConfig()
-    if not config.enabled:
-        return _legacy_segment_path(reply, config)
-    if config.natural_split_enabled:
-        return _natural_split_path(
-            reply,
-            config,
-            register=register,
-            slot_energy=slot_energy,
-            mood_label=mood_label,
-            rng=rng,
-        )
-    return _legacy_segment_path(reply, config)
+    if not config.enabled or not config.natural_split_enabled:
+        return _disabled_segment_plan(reply)
+    return _natural_segment_plan(
+        reply,
+        config,
+        register=register,
+        slot_energy=slot_energy,
+        mood_label=mood_label,
+        rng=rng,
+    )

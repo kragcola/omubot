@@ -519,6 +519,41 @@ v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output
 | `performance → balanced` | A 触发中切档导致单条 reply plan/utter 不一致 | profile 决议在 reply 入口 resolve 一次后冻结到 reply 完成；切档影响下一次 reply |
 | 群级覆盖 vs 全局 | 同一时刻不同群跑不同 profile，可观测混乱 | `storage/usage.db.call_type` 沿用 `proactive` / `proactive_plan` / `proactive_utter` 区分；BlockTrace 增 `profile` 字段 |
 
+#### 4.4.6 QQ 特殊交互能力（戳一戳 / 拍一拍 / 表情回应 / 引用回复）— v2.3 增补
+
+> 增补于 v2.3（2026-05-26 用户原话："qq存在戳一戳，拍一拍，表情直接在消息回复等特殊状态，当前是否支持，是否需要单开一个part或是加补充？" → "part2-3 已在执行，尽量与 part6 同批次"）。本节把 QQ 协议层四类特殊交互纳入 §4.4 的三档体系，**不开 Part 7**，入站事件并入 Part 2-3 调度器（仅事件源接入，不改调度逻辑），出站工具与 profile 切换并入 Part 6 同批次施工。
+
+**现状审计（2026-05-26 grep 实证）**：
+
+| 特殊交互 | 入站事件 | 出站 API | 仓内现状 |
+|---|---|---|---|
+| 戳一戳 | OneBot v11 [`PokeNotifyEvent`](../../.venv/lib/python3.13/site-packages/nonebot/adapters/onebot/v11/event.py) `notice_type=notify / sub_type=poke / target_id / user_id / group_id` | NapCat `send_poke` action | **0 命中**（router 仅处理 `GroupBanNoticeEvent`） |
+| 拍一拍 | NapCat 走 `notify.poke` 兼容子类型（与戳一戳同事件，不同 raw_info） | NapCat `send_poke` action | 同上 |
+| 表情回应 | NapCat 扩展事件（OneBot v11 上游无标准类，需 raw event hook） | NapCat `set_msg_emoji_like` action | **0 命中** |
+| 引用回复 | 入站消息已含 `reply` segment（NoneBot 自动解析） | [`MessageSegment.reply(msg_id)`](../../.venv/lib/python3.13/site-packages/nonebot/adapters/onebot/v11/bot.py#L184) | client.py 主回复路径**未使用** |
+
+**三档纳入策略**：
+
+| profile | 戳一戳响应 | 表情回应响应 | 主动戳人 | 主动加表情 | 引用回复 |
+|---|---|---|---|---|---|
+| `economy`（默认） | 关 | 关 | 关 | 关 | 关 |
+| `balanced`（推荐） | **被动响应**（被戳后概率回应） | **被动响应**（消息被 react 后概率轻反馈） | 关 | 关 | **开**（@场景或多人发言时显式定位被回方） |
+| `performance`（pilot） | 同 balanced | 同 balanced | **开**（低频；冷场或亲密度高时） | **开**（低频；情绪类轻反馈） | 同 balanced |
+| `custom` | 由 `humanization.qq_interactions.*` 子 flag 控制 | 同 | 同 | 同 | 同 |
+
+**统一速率门**（不分 profile，硬上限）：
+
+- 单群 60 秒窗口：`poke_out` ≤ 2 次 / `react_out` ≤ 3 次（防刷屏）
+- 单 user 5 分钟窗口：`poke_out` ≤ 1 次（防"对一个人反复戳"）
+- 入站频率护栏：单 user 60 秒内 `poke_in` ≥ 5 次 → 当前 user 进入 60 秒 mute（仅对该 user 不响应戳，不影响其他人）
+
+**与 Part 2-3 的接入边界**（关键，用户已强调 Part 2-3 在执行中，本节只接事件源）：
+
+- 入站 `PokeNotifyEvent` / `MessageReactionEvent`（NapCat raw）解析后，转写为统一 trigger signal 投递到现有 Part 2-3 group_timeline 调度器
+- **不改 Part 2-3 调度仲裁逻辑**——是否回应、回应形态由 Part 2-3 既有 trigger arbitration 决定；本节只新增"事件源"和"signal 类型枚举"
+- signal payload 字段：`{"kind": "poke" | "reaction", "actor_user_id", "target_user_id", "raw_message_id?", "emoji_code?", "is_tome": bool}`
+- 与 @ / 关键词 / debounce 同级 trigger，但**优先级独立（中）+ 速率独立**——避免戳一戳轰炸压住正常对话信号
+
 ## 5 不做的事（v2 增补）
 
 | 项 | 原因 |
@@ -571,12 +606,13 @@ v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output
 
 ---
 
-## 7 子任务编号 P6.0 ~ P6.13（v2.1 P6.0 三段拆分 / v2.2 三档 profile 切换）
+## 7 子任务编号 P6.0 ~ P6.13（v2.1 P6.0 三段拆分 / v2.2 三档 profile 切换 / v2.3 QQ 特殊交互）
 
 > v1 P6.8（cache_creation 字段监控）在 DeepSeek 路径下 dead——结构性恒为 0，无信号。删除。
 > v2 新增 P6.0（state_board prefix 稳定化）作为强制前置；编号让出空间，原 P6.1~P6.14 → P6.1~P6.13。
 > **v2.1**：P6.0 拆为 P6.0.a / P6.0.b / P6.0.c 三段，分别对应 §1.5.4 候选 (a) layout 后置、(b) 时间戳粒度抬升、(c) 7 日复盘验收。这条**承接** D+E 已落地的 slang 家族治理，**继续治理主链路** state_board 抖动层。
 > **v2.2**：新增 P6.0.x1~P6.0.x5（profile 切换基础设施），把 economy / balanced / performance / custom 四档物化到 [HumanizationConfig](../../kernel/config.py#L1024) + [GroupOverride](../../kernel/config.py#L343) + Admin SPA。施工节奏与 P6.1~P6.13 解耦——profile=custom 时全部新 flag 走原 flag-by-flag 路径，不强制升级。
+> **v2.3**：新增 P6.0.y1~P6.0.y4（QQ 特殊交互能力），把戳一戳 / 拍一拍 / 表情回应 / 引用回复纳入三档 profile。**不开 Part 7**；入站事件源接入 Part 2-3 既有调度器（不改 Part 2-3 逻辑），出站工具与 profile 切换并入 Part 6 同批次。Part 2-3 已在执行中，本节仅接事件源。
 
 ### 7.0 P6.0 三段细化（v2.1 增补 / v2.2 复用 profile=economy）
 
@@ -596,6 +632,17 @@ v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output
 | **P6.0.x4** | **健康守卫：performance → balanced 自动降级** | P6.0.x1 + P6.0.c | `services/humanization/health_guard.py` ≤ 100 行：(1) 周期 60s 查 [storage/usage.db](../../storage/usage.db) 最近 1h 按 group_id 的 proactive hit% / chat hit%；(2) 当 group 设置 performance 但实测 hit% < 80% → 写入 in-mem `_degraded_groups: dict[str, datetime]`；(3) `resolve_profile()` 在 performance 路径上检查该字典，若降级中则返回 balanced 决议；(4) hit% 恢复到 ≥ 85% 持续 10min 后自动解除降级 | `tests/test_humanization_health_guard.py` ≥ 6：DB 查询 / 降级触发 / 降级解除 / 多群独立降级 / SPA 显示值与运行时值不一致的 log warning / 健康守卫读不到 DB 的兜底（默认不降级，避免误伤） |
 | **P6.0.x5** | **Admin SPA 自动渲染 + 三档 chip 显示** | P6.0.x1 + P6.0.x2 | (1) [admin/routes/api/config.py:380 `_build_schema()`](../../admin/routes/api/config.py#L380) 自动渲染 enum（已有管线）；(2) [admin/frontend/src/views/](../../admin/frontend/src/views/) 系统配置页：拟人化区块加 profile 下拉 + 子配置只读卡片（profile=custom 时变可编辑）；(3) 群组管理页：群级 humanization_profile 下拉 + "继承全局" 选项；(4) 拟人化档位 chip 在 dashboard 显示当前生效档位 + 健康守卫降级红点 | `tests/test_admin_humanization_profile.py` ≥ 4 + 前端 vue-tsc + npm run build |
 
+### 7.0.y P6.0.y — QQ 特殊交互能力（v2.3 新增；与 v2.2 同批次）
+
+> 与 §4.4.6 对齐：戳一戳 / 拍一拍 / 表情回应 / 引用回复四类 QQ 特殊交互。**不开 Part 7**；入站事件源接入投递到 Part 2-3 既有调度器（Part 2-3 已在执行中，本节只接事件源不改调度逻辑），出站工具与 profile 切换并入 Part 6 同批次。施工节奏与 P6.0.x1~x5 并行（仅事件源 + 工具 + BaseModel 改动，无主链路）。
+
+| 编号 | 任务 | 依赖 | 关键产物 | 单测 |
+|---|---|---|---|---|
+| **P6.0.y1** | **入站事件源：戳一戳 / 表情回应 NoticeEvent handler** | 无 | (1) [kernel/router.py:1137-1149 `GroupBanNoticeEvent`](../../kernel/router.py#L1137-L1149) 同级新增 `on_notice` 处理 OneBot v11 [`PokeNotifyEvent`](../../.venv/lib/python3.13/site-packages/nonebot/adapters/onebot/v11/event.py)（`sub_type=poke / target_id / user_id / group_id`）；(2) NapCat 扩展 `MessageReactionEvent`（raw `notice_type=notify / sub_type=group_msg_emoji_like` 或 `reaction`，按 NapCat 实际 schema 适配）走 raw event hook；(3) 事件解析为统一 trigger signal `{"kind": "poke" \| "reaction", "actor_user_id", "target_user_id", "raw_message_id?", "emoji_code?", "is_tome": bool}`；(4) 投递到 Part 2-3 group_timeline 调度器（**复用既有 trigger 总线，不新增事件类型枚举**） | `tests/test_qq_interaction_inbound.py` ≥ 6：戳一戳 is_tome / 戳一戳 between users（drop） / 表情回应 to bot message / 表情回应 to other message（drop） / signal payload 格式 / 入站频率护栏（单 user 60s ≥ 5 次 poke → 60s mute） |
+| **P6.0.y2** | **出站工具：interaction_tools.py** | P6.0.y1 | `services/tools/interaction_tools.py` ≤ 120 行，沿 [services/tools/registry.py](../../services/tools/registry.py) 既有工具注册模式：(1) `poke_user(user_id, group_id?)` → NapCat `send_poke` action；(2) `react_to_message(message_id, emoji_code)` → NapCat `set_msg_emoji_like` action；(3) 出站速率门：单群 60s `poke_out` ≤ 2 / `react_out` ≤ 3；单 user 5min `poke_out` ≤ 1（in-mem token bucket，与 [storage/usage.db](../../storage/usage.db) 解耦）；(4) profile 守卫——economy 全关 / balanced 仅被动响应 / performance 全开；(5) tool spec `enabled` 字段从 `resolve_profile().qq_interactions_*` 读 | `tests/test_qq_interaction_tools.py` ≥ 6：poke 调用 / react 调用 / 单群速率上限 / 单 user 5min 上限 / profile=economy 工具不注册 / profile=balanced 主动 poke 拒绝 |
+| **P6.0.y3** | **引用回复：MessageSegment.reply 集成** | P6.0.y1 | (1) [services/llm/client.py:359 `_reply_segments`](../../services/llm/client.py#L359) 出站组装：模型在文本里输出 `<quote msg_id="..."/>` 锚点 → 组装时转 `MessageSegment.reply(msg_id) + 文本`；(2) profile 守卫：economy 关 / balanced+performance 开；(3) tag 解析失败兜底：未识别 / 不存在 msg_id → 静默 strip 锚点回退纯文本（不 raise） | `tests/test_quote_reply_segment.py` ≥ 4：合法锚点解析 / 无效 msg_id 兜底 / profile=economy 直接 strip / 多锚点取第一个 |
+| **P6.0.y4** | **HumanizationConfig.qq_interactions 子配置 + profile 决议扩展** | P6.0.x1 + P6.0.y1~y3 | (1) [kernel/config.py:1024 `HumanizationConfig`](../../kernel/config.py#L1024) 新增嵌套 `qq_interactions: QQInteractionsConfig` 子 BaseModel：`poke_inbound_response_enabled / reaction_inbound_response_enabled / poke_outbound_enabled / reaction_outbound_enabled / quote_reply_enabled` 5 个 bool（默认全 off）；(2) `resolve_profile()` 输出新增 5 个对应字段；(3) [GroupOverride](../../kernel/config.py#L343) 新增 `qq_interactions_profile_override: bool \| None = None`（与 humanization_profile 联动，不单独配 5 个 flag 防爆 SPA）；(4) Admin SPA 系统配置页 / 群组管理页自动渲染 enum（沿 P6.0.x5 管线，无前端额外 PR） | `tests/test_humanization_qq_interactions.py` ≥ 4：profile=economy 全 off / profile=balanced 入站响应 + quote_reply on / profile=performance 全 on / profile=custom 直读子 flag |
+
 ### 7.1 完整子任务表
 
 | 编号 | 任务 | 依赖 | 关键产物 | 单测 |
@@ -614,15 +661,15 @@ v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output
 | **P6.12** | C 方案 暂搁 — 不开发 | — | 文档锁定结论：DeepSeek 不支持 stream continuation + abort drift + 因果链复杂度，C 方案永不进灰度 | — |
 | **P6.13** | 文档收口 + maintenance-log 当日条目 | P6.0 ~ P6.11 | 本文 §10 状态表 + maintenance-log 条目 | — |
 
-合计：**P6.0（a/b/c）+ P6.0.x（x1~x5 profile 切换基础设施）+ B（P6.1~P6.4）+ D（P6.5~P6.8）+ A pilot（P6.9~P6.11）+ C 锁定（P6.12）+ 收口（P6.13）= 18 子任务**。新增代码估算 ≤ 1100 行 / 净删 ≈ 300 行；新增测试 ≥ 63 条。
+合计：**P6.0（a/b/c）+ P6.0.x（x1~x5 profile 切换基础设施）+ P6.0.y（y1~y4 QQ 特殊交互能力）+ B（P6.1~P6.4）+ D（P6.5~P6.8）+ A pilot（P6.9~P6.11）+ C 锁定（P6.12）+ 收口（P6.13）= 22 子任务**。新增代码估算 ≤ 1450 行 / 净删 ≈ 300 行；新增测试 ≥ 83 条。
 
 ### 7.2 施工节奏与 profile 解锁关系
 
 | profile | 解锁条件 | 包含子任务 |
 |---|---|---|
-| `economy`（默认） | P6.0.a + P6.0.b + P6.0.x1~x5 落地 | P6.0.a / P6.0.b / P6.0.c / P6.0.x1~x5 |
-| `balanced`（推荐） | economy 落地 + P6.0.c 阈值通过（proactive ≥ 85%）+ P6.1~P6.8 落地 | + P6.1~P6.4（B）+ P6.5~P6.8（D） |
-| `performance`（pilot） | balanced 落地 + 用户验收 + P6.9~P6.11 落地 | + P6.9~P6.11（A pilot）；运行时受 P6.0.x4 健康守卫保护 |
+| `economy`（默认） | P6.0.a + P6.0.b + P6.0.x1~x5 + P6.0.y1~y4 落地 | P6.0.a / P6.0.b / P6.0.c / P6.0.x1~x5 / P6.0.y1~y4（QQ 交互全 off） |
+| `balanced`（推荐） | economy 落地 + P6.0.c 阈值通过（proactive ≥ 85%）+ P6.1~P6.8 落地 | + P6.1~P6.4（B）+ P6.5~P6.8（D）+ QQ 交互入站响应 + 引用回复开 |
+| `performance`（pilot） | balanced 落地 + 用户验收 + P6.9~P6.11 落地 | + P6.9~P6.11（A pilot）；运行时受 P6.0.x4 健康守卫保护；+ QQ 交互主动 poke / 主动 react 开 |
 | `custom`（向后兼容） | 任意子任务可独立启用 | 所有 flag 自由组合，与 v2.1 前的 flag-by-flag 行为等价 |
 
 ---
@@ -641,6 +688,9 @@ v2 排序 B → D → A → C 基于 DeepSeek 实价：cache hit 0.02× / output
 | **A 成本爆表** | proactive 单 reply 成本 > 3× baseline | profile=balanced（关闭 A）；或 `plan_then_utter.enabled=false` | 成本 > 2.5× 即回滚；P6.0.x4 健康守卫先于人工触发 |
 | **A persona drift** | PersonaScore 跌 > 5pp | 同上 | — |
 | **abort 漂移导致 output 浪费**（C 方案专属，已锁定不开） | replan 后总 output > 1.5× baseline | C 方案永不开启，不需要回滚 | — |
+| **QQ 交互入站轰炸**（v2.3） | 单 user 60s 内 `poke_in` ≥ 5 次或群级 60s 内 `poke_in` ≥ 20 次 | P6.0.y1 入站频率护栏（user 级 60s mute）；如仍异常则 `qq_interactions.poke_inbound_response_enabled=false` | mute 命中率 ≥ 95% / 误触率 < 5% 即维持；否则人工关入站响应 |
+| **QQ 交互出站刷屏**（v2.3） | 单群 `poke_out` 或 `react_out` 超出 token bucket 上限 | P6.0.y2 token bucket 拒绝；profile=balanced 30 秒回滚则关闭 quote_reply / 入站响应 | 单群 1h 内 `poke_out` 触发拒绝 ≥ 3 次即收紧上限或 profile=economy |
+| **引用回复 msg_id 不存在导致协议层报错**（v2.3） | NapCat `MessageSegment.reply` 引用已撤回 / 历史过深消息 | P6.0.y3 兜底：未识别锚点静默 strip 回退纯文本；不 raise；error 计入 BlockTrace | 兜底命中率 ≥ 99% 即通过；< 99% 则 quote_reply 默认关 |
 
 紧急回滚（30 秒）：
 
@@ -698,36 +748,44 @@ docker compose restart bot
 | v2 重写 | ✅ 完成（2026-05-26） | 用户原话 "在执行1、3的前提下重写part6，搜索deepseek v4的最新指标和技术架构，你目前不严谨" — DeepSeek 官方 pricing / kv_cache / Anthropic 兼容性文档全部抓取并对齐 |
 | **v2.1 增补**（2026-05-26 同日续作） | ✅ 完成 | 用户原话 "此前进行过一次cache优化，评估是否需要进一步优化" + "先修改part6方案，将该修改列入其中" — §1.5.0 D+E 历史表 / §1.5.1 7 日实证重写 / §1.5.4 候选 (e) 长尾收口 / §7.0 P6.0 拆三段（a/b/c） |
 | **v2.2 增补**（2026-05-26 同日三续） | ✅ 完成 | 用户原话 "我不要单选项进行，而是在配置提供三档切换。改进方案，追加切换，审计是否需要切换功能修改流程" — §4.4 三档 profile（economy/balanced/performance/custom）+ §7.0.x P6.0.x1~x5 切换基础设施 + §7.2 施工节奏 + §8 风险与回滚同步 |
+| **v2.3 增补**（2026-05-26 同日四续） | ✅ 完成 | 用户原话 "qq存在戳一戳，拍一拍，表情直接在消息回复等特殊状态，当前是否支持，是否需要单开一个part或是加补充？" + "part2-3 已在执行，尽量与 part6 同批次" — grep 0 命中实证 / **§4.4.6 新增**（QQ 特殊交互三档映射 + 速率门）+ **§7.0.y 新增**（P6.0.y1 入站 NoticeEvent / P6.0.y2 出站 interaction_tools / P6.0.y3 引用回复 / P6.0.y4 qq_interactions 配置）+ §7.2 解锁表同步 + §8 风险表追加 3 行 |
 | §1 代码取证 v2 | ✅ 完成 | §1.1.5 cache 架构 dead code / §1.3 DeepSeek V4-Flash 完整规格 / §1.5 state_board 漂移根因（state_board.py:71-189 file:line 证据） |
 | §2 学术证据 v2 | ✅ 完成（27 篇） | Q6 行替换为 DeepSeek-specific 4 条 |
 | §3 成本重算 v2 | ✅ 完成 | 7 日 storage/usage.db 实证 baseline + 4 方案 prefix 稳定 / 不稳两组成本 |
 | §4 决策矩阵 v2 | ✅ 完成 | 排序 P6.0 → B → D → A → C 替换 v1 的 A → C → B → D |
 | **§4.4 三档 profile v2.2** | ✅ 完成 | economy/balanced/performance/custom 四档物化为 HumanizationConfig.profile + GroupOverride.humanization_profile |
+| **§4.4.6 QQ 交互三档映射 v2.3** | ✅ 完成 | 戳一戳 / 表情回应 / 引用回复 三档行为表 + 单群 / 单 user 速率门 + 入站频率护栏 |
 | §7 子任务 v2 | ✅ 完成 | P6.0 新增、P6.8（cache_creation 监控）删除 |
 | **§7.0 P6.0 三段拆分 v2.1** | ✅ 完成 | P6.0.a layout 后置 / P6.0.b 字段粒度抬升（含 sticky topics）/ P6.0.c 7 日生产复盘 |
 | **§7.0.x P6.0.x profile 切换 v2.2** | ✅ 完成 | P6.0.x1 HumanizationConfig.profile + ResolvedHumanization / P6.0.x2 GroupOverride.humanization_profile / P6.0.x3 消费者改读决议 / P6.0.x4 健康守卫降级 / P6.0.x5 Admin SPA |
-| **P6.0.a / P6.0.b / P6.0.c** | ⏳ 待动手 | 优先级最高；feature flag 双 off 兼容；落地后 profile=economy 默认值生效 |
-| **P6.0.x1 ~ P6.0.x5** | ⏳ 待动手 | 与 P6.0.a/b 并行可施工（仅 BaseModel 改动）；P6.0.x4 依赖 P6.0.c 阈值定义 |
-| **P6.1 ~ P6.13** | ⏳ 待动手 | 等 P6.0.c 验收过线后启动 B 方案（P6.1~P6.4），用户切 profile=balanced 后 D 方案（P6.5~P6.8）启用 |
+| **§7.0.y P6.0.y QQ 交互能力 v2.3** | ✅ 完成 | P6.0.y1 入站 PokeNotifyEvent + 表情回应 raw event hook / P6.0.y2 services/tools/interaction_tools.py / P6.0.y3 引用回复 MessageSegment.reply / P6.0.y4 qq_interactions 子配置 + GroupOverride.qq_interactions_profile_override |
+| **P6.0.a / P6.0.b** | 🟡 已落地待最终审查 | `state_board.layout` / `state_board.granularity` 已接 PromptBuilder 与运行时配置；P6.0.c 7 日生产复盘按用户口径不阻塞后续 Wave |
+| **P6.0.x1 ~ P6.0.x5** | 🟡 已落地待最终审查 | profile / group override / consumer resolve / health guard / Admin SPA 已完成，详见执行追踪 §6 |
+| **P6.0.y1 ~ P6.0.y4** | 🟡 已落地待最终审查 | QQ 入站 trigger、出站 interaction tools、quote reply、`qq_interactions` 决议字段已完成，详见执行追踪 §6 |
+| **P6.1 ~ P6.4（B streaming）** | 🟡 已落地待最终审查 | streaming segmenter、SSE hook、灰度脚本、默认路径收口已完成；`993065015` 短回复样本体感收益未达阈值，作为最终审查输入 |
+| **P6.5 ~ P6.8（D pause-extend）** | 🟡 已落地待最终审查 | pause decisioner、追发接入、extend_rate 灰度脚本、默认开启已完成；全量 pytest `1964 passed, 8 skipped` |
+| **P6.9 ~ P6.11（A plan-then-utter pilot）** | 🟡 已落地待最终审查 | P6.9 代码已接入但默认 off；P6.10 监控脚本显示当前 14 日窗口无 `proactive_plan/proactive_utter` 样本；P6.11 决策为继续 pilot 收样，不上默认也不永久关闭 |
+| **P6.12（C reactive replan）** | 🟡 已锁定不开发 | DeepSeek 不支持 stream continuation + abort drift + 因果链复杂度，C 方案不进灰度 |
+| **P6.13 收口** | 🟡 已落地待最终审查 | `scripts/dev/measure_humanization_part6.sh` 串联 P6.3/P6.7/P6.10 只读测量；`maintenance-log.md` 因共享脏改未触碰 |
 
 ---
 
-## 附录 A — v1 → v2 / v2.1 / v2.2 修订映射
+## 附录 A — v1 → v2 / v2.1 / v2.2 / v2.3 修订映射
 
-| v1 节 | v2 处置 | v2.1 增补 | v2.2 增补 |
-|---|---|---|---|
-| §0 边界 / 取证原则 / 8 问题 | 保留，无修改 | — | — |
-| §1.1 Omubot 现状 | 保留主体；新增 §1.1.5 标 4-breakpoint dead code | — | — |
-| §1.2 MaiBot 中断 dead code | 保留 | — | — |
-| §1.3 Anthropic SSE + 4-breakpoint | **整节替换**为 DeepSeek V4-Flash 架构 | — | — |
-| §1.4 框架对照 | 保留主体，校正 cache 列 | — | — |
-| §1.5（v1 不存在） | **新增** state_board 漂移诊断 | **§1.5.0 新增**（D+E 历史表 4 行）+ **§1.5.1 重写**（7 日实证 proactive 74.3% / chat 71.4%）+ **§1.5.4 增补**（候选 e "D+E 同方法不再延续"） | — |
-| §2 学术 27 篇 | 保留 26 篇；Q6 行 4 条改为 DeepSeek-specific | — | — |
-| §3 成本系数 | **整节重算** — Anthropic 数字全部不适用 | — | — |
-| §4 决策矩阵 | **整节重排** — A 从首选降到第三，B 从第三升到首选 | — | **§4.4 新增** — economy/balanced/performance/custom 四档 profile 切换设计 |
-| §5 不做的事 | 保留 + 增补 4 条 | — | — |
-| §6 接入点 | 保留 | — | profile 切换通过 [HumanizationConfig](../../kernel/config.py#L1024) + [GroupOverride](../../kernel/config.py#L343) + Admin SPA 三层接入；不需要新 admin route |
-| §7 子任务 | **新增 P6.0**；删除 P6.8（cache_creation）；编号 P6.1~P6.14 → P6.1~P6.13 | **§7.0 新增** — P6.0 拆三段：P6.0.a layout / P6.0.b 粒度 / P6.0.c 7 日复盘；§7.1 子标题保留 P6.1~P6.13 不变 | **§7.0.x 新增** — P6.0.x1~P6.0.x5 profile 切换基础设施；**§7.2 新增** — profile 解锁条件表 |
-| §8 风险阈值 | 重写为 DeepSeek 经济下的阈值 | — | 增 4 行 profile 切换风险 + 紧急回滚改为 `profile=economy` 一键回退 |
-| §9 引用 | 增 DeepSeek 官方文档 4 条；标记 Anthropic 引用为 v1 推翻 | — | — |
-| §10 状态 | 加 v2 重写条目 | 加 v2.1 增补条目 + P6.0.a/b/c 行 | 加 v2.2 增补条目 + §4.4 + §7.0.x + P6.0.x1~x5 行 |
+| v1 节 | v2 处置 | v2.1 增补 | v2.2 增补 | v2.3 增补 |
+|---|---|---|---|---|
+| §0 边界 / 取证原则 / 8 问题 | 保留，无修改 | — | — | — |
+| §1.1 Omubot 现状 | 保留主体；新增 §1.1.5 标 4-breakpoint dead code | — | — | — |
+| §1.2 MaiBot 中断 dead code | 保留 | — | — | — |
+| §1.3 Anthropic SSE + 4-breakpoint | **整节替换**为 DeepSeek V4-Flash 架构 | — | — | — |
+| §1.4 框架对照 | 保留主体，校正 cache 列 | — | — | — |
+| §1.5（v1 不存在） | **新增** state_board 漂移诊断 | **§1.5.0 新增**（D+E 历史表 4 行）+ **§1.5.1 重写**（7 日实证 proactive 74.3% / chat 71.4%）+ **§1.5.4 增补**（候选 e "D+E 同方法不再延续"） | — | — |
+| §2 学术 27 篇 | 保留 26 篇；Q6 行 4 条改为 DeepSeek-specific | — | — | — |
+| §3 成本系数 | **整节重算** — Anthropic 数字全部不适用 | — | — | — |
+| §4 决策矩阵 | **整节重排** — A 从首选降到第三，B 从第三升到首选 | — | **§4.4 新增** — economy/balanced/performance/custom 四档 profile 切换设计 | **§4.4.6 新增** — QQ 特殊交互（戳一戳 / 表情回应 / 引用回复）三档行为映射 + 速率门 + Part 2-3 接入边界 |
+| §5 不做的事 | 保留 + 增补 4 条 | — | — | — |
+| §6 接入点 | 保留 | — | profile 切换通过 [HumanizationConfig](../../kernel/config.py#L1024) + [GroupOverride](../../kernel/config.py#L343) + Admin SPA 三层接入；不需要新 admin route | QQ 交互入站事件源走 [kernel/router.py](../../kernel/router.py) `on_notice` + NapCat raw event hook，投递 Part 2-3 既有 trigger 总线 |
+| §7 子任务 | **新增 P6.0**；删除 P6.8（cache_creation）；编号 P6.1~P6.14 → P6.1~P6.13 | **§7.0 新增** — P6.0 拆三段：P6.0.a layout / P6.0.b 粒度 / P6.0.c 7 日复盘；§7.1 子标题保留 P6.1~P6.13 不变 | **§7.0.x 新增** — P6.0.x1~P6.0.x5 profile 切换基础设施；**§7.2 新增** — profile 解锁条件表 | **§7.0.y 新增** — P6.0.y1~P6.0.y4 QQ 交互能力（入站 NoticeEvent / 出站 interaction_tools / 引用回复 / qq_interactions 子配置）；§7 合计行从 18 → 22 子任务；§7.2 解锁表三档加 QQ 交互行为列 |
+| §8 风险阈值 | 重写为 DeepSeek 经济下的阈值 | — | 增 4 行 profile 切换风险 + 紧急回滚改为 `profile=economy` 一键回退 | 追加 3 行 QQ 交互风险（入站轰炸 / 出站刷屏 / 引用回复 msg_id 不存在） |
+| §9 引用 | 增 DeepSeek 官方文档 4 条；标记 Anthropic 引用为 v1 推翻 | — | — | — |
+| §10 状态 | 加 v2 重写条目 | 加 v2.1 增补条目 + P6.0.a/b/c 行 | 加 v2.2 增补条目 + §4.4 + §7.0.x + P6.0.x1~x5 行 | 加 v2.3 增补条目 + §4.4.6 + §7.0.y + P6.0.y1~y4 行 |

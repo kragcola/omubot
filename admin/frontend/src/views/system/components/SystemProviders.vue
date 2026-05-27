@@ -57,6 +57,8 @@ const providerTaskOrder: ProviderTaskKey[] = [
   'graph_edge_classifier',
   'reflection_consolidator',
   'episode_summarizer',
+  'scheduler_eot',
+  'scheduler_replay_judge',
 ]
 
 const providerTaskLabels: Record<ProviderTaskKey, string> = {
@@ -79,6 +81,8 @@ const providerTaskLabels: Record<ProviderTaskKey, string> = {
   graph_edge_classifier: '图谱边分类',
   reflection_consolidator: '反思聚合',
   episode_summarizer: '剧集摘要',
+  scheduler_eot: '调度 EOT',
+  scheduler_replay_judge: '调度重放评审',
 }
 
 const activeProvider = computed(() =>
@@ -127,6 +131,8 @@ function providerTaskCapabilityWarning(task: ProviderTaskKey): string {
     compact: ['chat', 'tools'],
     vision: ['chat', 'vision'],
     persona_import: ['json'],
+    scheduler_eot: ['chat', 'json'],
+    scheduler_replay_judge: ['chat', 'json'],
   }
   const wants = required[task] || ['chat']
   const missing = wants.filter(c => !caps.has(c))

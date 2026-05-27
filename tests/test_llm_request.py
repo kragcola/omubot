@@ -208,6 +208,7 @@ def test_unknown_task_string_is_rejected_by_type_checker_only() -> None:
         "slang_semantic",
         "style",
         "memo",
+        "persona_import",
         "chat_private",
         "bilibili_intent",
         "element_detect",
@@ -215,6 +216,8 @@ def test_unknown_task_string_is_rejected_by_type_checker_only() -> None:
         "graph_edge_classifier",
         "reflection_consolidator",
         "episode_summarizer",
+        "scheduler_eot",
+        "scheduler_replay_judge",
         "vision",
     ],
 )

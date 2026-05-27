@@ -156,3 +156,19 @@ class AnthropicProvider(LLMProvider):
             "prompt_cache_miss_tokens": max(0, total_input - cache_read),
             "reasoning_tokens": 0,
         }
+
+    def extract_text_delta(self, raw_line: str) -> str:
+        line = raw_line.strip()
+        if not line.startswith("data: "):
+            return ""
+        try:
+            data: dict[str, Any] = json.loads(line[6:])
+        except json.JSONDecodeError:
+            return ""
+        if data.get("type") != "content_block_delta":
+            return ""
+        delta = data.get("delta", {})
+        if not isinstance(delta, dict) or delta.get("type") != "text_delta":
+            return ""
+        text = delta.get("text")
+        return str(text) if text else ""

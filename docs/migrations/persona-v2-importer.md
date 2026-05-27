@@ -102,11 +102,11 @@
 
 | axis | v1 出处 | v2 dry-run 出处 | 当前 parity status | 备注 |
 |---|---|---|---|---|
-| identity_personality | `Identity.personality` 写入 `PromptBuilder.build_static()` Block 1 头部 | `core.identity` (`position=static`) | aligned（happy path） | parity 用 personality 首行作为 substring 锚点 |
-| bot_self_id | `PromptBuilder.build_static(identity, bot_self_id)` 拼接 `【你的QQ号是 …】` 段 | `runtime.adapter` (`position=static`) | aligned（提供 hint 时） | 三锚点齐：`bot self id hint：{id}`、`runtime source：adapter_connect_event`、`昵称不可信` |
-| behavior_instruction | `PromptBuilder.build_static()` 拼接 `self._instruction`（来自 `instruction.md`） | `core.guard` 的 `行为指令：…` 段 | aligned（source §8.4 写明时） | source 没写时 v2 缺段，axis = `divergent` |
-| admins | `PromptBuilder.build_static()` 输出 `【管理员】@QQ(nick)、…` | adapter.yaml.permissions.admins[] 仅落 draft 字段 | v1_only | follow-up：v2 prompt block 仍需补，未列入本轮 |
-| proactive_rules | `PromptBuilder.build_static()` 末尾追加 `identity.proactive` | source 暂未承载 `## 插话方式` | v1_only | follow-up：source schema 与 prompt block 同步立项 |
+| identity_personality | `Identity.personality` 写入 `PromptBuilder.build_static()` Block 1 头部 | `core.identity` (`position=static`) | aligned | parity 用 personality 前 5 条**有意义锚点**（跳过 markdown 标题与列表前缀）做 any-match；2026-05-27 后切多锚点 |
+| bot_self_id | `PromptBuilder.build_static(identity, bot_self_id)` 拼接 `【你的QQ号是 …】` 段 | `runtime.adapter` (`position=static`) | aligned | 三锚点齐：`bot self id hint：{id}`、`runtime source：adapter_connect_event`、`昵称不可信`；source 必须配 `bot_self_id_hint` front matter，2026-05-27 已补到 fengxiaomeng-v2 source.md |
+| behavior_instruction | `PromptBuilder.build_static()` 拼接 `self._instruction`（来自 `instruction.md`） | `core.guard` 的 `行为指令：…` 段 | aligned | source 没写时 v2 缺段，axis = `divergent`；2026-05-27 后 anchor 跳 markdown 标题 |
+| admins | `PromptBuilder.build_static()` 输出 `【管理员】@QQ(nick)、…` | `runtime.adapter` 末尾追加 `【管理员】@QQ(label)` + 信任策略尾巴 | aligned | source front matter `admins:` 落到 `adapter.yaml.permissions.admins[]`；2026-05-27 已补到 fengxiaomeng-v2 source.md，prompt block 端 [compiler.py:228-231](../../services/persona/compiler.py#L228-L231) 早已渲染 |
+| proactive_rules | `PromptBuilder.build_static()` 末尾追加 `identity.proactive` | `core.guard` 的 `插话方式：…` 段 | aligned | source `## 插话方式` 段 → `persona.yaml.identity.proactive_rules`；compiler [_guard_text](../../services/persona/compiler.py#L172) 已经把它接到 `core.guard`；2026-05-27 后 anchor 跳 markdown 标题 |
 | group_profile | `LLMClient._build_group_profile_block()` 输出 plugin_stable | `runtime.group_profile` (`position=stable`) | aligned | reply_style hint + custom_prompt 都覆盖；hint 表由 `tests/test_persona_parity_audit.py::test_reply_style_hints_reference_matches_runtime` 锁住 |
 
 | 旧状态 / 旧入口 | 新状态 / 新入口 | 状态 |

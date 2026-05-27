@@ -7,7 +7,7 @@ from kernel.config import GroupConfig, GroupOverride
 from kernel.types import TriggerContext
 from services.identity import Identity
 from services.memory.timeline import GroupTimeline
-from services.scheduler import GroupChatScheduler, _GroupSlot
+from services.scheduler import GroupChatScheduler, _GroupSlot, _should_force_reply
 
 
 def _make_identity(proactive: str | None = "积极参与群聊") -> Identity:
@@ -19,6 +19,23 @@ def _make_config(**kwargs: object) -> GroupConfig:
     defaults: dict[str, object] = {"talk_value": 1.0, "planner_smooth": 0, "batch_size": 100}
     defaults.update(kwargs)
     return GroupConfig(**defaults)  # type: ignore[arg-type]
+
+
+def test_qq_interaction_mode_force_reply() -> None:
+    assert _should_force_reply(
+        TriggerContext(
+            reason="戳一戳",
+            mode="qq_interaction",
+            extra={"addressee_self": False},
+        )
+    ) is True
+    assert _should_force_reply(
+        TriggerContext(
+            reason="有人@了你",
+            mode="at_mention",
+            extra={"addressee_self": False},
+        )
+    ) is False
 
 
 class _FakeIdentityMgr:

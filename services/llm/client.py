@@ -26,6 +26,7 @@ from services.humanization.contract import (
     REGISTER_LABEL_SLOT,
     STICKER_RECENT_USED_SLOT,
 )
+from services.humanization.pause_extend import PauseExtend
 from services.humanization.scorer import HumanizationScore, StylometricScorer
 from services.humanization.state import humanization_source
 from services.identity import Identity
@@ -36,19 +37,17 @@ from services.llm.cache_diagnostic import (
     diff_cache_diagnostics,
 )
 from services.llm.llm_request import LLMRequest, apply_cache_breakpoints
+from services.llm.plan_then_utter import PlanThenUtter
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.provider import ToolUse, create_provider, is_deepseek_v4_model, provider_mode
 from services.llm.segmentation import (
     ReplySegmentationConfig,
     ReplySegmentPlan,
-    segment_reply,
 )
 from services.llm.segmentation import (
     reply_segment_plan as _segment_reply_segment_plan,
 )
-from services.llm.segmentation import (
-    reply_segments as _segment_reply_segments,
-)
+from services.llm.streaming_segmenter import StreamingSegmenter
 from services.llm.usage import UsageTracker
 from services.media.image_cache import ImageCache
 from services.memory.card_store import CardStore, NewCard
@@ -82,6 +81,12 @@ _BLANK_LINE_RE = re.compile(r"\n{2,}")
 _CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
 _CQ_BROKEN_RE = re.compile(r"\[CQ:[^\]]*\]", re.DOTALL)
 _CQ_KV_FIX_RE = re.compile(r",(\w+):")
+_CQ_REPLY_RE = re.compile(r"\[CQ:reply\b[^\]]*\]", re.IGNORECASE)
+_QUOTE_ANCHOR_RE = re.compile(
+    r"<quote\b[^>]*\bmsg_id\s*=\s*(?P<quote>['\"])(?P<msg_id>\d+)(?P=quote)[^>]*/?>",
+    re.IGNORECASE,
+)
+_QUOTE_TAG_RE = re.compile(r"<quote\b[^>]*?/?>", re.IGNORECASE)
 _GROUP_REPLY_STYLE_HINTS: dict[str, str] = {
     "gentle": "回复风格偏柔和、耐心、安抚感更强，避免过硬或过冲的表达。",
     "playful": "回复风格可以更轻松俏皮，允许一点点玩梗和抖机灵，但不要失控。",
@@ -90,14 +95,27 @@ _GROUP_REPLY_STYLE_HINTS: dict[str, str] = {
     "steady": "回复保持平稳、克制、可靠，少用夸张语气和过度情绪化表达。",
 }
 _STICKER_TOOL_NAMES = {"send_sticker", "save_sticker", "manage_sticker"}
+_STREAMING_ALLOWED_TOOL_NAMES = frozenset({
+    "append_memo",
+    "pass_turn",
+    "send_sticker",
+    "update_memo",
+})
 _DEEPSEEK_V4_COMPACT_RATIO = 0.88
 _EMPTY_VISIBLE_REPLY_FALLBACK = "我先缓一下，马上接你。"
 _PASS_TURN_LIGHT_ACK = "嗯，我在。"
+_PAUSE_EXTEND_MAX_COUNT = 2
 _CONTROL_TOKEN_RE = re.compile(
     r"(?is)\s*(?:\[\s*pass[_\s-]*turn\s*\]|pass[_\s-]*turn|passturn)\s*(?:[:：\-]\s*.*)?\s*"
 )
 _VISIBLE_TOOL_OUTPUT_NAMES = {"send_sticker", "send_group_msg"}
 _PLAYFUL_KAOMOJI_MOODS = frozenset({"playful", "high"})
+_PAUSE_EXTEND_INSTRUCTION = (
+    "你刚刚已经发出上一条群聊回复，现在只允许自然追发一小句补充。\n"
+    "要求：像人类停顿后追加一句；不要重复上一条；不要解释你在追发；不要开启新话题；"
+    "不要使用工具或控制标记；只输出可直接发送的追发内容。\n\n"
+    "上一条回复：\n{last_reply}"
+)
 
 
 def _candidate_from_prompt_block(
@@ -387,24 +405,34 @@ def fix_cq_codes(text: str) -> str:
     return _CQ_CODE_RE.sub(lambda m: _CQ_KV_FIX_RE.sub(r",\1=", m.group(0)), text)
 
 
-_MIN_CHUNK = 6
-_MAX_CHUNK = 20
+def _strip_cq_reply_codes(text: str) -> str:
+    return _clean_text(_CQ_REPLY_RE.sub("", text))
 
 
-def _split_naturally(text: str) -> list[str]:
-    """Compatibility wrapper for old tests; production uses segmentation.py."""
-    return segment_reply(text, ReplySegmentationConfig()).texts
+def _extract_quote_anchor(text: str) -> tuple[str | None, str]:
+    """Return the first valid quote msg_id and text with quote tags stripped."""
+    match = _QUOTE_ANCHOR_RE.search(text)
+    msg_id = match.group("msg_id") if match else None
+    return msg_id, _QUOTE_TAG_RE.sub("", text).strip()
 
 
-def _reply_segments(
-    reply: str,
-    cfg: ReplySegmentationConfig | None = None,
-    *,
-    disable_natural_split: bool = False,
-) -> tuple[list[str], int, str]:
-    if disable_natural_split:
-        return [fix_cq_codes(reply)], 1, "none"
-    return _segment_reply_segments(fix_cq_codes(reply), cfg or ReplySegmentationConfig())
+def _quote_reply_enabled(humanization: ResolvedHumanization) -> bool:
+    return bool(getattr(humanization, "qq_interactions_quote_reply_enabled", False))
+
+
+def _apply_quote_reply_anchor(text: str, msg_id: str | None) -> str:
+    if not msg_id:
+        return text
+    return f"[CQ:reply,id={msg_id}]{text}"
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _reply_segment_plan(
@@ -413,9 +441,9 @@ def _reply_segment_plan(
     *,
     register: Any | None = None,
     slot_energy: float = 1.0,
-    disable_natural_split: bool = False,
+    streaming_already_emitted: bool = False,
 ) -> ReplySegmentPlan:
-    if disable_natural_split:
+    if streaming_already_emitted:
         return ReplySegmentPlan(
             segments=[fix_cq_codes(reply)],
             raw_count=1,
@@ -623,6 +651,18 @@ def _to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _tool_def_name(tool: dict[str, Any]) -> str:
+    raw_name = tool.get("name")
+    if isinstance(raw_name, str) and raw_name:
+        return raw_name
+    function = tool.get("function")
+    if isinstance(function, dict):
+        raw_function_name = function.get("name")
+        if isinstance(raw_function_name, str):
+            return raw_function_name
+    return ""
+
+
 _PASS_TURN_TOOL: dict[str, Any] = {
     "name": "pass_turn",
     "description": "当你认为不需要回复时调用此工具，跳过本轮发言；同时给出你对静默判断的 confidence。",
@@ -689,6 +729,7 @@ async def call_api(
     thinking: dict[str, Any] | None = None,
     api_format: str = "anthropic",
     request_options: dict[str, Any] | None = None,
+    on_text_delta: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Call the configured provider API and parse its SSE stream."""
     provider = create_provider(api_format, base_url, api_key)
@@ -734,6 +775,10 @@ async def call_api(
             line = raw_line.decode().strip()
             if line:
                 raw_lines.append(line)
+                if on_text_delta is not None:
+                    delta_text = provider.extract_text_delta(line)
+                    if delta_text:
+                        await on_text_delta(delta_text)
     stream_ms = (time.perf_counter() - t_api) * 1000
 
     t_parse = time.perf_counter()
@@ -972,7 +1017,7 @@ class LLMClient:
         humanization_runtime_groups: list[str] | tuple[str, ...] | None = None,
         pass_turn_confidence_gate: bool = False,
         pass_turn_confidence_threshold: float = 0.4,
-        humanization_resolver: Callable[[str | None], ResolvedHumanization] | None = None,
+        humanization_resolver: Callable[..., ResolvedHumanization] | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
             enable_cleanup_closed=True,
@@ -1046,14 +1091,38 @@ class LLMClient:
             return True
         return str(group_id or "").strip() in self._humanization_runtime_groups
 
-    def _resolve_humanization(self, group_id: str | None) -> ResolvedHumanization:
+    def _resolve_humanization(
+        self,
+        group_id: str | None,
+        *,
+        performance_degraded: bool | None = None,
+    ) -> ResolvedHumanization:
         if self._humanization_resolver is None:
             return ResolvedHumanization()
         try:
+            if performance_degraded is not None:
+                try:
+                    return self._humanization_resolver(
+                        group_id,
+                        performance_degraded=performance_degraded,
+                    )
+                except TypeError:
+                    return self._humanization_resolver(group_id)
             return self._humanization_resolver(group_id)
         except Exception:
             logger.exception("humanization resolve failed | group={}", group_id)
             return ResolvedHumanization()
+
+    def _humanization_performance_degraded_snapshot(self, group_id: str | None) -> bool | None:
+        if group_id is None:
+            return None
+        try:
+            from services.humanization.health_guard import is_group_degraded
+
+            return is_group_degraded(group_id)
+        except Exception:
+            logger.debug("humanization health guard snapshot failed | group={}", group_id)
+            return None
 
     def set_group_config(self, group_config: Any | None) -> None:
         self._group_config = group_config
@@ -1071,6 +1140,7 @@ class LLMClient:
         task: str = "main",
         user_id: str = "",
         group_id: str | None = None,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         # Spine path: caller passed LLMRequest. Unwrap into the same kwargs the
         # legacy 6-positional signature uses, then dispatch through the same
@@ -1088,6 +1158,7 @@ class LLMClient:
                 user_id=req.user_id,
                 group_id=req.group_id,
                 request=req,
+                on_text_delta=on_text_delta,
             )
         if messages is None:
             raise TypeError("_call() missing required argument: 'messages'")
@@ -1101,6 +1172,7 @@ class LLMClient:
             user_id=user_id,
             group_id=group_id,
             request=None,
+            on_text_delta=on_text_delta,
         )
 
     def _enforce_capabilities(
@@ -1191,6 +1263,7 @@ class LLMClient:
         user_id: str,
         group_id: str | None,
         request: LLMRequest | None,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         profile_name, base_url, api_key, model, api_format = self._profile_for_task(task)
         if request is not None:
@@ -1218,13 +1291,25 @@ class LLMClient:
             task=task,
             has_tools=bool(tools),
         )
+        call_kwargs: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "tools": tools,
+            "thinking": thinking,
+            "api_format": api_format,
+            "request_options": provider_request_options,
+        }
+        if on_text_delta is not None:
+            call_kwargs["on_text_delta"] = on_text_delta
         try:
             t_call = time.monotonic()
             result = await call_api(
-                self._session, base_url, api_key, model,
-                system_blocks, messages, max_tokens=max_tokens, tools=tools,
-                thinking=thinking, api_format=api_format,
-                request_options=provider_request_options,
+                self._session,
+                base_url,
+                api_key,
+                model,
+                system_blocks,
+                messages,
+                **call_kwargs,
             )
             elapsed = time.monotonic() - t_call
             result["call_elapsed_s"] = elapsed
@@ -1702,7 +1787,7 @@ class LLMClient:
         group_id: str | None,
         user_id: str,
         turn_id: str,
-        disable_natural_split: bool = False,
+        streaming_already_emitted: bool = False,
     ) -> ReplySegmentPlan:
         scope = self._humanization_scope(
             session_id=session_id,
@@ -1715,8 +1800,699 @@ class LLMClient:
             self._reply_segmentation_config,
             register=self._humanization_register(scope),
             slot_energy=self._current_slot_energy(scope),
-            disable_natural_split=disable_natural_split,
+            streaming_already_emitted=streaming_already_emitted,
         )
+
+    def _streaming_segment_enabled(
+        self,
+        humanization: ResolvedHumanization,
+        *,
+        on_segment: Callable[[str], Awaitable[None]] | None,
+        tool_defs: list[dict[str, Any]],
+        is_group: bool,
+        force_reply: bool,
+    ) -> bool:
+        if on_segment is None:
+            return False
+        if not is_group or not force_reply:
+            return False
+        if not bool(getattr(humanization, "streaming_segment_enabled", False)):
+            return False
+        blocking_tools = {
+            name
+            for tool in tool_defs
+            if (name := _tool_def_name(tool)) not in _STREAMING_ALLOWED_TOOL_NAMES
+        }
+        return not blocking_tools
+
+    async def _stream_with_segments(
+        self,
+        request: LLMRequest,
+        *,
+        on_segment: Callable[[str], Awaitable[None]],
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        turn_id: str,
+        quote_reply_enabled: bool = False,
+    ) -> tuple[dict[str, Any], list[str]]:
+        scope = self._humanization_scope(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        segmenter = StreamingSegmenter(
+            register=self._humanization_register(scope),
+            mood=self._current_humanization_mood(group_id=group_id, session_id=session_id),
+        )
+        emitted: list[str] = []
+        last_segment_emitted_at: float | None = None
+        quote_msg_id: str | None = None
+
+        async def _emit_segment(segment: str) -> None:
+            nonlocal last_segment_emitted_at, quote_msg_id
+            cleaned, _ = _strip_control_tokens(_clean_reply(segment))
+            if not cleaned:
+                return
+            msg_id, cleaned = _extract_quote_anchor(cleaned)
+            if quote_reply_enabled and msg_id and quote_msg_id is None and not emitted:
+                quote_msg_id = msg_id
+            if not cleaned:
+                return
+            visible = fix_cq_codes(cleaned)
+            if not quote_reply_enabled:
+                visible = _strip_cq_reply_codes(visible)
+                if not visible:
+                    return
+            if quote_reply_enabled and quote_msg_id and not emitted:
+                visible = _apply_quote_reply_anchor(visible, quote_msg_id)
+            await on_segment(visible)
+            last_segment_emitted_at = time.monotonic()
+            emitted.append(visible)
+
+        async def _emit(delta: str) -> None:
+            for segment in segmenter.push(delta):
+                await _emit_segment(segment)
+
+        try:
+            result = await self._call(request, on_text_delta=_emit)
+            for segment in segmenter.finish():
+                await _emit_segment(segment)
+            if not emitted:
+                fallback_text = str(result.get("text") or "")
+                for segment in segmenter.push(fallback_text):
+                    await _emit_segment(segment)
+                for segment in segmenter.finish():
+                    await _emit_segment(segment)
+            if last_segment_emitted_at is not None:
+                result["_last_segment_emitted_at"] = last_segment_emitted_at
+            return result, emitted
+        except asyncio.CancelledError:
+            segmenter.cancel()
+            raise
+
+    def _plan_then_utter_enabled(
+        self,
+        humanization: ResolvedHumanization,
+        *,
+        on_segment: Callable[[str], Awaitable[None]] | None,
+        tool_defs: list[dict[str, Any]],
+        is_group: bool,
+        force_reply: bool,
+        group_id: str | None,
+    ) -> bool:
+        if on_segment is None or not is_group or force_reply:
+            return False
+        if group_id is None or self._timeline is None:
+            return False
+        if not self._humanization_group_allowed(group_id):
+            return False
+        if not bool(getattr(humanization, "plan_then_utter_enabled", False)):
+            return False
+        business_tools = [
+            tool for tool in tool_defs
+            if str(tool.get("name", "") or "") != "pass_turn"
+        ]
+        return not business_tools
+
+    def _record_aux_result_usage(
+        self,
+        *,
+        call_type: str,
+        user_id: str,
+        group_id: str | None,
+        result: dict[str, Any],
+        fallback_model: str,
+        fallback_provider: str,
+    ) -> None:
+        cache_hit, cache_miss, reasoning_replay = _usage_observability_fields(result)
+        self._record_usage(
+            call_type=call_type,
+            user_id=user_id,
+            group_id=group_id,
+            model=str(result.get("provider_model", fallback_model) or fallback_model),
+            provider_kind=str(result.get("provider_kind", fallback_provider) or fallback_provider),
+            input_tokens=(
+                int(result.get("input_tokens", 0) or 0)
+                - int(result.get("cache_read", 0) or 0)
+                - int(result.get("cache_create", 0) or 0)
+            ),
+            cache_read_tokens=int(result.get("cache_read", 0) or 0),
+            cache_create_tokens=int(result.get("cache_create", 0) or 0),
+            output_tokens=int(result.get("output_tokens", 0) or 0),
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
+            reasoning_replay_tokens=reasoning_replay,
+            tool_rounds=0,
+            elapsed_s=float(result.get("call_elapsed_s", 0.0) or 0.0),
+        )
+
+    async def _record_plan_then_utter_trace(
+        self,
+        *,
+        session_id: str,
+        group_id: str,
+        user_id: str,
+        turn_id: str,
+        task: str,
+        status: str,
+        parent_span_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        from services.block_trace.llm_call_trace import record_llm_call_trace
+
+        await record_llm_call_trace(
+            getattr(self._budget_manager, "_store", None),
+            request_id=f"{parent_span_id}:{task}:{int(time.monotonic() * 1000)}",
+            task=task,
+            provider="plan_then_utter",
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+            metadata={
+                "source": "plan_then_utter",
+                "status": status,
+                "parent_span_id": parent_span_id,
+                **metadata,
+            },
+        )
+
+    def _clean_plan_then_utter_candidate(self, text: str) -> str:
+        candidate, _stripped = _strip_control_tokens(_clean_reply(text))
+        _quote_msg_id, candidate = _extract_quote_anchor(candidate)
+        candidate = fix_cq_codes(candidate.strip())
+        if candidate in {"", "...", "☆", "~"}:
+            return ""
+        return candidate
+
+    async def _maybe_plan_then_utter(
+        self,
+        *,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        turn_id: str,
+        humanization: ResolvedHumanization,
+        on_segment: Callable[[str], Awaitable[None]] | None,
+        tool_defs: list[dict[str, Any]],
+        is_group: bool,
+        force_reply: bool,
+        user_content: Content,
+        thinker_action: str,
+        thinker_thought: str,
+        tool_call_records: list[dict[str, Any]],
+        started_at: float,
+    ) -> str | None:
+        if not self._plan_then_utter_enabled(
+            humanization,
+            on_segment=on_segment,
+            tool_defs=tool_defs,
+            is_group=is_group,
+            force_reply=force_reply,
+            group_id=group_id,
+        ):
+            return None
+        assert group_id is not None
+        assert self._timeline is not None
+        assert on_segment is not None
+
+        planner = PlanThenUtter()
+        parent_span_id = f"plan_then_utter_{session_id}_{int(time.monotonic() * 1000)}"
+        _, _, _, main_model, main_api_format = self._profile_for_task("main")
+
+        try:
+            plan_result = await self._call(planner.build_plan_request(
+                system_blocks=system_blocks,
+                messages=messages,
+                user_id=user_id,
+                group_id=group_id,
+            ))
+        except asyncio.CancelledError:
+            asyncio.create_task(self._record_plan_then_utter_trace(  # noqa: RUF006
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                task="proactive_plan",
+                status="cancelled",
+                parent_span_id=parent_span_id,
+                metadata={"phase": "plan_call"},
+            ))
+            raise
+        except Exception as exc:
+            await self._record_plan_then_utter_trace(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                task="proactive_plan",
+                status="error",
+                parent_span_id=parent_span_id,
+                metadata={"error": str(exc)[:200]},
+            )
+            _log_msg_out.debug("plan_then_utter_plan_failed | session={} err={}", session_id, exc)
+            return None
+
+        self._record_aux_result_usage(
+            call_type="proactive_plan",
+            user_id=user_id,
+            group_id=group_id,
+            result=plan_result,
+            fallback_model=main_model,
+            fallback_provider=main_api_format,
+        )
+        plan_text = str(plan_result.get("text") or "")
+        outlines = planner.parse_plan(plan_text)
+        if not outlines:
+            await self._record_plan_then_utter_trace(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                task="proactive_plan",
+                status="skipped",
+                parent_span_id=parent_span_id,
+                metadata={"reason": "invalid_plan", "plan_text": plan_text[:200]},
+            )
+            return None
+
+        await self._record_plan_then_utter_trace(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+            task="proactive_plan",
+            status="planned",
+            parent_span_id=parent_span_id,
+            metadata={"outlines": list(outlines), "plan_text": plan_text[:500]},
+        )
+
+        candidates: list[str] = []
+        total_input_tokens = int(plan_result.get("input_tokens", 0) or 0)
+        for index, outline in enumerate(outlines):
+            try:
+                utter_result = await self._call(planner.build_utter_request(
+                    system_blocks=system_blocks,
+                    messages=messages,
+                    user_id=user_id,
+                    group_id=group_id,
+                    plan_text=plan_text,
+                    outline=outline,
+                    utter_index=index,
+                    total_utters=len(outlines),
+                    previous_utterances=tuple(candidates),
+                ))
+            except asyncio.CancelledError:
+                asyncio.create_task(self._record_plan_then_utter_trace(  # noqa: RUF006
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    task="proactive_utter",
+                    status="cancelled",
+                    parent_span_id=parent_span_id,
+                    metadata={"phase": "utter_call", "utter_index": index},
+                ))
+                raise
+            except Exception as exc:
+                await self._record_plan_then_utter_trace(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    task="proactive_utter",
+                    status="error",
+                    parent_span_id=parent_span_id,
+                    metadata={"utter_index": index, "outline": outline, "error": str(exc)[:200]},
+                )
+                _log_msg_out.debug("plan_then_utter_utter_failed | session={} err={}", session_id, exc)
+                return None
+
+            self._record_aux_result_usage(
+                call_type="proactive_utter",
+                user_id=user_id,
+                group_id=group_id,
+                result=utter_result,
+                fallback_model=main_model,
+                fallback_provider=main_api_format,
+            )
+            total_input_tokens += int(utter_result.get("input_tokens", 0) or 0)
+            candidate = self._clean_plan_then_utter_candidate(str(utter_result.get("text") or ""))
+            if not candidate or candidate in candidates:
+                await self._record_plan_then_utter_trace(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    task="proactive_utter",
+                    status="skipped",
+                    parent_span_id=parent_span_id,
+                    metadata={
+                        "utter_index": index,
+                        "outline": outline,
+                        "reason": "empty_or_duplicate",
+                    },
+                )
+                return None
+            candidates.append(candidate)
+
+        if len(candidates) < 2:
+            return None
+
+        send_start = time.monotonic()
+        last_segment_emitted_at: float | None = None
+        try:
+            for index, candidate in enumerate(candidates):
+                await on_segment(candidate)
+                last_segment_emitted_at = time.monotonic()
+                await self._record_plan_then_utter_trace(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    task="proactive_utter",
+                    status="emitted",
+                    parent_span_id=parent_span_id,
+                    metadata={
+                        "utter_index": index,
+                        "outline": outlines[index],
+                        "utter_chars": len(candidate),
+                    },
+                )
+                if index < len(candidates) - 1:
+                    await asyncio.sleep(_SEGMENT_DELAY)
+        except asyncio.CancelledError:
+            asyncio.create_task(self._record_plan_then_utter_trace(  # noqa: RUF006
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                task="proactive_utter",
+                status="cancelled",
+                parent_span_id=parent_span_id,
+                metadata={"phase": "send", "sent_count": len(candidates)},
+            ))
+            raise
+
+        full_reply = "\n".join(candidates)
+        self._timeline.add(group_id, role="assistant", content=full_reply)
+        self._timeline.set_input_tokens(group_id, total_input_tokens)
+        elapsed = time.monotonic() - started_at
+        _log_msg_out.info(
+            "plan_then_utter_reply | session={} segments={} send={:.1f}s total={:.1f}s",
+            session_id, len(candidates), time.monotonic() - send_start, elapsed,
+        )
+        await self._fire_post_reply(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            user_content=user_content,
+            reply_content=full_reply,
+            elapsed_ms=elapsed * 1000,
+            thinker_action=thinker_action,
+            thinker_thought=thinker_thought,
+            tool_calls=tool_call_records,
+        )
+        await self._maybe_extend(
+            last_reply=full_reply,
+            system_blocks=system_blocks,
+            messages=messages,
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+            humanization=humanization,
+            on_segment=on_segment,
+            last_segment_emitted_at=last_segment_emitted_at,
+        )
+        return ""
+
+    def _pause_extend_enabled(
+        self,
+        humanization: ResolvedHumanization,
+        *,
+        on_segment: Callable[[str], Awaitable[None]] | None,
+        is_group: bool,
+        group_id: str | None,
+    ) -> bool:
+        return (
+            on_segment is not None
+            and is_group
+            and group_id is not None
+            and self._timeline is not None
+            and self._humanization_group_allowed(group_id)
+            and bool(getattr(humanization, "pause_then_extend_enabled", False))
+        )
+
+    async def _record_pause_extend_trace(
+        self,
+        *,
+        session_id: str,
+        group_id: str,
+        user_id: str,
+        turn_id: str,
+        status: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        from services.block_trace.llm_call_trace import record_llm_call_trace
+
+        await record_llm_call_trace(
+            getattr(self._budget_manager, "_store", None),
+            request_id=f"pause_extend_{session_id}_{int(time.monotonic() * 1000)}",
+            task="proactive_extend",
+            provider="pause_then_extend",
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+            metadata={
+                "source": "pause_then_extend",
+                "status": status,
+                **metadata,
+            },
+        )
+
+    def _pause_extend_group_state(self, group_id: str) -> dict[str, Any]:
+        if self._timeline is None:
+            return {"heat": 0.5, "user_replied": False}
+        heat = 0.5
+        with contextlib.suppress(Exception):
+            heat = min(1.0, self._timeline.recent_interaction_count(group_id, window_s=60.0) / 12.0)
+        return {
+            "heat": heat,
+            "user_replied": bool(self._timeline.get_pending(group_id)),
+        }
+
+    async def _maybe_extend(
+        self,
+        *,
+        last_reply: str,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        turn_id: str,
+        humanization: ResolvedHumanization,
+        on_segment: Callable[[str], Awaitable[None]] | None,
+        last_segment_emitted_at: float | None = None,
+    ) -> list[str]:
+        is_group = group_id is not None and self._timeline is not None
+        if not self._pause_extend_enabled(
+            humanization,
+            on_segment=on_segment,
+            is_group=is_group,
+            group_id=group_id,
+        ):
+            return []
+        assert group_id is not None
+        assert self._timeline is not None
+        assert on_segment is not None
+
+        emitted: list[str] = []
+        current_reply = last_reply
+        decisioner = PauseExtend()
+        scope = self._humanization_scope(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        _, _, _, main_model, main_api_format = self._profile_for_task("main")
+
+        for extend_index in range(_PAUSE_EXTEND_MAX_COUNT):
+            group_state = self._pause_extend_group_state(group_id)
+            decision = decisioner.decide(
+                current_reply,
+                register=self._humanization_register(scope),
+                slot={"energy": self._current_slot_energy(scope)},
+                group_state=group_state,
+            )
+            trace_meta: dict[str, Any] = {
+                "extend_index": extend_index,
+                "should_extend": decision.should_extend,
+                "wait_seconds": decision.wait_seconds,
+                "reasons": list(decision.reasons),
+                "last_reply_chars": len(current_reply),
+                "pending_count": len(self._timeline.get_pending(group_id)),
+            }
+            if not decision.should_extend:
+                await self._record_pause_extend_trace(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    status="skipped",
+                    metadata=trace_meta,
+                )
+                break
+
+            wait_seconds = decision.wait_seconds
+            if last_segment_emitted_at is not None:
+                anchor_elapsed = max(0.0, time.monotonic() - last_segment_emitted_at)
+                wait_seconds = max(0.0, decision.wait_seconds - anchor_elapsed)
+                trace_meta["pause_anchor_elapsed_s"] = round(anchor_elapsed, 3)
+                trace_meta["effective_wait_seconds"] = round(wait_seconds, 3)
+
+            try:
+                await asyncio.sleep(wait_seconds)
+            except asyncio.CancelledError:
+                asyncio.create_task(self._record_pause_extend_trace(  # noqa: RUF006
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    status="cancelled",
+                    metadata={**trace_meta, "phase": "wait"},
+                ))
+                raise
+
+            pending_after_wait = self._timeline.get_pending(group_id)
+            if pending_after_wait:
+                await self._record_pause_extend_trace(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    status="skipped",
+                    metadata={
+                        **trace_meta,
+                        "reason": "user_replied_after_wait",
+                        "pending_count": len(pending_after_wait),
+                    },
+                )
+                break
+
+            extend_request = LLMRequest(
+                task="main",
+                user_id=user_id,
+                group_id=group_id,
+                static_blocks=list(system_blocks),
+                user_messages=[
+                    *list(messages),
+                    {"role": "assistant", "content": current_reply},
+                    {"role": "user", "content": _PAUSE_EXTEND_INSTRUCTION.format(last_reply=current_reply)},
+                ],
+                max_tokens=128,
+                auto_record_usage=False,
+                requires_capabilities=("chat",),
+            )
+            try:
+                result = await self._call(extend_request)
+            except asyncio.CancelledError:
+                asyncio.create_task(self._record_pause_extend_trace(  # noqa: RUF006
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    status="cancelled",
+                    metadata={**trace_meta, "phase": "call"},
+                ))
+                raise
+            except Exception as exc:
+                await self._record_pause_extend_trace(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    status="error",
+                    metadata={**trace_meta, "error": str(exc)[:200]},
+                )
+                _log_msg_out.debug("pause_extend_call_failed | session={} err={}", session_id, exc)
+                break
+
+            candidate, _stripped = _strip_control_tokens(_clean_reply(str(result.get("text") or "")))
+            _quote_msg_id, candidate = _extract_quote_anchor(candidate)
+            candidate = fix_cq_codes(candidate.strip())
+            if not candidate or candidate in {"...", "☆", "~"} or candidate == current_reply:
+                await self._record_pause_extend_trace(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    status="skipped",
+                    metadata={**trace_meta, "reason": "empty_or_duplicate"},
+                )
+                break
+
+            try:
+                await on_segment(candidate)
+                last_segment_emitted_at = time.monotonic()
+            except asyncio.CancelledError:
+                asyncio.create_task(self._record_pause_extend_trace(  # noqa: RUF006
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    status="cancelled",
+                    metadata={**trace_meta, "phase": "send"},
+                ))
+                raise
+
+            emitted.append(candidate)
+            self._timeline.add(group_id, role="assistant", content=candidate)
+            self._timeline.set_input_tokens(group_id, int(result.get("input_tokens", 0) or 0))
+            extend_cache_hit, extend_cache_miss, extend_reasoning_replay = _usage_observability_fields(result)
+            self._record_usage(
+                call_type="proactive_extend",
+                user_id=user_id,
+                group_id=group_id,
+                model=str(result.get("provider_model", main_model) or main_model),
+                provider_kind=str(result.get("provider_kind", main_api_format)),
+                input_tokens=(
+                    int(result.get("input_tokens", 0) or 0)
+                    - int(result.get("cache_read", 0) or 0)
+                    - int(result.get("cache_create", 0) or 0)
+                ),
+                cache_read_tokens=int(result.get("cache_read", 0) or 0),
+                cache_create_tokens=int(result.get("cache_create", 0) or 0),
+                output_tokens=int(result.get("output_tokens", 0) or 0),
+                prompt_cache_hit_tokens=extend_cache_hit,
+                prompt_cache_miss_tokens=extend_cache_miss,
+                reasoning_replay_tokens=extend_reasoning_replay,
+                tool_rounds=0,
+                elapsed_s=float(result.get("call_elapsed_s", 0.0) or 0.0),
+            )
+            await self._record_pause_extend_trace(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                status="emitted",
+                metadata={
+                    **trace_meta,
+                    "extend_reply_chars": len(candidate),
+                    "input_tokens": int(result.get("input_tokens", 0) or 0),
+                    "output_tokens": int(result.get("output_tokens", 0) or 0),
+                },
+            )
+            current_reply = candidate
+
+        return emitted
 
     def _recent_sticker_ids(self, scope: Scope) -> list[str]:
         value = self._runtime_state_value(STICKER_RECENT_USED_SLOT, scope)
@@ -2145,6 +2921,7 @@ class LLMClient:
         )
         t0 = time.monotonic()
         prompt_start = time.perf_counter()
+        performance_degraded_snapshot = self._humanization_performance_degraded_snapshot(group_id)
 
         is_group = group_id is not None and self._timeline is not None
         _, _, _, main_model, main_api_format = self._profile_for_task("main")
@@ -2324,7 +3101,10 @@ class LLMClient:
             thinker_thought = ""
 
         group_profile = self._resolve_group_profile(group_id)
-        humanization = self._resolve_humanization(group_id)
+        humanization = self._resolve_humanization(
+            group_id,
+            performance_degraded=performance_degraded_snapshot,
+        )
         prompt_build_start = time.perf_counter()
         if self._card_store:
             try:
@@ -2476,6 +3256,13 @@ class LLMClient:
             len(messages),
             len(tool_defs),
         )
+        streaming_segment = self._streaming_segment_enabled(
+            humanization,
+            on_segment=on_segment,
+            tool_defs=tool_defs,
+            is_group=is_group,
+            force_reply=force_reply,
+        )
 
         # Token accumulators across tool rounds
         acc_input = 0
@@ -2491,6 +3278,29 @@ class LLMClient:
         tool_call_records: list[dict[str, Any]] = []
 
         for round_i in range(MAX_TOOL_ROUNDS):
+            reply_turn_id = thinker_turn_id or f"{session_id}:reply:{round_i}:{int(time.monotonic() * 1000)}"
+            if round_i == 0:
+                plan_reply = await self._maybe_plan_then_utter(
+                    system_blocks=system_blocks,
+                    messages=messages,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=reply_turn_id,
+                    humanization=humanization,
+                    on_segment=on_segment,
+                    tool_defs=tool_defs,
+                    is_group=is_group,
+                    force_reply=force_reply,
+                    user_content=user_content,
+                    thinker_action=thinker_action,
+                    thinker_thought=thinker_thought,
+                    tool_call_records=tool_call_records,
+                    started_at=t0,
+                )
+                if plan_reply is not None:
+                    return plan_reply
+
             main_request = LLMRequest(
                 task="main",
                 user_id=user_id,
@@ -2501,7 +3311,19 @@ class LLMClient:
                 auto_record_usage=False,
                 requires_capabilities=("chat",),
             )
-            result = await self._call(main_request)
+            streamed_segments: list[str] = []
+            if streaming_segment and round_i == 0 and on_segment is not None:
+                result, streamed_segments = await self._stream_with_segments(
+                    main_request,
+                    on_segment=on_segment,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=reply_turn_id,
+                    quote_reply_enabled=_quote_reply_enabled(humanization),
+                )
+            else:
+                result = await self._call(main_request)
             acc_llm_elapsed += float(result.get("call_elapsed_s", 0.0) or 0.0)
             acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
             acc_output += result.get("output_tokens", 0)
@@ -2564,6 +3386,63 @@ class LLMClient:
                     )
                     return None
             if not tool_uses:
+                if streamed_segments:
+                    full_reply = "\n".join(streamed_segments)
+                    total_elapsed = time.monotonic() - t0
+                    preview = full_reply[:120] + "…" if len(full_reply) > 120 else full_reply
+                    _log_msg_out.info(
+                        "{!r} | sticker={} len={} segments={} raw={} llm={:.1f}s send=stream total={:.1f}s",
+                        preview, "sent" if _sticker_sent else "none",
+                        len(full_reply), len(streamed_segments), len(streamed_segments),
+                        acc_llm_elapsed, total_elapsed,
+                    )
+                    if is_group and group_id is not None and self._timeline is not None:
+                        self._timeline.add(group_id, role="assistant", content=full_reply)
+                        self._timeline.set_input_tokens(group_id, result["input_tokens"])
+                    else:
+                        self._short_term.add(session_id, "assistant", full_reply)
+                        self._short_term.set_input_tokens(session_id, result["input_tokens"])
+                        if self._message_log is not None:
+                            await self._message_log.record_session_msg(
+                                session_id, "assistant", full_reply[:2000]
+                            )
+                    self._record_usage(
+                        call_type="proactive" if is_group else "chat",
+                        user_id=user_id, group_id=group_id,
+                        model=main_model,
+                        provider_kind=str(result.get("provider_kind", main_api_format)),
+                        input_tokens=acc_input, cache_read_tokens=acc_cache_read,
+                        cache_create_tokens=acc_cache_create, output_tokens=acc_output,
+                        prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                        prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                        reasoning_replay_tokens=acc_reasoning_replay,
+                        tool_rounds=round_i, elapsed_s=acc_llm_elapsed,
+                    )
+                    await self._fire_post_reply(
+                        session_id=session_id,
+                        group_id=group_id,
+                        user_id=user_id,
+                        user_content=user_content,
+                        reply_content=full_reply,
+                        elapsed_ms=total_elapsed * 1000,
+                        thinker_action=thinker_action,
+                        thinker_thought=thinker_thought,
+                        tool_calls=tool_call_records,
+                    )
+                    await self._maybe_extend(
+                        last_reply=full_reply,
+                        system_blocks=system_blocks,
+                        messages=messages,
+                        session_id=session_id,
+                        group_id=group_id,
+                        user_id=user_id,
+                        turn_id=reply_turn_id,
+                        humanization=humanization,
+                        on_segment=on_segment,
+                        last_segment_emitted_at=_optional_float(result.get("_last_segment_emitted_at")),
+                    )
+                    return ""
+
                 reply, _reply_state = self._finalize_visible_reply(
                     reply=text or "...",
                     session_id=session_id,
@@ -2571,6 +3450,11 @@ class LLMClient:
                     has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
                     is_group=is_group,
                 )
+                quote_reply_enabled = _quote_reply_enabled(humanization)
+                quote_msg_id, reply = _extract_quote_anchor(reply)
+                if not quote_reply_enabled:
+                    quote_msg_id = None
+                    reply = _strip_cq_reply_codes(reply)
 
                 if not reply:
                     if is_group and group_id is not None and self._timeline is not None:
@@ -2591,7 +3475,6 @@ class LLMClient:
                     )
                     return None
 
-                reply_turn_id = thinker_turn_id or f"{session_id}:reply:{round_i}:{int(time.monotonic() * 1000)}"
                 rewrite = await self._maybe_rewrite_humanization_reply(
                     reply=reply,
                     system_blocks=system_blocks,
@@ -2621,6 +3504,10 @@ class LLMClient:
                     acc_reasoning_replay += rewrite_reasoning_replay
                     if rewrite.metadata.get("rewrite_applied"):
                         text = reply
+
+                if not quote_reply_enabled:
+                    reply = _strip_cq_reply_codes(reply)
+                reply = _apply_quote_reply_anchor(reply, quote_msg_id)
 
                 # Kaomoji enforcement: if the reply contains a kaomoji / action
                 # description but the LLM forgot to call send_sticker, inject a
@@ -2659,7 +3546,7 @@ class LLMClient:
                     group_id=group_id,
                     user_id=user_id,
                     turn_id=reply_turn_id,
-                    disable_natural_split=humanization.disable_natural_split,
+                    streaming_already_emitted=bool(streamed_segments),
                 )
                 segments = plan.segments
                 raw_segment_count = plan.raw_count
@@ -2675,7 +3562,26 @@ class LLMClient:
                         session_id, limit_status, raw_segment_count, len(segments),
                     )
                 send_start = time.monotonic()
-                if on_segment and len(segments) > 1:
+                last_segment_emitted_at: float | None = None
+                extend_enabled = self._pause_extend_enabled(
+                    humanization,
+                    on_segment=on_segment,
+                    is_group=is_group,
+                    group_id=group_id,
+                )
+                if extend_enabled and on_segment:
+                    for idx, seg in enumerate(segments):
+                        await on_segment(seg)
+                        last_segment_emitted_at = time.monotonic()
+                        if idx < len(segments) - 1:
+                            delay = (
+                                plan.inter_segment_delays[idx]
+                                if idx < len(plan.inter_segment_delays)
+                                else _SEGMENT_DELAY
+                            )
+                            await asyncio.sleep(delay)
+                    last_seg = ""
+                elif on_segment and len(segments) > 1:
                     for idx, seg in enumerate(segments[:-1]):
                         await on_segment(seg)
                         delay = (
@@ -2733,6 +3639,18 @@ class LLMClient:
                     thinker_thought=thinker_thought,
                     tool_calls=tool_call_records,
                 )
+                await self._maybe_extend(
+                    last_reply=full_reply,
+                    system_blocks=system_blocks,
+                    messages=messages,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=reply_turn_id,
+                    humanization=humanization,
+                    on_segment=on_segment,
+                    last_segment_emitted_at=last_segment_emitted_at,
+                )
 
                 return last_seg
 
@@ -2758,6 +3676,8 @@ class LLMClient:
 
             # Execute tools in parallel
             tool_ctx = ctx or ToolContext(user_id=user_id, group_id=group_id, session_id=session_id)
+            tool_ctx.extra["resolved_humanization"] = humanization
+            tool_ctx.extra["humanization"] = humanization
             tool_ctx.extra["image_tags"] = image_tag_map
             if self._timeline is not None:
                 tool_ctx.extra["timeline"] = self._timeline
@@ -2814,6 +3734,11 @@ class LLMClient:
             has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
             is_group=is_group,
         )
+        quote_reply_enabled = _quote_reply_enabled(humanization)
+        quote_msg_id, reply = _extract_quote_anchor(reply)
+        if not quote_reply_enabled:
+            quote_msg_id = None
+            reply = _strip_cq_reply_codes(reply)
         if not reply:
             if is_group and group_id is not None and self._timeline is not None:
                 self._timeline.set_input_tokens(group_id, result["input_tokens"])
@@ -2860,13 +3785,16 @@ class LLMClient:
             acc_prompt_cache_hit += rewrite_cache_hit
             acc_prompt_cache_miss += rewrite_cache_miss
             acc_reasoning_replay += rewrite_reasoning_replay
+        if not quote_reply_enabled:
+            reply = _strip_cq_reply_codes(reply)
+        reply = _apply_quote_reply_anchor(reply, quote_msg_id)
         plan = self._visible_reply_segment_plan(
             reply,
             session_id=session_id,
             group_id=group_id,
             user_id=user_id,
             turn_id=reply_turn_id,
-            disable_natural_split=humanization.disable_natural_split,
+            streaming_already_emitted=False,
         )
         segments = plan.segments
         raw_segment_count = plan.raw_count
@@ -2882,7 +3810,26 @@ class LLMClient:
                 session_id, limit_status, raw_segment_count, len(segments),
             )
         send_start = time.monotonic()
-        if on_segment and len(segments) > 1:
+        last_segment_emitted_at: float | None = None
+        extend_enabled = self._pause_extend_enabled(
+            humanization,
+            on_segment=on_segment,
+            is_group=is_group,
+            group_id=group_id,
+        )
+        if extend_enabled and on_segment:
+            for idx, seg in enumerate(segments):
+                await on_segment(seg)
+                last_segment_emitted_at = time.monotonic()
+                if idx < len(segments) - 1:
+                    delay = (
+                        plan.inter_segment_delays[idx]
+                        if idx < len(plan.inter_segment_delays)
+                        else _SEGMENT_DELAY
+                    )
+                    await asyncio.sleep(delay)
+            last_seg = ""
+        elif on_segment and len(segments) > 1:
             for idx, seg in enumerate(segments[:-1]):
                 await on_segment(seg)
                 delay = (
@@ -2935,6 +3882,18 @@ class LLMClient:
             thinker_action=thinker_action,
             thinker_thought=thinker_thought,
             tool_calls=tool_call_records,
+        )
+        await self._maybe_extend(
+            last_reply=full_reply,
+            system_blocks=system_blocks,
+            messages=messages,
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=reply_turn_id,
+            humanization=humanization,
+            on_segment=on_segment,
+            last_segment_emitted_at=last_segment_emitted_at,
         )
         return last_seg
 

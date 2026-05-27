@@ -345,6 +345,7 @@ class ResolvedGroupConfig(BaseModel):
     sticker_mode: GroupStickerMode = "inherit"
     slang_enabled: bool = True
     humanization_profile: HumanizationProfile | None = None
+    qq_interactions_profile_override: bool | None = None
 
 
 class GroupOverride(BaseModel):
@@ -368,6 +369,7 @@ class GroupOverride(BaseModel):
     slang_enabled: bool | None = None
     presence_mode: GroupPresenceMode | None = None
     humanization_profile: HumanizationProfile | None = None
+    qq_interactions_profile_override: bool | None = None
 
 
 class GroupConfig(BaseModel):
@@ -509,6 +511,7 @@ class GroupConfig(BaseModel):
                     sticker_mode="inherit",
                     slang_enabled=False,
                     humanization_profile=None,
+                    qq_interactions_profile_override=None,
                 )
             return ResolvedGroupConfig(
                 access_allowed=access_allowed,
@@ -531,6 +534,7 @@ class GroupConfig(BaseModel):
                 sticker_mode=self.sticker_mode,
                 slang_enabled=self.slang_enabled,
                 humanization_profile=None,
+                qq_interactions_profile_override=None,
             )
         o = override
         allowed_tools = (
@@ -582,6 +586,7 @@ class GroupConfig(BaseModel):
             sticker_mode=o.sticker_mode if o.sticker_mode is not None else self.sticker_mode,
             slang_enabled=slang_enabled,
             humanization_profile=o.humanization_profile,
+            qq_interactions_profile_override=o.qq_interactions_profile_override,
         )
 
 
@@ -770,12 +775,11 @@ class ReplySegmentationConfig(BaseModel):
         },
     )
     natural_split_enabled: bool = Field(
-        default=False,
+        default=True,
         description="是否启用 Part 5 自然分段算法。",
         json_schema_extra={
-            "display_label": "自然分段灰度",
-            "help": "开启后回复会使用自然分段算法与自适应段间延迟；默认关闭，便于灰度与快速回滚。",
-            "risk_level": "careful",
+            "display_label": "自然分段",
+            "help": "默认开启 Part 5 自然分段算法 + 自适应段间延迟；关闭会让回复整段一次性发出。",
             "restart_hint": "recommended",
         },
     )
@@ -1104,11 +1108,11 @@ class PauseThenExtendConfig(BaseModel):
     """Pause-then-extend profile gate."""
 
     enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable Part 6 pause-then-extend follow-up generation.",
         json_schema_extra={
             "display_label": "暂停后追发",
-            "help": "默认关闭；balanced/performance profile 可在决议层启用。",
+            "help": "默认开启；可用 profile=economy 或本开关关闭快速回滚。",
             "risk_level": "careful",
             "restart_hint": "required",
         },
@@ -1154,6 +1158,61 @@ class PlanThenUtterConfig(BaseModel):
         return normalized
 
 
+class QQInteractionsConfig(BaseModel):
+    """QQ special interaction feature flags."""
+
+    poke_inbound_response_enabled: bool = Field(
+        default=False,
+        description="Enable reply triggers for inbound poke notices.",
+        json_schema_extra={
+            "display_label": "戳一戳入站响应",
+            "help": "开启后被戳一戳时可投递调度 trigger；默认关闭。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+    reaction_inbound_response_enabled: bool = Field(
+        default=False,
+        description="Enable reply triggers for inbound message reactions.",
+        json_schema_extra={
+            "display_label": "表情回应入站响应",
+            "help": "开启后消息被表情回应时可投递调度 trigger；默认关闭。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+    poke_outbound_enabled: bool = Field(
+        default=False,
+        description="Enable outbound poke_user tool registration.",
+        json_schema_extra={
+            "display_label": "主动戳一戳",
+            "help": "开启后可低频调用 poke_user；默认关闭。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+    reaction_outbound_enabled: bool = Field(
+        default=False,
+        description="Enable outbound react_to_message tool registration.",
+        json_schema_extra={
+            "display_label": "主动表情回应",
+            "help": "开启后可低频调用 react_to_message；默认关闭。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+    quote_reply_enabled: bool = Field(
+        default=False,
+        description="Enable quote reply anchor conversion.",
+        json_schema_extra={
+            "display_label": "引用回复锚点",
+            "help": "开启后 <quote msg_id=\"...\"/> 可转为 OneBot 引用回复；默认关闭。",
+            "risk_level": "careful",
+            "restart_hint": "required",
+        },
+    )
+
+
 @dataclass(frozen=True)
 class ResolvedHumanization:
     """Profile decisions consumed by Part 6 runtime hooks."""
@@ -1164,6 +1223,11 @@ class ResolvedHumanization:
     pause_then_extend_enabled: bool = False
     plan_then_utter_enabled: bool = False
     disable_natural_split: bool = False
+    qq_interactions_poke_inbound_response_enabled: bool = False
+    qq_interactions_reaction_inbound_response_enabled: bool = False
+    qq_interactions_poke_outbound_enabled: bool = False
+    qq_interactions_reaction_outbound_enabled: bool = False
+    qq_interactions_quote_reply_enabled: bool = False
 
 
 class HumanizationConfig(BaseModel):
@@ -1292,7 +1356,7 @@ class HumanizationConfig(BaseModel):
         description="Part 6 pause-then-extend controls.",
         json_schema_extra={
             "display_label": "暂停后追发配置",
-            "help": "默认关闭；custom profile 下显式读取。",
+            "help": "默认开启；custom profile 下显式读取，可通过本开关关闭。",
             "risk_level": "careful",
             "restart_hint": "required",
         },
@@ -1304,6 +1368,16 @@ class HumanizationConfig(BaseModel):
             "display_label": "计划后发言配置",
             "help": "默认关闭；custom profile 下显式读取。",
             "risk_level": "danger",
+            "restart_hint": "required",
+        },
+    )
+    qq_interactions: QQInteractionsConfig = Field(
+        default_factory=QQInteractionsConfig,
+        description="Part 6 QQ special interaction controls.",
+        json_schema_extra={
+            "display_label": "QQ 特殊交互配置",
+            "help": "默认全关；custom profile 下显式读取，预设档位按三档策略决议。",
+            "risk_level": "careful",
             "restart_hint": "required",
         },
     )
@@ -1433,6 +1507,8 @@ class HumanizationConfig(BaseModel):
         self,
         profile_value: HumanizationProfile | None = None,
         group_id: int | str | None = None,
+        *,
+        performance_degraded: bool | None = None,
     ) -> ResolvedHumanization:
         """Resolve Part 6 profile into concrete generation decisions."""
         profile = profile_value or self.profile
@@ -1442,30 +1518,48 @@ class HumanizationConfig(BaseModel):
                 state_board_granularity="coarse",
             )
         if profile == "balanced":
+            streaming_enabled = True
+            plan_enabled = False
             return ResolvedHumanization(
                 state_board_layout="tail",
                 state_board_granularity="coarse",
-                streaming_segment_enabled=True,
+                streaming_segment_enabled=streaming_enabled,
                 pause_then_extend_enabled=True,
-                disable_natural_split=True,
+                plan_then_utter_enabled=plan_enabled,
+                disable_natural_split=streaming_enabled or plan_enabled,
+                qq_interactions_poke_inbound_response_enabled=True,
+                qq_interactions_reaction_inbound_response_enabled=True,
+                qq_interactions_quote_reply_enabled=True,
             )
         if profile == "performance":
-            if self._performance_degraded(group_id):
+            if self._performance_degraded(group_id, override=performance_degraded):
+                streaming_enabled = True
+                plan_enabled = False
                 return ResolvedHumanization(
                     state_board_layout="tail",
                     state_board_granularity="coarse",
-                    streaming_segment_enabled=True,
+                    streaming_segment_enabled=streaming_enabled,
                     pause_then_extend_enabled=True,
-                    disable_natural_split=True,
+                    plan_then_utter_enabled=plan_enabled,
+                    disable_natural_split=streaming_enabled or plan_enabled,
+                    qq_interactions_poke_inbound_response_enabled=True,
+                    qq_interactions_reaction_inbound_response_enabled=True,
+                    qq_interactions_quote_reply_enabled=True,
                 )
-            plan_enabled = self._plan_then_utter_allowed(group_id)
+            plan_enabled = self.plan_then_utter.enabled and self._plan_then_utter_allowed(group_id)
+            streaming_enabled = True
             return ResolvedHumanization(
                 state_board_layout="tail",
                 state_board_granularity="coarse",
-                streaming_segment_enabled=True,
+                streaming_segment_enabled=streaming_enabled,
                 pause_then_extend_enabled=True,
                 plan_then_utter_enabled=plan_enabled,
-                disable_natural_split=True,
+                disable_natural_split=streaming_enabled or plan_enabled,
+                qq_interactions_poke_inbound_response_enabled=True,
+                qq_interactions_reaction_inbound_response_enabled=True,
+                qq_interactions_poke_outbound_enabled=True,
+                qq_interactions_reaction_outbound_enabled=True,
+                qq_interactions_quote_reply_enabled=True,
             )
 
         plan_enabled = self.plan_then_utter.enabled and self._plan_then_utter_allowed(group_id)
@@ -1477,6 +1571,11 @@ class HumanizationConfig(BaseModel):
             pause_then_extend_enabled=self.pause_then_extend.enabled,
             plan_then_utter_enabled=plan_enabled,
             disable_natural_split=streaming_enabled or plan_enabled,
+            qq_interactions_poke_inbound_response_enabled=self.qq_interactions.poke_inbound_response_enabled,
+            qq_interactions_reaction_inbound_response_enabled=self.qq_interactions.reaction_inbound_response_enabled,
+            qq_interactions_poke_outbound_enabled=self.qq_interactions.poke_outbound_enabled,
+            qq_interactions_reaction_outbound_enabled=self.qq_interactions.reaction_outbound_enabled,
+            qq_interactions_quote_reply_enabled=self.qq_interactions.quote_reply_enabled,
         )
 
     def _plan_then_utter_allowed(self, group_id: int | str | None) -> bool:
@@ -1485,7 +1584,14 @@ class HumanizationConfig(BaseModel):
             return True
         return str(group_id or "").strip() in whitelist
 
-    def _performance_degraded(self, group_id: int | str | None) -> bool:
+    def _performance_degraded(
+        self,
+        group_id: int | str | None,
+        *,
+        override: bool | None = None,
+    ) -> bool:
+        if override is not None:
+            return override
         try:
             from services.humanization.health_guard import is_group_degraded
 

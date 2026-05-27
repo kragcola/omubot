@@ -62,7 +62,18 @@ def test_inter_segment_delay_playful_mood_speeds() -> None:
 def test_reply_segment_plan_passes_mood_to_inter_segment_delay() -> None:
     cfg = ReplySegmentationConfig(enabled=True, natural_split_enabled=True, max_segment_chars=6)
 
-    neutral = reply_segment_plan("第一句很长很长。第二句也很长很长。", cfg, mood_label="neutral")
-    cold = reply_segment_plan("第一句很长很长。第二句也很长很长。", cfg, mood_label="cold")
+    class _ConstRng:
+        def __init__(self, value: float) -> None:
+            self._value = value
+
+        def random(self) -> float:
+            return self._value
+
+    neutral = reply_segment_plan(
+        "第一句很长很长。第二句也很长很长。", cfg, mood_label="neutral", rng=_ConstRng(0.0),
+    )
+    cold = reply_segment_plan(
+        "第一句很长很长。第二句也很长很长。", cfg, mood_label="cold", rng=_ConstRng(0.0),
+    )
 
     assert cold.inter_segment_delays[0] > neutral.inter_segment_delays[0]

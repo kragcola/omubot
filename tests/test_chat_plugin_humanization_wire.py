@@ -8,9 +8,10 @@ import pytest
 
 from kernel.config import BotConfig
 from kernel.types import MessageContext, PluginContext
-from plugins.chat.plugin import ChatPlugin, _humanization_resolve
+from plugins.chat.plugin import ChatPlugin, _humanization_resolve, _register_humanization_interaction_tools
 from services.humanization import REGISTER_LABEL_SLOT, RegisterClassifier, create_humanization_state_bus
 from services.system_module import Scope
+from services.tools.registry import ToolRegistry
 
 
 class _FakeLLM:
@@ -112,6 +113,29 @@ def test_humanization_resolve_honors_group_profile_override() -> None:
     assert resolved.streaming_segment_enabled is True
     assert resolved.pause_then_extend_enabled is True
     assert resolved.disable_natural_split is True
+
+
+def test_register_interaction_tools_wired_for_performance() -> None:
+    registry = ToolRegistry()
+    _register_humanization_interaction_tools(
+        BotConfig.model_validate({"humanization": {"profile": "performance"}}),
+        registry,
+    )
+
+    assert registry.get("poke_user") is not None
+    assert registry.get("react_to_message") is not None
+
+
+def test_register_interaction_tools_not_wired_for_default_profiles() -> None:
+    for profile in ("economy", "balanced", "custom"):
+        registry = ToolRegistry()
+        _register_humanization_interaction_tools(
+            BotConfig.model_validate({"humanization": {"profile": profile}}),
+            registry,
+        )
+
+        assert registry.get("poke_user") is None
+        assert registry.get("react_to_message") is None
 
 
 @pytest.mark.asyncio

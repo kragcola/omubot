@@ -98,3 +98,29 @@ def test_performance_profile_uses_balanced_when_group_degraded(tmp_path: Path) -
     assert resolved.pause_then_extend_enabled is True
     assert resolved.plan_then_utter_enabled is False
     assert resolved.disable_natural_split is True
+
+
+def test_health_guard_no_mid_turn_switch(tmp_path: Path) -> None:
+    cfg = HumanizationConfig.model_validate({
+        "profile": "performance",
+        "plan_then_utter": {"enabled": True},
+    })
+    db_path = tmp_path / "usage.db"
+    _init_db(db_path)
+    _insert_usage(db_path, "993065015", hit=70, miss=30)
+    HumanizationHealthGuard(db_path=db_path, now=lambda: 100.0).poll_once()
+    assert is_group_degraded("993065015") is True
+
+    healthy_turn = cfg.resolve_profile(
+        group_id="993065015",
+        performance_degraded=False,
+    )
+    degraded_turn = cfg.resolve_profile(
+        group_id="993065015",
+        performance_degraded=True,
+    )
+
+    assert healthy_turn.plan_then_utter_enabled is True
+    assert healthy_turn.qq_interactions_poke_outbound_enabled is True
+    assert degraded_turn.plan_then_utter_enabled is False
+    assert degraded_turn.qq_interactions_poke_outbound_enabled is False

@@ -8,7 +8,7 @@ from pathlib import Path
 from kernel.config import BotConfig, HumanizationConfig, load_config
 
 
-def test_humanization_config_defaults_all_features_off() -> None:
+def test_humanization_config_defaults_keep_only_safe_runtime_features_on() -> None:
     cfg = BotConfig()
 
     assert cfg.humanization.context_providers is False
@@ -23,7 +23,7 @@ def test_humanization_config_defaults_all_features_off() -> None:
     assert cfg.humanization.state_board.layout == "head"
     assert cfg.humanization.state_board.granularity == "fine"
     assert cfg.humanization.streaming_segment.enabled is False
-    assert cfg.humanization.pause_then_extend.enabled is False
+    assert cfg.humanization.pause_then_extend.enabled is True
     assert cfg.humanization.plan_then_utter.enabled is False
     assert cfg.humanization.plan_then_utter.group_whitelist == []
     assert cfg.humanization.rws_shadow is False
@@ -196,6 +196,32 @@ def test_humanization_resolve_profile_presets() -> None:
     assert performance.pause_then_extend_enabled is True
     assert performance.plan_then_utter_enabled is False
     assert performance.disable_natural_split is True
+
+    performance_pilot = HumanizationConfig.model_validate({
+        "profile": "performance",
+        "plan_then_utter": {"enabled": True, "group_whitelist": ["993065015"]},
+    }).resolve_profile("performance", group_id="993065015")
+    assert performance_pilot.plan_then_utter_enabled is True
+
+
+def test_resolve_profile_invariants() -> None:
+    cases = [
+        HumanizationConfig(profile="economy").resolve_profile("economy"),
+        HumanizationConfig(profile="balanced").resolve_profile("balanced"),
+        HumanizationConfig.model_validate({
+            "profile": "performance",
+            "plan_then_utter": {"enabled": True, "group_whitelist": ["993065015"]},
+        }).resolve_profile("performance", group_id="993065015"),
+        HumanizationConfig.model_validate({
+            "profile": "custom",
+            "streaming_segment": {"enabled": False},
+            "plan_then_utter": {"enabled": True, "group_whitelist": ["993065015"]},
+        }).resolve_profile("custom", group_id="993065015"),
+    ]
+
+    for resolved in cases:
+        if resolved.disable_natural_split:
+            assert resolved.streaming_segment_enabled or resolved.plan_then_utter_enabled
 
 
 def test_humanization_config_allows_single_flag_override() -> None:

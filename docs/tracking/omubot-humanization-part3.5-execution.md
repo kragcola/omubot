@@ -139,13 +139,19 @@
 | **P3.11.2a** | 1 | ✅ | 自主验收通过：`consecutive_skip` 两档阈值已升格为 `GroupConfig` / `GroupOverride` / `ResolvedGroupConfig` 字段；scheduler 裸字面量 grep 归零，相关回归 70 条通过 |
 | **P3.11.2b** | 1 | ✅ | 自主验收通过：force-threshold 已叠加 30 分钟 skip 窗口；`last_skip_time` grep 命中收敛到 `__slots__` + `notify()` 两处，相关回归 74 条通过 |
 | **P3.11.3** | 1 | ✅ | 自主验收通过：`planner_smooth` 默认值在代码默认路径已从 3.0 收敛到 2.0；`planner_smooth.*3.0` 在 `kernel/config.py` / `config/config.json` 默认位点归零，config loader 回归 24 条通过 |
-| **P3.12** | 2 | ⏳ | RWS scaffolding，未开始；阻塞于 Wave 1 |
-| **P3.13** | 2 | ⏳ | Hawkes 离线 cache，未开始；阻塞于 P3.12 |
-| **P3.14** | 2 | ⏳ | EOT classifier，未开始；阻塞于 P3.12 |
-| **P3.15** | 3 | ⏳ | 反事实静默重放，未开始；阻塞于 Wave 2 |
-| **P3.16** | 3 | ⏳ | ResponseClass 枚举重构，未开始；阻塞于 P3.15 |
-| **P3.17** | 3 | ⏳ | ε-greedy θ bandit，未开始；阻塞于 P3.16 |
-| **P3.18** | 3 | ⏳ | confidence-gated skip，未开始；阻塞于 P3.16 |
+| **P3.12** | 2 | ✅ | 自主验收通过：新增 `services/scheduler_rws/`，`[humanization]` 增 `rws_shadow` / `rws_primary` / `rws_threshold` 等开关；`services/scheduler.py` 默认关、shadow 仅写 `last_rws`，primary 才接管 |
+| **P3.13** | 2 | ✅ | 自主验收通过：新增 `services/scheduler_hawkes/` cache + offline refresher；`ChatPlugin` 在 `humanization.rws_hawkes=true` 时启动 10 分钟刷新器，scheduler cache miss 回退近期 timeline 估算 |
+| **P3.14** | 2 | ✅ | 自主验收通过：新增 `services/scheduler_eot/`，注册 `scheduler_eot` LLMTask/profile/admin 同步；scheduler 以 cache + per-group interval 后台预热方式注入 RWS，排队即 reserve quota，失败 fallback 0.5 |
+| **P3.15** | 3 | ✅ | 自主验收通过：新增 `services/scheduler_replay/`、`/api/admin/replay/weekly` 与 `/admin/replay/weekly` 报表页；已补 Vite `/admin/replay/` SPA fallback；当前落地 run summary 存取与只读周报入口，重型 LLM judge cron 留给后续运营任务 |
+| **P3.16** | 3 | ✅ | 自主验收通过：`kernel.types.ResponseClass` 已落地，scheduler 槽位公开 `last_response_class`，probability fire/skip 与 `_fire()` 入口已标记 `full_reply` / `silence`；sticker_only 反向回调未启用，保持后续增强项 |
+| **P3.17** | 3 | ✅ | 自主验收通过：新增 `RWSBandit` 与 `/api/admin/bandit/rws` 观测/手动 observe API；默认 `rws_bandit=false` 且 `rws_bandit_freeze=true`，只调 θ 不改权重 |
+| **P3.18** | 3 | ✅ | 自主验收通过：`pass_turn` tool schema 增必填 `confidence`；`humanization.pass_turn_confidence_gate=true` 且低于阈值时转轻量确认，不再静默；force_reply 下 pass_turn 仍被剥离 |
+
+**2026-05-26 接手后补充验收记录（Codex）**：
+
+- 新增 package 迁移清单：[docs/migrations/scheduler-rws-package-split.md](../migrations/scheduler-rws-package-split.md)。
+- 验证：`uv run pytest -q` focused 集合 215 条通过 + provider API 3 条通过；`uv run ruff check` 改动范围通过；`uv run pyright` 新增/核心改动范围 0 errors；`admin/frontend` 的 `vue-tsc --noEmit` 与 `npm run build` 均通过。
+- 已知保留项：P3.15 当前提供 replay run summary 存取与 admin 周报入口，未实现重型每日 LLM judge cron；P3.16 已落 `ResponseClass` 与 scheduler 槽位标记，未启用 sticker_only 反向回调。
 
 ---
 

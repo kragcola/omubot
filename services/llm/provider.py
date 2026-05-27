@@ -130,6 +130,10 @@ class LLMProvider(ABC):
         """
         ...
 
+    def extract_text_delta(self, raw_line: str) -> str:
+        """Extract visible text from one SSE line for streaming side effects."""
+        return ""
+
     def extract_text(self, result: dict[str, Any]) -> str:
         """Extract usable text from a parse result. Never returns thinking blocks."""
         return extract_text(result)

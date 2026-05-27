@@ -157,6 +157,12 @@ const router = createRouter({
       component: () => import('../views/scheduler/SchedulerView.vue'),
     },
     {
+      path: '/replay/weekly',
+      name: 'replay-weekly',
+      meta: { title: '反事实重放', keepAlive: true },
+      component: () => import('../views/replay/ReplayWeeklyView.vue'),
+    },
+    {
       path: '/config',
       name: 'config',
       meta: { title: '配置', keepAlive: true },

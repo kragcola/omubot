@@ -47,6 +47,7 @@ const menuOptions: MenuOption[] = [
       { label: '学习管道', key: '/learning', icon: renderIcon(AnalyticsOutline) },
       { label: '知识库', key: '/knowledge', icon: renderIcon(LibraryOutline) },
       { label: 'BlockTrace', key: '/block-trace', icon: renderIcon(AnalyticsOutline) },
+      { label: '反事实重放', key: '/replay/weekly', icon: renderIcon(AnalyticsOutline) },
     ],
   },
   {

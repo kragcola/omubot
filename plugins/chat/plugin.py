@@ -105,6 +105,8 @@ def _humanization_group_allowed(config: BotConfig, group_id: str | None) -> bool
 def _humanization_resolve(
     config: BotConfig,
     group_id: str | int | None,
+    *,
+    performance_degraded: bool | None = None,
 ) -> ResolvedHumanization:
     profile_override = None
     if group_id is not None:
@@ -113,7 +115,20 @@ def _humanization_resolve(
             profile_override = group_profile.humanization_profile
         except Exception:
             profile_override = None
-    return config.humanization.resolve_profile(profile_override, group_id)
+    return config.humanization.resolve_profile(
+        profile_override,
+        group_id,
+        performance_degraded=performance_degraded,
+    )
+
+
+def _register_humanization_interaction_tools(config: BotConfig, tools: Any) -> None:
+    if not hasattr(tools, "register_interaction_tools"):
+        return
+    tools.register_interaction_tools(
+        resolved_humanization=config.humanization.resolve_profile(config.humanization.profile),
+        profile=config.humanization.profile,
+    )
 
 
 class _ScopedHumanizationProvider:
@@ -993,6 +1008,7 @@ class ChatPlugin(AmadeusPlugin):
         from services.tools.registry import ToolRegistry
 
         tools = ToolRegistry()
+        _register_humanization_interaction_tools(config, tools)
         # Tools are registered by individual plugins via bus.collect_tools()
         ctx.tool_registry = tools
 
@@ -1083,7 +1099,11 @@ class ChatPlugin(AmadeusPlugin):
             humanization_rewrite_threshold=config.humanization.rewrite_threshold,
             humanization_kaomoji_enforce_strict=config.humanization.kaomoji_enforce_strict,
             humanization_runtime_groups=config.humanization.runtime_groups,
-            humanization_resolver=lambda group_id: _humanization_resolve(config, group_id),
+            humanization_resolver=lambda group_id, *, performance_degraded=None: _humanization_resolve(
+                config,
+                group_id,
+                performance_degraded=performance_degraded,
+            ),
             pass_turn_confidence_gate=config.humanization.pass_turn_confidence_gate,
             pass_turn_confidence_threshold=config.humanization.pass_turn_confidence_threshold,
         )

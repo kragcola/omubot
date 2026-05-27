@@ -4,6 +4,704 @@
 
 ---
 
+## 2026-05-27 Persona parity audit 假阳性修复 + source.md front matter 补齐
+
+**变更类型**：代码（`services/persona/parity_audit.py`、`tests/test_persona_parity_audit.py`）+ 配置（`config/persona/fengxiaomeng-v2/source.md` front matter）；无 runtime 代码改动
+
+**触发**：B3.4 跟踪期间发现 shadow diff log 持续报 4 axes divergent（`identity_personality`、`bot_self_id`、`behavior_instruction`、`admins`），与 B3 切流真已上线（v2 sha256 `398ca36e…` 与 shadow log `compile_signature` 完全匹配）的事实冲突。逐 axis 走代码 + freeze 比对后定位为：3 条假阳性（parity audit 算法）+ 2 条 source schema 缺口（front matter）。
+
+**根因**（4 axis 拆解）：
+
+- `identity_personality` / `behavior_instruction` / `proactive_rules`：[parity_audit.py](services/persona/parity_audit.py) 之前用 `_first_line` 取 v1 第一行做 substring 锚点。`Identity.personality` 第一行是 `# 1. 是谁（必填）`、`instruction.md` 第一行是 `## 8.4 行为指令`、`identity.proactive` 第一行是 `## 插话方式`——markdown 标题在 v2 yaml-rendered prompt block 里**永远不会出现原文**，等于必然失配。3 条全是算法假阳性。
+- `bot_self_id`：[fengxiaomeng-v2/source.md](config/persona/fengxiaomeng-v2/source.md) front matter 之前没有 `bot_self_id_hint`，`adapter.yaml.bot_identity.self_id_hint` 因此为空，compiler `runtime.adapter` block 输出 `bot self id hint：`（值缺失），parity 找不到 `bot self id hint：384801062` 锚点 → 真分歧。
+- `admins`：source front matter 之前没有 `admins:`，`adapter.yaml.permissions.admins[]` 为空，[compiler.py:228-231](services/persona/compiler.py#L228-L231) 的 `_admins_line()` 返回空串、`【管理员】@…` 段不输出 → parity 真 v1_only。
+- `group_profile` / `bot_self_id` 三锚点其它两条（`runtime source：adapter_connect_event` / `昵称不可信`）一直 OK，未受影响。
+
+**改动清单**：
+
+- [services/persona/parity_audit.py](services/persona/parity_audit.py) — 新增 `_meaningful_anchors()`：跳过 markdown 标题整行、剥列表前缀（`-` / `*` / `+` / `1.` / `1、`）、过滤 < 6 字短行、最多取前 5 条；`_evaluate_identity` / `_evaluate_instruction` / `_evaluate_proactive` 改为「多锚点 any-match」（任一命中即 aligned，否则 divergent）。`_first_line` 保留作为兜底（无任何 anchor 时使用）。
+- [tests/test_persona_parity_audit.py](tests/test_persona_parity_audit.py) — 新增 4 条回归（21 全绿）：v1 首行是 narrative 时取第二行业务锚点；v1 首行是 markdown 标题时跳过；带 `行为指令：` 块时正常 align；`## 插话方式` 标题不出现在 v1_signal。
+- [config/persona/fengxiaomeng-v2/source.md](config/persona/fengxiaomeng-v2/source.md) front matter — 补 `bot_self_id_hint: "384801062"` + `admins: { "1416930401": "工丿囗" }`（与 [config/config.json](config/config.json) `admins` / [bot.py 的 self_id 384801062] 对齐）。
+- importer/freeze 重跑（`uv run python -m services.persona.importer fengxiaomeng-v2 --pending-freeze --compile-dry-run`）— `adapter.yaml` 已正确生成 `bot_identity.self_id_hint='384801062'` + `permissions.admins=[{id:'1416930401', label:'工丿囗'}]`；compile dry-run runtime.adapter block 输出 `bot self id hint：384801062` + `【管理员】@1416930401(工丿囗)` + 信任策略尾巴齐全。
+
+**验证**：
+
+- `uv run pytest tests/test_persona_parity_audit.py -q` → 21/21 passed
+- `uv run ruff check services/persona/parity_audit.py tests/test_persona_parity_audit.py` → All checks passed
+- `uv run pyright services/persona/parity_audit.py tests/test_persona_parity_audit.py` → 0 errors / 0 warnings
+- 全量 `uv run pytest -q` → 1989 passed / 1 failed / 8 skipped；唯一 fail（`test_streaming_hook.py::test_tool_execution_receives_resolved_humanization_context`）属 humanization Part 6 系列 dirty 改动遗留，与本次 parity 修复无因果关系
+- 容器 shadow log 复核延后：bot 镜像里 `services/persona/` 不是 bind mount（bind mount 仅 `config/` + `admin/static/`），rebuild 之前 connect-time shadow 仍跑老 `_first_line` 算法。最近一行（2026-05-26T19:10Z `divergent_axes: identity_personality, behavior_instruction`）即此残影；rebuild 后下次 connect 应复核为 0 divergent_axes。
+
+**影响**：parity audit 6 axes 全 `aligned`（待 rebuild 复核）。B5 全量切流前提中"6 axes 全 aligned"达成。B3.4 用户最终验收前提不变。
+
+**未实施 / 不在本次范围**：
+
+- 不 rebuild 镜像：rebuild 是 D6 高代价操作，与 Part 6 bugfix Phase 0 鬓边耦合（balanced profile 死锁）；rebuild 时机与 Phase 0 回滚时机一并交用户决策，本次仅完成代码 + config 落地。
+- 不 commit：D7 git hygiene 规定不做未授权 commit；本次涉及的 source.md / parity_audit.py / 测试 + 28 个 dirty 文件需要逐组提交方案与用户对齐。
+- 不 push / PR：同上。
+
+**回滚**：
+
+- 撤源 + 测试：`git restore services/persona/parity_audit.py tests/test_persona_parity_audit.py`
+- 撤 source：`git restore config/persona/fengxiaomeng-v2/source.md`
+- 重跑 importer/freeze：`uv run python -m services.persona.importer fengxiaomeng-v2 --pending-freeze`
+- 不需要 restart bot（这一系列改动尚未进入运行时镜像）
+
+**关联文档**：
+
+- [docs/migrations/persona-v2-importer.md §9](docs/migrations/persona-v2-importer.md) — 6 axes 表已修正：admins / proactive_rules 从 `v1_only` → `aligned`；bot_self_id 备注新增 front matter 落地说明
+- [docs/tracking/omubot-grayscale-progress-tracker.md §3](docs/tracking/omubot-grayscale-progress-tracker.md) — B2 行 + parity 现状表已修正
+- [docs/tracking/persona-runtime-cutover-B3-execution.md §7](docs/tracking/persona-runtime-cutover-B3-execution.md) — B3.4 行已补 parity 修复说明
+
+---
+
+## 2026-05-27 humanization Part 5 P5.5 误判验收撤回
+
+**变更类型**：文档（撤回前一条目的验收结论；无代码 / config 改动）
+
+**触发**：用户指出「part5 的回复分段功能不是正在 fix 吗？你为什么验收了」。
+
+**误判根因**：
+
+- 我把"代码落地 + 单元测试通过 + 默认翻 True 已上线"等同于"达标"，忽略了 P5 与 [Part 6 bugfix](docs/tracking/omubot-humanization-part6-bugfix-part1.md) 的强耦合
+- bugfix §1.2 故障根因点正是 P5 fallback 路径 `_disabled_segment_plan`；bugfix Phase 1A 计划改名 `disable_natural_split` → `streaming_already_emitted`，4 处 client.py 调用点 + 5 处 kernel/config.py setter 全部重构 — P5.5 现状的代码会被 Phase 1A 推翻
+- balanced profile 实地表现「所有回复一段话」证伪了 P5 默认 True 在 profile 干预下真正分段
+- P5.4 24h 出口指标矩阵从未补采样，2026-05-25 是用户授权代验收忽略 24h 窗口；本不该把"未实地验证"算进 P5.5 的验收依据
+
+**撤回动作**（按用户「原版不用删」原则，前一条目 2026-05-27 P5.5 验收 + P5.6 收口保留作为误判证据）：
+
+- [docs/tracking/omubot-humanization-part5-execution.md](docs/tracking/omubot-humanization-part5-execution.md) §6：P5.5 ✅ → 🟡 ⚠️（保留 2026-05-26 落地证据 + 标注撤回原因 + 阻塞 bugfix Phase 1）；P5.6 🟡 → ⏳
+- [docs/tracking/omubot-humanization-part5-segmentation.md](docs/tracking/omubot-humanization-part5-segmentation.md) §6：恢复 P5.1~P5.4 ✅ + P5.5 🟡 ⚠️ + P5.6 ⏳，补"代码已落但与 bugfix 强耦合"说明
+- [docs/tracking/omubot-humanization-part1-language-feel.md](docs/tracking/omubot-humanization-part1-language-feel.md) §13 Part 5 行：去掉 P5.1~P5.5 ✅ 收口标记，加 🟡 ⚠️ 撤回 + bugfix 耦合警示
+- [docs/tracking/omubot-grayscale-progress-tracker.md](docs/tracking/omubot-grayscale-progress-tracker.md) §4.5：P5.5 ✅→🟡 ⚠️；P5.6 🟡→⏳；附 bugfix Phase 1A 改名重构警示
+
+**未实施**：
+
+- 不动 P5.5 已落地的代码（segmentation.py / kernel/config.py / client.py）— 撤回的是验收结论，不是代码状态
+- 不删除前一条 2026-05-27 P5.5 验收 + P5.6 收口的 maintenance-log 条目（按用户「原版不用删」纪律）
+
+**纠偏纪律**（自记于此防再犯）：
+
+- 任何 part 的 ✅ 验收前，必须先 grep 是否有 active bugfix / fix-track 文档与该 part 的代码路径有交集
+- "单元测试全绿" ≠ "验收通过"；profile 介入 / 多 part 联动场景必须有实地证据
+- 跨 part 强耦合时，下游 part 必须在上游 fix 全绿后才能算自身收口
+
+**回滚路径**：本条目纯文档撤回，无回滚需求。如需重新认定 P5.5 ✅，前置条件：[Part 6 bugfix Phase 1A/1B/1C](docs/tracking/omubot-humanization-part6-bugfix-part1-execution.md) 全绿 + balanced 灰度二次切回成功 + 实地验证多段对话表现达标。
+
+---
+
+## 2026-05-27 humanization Part 5 P5.5 验收 + P5.6 文档收口
+
+**变更类型**：文档（验收 + 跨文档状态同步；无代码 / config 改动）
+
+**触发**：用户要求「达标的进行收口，进行下一阶段」。复核后 P5.5 是当前唯一"已落地待验收且下一阶段未被 bugfix 阻塞"的项。
+
+**验收证据**（[Part 5 执行追踪 §5](docs/tracking/omubot-humanization-part5-execution.md#5-验收清单每条任务交付时勾)）：
+
+- `natural_split_enabled` 默认 `True` 双源已落地（[services/llm/segmentation.py:94](services/llm/segmentation.py#L94) + [kernel/config.py:777](kernel/config.py#L777)）
+- `reply_segment_plan` 分支化简为 `_disabled_segment_plan` / `_natural_segment_plan`（[segmentation.py:951-953](services/llm/segmentation.py#L951-L953)）
+- `_split_naturally` / `_MIN_CHUNK` / `_MAX_CHUNK` / `_reply_segments` 委托 stub 已从 `services/llm/client.py` 卸除
+- `disable_natural_split` 入参在 `_reply_segment_plan` / `_visible_reply_segment_plan` / 两处 fan-out 保留（streaming_segment / plan_then_utter / balanced / performance profile 前向兼容）
+- P5 定向 `tests/test_natural_split.py + test_inter_segment_delay.py + test_segmentation.py` 38 passed
+- `uv run ruff check services/llm/segmentation.py services/llm/client.py kernel/config.py` clean
+- `uv run pyright services/llm/segmentation.py services/llm/client.py kernel/config.py` 0 errors / 0 warnings
+- 全量 `uv run pytest -q` 1980 passed / 8 skipped（1 fail `test_chat_plan_then_utter_invalid_plan_falls_back_to_main_path` 经定向重跑通过，属其它测试状态污染，非 P5 范围）
+
+**文档同步**（P5.6 收口动作）：
+
+- [docs/tracking/omubot-humanization-part5-execution.md](docs/tracking/omubot-humanization-part5-execution.md) §6：P5.5 ⏳→✅；P5.6 ⏳→🟡，附今日验收时间戳与全部证据
+- [docs/tracking/omubot-humanization-part5-segmentation.md](docs/tracking/omubot-humanization-part5-segmentation.md) §6：P5.1~P5.4 ✅ + P5.5~P5.6 ⏳ → P5.1~P5.5 ✅ + P5.6 🟡
+- [docs/tracking/omubot-humanization-part1-language-feel.md](docs/tracking/omubot-humanization-part1-language-feel.md) §13 边界表 Part 5 行追加 2026-05-27 P5.5 ✅ 收口标记 + `disable_natural_split` 前向兼容说明
+- [docs/tracking/omubot-grayscale-progress-tracker.md](docs/tracking/omubot-grayscale-progress-tracker.md) §4.5：P5.5 🟡→✅；P5.6 ⏳→🟡
+
+**未实施**：
+
+- 任何代码 / config 改动均未执行
+- 灰度追踪表 §4.5 P5.6 仍 🟡（待用户最终签收 P5 全 part 收口；本次只把已落地证据与文档对齐）
+
+**下一阶段建议**（按用户「达标→下一阶段」要求）：
+
+- Part 5 范围：等用户对 P5.6 文档收口签字 → 本表 P5.6 🟡→✅ → Part 5 全 part 关闭
+- 跨 part：Part 1 灰度-2/3 / Part 2-3 Wave 7 / Persona B4 观察期等阻塞项均不受 P5 收口影响，按既有节奏推进；Part 6 bugfix Phase 0 仍待用户书面授权
+- 不进入 P5.4 24h 出口指标补采样：用户 2026-05-25 已授权代验收忽略 24h 窗口，按既定决议不再阻塞
+
+**回滚路径**：
+
+- 文档回滚：`git restore docs/tracking/omubot-humanization-part5-execution.md docs/tracking/omubot-humanization-part5-segmentation.md docs/tracking/omubot-humanization-part1-language-feel.md docs/tracking/omubot-grayscale-progress-tracker.md`
+- 代码回滚（若 P5.5 后续暴露问题）：`config/config.json` 加 `humanization.natural_split_enabled=false` + `docker compose restart bot`，30 秒回到老路径行为；但 [Part 5 执行追踪 §6](docs/tracking/omubot-humanization-part5-execution.md#6-当前状态执行者每完成一条把-改--等验收验收后我改-) 标注 `_legacy_segment_path` 已删除，回滚需配合 `_disabled_segment_plan` 路径（仍在线）
+
+---
+
+## 2026-05-27 灰度进度追踪表（人设 / 拟人）落地
+
+**变更类型**：文档（跨 part 索引视图；无代码 / config 改动）
+
+**触发**：用户要求「创建灰度程度追踪文档，标记目前人设和拟人两个大模块内部灰度进行表，进行阶段和进行内容，方便我查阅推进」。
+
+**改动**：
+
+- 新增 [docs/tracking/omubot-grayscale-progress-tracker.md](docs/tracking/omubot-grayscale-progress-tracker.md) — 跨执行文档的索引视图：§0 速览（最近 7 天关键事件）、§1 当前生产灰度配置快照（humanization + persona_v2 全字段映射 [config/config.json:374-411](config/config.json#L374-L411)）、§2 灰度群清单（993065015 / 984198159 + 各群启用能力）、§3 Persona B1-B6 进行表（B1/B2/B3 ✅、B4 进行中、B5/B6 ⏳）、§4 Humanization Part 1-6 + bugfix 进行表（Part 1-3.5 ✅、Part 4 v2-修订版 ⏳、Part 5 P5.5 🟡 / P5.6 ⏳、Part 6 🟡 待最终验收 但被 bugfix 阻塞 🔥、Part 6 bugfix Phase 0/1A/1B/1C/2/3 全 ⏳）、§5 当前阻塞 & 下一步建议执行序、§6 文档关系图（避免重复维护）、§7 自审记录 6 项
+
+**核心防呆**：
+
+- 本表只放「当前阶段 / 当前内容 / 阻塞」三栏，**不复制各 part 的 wave 级细节**；冲突时以执行文档为准
+- §1.1 humanization 表显式标注 `profile=balanced` 🔥 故障态、`streaming_segment.enabled=false` profile 转译歧义、`runtime_groups` 仅 plan_then_utter 等子模块才参考
+- §2 易错点提示：humanization profile 对全群生效，runtime_groups 不是整体白名单
+- §6 维护规则：Wave 推进或档位变更需先改本表顶部时间戳与对应行
+
+**未实施**：
+
+- 任何代码 / config 改动均未执行；本表纯索引
+
+**回滚路径**：本条目纯文档新增，无回滚需求；如需删除：`git rm docs/tracking/omubot-grayscale-progress-tracker.md`
+
+---
+
+## 2026-05-27 humanization Part 6 bugfix part1 派单追踪文档落地
+
+**变更类型**：文档（派单版执行追踪，配套审查文档；未实施代码/config 改动）
+
+**触发**：用户要求「自审文档，之后创建派发追踪文档。我好给其他人执行，格式参照拟人 part1」。
+
+**改动**：
+
+- 主线 [docs/tracking/omubot-humanization-part6-bugfix-part1.md](docs/tracking/omubot-humanization-part6-bugfix-part1.md) 自审 4 处订正：①§1.2 / §5.2.1 / §7.2 调用点列表展开为 client.py 4 处 + kernel/config.py 5 处；②§2 finding C 加 [client.py:85-88](services/llm/client.py#L85-L88) `_QUOTE_RE` 正则 anchor + `fix_cq_codes` 透传机制；③§4.4 T8 invariant 订正为 `streaming OR plan` 双蕴含（与 [kernel/config.py:1564](kernel/config.py#L1564) custom 分支对齐）；④§5.2.1 改动表加 [client.py:3704](services/llm/client.py#L3704) rewrite 路径双路径处理 + §10 自审记录表 8 项
+- 新增 [docs/tracking/omubot-humanization-part6-bugfix-part1-execution.md](docs/tracking/omubot-humanization-part6-bugfix-part1-execution.md) — 派单版并列执行追踪：§0 状态/工作流/原则、§1 主线自审订正表、§2 P0.0 streaming 解析器降级路径前置任务、§3 Wave 0~8 任务表（B0 紧急回滚 / B1A 改名 / B1B scheduler 白名单 / B1C streaming 门禁松绑 / B2 must-have 回归 T1~T4 / B3 灰度切档 / B4 nice-to-have T5~T8 / B5 Phase 3 契约缺陷 C/E/F/G/J）、§4 灰度 30min 出口指标矩阵、§5 验收清单、§6 状态表、§7 交接说明、§8 与 Part 1 / Part 5 / Part 6 主线关系、§9 领单/完成/自审 logs（B1A~B5 模板）、§10 自审记录
+
+**核心防呆**：
+
+- B0 命中"高风险" tier（生产 config 切档），§6 状态标 ⏸ 阻塞用户书面授权；§7 第 2 条强调执行前必须确认主线 §9 三件事已签收
+- B1A 改名跨 client.py 4 处 + kernel/config.py 5 处，§3.2 列完整 callsite 表 + D1 grep 锁
+- B1C 选项 A vs B 取舍依赖 P0.0 回执；P0.0 是零代码前置验证
+
+**未实施**：
+
+- 派单文档内任何 wave 的代码 / config 改动均未执行
+- B0 紧急回滚仍待用户授权
+
+**回滚路径**：本条目纯文档新增，无回滚需求；如需删除：`git rm docs/tracking/omubot-humanization-part6-bugfix-part1-execution.md`
+
+**下一步**：用户书面授权 P0.0 + B0 后，由执行者按 wave 顺序领单。
+
+---
+
+## 2026-05-27 humanization Part 6 bugfix part1 审查文档落地
+
+**变更类型**：文档（审查 + 修复方案，未实施代码改动）
+
+**触发**：balanced profile 上线后生产观察「所有回复一段话、多段对话表现极差」。用户决策「当前状态紧急，但不能急切」，要求先全量审查新回复流。
+
+**改动**：
+
+- 新增 [docs/tracking/omubot-humanization-part6-bugfix-part1.md](docs/tracking/omubot-humanization-part6-bugfix-part1.md) — 9 条 finding（A–J）+ 3 层根因 + 5 条契约缺陷 + 4 条 must-have 回归测试 + 4 阶段（Phase 0/1/2/3）修复方案 + 推荐执行顺序 + 风险回滚
+
+**核心定位**：
+
+1. [services/llm/client.py:1764-1771](services/llm/client.py#L1764-L1771) `_streaming_segment_enabled` 在 `tool_defs` 非空时硬关 → 群聊 streaming-as-segment 永远走不到
+2. [services/llm/client.py:432-438](services/llm/client.py#L432-L438) `_reply_segment_plan` 在 `disable_natural_split=True` 时短路成单段；balanced 同时打开两个 flag → 双重死锁
+3. [services/scheduler.py:35-42](services/scheduler.py#L35-L42) `_should_force_reply` 白名单缺 `qq_interaction` → 戳一戳/表情回应入站不触发回复
+
+**未实施**：
+
+- Phase 0 紧急回滚（config.json `balanced` → `custom`）等用户书面确认
+- Phase 1A/1B/1C 代码改动尚未动手
+- 4 条 must-have 回归测试尚未编写
+
+**回滚路径**：本条目纯文档新增，无回滚需求；如需删除文档：`git rm docs/tracking/omubot-humanization-part6-bugfix-part1.md`
+
+**下一步**：等待用户对 Phase 0 / Phase 1 三组改动 / Phase 1C 选项 A vs B 的执行授权。
+
+---
+
+## 2026-05-27 humanization profile 切到 balanced + rebuild bot 镜像
+
+**变更类型**：运行时配置 + 镜像 rebuild（容器旧镜像缺 P6.0.y4 QQInteractionsConfig 字段）
+
+**触发**：用户在 Part 6 三档机制验收通过后（45 条 pytest 全 pass）依次决策：先看是否能直接进 performance → 评估 plan_then_utter 在 plan_then_utter.enabled=false 下等于 balanced+QQ 出站，性能跨度比预期小且跳过 economy/balanced 的灰度闸门 → 改选 balanced。
+
+**改动 1：config.json**
+
+- [config/config.json:382](config/config.json#L382) `humanization.profile` 由 `"custom"` 改为 `"balanced"`，单字段，1 行
+- 全局生效；两个灰度群（993065015 / 984198159）由 `humanization.runtime_groups` 限定
+
+**改动 2：bot 镜像 rebuild**
+
+- 重启 bot 后 `ResolvedHumanization` repr 仅返回 6 个字段（缺 5 个 `qq_interactions_*`），定位为容器内 kernel/config.py 早于 P6.0.y4 落地的 commit
+- 跑 `dot_clean . && docker compose up bot -d --build` 重建 omubot-bot:latest（manifest sha256:c1a6cc09...）
+- napcat 不动（D6：永远不 down + up）
+
+**运行时 resolve_profile 验证**（balanced @ group 993065015）：
+
+| 字段 | 值 | 设计意图 |
+|---|---|---|
+| state_board_layout | tail | DeepSeek prefix cache 稳定化 |
+| state_board_granularity | coarse | 减少时间字段抖动 |
+| streaming_segment_enabled | True | B 方案 SSE 流式分段 |
+| pause_then_extend_enabled | True | D 方案暂停后追发 |
+| disable_natural_split | True | 与 Part 5 natural_split 互斥（自动写入） |
+| plan_then_utter_enabled | False | A 方案锁死（balanced 档语义） |
+| qq_interactions_poke_inbound_response_enabled | True | 被戳被动响应 |
+| qq_interactions_reaction_inbound_response_enabled | True | 被表情回应被动响应 |
+| qq_interactions_quote_reply_enabled | True | 引用回复 |
+| qq_interactions_poke_outbound_enabled | False | 主动戳留给 performance |
+| qq_interactions_reaction_outbound_enabled | False | 主动 react 留给 performance |
+
+**影响范围**：
+
+- 主链路 generation 形态变化：streaming-as-segment 取代 Part 5 natural_split；inter-segment 节奏由 pause_then_extend 接管
+- prompt cache 抖动预期 −58% ~ −56%（参 [omubot-humanization-part6-source-side-generation.md §4.4.1](docs/tracking/omubot-humanization-part6-source-side-generation.md#441-三档-profile-定义)）
+- QQ 入站 poke / reaction → 调度 trigger 投递路径开启
+- `<quote msg_id="..."/>` 锚点转 OneBot 引用回复出站组装路径开启
+
+**健康守卫保险**：[services/humanization/health_guard.py](services/humanization/health_guard.py) 60s 轮询 storage/usage.db；hit% < 0.80 自动降级；balanced 不受降级影响（降级只把 performance → balanced）。
+
+**回滚路径**：
+
+```bash
+# 配置回滚
+sed -i '' 's/"profile": "balanced"/"profile": "custom"/' config/config.json
+docker compose restart bot
+# 镜像回滚（如需）：上一个 image id 可用 docker images omubot-bot 查
+```
+
+30 秒回到本次切档前状态。
+
+**不做的事**：
+
+- 不切 performance（plan_then_utter.enabled 仍 false，开 performance 也只是 balanced+QQ 出站，blast radius 不值得）
+- 不动 streaming_segment / pause_then_extend / qq_interactions 子配置（balanced 档由 resolve_profile 物化决策，子开关进入 cosmetic）
+- 未跑 P6.0.c 7 日 cache hit 复盘（balanced 档下后续可独立做）
+
+---
+
+## 2026-05-27 §Issue 4 复审增补：DeepSeek dual-provider 视角下的勘误（原版保留）
+
+**变更类型**：解决方案文档 §Issue 4 末尾追加"复审增补"小节（不删原版任何文字）
+
+**触发**：用户："复审 issue4 是否使用 deepseek。原版不用删"——原 v2 §Issue 4 §0 不可行清单是按 Anthropic API 单一路径写的，但 [services/llm/provider.py:76-87](services/llm/provider.py#L76-L87) 表明 omubot 已支持 DeepSeek 4 档 provider mode（native / native-beta / anthropic-compat / openai-compat），需复审 v2 §0 表是否在 DeepSeek 路径下需要勘误。
+
+**调研方法**：1 轮 batch_search × 5 query 直奔 [api-docs.deepseek.com](https://api-docs.deepseek.com)，按 v2 §0 表同口径核对 logit_bias / logprobs / fine-tune / prefix completion / response_format 5 项官方文档结论。
+
+**核心发现 4 条差异**：
+
+1. **logprobs / top_logprobs**：Anthropic 不暴露；DeepSeek 官方 v4 API 暴露 `logprobs: bool` + `top_logprobs: int (≤20)`——但 deepseek-reasoner / 思考模式禁用（[apidog 文档](https://deepseek.apidog.io/reasoning-model-deepseek-reasoner-835841m0)）
+2. **Assistant 消息预填**：Anthropic 走 prefilling（与 Citations / Extended Thinking 互斥）；DeepSeek 走 Chat Prefix Completion (Beta) `prefix=true` + `base_url=/beta`——形态等价，由 provider 抽象层吃掉
+3. **官方微调**：两边官方 API 都不暴露 first-party 微调端点；但 DeepSeek 权重 MIT-licensed + 官方明示 API outputs 可用于 distillation——**4C 在 DeepSeek 路径下条件下放**（自托管 LoRA / 第三方托管训练）
+4. **DeepSeek V3/V4 长 chat 重排 system messages quirk**（reddit r/SillyTavernAI 工程实证）—— **强化** v2 §Layer 2 "boundary reinjection" 必要性；DeepSeek 路径同样需要而非只对 Anthropic 有效
+
+**v2 §Issue 4 各层在 DeepSeek 路径下的可行性**：
+
+- Layer 1 build-time compiler validator：provider-agnostic，**等价**
+- Layer 2 anchor reinjection：provider-agnostic，**等价**（prefix 走 `prefix=true` vs Anthropic prefilling 由 provider 层抽象）
+- Layer 3 drift detector + bounded retry：provider-agnostic，**等价**；DeepSeek 路径下可 opt-in 用 logprobs 增强 drift signal（thinking-disabled 时）
+- Layer 4 PPA refinement：provider-agnostic，**等价**
+- Layer 5 exit-side stripper：provider-agnostic，**等价**
+
+**结论**：v2 §Issue 4 5 层方案在 DeepSeek 官方 API 路径下 **100% 可平移，无层次需要重写**；4C fine-tune 评级**不变**（仍不推荐当下做），但**条件下放**仅在 DeepSeek 路径生效（Anthropic 路径维持原版评级）。
+
+**新增灰度观测项**（不改方案，仅记录）：Layer 2 user-role anchor reinjection 与 [services/llm/cache_diagnostic.py](services/llm/cache_diagnostic.py) DeepSeek 端 prompt cache 命中率相互作用——anchor 内容稳定化策略（同 group 同 hour 同 anchor）作为前置约束；DeepSeek 计费按 cache hit/miss 分档差异较 Anthropic 更敏感。
+
+**修改文件**：
+
+- [docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md](docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md)：§Issue 4 4C 末尾追加 "复审增补（2026-05-27）— DeepSeek dual-provider 视角下的 §0 表勘误 + 4C 修订" 小节（约 +60 行）；不动 §0 / 4A / 4B 原文一字
+- 不动：研究文档 / config / 任何 .py 文件 / admin/frontend
+- 不动 §0.2 簇划分表 + 决策模板 + 紧迫性建议 + D1-D7 对接表——本次复审结论是"无层次需要重写"，故无 ripple
+
+**回滚路径**：`git diff HEAD~1 -- docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md` + `git restore --source HEAD~1 ...`；本节是纯增补，回滚后不影响 v2 主体。
+
+**未解 / 待办**：
+
+- 若 omubot 决定从 Anthropic 切 DeepSeek 默认路径，需复审 v2 §Issue 4 §0 表的 cache 计费分档敏感度（已记录在 §复审增补 末尾"新增灰度观测项"）
+- 4C 在 DeepSeek 路径下的"自托管 distill 模型 / 第三方托管训练"具体技术选型（vLLM / SGLang vs Fireworks vs CoreWeave / DeployBase）——超出本任务范围，待"决定迁 4C"时再独立调研
+
+**Skill 边界**：本任务在 `omubot-admin-console` skill 行为指南下进行——属于"无前端改动 / 无 admin/routes 改动"的纯文档任务（Workflow B 子集）；维护日志按 reverse-chronological 准则更新。
+
+---
+
+## 2026-05-27 灰度问题文档 §Issue 4 二次重写（基于 14 条检索证据，5 层 API-feasible 混合）
+
+**变更类型**：解决方案文档 §Issue 4 二次重写（v2）+ 0.2 簇划分调整（A 簇 7 件 / B 簇 9 件 / C 簇 3 件）+ D 系列纪律对接表 F4 行更新
+
+**触发**：用户连续两次否决——
+
+1. 第一次（2026-05-26 末）："更改 soul 文件只能减缓而非根治，换一个人不知道该规则制作出来的 soul 文件还是会犯错"——v0 4A "改写 source.md voice exemplars" 否决；改为 v1 4A "compiler validator + CI lint + runtime stripper 三层"
+2. 第二次（2026-05-27）："你全程没有动用搜索，全程主观臆断。打回，我需要更确凿的根治方案"——v1 4A 在用户判断下仍为"凭空拼装"；要求检索证据支撑的根治方案
+
+**调研方法**：4 轮 batch_search 累计 ~25 条 query，过滤后 14 条核心证据：
+
+- arxiv 2601.10387 Anthropic + Oxford 2026-01 Assistant Axis（activation capping 不可在 API 用）
+- arxiv 2402.10962 split-softmax + attention decay 实证（attention 重权不可在 API 用，但 attention decay 论据可用）
+- arxiv 2506.11857 PPA EMNLP findings 2025（Layer 4 opt-in 引证）
+- arxiv 2511.10215 PAL TACL 2025（Layer 4C 引证）
+- ACL findings 2025 Persona-judge（4C 引证；不可在 API 用）
+- github Seanhong0818/Echo-Mode FSM Apache-2.0（Layer 3 EWMA λ≈0.3 引证）
+- blog.ozigi.app banned-lexicon-validator REPAIR DIRECTIVE（Layer 3 hard cap=1 引证）
+- tianpan.co persona-drift-agent-identity-stability 2026-04-26（Layer 2 semantic boundary 引证）
+- agentpatterns.ai event-driven system reminders（Layer 2 user-role injection 引证）
+- platform.claude.com OpenAI SDK compat 文档（logit_bias=Ignored 确认）
+- anthropic-sdk-python issue #393（Anthropic 官方拒绝 logit_bias 确认）
+- LMQL issue #118（Anthropic 不暴露 logit-distribution masking 确认）
+- docs.claude.com prefill-claudes-response（assistant prefilling 可用边界）
+- OpenAI Cookbook How_to_use_guardrails（Layer 5 出口 guardrail 引证）
+
+**v2 §Issue 4 5 层架构**：
+
+- **Layer 1 build-time（C 簇）**：persona compiler `declaration_lint()` 扩展 + CI / pre-commit hook；引证 services/persona/models.py:85 ImportIssue + system_validation.py:32 既存模式 + arxiv 2601.10387 "reinforce through behavior, not declarations"
+- **Layer 2 request-time（B 簇）**：4 类 semantic boundary（topic shift / tool-result-return / @-mention switch / session boundary）触发 user-role 末端 anchor reinjection + assistant prefilling；引证 tianpan.co + agentpatterns.ai + arxiv 2402.10962 attention decay
+- **Layer 3 inference-time（新出口侧子簇 / A 簇扩展）**：PersonaDriftDetector EWMA λ=0.3 + REPAIR DIRECTIVE bounded retry hard cap=1 + θ_block=0.85 drop；引证 EchoMode FSM + Ozigi REPAIR DIRECTIVE
+- **Layer 4 post-hoc PPA refinement（独立路径 opt-in）**：仅 Layer 3 命中 θ_repair < s < θ_block 中段 drift case 启用；2× LLM call 成本；引证 arxiv 2506.11857
+- **Layer 5 exit-side stripper（A 簇）**：runtime_selector strip + post-LLM detector 与 F1 sentinel registry 共骨架；引证 arxiv 2402.10962 + OpenAI Cookbook guardrails
+
+**Anthropic API 不可行方案明列+引证淘汰**：logit_bias（platform.claude.com OpenAI SDK 兼容文档 + anthropic-sdk-python#393 + lmql#118）/ activation capping（arxiv 2601.10387 需 open weights）/ split-softmax（arxiv 2402.10962 需 attention 写权限）/ Persona-judge（ACL 2025 需 token logprob）/ Outlines/XGrammar/SGLang（需本地模型 FSM logit mask）。
+
+**0.2 簇划分调整**（F4 横跨 A/B/C 三簇）：
+
+- A 簇 6 件 → **A 簇 7 件**（加 F4 Layer 3 drift detector + Layer 5 stripper；估行数 1000-1300 → 1100-1450）
+- B 簇 8 件 → **B 簇 9 件**（加 F4 Layer 2 anchor reinjection；估行数 1900-2600 → 2050-2750）
+- C 簇 3 件不变（F4 Layer 1 + F8 第一刀 + F13 治本路径，复用 ImportIssue + system_validation 扩展引擎）
+
+**决策模板更新**：Issue 4 行从 `[ ] 4A 推荐 [ ] 4B [ ] 4C` 改为 `[ ] 4A 推荐（Layer 1+2+3+5；Layer 4 PPA 后续 opt-in） [ ] 4A 仅 Layer 5（弱化版） [ ] 4B 仅出口 stripper [ ] 4C fine-tune（不推荐当下）`；执行批次新增"F4 Layer 4 PPA opt-in"独立项；紧迫性建议把 Layer 5 提前到本周尽量做（A 簇出口 cheap）+ Layer 1/2/3 列入本月内（与 part6 节奏对齐）+ Layer 4 列入 30 天 watcher。
+
+**D 系列纪律对接表 F4 行更新**：
+
+- D1 grep：新增 `grep -nE '^\s*(我是|我叫|作为|...)' config/persona/*.md` + `grep -rn 'core\.identity|core\.personality|core\.role' services/persona/` + `grep -rn 'ImportIssue\(level=' services/persona/` + `grep -rn 'system_message_addition|user_role.*append|messages\[-1\]' services/`
+- D2 cancel-path：Layer 3 PersonaDriftDetector `repair_once()` cancel 不脏 EWMA / Layer 4 PPA 第二次 LLM call cancel 不让 first reply 漏出 / Layer 2 boundary detector race 不让两份 anchor 同时注入（per-(group, request_id) 单飞）
+- D3 迁移清单：Layer 1 落地额外出"旧 declaration → 新 voice exemplar 引用"映射表存 `docs/migrations/persona-declaration-lint.md`
+- D4 证据：Layer 1 `ImportIssue` 计数 + pre-commit fail 样本 / Layer 2 `anchor_reinject_count` + 7 天 `cache_hit_rate` 趋势 / Layer 3 FSM `persona_drift_state` + repair/drop hit_rate / Layer 5 `declaration_strip_count`
+- D6：F4 v2 全后端，无 admin SPA 改动 / 不 rebuild npm
+- D7：`declaration_policy` / `drift_policy` 写在 `_persona_runtime.json` 顶层（跟 persona 走，不进 config.json）
+
+**v1 vs v2 关键差异**：
+
+- v1 4A 三层（compiler / CI / runtime stripper）只覆盖"build → exit"两端，**完全空缺 request-time 与 inference-time**——即攻击面里 attention decay + 长会话 drift 没有对策
+- v2 4A 五层补齐 inbound boundary reinjection（Layer 2）+ inference drift detector with bounded repair（Layer 3）+ 可选 PPA refinement（Layer 4）；每层学界/工程界引证 + Anthropic API 可行性 sanity check 通过
+- v1 把所有"治本"押注 compiler + CI（要等作者懂规则才生效）；v2 把治本拆成"build 阻拦 + 运行时主动校准 + 出口兜底"三段独立工作的纵深防御——单层失守不致漂移
+
+**修改文件**：
+
+- `docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md`：§Issue 4 整段重写（约 +135 行 / -95 行）+ 0.2 簇划分表 A/B/C 行更新 + 优先序段重写 + 决策模板 Issue 4 行 + 执行批次段 + 紧迫性建议段 + 0.附 复用项段 + D 系列纪律对接表 D1-D7 全行 F4 子条目添加
+- 不动：研究文档（[omubot-grayscale-issues-2026-05-26.md](docs/tracking/omubot-grayscale-issues-2026-05-26.md)）；不动 config.json / config.toml；不动任何 .py 文件；不重 build；不部署
+- 不动 `_persona_runtime.json`：Layer 1 / Layer 3 配置项需要落地实施时才写
+
+**影响范围**：仅文档；零代码改动；零部署；零回归风险；用户决策面更新（4 选项替代 3 选项）。
+
+**回滚路径**：`git diff HEAD~1 -- docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md` + `git restore --source HEAD~1 ...` 即可恢复 v1 版本（v1 commit ID 见 git log 之前一条）。
+
+**未解 / 待办**：
+
+- v2 4A 5 层是文档级方案，未实施代码；待用户在决策模板上勾选后按 A/B/C 三簇排期落地
+- Layer 3 PersonaDriftDetector baseline signature build script 未具体设计——落地时与 part6 source-side generation roadmap 协同
+- Layer 4 PPA opt-in 阈值需 7-14 天灰度后确定——纳入 30 天 watcher 后期决策
+
+**Skill 边界**：本任务在 `omubot-admin-console` skill 行为指南下进行——但属于"无前端改动 / 无 admin/routes 改动"的纯文档任务（Workflow B "Architecture, Wiki, and Code Audit" 子集）；维护日志按 Skill 准则更新（reverse-chronological + 含影响 / 回滚 / 未解）。
+
+---
+
+## 2026-05-26 灰度问题文档扩展至 17 个（追加 @-segment wiring / echo plugin 节奏 / self-mute 状态 / @-burst 处理）
+
+**变更类型**：研究文档第七刀 + 解决方案文档同步扩张（在十三问题基础上追加 issue 14/15/16/17 + 调研引用累计 64 条）
+
+**触发**：用户继续审灰度日志后追加："**追加两个问题，要求 @ 特殊对象时识别到昵称却未能成功 @，llm 自主调用工具问题待调研。2，观察到复读插件的复读回复比正常回复还要慢，排查。3，群聊日志中，我禁言了 bot，需要观察 bot 中禁言状态表现。4，其他 bot 在连续 @ 时出现异常表现，判断 omubot 是否存在该问题**"（用户写"两个"实际列了 4 条——以"两个"作为最低承诺，按 4 条全部纳入文档不丢漏）。
+
+**调研方法**：再 4 轮 batch_search × 6 results 增量；总累计 21 轮 152+ 候选筛选 64 条独立来源（GitHub PR/Issue × 22、arxiv 论文 × 11、工程博客/wiki × 22、Reddit/社区 × 5、Anthropic alignment × 2、协议文档 × 2）。
+
+**新增问题 + 修复方向**：
+
+- **Issue 14 — @ 真 at 不出 CQ 段（mention wiring 缺位，P1）**：LLM 输出 `@昵称` 字面量进 reply text，OneBot 协议层 `[CQ:at,qq=N]` 段从未被构造。**根因**：架构层 LLM token 输出 ↔ OneBot at-segment 协议之间无 wiring——`MessageSegment.at()` 在 nonebot adapter 库存在但业务 outbound 路径 0 调用；唯一硬编码 outbound at-segment 在 [plugins/food/plugin.py:1012](plugins/food/plugin.py)（写死 `f"[CQ:reply,id={message_id}][CQ:at,qq={user_id}] "`，不通用）；同时缺 LLM 工具——[services/tools/group_admin.py:63](services/tools/group_admin.py) 有 `set_group_ban` 但**无 `at_user` tool**，[services/llm/client.py:1420](services/llm/client.py) `_build_tool_defs` 0 命中 `at_user`。修复方向 — **方案 14A（推荐）**：① 新建 `services/llm/mention_post_processor.py` 在 [services/scheduler.py:649](services/scheduler.py) humanizer.delay 之后、`_send_to_group` 之前插入 ② 输入 `(reply_text, group_id, recent_speakers)`——recent_speakers 取自 GroupTimeline 最近 N=20 sender 集合 ③ 扫描 `@昵称` 字面量按 member_card / nickname / qq 三段优先级命中改写为 `[CQ:at,qq=<id>]` ④ 与 F11 addressee binding 共建 `services/group/nickname_registry.py` ⑤ config.json 顶层 `mention_post_processor: { enabled: true, fallback_keep_literal: true }`。引用 Telegram bot/grammY parseEntity hook / Discord.js mention.parse / go-cqhttp nickname→qq lookup helper / Anthropic Tool Use multi-turn hallucinate tool name 风险 / nonebot OneBot v11 MessageSegment.at()。
+
+- **Issue 15 — 复读插件回复异常慢（输入选错 + runtime 参数缺失，P2）**：echo plugin 复读触发后回复速度倒挂超过正常 LLM 回复，破节奏破沉浸。**根因（双层）**：① [plugins/echo/plugin.py:189-195](plugins/echo/plugin.py) `await self._humanizer.delay(echo_key)` 输入选错——echo_key 是段标记字符串 `[image:sub:hash]` `[at:qq]` `[face:id]` `[json:prompt]`（[plugins/echo/plugin.py:38-71](plugins/echo/plugin.py) `build_echo_key`），`len(echo_key)` 远大于"用户视觉感知字符长度"；humanizer `extra = len(text) * self.char_delay * random.uniform(0.8, 1.2)`（[services/humanizer.py:51-77](services/humanizer.py)）使 delay 严重 inflate ② echo plugin 没传 `**self._humanizer_runtime(group_id)`（mood/slot 影响 char_delay 系数），与 [services/scheduler.py:649](services/scheduler.py) `humanizer.delay(text, **self._humanizer_runtime(group_id))` 良好范本不一致——D1 同模式扫描结论："scheduler 是好榜样，echo 是异常点"。修复方向 — **方案 15A（推荐）**：① 新增 `_visible_text_for_humanizer(echo_key)`——剥离段标记还原近似可见字符长度（image/face/json 段当 2-3 字符、at 段当 len(at_target_nickname)） ② `delay()` 加 `**self._humanizer_runtime(group_id)` 同 scheduler 模式 ③ 错误分支 "打断"路径同样改 visible_text 输入。
+
+- **Issue 16 — bot 自身禁言状态可见性 + 自动恢复（self-mute lifecycle，P2）**：调研后**重新框定**——基础设施已存在：`scheduler.mute / unmute / is_muted` 全套已落地（[services/scheduler.py:110/119/131/136/187/374/644](services/scheduler.py)）+ send_queue gate（[services/send_queue.py:75-80/244](services/send_queue.py)）+ qq_interactions（[services/qq_interactions.py:165](services/qq_interactions.py)）+ kernel/router `_handle_group_ban`（[kernel/router.py:1156-1165](kernel/router.py)：`if str(event.user_id) == bot.self_id: scheduler.mute/unmute(group_id)`）+ startup poll `bot.get_group_member_info(no_cache=True)` 拉 `shut_up_timestamp`（[kernel/router.py:775-787](kernel/router.py)）。**真实 gap 三段**：① echo plugin 调用 `bot.send_group_msg` 时**未走 `is_muted` gate**——绕开 scheduler.send_queue（[plugins/echo/plugin.py:189-195](plugins/echo/plugin.py)），bot 被禁言时仍尝试发送 → ActionFailed 累积日志噪声 ② admin SPA 不可见 self-mute 状态——用户/管理员不知 bot 当前是否在禁言中（违反 D6 admin SPA observability 准则） ③ 缺周期 reconcile + ActionFailed 反向标记——NapCat 协议层 `shut_up_timestamp=0` Android 协议 bug（go-cqhttp#1429）+ `get_group_member_info` 在含 muted 用户群挂死（NapCatQQ#473）会让 startup poll 状态 stale。修复方向 — **方案 16A（推荐三段并行）**：① echo gate（[plugins/echo/plugin.py:189](plugins/echo/plugin.py) 加 `if ctx.scheduler.is_muted(group_id): return`） ② admin SPA `GET /api/scheduler/mute_state` 返回 `{group_id: {muted, since_unix, source}}`，dashboard 顶部状态卡列出当前 muted 群 + 起始时间 + 来源 ③ scheduler 注册 `_reconcile_self_mute_loop` 每 5 分钟跑 `bot.get_group_member_info(no_cache=True)` 对比 `shut_up_timestamp` 与 `_muted_groups`；send_queue ActionFailed retcode in {1200, ...} 反向标记 mute（多源容错）④ config.json 顶层 `self_mute_lifecycle: { reconcile_interval_seconds: 300, action_failed_reverse_mark: true, admin_state_visible: true }`。引用 go-cqhttp#1429 `shut_up_timestamp=0` Android 协议 bug / NapCatQQ#473 `get_group_member_info` 多源容错。
+
+- **Issue 17 — 连续 @ 时丢早 @ 目标 + burst（per-(group,user) burst window 缺位，P2）**：调研后**重新框定**——部分防御已存在：`pending_at: bool` 单飞 gate（[services/scheduler.py:208-215](services/scheduler.py)）已防同群同时多次 _do_chat 并发触发。**真实 gap 三段**：① `slot.trigger = trigger` 是单字段 covering write——同群内 user A @ bot 后 user B 紧跟着 @ bot，B 的 trigger 覆盖 A 的；LLM 进 _do_chat 时只看到 B 的 target_user_id，A 被丢失 ② 缺 per-(group, user) @ burst window——同一用户 1 秒连发 3 次 @ 仍触发 3 次 _do_chat，浪费 LLM API 配额 + 破节奏 ③ 缺跨群 per-bot rate（mitigated by Anthropic RateLimitError but not specifically guarded）。修复方向 — **方案 17A（推荐）**：① [services/scheduler.py:206-215](services/scheduler.py) `slot.trigger` → `slot.pending_triggers: list[Trigger]`（保留 `slot.last_trigger` 兼容属性） ② 新建 `services/scheduler/burst_window.py` per-(group, user) `TTLCache(maxsize=10000, ttl=3.0)`——3 秒内同一用户 @ bot N 次仅触发一次 _do_chat（first-fire + 窗口期合并到 pending_triggers + silent drop） ③ 与 F3（message coalescing）共 TTLCache 骨架（B 簇 8 件） ④ config.json 顶层 `at_mention_burst_window: { enabled: true, window_seconds: 3.0, drop_silent: true }`。引用 Telegram bot ThrottleMiddleware 18-line / grammY ratelimiter `keyGenerator: ctx => from.id` per-user 模式 / Inngest debounce#3695 "burst → single event" 思路。
+
+**新增 D1 同模式扫描发现**：
+
+- `grep -rn "MessageSegment\.at\|\[CQ:at,qq=" --include="*.py"` —— 仅 [plugins/food/plugin.py:1012](plugins/food/plugin.py) 一处硬编码 outbound at-segment（其他全是 inbound parse），D1 outbound at-segment wiring 缺位确认（issue 14）
+- `grep -rn "\"at_user\"" services/tools/ services/llm/` 0 命中 —— D1 LLM 工具集无 `at_user` tool 注册（issue 14）
+- `grep -rn "humanizer\.delay(" --include="*.py"` —— [services/scheduler.py:649-650](services/scheduler.py) 唯一带 `**self._humanizer_runtime(group_id)` 的良好范本；[plugins/echo/plugin.py:191/194](plugins/echo/plugin.py) 是裸调用异常点 — D1 echo plugin humanizer 调用模式不一致（issue 15）
+- `grep -rn "is_muted\|_muted_groups" services/ kernel/ plugins/` —— scheduler / send_queue / qq_interactions / router 全套已落地，唯独 [plugins/echo/plugin.py](plugins/echo/plugin.py) 0 命中 — D1 echo plugin 缺 mute gate 确认（issue 16）
+- `grep -rn "shut_up_timestamp" --include="*.py"` —— [kernel/router.py:775-787](kernel/router.py) startup poll 一处；周期 reconcile loop 0 命中 — D1 周期 reconcile 缺位确认（issue 16）
+- `grep -rn "slot\.trigger\s*=" services/scheduler.py` —— [services/scheduler.py:206-215](services/scheduler.py) 单字段 covering write 一处 — D1 covering write 丢早 @ 目标 root cause 确认（issue 17）
+- `grep -rn "burst_window\|TTLCache\|debounce.*at_mention\|per_user_rate" --include="*.py"` 0 命中 — D1 per-user @ burst window 完全缺位（issue 17）
+
+**新增 cluster 划分（issue 17 后）**：
+
+- A 簇 5 → 6 件（追加 F14 mention post-processor 共 nickname/sentinel/dedup/phrase registry 出口骨架）
+- B 簇 7 → 8 件（追加 F17 @ burst window 共 TTLCache 骨架）
+- 新增 E 簇 humanization tuning（F15 echo plugin 单点修复，独立）
+- 新增 F 簇 self-mute lifecycle（F16 echo gate + admin SPA + reconcile，与 F7/F12 admin SPA 改动批一起做最经济）
+- A → B → F → D → C → B 余下 + E 优先序：A 簇 6 件出口 guardrail 一次落地最经济；F 簇 echo gate 是 bug fix 必修，admin SPA 改动批合并；F17 与 F3 共 TTLCache 同次落地最经济；F14 与 F11 共 nickname registry。
+
+**写盘**：
+
+- [docs/tracking/omubot-grayscale-issues-2026-05-26.md](docs/tracking/omubot-grayscale-issues-2026-05-26.md) +495 行（§问题 14/15/16/17 全套结构 + §6 行动清单 F14/F15/F16/F17 + §7 验证证据 4 anchor + 调研统计 52 → 64 + §8 4 reference 块共 21 条新引用）
+- [docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md](docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md) +约 350 行（§Issue 14/15/16/17 各 3 候选 ABC + §0.1 13 → 17 行 + §0.2 cluster 表 A 簇 6 / B 簇 8 / 新增 E 簇 + F 簇 + 决策模板 4 新行 + 紧迫性建议 + 复用项 footnote + D 系列纪律对接表 F14/F15/F16/F17 mappings）
+
+**影响范围**：仅文档。**无代码改动 / 无 config 改动 / 无部署**——本轮严格遵守用户"无需更改代码"约束。
+
+**回滚**：`git restore docs/tracking/omubot-grayscale-issues-2026-05-26.md docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md maintenance-log.md`。
+
+**下一步交接**：用户根据 17 问题决策模板逐一选 A/B/C/暂不做后再启动 part6 / part7 / 修复 PR；本轮不动代码、不动 config、不动 source.md。
+
+---
+
+## 2026-05-26 灰度问题文档扩展至 13 个（追加 addressee 不指向 / 上游工具命令不屏蔽 / thinker 文本泄漏）
+
+**变更类型**：研究文档六刀 + 解决方案文档同步扩张（在十问题基础上追加 issue 11/12/13 + 调研引用累计 52 条）
+
+**触发**：用户继续审灰度日志后追加："**追加三个问题：1，bot 回复消息用你而非指向性的用户昵称，是否当前指向性判断不足需要加强，以及 bot 回复注入问题。2，bot 未屏蔽 napcat 等工具命令，如 #napcat，应当可配置屏蔽上游工具命令，默认关闭。3，"他们正在处理邮件，"此类 thinker 或是其他内容提示词出现在群里，排查**"
+
+**调研方法**：再 4 轮 batch_search × 6 results 增量；总累计 17 轮 124+ 候选筛选 52 条独立来源（GitHub PR/Issue × 16、arxiv 论文 × 11、工程博客/wiki × 18、Reddit/社区 × 4、Anthropic alignment × 2、协议文档 × 1）。
+
+**新增问题 + 修复方向**：
+
+- **Issue 11 — addressee binding 缺失 / 用泛指"你"而非具体昵称（P1）**：9930 群同日 4 处证据：① 19:21:48 工丿囗"你真可爱"→ bot 通篇泛指"你"无昵称（[tmp/today_9930_dedup.txt:130-132](tmp/today_9930_dedup.txt)） ② 19:21:55-19:24:52 丛非凡"你是 op" + 工丿囗"她是 op" → bot 把两人当一方处理 ③ 19:29:05 bot "你们俩一唱一和"指代不明 ④ 16:41:46 reply quote `«回复 丛非凡(2459515872): [图片: ...]»` 字面进 prompt（reply injection 隐患）。**双机制**：① 机制 A 架构层缺 deterministic addressee→nickname binding —— `AddresseeDetector` 输出 `target_user_id` + confidence 但 **PromptBuilder 0 引用**（`grep -rn "target_user_id\|addressee" services/llm/prompt_builder.py services/llm/client.py services/memory/timeline.py` 仅 [services/scheduler.py:528-696](services/scheduler.py) 单一传递点）；② 机制 B reply injection 隐患 —— `«回复 X(QQ):...»` 字面化进 prompt 没做 normalization，arxiv 2509.22830 ChatInject 攻击成功率 47-62%，arxiv 2603.12277 Role Confusion 论证 user-role 文本里出现 role-tag-like 字面会让模型在 latent role space 把那段当成另一个 role 输入。修复方向 — **方案 11A（推荐）**：① 扩展 `services/group/addressee.py` `AddresseeDetector.detect()` 返回 `AddresseeResult` dataclass ② 新建 `services/llm/addressee_hint.py` 暴露 `build_addressee_hint`，PromptBuilder 注入 `[当前你在回复：{nickname}（QQ: {qq}）]` ③ `services/memory/timeline.py:33-92` quote 渲染加结构化 marker `[QUOTED_METADATA platform=napcat msg_id=..., from={X}({QQ})]` ④ build_static 加 system instruction 区分 quote metadata vs 当前发言者 ⑤ 新建 `services/persona/name_registry.py` (NameVariationRegistry) ⑥ config.json 顶层加 `addressee_binding` 段。引用 elizaOS/eliza#6712 NameVariationRegistry / arxiv 2401.04883 MUCA addressee selection / arxiv 2603.12277 Role Confusion / arxiv 2509.22830 ChatInject / slixmpp MUC nickname binding。
+
+- **Issue 12 — 上游工具命令未屏蔽（如 `#napcat`）（P1，可配置默认 OFF）**：9841 群 today 4 次复现：line 115-119 / 233-237 / 351-355 / 469-473 — `#napcat` 进 omubot timeline 后跟"NapCat 信息\n版本: 4.15.0\n平台: linux\n运行时间: ..."；line 111-114 `/共鸣 无名者` → 一只魔精(3889009473) 输出"无名者查询到以下共鸣..."大段游戏数据进 user role。**根因**：[services/command.py:60](services/command.py) `CommandDispatcher` 命令调度只接 `/`-prefix（`if not stripped_text.startswith("/"): return False`），`#`-prefix 完全不在 omubot 命令系统拦截范围；同时缺 `known_other_bots` 黑名单——**与 issue 7 多 bot 互引同共缺位**（`grep -rn "is_bot_user\|known_other_bots\|bot_blocklist\|other_bot_self_ids" --include="*.py"` 0 命中）。修复方向 — **方案 12A（推荐）**：① 新建 `services/upstream_filter.py` `UpstreamCommandFilter`（暴露 `should_drop` 判 ① content match `^#\\w+` 模式 ② sender_id ∈ known_other_bots ③ 配置 `upstream_command_filter.enabled` ON——任一命中 drop） ② [kernel/router.py](kernel/router.py) `group_listener` 入口插判定 ③ config.json 顶层加 `upstream_command_filter: { enabled: false (默认), command_patterns: ["^#\\w+", "^!\\w+"], known_other_bots: [], drop_silently: true, log_drops: true }` ④ group-level override `group.overrides.<gid>.upstream_command_filter.known_other_bots` ⑤ admin SPA 编辑面板（D6：admin 前端独立 build） ⑥ drop log 落 `storage/logs/upstream_filter_drops.log`。**默认 enabled=false 满足"默认关闭"诉求与现状兼容**；与 F7 共 known_other_bots 数据结构合并推进降低成本。引用 AstrBotDevs/AstrBot#6505 `discord_allow_bot_messages` / RightNow-AI/openfang#403 `ignore_bots = true` toml / Rapptz/discord.py#6579 历史经验 / Discord platform native bot-trigger-bot disabled-by-default。
+
+- **Issue 13 — thinker 内心独白文本"他们正在处理邮件，"等泄漏到群里（P0）**：用户报告字符串 today logs 0 命中（用户描述的是历史时段；今天没复现 ≠ 架构没漏洞）；today 同骨架旁证：bot 19:21:05-19:21:19 "哇呀呀非要逼我选是吧！/ 那… / 原神！"等多段独立段落节奏接近 thinker 内心独白形式化片段。**双路径泄漏**：① 路径 A — [services/llm/client.py:2526-2541](services/llm/client.py) 把 `ThinkDecision.thought` 自由文本字面化进 system_blocks（`hints = [f"你决定说话：{thinker_thought}"]; thinker_block = {"type": "text", "text": "【" + "】【".join(hints) + "】"}; system_blocks = [*system_blocks, thinker_block]`）—— v4-flash 把这段 paraphrase 进 reply text；arxiv "Leaky Thoughts" EMNLP 2025 命中率 33.1%；② 路径 B — [services/llm/client.py:853-867](services/llm/client.py) 把 schedule slot `activity` 字段（[plugins/schedule/generator.py:42](plugins/schedule/generator.py) 模板"具体、有画面感的正在做的事情"——"正在处理邮件"完全符合）字面化为 `今日日程: HH:MM activity [mood]@location` 注入 prompt。**根因**：缺 thinker output guardrail；与 issue 1（sentinel token 泄漏）/ issue 8（schedule oversharing）同集群"omubot 内部信息边界缺位"。修复方向 — **方案 13A（推荐三层）**：① 路径 A 治本 — `services/llm/thinker.py` ThinkDecision 字段重构（保留 action/tone/sticker，新增 `topic_intent_label` enum 替代自由 thought；自由 thought 仅 internal log，不进 system_blocks）；client.py:2541 thinker_block 改成 `【意图：{topic_intent_label}】【tone: ...】【sticker: ...】` ② 路径 A 治症状 — 新建 `services/llm/thinker_phrase_detector.py` 检测 LLM reply 复读 thinker block n-gram 重叠率，命中改写或 drop（与 F1 sentinel registry 共 A 簇出口骨架） ③ 路径 B 治本 — `plugins/schedule/generator.py` `activity` 字段改 enum；client.py:853-867 注入处也改 enum 显示 ④ 路径 B 治症状 — schedule_activity_detector（与 F8 第二刀共 detector 骨架） ⑤ config.json 顶层 `thinker_output_guardrail: { thought_in_prompt: false, structured_decision_only: true, post_llm_phrase_detector_threshold: 0.4 }`。引用 arxiv "Leaky Thoughts" EMNLP 2025 33.1% 泄漏率 / dev.to mukundakatta llm-think-tag-strip + THINK_PATTERNS / Anthropic Extended Thinking Chain-of-Sanitized-Thoughts / alignmentforum Illegible CoT enum/struct/sandbox 三种实现 / tianpan.co Reasoning Trace Privacy "新 SQL injection" 类比。
+
+**新增 D1 同模式扫描发现**：
+
+- `grep -rn "target_user_id\|target_uid\|addressee" services/llm/prompt_builder.py services/llm/client.py services/memory/timeline.py` —— [services/scheduler.py:528-696](services/scheduler.py) 单一传递点，PromptBuilder 0 引用 — D1 addressee binding 缺位确认（issue 11）
+- `grep -rn "QUOTED_METADATA\|quote_provenance\|name_registry" --include="*.py"` 0 命中 — D1 quote provenance / name registry 完全缺位（issue 11）
+- `grep -rn "upstream_command_filter\|ignore_bots\|known_other_bots\|other_bot_self_ids" --include="*.py" --include="*.json" --include="*.toml"` 0 命中 — D1 upstream filter 完全缺位（issue 12，与 issue 7 known_other_bots 共缺位）
+- `grep -rn "^#\|startswith.*#\|stripped_text.*startswith" services/command.py` 仅 [services/command.py:60](services/command.py) 一处 `/`-prefix only — D1 命令前缀只接 `/`，`#` / `!` 完全不识别（issue 12）
+- `grep -rn "thinker_thought\|thinker_block\|thought.*system_blocks" services/llm/client.py` —— [services/llm/client.py:2526-2541](services/llm/client.py) 唯一字面化注入点确认 — D1 thinker thought 字面进 system_blocks（issue 13 路径 A）
+- `grep -rn "schedule.*activity\|slot.activity" services/llm/client.py plugins/schedule/` —— [services/llm/client.py:853-867](services/llm/client.py) schedule 注入 + [plugins/schedule/generator.py:42](plugins/schedule/generator.py) "具体、有画面感的"模板 — D1 schedule activity 自由文本进 prompt（issue 13 路径 B）
+- `grep -rn "thinker_output_guardrail\|thought_in_prompt\|topic_intent_label\|structured_decision_only" --include="*.py" --include="*.json"` 0 命中 — D1 thinker output guardrail 完全缺位（issue 13）
+
+**簇划分更新（簇 A/B/C 全部增员）**：
+
+- 簇 A 出口 guardrail — F1+F8 第二刀+F9+F10 dedup gate **+ F13 thinker_phrase_detector** = 5 件（同 `services/llm/client.py` post-LLM 段位点）
+- 簇 B 入口 normalization — F2+F3+F5+F7+F10 lock 部分 **+ F11 addressee binding+F12 upstream filter** = 7 件（同 `kernel/router.py` group_listener / `services/scheduler.py:_do_chat` 入口前置 layer）
+- 簇 C persona source 重写 — F4+F8 第一刀 **+ F13 治本路径（ThinkDecision 字段重构）** = 3 件（同"自由叙事文本→结构化 enum"治本骨架）
+- 簇 D sticker wiring — F6 单独（不变）
+
+**优先序建议（13 问题汇总）**：
+
+- 本周必做 P0：F7 多 bot loop + F10 dedup gate + **F13 phrase_detector**（A 簇内最小子集，与 F1 同位点）
+- 本周尽量做 P0+P1：F1 sentinel + F3 coalescer + F10 lock 部分 + **F12 upstream filter**（与 F7 共 known_other_bots）
+- 本月内 P1：F6 sticker + F4+F8 第一刀+F13 治本路径（C 簇 source 重写） + **F11 addressee binding**（与 F3 共 router 入口）
+- 30 天 watcher：F9 symbols（不变）
+- 可滞后：F2 preflight + F5 OOV slang（与 B 簇合做）
+
+**为什么不在本日落地**：① 用户明确"无需更改代码、不要 part6/part7、搜索尝试解决方案不要治标不治本" ② issue 11/12/13 都是架构层补缺，单文件 1-3 行修改不够 ③ 优先级判定见研究文档 §6 升级版 13 行清单。
+
+**新增产物**：
+
+- 研究文档新增三章节 §问题 11 / §问题 12 / §问题 13（每章含现象 + 链路定位 + 根因 + 修复方向 + 优先级 + 同模式扫描）；§6 行动清单 F11/F12/F13 三行扩张；§6 合并推进建议更新；§7 验证证据加 11/12/13 锚点行 + grep 命令；§7 调研统计 39→52；§8 引用源加 Issue 11/12/13 三段 13 条引用。
+- 解决方案文档同步扩张三章节 §Issue 11 / §Issue 12 / §Issue 13（每章 3 候选解 A/B/C 排序）；§0.1 priority table 10 行→13 行；§0.2 cluster table A 簇 4→5 件、B 簇 5→7 件、C 簇 2→3 件；决策模板 10 行→13 行；执行批次描述更新；与现有 roadmap 关系补充；与 D 系列纪律对接表全部 7 项更新覆盖 F11/F12/F13。
+
+**回滚路径**：本次仅文档变更——`git restore docs/tracking/omubot-grayscale-issues-2026-05-26.md docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md maintenance-log.md` 即可；无 config / 代码改动。
+
+---
+
+## 2026-05-26 灰度问题文档扩展至 10 个（追加 bot 重复回应自我盲点）
+
+**变更类型**：研究文档五刀（在九问题基础上追加 issue 10 + 调研引用扩至 39 条）
+
+**触发**：用户继续审日志后追加："**目前查看日志，再次追加问题，bot 会对连续消息发出重复回应，疑似两条消息注入同样上下文生成两次，而没有看自己是否回应过类似内容？**"
+
+**调研方法**：再 4 轮 batch_search × 6-8 results 增量；总累计 13 轮 100+ 候选筛选 39 条独立来源（GitHub PR/Issue × 12、arxiv 论文 × 7、工程博客/wiki × 15、Reddit/社区 × 4、Anthropic alignment × 1）。
+
+**新增问题 + 修复方向**：
+
+- **Issue 10 — 近重复回应 / 自我相似度盲区（P0）**：9930 群同日发现 3 簇近重复出文证据：簇 1 = 14:11:07 / 14:11:18 自我介绍 11s 内复读两次 ("我是凤笑梦…守护者喔☆" / "我是凤笑梦，请多指教啦☆")；簇 2 = 14:12:20 / 14:12:40 / 14:13:08 "躺床上刷手机看猫咪视频"+"自由时间"+"排练都安排好啦"三组短语 ~48s 内复读 2-3 次；簇 3 = 14:12:40 / 14:12:46 / 14:12:55 ~15s 内 3 次出文每条都没看上一条。**双机制叠加**：① 机制 A concurrent pipeline race —— `services/scheduler.py:209-215, 615-625` 已有 `running_task` 单 task 串行保护，但保护粒度只到 task done，**不保护"上一条 reply 已发出但 segments 尚未提交到 MessageLog 而下一条 `_do_chat` 已开始构 prompt"的窗口**（segments 持久化经 [kernel/router.py:399-403](kernel/router.py) 写 `group_messages`，与触发链异步）；② 机制 B self-similarity blind spot —— `grep -rn "deduplicate\|near_duplicate\|self_repetition\|already_said\|recent_reply_dedup" --include="*.py"` 全代码库 0 命中，PromptBuilder 把 prior assistant turn 放 messages 但**没有任何 deterministic dedupe 层**也没有 self-recall instruction。**这是 issue 7 + issue 8 的乘法放大器**——issue 7（多 bot 互引）让 inbound 触发频次飙升、issue 8（schedule oversharing）提供高重复模板素材、本 issue 缺 dedupe layer 让两者叠加爆发。修复方向 — **方案 10A（推荐）**：① 新建 `services/llm/dedup_gate.py` `NearDuplicateGate`（n-gram=5 / Jaccard threshold=0.4 / `drop|rewrite|merge` 三档 action / 仅相邻去重 / hard cap 1 次 retry），post-LLM 链尾接入 ② 新建/扩展 `services/scheduler/group_lock.py` `asyncio.Lock`，`_do_chat` 入口 `async with lock:` 覆盖 prompt-build → LLM call → segments persist 整段 ③ PromptBuilder 加一行轻量 self-recall hint 作辅助 ④ config.json 顶层加 `dedup_gate` 段 ⑤ `services/block_trace/store.py` 加 `near_duplicate_hits/dropped/rewritten` metric 灰度 7 天观测。引用 microsoft/agent-framework#4716 consecutive-duplicate skip / arxiv 2605.15102 SRT 内生 recall / emergentmind 2602.24287 context pollution + AO prompting / arxiv 2504.20131 LZ + oobabooga DRY n-gram penalty / arxiv 2112.08657 self-vs-partner 分类 / openclaw#51979 concurrent appendMessage mutex / openai/codex#14318 commit barrier。
+
+**新增 D1 同模式扫描发现**：
+
+- "**`running_task` 串行只覆盖到 task done，不覆盖 segments persist commit**"——这是 mechanism A 窗口存在的根因；F10 lock 必须延伸到 persist 才堵得住
+- "**全代码库 0 dedup 层**"——self-similarity check 被默认视为 LLM 涌现能力，未建模为 deterministic post-LLM 层；与 issue 1 / 4 / 6 / 8 反复展现的"prompt-only 控制不稳"是同型架构缺口
+- "**v4-flash 对 prompt-only 控制不稳已 5 次复现**"（issue 1 sentinel / issue 4 declaration / issue 6 sticker / issue 8 schedule / issue 10 self-dedup）——可作为 part5/part6 阶段"凡是依赖 LLM 自律的设计都需 deterministic 兜底"原则的硬证据
+
+**文档变更**：[docs/tracking/omubot-grayscale-issues-2026-05-26.md](docs/tracking/omubot-grayscale-issues-2026-05-26.md) + [docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md](docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md)
+
+- 研究文档新增 §问题 10，结构对齐 §问题 1-9（现象 / 链路定位 / 根因 / 修复方向 / 优先级 / 同模式扫描）
+- §6 行动清单从 9 条扩到 10 条（F10），合并推进建议补充："F10 与 F1 共出口 guardrail 骨架；F10 的 per-group `asyncio.Lock` 与 F7 router 入口 BotPairLoopGuard 同模式（inbound→prompt build 之间加序列化层）"
+- §7 验证证据补充 issue 10 三组锚点（簇 1/2/3）+ 2 条新 grep 同模式扫描命令
+- §8 引用源补充 8 条新来源（按 issue 10 归档），累计 39 条
+- 解决方案文档标题"九问题"→"十问题"，§0.1 优先级表补 issue 10（P0），§0.2 簇划分把 F10 分别归入 A 簇（dedup gate）+ B 簇（group lock 部分），§Issue 10 增 3 套候选（10A 推荐 / 10B / 10C），决策模板加 Issue 10 行 + 执行批次更新（簇 A 4 件 / 簇 B 子集 3 件 P0），D2 纪律对接补 F10
+
+**影响范围**：
+
+- 仍是文档级，无运行时变化、无 config / .py / 前端改动
+- 后续 PR 合并建议：F1+F8 第二刀+F9+**F10 dedup gate**（A 簇出口 guardrail 骨架）；F3+F7+**F10 lock 部分**（B 簇 router/scheduler 入口序列化骨架）；F4+F8+B5/B6（C 簇 source 重写）；F6 单独（D 簇 sticker wiring）
+
+**回滚**：纯文档改动，`git restore docs/tracking/omubot-grayscale-issues-2026-05-26.md docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md maintenance-log.md` 即可
+
+---
+
+## 2026-05-26 灰度问题文档扩展至 9 个（多 bot 死循环 + 日程过曝 + ☆/✨ 符号存疑）
+
+**变更类型**：研究文档四刀（在六问题基础上追加 issue 7 / 8 / 9 + 调研引用扩至 32 条）
+
+**触发**：用户继续审 9930 群当日日志后补充："**继续查看该群日志，最新暴露出三个问题：① 在多 bot 群中，两个 bot 会反复引用与 @，若同时开启引用 / @必回复，就会形成死循环。本轮是对方终止了循环对话，但以后不一定会。② bot 过于强调日程信息。③ bot 对话中出现异常星星符号，这个是否是问题存疑。追加这三条**"。
+
+**调研方法**：再 4 轮 batch_search × 8 results 增量；总累计 9 轮 70+ 候选筛选 32 条独立来源（GitHub PR/Issue × 9、arxiv 论文 × 4、工程博客 × 14、Reddit/社区 × 4、Anthropic alignment × 1）。
+
+**新增问题 + 修复方向**：
+
+- **Issue 7 — 多 bot 互引死循环（P0）**：14:08:46 - 14:14:42 段凤笑梦 (384801062) 与晓山瑞希 (2708815230, napcat+astrbot 框架自报) 形成 12+ 轮 `«回复 我:...»` + at 互锁。`reply_workflow` 14:11:07 给出 footprint：`force_reply source=rule confidence=1.00 reason=current_trigger:at_mention`——双向 1.00 置信度死锁。终止条件 = 对方先停（运气）。D1 同模式扫描：`grep -rn "is_bot_user\|known_other_bots\|bot_blocklist\|other_bot_self_ids"` 全代码库 0 命中——**架构层缺一道 layer**。修复方向：新增 `kernel/bot_pair_guard.py` `BotPairLoopGuard` 维护 `(group_id, sorted(self_id, other_id)) → deque[ts]`、`maxBotToBotPerMinute` + `cooldown_seconds`、self-pair 短路；router 入口 + reply_workflow 出口同时挂；config.json 顶层 `bot_pair_guard` 段；可选 known_other_bots 自动学习 phase 2。引用 openclaw#80719（最契合 PR）+ HammerMei/agent-chat-gateway 三层退出 + dev.to/pratikpathak/medium Stateful Circuit Breakers + stackoverflow/reddit Discord 经验。
+- **Issue 8 — bot 过度强调日程（P1）**：14:12-14:13 段连续 4 条 unsolicited 报作息（"洗完澡躺床上看猫咪视频" / "今天白天已经把明天排练都排好啦" / "今天逃了下午的课"）。源头 = [config/soul/instruction.md:342](config/soul/instruction.md) + [SKILL.md:469](config/soul/SKILL.md) 显式注入"你每天都有具体的日程——起床/上课/排练/休息……"+ persona v2 source.md `已知事实` 提供具体槽位。和 issue 4 同型 declaration→over-reflection。修复方向 — **第一刀（prompt 改）**：删枚举段保抽象（"心情基调影响说话节奏"留），把"WxS 成员/学校"挪到 voice exemplars；**第二刀（架构层 detector）**：post-LLM 段加 `unsolicited_schedule_detector`，复用 issue 1 guardrail 骨架。引用 arxiv 2602.13516 SPILLage（content × behavior 二维 oversharing；behavioral 5×；前置过滤 +17%）+ dev.to billhongtendera "facts braided into voice"（before/after 改写示例）+ Anthropic PSM Level 2 capping +60% drift reduction + agent-character-design Field Guide + OWASP LLM02:2025。
+- **Issue 9 — ☆/✨ 异常符号（P3，用户存疑）**：双层判定：① ☆ 是 persona 设计核心标记（source.md:57"哇嚯☆ 是情绪点火器"+ identity.md:18 + instruction.md:58 + scorer.py:18 `_DECOR_RE` 白名单），**不是 bug**；② ✨ 不在白名单不在 sentinel 集合，可能是 LLM 自由 emoji 也可能是 sticker description 回流——和 issue 1 sentinel 泄漏同型但证据不足。修复方向：**不立独立 fix**——挂到 issue 1 sentinel registry 作 watcher（30 天 soft-watch），再决定升级；同时加 `tests/test_persona_marker_frequency.py` 作 ☆ 频率回归保险丝（验证「哇嚯☆」落在 1/4 - 1/8 区间）。
+
+**新增 D1 同模式扫描发现**：
+
+- "**架构假设单向 user→bot，没建模 bot↔bot 双向**"——多 bot 灰度群已是常态化场景，第三台 bot 接入或同型循环将再次复现
+- "**declaration→over-reflection 是同一种失败模式**"——issue 4（"我是凤笑梦"自标榜）+ issue 8（"今天排练都安排好啦"报作息）+ "你曾经经历过 XXX" / "你的爱好是 XXX" 等枚举段，可作为 part6 source-side generation 的 avoid-pattern 清单整体 sweep
+- "**`✨` 不在 `_DECOR_RE` 不在 sentinel**"——可扩展 sentinel registry 设计（issue 1 修复时把白名单 / 黑名单 / watcher 三档分清）
+
+**文档变更**：[docs/tracking/omubot-grayscale-issues-2026-05-26.md](docs/tracking/omubot-grayscale-issues-2026-05-26.md) + 新增 [docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md](docs/tracking/omubot-grayscale-issues-2026-05-26-solutions.md)（解决方案候选与初步审计）
+
+- 新增 §问题 7 / §问题 8 / §问题 9，结构对齐 §问题 1-6（现象 / 链路定位 / 根因 / 修复方向 / 优先级 / 同模式扫描）
+- §6 行动清单从 6 条扩到 9 条（F7 / F8 / F9），合并推进建议改写：F1+F2+F5（gate 前 normalization）+ F3+F7（router 入口共用）+ F4+F8+B5/B6（source 重写"voice exemplars > declarations"同骨架）+ F6 单独 + F9 挂 F1
+- §7 验证证据补充 14:08:46-14:14:42 / 14:11:07 / 14:12-14:13 / 14:18:11 / 14:18:44 / 14:21:09 锚点 + 三组新 grep 同模式扫描命令
+- §8 引用源补充 13 条新来源（按 issue 7/8/9 归档），累计 32 条
+- 新增解决方案文档：每个 issue 列 3 套候选（A 推荐 / B 备选 / C 不推荐），按"形态 / 成本 / 优势 / 风险与代价 / 与其他 issue 耦合"五维对比；提供 0.2 簇划分（A 出口 guardrail / B 入口 normalization / C source 重写 / D sticker wiring）+ 决策模板让用户勾选
+
+**影响范围**：
+
+- 仍是文档级，无运行时变化、无 config / .py / 前端改动
+- 后续 PR 合并建议：F1+F2+F5（gate 前 normalization 骨架）；F3+F7（router 入口骨架）；F4+F8+B5/B6（persona source 重写"voice exemplars > declarations"骨架）；F6 单独（sticker 后端 wiring）；F9 挂 F1 落地附带
+
+**回滚**：纯文档改动，`git restore docs/tracking/omubot-grayscale-issues-2026-05-26.md maintenance-log.md` 即可
+
+---
+
+## 2026-05-26 灰度问题文档扩展至 6 个（追加 op 黑话失语 + 表情包频率异常）
+
+**变更类型**：研究文档三刀（在四问题基础上追加 issue 5 / issue 6 + 调研引用扩至 22 条）
+
+**触发**：用户对二刀版补充："**还有两个问题，补充进文档：① 在说"你是 op / 她是 op" 这种我看着是只想 bot 的内容时，bot 无回复。可能是不理解 op 的意思（是更喜欢玩原神的人调侃的黑话），这时应当搜索获取吧。② bot 表情包频率不正常，继续排查**"。
+
+**调研方法**：再 4 轮 batch_search × 6-8 results 增量；总累计 6 轮 50+ 候选筛选 22 条独立来源。
+
+**新增问题 + 修复方向**：
+
+- **Issue 5 — "op" 黑话失语**：日志确认 19:21:55 / 19:22:07 两次 `semantic_gate confidence = 0.10 / 0.70 < 0.78` 直接 skip；19:24:52 终于 fire 时 LLM 回复"什么 op 不 op 的啦"——回避不是回答。**双层失败**：① gate prompt 自己也不懂 op ② 主 LLM 不会主动调 slang_lookup / web_search。修复方向：gate prompt 输出从单维 confidence 升级到二维（specification × model uncertainty）；新增 `services/term_lookup.py` 做 cascade（group slang → global slang → web_search hard cap 2）；命中后 query augmentation 注回 system block 2。引用 arxiv 2511.08798 SAGE / Agentic RAG / Tiny-ReAct-Agent / OOV 综述（99helpers + Milvus）/ DataDrivenInvestor。
+- **Issue 6 — 表情包频率异常 + StickerDecisionProvider 死代码**：实测 24h `send_sticker ok` 仅 5 次（应是"每条必发"语义）。**关键发现**：[services/sticker/decision_provider.py](services/sticker/decision_provider.py) 完整 203 行 deterministic 决策（mood/affection/cooldown/source-priority gating），但 `grep -rn "StickerDecisionProvider"` 全代码库 0 外部调用方——**死代码**。频率本应是 deterministic policy（代码层 gate），现状全靠 prompt 命令 LLM "每条必发"，v4-flash 不严格执行。修复方向：在 [services/llm/client.py:2625](services/llm/client.py) `kaomoji_enforce` 同位置激活 provider；frequency 设置升级为 send_probability 阈值映射（rarely/normal/frequently → 0.85/0.55/0.30）；新增 `services/sticker/state.py` 持久化 last_sticker_ts 用于 cooldown。引用 chrimage/discord-emoji-react-bot（Discord 双 LLM call 架构）/ eleata/resilient-llm-router / ilyajob05/emo_bot / arxiv 2605.00737 / PromptQL / medium 工程经验。
+
+**新增 D1 同模式扫描发现**：
+
+- "**装了工具但没装触发反射**"——slang_lookup（45MB slang.db）+ web_search 都已落地，但 LLM 主动调用率近 0；典型 architectural-vs-prompt 失配
+- "**203 行 deterministic 决策代码 = 0 调用方 = 死代码**"——建议 part5/part6 阶段做一次 services/ 全目录死代码扫描（命令已写入 §问题 6 同模式扫描节）
+
+**文档变更**：[docs/tracking/omubot-grayscale-issues-2026-05-26.md](docs/tracking/omubot-grayscale-issues-2026-05-26.md)
+
+- 新增 §问题 5（OOV 黑话失语）和 §问题 6（StickerDecisionProvider 死代码）
+- §6 行动清单从 4 条扩到 6 条（F5 / F6），含合并推进建议
+- §7 验证证据补充 issue 5/6 的日志锚点 + grep 同模式扫描命令
+- §8 引用源补充 12 条新来源（按 issue 5/6 归档），全文引用累计 22 条
+
+**影响范围**：
+
+- 仍是文档级，无运行时变化、无 config / .py / 前端改动
+- 后续 PR 合并建议：F1+F2+F5（gate-前 normalization 同骨架）；F3 独立（router 入口）；F4 + B5/B6 合并（persona import）；F6 独立（sticker 后端 wiring，独立链路）
+
+**回滚**：纯文档改动，`git restore docs/tracking/omubot-grayscale-issues-2026-05-26.md maintenance-log.md` 即可
+
+---
+
+## 2026-05-26 灰度四问题文档联网调研升级（治本不治标）
+
+**变更类型**：研究文档二刀（修复方向重写为结构性方案 + 引用 12 条业内来源）
+
+**触发**：用户对当日上一版"灰度观察四问题待研究文档"反馈："**搜索尝试解决方案，不要仅凭自己，不要治标不治本**"。要求把"加几行正则 / 加 prompt 命令"这类症状级补丁全部废弃，找业内已落地的根因方案。
+
+**调研方法**：4 轮 batch_search × 8 results = 32 条候选；筛选与 omubot 现有架构兼容、业内已上线的方案；丢弃只有 blog-post 没工程落地的提议、丢弃需要切换底层框架的提议。
+
+**修复方向升级**：
+
+- F1：从"1~3 行正则" → **sentinel registry + post-LLM guardrail layer**。引用 openclaw#24583 `stripExternalContentFromOutput()`、Arthur.ai pre/post 模式、Brenndoerfer `PipelineResult` 形式化框架。失败模式：注入侧分散在 5 处而清洗侧 0 处的"sanitizer drift"。
+- F2：从"punctuation-only 早退" → **`services/text_preflight.py` 输入侧 normalizer 分层**。引用 Rasa custom NLU component、RasaHQ#7917 维护者结论、botonic 三段式注入。建议和 F1 共用前置/后置 pipeline 骨架。
+- F3：从"扩 `_FOLLOWUP_PATTERNS`" → **per-sender message coalescer**（架构层补缺）。引用 hermes-agent#345（Spacedrive 多平台量产）、openclaw#51361 RFC、n8n workflow 8238、dev.to 工程文章、Reddit 共识。失败模式：架构把每条用户消息当独立 gate 输入，连发短句天然 skip。
+- F4：从"加第 5 档 meta 软避开 + 24h 频率限制" → **voice-exemplars persona + meta-trigger 任务化路由**。引用 Anthropic arxiv 2601.10387 Assistant Axis 论文（"persona drift driven by meta-reflection"是教科书失败模式）、safety-research/assistant-axis、Geoff Graham/Emergent Mind 工程视角。结论：identity.md 顶部 "你是活生生的 X" 这种 declaration anchor 反而促进漂移；改成分布式 voice exemplars + meta-trigger 任务化重定向。
+
+**文档变更**：[docs/tracking/omubot-grayscale-issues-2026-05-26.md](docs/tracking/omubot-grayscale-issues-2026-05-26.md)
+
+- 新增 §0.1 调研口径升级（说明二刀依据 + 调研方法）
+- §1~§4 全部重写"修复方向" 子节，每条引用具体出处
+- §6 行动清单升级：每行从"1~3 行正则"等描述改为结构性补全 + 净增行数估算 + 引用源
+- 新增 §8 引用源（按 issue 归档 12 条独立来源）
+
+**影响范围**：
+
+- 仍是文档级，无运行时变化、无 config / .py / 前端改动
+- 后续 PR 计划：F1 + F2 共用前置/后置 pipeline 骨架（建议合并）；F3 是独立的架构层；F4 与 part6 source-side generation roadmap 合并
+- D1 同模式扫描结论保持不变；新增"sanitizer drift""persona declaration anchor"两条业内已知反模式作为 D1 候选关注词
+
+**回滚**：纯文档改动，`git restore docs/tracking/omubot-grayscale-issues-2026-05-26.md maintenance-log.md` 即可
+
+---
+
+## 2026-05-26 灰度观察四问题待研究文档落地
+
+**变更类型**：研究文档 + 灰度认可样本沉淀（无代码改动）
+
+**触发**：用户验收 993065015 凤笑梦 v2 灰度，认可 19:18:36「必须选一个」之后的 bot 回复（"唔…/那就/原…/原神？/不行/鸣潮也好玩…"），可作为 humanization Part 6 source-side generation 的 reference sample。同时报告 4 个观察问题待研究，要求只做调研不动代码。
+
+**新增文档**：[docs/tracking/omubot-grayscale-issues-2026-05-26.md](docs/tracking/omubot-grayscale-issues-2026-05-26.md)，记录 4 问题的代码定位、prompt 定位、根因初判与修复方向草案：
+
+- F1（P0）`«img:N»` / `«图片»` 字面 token 泄漏到 LLM 文本回复——[services/llm/client.py:539](services/llm/client.py#L539) 注入，全代码库无回流过滤
+- F2（P1）单标点「。」短消息触发 semantic_gate 并被 LLM 复读追问含义——[services/reply_workflow.py:246](services/reply_workflow.py#L246) `should_call_semantic_gate` 缺 punctuation-only 早退
+- F3（P0）追加修正"不行不行，一定要有一个很喜欢的" / "更喜欢的" 被 semantic_gate 连续判 confidence=0.30 而 skip——[services/reply_workflow.py](services/reply_workflow.py) `_FOLLOWUP_PATTERNS` 未覆盖否定/修正起手词
+- F4（P1）整段对话过度复读"凤笑梦本梦/活生生的凤笑梦"——[config/soul/instruction.md:217](config/soul/instruction.md#L217) "稳固人格" 段缺 meta-话题软避开档
+
+**数据采集**：
+
+- 容器 named volume `omubot-storage` 是真实运行时源；宿主机 `/Volumes/OmubotDisk/omubot/storage/` 是 5/21 之前 `uv run python bot.py` 期间产生的旧残留——5/22 起 bot 在容器跑，host 目录 5 天没新写入
+- 走 `docker compose exec bot /app/.venv/bin/python` 直读 `/app/storage/messages.db`：993065015 今日 172 条/69 distinct mid，984198159 今日 92 条但 distinct mid 只有 11——9841 实为 backfill replay 撞同一毫秒导致的虚假数据（hour 分布 `[(10,23),(11,23),(18,23),(19,23)]` 完全相同），9841 今日实际**无真有机消息**
+- 容器时区为 UTC，CST 今日窗口 `>= UTC 2026-05-25 16:00`；初次查询误用 host 本地时区导致计数和 SQL 都跑错——已修正
+
+**影响范围**：
+
+- 文档级，无运行时变化、无 config / .py / 前端改动；不需要 restart 或 rebuild
+- D1 同模式扫描：`«img:` 回流过滤盲区是当前 LLM 文本输出唯一未防御的字面 token 类型；`_FOLLOWUP_PATTERNS` 否定起手词缺失会同样影响"提问后追加补充 / 命令后追加参数"等场景，未来修 F3 时一并加 regression
+- 4 项均为后续 PR，不在本日实施
+
+**回滚**：纯文档新增，`git restore docs/tracking/omubot-grayscale-issues-2026-05-26.md maintenance-log.md` 即可；无运行时副作用
+
+---
+
+## 2026-05-26 Part 5 P5.5 自然分段默认开 + 卸 fallback
+
+**变更类型**：humanization 默认行为翻转 + dead code 卸载
+
+**变更内容**：
+
+- `ReplySegmentationConfig.natural_split_enabled` 默认值 `False → True`（[services/llm/segmentation.py:94](services/llm/segmentation.py#L94)）；`KernelReplySegmentationConfig.natural_split_enabled` 同步翻 `True`（[kernel/config.py:773](kernel/config.py#L773)），`json_schema_extra.help` 文案重写、`risk_level: careful` 字段去除。
+- [services/llm/segmentation.py:reply_segment_plan](services/llm/segmentation.py) 删除 `_legacy_segment_path` 函数体；分支化简为 `if not enabled or not natural_split_enabled: _disabled_segment_plan else: _natural_segment_plan`（disabled 路径返回单段计划，作为 kill-switch）。
+- [services/llm/client.py](services/llm/client.py) 卸载：`_split_naturally` 委托 stub、`_MIN_CHUNK = 6` / `_MAX_CHUNK = 20` 常量、`_reply_segments` wrapper、`from services.llm.segmentation import segment_reply / reply_segments` import 全部删除。
+- 保留前向特性：`disable_natural_split` 入参在 `_reply_segment_plan` / `_visible_reply_segment_plan` / 两处 fan-out 完整保留——streaming_segment / plan_then_utter / balanced / performance 四个 humanization profile 仍依赖该入参（[kernel/config.py ResolvedHumanization](kernel/config.py)）。
+- 保留 debug surface：`segment_reply()` 3-tuple API + `_TRAILING_CLAUSE` / `_CLAUSE_BREAK` 保留，`/debug split`（[plugins/chat/plugin.py:693](plugins/chat/plugin.py#L693)）+ `tests/test_segmentation.py` + `scripts/segmentation_benchmark.py` 仍为该 backbone 的消费者。
+
+**测试调整**：
+
+- `tests/test_inter_segment_delay.py:test_natural_split_flag_defaults_on_in_both_config_models` 默认值断言翻转。
+- `tests/test_reply_segments_natural.py` 用 `test_flag_off_returns_single_segment_plan` 替换 `test_fallback_path_matches_reply_segments_when_flag_off`，验证 disabled 路径单段返回。
+- `tests/test_client.py` 删除 `TestSplitNaturally` 测试类（124 行），`_split_naturally` 已不存在；`test_reply_segments_can_disable_natural_split` 改用 `reply_segment_plan` 直调。
+- 6 处因默认翻转裸露的 trailing-period 断言（`reply == "...。"` 等）改为 `_normalize_reply` helper 或 set membership 容忍，覆盖 `tests/test_client.py` 3 条 + `tests/test_llm_client_rewrite.py` 3 条；`tests/test_humanizer_mood.py::test_reply_segment_plan_passes_mood_to_inter_segment_delay` 用 `_ConstRng(0.0)` 注入消除 RNG 测试间污染（baseline 上即偶发 IndexError）；`tests/test_llm_client_reply_segment_plan.py::test_chat_uses_reply_segment_plan_dynamic_delays` 的 `_plan` mock 签名补 `disable_natural_split` kwarg。
+
+**验证**：
+
+- `uv run pytest -q` → **1908 passed, 8 skipped, 1 failed**（≥ 1735 baseline 达标）；唯一失败 `tests/test_persona_parity_audit.py::test_extended_fields_constant_covers_all_kernel_override_fields` 在 P5.5 之前的 baseline 上即同样失败，与本变更无关。
+- `uv run ruff check` 触达 9 个文件 → All checks passed。
+- `uv run pyright kernel/config.py services/llm/segmentation.py services/llm/client.py tests/test_humanizer_mood.py tests/test_inter_segment_delay.py tests/test_reply_segments_natural.py tests/test_llm_client_reply_segment_plan.py tests/test_llm_client_rewrite.py` → 0 errors。
+- D1 grep：`grep -rn '_split_naturally\|_MIN_CHUNK\|_MAX_CHUNK\|_legacy_segment_path' --include='*.py' services tests` → 0 命中。
+- D2 cancel-path：`tests/test_reply_segments_natural.py::test_cancel_during_natural_path_does_not_dirty_write` 仍在通过；`monkeypatch` 注入 `CancelledError` 验证外部状态不污染。
+
+**影响 / 回滚**：
+
+- 默认开启后，所有未 opt-in disable_natural_split 的 reply 都会经 `natural_split`（含 trailing 句号 90% 概率剥除、句间动态 delay）。如线上观测尾标点缺失影响人设感知，回滚：把 [kernel/config.py:773](kernel/config.py#L773) + [services/llm/segmentation.py:94](services/llm/segmentation.py#L94) 默认值改回 `False`，`docker compose restart bot`，30 秒回到 P5.4 灰度形态。
+- 老路径函数已物理删除，深度回滚需 `git revert` 本 commit。
+- `disable_natural_split` 与 humanization profile 解耦，profile 出事单独关 profile 即可，不影响 P5.5 默认开关。
+
+**关联**：[Part 5 主线 §6](docs/tracking/omubot-humanization-part5-segmentation.md#6-当前状态) | [Part 5 派单 §6 P5.5](docs/tracking/omubot-humanization-part5-execution.md) | [Part 5 §9 P5.5 完成记录](docs/tracking/omubot-humanization-part5-execution.md)
+
+---
+
 ## 2026-05-26 Part 6 Wave 1 x5 Admin SPA 档位治理落地
 
 **变更类型**：admin API / admin frontend / humanization profile governance

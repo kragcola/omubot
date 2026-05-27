@@ -250,7 +250,7 @@ def inter_segment_delay(prev_segment: str, *, register=None, slot_energy=1.0) ->
 | 立项 | ✅ 完成（本文） | 用户原话锚点；MaiBot 取证（utils.py:236 + uni_message_sender.py:320） |
 | 取证 | ✅ 完成（§1 + §2） | Omubot client.py:378-538 / segmentation.py:574 行 0 caller / TRAILING_CLAUSE strip / _SEGMENT_DELAY=0.8；MaiBot split_into_sentences_w_remove_punctuation / calculate_typing_time / response_splitter config |
 | 设计 | ✅ 完成（§3） | natural_split + inter_segment_delay 双函数；与 Part 1 U1/U3/V1/V11/V8 接口表 |
-| P5.1 ~ P5.6 | P5.1~P5.4 ✅；P5.5~P5.6 ⏳ | P5.4 已由用户授权忽略 24h 窗口限制并代验收通过；P5.5 默认开 + 卸 fallback 待执行 |
+| P5.1 ~ P5.6 | P5.1~P5.4 ✅；P5.5 🟡 ⚠️；P5.6 ⏳ | P5.4 用户授权代验收（2026-05-25）忽略 24h 窗口；P5.5 代码已落地（默认翻 True + `_legacy_segment_path` 删除 + 1980 passed），但 2026-05-27 误判验收已撤回 — 与 [Part 6 bugfix Part 1](./omubot-humanization-part6-bugfix-part1.md) §1.2 故障强耦合，bugfix Phase 1A 改名 `disable_natural_split` → `streaming_already_emitted` 会重构 P5 fallback 路径，且 balanced 实地「单段死锁」证伪了 P5 默认 True 在 profile 干预下真正分段；阻塞于 bugfix Phase 1 全绿后再判定收口；P5.6 同步阻塞 |
 
 ---
 

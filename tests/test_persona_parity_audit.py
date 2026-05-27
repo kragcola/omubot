@@ -557,3 +557,145 @@ def test_persona_draft_landed_proactive_rules_field(
         (persona_root / "fengxiaomeng-v2" / ".draft" / "persona.yaml").read_text(encoding="utf-8")
     )
     assert "看到群里有人提到名字时主动接一句" in persona_yaml["identity"]["proactive_rules"]
+
+
+# ---------------------------------------------------------------------------
+# Anchor robustness regressions (D1: shadow log of fengxiaomeng-v2 was full of
+# false-positive divergences because the v1 first line was either a markdown
+# header or a narrative prefix that v2's yaml-styled compile output never
+# carried verbatim. Anchor matching now scans the first 5 meaningful lines.)
+# ---------------------------------------------------------------------------
+
+
+def test_identity_anchor_matches_when_v1_first_line_is_narrative(
+    tmp_path: Path,
+) -> None:
+    """v1 personality first line is a sentence; v2 core.identity rephrases it
+    as ``名字：…`` but still carries the canonical name later. Should align."""
+
+    source_text = MINIMAL_SOURCE.replace(
+        "language: zh-CN\n---", GROUP_PROFILE_FRONT_MATTER
+    ) + INSTRUCTION_BLOCK
+    compile_result = _import_and_compile(tmp_path, source_text)
+
+    narrative_identity = Identity(
+        id="fengxiaomeng",
+        name="凤笑梦",
+        personality=(
+            "你是一个 QQ 群聊机器人。\n"  # noisy first line, no canonical name
+            "一句话角色：群聊中的拟人 bot，元气、反应快、有一点调皮。\n"  # actual anchor on line 2
+            "- 自称：我"
+        ),
+    )
+
+    report = compare_v1_vs_v2_dry_run(
+        identity=narrative_identity,
+        bot_self_id="10000",
+        instruction_text="默认只回一句话",
+        admins=None,
+        proactive=None,
+        group_override=None,
+        compile_result=compile_result,
+    )
+
+    finding = next(f for f in report.findings if f.axis == "identity_personality")
+    assert finding.status == "aligned"
+
+
+def test_instruction_anchor_skips_markdown_header(tmp_path: Path) -> None:
+    """v1 instruction.md may start with ``## 底线规则…`` style header; v2
+    core.guard renders ``行为指令：默认只回一句话`` without the markdown
+    prefix. Anchor matcher must skip the header and use the next bullet."""
+
+    compile_result = _import_and_compile(tmp_path, MINIMAL_SOURCE)
+
+    report = compare_v1_vs_v2_dry_run(
+        identity=Identity(id="x", name="x", personality="一句话角色：测试 bot"),
+        bot_self_id="",
+        instruction_text=(
+            "## 底线规则（每次回复前必查）\n"
+            "- 默认只回一句话\n"
+            "- 不用 Markdown\n"
+        ),
+        admins=None,
+        proactive=None,
+        group_override=None,
+        compile_result=compile_result,
+    )
+
+    finding = next(f for f in report.findings if f.axis == "behavior_instruction")
+    assert finding.status == "divergent"
+    assert "缺『行为指令：』段" in finding.notes
+    # The anchor we surface must NOT be the markdown header — that's the bug we
+    # are fixing. The first meaningful anchor is the bullet body.
+    assert finding.v1_signal != "## 底线规则（每次回复前必查）"
+    assert "默认只回一句话" in finding.v1_signal
+
+
+def test_instruction_anchor_aligned_when_bullet_is_present(tmp_path: Path) -> None:
+    """Same shape as above but with INSTRUCTION_BLOCK in source — the
+    bullet body is present in v2 core.guard. Must align even though v1 line 1
+    is a markdown header."""
+
+    source_text = MINIMAL_SOURCE.replace(
+        "language: zh-CN\n---", GROUP_PROFILE_FRONT_MATTER
+    ) + INSTRUCTION_BLOCK
+    compile_result = _import_and_compile(tmp_path, source_text)
+
+    report = compare_v1_vs_v2_dry_run(
+        identity=Identity(id="x", name="x", personality="一句话角色：测试 bot"),
+        bot_self_id="10000",
+        instruction_text=(
+            "## 底线规则（每次回复前必查）\n"
+            "- 默认只回一句话\n"
+            "- 不用 Markdown\n"
+        ),
+        admins=None,
+        proactive=None,
+        group_override=None,
+        compile_result=compile_result,
+    )
+
+    finding = next(f for f in report.findings if f.axis == "behavior_instruction")
+    assert finding.status == "aligned"
+
+
+def test_proactive_anchor_skips_markdown_header(tmp_path: Path) -> None:
+    """``identity.proactive`` typically starts with ``## 插话方式`` header in
+    v1. v2 core.guard exposes the section as ``插话方式：…``. Anchor matcher
+    must skip the header and align on the bullet body."""
+
+    persona_root = tmp_path / "persona"
+    defaults = _write_defaults(persona_root)
+    source_dir = persona_root / "fengxiaomeng-v2"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.md").write_text(
+        MINIMAL_SOURCE
+        + "\n"
+        + "## 插话方式\n\n- 看到群里有人提到名字时主动接一句\n",
+        encoding="utf-8",
+    )
+    writer = PersonaDraftWriter(persona_root=persona_root, defaults_dir=defaults)
+    writer.import_source("fengxiaomeng", strict=False)
+    compile_result = compile_persona_dry_run(
+        "fengxiaomeng", persona_root=persona_root, defaults_dir=defaults
+    )
+
+    report = compare_v1_vs_v2_dry_run(
+        identity=Identity(
+            id="x",
+            name="x",
+            personality="一句话角色：测试 bot",
+            proactive="## 插话方式\n- 看到群里有人提到名字时主动接一句",
+        ),
+        bot_self_id="",
+        instruction_text="",
+        admins=None,
+        proactive="## 插话方式\n- 看到群里有人提到名字时主动接一句",
+        group_override=None,
+        compile_result=compile_result,
+    )
+
+    finding = next(f for f in report.findings if f.axis == "proactive_rules")
+    assert finding.status == "aligned"
+    assert finding.v1_signal != "## 插话方式"

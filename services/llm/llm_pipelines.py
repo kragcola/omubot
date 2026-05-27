@@ -1,6 +1,6 @@
 """LLM pipeline taxonomy.
 
-Groups the 18 :data:`services.llm.llm_request.LLMTask` values into 4
+Groups the :data:`services.llm.llm_request.LLMTask` values into 4
 operational pipelines. Used by the admin dashboard cache-hit panel so
 operators can spot which pipeline is dragging the cache hit rate down
 without having to scan all 18 tasks individually.
@@ -69,7 +69,17 @@ LLM_PIPELINES: tuple[LLMPipeline, ...] = (
     LLMPipeline(
         "learning",
         "学习与工具",
-        ("style", "memo", "persona_import", "chat_private", "bilibili_intent", "element_detect", "vision"),
+        (
+            "style",
+            "memo",
+            "persona_import",
+            "chat_private",
+            "bilibili_intent",
+            "element_detect",
+            "vision",
+            "scheduler_eot",
+            "scheduler_replay_judge",
+        ),
     ),
     LLMPipeline(
         "memory_graph",

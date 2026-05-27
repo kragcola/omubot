@@ -5,6 +5,9 @@ version_hint: 2.1.0
 language: zh-CN
 legacy_instruction_md: true
 legacy_instruction_md_path: "../../soul/instruction.md"
+bot_self_id_hint: "384801062"
+admins:
+  "1416930401": "工丿囗"
 ---
 
 # 1. 是谁（必填）

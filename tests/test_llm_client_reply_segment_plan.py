@@ -48,11 +48,13 @@ async def test_chat_uses_reply_segment_plan_dynamic_delays() -> None:
         *,
         register: Any | None = None,
         slot_energy: float = 1.0,
+        streaming_already_emitted: bool = False,
     ) -> ReplySegmentPlan:
         captured["reply"] = reply
         captured["cfg"] = cfg
         captured["register"] = register
         captured["slot_energy"] = slot_energy
+        captured["streaming_already_emitted"] = streaming_already_emitted
         return ReplySegmentPlan(
             segments=["第一段", "第二段", "第三段"],
             raw_count=3,
@@ -99,3 +101,4 @@ async def test_chat_uses_reply_segment_plan_dynamic_delays() -> None:
     assert captured["cfg"] is cfg
     assert captured["register"] is None
     assert captured["slot_energy"] == 1.0
+    assert captured["streaming_already_emitted"] is False

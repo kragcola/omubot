@@ -16,6 +16,7 @@ const SPA_ROUTES = new Set([
 ])
 const SPA_ROUTE_PREFIXES = [
   '/admin/plugins/',
+  '/admin/replay/',
 ]
 
 function isSpaRoute(pathname: string) {

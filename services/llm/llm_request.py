@@ -56,6 +56,9 @@ LLMTask = Literal[
     "graph_edge_classifier",
     "reflection_consolidator",
     "episode_summarizer",
+    # Scheduler humanization probes.
+    "scheduler_eot",
+    "scheduler_replay_judge",
 ]
 
 
@@ -287,6 +290,8 @@ TASK_CACHE_PROFILES: dict[str, TaskCacheProfile] = {
     "graph_edge_classifier":   TaskCacheProfile(system_breakpoints=1),
     "reflection_consolidator": TaskCacheProfile(system_breakpoints=1),
     "episode_summarizer":      TaskCacheProfile(system_breakpoints=1),
+    "scheduler_eot":           TaskCacheProfile(system_breakpoints=1),
+    "scheduler_replay_judge":  TaskCacheProfile(system_breakpoints=1),
 }
 
 DEFAULT_TASK_CACHE_PROFILE = TaskCacheProfile(system_breakpoints=1)
