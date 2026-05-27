@@ -34,7 +34,7 @@ def create_api_router(
     affection_store: Any = None,
     affection_engine: Any = None,
     scheduler: Any = None,
-    identity_mgr: Any = None,
+    persona_runtime: Any = None,
     bus: Any = None,
     plugin_state_store: Any = None,
     plugin_config_store: Any = None,
@@ -109,7 +109,7 @@ def create_api_router(
     ))
     router.include_router(create_config_router(config_path=config_path))
     router.include_router(create_context_router(ctx=ctx, bus=bus))
-    router.include_router(create_soul_router(soul_dir=soul_dir, identity_mgr=identity_mgr))
+    router.include_router(create_soul_router(soul_dir=soul_dir, persona_runtime=persona_runtime))
     router.include_router(create_logs_router(log_dir=log_dir))
     router.include_router(create_memory_router(
         card_store=card_store, group_memory_config=group_memory_config,
@@ -154,12 +154,11 @@ def create_api_router(
     router.include_router(create_persona_importer_router(
         ctx=ctx,
         soul_dir=soul_dir,
-        identity_mgr=identity_mgr,
         config=config,
         bot=bot,
     ))
     router.include_router(create_dream_router(dream_agent=dream_agent))
-    router.include_router(create_sandbox_router(llm_client=llm_client, identity_mgr=identity_mgr, ctx=ctx))
+    router.include_router(create_sandbox_router(llm_client=llm_client, persona_runtime=persona_runtime, ctx=ctx))
     router.include_router(create_slang_router(ctx=ctx, bus=bus, message_log=message_log, llm_client=llm_client))
     router.include_router(create_style_router(ctx=ctx, message_log=message_log, llm_client=llm_client))
     router.include_router(create_learning_normalizer_router(ctx=ctx))

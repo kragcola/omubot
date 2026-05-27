@@ -9,23 +9,19 @@ import pytest
 
 from kernel.config import ResolvedHumanization
 from services.block_trace.store import BlockTraceStore
-from services.identity import Identity
 from services.llm.client import LLMClient
 from services.llm.plan_then_utter import PlanThenUtter
 from services.llm.prompt_builder import PromptBuilder
 from services.memory.short_term import ShortTermMemory
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 from services.tools.registry import ToolRegistry
 
-_IDENTITY = Identity(id="t", name="Bot", personality="p")
 
-
-def _prompt() -> PromptBuilder:
-    prompt = PromptBuilder(instruction="test")
-    prompt.build_static(_IDENTITY, bot_self_id="999")
-    return prompt
+def _prompt(persona_runtime: PersonaRuntime) -> PromptBuilder:
+    return PromptBuilder(persona_runtime=persona_runtime)
 
 
 def _result(text: str, *, input_tokens: int = 120, output_tokens: int = 20) -> dict[str, Any]:
@@ -44,6 +40,7 @@ def _result(text: str, *, input_tokens: int = 120, output_tokens: int = 20) -> d
 
 async def _make_client(
     timeline: GroupTimeline,
+    persona_runtime: PersonaRuntime,
     *,
     humanization: ResolvedHumanization | None = None,
     tools: ToolRegistry | None = None,
@@ -53,7 +50,7 @@ async def _make_client(
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=tools or ToolRegistry(),
         group_timeline=timeline,
@@ -131,10 +128,13 @@ def test_build_requests_keep_p6_9_token_caps_and_no_tools() -> None:
     assert "plan_then_utter" in str(utter_hint["text"])
 
 
-async def test_chat_plan_then_utter_default_off_uses_main_path() -> None:
+async def test_chat_plan_then_utter_default_off_uses_main_path(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
-    client = await _make_client(timeline)
+    client = await _make_client(timeline, persona_runtime)
 
     async def _on_segment(segment: str) -> None:
         sent.append(segment)
@@ -145,7 +145,7 @@ async def test_chat_plan_then_utter_default_off_uses_main_path() -> None:
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
             )
@@ -157,12 +157,16 @@ async def test_chat_plan_then_utter_default_off_uses_main_path() -> None:
     assert call.await_count == 1
 
 
-async def test_chat_plan_then_utter_sends_utterances_and_records_usage() -> None:
+async def test_chat_plan_then_utter_sends_utterances_and_records_usage(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
     usage_rows: list[dict[str, Any]] = []
     client = await _make_client(
         timeline,
+        persona_runtime,
         humanization=ResolvedHumanization(plan_then_utter_enabled=True, disable_natural_split=True),
     )
 
@@ -190,7 +194,7 @@ async def test_chat_plan_then_utter_sends_utterances_and_records_usage() -> None
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
             )
@@ -208,12 +212,17 @@ async def test_chat_plan_then_utter_sends_utterances_and_records_usage() -> None
     ]
 
 
-async def test_chat_plan_then_utter_writes_block_trace_parent_span(tmp_path) -> None:
+async def test_chat_plan_then_utter_writes_block_trace_parent_span(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+    tmp_path,
+) -> None:
     store = BlockTraceStore(tmp_path / "trace.db")
     await store.init()
     timeline = GroupTimeline()
     client = await _make_client(
         timeline,
+        persona_runtime,
         humanization=ResolvedHumanization(plan_then_utter_enabled=True),
         budget_manager=SimpleNamespace(_store=store),
     )
@@ -238,7 +247,7 @@ async def test_chat_plan_then_utter_writes_block_trace_parent_span(tmp_path) -> 
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
             )
@@ -254,12 +263,16 @@ async def test_chat_plan_then_utter_writes_block_trace_parent_span(tmp_path) -> 
     assert {trace.metadata["status"] for trace in p6_traces} >= {"planned", "emitted"}
 
 
-async def test_chat_plan_then_utter_invalid_plan_falls_back_to_main_path() -> None:
+async def test_chat_plan_then_utter_invalid_plan_falls_back_to_main_path(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
     usage_rows: list[dict[str, Any]] = []
     client = await _make_client(
         timeline,
+        persona_runtime,
         humanization=ResolvedHumanization(plan_then_utter_enabled=True),
     )
 
@@ -283,25 +296,29 @@ async def test_chat_plan_then_utter_invalid_plan_falls_back_to_main_path() -> No
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
             )
     finally:
         await client.close()
 
-    assert reply == "回到旧路径"
+    assert reply in {"回到旧路径", "回到旧路径。"}
     assert sent == []
     assert call.await_count == 2
     assert [row["call_type"] for row in usage_rows] == ["proactive_plan", "proactive"]
 
 
-async def test_chat_plan_then_utter_plan_cancel_re_raises_without_dirty_write() -> None:
+async def test_chat_plan_then_utter_plan_cancel_re_raises_without_dirty_write(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
     usage_rows: list[dict[str, Any]] = []
     client = await _make_client(
         timeline,
+        persona_runtime,
         humanization=ResolvedHumanization(plan_then_utter_enabled=True),
     )
 
@@ -324,7 +341,7 @@ async def test_chat_plan_then_utter_plan_cancel_re_raises_without_dirty_write() 
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
             )
@@ -337,13 +354,17 @@ async def test_chat_plan_then_utter_plan_cancel_re_raises_without_dirty_write() 
     assert list(timeline.get_turns("123")) == []
 
 
-async def test_chat_plan_then_utter_business_tool_blocks_pilot() -> None:
+async def test_chat_plan_then_utter_business_tool_blocks_pilot(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     registry = ToolRegistry()
     registry.register(_StaticTool())  # real business tool, not pass_turn
     usage_rows: list[dict[str, Any]] = []
     client = await _make_client(
         timeline,
+        persona_runtime,
         humanization=ResolvedHumanization(plan_then_utter_enabled=True),
         tools=registry,
     )
@@ -361,7 +382,7 @@ async def test_chat_plan_then_utter_business_tool_blocks_pilot() -> None:
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
             )

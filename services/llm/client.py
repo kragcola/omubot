@@ -29,7 +29,6 @@ from services.humanization.contract import (
 from services.humanization.pause_extend import PauseExtend
 from services.humanization.scorer import HumanizationScore, StylometricScorer
 from services.humanization.state import humanization_source
-from services.identity import Identity
 from services.llm.cache_diagnostic import (
     CacheDiagnostic,
     CacheDiagnosticDiff,
@@ -55,6 +54,7 @@ from services.memory.message_log import MessageLog
 from services.memory.short_term import ChatMessage, ShortTermMemory
 from services.memory.timeline import GroupTimeline
 from services.memory.types import Content
+from services.persona import IdentitySnapshot
 from services.runtime_clock import slot_features, today_key
 from services.system_module import Scope
 from services.tools.context import ToolContext
@@ -87,13 +87,6 @@ _QUOTE_ANCHOR_RE = re.compile(
     re.IGNORECASE,
 )
 _QUOTE_TAG_RE = re.compile(r"<quote\b[^>]*?/?>", re.IGNORECASE)
-_GROUP_REPLY_STYLE_HINTS: dict[str, str] = {
-    "gentle": "回复风格偏柔和、耐心、安抚感更强，避免过硬或过冲的表达。",
-    "playful": "回复风格可以更轻松俏皮，允许一点点玩梗和抖机灵，但不要失控。",
-    "concise": "回复尽量短一些，优先直接结论，减少过长铺垫和重复解释。",
-    "energetic": "回复可以更有活力和在场感，语气积极，但不要变得吵闹失真。",
-    "steady": "回复保持平稳、克制、可靠，少用夸张语气和过度情绪化表达。",
-}
 _STICKER_TOOL_NAMES = {"send_sticker", "save_sticker", "manage_sticker"}
 _STREAMING_ALLOWED_TOOL_NAMES = frozenset({
     "append_memo",
@@ -1417,27 +1410,6 @@ class LLMClient:
         with contextlib.suppress(Exception):
             return self._group_config.resolve(int(group_id))
         return None
-
-    def _build_group_profile_block(self, group_profile: Any | None) -> dict[str, Any] | None:
-        if group_profile is None:
-            return None
-
-        lines: list[str] = []
-        reply_style = str(getattr(group_profile, "reply_style", "default") or "default")
-        style_hint = _GROUP_REPLY_STYLE_HINTS.get(reply_style)
-        if style_hint:
-            lines.append(style_hint)
-
-        custom_prompt = str(getattr(group_profile, "custom_prompt", "") or "").strip()
-        if custom_prompt:
-            lines.append(f"【本群附加要求】\n{custom_prompt}")
-
-        if not lines:
-            return None
-        return {
-            "type": "text",
-            "text": "【群聊回复偏好】\n" + "\n".join(lines),
-        }
 
     def _deepseek_hash_salt(self) -> str:
         return (
@@ -2906,7 +2878,7 @@ class LLMClient:
         session_id: str,
         user_id: str,
         user_content: Content,
-        identity: Identity,
+        identity: IdentitySnapshot,
         group_id: str | None = None,
         ctx: ToolContext | None = None,
         on_segment: Callable[[str], Awaitable[None]] | None = None,
@@ -3113,9 +3085,9 @@ class LLMClient:
                 plugin_stable: list[dict[str, Any]] = []
                 plugin_dynamic: list[dict[str, Any]] = []
                 tail_blocks: list[dict[str, Any]] = []
-                group_profile_block = self._build_group_profile_block(group_profile)
-                if group_profile_block is not None:
-                    plugin_stable.append(group_profile_block)
+                group_profile_text = self._prompt.persona_runtime.group_profile_text(group_id)
+                if group_profile_text:
+                    plugin_stable.append({"type": "text", "text": group_profile_text})
                 if self._bus is not None:
                     from kernel.types import PromptContext
                     prompt_ctx = PromptContext(
@@ -3214,9 +3186,9 @@ class LLMClient:
                     messages = _append_tail_metadata(messages, tail_blocks)
             except Exception:
                 logger.exception("build_blocks failed, falling back to static block")
-                system_blocks = [self._prompt.resolve_static_block(group_id)]
+                system_blocks = [self._prompt.static_block]
         else:
-            system_blocks = [self._prompt.resolve_static_block(group_id)]
+            system_blocks = [self._prompt.static_block]
 
         # Inject thinker decision as final system block so the main LLM
         # knows what direction to take — placed last for highest attention.
@@ -4130,7 +4102,7 @@ class LLMClient:
     # Compact — group chat (with memo extraction)
     # ------------------------------------------------------------------
 
-    async def _compact_group(self, group_id: str, identity: Identity) -> None:
+    async def _compact_group(self, group_id: str, identity: IdentitySnapshot) -> None:
         """Compress first half of group timeline into summary and extract memos."""
         if self._group_compact_failures >= self._max_compact_failures:
             assert self._timeline is not None

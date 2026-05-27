@@ -637,10 +637,8 @@ def _extract_proactive_rules(
 ) -> None:
     """Land ``## 插话方式`` raw section body into ``persona.yaml.identity.proactive_rules``.
 
-    The v1 counterpart is ``Identity.proactive`` (raw text appended after
-    ``Block 1`` by ``PromptBuilder.build_static``). v2 keeps the original
-    paragraph instead of bullets so compiler can replay the same prompt block
-    text without losing line breaks.
+    Stored as the original paragraph (not bullets) so the compiler can render the
+    same prompt block text without losing line breaks.
     """
 
     section = source.section("插话方式", "proactive_rules", "proactive")

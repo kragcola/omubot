@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from services.identity import Identity
 from services.llm.prompt_builder import PromptBuilder
+from services.persona import PersonaRuntime
 from services.url_meta.blacklist import is_blocked_url
 from services.url_meta.og_title import clear_url_title_cache, collect_url_titles
 
@@ -41,10 +41,8 @@ class _Session:
         return result
 
 
-def _builder() -> PromptBuilder:
-    builder = PromptBuilder(instruction="")
-    builder.build_static(Identity(id="t", name="Bot", personality="persona"), bot_self_id="999")
-    return builder
+def _builder(persona_runtime: PersonaRuntime) -> PromptBuilder:
+    return PromptBuilder(persona_runtime=persona_runtime)
 
 
 async def test_collect_url_titles_reads_og_title() -> None:
@@ -117,14 +115,16 @@ async def test_collect_url_titles_uses_lru_cache() -> None:
     assert session.calls == [url]
 
 
-async def test_prompt_builder_injects_group_url_titles(monkeypatch: Any) -> None:
+async def test_prompt_builder_injects_group_url_titles(
+    monkeypatch: Any, persona_runtime: PersonaRuntime,
+) -> None:
     async def fake_context(text: str, *, limit: int = 3) -> str:
         assert "https://example.com/post" in text
         assert limit == 3
         return "【链接标题】\n- Example (https://example.com/post)"
 
     monkeypatch.setattr("services.llm.prompt_builder.build_url_title_context", fake_context)
-    blocks = await _builder().build_blocks(
+    blocks = await _builder(persona_runtime).build_blocks(
         group_id="200",
         conversation_text="看 https://example.com/post",
         include_state_board=False,
@@ -133,7 +133,9 @@ async def test_prompt_builder_injects_group_url_titles(monkeypatch: Any) -> None
     assert blocks[1]["text"] == "【链接标题】\n- Example (https://example.com/post)"
 
 
-async def test_prompt_builder_skips_url_titles_for_private_chat(monkeypatch: Any) -> None:
+async def test_prompt_builder_skips_url_titles_for_private_chat(
+    monkeypatch: Any, persona_runtime: PersonaRuntime,
+) -> None:
     called = False
 
     async def fake_context(_text: str, *, limit: int = 3) -> str:
@@ -142,7 +144,7 @@ async def test_prompt_builder_skips_url_titles_for_private_chat(monkeypatch: Any
         return "bad"
 
     monkeypatch.setattr("services.llm.prompt_builder.build_url_title_context", fake_context)
-    blocks = await _builder().build_blocks(
+    blocks = await _builder(persona_runtime).build_blocks(
         group_id=None,
         conversation_text="看 https://example.com/post",
         include_state_board=False,

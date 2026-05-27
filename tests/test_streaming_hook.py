@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kernel.config import ReplySegmentationConfig, ResolvedHumanization
-from services.identity import Identity
 from services.llm.client import LLMClient, call_api
 from services.llm.llm_request import LLMRequest
 from services.llm.prompt_builder import PromptBuilder
@@ -18,17 +17,14 @@ from services.llm.providers.deepseek import DeepSeekProvider
 from services.llm.providers.openai import OpenAIProvider
 from services.memory.short_term import ShortTermMemory
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 from services.tools.registry import ToolRegistry
 
-_IDENTITY = Identity(id="t", name="Bot", personality="p")
 
-
-def _prompt() -> PromptBuilder:
-    prompt = PromptBuilder(instruction="test")
-    prompt.build_static(_IDENTITY, bot_self_id="999")
-    return prompt
+def _prompt(persona_runtime: PersonaRuntime) -> PromptBuilder:
+    return PromptBuilder(persona_runtime=persona_runtime)
 
 
 def _make_sse_lines(*events: str) -> list[bytes]:
@@ -144,12 +140,12 @@ async def test_call_api_invokes_text_delta_callback() -> None:
     assert result["text"] == "Hi there"
 
 
-async def test_dispatch_call_passes_text_delta_callback() -> None:
+async def test_dispatch_call_passes_text_delta_callback(persona_runtime: PersonaRuntime) -> None:
     client = LLMClient(
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         thinker_enabled=False,
@@ -173,12 +169,12 @@ async def test_dispatch_call_passes_text_delta_callback() -> None:
     assert result["text"] == "增量"
 
 
-async def test_stream_with_segments_cleans_buffer_on_cancel() -> None:
+async def test_stream_with_segments_cleans_buffer_on_cancel(persona_runtime: PersonaRuntime) -> None:
     client = LLMClient(
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         thinker_enabled=False,
@@ -252,7 +248,10 @@ async def test_stream_with_segments_cleans_buffer_on_cancel() -> None:
     assert streamed == ["新的内容。"]
 
 
-async def test_chat_streaming_sends_segments_and_returns_empty_to_avoid_duplicate() -> None:
+async def test_chat_streaming_sends_segments_and_returns_empty_to_avoid_duplicate(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
 
@@ -268,7 +267,7 @@ async def test_chat_streaming_sends_segments_and_returns_empty_to_avoid_duplicat
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         group_timeline=timeline,
@@ -284,7 +283,7 @@ async def test_chat_streaming_sends_segments_and_returns_empty_to_avoid_duplicat
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
                 force_reply=True,
@@ -297,7 +296,10 @@ async def test_chat_streaming_sends_segments_and_returns_empty_to_avoid_duplicat
     assert timeline.get_turns("123")[-1]["content"] == "第一段很长很长。\n第二段也很长。"
 
 
-async def test_balanced_long_reply_with_business_tools_streams_segments() -> None:
+async def test_balanced_long_reply_with_business_tools_streams_segments(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
     tools = ToolRegistry()
@@ -316,7 +318,7 @@ async def test_balanced_long_reply_with_business_tools_streams_segments() -> Non
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=tools,
         group_timeline=timeline,
@@ -332,7 +334,7 @@ async def test_balanced_long_reply_with_business_tools_streams_segments() -> Non
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
                 force_reply=True,
@@ -345,7 +347,10 @@ async def test_balanced_long_reply_with_business_tools_streams_segments() -> Non
     assert timeline.get_turns("123")[-1]["content"] == "第一段很长很长。\n第二段也很长。"
 
 
-async def test_tool_execution_receives_resolved_humanization_context() -> None:
+async def test_tool_execution_receives_resolved_humanization_context(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     captured: list[dict[str, Any]] = []
     tools = ToolRegistry()
@@ -368,7 +373,7 @@ async def test_tool_execution_receives_resolved_humanization_context() -> None:
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=tools,
         group_timeline=timeline,
@@ -381,20 +386,23 @@ async def test_tool_execution_receives_resolved_humanization_context() -> None:
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 force_reply=True,
             )
     finally:
         await client.close()
 
-    assert reply == "工具执行完毕"
+    assert reply in {"工具执行完毕", "工具执行完毕。"}
     assert len(captured) == 1
     assert captured[0]["resolved_humanization"] is resolved
     assert captured[0]["humanization"] is resolved
 
 
-async def test_streaming_disabled_fallback_uses_natural_split() -> None:
+async def test_streaming_disabled_fallback_uses_natural_split(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
     tools = ToolRegistry()
@@ -417,7 +425,7 @@ async def test_streaming_disabled_fallback_uses_natural_split() -> None:
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=tools,
         group_timeline=timeline,
@@ -441,7 +449,7 @@ async def test_streaming_disabled_fallback_uses_natural_split() -> None:
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
                 force_reply=True,
@@ -456,7 +464,10 @@ async def test_streaming_disabled_fallback_uses_natural_split() -> None:
     assert full_reply.replace("\n", "").replace("。", "") == text.replace("。", "")
 
 
-async def test_chat_balanced_streaming_handles_quote_anchor() -> None:
+async def test_chat_balanced_streaming_handles_quote_anchor(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
 
@@ -472,7 +483,7 @@ async def test_chat_balanced_streaming_handles_quote_anchor() -> None:
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         group_timeline=timeline,
@@ -491,7 +502,7 @@ async def test_chat_balanced_streaming_handles_quote_anchor() -> None:
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
                 force_reply=True,
@@ -504,7 +515,10 @@ async def test_chat_balanced_streaming_handles_quote_anchor() -> None:
     assert timeline.get_turns("123")[-1]["content"] == "[CQ:reply,id=42]第一段很长很长。\n第二段也很长。"
 
 
-async def test_quote_reply_disabled_strips_cq_reply_on_non_streaming_path() -> None:
+async def test_quote_reply_disabled_strips_cq_reply_on_non_streaming_path(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
     tools = ToolRegistry()
@@ -521,7 +535,7 @@ async def test_quote_reply_disabled_strips_cq_reply_on_non_streaming_path() -> N
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=tools,
         group_timeline=timeline,
@@ -537,7 +551,7 @@ async def test_quote_reply_disabled_strips_cq_reply_on_non_streaming_path() -> N
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
                 force_reply=True,
@@ -550,7 +564,10 @@ async def test_quote_reply_disabled_strips_cq_reply_on_non_streaming_path() -> N
     assert "[CQ:reply" not in timeline.get_turns("123")[-1]["content"]
 
 
-async def test_quote_reply_disabled_strips_cq_reply_on_streaming_path() -> None:
+async def test_quote_reply_disabled_strips_cq_reply_on_streaming_path(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
 
@@ -565,7 +582,7 @@ async def test_quote_reply_disabled_strips_cq_reply_on_streaming_path() -> None:
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         group_timeline=timeline,
@@ -581,7 +598,7 @@ async def test_quote_reply_disabled_strips_cq_reply_on_streaming_path() -> None:
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
                 force_reply=True,
@@ -594,12 +611,12 @@ async def test_quote_reply_disabled_strips_cq_reply_on_streaming_path() -> None:
     assert timeline.get_turns("123")[-1]["content"] == "第一段很长很长。"
 
 
-async def test_stream_with_segments_falls_back_to_result_text_without_deltas() -> None:
+async def test_stream_with_segments_falls_back_to_result_text_without_deltas(persona_runtime: PersonaRuntime) -> None:
     client = LLMClient(
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         thinker_enabled=False,

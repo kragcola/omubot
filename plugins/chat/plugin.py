@@ -799,17 +799,7 @@ class ChatPlugin(AmadeusPlugin):
 
         ctx.short_term = ShortTermMemory()
 
-        # ---- identity ----
-        from services.identity import IdentityManager
-
-        identity_mgr = IdentityManager()
-        soul_dir = config.soul.dir
-        identity_path = f"{soul_dir}/identity.md"
-        await identity_mgr.load_file(identity_path)
-        ctx.identity_mgr = identity_mgr
-        ctx.identity = identity_mgr.resolve()
-
-        # ---- persona v2 runtime singleton (C1 — additive; v2 cutover) ----
+        # ---- persona v2 runtime singleton (single source of identity + prompt) ----
         from services.persona import PersonaRuntime
 
         persona_v2_cfg = getattr(config, "persona_v2", None)
@@ -834,6 +824,7 @@ class ChatPlugin(AmadeusPlugin):
                     exc,
                 )
         ctx.persona_runtime = persona_runtime
+        ctx.identity = persona_runtime.identity_snapshot()
 
         # ---- schedule system ----
         from plugins.schedule.plugin import ScheduleConfig
@@ -990,24 +981,17 @@ class ChatPlugin(AmadeusPlugin):
             logger.warning("episode graph bridge attach failed | err={}", exc)
         ctx.memory_consolidator = None  # set after llm_client is built below
 
-        # ---- instruction ----
-        from services.llm.prompt_builder import load_instruction
-
-        instruction = load_instruction(config.soul.dir)
-
-        # ---- prompt builder ----
+        # ---- prompt builder (v2 — owns persona via PersonaRuntime) ----
         from services.llm.prompt_builder import PromptBuilder
 
         initial_humanization = _humanization_resolve(config, None)
         prompt_builder = PromptBuilder(
-            instruction=instruction,
-            admins=config.admins,
+            persona_runtime=persona_runtime,
             state_board=ctx.state_board,
             retrieval_gate=ctx.retrieval,
             state_board_layout=initial_humanization.state_board_layout,
             state_board_granularity=initial_humanization.state_board_granularity,
         )
-        prompt_builder.build_static(ctx.identity, bot_self_id="")
         ctx.prompt_builder = prompt_builder
 
         # ---- dream agent (created by DreamPlugin) ----
@@ -1275,7 +1259,7 @@ class ChatPlugin(AmadeusPlugin):
         ctx.scheduler = GroupChatScheduler(
             llm=llm,
             timeline=ctx.timeline,
-            identity_mgr=identity_mgr,
+            persona_runtime=persona_runtime,
             group_config=config.group,
             humanizer=humanizer,
             talk_schedule=talk_schedule,

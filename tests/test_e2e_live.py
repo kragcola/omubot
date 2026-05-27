@@ -5,14 +5,15 @@
 """
 
 import os
+from typing import cast
 
 import pytest
 
-from services.identity import Identity
 from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
 from services.memory.card_store import CardStore
 from services.memory.short_term import ShortTermMemory
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.tools.context import ToolContext
 from services.tools.datetime_tool import DateTimeTool
 from services.tools.memo_tools import CardLookupTool, CardUpdateTool
@@ -33,10 +34,23 @@ async def llm(tmp_path: object) -> LLMClient:
     card_store = CardStore(db_path=str(tmp_path) + "/e2e_cards.db")
     await card_store.init()
     short_term = ShortTermMemory()
-    identity = Identity(id="test", name="测试", personality="你是一个QQ群聊机器人，回复简洁。")
-    prompt_builder = PromptBuilder()
-    prompt_builder.build_static(identity, bot_self_id="")
+    identity = IdentitySnapshot(id="test", name="测试", personality="你是一个QQ群聊机器人，回复简洁。")
 
+    class _StubRuntime:
+        def __init__(self, snap: IdentitySnapshot) -> None:
+            self._snap = snap
+
+        @property
+        def static_text(self) -> str:
+            return f"你是 {self._snap.name}。{self._snap.personality}"
+
+        def identity_snapshot(self) -> IdentitySnapshot:
+            return self._snap
+
+        def group_profile_text(self, group_id: str | None) -> str:
+            return ""
+
+    prompt_builder = PromptBuilder(persona_runtime=cast(PersonaRuntime, _StubRuntime(identity)))
     tools = ToolRegistry()
     tools.register(CardLookupTool(card_store))
     tools.register(CardUpdateTool(card_store))
@@ -54,11 +68,11 @@ async def llm(tmp_path: object) -> LLMClient:
 
 
 @pytest.fixture
-def identity() -> Identity:
-    return Identity(id="test", name="测试", personality="你是一个QQ群聊机器人，回复简洁。")
+def identity() -> IdentitySnapshot:
+    return IdentitySnapshot(id="test", name="测试", personality="你是一个QQ群聊机器人，回复简洁。")
 
 
-async def test_basic_chat(llm: LLMClient, identity: Identity) -> None:
+async def test_basic_chat(llm: LLMClient, identity: IdentitySnapshot) -> None:
     """基础对话：发送消息，收到非空回复。"""
     reply = await llm.chat(
         session_id="test_s1",
@@ -72,7 +86,7 @@ async def test_basic_chat(llm: LLMClient, identity: Identity) -> None:
     assert reply != "..."
 
 
-async def test_tool_call_datetime(llm: LLMClient, identity: Identity) -> None:
+async def test_tool_call_datetime(llm: LLMClient, identity: IdentitySnapshot) -> None:
     """工具调用：问时间，LLM 应调用 get_datetime 工具。"""
     reply = await llm.chat(
         session_id="test_s2",
@@ -85,7 +99,7 @@ async def test_tool_call_datetime(llm: LLMClient, identity: Identity) -> None:
     assert len(reply) > 0
 
 
-async def test_tool_call_memory(llm: LLMClient, identity: Identity) -> None:
+async def test_tool_call_memory(llm: LLMClient, identity: IdentitySnapshot) -> None:
     """记忆工具：告诉 Bot 信息，应调用 save_memory。"""
     ctx = ToolContext(user_id="67890")
     reply = await llm.chat(
@@ -100,7 +114,7 @@ async def test_tool_call_memory(llm: LLMClient, identity: Identity) -> None:
     assert len(reply) > 0
 
 
-async def test_multi_turn(llm: LLMClient, identity: Identity) -> None:
+async def test_multi_turn(llm: LLMClient, identity: IdentitySnapshot) -> None:
     """多轮对话：短期记忆应保留上下文。"""
     await llm.chat(session_id="test_s4", user_id="11111", user_content="我最喜欢的颜色是蓝色", identity=identity)
     reply = await llm.chat(

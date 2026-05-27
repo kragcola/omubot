@@ -1025,33 +1025,14 @@ class BackupConfig(BaseModel):
 
 
 class PersonaV2Config(BaseModel):
-    """Persona Source Importer v2 runtime cutover flags.
+    """Persona v2 runtime configuration.
 
-    All flags default to off; runtime behavior remains v1 until cutover begins.
-    See docs/tracking/persona-source-importer-go-live-readiness.md and
-    docs/tracking/persona-runtime-cutover-B1-execution.md for the full
-    cutover sequence (B1~B6).
+    The bot loads persona artifacts from ``config/persona/<persona_id>/`` at
+    connect time. There is no v1 path; ``persona_id`` selects which compiled
+    persona bundle to load.
     """
 
-    runtime_consume: bool = False
-    runtime_groups: list[str] = []
-    shadow_compare: bool = False
-    fallback_on_compile_error: bool = True
     persona_id: str = "default"
-
-    @field_validator("runtime_groups", mode="before")
-    @classmethod
-    def _coerce_runtime_groups(cls, value: object) -> list[str]:
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            raise TypeError("runtime_groups must be a list")
-        normalized: list[str] = []
-        for raw in value:
-            text = str(raw).strip()
-            if text:
-                normalized.append(text)
-        return normalized
 
 
 StateBoardLayout = Literal["head", "tail"]

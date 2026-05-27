@@ -68,10 +68,10 @@ class PersonaRuntimeBundle:
 
 @dataclass(frozen=True)
 class IdentitySnapshot:
-    """v2 replacement for the legacy ``services.identity.Identity``.
+    """Lightweight identity model exposed to plugins/services.
 
-    Carries the fields callers used to read off the v1 ``Identity`` model.
-    Constructed from ``persona.yaml.identity`` at load time.
+    Carries the fields callers read off ``ctx.identity``. Constructed from
+    ``persona.yaml.identity`` at load time.
     """
 
     id: str

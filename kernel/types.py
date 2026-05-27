@@ -111,7 +111,7 @@ class ToolContext:
 
 @dataclass
 class Identity:
-    """Bot 人格。由 IdentityManager（系统服务）从 soul/ 加载。"""
+    """Bot 人格（kernel ABI 形态；运行时由 PersonaRuntime 提供 IdentitySnapshot）。"""
 
     id: str = ""
     name: str = ""
@@ -197,7 +197,7 @@ class PluginContext:
     runtime_state: Any = None
     humanization_contract: Any = None
     humanization_register_classifier: Any = None
-    identity: Any = None  # Identity 实例
+    identity: Any = None  # IdentitySnapshot（由 PersonaRuntime 提供）
 
     # PluginBus 引用（供 LLMClient 等需要触发钩子的服务使用）
     bus: Any = None
@@ -223,13 +223,7 @@ class PluginContext:
     style_feedback_graph_bridge: Any = None
     fact_graph_bridge: Any = None
 
-    # Persona v2 — shadow compare engine (B2; flag-gated)
-    shadow_engine: Any = None
-
-    # Persona v2 — runtime selector (B3; flag-gated; per-turn read)
-    runtime_selector: Any = None
-
-    # Persona v2 — runtime singleton (C1; owns prompt/identity for v2 cutover)
+    # Persona v2 — runtime singleton (owns prompt/identity for v2)
     persona_runtime: Any = None
 
 

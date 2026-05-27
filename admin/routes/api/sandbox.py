@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request
 def create_sandbox_router(
     *,
     llm_client: Any = None,
-    identity_mgr: Any = None,
+    persona_runtime: Any = None,
     ctx: Any = None,
 ) -> APIRouter:
     router = APIRouter()
@@ -19,7 +19,10 @@ def create_sandbox_router(
         return llm_client or (getattr(ctx, "llm_client", None) if ctx else llm_client)
 
     def _identity():
-        return identity_mgr or (getattr(ctx, "identity_mgr", None) if ctx else identity_mgr)
+        runtime = persona_runtime or (getattr(ctx, "persona_runtime", None) if ctx else persona_runtime)
+        if runtime is None:
+            return None
+        return runtime.identity_snapshot()
 
     @router.post("/sandbox/chat")
     async def sandbox_chat(request: Request):
@@ -36,10 +39,7 @@ def create_sandbox_router(
         user_id = body.get("user_id", "sandbox_user")
         group_id = body.get("group_id")
 
-        identity = None
-        id_mgr = _identity()
-        if id_mgr is not None:
-            identity = id_mgr.resolve()
+        identity = _identity()
 
         try:
             from services.tools.context import ToolContext

@@ -5,21 +5,17 @@ from unittest.mock import AsyncMock, patch
 
 from services.humanization import REGISTER_LABEL_SLOT, create_humanization_state_bus
 from services.humanization.state import humanization_source
-from services.identity import Identity
 from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
 from services.memory.short_term import ShortTermMemory
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.system_module import RuntimeStateBus, Scope
 from services.tools.registry import ToolRegistry
 
-_IDENTITY = Identity(id="t", name="Bot", personality="p")
 
-
-def _prompt() -> PromptBuilder:
-    prompt = PromptBuilder(instruction="test")
-    prompt.build_static(_IDENTITY, bot_self_id="999")
-    return prompt
+def _prompt(persona_runtime: PersonaRuntime) -> PromptBuilder:
+    return PromptBuilder(persona_runtime=persona_runtime)
 
 
 def _result(text: str) -> dict[str, Any]:
@@ -48,6 +44,8 @@ def _set_register(runtime_state: RuntimeStateBus, label: str) -> None:
 
 
 async def _chat_reply(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
     *,
     strict: bool,
     register_label: str | None = None,
@@ -61,7 +59,7 @@ async def _chat_reply(
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         group_timeline=GroupTimeline(),
@@ -81,7 +79,7 @@ async def _chat_reply(
                 group_id="100",
                 user_id="u1",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
             )
     finally:
         await client.close()
@@ -89,15 +87,20 @@ async def _chat_reply(
     return final_reply, mock_api.await_count
 
 
-async def test_kaomoji_enforce_strict_default_preserves_v1_round() -> None:
-    final_reply, rounds = await _chat_reply(strict=False)
+async def test_kaomoji_enforce_strict_default_preserves_v1_round(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    final_reply, rounds = await _chat_reply(persona_runtime, identity_snapshot, strict=False)
 
     assert final_reply == "第二轮补图"
     assert rounds == 2
 
 
-async def test_kaomoji_enforce_strict_allows_playful_mood() -> None:
+async def test_kaomoji_enforce_strict_allows_playful_mood(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     final_reply, rounds = await _chat_reply(
+        persona_runtime, identity_snapshot,
         strict=True,
         register_label="playful",
         mood={"label": "playful"},
@@ -107,8 +110,11 @@ async def test_kaomoji_enforce_strict_allows_playful_mood() -> None:
     assert rounds == 2
 
 
-async def test_kaomoji_enforce_strict_allows_high_mood() -> None:
+async def test_kaomoji_enforce_strict_allows_high_mood(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     final_reply, rounds = await _chat_reply(
+        persona_runtime, identity_snapshot,
         strict=True,
         register_label="playful",
         mood={"label": "high"},
@@ -118,8 +124,11 @@ async def test_kaomoji_enforce_strict_allows_high_mood() -> None:
     assert rounds == 2
 
 
-async def test_kaomoji_enforce_strict_blocks_non_playful_register() -> None:
+async def test_kaomoji_enforce_strict_blocks_non_playful_register(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     final_reply, rounds = await _chat_reply(
+        persona_runtime, identity_snapshot,
         strict=True,
         register_label="quiet",
         mood={"label": "playful"},
@@ -129,8 +138,11 @@ async def test_kaomoji_enforce_strict_blocks_non_playful_register() -> None:
     assert rounds == 1
 
 
-async def test_kaomoji_enforce_strict_blocks_non_playful_mood() -> None:
+async def test_kaomoji_enforce_strict_blocks_non_playful_mood(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     final_reply, rounds = await _chat_reply(
+        persona_runtime, identity_snapshot,
         strict=True,
         register_label="playful",
         mood={"label": "cold"},
@@ -140,8 +152,11 @@ async def test_kaomoji_enforce_strict_blocks_non_playful_mood() -> None:
     assert rounds == 1
 
 
-async def test_kaomoji_enforce_requires_kaomoji_text() -> None:
+async def test_kaomoji_enforce_requires_kaomoji_text(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     final_reply, rounds = await _chat_reply(
+        persona_runtime, identity_snapshot,
         strict=True,
         register_label="playful",
         mood={"label": "playful"},

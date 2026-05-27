@@ -8,15 +8,14 @@ import pytest
 
 from kernel.types import PromptBlock
 from services.humanization import CLOCK_CURRENT_SLOT, THINKER_LAST_DECISION_SLOT, create_humanization_state_bus
-from services.identity import Identity
 from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.thinker import ThinkDecision, write_clock_state, write_thinker_decision_state
 from services.memory.short_term import ShortTermMemory
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.system_module import Scope
 from services.tools.registry import ToolRegistry
 
-_IDENTITY = Identity(id="t", name="Bot", personality="p")
 _MAIN_RESULT = {
     "text": "reply text",
     "tool_uses": [],
@@ -53,13 +52,12 @@ class _ProviderBus:
         return list(self.blocks)
 
 
-def _prompt() -> PromptBuilder:
-    prompt = PromptBuilder(instruction="test")
-    prompt.build_static(_IDENTITY, bot_self_id="999")
-    return prompt
+def _prompt(persona_runtime: PersonaRuntime) -> PromptBuilder:
+    return PromptBuilder(persona_runtime=persona_runtime)
 
 
 async def _client(
+    persona_runtime: PersonaRuntime,
     *,
     runtime_state=None,
     bus=None,
@@ -71,7 +69,7 @@ async def _client(
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         thinker_enabled=True,
@@ -148,7 +146,9 @@ def test_write_clock_state_happy_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_client_writes_thinker_state_and_keeps_hook() -> None:
+async def test_llm_client_writes_thinker_state_and_keeps_hook(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     runtime_state = create_humanization_state_bus()
     plugin_bus = _Bus()
     clock_features = {
@@ -164,6 +164,7 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook() -> None:
         "slot_mood_hint": "困倦",
     }
     client = await _client(
+        persona_runtime,
         runtime_state=runtime_state,
         bus=plugin_bus,
         clock_context_getter=lambda **_: clock_features,
@@ -186,7 +187,7 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook() -> None:
                 session_id="private_100",
                 user_id="100",
                 user_content="omubot 怎么部署",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
             )
     finally:
         await client.close()
@@ -225,10 +226,12 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook() -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_client_passes_runtime_state_and_turn_id_to_providers() -> None:
+async def test_llm_client_passes_runtime_state_and_turn_id_to_providers(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     runtime_state = create_humanization_state_bus()
     provider_bus = _ProviderBus()
-    client = await _client(runtime_state=runtime_state, bus=_Bus())
+    client = await _client(persona_runtime, runtime_state=runtime_state, bus=_Bus())
     client._card_store = object()
     client.set_provider_bus(provider_bus)
     try:
@@ -249,7 +252,7 @@ async def test_llm_client_passes_runtime_state_and_turn_id_to_providers() -> Non
                 session_id="private_100",
                 user_id="100",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
             )
     finally:
         await client.close()
@@ -260,10 +263,12 @@ async def test_llm_client_passes_runtime_state_and_turn_id_to_providers() -> Non
 
 
 @pytest.mark.asyncio
-async def test_llm_client_passes_mood_fit_target_to_providers() -> None:
+async def test_llm_client_passes_mood_fit_target_to_providers(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     provider_bus = _ProviderBus()
     mood = SimpleNamespace(label="兴奋", energy=1.0, valence=1.0, openness=1.0, tension=0.0)
-    client = await _client(bus=_Bus(), mood_getter=lambda **_: mood)
+    client = await _client(persona_runtime, bus=_Bus(), mood_getter=lambda **_: mood)
     client._card_store = object()
     client.set_provider_bus(provider_bus)
     try:
@@ -284,7 +289,7 @@ async def test_llm_client_passes_mood_fit_target_to_providers() -> None:
                 session_id="private_100",
                 user_id="100",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
             )
     finally:
         await client.close()
@@ -294,14 +299,16 @@ async def test_llm_client_passes_mood_fit_target_to_providers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_client_keeps_legacy_thinker_block_when_provider_disabled() -> None:
+async def test_llm_client_keeps_legacy_thinker_block_when_provider_disabled(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     captured: dict[str, object] = {}
 
     async def _capture_main(*args, **_kwargs):
         captured["system_blocks"] = args[4]
         return _MAIN_RESULT
 
-    client = await _client(bus=_Bus())
+    client = await _client(persona_runtime, bus=_Bus())
     try:
         with (
             patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
@@ -320,7 +327,7 @@ async def test_llm_client_keeps_legacy_thinker_block_when_provider_disabled() ->
                 session_id="private_100",
                 user_id="100",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
             )
     finally:
         await client.close()
@@ -330,7 +337,9 @@ async def test_llm_client_keeps_legacy_thinker_block_when_provider_disabled() ->
 
 
 @pytest.mark.asyncio
-async def test_llm_client_uses_thinker_provider_without_legacy_double_injection() -> None:
+async def test_llm_client_uses_thinker_provider_without_legacy_double_injection(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     captured: dict[str, object] = {}
 
     async def _capture_main(*args, **_kwargs):
@@ -345,7 +354,7 @@ async def test_llm_client_uses_thinker_provider_without_legacy_double_injection(
         provider="thinker_provider",
     )
     provider_bus = _ProviderBus(blocks=[block])
-    client = await _client(bus=_Bus(), thinker_provider_enabled=True)
+    client = await _client(persona_runtime, bus=_Bus(), thinker_provider_enabled=True)
     client._card_store = object()
     client.set_provider_bus(provider_bus)
     try:
@@ -366,7 +375,7 @@ async def test_llm_client_uses_thinker_provider_without_legacy_double_injection(
                 session_id="private_100",
                 user_id="100",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
             )
     finally:
         await client.close()
@@ -404,9 +413,11 @@ def test_thinker_runtime_state_per_turn_can_be_cleared() -> None:
 
 
 @pytest.mark.asyncio
-async def test_thinker_runtime_state_cancel_path_does_not_dirty_write() -> None:
+async def test_thinker_runtime_state_cancel_path_does_not_dirty_write(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
     runtime_state = create_humanization_state_bus()
-    client = await _client(runtime_state=runtime_state)
+    client = await _client(persona_runtime, runtime_state=runtime_state)
 
     async def _slow_think(*args, **kwargs):
         await asyncio.sleep(60)
@@ -419,7 +430,7 @@ async def test_thinker_runtime_state_cancel_path_does_not_dirty_write() -> None:
                     session_id="private_100",
                     user_id="100",
                     user_content="hello",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                 )
             )
             await asyncio.sleep(0)

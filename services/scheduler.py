@@ -26,8 +26,8 @@ from services.tools.context import ToolContext
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
 
-    from services.identity import IdentityManager
     from services.llm.client import LLMClient
+    from services.persona import PersonaRuntime
 
 _L = logger.bind(channel="scheduler")
 
@@ -70,7 +70,7 @@ class GroupChatScheduler:
         self,
         llm: LLMClient,
         timeline: GroupTimeline,
-        identity_mgr: IdentityManager,
+        persona_runtime: PersonaRuntime,
         group_config: GroupConfig,
         humanizer: Any = None,
         mood_getter: Callable[..., Any] | None = None,
@@ -84,7 +84,7 @@ class GroupChatScheduler:
     ) -> None:
         self._llm = llm
         self._timeline = timeline
-        self._identity_mgr = identity_mgr
+        self._persona_runtime = persona_runtime
         self._group_config = group_config
         self._humanizer = humanizer
         self._mood_getter = mood_getter
@@ -186,7 +186,7 @@ class GroupChatScheduler:
         """Called on every group message. Manages probability-based dispatch."""
         if group_id in self._muted_groups:
             return
-        identity = self._identity_mgr.resolve()
+        identity = self._persona_runtime.identity_snapshot()
         is_at = trigger is not None and trigger.mode == "at_mention"
         is_video_always = trigger is not None and trigger.mode == "video_always"
         is_directed_followup = trigger is not None and trigger.mode == "directed_followup"
@@ -373,7 +373,7 @@ class GroupChatScheduler:
         """Immediately fire a chat for this group (no debounce). Used at startup."""
         if group_id in self._muted_groups:
             return
-        identity = self._identity_mgr.resolve()
+        identity = self._persona_runtime.identity_snapshot()
         if identity.proactive is None:
             return
         slot = self._slots.setdefault(group_id, _GroupSlot())
@@ -674,7 +674,7 @@ class GroupChatScheduler:
         try:
             for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
                 try:
-                    identity = self._identity_mgr.resolve()
+                    identity = self._persona_runtime.identity_snapshot()
                     session_id = f"group_{group_id}"
                     uid = slot.last_user_id if slot else ""
                     ctx = ToolContext(

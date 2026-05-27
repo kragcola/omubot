@@ -660,63 +660,8 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
         ctx.llm_client._bot_self_id = bot.self_id
         ctx.state_board.bot_self_id = bot.self_id
-        ctx.prompt_builder.build_static(ctx.identity_mgr.resolve(), bot_self_id=bot.self_id)
-        # C1 — bind bot_self_id into PersonaRuntime (additive; no v1 path change yet)
-        if getattr(ctx, "persona_runtime", None) is not None:
-            ctx.persona_runtime.bind_bot_self_id(str(bot.self_id))
+        ctx.persona_runtime.bind_bot_self_id(str(bot.self_id))
         ctx.scheduler.set_bot(bot)
-
-        # B2 shadow compare — flag-gated; defaults off so this is a no-op.
-        persona_v2_cfg = getattr(ctx.config, "persona_v2", None)
-        if persona_v2_cfg is not None and persona_v2_cfg.shadow_compare:
-            from services.persona.shadow import ShadowCompareEngine
-
-            v1_identity = ctx.identity_mgr.resolve()
-            pb = ctx.prompt_builder
-            shadow_engine = ShadowCompareEngine(
-                cfg=persona_v2_cfg,
-                v1_static_text=pb.static_block.get("text", "") if pb.static_block else "",
-                v1_identity=v1_identity,
-                v1_instruction_text=getattr(pb, "_instruction", "") or "",
-                v1_admins=getattr(pb, "_admins", None),
-                v1_proactive=v1_identity.proactive or "",
-                v1_bot_self_id=str(bot.self_id),
-            )
-            try:
-                await shadow_engine.run_once()
-            except Exception as exc:
-                _base_logger.bind(channel="persona_shadow").warning(
-                    "shadow compare unexpected error: {}", exc
-                )
-            ctx.shadow_engine = shadow_engine
-
-        # B3 runtime cutover — flag-gated; defaults off so this is a no-op.
-        runtime_selector = None
-        if persona_v2_cfg is not None and persona_v2_cfg.runtime_consume:
-            from services.persona.runtime import load_pending_freeze
-            from services.persona.runtime_selector import (
-                PersonaRuntimeSelector,
-                join_static_blocks,
-            )
-
-            bundle = load_pending_freeze(persona_v2_cfg.persona_id)
-            v2_text = ""
-            if bundle is not None and bundle.ok:
-                v2_text = join_static_blocks(bundle)
-            runtime_selector = PersonaRuntimeSelector(
-                cfg=persona_v2_cfg,
-                bundle=bundle,
-                v2_static_text=v2_text,
-            )
-            if bundle is None or not bundle.ok:
-                level = "warning" if persona_v2_cfg.fallback_on_compile_error else "error"
-                getattr(_base_logger.bind(channel="persona_runtime"), level)(
-                    "v2 bundle unavailable | bundle_ok={} errors={}",
-                    bundle is not None and bundle.ok,
-                    tuple(bundle.errors) if bundle else (),
-                )
-        ctx.prompt_builder.set_runtime_selector(runtime_selector)
-        ctx.runtime_selector = runtime_selector
 
         # Track whether this is the first connect (vs reconnect)
         is_first_connect = not getattr(ctx, "startup_triggered", False)
@@ -1223,7 +1168,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             return
 
         sid = _session_id(event)
-        identity = ctx.identity_mgr.resolve()
+        identity = ctx.persona_runtime.identity_snapshot()
         tool_ctx = ToolContext(bot=bot, user_id=str(event.user_id), group_id=None, session_id=sid)
         private_actor = get_private_conversation_actor(sid)
 

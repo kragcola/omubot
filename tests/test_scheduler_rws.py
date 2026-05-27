@@ -3,18 +3,18 @@ from __future__ import annotations
 import asyncio
 
 from kernel.config import GroupConfig, HumanizationConfig
-from services.identity import Identity
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot
 from services.scheduler import GroupChatScheduler
 from services.scheduler_eot import EOTCache
 
 
-def _identity() -> Identity:
-    return Identity(id="test", name="测试", personality="测试人设", proactive="积极参与群聊")
+def _identity() -> IdentitySnapshot:
+    return IdentitySnapshot(id="test", name="测试", personality="测试人设", proactive="积极参与群聊")
 
 
-class _IdentityMgr:
-    def resolve(self) -> Identity:
+class _FakeRuntime:
+    def identity_snapshot(self) -> IdentitySnapshot:
         return _identity()
 
 
@@ -32,7 +32,7 @@ async def test_rws_shadow_records_explanation_without_changing_decision() -> Non
     scheduler = GroupChatScheduler(
         llm=llm,  # type: ignore[arg-type]
         timeline=GroupTimeline(),
-        identity_mgr=_IdentityMgr(),  # type: ignore[arg-type]
+        persona_runtime=_FakeRuntime(),  # type: ignore[arg-type]
         group_config=GroupConfig(talk_value=1.0, planner_smooth=0),
         humanization_config=HumanizationConfig(rws_shadow=True),
     )
@@ -52,7 +52,7 @@ async def test_rws_primary_can_skip_legacy_probability_fire() -> None:
     scheduler = GroupChatScheduler(
         llm=llm,  # type: ignore[arg-type]
         timeline=GroupTimeline(),
-        identity_mgr=_IdentityMgr(),  # type: ignore[arg-type]
+        persona_runtime=_FakeRuntime(),  # type: ignore[arg-type]
         group_config=GroupConfig(talk_value=0.4, planner_smooth=0),
         humanization_config=HumanizationConfig(rws_primary=True, rws_threshold=0.9),
     )
@@ -75,7 +75,7 @@ async def test_rws_eot_reserves_prefetch_quota_before_background_refresh() -> No
     scheduler = GroupChatScheduler(
         llm=llm,  # type: ignore[arg-type]
         timeline=timeline,
-        identity_mgr=_IdentityMgr(),  # type: ignore[arg-type]
+        persona_runtime=_FakeRuntime(),  # type: ignore[arg-type]
         group_config=GroupConfig(talk_value=0.0, planner_smooth=0),
         humanization_config=HumanizationConfig(rws_shadow=True, rws_eot=True),
         eot_cache=eot_cache,

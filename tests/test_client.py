@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from kernel.config import GroupConfig, GroupOverride, ReplySegmentationConfig
-from services.identity import Identity
 from services.llm.client import (
     LLMClient,
     RateLimitError,
@@ -27,9 +26,8 @@ from services.memory.card_store import CardStore
 from services.memory.short_term import ChatMessage, ShortTermMemory
 from services.memory.timeline import GroupTimeline
 from services.memory.types import ContentBlock, ImageRefBlock, TextBlock
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.tools.registry import ToolRegistry
-
-_IDENTITY = Identity(id="t", name="Bot", personality="p")
 
 
 def _normalize_reply(text: str | None) -> str:
@@ -40,9 +38,8 @@ def _normalize_reply(text: str | None) -> str:
 
 
 @pytest.fixture
-def prompt() -> PromptBuilder:
-    pb = PromptBuilder(instruction="test")
-    pb.build_static(_IDENTITY, bot_self_id="999")
+def prompt(persona_runtime: PersonaRuntime) -> PromptBuilder:
+    pb = PromptBuilder(persona_runtime=persona_runtime)
     return pb
 
 
@@ -138,7 +135,14 @@ def test_reply_segments_can_disable_natural_split() -> None:
     assert plan.inter_segment_delays == []
 
 
-async def test_chat_uses_injected_reply_segmentation_config(prompt, short_term, tools, timeline) -> None:
+async def test_chat_uses_injected_reply_segmentation_config(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+    prompt,
+    short_term,
+    tools,
+    timeline,
+) -> None:
     """Production chat path should honor config.reply_segmentation, not old client constants."""
     cfg = ReplySegmentationConfig(
         max_segment_chars=6,
@@ -167,7 +171,7 @@ async def test_chat_uses_injected_reply_segmentation_config(prompt, short_term, 
                 session_id="group_12345",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="12345",
                 on_segment=_on_segment,
             )
@@ -285,7 +289,14 @@ async def test_profile_rate_limit_cooldown_is_per_profile(prompt, short_term, to
 # ---------------------------------------------------------------------------
 
 
-async def test_group_compact_triggers_at_ratio(prompt, short_term, tools, timeline, card_store) -> None:
+async def test_group_compact_triggers_at_ratio(
+    identity_snapshot: IdentitySnapshot,
+    prompt,
+    short_term,
+    tools,
+    timeline,
+    card_store,
+) -> None:
     """compact_group fires when input_tokens > max_context_tokens * compact_ratio."""
     async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
         gid = "12345"
@@ -306,14 +317,21 @@ async def test_group_compact_triggers_at_ratio(prompt, short_term, tools, timeli
         with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=[mock_compact, mock_chat]):
             result = await client.chat(
                 session_id="group_12345", user_id="111",
-                user_content="hello", identity=_IDENTITY, group_id=gid,
+                user_content="hello", identity=identity_snapshot, group_id=gid,
             )
 
         assert result is not None
         assert timeline.get_summary(gid) == "compressed"
 
 
-async def test_group_no_compact_below_ratio(prompt, short_term, tools, timeline, card_store) -> None:
+async def test_group_no_compact_below_ratio(
+    identity_snapshot: IdentitySnapshot,
+    prompt,
+    short_term,
+    tools,
+    timeline,
+    card_store,
+) -> None:
     """No compact when tokens below threshold."""
     async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
         gid = "12345"
@@ -330,7 +348,7 @@ async def test_group_no_compact_below_ratio(prompt, short_term, tools, timeline,
         with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=mock_chat):
             await client.chat(
                 session_id="group_12345", user_id="111",
-                user_content="hello", identity=_IDENTITY, group_id=gid,
+                user_content="hello", identity=identity_snapshot, group_id=gid,
             )
         # 8 existing turns + chat adds 1 assistant turn (no pending to flush since
         # group messages are added by the listener, not by chat())
@@ -338,7 +356,14 @@ async def test_group_no_compact_below_ratio(prompt, short_term, tools, timeline,
         assert len(turns) == 9  # 8 existing + 1 assistant reply
 
 
-async def test_group_profile_injects_prompt_and_filters_tools(prompt, short_term, timeline, card_store) -> None:
+async def test_group_profile_injects_prompt_and_filters_tools(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+    prompt,
+    short_term,
+    timeline,
+    card_store,
+) -> None:
     tools = ToolRegistry()
     tools.register(_StaticTool("send_sticker"))
     tools.register(_StaticTool("slang_lookup"))
@@ -355,6 +380,7 @@ async def test_group_profile_injects_prompt_and_filters_tools(prompt, short_term
             ),
         },
     )
+    persona_runtime._group_config_resolver = group_config.resolve
 
     async for client in _client(
         prompt,
@@ -376,7 +402,7 @@ async def test_group_profile_injects_prompt_and_filters_tools(prompt, short_term
                 session_id="group_12345",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="12345",
             )
 
@@ -401,11 +427,12 @@ async def test_group_profile_injects_prompt_and_filters_tools(prompt, short_term
 
 
 async def test_deepseek_main_moves_dynamic_prompt_blocks_to_tail_metadata(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
     prompt,
     short_term,
     timeline,
-    card_store,
-) -> None:
+    card_store,) -> None:
     tools = ToolRegistry()
 
     class _Bus:
@@ -448,7 +475,7 @@ async def test_deepseek_main_moves_dynamic_prompt_blocks_to_tail_metadata(
                 session_id="group_12345",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="12345",
             )
 
@@ -568,7 +595,14 @@ async def test_private_compact_no_card_store(prompt, short_term, tools) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_group_compact_adds_cards(prompt, short_term, tools, timeline, card_store) -> None:
+async def test_group_compact_adds_cards(
+    identity_snapshot: IdentitySnapshot,
+    prompt,
+    short_term,
+    tools,
+    timeline,
+    card_store,
+) -> None:
     async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
         gid = "99999"
         # Build proper turn pairs so compact has enough turns (needs >= 4)
@@ -596,7 +630,7 @@ async def test_group_compact_adds_cards(prompt, short_term, tools, timeline, car
         mock_summary = {"text": "group summary", "tool_uses": [], "input_tokens": 50}
 
         with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=[mock_tool_call, mock_summary]):
-            await client._compact_group(gid, _IDENTITY)
+            await client._compact_group(gid, identity_snapshot)
 
         cards_111 = await card_store.get_entity_cards("user", "111")
         cards_222 = await card_store.get_entity_cards("user", "222")
@@ -607,7 +641,14 @@ async def test_group_compact_adds_cards(prompt, short_term, tools, timeline, car
         assert timeline.get_summary(gid) == "group summary"
 
 
-async def test_group_compact_invalid_category(prompt, short_term, tools, timeline, card_store) -> None:
+async def test_group_compact_invalid_category(
+    identity_snapshot: IdentitySnapshot,
+    prompt,
+    short_term,
+    tools,
+    timeline,
+    card_store,
+) -> None:
     """Invalid category is rejected gracefully, valid cards still succeed."""
     async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
         gid = "99999"
@@ -631,7 +672,7 @@ async def test_group_compact_invalid_category(prompt, short_term, tools, timelin
         mock_summary = {"text": "summary", "tool_uses": [], "input_tokens": 50}
 
         with patch("services.llm.client.call_api", new_callable=AsyncMock, side_effect=[mock_tool_call, mock_summary]):
-            await client._compact_group(gid, _IDENTITY)
+            await client._compact_group(gid, identity_snapshot)
 
         # Valid card was written
         cards = await card_store.get_entity_cards("user", "12345")
@@ -645,7 +686,7 @@ async def test_group_compact_invalid_category(prompt, short_term, tools, timelin
 # ---------------------------------------------------------------------------
 
 
-async def test_compact_calls_on_compact(prompt, short_term, tools) -> None:
+async def test_compact_calls_on_compact(identity_snapshot: IdentitySnapshot, prompt, short_term, tools) -> None:
     async for client in _client(prompt, short_term, tools):
         callback = Mock()
         client._on_compact = callback
@@ -662,7 +703,9 @@ async def test_compact_calls_on_compact(prompt, short_term, tools) -> None:
 
 
 class TestPassTurn:
-    async def test_pass_turn_returns_none(self, prompt, short_term, tools, timeline, card_store) -> None:
+    async def test_pass_turn_returns_none(
+        self, identity_snapshot, prompt, short_term, tools, timeline, card_store,
+    ) -> None:
         """pass_turn is always honored — chat() returns None."""
         async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
             gid = "12345"
@@ -681,14 +724,14 @@ class TestPassTurn:
                     session_id="group_12345",
                     user_id="111",
                     user_content="hello",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                     group_id=gid,
                     ctx=None,
                 )
             assert result is None
 
     async def test_textual_pass_turn_is_suppressed_in_group(
-        self, prompt, short_term, tools, timeline, card_store,
+        self, identity_snapshot, prompt, short_term, tools, timeline, card_store,
     ) -> None:
         async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
             bus = _Bus()
@@ -710,7 +753,7 @@ class TestPassTurn:
                     session_id="group_12345",
                     user_id="111",
                     user_content="hello",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                     group_id="12345",
                     ctx=None,
                 )
@@ -719,7 +762,7 @@ class TestPassTurn:
             assert len(bus.post_reply_calls) == 0
             assert len(timeline.get_turns("12345")) == 0
 
-    async def test_empty_reply_falls_back_in_private_chat(self, prompt, short_term, tools) -> None:
+    async def test_empty_reply_falls_back_in_private_chat(self, identity_snapshot, prompt, short_term, tools) -> None:
         async for client in _client(prompt, short_term, tools):
             bus = _Bus()
             client._bus = bus
@@ -740,7 +783,7 @@ class TestPassTurn:
                     session_id="private_100",
                     user_id="100",
                     user_content="hello",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                 )
 
             assert _normalize_reply(result) == _normalize_reply("我先缓一下，马上接你。")
@@ -750,7 +793,7 @@ class TestPassTurn:
             )
 
     async def test_pass_turn_tool_omitted_when_force_reply(
-        self, prompt, short_term, tools, timeline, card_store,
+        self, identity_snapshot, prompt, short_term, tools, timeline, card_store,
     ) -> None:
         """force_reply=True must strip pass_turn from tool_defs so the LLM cannot pick it."""
         async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
@@ -773,7 +816,7 @@ class TestPassTurn:
                     session_id=f"group_{gid}",
                     user_id="111",
                     user_content="",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                     group_id=gid,
                     ctx=None,
                     force_reply=True,
@@ -783,7 +826,7 @@ class TestPassTurn:
             assert "pass_turn" not in tool_names
 
     async def test_pass_turn_overridden_when_force_reply(
-        self, prompt, short_term, tools, timeline, card_store,
+        self, identity_snapshot, prompt, short_term, tools, timeline, card_store,
     ) -> None:
         """If LLM still calls pass_turn under force_reply (cached toolset), override and emit a reply."""
         async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
@@ -801,7 +844,7 @@ class TestPassTurn:
                     session_id=f"group_{gid}",
                     user_id="111",
                     user_content="",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                     group_id=gid,
                     ctx=None,
                     force_reply=True,
@@ -810,7 +853,7 @@ class TestPassTurn:
             assert result is not None and result.strip() != ""
 
     async def test_low_confidence_pass_turn_light_ack_when_gate_enabled(
-        self, prompt, short_term, tools, timeline, card_store,
+        self, identity_snapshot, prompt, short_term, tools, timeline, card_store,
     ) -> None:
         async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
             client._pass_turn_confidence_gate = True
@@ -835,14 +878,14 @@ class TestPassTurn:
                     session_id=f"group_{gid}",
                     user_id="111",
                     user_content="",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                     group_id=gid,
                     ctx=None,
                 )
 
             assert _normalize_reply(result) == _normalize_reply("嗯，我在。")
 
-    async def test_tool_calls_are_exposed_to_post_reply(self, prompt, short_term, tools) -> None:
+    async def test_tool_calls_are_exposed_to_post_reply(self, identity_snapshot, prompt, short_term, tools) -> None:
         async for client in _client(prompt, short_term, tools):
             bus = _Bus()
             client._bus = bus
@@ -874,7 +917,7 @@ class TestPassTurn:
                     session_id="private_100",
                     user_id="100",
                     user_content="查一下",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                 )
 
             assert result == "找到啦"
@@ -882,7 +925,7 @@ class TestPassTurn:
             assert bus.post_reply_calls[0].tool_calls
             assert bus.post_reply_calls[0].tool_calls[0]["name"] == "lookup_cards"
 
-    async def test_thinker_retrieve_mode_propagates_to_hook(self, prompt, short_term, tools) -> None:
+    async def test_thinker_retrieve_mode_propagates_to_hook(self, identity_snapshot, prompt, short_term, tools) -> None:
         """PR5: thinker decision retrieve_mode reaches ThinkerContext via the bus hook."""
         async for client in _client(prompt, short_term, tools):
             client._thinker_enabled = True
@@ -905,7 +948,7 @@ class TestPassTurn:
                     session_id="private_100",
                     user_id="100",
                     user_content="omubot 怎么部署",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                 )
 
             assert result == "reply text"
@@ -919,7 +962,7 @@ class TestPassTurn:
 # ---------------------------------------------------------------------------
 
 
-async def test_chat_records_usage(prompt, short_term, tools, tmp_path) -> None:
+async def test_chat_records_usage(identity_snapshot: IdentitySnapshot, prompt, short_term, tools, tmp_path) -> None:
     tracker = UsageTracker(db_path=str(tmp_path / "usage.db"))
     await tracker.init()
     try:
@@ -928,7 +971,7 @@ async def test_chat_records_usage(prompt, short_term, tools, tmp_path) -> None:
             with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=MOCK_RESULT_FULL):
                 await client.chat(
                     session_id="private_100", user_id="100",
-                    user_content="hello", identity=_IDENTITY,
+                    user_content="hello", identity=identity_snapshot,
                 )
             await asyncio.sleep(0)
         rows = await tracker.query_raw("SELECT * FROM llm_calls")
@@ -1384,7 +1427,11 @@ async def test_compact_aggregated_usage_with_per_round_diagnostic(
 
 
 async def test_main_chat_aggregated_usage_with_per_round_diagnostic(
-    prompt, short_term, tools, tmp_path
+    identity_snapshot: IdentitySnapshot,
+    prompt,
+    short_term,
+    tools,
+    tmp_path,
 ) -> None:
     """DL.5: main chat() runs the tool loop. The ``len(rows)==1`` contract
     from ``test_chat_records_usage`` must hold (caller aggregates), AND
@@ -1401,7 +1448,7 @@ async def test_main_chat_aggregated_usage_with_per_round_diagnostic(
             ):
                 await client.chat(
                     session_id="private_100", user_id="100",
-                    user_content="hello", identity=_IDENTITY,
+                    user_content="hello", identity=identity_snapshot,
                 )
             await asyncio.sleep(0)
 

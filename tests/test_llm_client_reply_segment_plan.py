@@ -4,15 +4,14 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from kernel.config import ReplySegmentationConfig
-from services.identity import Identity
 from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.segmentation import ReplySegmentPlan
 from services.memory.short_term import ShortTermMemory
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.tools.registry import ToolRegistry
 
-_IDENTITY = Identity(id="t", name="Bot", personality="p")
 _MOCK_RESULT = {
     "text": "reply text",
     "tool_uses": [],
@@ -23,13 +22,14 @@ _MOCK_RESULT = {
 }
 
 
-def _prompt() -> PromptBuilder:
-    prompt = PromptBuilder(instruction="test")
-    prompt.build_static(_IDENTITY, bot_self_id="999")
-    return prompt
+def _prompt(persona_runtime: PersonaRuntime) -> PromptBuilder:
+    return PromptBuilder(persona_runtime=persona_runtime)
 
 
-async def test_chat_uses_reply_segment_plan_dynamic_delays() -> None:
+async def test_chat_uses_reply_segment_plan_dynamic_delays(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     cfg = ReplySegmentationConfig(natural_split_enabled=True, inter_segment_delay_s=0.0)
     timeline = GroupTimeline()
     sent: list[str] = []
@@ -66,7 +66,7 @@ async def test_chat_uses_reply_segment_plan_dynamic_delays() -> None:
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         group_timeline=timeline,
@@ -87,7 +87,7 @@ async def test_chat_uses_reply_segment_plan_dynamic_delays() -> None:
                 session_id="group_12345",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="12345",
                 on_segment=_on_segment,
             )

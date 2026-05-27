@@ -203,12 +203,15 @@ def _msg_ctx(content: str = "hello") -> MessageContext:
 
 
 class _DummyIdentityMgr:
-    def __init__(self, should_fail: bool = False) -> None:
+    """Minimal stand-in for ``PersonaRuntime`` used by the legacy soul endpoint tests."""
+
+    def __init__(self, should_fail: bool = False, persona_id: str = "default") -> None:
         self.should_fail = should_fail
         self.loaded_paths: list[str] = []
+        self.bundle = SimpleNamespace(persona_id=persona_id)
 
-    async def load_file(self, path: str) -> None:
-        self.loaded_paths.append(path)
+    def swap_bundle(self, persona_id: str) -> None:
+        self.loaded_paths.append(persona_id)
         if self.should_fail:
             raise RuntimeError("reload failed")
 
@@ -2108,10 +2111,10 @@ def test_soul_endpoint_saves_legacy_files_and_reloads_identity(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    identity_mgr = _DummyIdentityMgr()
+    identity_mgr = _DummyIdentityMgr(persona_id="default")
     app = FastAPI()
     app.include_router(
-        create_soul_router(soul_dir=str(tmp_path), identity_mgr=identity_mgr),
+        create_soul_router(soul_dir=str(tmp_path), persona_runtime=identity_mgr),
         prefix="/api/admin",
     )
     client = TestClient(app)
@@ -2137,7 +2140,7 @@ def test_soul_endpoint_saves_legacy_files_and_reloads_identity(tmp_path: Path) -
     assert not (tmp_path / "SKILL.md").exists()
     assert (tmp_path / "identity.md").is_file()
     assert (tmp_path / "instruction.md").is_file()
-    assert identity_mgr.loaded_paths == [str(tmp_path / "identity.md")]
+    assert identity_mgr.loaded_paths == ["default"]
 
     identity_text = (tmp_path / "identity.md").read_text(encoding="utf-8")
     instruction_text = (tmp_path / "instruction.md").read_text(encoding="utf-8")
@@ -2305,7 +2308,7 @@ def test_soul_endpoint_reports_reload_warning_without_losing_save(tmp_path: Path
 
     app = FastAPI()
     app.include_router(
-        create_soul_router(soul_dir=str(tmp_path), identity_mgr=_DummyIdentityMgr(should_fail=True)),
+        create_soul_router(soul_dir=str(tmp_path), persona_runtime=_DummyIdentityMgr(should_fail=True)),
         prefix="/api/admin",
     )
     client = TestClient(app)

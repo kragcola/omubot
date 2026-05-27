@@ -9,20 +9,16 @@ import pytest
 
 from services.block_trace.store import BlockTraceStore
 from services.humanization import LAST_METRICS_SLOT, create_humanization_state_bus
-from services.identity import Identity
 from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
 from services.memory.short_term import ShortTermMemory
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.tools.registry import ToolRegistry
 
-_IDENTITY = Identity(id="t", name="Bot", personality="p")
 
-
-def _prompt() -> PromptBuilder:
-    prompt = PromptBuilder(instruction="test")
-    prompt.build_static(_IDENTITY, bot_self_id="999")
-    return prompt
+def _prompt(persona_runtime: PersonaRuntime) -> PromptBuilder:
+    return PromptBuilder(persona_runtime=persona_runtime)
 
 
 def _result(text: str) -> dict[str, Any]:
@@ -45,6 +41,7 @@ def _normalize_reply(text: str | None) -> str:
 
 async def _client(
     short_term: ShortTermMemory,
+    persona_runtime: PersonaRuntime,
     *,
     rewrite_threshold: float = -1.0,
     runtime_state: object | None = None,
@@ -56,7 +53,7 @@ async def _client(
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=short_term,
         tools=ToolRegistry(),
         group_timeline=timeline,
@@ -68,10 +65,13 @@ async def _client(
     )
 
 
-async def test_humanization_rewrite_default_off_does_not_score_or_call_twice() -> None:
+async def test_humanization_rewrite_default_off_does_not_score_or_call_twice(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     short_term = ShortTermMemory()
     runtime_state = create_humanization_state_bus()
-    client = await _client(short_term, runtime_state=runtime_state)
+    client = await _client(short_term, persona_runtime, runtime_state=runtime_state)
     try:
         with patch(
             "services.llm.client.call_api",
@@ -82,7 +82,7 @@ async def test_humanization_rewrite_default_off_does_not_score_or_call_twice() -
                 session_id="private_100",
                 user_id="100",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
             )
     finally:
         await client.close()
@@ -92,13 +92,17 @@ async def test_humanization_rewrite_default_off_does_not_score_or_call_twice() -
     assert all("humanization.last_metrics" not in key for key in runtime_state.snapshot_all_for_trace())
 
 
-async def test_humanization_rewrite_skips_non_gray_group() -> None:
+async def test_humanization_rewrite_skips_non_gray_group(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     short_term = ShortTermMemory()
     runtime_state = create_humanization_state_bus()
     timeline = GroupTimeline()
     timeline.add("100", role="user", content="hello", speaker="user(100)")
     client = await _client(
         short_term,
+        persona_runtime,
         rewrite_threshold=0.95,
         runtime_state=runtime_state,
         timeline=timeline,
@@ -115,7 +119,7 @@ async def test_humanization_rewrite_skips_non_gray_group() -> None:
                 group_id="100",
                 user_id="100",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
             )
     finally:
         await client.close()
@@ -129,6 +133,8 @@ async def test_humanization_rewrite_skips_non_gray_group() -> None:
 
 
 async def test_humanization_rewrite_low_score_runs_one_extra_round_and_persists_metric(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
     tmp_path,
 ) -> None:
     short_term = ShortTermMemory()
@@ -138,6 +144,7 @@ async def test_humanization_rewrite_low_score_runs_one_extra_round_and_persists_
     budget_manager = SimpleNamespace(_store=trace_store)
     client = await _client(
         short_term,
+        persona_runtime,
         rewrite_threshold=0.95,
         runtime_state=runtime_state,
         budget_manager=budget_manager,
@@ -156,7 +163,7 @@ async def test_humanization_rewrite_low_score_runs_one_extra_round_and_persists_
                 session_id="private_100",
                 user_id="100",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
             )
             rows = await trace_store.list_humanization_metrics(session_id="private_100")
     finally:
@@ -179,10 +186,13 @@ async def test_humanization_rewrite_low_score_runs_one_extra_round_and_persists_
     assert rows[0]["metadata"]["initial_score"] < 0.95
 
 
-async def test_humanization_rewrite_cancel_path_does_not_write_assistant_or_metrics() -> None:
+async def test_humanization_rewrite_cancel_path_does_not_write_assistant_or_metrics(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     short_term = ShortTermMemory()
     runtime_state = create_humanization_state_bus()
-    client = await _client(short_term, rewrite_threshold=0.95, runtime_state=runtime_state)
+    client = await _client(short_term, persona_runtime, rewrite_threshold=0.95, runtime_state=runtime_state)
     calls = 0
 
     async def _fake_api(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -200,7 +210,7 @@ async def test_humanization_rewrite_cancel_path_does_not_write_assistant_or_metr
                     session_id="private_100",
                     user_id="100",
                     user_content="hello",
-                    identity=_IDENTITY,
+                    identity=identity_snapshot,
                 )
             )
             await asyncio.sleep(0)

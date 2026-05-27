@@ -7,21 +7,17 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from kernel.config import ResolvedHumanization
-from services.identity import Identity
 from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.segmentation import ReplySegmentationConfig
 from services.memory.short_term import ShortTermMemory
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.tools.registry import ToolRegistry
 
-_IDENTITY = Identity(id="t", name="Bot", personality="p")
 
-
-def _prompt() -> PromptBuilder:
-    prompt = PromptBuilder(instruction="test")
-    prompt.build_static(_IDENTITY, bot_self_id="999")
-    return prompt
+def _prompt(persona_runtime: PersonaRuntime) -> PromptBuilder:
+    return PromptBuilder(persona_runtime=persona_runtime)
 
 
 def _result(text: str) -> dict[str, Any]:
@@ -40,6 +36,7 @@ def _result(text: str) -> dict[str, Any]:
 
 async def _make_client(
     timeline: GroupTimeline,
+    persona_runtime: PersonaRuntime,
     *,
     humanization: ResolvedHumanization | None = None,
     reply_segmentation_config: ReplySegmentationConfig | None = None,
@@ -48,7 +45,7 @@ async def _make_client(
         base_url="http://fake",
         api_key="sk-fake",
         model="test-model",
-        prompt_builder=_prompt(),
+        prompt_builder=_prompt(persona_runtime),
         short_term=ShortTermMemory(),
         tools=ToolRegistry(),
         group_timeline=timeline,
@@ -58,9 +55,9 @@ async def _make_client(
     )
 
 
-async def test_maybe_extend_feature_off_does_not_call_llm() -> None:
+async def test_maybe_extend_feature_off_does_not_call_llm(persona_runtime: PersonaRuntime) -> None:
     timeline = GroupTimeline()
-    client = await _make_client(timeline)
+    client = await _make_client(timeline, persona_runtime)
     sent: list[str] = []
 
     async def _on_segment(segment: str) -> None:
@@ -87,12 +84,14 @@ async def test_maybe_extend_feature_off_does_not_call_llm() -> None:
     call.assert_not_awaited()
 
 
-async def test_chat_pause_extend_sends_initial_reply_then_extension() -> None:
+async def test_chat_pause_extend_sends_initial_reply_then_extension(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
     timeline = GroupTimeline()
     sent: list[str] = []
     usage_rows: list[dict[str, Any]] = []
-    client = await _make_client(
-        timeline,
+    client = await _make_client(timeline, persona_runtime,
         humanization=ResolvedHumanization(
             pause_then_extend_enabled=True,
             disable_natural_split=True,
@@ -123,7 +122,7 @@ async def test_chat_pause_extend_sends_initial_reply_then_extension() -> None:
                 session_id="group_123",
                 user_id="111",
                 user_content="hello",
-                identity=_IDENTITY,
+                identity=identity_snapshot,
                 group_id="123",
                 on_segment=_on_segment,
                 force_reply=True,
@@ -141,9 +140,9 @@ async def test_chat_pause_extend_sends_initial_reply_then_extension() -> None:
     assert "proactive_extend" in {row["call_type"] for row in usage_rows}
 
 
-async def test_maybe_extend_user_reply_during_wait_drops_extension() -> None:
+async def test_maybe_extend_user_reply_during_wait_drops_extension(persona_runtime: PersonaRuntime) -> None:
     timeline = GroupTimeline()
-    client = await _make_client(timeline)
+    client = await _make_client(timeline, persona_runtime)
     sent: list[str] = []
 
     async def _on_segment(segment: str) -> None:
@@ -178,9 +177,9 @@ async def test_maybe_extend_user_reply_during_wait_drops_extension() -> None:
     assert list(timeline.get_turns("123")) == []
 
 
-async def test_pause_extend_timing_after_last_segment() -> None:
+async def test_pause_extend_timing_after_last_segment(persona_runtime: PersonaRuntime) -> None:
     timeline = GroupTimeline()
-    client = await _make_client(timeline)
+    client = await _make_client(timeline, persona_runtime)
     sleeps: list[float] = []
     sent: list[str] = []
 
@@ -217,9 +216,9 @@ async def test_pause_extend_timing_after_last_segment() -> None:
     assert sent == ["补一句就这个。"]
 
 
-async def test_maybe_extend_cancel_during_wait_re_raises_without_extension() -> None:
+async def test_maybe_extend_cancel_during_wait_re_raises_without_extension(persona_runtime: PersonaRuntime) -> None:
     timeline = GroupTimeline()
-    client = await _make_client(timeline)
+    client = await _make_client(timeline, persona_runtime)
     sent: list[str] = []
 
     async def _on_segment(segment: str) -> None:

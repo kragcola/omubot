@@ -13,15 +13,15 @@ from services.humanization import (
     create_humanization_state_bus,
     humanization_source,
 )
-from services.identity import Identity
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot
 from services.scheduler import GroupChatScheduler, _GroupSlot
 from services.system_module import Scope
 
 
-class _IdentityMgr:
-    def resolve(self) -> Identity:
-        return Identity(id="test", name="测试", personality="测试人设", proactive="积极")
+class _FakeRuntime:
+    def identity_snapshot(self) -> IdentitySnapshot:
+        return IdentitySnapshot(id="test", name="测试", personality="测试人设", proactive="积极")
 
 
 class _HumanizerSpy:
@@ -41,7 +41,7 @@ def _scheduler(
     scheduler = GroupChatScheduler(
         llm=cast(Any, SimpleNamespace()),
         timeline=GroupTimeline(),
-        identity_mgr=cast(Any, _IdentityMgr()),
+        persona_runtime=cast(Any, _FakeRuntime()),
         group_config=GroupConfig(talk_value=1.0, planner_smooth=0),
         humanizer=humanizer,
         runtime_state=runtime_state,

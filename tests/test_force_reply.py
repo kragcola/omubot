@@ -4,17 +4,17 @@ import asyncio
 
 from kernel.config import GroupConfig
 from kernel.types import TriggerContext
-from services.identity import Identity
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot
 from services.scheduler import GroupChatScheduler
 
 
-def _make_identity() -> Identity:
-    return Identity(id="test", name="测试", personality="测试人设", proactive="积极参与群聊")
+def _make_identity() -> IdentitySnapshot:
+    return IdentitySnapshot(id="test", name="测试", personality="测试人设", proactive="积极参与群聊")
 
 
-class _FakeIdentityMgr:
-    def resolve(self) -> Identity:
+class _FakeRuntime:
+    def identity_snapshot(self) -> IdentitySnapshot:
         return _make_identity()
 
 
@@ -31,7 +31,7 @@ def _make_scheduler(llm: _FakeLLM) -> GroupChatScheduler:
     return GroupChatScheduler(
         llm=llm,  # type: ignore[arg-type]
         timeline=GroupTimeline(),
-        identity_mgr=_FakeIdentityMgr(),  # type: ignore[arg-type]
+        persona_runtime=_FakeRuntime(),  # type: ignore[arg-type]
         group_config=GroupConfig(talk_value=1.0, planner_smooth=0, batch_size=100),
     )
 

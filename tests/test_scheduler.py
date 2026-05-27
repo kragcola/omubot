@@ -5,13 +5,13 @@ import time
 
 from kernel.config import GroupConfig, GroupOverride
 from kernel.types import TriggerContext
-from services.identity import Identity
 from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot
 from services.scheduler import GroupChatScheduler, _GroupSlot, _should_force_reply
 
 
-def _make_identity(proactive: str | None = "积极参与群聊") -> Identity:
-    return Identity(id="test", name="测试", personality="测试人设", proactive=proactive)
+def _make_identity(proactive: str | None = "积极参与群聊") -> IdentitySnapshot:
+    return IdentitySnapshot(id="test", name="测试", personality="测试人设", proactive=proactive)
 
 
 def _make_config(**kwargs: object) -> GroupConfig:
@@ -38,11 +38,11 @@ def test_qq_interaction_mode_force_reply() -> None:
     ) is False
 
 
-class _FakeIdentityMgr:
-    def __init__(self, identity: Identity) -> None:
+class _FakeRuntime:
+    def __init__(self, identity: IdentitySnapshot) -> None:
         self._identity = identity
 
-    def resolve(self) -> Identity:
+    def identity_snapshot(self) -> IdentitySnapshot:
         return self._identity
 
 
@@ -66,7 +66,7 @@ class TestNotify:
         """notify is a no-op when identity.proactive is None."""
         identity = _make_identity(proactive=None)
         scheduler = GroupChatScheduler(
-            llm=_FakeLLM(), timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(identity),  # type: ignore[arg-type]
+            llm=_FakeLLM(), timeline=GroupTimeline(), persona_runtime=_FakeRuntime(identity),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111")
@@ -77,7 +77,7 @@ class TestNotify:
         """With talk_value=1.0, notify fires immediately (no debounce)."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111")
@@ -89,7 +89,7 @@ class TestNotify:
         """talk_value=0 means never reply to non-@ messages."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0),
         )
         scheduler.notify("111")
@@ -101,7 +101,7 @@ class TestNotify:
         """planner_smooth prevents firing again before interval elapses."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(planner_smooth=999.0),
         )
         scheduler.notify("111")
@@ -116,7 +116,7 @@ class TestNotify:
         """Probability doubling reads resolved config instead of hardcoded literals."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(
                 talk_value=0.6,
                 consecutive_skip_force_threshold=5,
@@ -137,7 +137,7 @@ class TestNotify:
         """Expired skip history no longer triggers forced reply."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(
                 talk_value=0.0,
                 consecutive_skip_force_threshold=3,
@@ -160,7 +160,7 @@ class TestNotify:
         """Recent skip history still triggers forced reply."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(
                 talk_value=0.0,
                 consecutive_skip_force_threshold=3,
@@ -182,7 +182,7 @@ class TestNotify:
         """A probability skip refreshes last_skip_time for future decay checks."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0),
         )
         slot = scheduler._slots.setdefault("111", _GroupSlot())
@@ -199,7 +199,7 @@ class TestNotify:
         """A stale force-threshold miss updates the window so the next turn can force."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(
                 talk_value=0.0,
                 consecutive_skip_force_threshold=3,
@@ -226,7 +226,7 @@ class TestNotify:
         """While running_task is active, notify does not start new call."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111")
@@ -242,7 +242,7 @@ class TestAtHandling:
         """notify(is_at=True) fires immediately, skipping probability check."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0),  # would never fire normally
         )
         scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))
@@ -254,7 +254,7 @@ class TestAtHandling:
         """notify(is_at=True) fires even when planner_smooth blocks non-@ messages."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(planner_smooth=999.0),
         )
         scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))
@@ -266,7 +266,7 @@ class TestAtHandling:
         """notify(is_at=True) sets pending_at when a task is already running."""
         llm = _FakeLLM(reply=None, delay=0.5)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111")
@@ -280,7 +280,7 @@ class TestAtHandling:
         """After running task completes, pending_at triggers a new call."""
         llm = _FakeLLM(reply=None, delay=0.2)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111")
@@ -299,7 +299,7 @@ class TestDirectedFollowup:
         identity = _make_identity(proactive=None)
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(identity),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(identity),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0, planner_smooth=999.0),
         )
         scheduler.notify("111", trigger=TriggerContext(reason="继续刚才的话题", mode="directed_followup"))
@@ -311,7 +311,7 @@ class TestDirectedFollowup:
         """Queued directed_followup can be cancelled cleanly without skip pollution."""
         llm = _FakeLLM(reply=None, delay=1.0)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111", user_id="42")
@@ -347,7 +347,7 @@ class TestPendingReset:
         scheduler = GroupChatScheduler(
             llm=llm,  # type: ignore[arg-type]
             timeline=GroupTimeline(),
-            identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111", user_id="42")
@@ -370,7 +370,7 @@ class TestPendingReset:
         scheduler = GroupChatScheduler(
             llm=llm,  # type: ignore[arg-type]
             timeline=GroupTimeline(),
-            identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111", user_id="42")
@@ -392,7 +392,7 @@ class TestClose:
         """close() cancels all running tasks."""
         llm = _FakeLLM(reply=None, delay=1.0)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(planner_smooth=999),
         )
         scheduler.notify("111")
@@ -413,7 +413,7 @@ class TestAtOnly:
         llm = _FakeLLM(reply=None)
         group_config = _make_config(at_only=True, talk_value=1.0)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=group_config,
         )
         scheduler.notify("123")
@@ -428,7 +428,7 @@ class TestAtOnly:
         llm = _FakeLLM(reply=None)
         group_config = _make_config(at_only=True, talk_value=1.0)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=group_config,
         )
         scheduler.notify("123", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))
@@ -444,7 +444,7 @@ class TestAtOnly:
             overrides={123: GroupOverride(at_only=True)},
         )
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=group_config,
         )
         scheduler.notify("123")  # at_only group — skip
@@ -464,7 +464,7 @@ class TestPerGroupParams:
             overrides={123: GroupOverride(planner_smooth=999)},
         )
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=group_config,
         )
         scheduler.notify("123")  # first fire: last_fire_time=0 so interval passes
@@ -485,7 +485,7 @@ class TestPerGroupParams:
             overrides={456: GroupOverride(talk_value=1.0)},
         )
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=group_config,
         )
         scheduler.notify("123")  # talk_value=0 → skip
@@ -501,7 +501,7 @@ class TestMute:
         """notify is a no-op for muted groups."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.mute("111")
@@ -515,7 +515,7 @@ class TestMute:
         """trigger is a no-op for muted groups."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.mute("111")
@@ -528,7 +528,7 @@ class TestMute:
         """After unmute, notify works again."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.mute("111")
@@ -546,7 +546,7 @@ class TestMute:
         """Muting a group cancels its running tasks."""
         llm = _FakeLLM(reply=None, delay=1.0)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111")
@@ -562,7 +562,7 @@ class TestMute:
     async def test_is_muted(self) -> None:
         """is_muted returns correct state."""
         scheduler = GroupChatScheduler(
-            llm=_FakeLLM(), timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=_FakeLLM(), timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         assert not scheduler.is_muted("111")
@@ -576,7 +576,7 @@ class TestMute:
         """Muting group 111 does not affect group 222."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.mute("111")
@@ -610,7 +610,7 @@ class TestMood:
             return _FakeMood(energy=0.5, valence=0.0, openness=0.5)
 
         scheduler = GroupChatScheduler(
-            llm=_FakeLLM(), timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=_FakeLLM(), timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
             mood_getter=getter,
         )
@@ -625,7 +625,7 @@ class TestMood:
         # talk_value=0.2 with a very good mood → multiplier ~2.0 → threshold ~0.4
         # That's still below 1.0, so we might skip. Let's use multiple calls.
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.15, planner_smooth=0),
             mood_getter=self._mood_getter(energy=0.9, valence=0.9, openness=0.9),
         )
@@ -641,7 +641,7 @@ class TestMood:
         """Bad mood (low energy, negative valence, low openness) suppresses talk_value."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.5, planner_smooth=0),
             mood_getter=self._mood_getter(energy=0.2, valence=-0.6, openness=0.2),
         )
@@ -659,7 +659,7 @@ class TestMood:
         """mood_getter returning None → multiplier 1.0, behavior unchanged."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=1.0, planner_smooth=0),
             mood_getter=lambda: None,
         )
@@ -672,7 +672,7 @@ class TestMood:
         """Without mood_getter, multiplier is 1.0 — talk_value=1.0 fires, 0.0 skips."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=1.0, planner_smooth=0),
             # no mood_getter passed
         )
@@ -685,7 +685,7 @@ class TestMood:
         """Even with extreme mood, threshold never exceeds 1.0."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.8, planner_smooth=0),
             mood_getter=self._mood_getter(energy=1.0, valence=1.0, openness=1.0),
         )
@@ -701,7 +701,7 @@ class TestVideoHint:
         """video_hint mode='always' fires immediately, bypassing probability."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
         scheduler.notify("111", trigger=TriggerContext(
@@ -716,7 +716,7 @@ class TestVideoHint:
         """Even always mode does not fire when muted."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.mute("111")
@@ -733,7 +733,7 @@ class TestVideoHint:
         identity = _make_identity(proactive=None)
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(identity),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(identity),  # type: ignore[arg-type]
             group_config=_make_config(),
         )
         scheduler.notify("111", trigger=TriggerContext(
@@ -748,7 +748,7 @@ class TestVideoHint:
         """video_hint mode='always' bypasses planner_smooth interval."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(planner_smooth=999.0),
         )
         scheduler.notify("111", trigger=TriggerContext(
@@ -770,7 +770,7 @@ class TestVideoHint:
         """Dedicated mode uses bilibili_talk_value=1.0 to guarantee fire."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
         scheduler.notify("111", trigger=TriggerContext(
@@ -785,7 +785,7 @@ class TestVideoHint:
         """Dedicated mode with bilibili_talk_value=0.0 never fires."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=1.0, planner_smooth=0),
         )
         scheduler.notify("111", trigger=TriggerContext(
@@ -800,7 +800,7 @@ class TestVideoHint:
         """High interest score with high bilibili_talk_value = likely fires."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
         # talk_value=1.0 * interest=1.0 = 1.0 threshold → guaranteed fire
@@ -816,7 +816,7 @@ class TestVideoHint:
         """Even with interest=0.05, consecutive_skip>=5 guarantees reply."""
         llm = _FakeLLM(reply=None, delay=0.001)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=0.0, planner_smooth=0),
         )
         # First 5 calls may or may not fire (low interest), but 6th is guaranteed
@@ -839,7 +839,7 @@ class TestVideoHint:
         """Force threshold override still fires and leaves cancel-path clean."""
         llm = _FakeLLM(reply=None, delay=1.0)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(
                 talk_value=0.0,
                 consecutive_skip_force_threshold=1,
@@ -872,7 +872,7 @@ class TestVideoHint:
         """No video_hint — behavior unchanged."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
-            llm=llm, timeline=GroupTimeline(), identity_mgr=_FakeIdentityMgr(_make_identity()),  # type: ignore[arg-type]
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
             group_config=_make_config(talk_value=1.0),
         )
         scheduler.notify("111")  # no video_hint

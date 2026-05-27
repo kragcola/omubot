@@ -37,7 +37,7 @@ _PERSONA_GUIDE_PATH = _REPO_ROOT / "docs/ai-persona-generation-rules.md"
 def create_soul_router(
     *,
     soul_dir: str = "config/soul",
-    identity_mgr: Any = None,
+    persona_runtime: Any = None,
 ) -> APIRouter:
     router = APIRouter()
     _soul = Path(soul_dir)
@@ -510,9 +510,11 @@ def create_soul_router(
 
         reload_ok = True
         reload_msg = "已自动重载，无需重启"
-        if identity_mgr is not None:
+        if persona_runtime is not None:
             try:
-                await identity_mgr.load_file(str(_soul / "identity.md"))
+                persona_id = persona_runtime.bundle.persona_id if persona_runtime.bundle else ""
+                if persona_id:
+                    persona_runtime.swap_bundle(persona_id)
             except Exception:
                 reload_ok = False
                 reload_msg = "运行时同步失败，请重启"
