@@ -11,6 +11,7 @@ Public surface intentionally narrow:
 from __future__ import annotations
 
 from services.memory_consolidator.consolidator import MemoryConsolidator
+from services.memory_consolidator.event_boundary import EventBoundaryDetector
 from services.memory_consolidator.feedback_sources import (
     NegativeSignal,
     collect_negative_signals,
@@ -63,6 +64,7 @@ __all__ = [
     "ConsolidatorCandidatesStore",
     "EpisodePayload",
     "EpisodePromoter",
+    "EventBoundaryDetector",
     "FactPayload",
     "GraphRelationPayload",
     "MemoryConsolidator",

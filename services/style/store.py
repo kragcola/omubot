@@ -16,6 +16,14 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 from loguru import logger
 
+from services.cross_group import (
+    CrossGroupVisibility,
+    cross_group_allows_viewer,
+    legacy_cross_group_visible,
+    resolve_cross_group_visibility,
+    visibility_from_db,
+    visibility_to_db,
+)
 from services.learning_normalizer import LearningNormalizerStore, normalize_key
 from services.storage import close_with_checkpoint, connect_sqlite
 
@@ -171,6 +179,7 @@ class StyleExpression:
     last_seen_at: str
     meta: dict[str, Any] = field(default_factory=dict)
     cross_group_visible: bool = False
+    cross_group_visibility: CrossGroupVisibility = "none"
     cross_group_enabled_by: str = ""
     cross_group_enabled_at: str = ""
     cross_group_enabled_for_groups: list[str] = field(default_factory=list)
@@ -357,6 +366,7 @@ def _json_loads_str_list(value: str | None) -> list[str]:
 
 def _row_to_expression(row: aiosqlite.Row) -> StyleExpression:
     keys = tuple(row.keys())
+    visibility = visibility_from_db(row["cross_group_visible"]) if "cross_group_visible" in keys else "none"
     return StyleExpression(
         expression_id=row["expression_id"],
         situation=row["situation"],
@@ -375,7 +385,8 @@ def _row_to_expression(row: aiosqlite.Row) -> StyleExpression:
         updated_at=row["updated_at"],
         last_seen_at=row["last_seen_at"],
         meta=_json_loads_dict(row["meta_json"] if "meta_json" in keys else "{}"),
-        cross_group_visible=bool(row["cross_group_visible"]) if "cross_group_visible" in keys else False,
+        cross_group_visible=legacy_cross_group_visible(visibility),
+        cross_group_visibility=visibility,
         cross_group_enabled_by=row["cross_group_enabled_by"] if "cross_group_enabled_by" in keys else "",
         cross_group_enabled_at=row["cross_group_enabled_at"] if "cross_group_enabled_at" in keys else "",
         cross_group_enabled_for_groups=_json_loads_str_list(
@@ -587,7 +598,7 @@ class StyleStore:
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_style_cross_group "
             "ON style_expressions(cross_group_visible, status) "
-            "WHERE cross_group_visible = 1"
+            "WHERE cross_group_visible IN (1, 2)"
         )
         await self._db.commit()
         self.initialized = True
@@ -862,7 +873,7 @@ class StyleStore:
         values: list[Any] = [group_id]
         if include_global:
             conditions.append("(scope = 'global' AND group_id = 'global')")
-        conditions.append("(scope = 'group' AND cross_group_visible = 1)")
+        conditions.append("(scope = 'group' AND cross_group_visible IN (1, 2))")
         cursor = await db.execute(
             f"""SELECT * FROM style_expressions
                 WHERE status = 'approved'
@@ -873,7 +884,18 @@ class StyleStore:
                 LIMIT ?""",
             [max(0.0, min(1.0, float(min_confidence or 0.0))), *values, max(1, min(max_items * 8, 80))],
         )
-        candidates = [_row_to_expression(row) for row in await cursor.fetchall()]
+        candidates = []
+        for row in await cursor.fetchall():
+            expression = _row_to_expression(row)
+            if not cross_group_allows_viewer(
+                viewer_group_id=group_id,
+                owner_group_id=expression.group_id,
+                scope=expression.scope,
+                visibility=expression.cross_group_visibility,
+                enabled_for_groups=expression.cross_group_enabled_for_groups,
+            ):
+                continue
+            candidates.append(expression)
         ranked = [
             (score, expression)
             for expression in candidates
@@ -1403,7 +1425,8 @@ class StyleStore:
         self,
         expression_id: str,
         *,
-        visible: bool,
+        visible: bool | None = None,
+        visibility: CrossGroupVisibility | None = None,
         actor: str,
         reason: str = "",
         enabled_for_groups: list[str] | None = None,
@@ -1414,14 +1437,16 @@ class StyleStore:
             return False
         before = self.expression_to_dict(existing)
         now = _now_iso()
-        enabled_by = actor if visible else ""
-        enabled_at = now if visible else ""
+        resolved_visibility = resolve_cross_group_visibility(visible=visible, visibility=visibility)
+        enabled = resolved_visibility != "none"
+        enabled_by = actor if enabled else ""
+        enabled_at = now if enabled else ""
         groups_payload = (
             [str(g).strip() for g in (enabled_for_groups or []) if str(g).strip()]
-            if visible
+            if enabled
             else []
         )
-        reason_payload = reason if visible else ""
+        reason_payload = reason if enabled else ""
         db = self._require_db()
         await db.execute(
             """UPDATE style_expressions
@@ -1432,7 +1457,7 @@ class StyleStore:
                    updated_at = ?
                WHERE expression_id = ?""",
             (
-                int(visible),
+                visibility_to_db(resolved_visibility),
                 enabled_by,
                 enabled_at,
                 json.dumps(groups_payload, ensure_ascii=False),
@@ -1445,11 +1470,11 @@ class StyleStore:
         updated = await self.get_expression(expression_id)
         await self.record_revision(
             expression_id,
-            action="cross_group_enable" if visible else "cross_group_disable",
+            action="cross_group_enable" if enabled else "cross_group_disable",
             actor=actor,
             before=before,
             after=self.expression_to_dict(updated) if updated else {},
-            reason=reason or f"cross_group_visible={'true' if visible else 'false'}",
+            reason=reason or f"cross_group_visibility={resolved_visibility}",
         )
         return True
 
@@ -1464,8 +1489,8 @@ class StyleStore:
         await db.commit()
 
     def _normalize_update_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
-        if "cross_group_visible" in fields:
-            raise ValueError("cross_group_visible can only be set via set_cross_group_visibility()")
+        if "cross_group_visible" in fields or "cross_group_visibility" in fields:
+            raise ValueError("cross_group_visibility can only be set via set_cross_group_visibility()")
         updates: dict[str, Any] = {}
         if "situation" in fields:
             situation = _clean_text(str(fields["situation"]), max_len=160)
@@ -1728,6 +1753,10 @@ class StyleStore:
             "last_seen_at": expression.last_seen_at,
             "meta": expression.meta,
             "normalization": _normalization_summary(expression.meta),
+            "cross_group_visible": expression.cross_group_visible,
+            "cross_group_visibility": expression.cross_group_visibility,
+            "cross_group_enabled_for_groups": list(expression.cross_group_enabled_for_groups),
+            "cross_group_enabled_reason": expression.cross_group_enabled_reason,
         }
 
     @staticmethod

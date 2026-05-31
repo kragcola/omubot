@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -9,7 +11,13 @@ import pytest
 from kernel.config import BotConfig
 from kernel.types import MessageContext, PluginContext
 from plugins.chat.plugin import ChatPlugin, _humanization_resolve, _register_humanization_interaction_tools
-from services.humanization import REGISTER_LABEL_SLOT, RegisterClassifier, create_humanization_state_bus
+from services.humanization import (
+    REGISTER_LABEL_SLOT,
+    WILLINGNESS_STAGE_SLOT,
+    RegisterClassifier,
+    create_humanization_state_bus,
+)
+from services.llm.arbiter import ArbiterClient
 from services.system_module import Scope
 from services.tools.registry import ToolRegistry
 
@@ -39,6 +47,10 @@ class _Timeline:
             {"role": "assistant", "content": "可以，我先给结论。"},
         ]
 
+    def get_turn_time(self, group_id: str, index: int) -> float:
+        assert group_id == "100"
+        return [time.time() - 120.0, time.time() - 30.0][index]
+
 
 def _message(text: str = "这事认真点说", *, group_id: str = "100") -> MessageContext:
     return MessageContext(
@@ -57,6 +69,9 @@ def _plugin_ctx(
     classifier: object | None,
     runtime_state: object | None,
     runtime_groups: list[str] | None = None,
+    episode_store: object | None = None,
+    card_store: object | None = None,
+    mood_engine: object | None = None,
 ) -> PluginContext:
     return PluginContext(
         config=BotConfig.model_validate({
@@ -68,6 +83,9 @@ def _plugin_ctx(
         runtime_state=runtime_state,
         timeline=_Timeline(),
         humanization_register_classifier=classifier,
+        episode_store=episode_store,
+        card_store=card_store,
+        mood_engine=mood_engine,
     )
 
 
@@ -92,6 +110,28 @@ def test_chat_plugin_leaves_register_classifier_unwired_by_default() -> None:
     plugin._wire_humanization_runtime(ctx, BotConfig(), object())
 
     assert ctx.humanization_register_classifier is None
+
+
+def test_chat_plugin_builds_arbiter_client_with_llm_fallbacks() -> None:
+    plugin = ChatPlugin()
+    config = BotConfig.model_validate({
+        "llm": {
+            "base_url": "https://api.deepseek.com",
+            "api_key": "sk-test",
+            "model": "deepseek-v4-flash",
+        },
+        "arbiter": {
+            "enabled": True,
+        },
+    })
+    llm = SimpleNamespace(_session=object())
+
+    arbiter = plugin._build_arbiter_client(config, llm, usage_tracker=None)
+
+    assert isinstance(arbiter, ArbiterClient)
+    assert config.arbiter.resolved_api_base == "https://api.deepseek.com"
+    assert config.arbiter.resolved_api_key == "sk-test"
+    assert config.arbiter.resolved_model == "deepseek-v4-flash"
 
 
 def test_humanization_resolve_honors_group_profile_override() -> None:
@@ -208,3 +248,54 @@ async def test_chat_plugin_register_classifier_cancel_path_does_not_dirty_write(
         await task
 
     assert bus.get(REGISTER_LABEL_SLOT, scope=Scope(session_id="group_100", group_id="100", user_id="u1")) is None
+
+
+@pytest.mark.asyncio
+async def test_chat_plugin_writes_willingness_and_memory_signal_cache() -> None:
+    class _Episode:
+        def __init__(self, outcome_signal: str) -> None:
+            self.outcome_signal = outcome_signal
+            self.situation = "今天在认真解释问题"
+            self.observed_context = "群友继续追问"
+            self.updated_at = "2026-05-29T12:00:00"
+
+    class _EpisodeStore:
+        async def list_episodes(self, **_kwargs):
+            return [_Episode("用户后来愿意继续聊")]
+
+        async def list_for_recall(self, **_kwargs):
+            return [_Episode("用户后来愿意继续聊")]
+
+    class _CardStore:
+        async def list_cards(self, **_kwargs):
+            return [object(), object(), object()]
+
+    class _MoodProfile:
+        def __init__(self, valence: float) -> None:
+            self.valence = valence
+
+    class _MoodEngine:
+        def recent_profiles(self, **_kwargs):
+            return [_MoodProfile(-0.2), _MoodProfile(0.3)]
+
+    plugin = ChatPlugin()
+    bus = create_humanization_state_bus()
+    plugin._ctx = _plugin_ctx(
+        register_classifier=False,
+        classifier=None,
+        runtime_state=bus,
+        episode_store=_EpisodeStore(),
+        card_store=_CardStore(),
+        mood_engine=_MoodEngine(),
+    )
+
+    consumed = await plugin.on_message(_message())
+
+    willingness = bus.get(
+        WILLINGNESS_STAGE_SLOT,
+        scope=Scope(session_id="group_100", group_id="100", user_id="u1"),
+    )
+    assert consumed is False
+    assert willingness is not None
+    assert willingness.value["willingness_stage"] in {"acquaint", "familiar"}
+    assert plugin._ctx.memory_relation_signals[("100", "u1")]["outcome_ratio"] >= 0.5

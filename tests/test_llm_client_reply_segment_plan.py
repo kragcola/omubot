@@ -36,8 +36,9 @@ async def test_chat_uses_reply_segment_plan_dynamic_delays(
     sleeps: list[float] = []
     captured: dict[str, object] = {}
 
-    async def _on_segment(seg: str) -> None:
+    async def _on_segment(seg: str) -> bool:
         sent.append(seg)
+        return True
 
     async def _sleep(delay: float) -> None:
         sleeps.append(delay)

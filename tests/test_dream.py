@@ -253,3 +253,51 @@ async def test_dream_delete_sticker_not_found(store: CardStore, sticker_store: S
     result = await agent._execute_tool("delete_sticker", {"id": "stk_nonexistent"})
 
     assert "未找到" in result
+
+
+# ---------------------------------------------------------------------------
+# OCR 回填（阶段 1）
+# ---------------------------------------------------------------------------
+
+
+async def test_dream_backfill_ocr_enriches_legacy(store: CardStore, sticker_store: StickerStore) -> None:
+    """Legacy sticker (no ocr_text key) gets OCR backfilled, rate-limited."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    stk_id, _ = sticker_store.add(_JPEG_DATA, "挥手", "告别时", source="auto")
+    # Simulate a legacy entry: remove the ocr_text key written by add().
+    del sticker_store._index[stk_id]["ocr_text"]  # type: ignore[attr-defined]
+    assert "ocr_text" not in sticker_store.get(stk_id)  # type: ignore[operator]
+
+    vision = MagicMock()
+    vision.describe_image = AsyncMock(return_value="告别时发。图上文字：拜拜")
+    agent = DreamAgent(store=store, sticker_store=sticker_store, vision_client=vision)
+
+    enriched = await agent._backfill_sticker_ocr()
+
+    assert enriched == 1
+    assert sticker_store.get(stk_id)["ocr_text"] == "拜拜"  # type: ignore[index]
+
+
+async def test_dream_backfill_ocr_skips_when_present(store: CardStore, sticker_store: StickerStore) -> None:
+    """Stickers that already have ocr_text key are not re-processed."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    sticker_store.add(_JPEG_DATA, "desc", "hint", ocr_text="已有")  # key present
+    vision = MagicMock()
+    vision.describe_image = AsyncMock(return_value="不该被调用")
+    agent = DreamAgent(store=store, sticker_store=sticker_store, vision_client=vision)
+
+    enriched = await agent._backfill_sticker_ocr()
+
+    assert enriched == 0
+    vision.describe_image.assert_not_awaited()
+
+
+async def test_dream_backfill_ocr_noop_without_vision(store: CardStore, sticker_store: StickerStore) -> None:
+    """No vision_client → backfill is a no-op."""
+    stk_id, _ = sticker_store.add(_JPEG_DATA, "desc", "hint", source="auto")
+    del sticker_store._index[stk_id]["ocr_text"]  # type: ignore[attr-defined]
+    agent = DreamAgent(store=store, sticker_store=sticker_store, vision_client=None)
+
+    assert await agent._backfill_sticker_ocr() == 0

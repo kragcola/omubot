@@ -67,6 +67,11 @@ class AffectionPlugin(AmadeusPlugin):
     async def on_post_reply(self, ctx: ReplyContext) -> None:
         if self._engine is None or not ctx.user_id or ctx.user_id == "0":
             return
+        from services import learning_settings
+
+        settings = learning_settings.load(getattr(ctx, "storage_dir", "storage"))
+        if not settings.get("affection", {}).get("scoring_enabled", True):
+            return
         profile = await self._engine.record_interaction(ctx.user_id)
         _L.info(
             "user={} score={:.1f} tier={} total={}",

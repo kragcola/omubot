@@ -245,6 +245,7 @@ if _bot_config.vision.qwen.api_key:
         api_key=_bot_config.vision.qwen.api_key,
         model=_bot_config.vision.qwen.model,
         timeout_s=15.0,
+        max_tokens=_bot_config.vision.describe_max_tokens,
     )
     logger.info(
         "Qwen VL vision enabled | model={} base_url={}",

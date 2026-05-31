@@ -10,8 +10,12 @@ class RWSWeights:
     at: float = 6.0
     directed_followup: float = 6.0
     video_always: float = 6.0
+    qq_interaction: float = 3.0
     addressee: float = 0.0
     eot: float = 1.0
+    outcome: float = 0.08
+    familiarity: float = 0.06
+    willingness: float = 0.08
     info_gain: float = 0.0
     hawkes: float = 1.3
     skip_pressure: float = 0.0

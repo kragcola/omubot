@@ -10,6 +10,7 @@ from services.llm.sentinel_registry import (
     GuardrailHit,
     GuardrailResult,
     register_rule,
+    sentinel_guardrail_enabled,
 )
 
 
@@ -68,6 +69,8 @@ def _phrase_ngram(config: object | None) -> int:
 
 
 def thinker_phrase_rule(text: str, ctx: GuardrailContext) -> GuardrailResult:
+    if not sentinel_guardrail_enabled(ctx.config):
+        return GuardrailResult(passed=True, text=text)
     result = detect(
         text,
         ctx.thinker_thought,

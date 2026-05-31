@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../../.." && pwd)"
+user_data_dir="$repo_root/.vscode/codex-goals-user-data"
+
+preferred_vscode_bin="$HOME/Desktop/Visual Studio Code.app/Contents/Resources/app/bin/code"
+if [[ -x "$preferred_vscode_bin" ]]; then
+  code_bin="$preferred_vscode_bin"
+else
+  code_bin="${CODE_BIN:-$(command -v code || true)}"
+fi
+
+if [[ -z "$code_bin" ]]; then
+  echo "Could not find the VS Code 'code' command in PATH." >&2
+  exit 1
+fi
+
+exec "$code_bin" --user-data-dir "$user_data_dir" -n "$repo_root" "$@"

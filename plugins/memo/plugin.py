@@ -124,7 +124,7 @@ class MemoExtractor:
                     content=content,
                     confidence=0.6,
                     source="extractor",
-                ))
+                ), captured_by="memo_extractor")
                 written += 1
             except (ValueError, Exception):
                 _L.warning("memo extractor add_card failed | user={} category={}", user_id, category)

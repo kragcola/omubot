@@ -14,6 +14,13 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 from loguru import logger
 
+from services.cross_group import (
+    CrossGroupVisibility,
+    legacy_cross_group_visible,
+    resolve_cross_group_visibility,
+    visibility_from_db,
+    visibility_to_db,
+)
 from services.storage import close_with_checkpoint, connect_sqlite
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -94,7 +101,7 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_episode_decay ON episodes(decay_at) WHERE decay_at != ''",
     (
         "CREATE INDEX IF NOT EXISTS idx_episode_cross_group "
-        "ON episodes(cross_group_visible, episode_state) WHERE cross_group_visible = 1"
+        "ON episodes(cross_group_visible, episode_state) WHERE cross_group_visible IN (1, 2)"
     ),
     "CREATE INDEX IF NOT EXISTS idx_episode_rev ON episode_revisions(episode_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_episode_obs_today ON episode_observations(observed_at, episode_id)",
@@ -122,6 +129,7 @@ class Episode:
     updated_at: str
     disabled_by_admin: bool = False
     cross_group_visible: bool = False
+    cross_group_visibility: CrossGroupVisibility = "none"
     cross_group_enabled_by: str = ""
     cross_group_enabled_at: str = ""
     cross_group_enabled_for_groups: list[str] = field(default_factory=list)
@@ -209,7 +217,8 @@ def _row_to_episode(row: aiosqlite.Row) -> Episode:
         created_at=d.get("created_at", ""),
         updated_at=d.get("updated_at", ""),
         disabled_by_admin=bool(d.get("disabled_by_admin", 0)),
-        cross_group_visible=bool(d.get("cross_group_visible", 0)),
+        cross_group_visible=legacy_cross_group_visible(visibility_from_db(d.get("cross_group_visible", 0))),
+        cross_group_visibility=visibility_from_db(d.get("cross_group_visible", 0)),
         cross_group_enabled_by=d.get("cross_group_enabled_by", ""),
         cross_group_enabled_at=d.get("cross_group_enabled_at", ""),
         cross_group_enabled_for_groups=_parse_string_list(d.get("cross_group_enabled_for_groups", "")),
@@ -427,12 +436,14 @@ class EpisodeStore:
         *,
         group_id: str,
         limit: int = 3,
+        include_decayed: bool = False,
     ) -> list[Episode]:
         """Episodes eligible for prompt injection (D.4 recall path).
 
-        Only returns ``episode_state='enabled_for_prompt'`` rows scoped to
-        ``group_id`` — invariant from the Phase D audit § D.4: states other
-        than ``enabled_for_prompt`` must never reach the prompt builder.
+        Default behavior keeps the Phase D recall invariant and only returns
+        ``episode_state='enabled_for_prompt'`` rows scoped to ``group_id``.
+        ``include_decayed=True`` widens the reader for long-range lookups so
+        disabled/decayed episodes remain discoverable outside the prompt path.
 
         Order: ``confidence DESC, updated_at DESC`` so the most-trusted
         recently-promoted reflections surface first; ``last_used_at`` is
@@ -442,11 +453,13 @@ class EpisodeStore:
         if not group_id:
             return []
         db = self._require_db()
+        states = ("enabled_for_prompt", "disabled") if include_decayed else ("enabled_for_prompt",)
+        placeholders = ",".join("?" for _ in states)
         async with db.execute(
             "SELECT * FROM episodes "
-            "WHERE episode_state = 'enabled_for_prompt' AND group_id = ? "
+            f"WHERE episode_state IN ({placeholders}) AND group_id = ? "
             "ORDER BY confidence DESC, updated_at DESC LIMIT ?",
-            (group_id, max(0, int(limit))),
+            (*states, group_id, max(0, int(limit))),
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_episode(r) for r in rows]
@@ -636,7 +649,8 @@ class EpisodeStore:
         self,
         episode_id: str,
         *,
-        visible: bool,
+        visible: bool | None = None,
+        visibility: CrossGroupVisibility | None = None,
         actor: str,
         reason: str = "",
         enabled_for_groups: list[str] | None = None,
@@ -646,15 +660,17 @@ class EpisodeStore:
         if ep is None:
             return False
         now = _now_iso()
-        new_val = 1 if visible else 0
-        enabled_by = actor if visible else ""
-        enabled_at = now if visible else ""
+        resolved_visibility = resolve_cross_group_visibility(visible=visible, visibility=visibility)
+        new_val = visibility_to_db(resolved_visibility)
+        enabled = resolved_visibility != "none"
+        enabled_by = actor if enabled else ""
+        enabled_at = now if enabled else ""
         groups_payload = (
             [str(g).strip() for g in (enabled_for_groups or []) if str(g).strip()]
-            if visible
+            if enabled
             else []
         )
-        reason_payload = reason if visible else ""
+        reason_payload = reason if enabled else ""
         await db.execute(
             "UPDATE episodes SET cross_group_visible = ?, cross_group_enabled_by = ?, "
             "cross_group_enabled_at = ?, cross_group_enabled_for_groups = ?, "
@@ -670,7 +686,7 @@ class EpisodeStore:
             ),
         )
         await db.commit()
-        action = "cross_group_enable" if visible else "cross_group_disable"
+        action = "cross_group_enable" if enabled else "cross_group_disable"
         await self.record_revision(
             episode_id,
             action=action,
@@ -679,15 +695,17 @@ class EpisodeStore:
             new_state=ep.episode_state,
             before={
                 "cross_group_visible": ep.cross_group_visible,
+                "cross_group_visibility": ep.cross_group_visibility,
                 "cross_group_enabled_for_groups": list(ep.cross_group_enabled_for_groups),
                 "cross_group_enabled_reason": ep.cross_group_enabled_reason,
             },
             after={
-                "cross_group_visible": visible,
+                "cross_group_visible": enabled,
+                "cross_group_visibility": resolved_visibility,
                 "cross_group_enabled_for_groups": groups_payload,
                 "cross_group_enabled_reason": reason_payload,
             },
-            reason=reason or f"{action} by {actor}",
+            reason=reason or f"cross_group_visibility={resolved_visibility}",
         )
         return True
 

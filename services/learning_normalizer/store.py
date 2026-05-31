@@ -12,6 +12,14 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
+from services.cross_group import (
+    CrossGroupVisibility,
+    cross_group_allows_viewer,
+    legacy_cross_group_visible,
+    resolve_cross_group_visibility,
+    visibility_from_db,
+    visibility_to_db,
+)
 from services.learning_normalizer.normalize import (
     NormalizationProfile,
     extract_features,
@@ -120,6 +128,7 @@ class LearningNormalizerCluster:
     locked_at: str
     meta: dict[str, Any] = field(default_factory=dict)
     cross_group_visible: bool = False
+    cross_group_visibility: CrossGroupVisibility = "none"
     cross_group_enabled_by: str = ""
     cross_group_enabled_at: str = ""
     cross_group_enabled_for_groups: list[str] = field(default_factory=list)
@@ -235,7 +244,7 @@ class LearningNormalizerStore:
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_ln_cross_group "
             "ON learning_normalizer_clusters(cross_group_visible, domain) "
-            "WHERE cross_group_visible = 1"
+            "WHERE cross_group_visible IN (1, 2)"
         )
         await self._db.commit()
         self.initialized = True
@@ -500,7 +509,7 @@ class LearningNormalizerStore:
         cursor = await db.execute(
             """SELECT * FROM learning_normalizer_clusters
                WHERE domain = ? AND status IN ('active', 'locked')
-                 AND (scope = 'global' OR (scope = 'group' AND group_id = ?) OR cross_group_visible = 1)
+                 AND (scope = 'global' OR (scope = 'group' AND group_id = ?) OR cross_group_visible IN (1, 2))
                ORDER BY
                  CASE WHEN scope = 'group' AND group_id = ? THEN 0 ELSE 1 END,
                  item_count DESC,
@@ -514,12 +523,12 @@ class LearningNormalizerStore:
             cluster = _row_to_cluster(row)
             if cluster.cluster_id in excluded:
                 continue
-            if cluster.scope == "group" and cluster.group_id != gid and not cluster.cross_group_visible:
-                continue
-            if (
-                cluster.cross_group_visible
-                and cluster.cross_group_enabled_for_groups
-                and gid not in {str(item) for item in cluster.cross_group_enabled_for_groups}
+            if not cross_group_allows_viewer(
+                viewer_group_id=gid,
+                owner_group_id=cluster.group_id,
+                scope=cluster.scope,
+                visibility=cluster.cross_group_visibility,
+                enabled_for_groups=cluster.cross_group_enabled_for_groups,
             ):
                 continue
             text = str(cluster.canonical_text or "").strip()
@@ -756,13 +765,21 @@ class LearningNormalizerStore:
         cursor = await db.execute(
             """SELECT * FROM learning_normalizer_clusters
                WHERE domain = ? AND status IN ('active', 'locked')
-                 AND ((scope = ? AND group_id = ?) OR cross_group_visible = 1)
+                 AND ((scope = ? AND group_id = ?) OR cross_group_visible IN (1, 2))
                ORDER BY updated_at DESC""",
             (domain, scope, group_id),
         )
         best: tuple[LearningNormalizerCluster, float, str] | None = None
         for row in await cursor.fetchall():
             cluster = _row_to_cluster(row)
+            if not cross_group_allows_viewer(
+                viewer_group_id=group_id,
+                owner_group_id=cluster.group_id,
+                scope=cluster.scope,
+                visibility=cluster.cross_group_visibility,
+                enabled_for_groups=cluster.cross_group_enabled_for_groups,
+            ):
+                continue
             score = score_similarity(raw_text, cluster.canonical_text, profile)
             method_score = score.score
             method = score.method
@@ -957,7 +974,8 @@ class LearningNormalizerStore:
         self,
         cluster_id: str,
         *,
-        visible: bool,
+        visible: bool | None = None,
+        visibility: CrossGroupVisibility | None = None,
         actor: str,
         reason: str = "",
         enabled_for_groups: list[str] | None = None,
@@ -968,14 +986,16 @@ class LearningNormalizerStore:
         if cluster is None:
             return False
         now = _now_iso()
-        enabled_by = actor if visible else ""
-        enabled_at = now if visible else ""
+        resolved_visibility = resolve_cross_group_visibility(visible=visible, visibility=visibility)
+        enabled = resolved_visibility != "none"
+        enabled_by = actor if enabled else ""
+        enabled_at = now if enabled else ""
         groups_payload = (
             [str(g).strip() for g in (enabled_for_groups or []) if str(g).strip()]
-            if visible
+            if enabled
             else []
         )
-        reason_payload = reason if visible else ""
+        reason_payload = reason if enabled else ""
         cursor = await db.execute(
             """UPDATE learning_normalizer_clusters
                SET cross_group_visible = ?, cross_group_enabled_by = ?,
@@ -983,7 +1003,7 @@ class LearningNormalizerStore:
                    cross_group_enabled_reason = ?, updated_at = ?
                WHERE cluster_id = ?""",
             (
-                int(visible),
+                visibility_to_db(resolved_visibility),
                 enabled_by,
                 enabled_at,
                 json.dumps(groups_payload, ensure_ascii=False),
@@ -995,22 +1015,24 @@ class LearningNormalizerStore:
         await db.commit()
         if cursor.rowcount <= 0:
             return False
-        action = "cross_group_enable" if visible else "cross_group_disable"
+        action = "cross_group_enable" if enabled else "cross_group_disable"
         await self._record_revision(
             cluster_id,
             action=action,
             actor=actor,
             before={
                 "cross_group_visible": cluster.cross_group_visible,
+                "cross_group_visibility": cluster.cross_group_visibility,
                 "cross_group_enabled_for_groups": list(cluster.cross_group_enabled_for_groups),
                 "cross_group_enabled_reason": cluster.cross_group_enabled_reason,
             },
             after={
-                "cross_group_visible": visible,
+                "cross_group_visible": enabled,
+                "cross_group_visibility": resolved_visibility,
                 "cross_group_enabled_for_groups": groups_payload,
                 "cross_group_enabled_reason": reason_payload,
             },
-            reason=reason or f"{action} by {actor}",
+            reason=reason or f"cross_group_visibility={resolved_visibility}",
         )
         return True
 
@@ -1033,6 +1055,10 @@ class LearningNormalizerStore:
             "updated_at": cluster.updated_at,
             "locked_at": cluster.locked_at,
             "meta": cluster.meta,
+            "cross_group_visible": cluster.cross_group_visible,
+            "cross_group_visibility": cluster.cross_group_visibility,
+            "cross_group_enabled_for_groups": list(cluster.cross_group_enabled_for_groups),
+            "cross_group_enabled_reason": cluster.cross_group_enabled_reason,
         }
 
     @staticmethod
@@ -1126,6 +1152,7 @@ def _row_to_cluster(row: aiosqlite.Row) -> LearningNormalizerCluster:
         ]
     else:
         enabled_for_groups = []
+    visibility = visibility_from_db(row["cross_group_visible"]) if "cross_group_visible" in keys else "none"
     return LearningNormalizerCluster(
         cluster_id=row["cluster_id"],
         domain=row["domain"],
@@ -1141,7 +1168,8 @@ def _row_to_cluster(row: aiosqlite.Row) -> LearningNormalizerCluster:
         updated_at=row["updated_at"],
         locked_at=row["locked_at"],
         meta=_json_dict(row["meta_json"]),
-        cross_group_visible=bool(row["cross_group_visible"]) if "cross_group_visible" in keys else False,
+        cross_group_visible=legacy_cross_group_visible(visibility),
+        cross_group_visibility=visibility,
         cross_group_enabled_by=row["cross_group_enabled_by"] if "cross_group_enabled_by" in keys else "",
         cross_group_enabled_at=row["cross_group_enabled_at"] if "cross_group_enabled_at" in keys else "",
         cross_group_enabled_for_groups=enabled_for_groups,

@@ -38,6 +38,9 @@ def create_dashboard_router(
     def _config():
         return config or (getattr(ctx, "config", None) if ctx else None)
 
+    def _scheduler():
+        return getattr(ctx, "scheduler", None) if ctx else None
+
     def _humanization_status() -> dict[str, Any]:
         root = _config()
         humanization = getattr(root, "humanization", None) if root is not None else None
@@ -59,6 +62,19 @@ def create_dashboard_router(
             "runtime_group_count": len(runtime_groups),
             "degraded_groups": degraded_groups,
             "degraded_count": len(degraded_groups),
+        }
+
+    def _self_mute_status() -> dict[str, Any]:
+        scheduler = _scheduler()
+        if scheduler is None:
+            return {"groups": {}, "count": 0}
+        getter = getattr(scheduler, "get_mute_state", None)
+        groups = getter() if callable(getter) else {}
+        if not isinstance(groups, dict):
+            groups = {}
+        return {
+            "groups": groups,
+            "count": len(groups),
         }
 
     @router.get("/dashboard")
@@ -129,6 +145,7 @@ def create_dashboard_router(
             "mood": mood,
             "schedule": schedule,
             "humanization": _humanization_status(),
+            "self_mute": _self_mute_status(),
         }
 
     @router.get("/dashboard/cache-pipelines")

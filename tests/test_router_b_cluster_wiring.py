@@ -52,11 +52,25 @@ class _Scheduler:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    def notify(self, group_id: str, *, trigger: object | None = None, user_id: str = "") -> None:
+    def notify(
+        self,
+        group_id: str,
+        *,
+        trigger: object | None = None,
+        user_id: str = "",
+        message_text: str = "",
+        message_id: int | None = None,
+        reply_to_sender_id: str = "",
+        reply_to_self: bool = False,
+        at_targets: tuple[str, ...] = (),
+        at_self: bool = False,
+        is_addressed: bool = False,
+    ) -> None:
         self.calls.append({
             "group_id": group_id,
             "trigger": trigger,
             "user_id": user_id,
+            "message_text": message_text,
         })
 
 
@@ -177,6 +191,7 @@ async def test_notify_group_scheduler_bypass_discards_bucket_and_records_metric(
         "group_id": "100",
         "trigger": trigger,
         "user_id": "200",
+        "message_text": "hello",
     }]
     assert store.rows[-1]["metric_key"] == "coalesce_bypassed"
     assert store.rows[-1]["metadata"]["discarded_messages"] == 2
@@ -205,6 +220,7 @@ async def test_notify_group_scheduler_enqueue_then_flush_records_metrics() -> No
         "group_id": "100",
         "trigger": None,
         "user_id": "200",
+        "message_text": "hello world",
     }]
     assert store.rows[-1]["metric_key"] == "coalesce_flushed"
     assert store.rows[-1]["metadata"]["message_count"] == 2
@@ -227,4 +243,5 @@ async def test_notify_group_scheduler_without_coalescer_falls_back_directly() ->
         "group_id": "100",
         "trigger": None,
         "user_id": "200",
+        "message_text": "hello",
     }]

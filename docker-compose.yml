@@ -26,6 +26,8 @@ services:
     ports:
       - "8081:8080"   # NoneBot FastAPI + Admin Dashboard
     env_file: config/.env
+    environment:
+      - TZ=Asia/Shanghai
     depends_on:
       - napcat
     volumes:

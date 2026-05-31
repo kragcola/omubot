@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from services.cross_group import CrossGroupVisibility
+
 GraphStatus = Literal["active", "pending", "rejected", "superseded"]
 
 GraphNodeType = Literal[
@@ -35,6 +37,7 @@ class GraphFact:
     metadata: dict[str, Any] = field(default_factory=dict)
     evidence: list[dict[str, Any]] = field(default_factory=list)
     cross_group_visible: bool = False
+    cross_group_visibility: CrossGroupVisibility = "none"
     cross_group_enabled_by: str = ""
     cross_group_enabled_at: str = ""
     cross_group_enabled_for_groups: list[str] = field(default_factory=list)
@@ -57,6 +60,7 @@ class GraphFact:
             "metadata": dict(self.metadata),
             "evidence": [dict(item) for item in self.evidence],
             "cross_group_visible": self.cross_group_visible,
+            "cross_group_visibility": self.cross_group_visibility,
             "cross_group_enabled_by": self.cross_group_enabled_by,
             "cross_group_enabled_at": self.cross_group_enabled_at,
             "cross_group_enabled_for_groups": list(self.cross_group_enabled_for_groups),
@@ -80,6 +84,7 @@ class GraphCandidate:
     scope_id: str = "global"
     review_note: str = ""
     cross_group_visible: bool = False
+    cross_group_visibility: CrossGroupVisibility = "none"
     cross_group_enabled_by: str = ""
     cross_group_enabled_at: str = ""
     cross_group_enabled_for_groups: list[str] = field(default_factory=list)
@@ -101,6 +106,7 @@ class GraphCandidate:
             "updated_at": self.updated_at,
             "review_note": self.review_note,
             "cross_group_visible": self.cross_group_visible,
+            "cross_group_visibility": self.cross_group_visibility,
             "cross_group_enabled_by": self.cross_group_enabled_by,
             "cross_group_enabled_at": self.cross_group_enabled_at,
             "cross_group_enabled_for_groups": list(self.cross_group_enabled_for_groups),
@@ -145,6 +151,7 @@ class GraphNode:
     created_at: str
     updated_at: str
     cross_group_visible: bool = False
+    cross_group_visibility: CrossGroupVisibility = "none"
     cross_group_enabled_by: str = ""
     cross_group_enabled_at: str = ""
     cross_group_enabled_for_groups: list[str] = field(default_factory=list)
@@ -164,6 +171,7 @@ class GraphNode:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "cross_group_visible": self.cross_group_visible,
+            "cross_group_visibility": self.cross_group_visibility,
             "cross_group_enabled_by": self.cross_group_enabled_by,
             "cross_group_enabled_at": self.cross_group_enabled_at,
             "cross_group_enabled_for_groups": list(self.cross_group_enabled_for_groups),
@@ -186,6 +194,7 @@ class GraphEdge:
     created_at: str
     updated_at: str
     cross_group_visible: bool = False
+    cross_group_visibility: CrossGroupVisibility = "none"
     cross_group_enabled_by: str = ""
     cross_group_enabled_at: str = ""
     cross_group_enabled_for_groups: list[str] = field(default_factory=list)
@@ -206,6 +215,7 @@ class GraphEdge:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "cross_group_visible": self.cross_group_visible,
+            "cross_group_visibility": self.cross_group_visibility,
             "cross_group_enabled_by": self.cross_group_enabled_by,
             "cross_group_enabled_at": self.cross_group_enabled_at,
             "cross_group_enabled_for_groups": list(self.cross_group_enabled_for_groups),

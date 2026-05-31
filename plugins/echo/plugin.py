@@ -6,10 +6,13 @@ On 3rd occurrence: either echoes the message or randomly (5%) breaks the chain.
 
 from __future__ import annotations
 
+import json
 import random
+import re
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel
@@ -21,6 +24,7 @@ _ECHO_WINDOW_S = 300.0
 _ECHO_THRESHOLD = 3
 _BREAK_TEXT = "打断复读！"
 _BREAK_CHANCE = 0.05
+_MARKER_RE = re.compile(r"\[(?:image|face|json|mface|record|video|forward)(?::[^\]]*)?\]")
 
 _log = logger.bind(channel="echo")
 
@@ -59,15 +63,19 @@ def build_echo_key(segments: Iterable[object]) -> str:
             prompt = ""
             if isinstance(raw, str) and raw:
                 try:
-                    import json as _json
-                    obj = _json.loads(raw)
+                    obj = json.loads(raw)
                     prompt = obj.get("prompt", "") or obj.get("desc", "")
-                except (_json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError):
                     pass
             parts.append(f"[json:{prompt}]")
         else:
             parts.append(f"[{t}]")
     return "".join(parts).strip()
+
+
+def _visible_text_for_humanizer(echo_key: str) -> str:
+    """Approximate the visible text length for humanized typing delay."""
+    return _MARKER_RE.sub("__", echo_key or "")
 
 
 @dataclass
@@ -152,6 +160,20 @@ class EchoPlugin(AmadeusPlugin):
         self._scheduler = ctx.scheduler
         self._timeline = ctx.timeline
 
+    def _get_humanizer_runtime(self, group_id: str) -> dict[str, Any]:
+        runtime_getter = getattr(self._scheduler, "_humanizer_runtime", None)
+        if callable(runtime_getter):
+            runtime = runtime_getter(group_id)
+            return dict(runtime) if isinstance(runtime, dict) else {}
+        mood_getter = getattr(self._scheduler, "_get_current_mood", None)
+        mood = mood_getter(group_id) if callable(mood_getter) else None
+        return {
+            "group_id": group_id,
+            "register": None,
+            "slot": None,
+            "mood": mood,
+        }
+
     async def on_message(self, ctx: MessageContext) -> bool:
         if not self._config.enabled:
             return False
@@ -183,15 +205,20 @@ class EchoPlugin(AmadeusPlugin):
             content=ctx.raw_message.get("plain_text", echo_key),
             message_id=ctx.message_id or 0,
         )
+        if self._scheduler.is_muted(group_id):
+            _log.info("echo | group={} muted, skip send", group_id)
+            return True
 
         from nonebot.adapters.onebot.v11 import Message
 
         if echo_reply.startswith("打断"):
-            await self._humanizer.delay(echo_reply)
+            visible = _visible_text_for_humanizer(echo_reply)
+            await self._humanizer.delay(visible, **self._get_humanizer_runtime(group_id))
             await ctx.bot.send_group_msg(group_id=int(group_id), message=Message(echo_reply))
         else:
             segments = ctx.raw_message.get("segments")
-            await self._humanizer.delay(echo_key)
+            visible = _visible_text_for_humanizer(echo_key)
+            await self._humanizer.delay(visible, **self._get_humanizer_runtime(group_id))
             await ctx.bot.send_group_msg(group_id=int(group_id), message=segments)
 
         self._timeline.add(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,7 @@ class StylePlugin(AmadeusPlugin):
         self._store: StyleStore | None = None
         self._owns_store = False
         self._provider_superseded: bool = False
+        self._last_extract_monotonic: float = 0.0
 
     async def on_startup(self, ctx: PluginContext) -> None:
         cfg = self._config_override or load_plugin_config("plugins/style/config.default.json", StyleConfig)
@@ -181,6 +183,40 @@ class StylePlugin(AmadeusPlugin):
                 "tool_call_count": len(ctx.tool_calls),
             },
         )
+
+    async def on_tick(self, ctx: PluginContext) -> None:
+        if not self._enabled or self._store is None:
+            return
+        from services import learning_settings
+
+        settings = learning_settings.load(getattr(ctx, "storage_dir", "storage"))
+        style_cfg = settings.get("style", {})
+        if not style_cfg.get("extract_enabled", True):
+            return
+        interval_s = int(style_cfg.get("extract_interval_minutes", 120)) * 60
+        now = time.monotonic()
+        if now - self._last_extract_monotonic < interval_s:
+            return
+        self._last_extract_monotonic = now
+        message_log = getattr(ctx, "message_log", None)
+        llm_client = getattr(ctx, "llm_client", None)
+        if message_log is None or llm_client is None:
+            return
+        try:
+            from admin.routes.api.style import run_style_manual_extract
+
+            await run_style_manual_extract(
+                style_store=self._store,
+                message_log=message_log,
+                llm_client=llm_client,
+                slang_store=getattr(ctx, "slang_store", None),
+                auto_approve=False,
+                limit=40,
+                max_batches=1,
+            )
+            _L.info("style periodic extract completed")
+        except Exception as exc:
+            _L.warning("style periodic extract failed | err={}", exc)
 
 
 def config_schema() -> dict[str, Any]:

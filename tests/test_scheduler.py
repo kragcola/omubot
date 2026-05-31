@@ -49,10 +49,11 @@ class _FakeRuntime:
 class _FakeLLM:
     """Records chat() calls and returns configured reply."""
 
-    def __init__(self, reply: str | None = "你好", *, delay: float = 0) -> None:
+    def __init__(self, reply: str | None = "你好", *, delay: float = 0, thinker_action: str = "") -> None:
         self.calls: list[dict] = []
         self.reply = reply
         self._delay = delay
+        self._last_thinker_action = thinker_action
 
     async def chat(self, **kwargs) -> str | None:  # type: ignore[override]
         self.calls.append(kwargs)
@@ -263,7 +264,7 @@ class TestAtHandling:
         await scheduler.close()
 
     async def test_at_queues_when_busy(self) -> None:
-        """notify(is_at=True) sets pending_at when a task is already running."""
+        """notify(is_at=True) stores pending message details when a task is already running."""
         llm = _FakeLLM(reply=None, delay=0.5)
         scheduler = GroupChatScheduler(
             llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
@@ -272,12 +273,16 @@ class TestAtHandling:
         scheduler.notify("111")
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
-        scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))  # should queue
-        assert scheduler._slots["111"].pending_at is True
+        scheduler.notify(
+            "111",
+            trigger=TriggerContext(reason="有人@了你", mode="at_mention"),
+            message_text="别睡",
+        )
+        assert len(scheduler._slots["111"].pending_during_generation) == 1
         await scheduler.close()
 
-    async def test_pending_at_fires_after_completion(self) -> None:
-        """After running task completes, pending_at triggers a new call."""
+    async def test_pending_generation_fires_after_completion(self) -> None:
+        """After running task completes, queued pending messages trigger a new call."""
         llm = _FakeLLM(reply=None, delay=0.2)
         scheduler = GroupChatScheduler(
             llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
@@ -286,10 +291,14 @@ class TestAtHandling:
         scheduler.notify("111")
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
-        scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))  # queued as pending_at
+        scheduler.notify(
+            "111",
+            trigger=TriggerContext(reason="有人@了你", mode="at_mention"),
+            message_text="别睡",
+        )
         await asyncio.sleep(0.5)  # first call finishes, pending fires
         assert len(llm.calls) == 2
-        assert scheduler._slots["111"].pending_at is False
+        assert scheduler._slots["111"].pending_during_generation == []
         await scheduler.close()
 
 
@@ -327,14 +336,14 @@ class TestDirectedFollowup:
             user_id="42",
         )
 
-        assert slot.pending_at is True
+        assert len(slot.pending_during_generation) == 1
         assert slot.trigger is not None and slot.trigger.mode == "directed_followup"
         assert slot.consecutive_skip == 0
 
         scheduler.clear_pending("111", cancel_running=True)
         await asyncio.sleep(0.05)
 
-        assert slot.pending_at is False
+        assert slot.pending_during_generation == []
         assert slot.trigger is None
         assert slot.consecutive_skip == 0
         assert len(llm.calls) == 1
@@ -355,12 +364,12 @@ class TestPendingReset:
         scheduler.notify("111", trigger=TriggerContext(reason="有人@了你", mode="at_mention"), user_id="42")
 
         slot = scheduler._slots["111"]
-        assert slot.pending_at is True
+        assert len(slot.pending_during_generation) == 1
         assert slot.trigger is not None
 
         scheduler.clear_pending("111")
 
-        assert slot.pending_at is False
+        assert slot.pending_during_generation == []
         assert slot.trigger is None
         assert slot.msg_count == 0
         await scheduler.close()
@@ -556,7 +565,7 @@ class TestMute:
         slot = scheduler._slots["111"]
         assert slot.running_task is None
         assert slot.msg_count == 0
-        assert slot.pending_at is False
+        assert slot.pending_during_generation == []
         await scheduler.close()
 
     async def test_is_muted(self) -> None:
@@ -864,7 +873,7 @@ class TestVideoHint:
         await asyncio.sleep(0.05)
 
         assert slot.consecutive_skip == 0
-        assert slot.pending_at is False
+        assert slot.pending_during_generation == []
         assert slot.trigger is None
         await scheduler.close()
 
@@ -878,4 +887,480 @@ class TestVideoHint:
         scheduler.notify("111")  # no video_hint
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 1
+        await scheduler.close()
+
+
+class TestClosingBypass:
+    """Weak-reply P0: closing trigger bypasses probability gate with dedup + cooldown."""
+
+    def _closing(self) -> TriggerContext:
+        return TriggerContext(reason="收尾", mode="closing", target_message_id=1, target_user_id="u1")
+
+    async def test_closing_fires_bypassing_low_talk_value(self) -> None:
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),  # would never fire normally
+        )
+        scheduler.notify("111", trigger=self._closing())
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1
+        await scheduler.close()
+
+    async def test_closing_bypasses_proactive_none(self) -> None:
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity(proactive=None)),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        scheduler.notify("111", trigger=self._closing())
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1
+        await scheduler.close()
+
+    async def test_closing_dedup_second_is_skipped(self) -> None:
+        """Once a terminal exchange is done, a repeated farewell does not re-fire."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        scheduler.notify("111", trigger=self._closing())
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1
+        assert scheduler._slots["111"].closing_done is True
+        # Second farewell, same conversation — deduped.
+        scheduler.notify("111", trigger=self._closing())
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1
+        await scheduler.close()
+
+    async def test_closing_cooldown_blocks_recent_light(self) -> None:
+        """A closing within the light cooldown of a prior light reply is suppressed."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.last_light_time = time.time()  # just had a light reply
+        scheduler.notify("111", trigger=self._closing())
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 0  # within cooldown → suppressed
+        await scheduler.close()
+
+
+class TestTopicBlockAnchor:
+    """B1: prob-fire anchors to the bot's topic block via add_pending_trigger."""
+
+    def _enabled_config(self):
+        from kernel.config import TopicBlockConfig
+
+        return TopicBlockConfig(enabled=True)
+
+    async def test_prob_fire_injects_anchor_only_when_bot_involved(self) -> None:
+        """F-α fix: a fire on a block the bot is NOT part of injects NO anchor
+        (the bot must not be 'placed' into a conversation it only overhears)."""
+        llm = _FakeLLM(reply=None)
+        timeline = GroupTimeline()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=timeline, persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),  # always fires
+            topic_block_config=self._enabled_config(),
+        )
+        # A sticker with no @bot, no reply-to-bot → block is NOT bot-involved.
+        scheduler.notify("111", user_id="u1", message_text="«动画表情»", message_id=42)
+        await asyncio.sleep(0.1)
+        pending = timeline.get_pending("111")
+        anchors = [m for m in pending if m.get("trigger_reason")]
+        assert not anchors  # no anchor → bot not forced into a non-own block
+        await scheduler.close()
+
+    async def test_prob_fire_anchors_to_bot_involved_block(self) -> None:
+        """When the bot IS part of the active block (@-ed earlier), a later
+        prob-fire anchors to that block's representative message."""
+        llm = _FakeLLM(reply=None)
+        timeline = GroupTimeline()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=timeline, persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._enabled_config(),
+        )
+        # First message @-mentions the bot → block becomes bot-involved.
+        scheduler.notify(
+            "111", user_id="u1", message_text="姆姆你看这个", message_id=40,
+            at_targets=(), at_self=True,
+        )
+        await asyncio.sleep(0.05)
+        # A follow-up in the same block (same speaker, continuation) fires.
+        scheduler.notify("111", user_id="u1", message_text="对吧对吧", message_id=42)
+        await asyncio.sleep(0.1)
+        pending = timeline.get_pending("111")
+        anchors = [m for m in pending if m.get("trigger_reason")]
+        assert any(m.get("message_id") in (40, 42) for m in anchors)
+        await scheduler.close()
+
+    async def test_disabled_injects_no_anchor(self) -> None:
+        """Default (disabled) → no tracker, no anchor; behavior == status quo."""
+        llm = _FakeLLM(reply=None)
+        timeline = GroupTimeline()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=timeline, persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+        )
+        scheduler.notify("111", user_id="u1", message_text="«动画表情»", message_id=42)
+        await asyncio.sleep(0.1)
+        assert scheduler._topic_tracker is None
+        pending = timeline.get_pending("111")
+        assert not [m for m in pending if m.get("trigger_reason")]
+        await scheduler.close()
+
+    async def test_explicit_trigger_not_overridden(self) -> None:
+        """An explicit trigger (e.g. at_mention) already has its own anchor;
+        B1 must not inject a competing one."""
+        llm = _FakeLLM(reply=None)
+        timeline = GroupTimeline()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=timeline, persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._enabled_config(),
+        )
+        trig = TriggerContext(reason="at", mode="at_mention", target_message_id=7, target_user_id="u1")
+        scheduler.notify("111", trigger=trig, user_id="u1", message_text="在吗", message_id=7)
+        await asyncio.sleep(0.1)
+        # at_mention fires via its own path; the B1 helper is a no-op here.
+        # (anchor message_id, if any, comes from the at path — not the tracker.)
+        assert scheduler._topic_tracker is not None
+        await scheduler.close()
+
+
+class TestOverhearerRole:
+    """B2: receiver-role gating — overhearer (not addressed, not a block
+    participant) is suppressed per overhearer_mode."""
+
+    def _config(self, mode: str = "shadow", boost: float = 0.0, ratified_floor: float = 0.0):
+        from kernel.config import TopicBlockConfig
+
+        return TopicBlockConfig(
+            enabled=True, overhearer_mode=mode, overhearer_threshold_boost=boost,
+            ratified_continuation_floor=ratified_floor,
+        )
+
+    async def test_shadow_does_not_change_behavior(self) -> None:
+        """shadow mode: overhearer is logged but still fires (talk_value=1.0)."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("shadow"),
+        )
+        # Two third parties talking; bot not addressed, not in any block.
+        scheduler.notify("111", user_id="u1", message_text="你看比赛了吗", message_id=1)
+        scheduler.notify("111", user_id="u2", message_text="看了好激烈", message_id=2)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) >= 1  # shadow → behavior unchanged
+        await scheduler.close()
+
+    async def test_silent_overhearer_does_not_fire(self) -> None:
+        """silent mode: overhearer is suppressed even with talk_value=1.0."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("silent"),
+        )
+        scheduler.notify("111", user_id="u1", message_text="你看比赛了吗", message_id=1)
+        scheduler.notify("111", user_id="u2", message_text="看了好激烈", message_id=2)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 0  # overhearer → silent
+        assert scheduler._slots["111"].consecutive_skip >= 1  # skip state recorded
+        await scheduler.close()
+
+    async def test_addressed_fires_even_in_silent_mode(self) -> None:
+        """addressed (is_addressed=True) always fires, silent mode notwithstanding."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("silent"),
+        )
+        scheduler.notify("111", user_id="u1", message_text="姆姆你好", message_id=1, is_addressed=True)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1
+        await scheduler.close()
+
+    async def test_ratified_fires_in_silent_mode(self) -> None:
+        """ratified (bot already in the block via @-self) is not suppressed."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("silent"),
+        )
+        # First @-self makes the block bot-involved (addressed → fires).
+        scheduler.notify("111", user_id="u1", message_text="姆姆看这个", message_id=1, at_self=True, is_addressed=True)
+        await asyncio.sleep(0.1)
+        calls_after_at = len(llm.calls)
+        # Follow-up in same block, not addressed → role=ratified → still fires.
+        scheduler.notify("111", user_id="u1", message_text="对吧", message_id=2)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) > calls_after_at
+        await scheduler.close()
+
+    async def test_disabled_tracker_no_role_gating(self) -> None:
+        """Tracker disabled → role is always 'addressed', no suppression."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+        )
+        scheduler.notify("111", user_id="u1", message_text="随便聊聊", message_id=1)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1  # no gating without tracker
+        await scheduler.close()
+
+    async def test_bot_involvement_makes_followup_ratified_not_silenced(self) -> None:
+        """B2 fix: after the bot speaks in a block, a user's follow-up in the
+        same block is 'ratified' (continuation) — NOT silenced as overhearer.
+        Regression for: bot replies once then goes silent on the next line."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("silent"),
+        )
+        # Third party chatter forms a block; bot is initially an overhearer.
+        scheduler.notify("111", user_id="u1", message_text="你喝雪碧", message_id=1)
+        await asyncio.sleep(0.05)
+        assert len(llm.calls) == 0  # overhearer → silent (bot not yet involved)
+        # Simulate the bot having spoken in that active block.
+        scheduler._topic_tracker.mark_bot_involved("111")
+        # User's follow-up in the same block must now be ratified → fires.
+        scheduler.notify("111", user_id="u1", message_text="这叫雪人三项", message_id=2)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1  # ratified continuation, not silenced
+        await scheduler.close()
+
+    async def test_do_chat_marks_block_bot_involved_after_reply(self) -> None:
+        """_do_chat calls mark_bot_involved after a successful send."""
+        from unittest.mock import AsyncMock
+
+        llm = _FakeLLM(reply="好呀")
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("silent"),
+        )
+        scheduler._send_to_group = AsyncMock(return_value=0.1)  # type: ignore[method-assign]
+        scheduler._topic_tracker.observe("111", message_id=1, speaker="u1", text="姆姆在吗", at_self=True)
+        await scheduler._do_chat("111", trigger=TriggerContext(
+            reason="@", mode="at_mention", target_message_id=1, target_user_id="u1",
+        ))
+        # The block the bot replied in is now bot-involved.
+        blk = scheduler._topic_tracker.pick_anchor_block("111", require_bot_involved=True)
+        assert blk is not None and blk.bot_involved is True
+        await scheduler.close()
+
+    async def test_ratified_floor_fires_when_rws_would_skip(self) -> None:
+        """B2 continuation floor: a ratified follow-up fires even when the base
+        probability is near zero (low time-of-day mult). Regression for: bot
+        replies, user follows up, but RWS+low time_mult skips the exchange."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),  # base prob ~0 → would skip
+            topic_block_config=self._config("silent", ratified_floor=1.0),  # floor forces fire
+        )
+        # The bot was @-ed earlier and replied → that block is bot-involved.
+        scheduler._topic_tracker.observe("111", message_id=0, speaker="u1", text="姆姆你看", at_self=True)
+        scheduler._topic_tracker.mark_bot_involved("111")
+        scheduler.notify("111", user_id="u1", message_text="你懂雪人三项吗", message_id=1)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1  # floor rescued the continuation
+        await scheduler.close()
+
+    async def test_ratified_floor_zero_keeps_rws_behavior(self) -> None:
+        """Floor=0 (default) → no rescue; ratified still follows base prob."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        scheduler._topic_tracker.observe("111", message_id=0, speaker="u1", text="姆姆你看", at_self=True)
+        scheduler._topic_tracker.mark_bot_involved("111")
+        scheduler.notify("111", user_id="u1", message_text="你懂雪人三项吗", message_id=1)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 0  # no floor → base prob 0 skips
+        await scheduler.close()
+
+
+
+class TestFocusedTriggerReason:
+    """B1-addressed: addressed triggers get a topic-focus directive so the
+    bot answers the @-ed message, not the whole stale multi-topic timeline."""
+
+    def _config(self):
+        from kernel.config import TopicBlockConfig
+
+        return TopicBlockConfig(enabled=True)
+
+    def _scheduler(self, *, topic_block_config=None):
+        return GroupChatScheduler(
+            llm=_FakeLLM(reply=None), timeline=GroupTimeline(),
+            persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+            topic_block_config=topic_block_config,
+        )
+
+    def test_at_mention_reason_gets_focus_directive(self) -> None:
+        s = self._scheduler(topic_block_config=self._config())
+        trig = TriggerContext(reason="有人@了你", mode="at_mention", target_message_id=1, target_user_id="u1")
+        out = s._focused_trigger_reason(trig)
+        assert out.startswith("有人@了你")
+        assert "不要把上文里别的" in out
+
+    def test_directed_followup_and_correction_focused(self) -> None:
+        s = self._scheduler(topic_block_config=self._config())
+        for mode in ("directed_followup", "correction", "qq_interaction"):
+            trig = TriggerContext(reason="r", mode=mode, target_message_id=1, target_user_id="u1")
+            assert "不要把上文里别的" in s._focused_trigger_reason(trig)
+
+    def test_non_addressed_mode_unchanged(self) -> None:
+        s = self._scheduler(topic_block_config=self._config())
+        trig = TriggerContext(reason="收尾", mode="closing", target_message_id=1, target_user_id="u1")
+        assert s._focused_trigger_reason(trig) == "收尾"  # closing not in focus modes
+
+    def test_disabled_tracker_returns_original_reason(self) -> None:
+        s = self._scheduler(topic_block_config=None)  # tracker off
+        trig = TriggerContext(reason="有人@了你", mode="at_mention", target_message_id=1, target_user_id="u1")
+        assert s._focused_trigger_reason(trig) == "有人@了你"
+
+
+class TestAddressedWaitDeferral:
+    """@ turn whose thinker chose wait must not be silently dropped — it
+    re-fires (forced) after a quiet window, bounded by wait_max_deferrals."""
+
+    def _thinker_cfg(self, *, delay: float = 0.05, max_def: int = 1):
+        from kernel.config import ThinkerConfig
+
+        return ThinkerConfig(wait_deferral_seconds=delay, wait_max_deferrals=max_def)
+
+    def _at_trigger(self) -> TriggerContext:
+        # at_mention but addressee_self=False (the F-γ shape: @bot + @other)
+        return TriggerContext(
+            reason="有人@了你", mode="at_mention", target_message_id=1, target_user_id="u1",
+            extra={"addressee_self": False},
+        )
+
+    async def test_wait_defers_then_force_fires(self) -> None:
+        llm = _FakeLLM(reply=None, thinker_action="wait")  # thinker waits, nothing sent
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            thinker_config=self._thinker_cfg(delay=0.05, max_def=1),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        # Simulate _do_chat having just run an @ turn that waited.
+        scheduler._maybe_defer_addressed_wait("111", self._at_trigger())
+        assert slot.wait_defer_task is not None
+        assert slot.wait_deferrals == 1
+        await asyncio.sleep(0.15)  # let the deferral window elapse + re-fire
+        await asyncio.sleep(0.05)
+        # The deferred re-fire forced a reply → chat() called with force_reply=True.
+        assert any(c.get("force_reply") is True for c in llm.calls)
+        await scheduler.close()
+
+    async def test_deferral_capped(self) -> None:
+        llm = _FakeLLM(reply=None, thinker_action="wait")
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            thinker_config=self._thinker_cfg(delay=0.05, max_def=1),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.wait_deferrals = 1  # already at cap
+        scheduler._maybe_defer_addressed_wait("111", self._at_trigger())
+        assert slot.wait_defer_task is None  # capped → no new deferral
+        await scheduler.close()
+
+    async def test_non_wait_does_not_defer(self) -> None:
+        llm = _FakeLLM(reply=None, thinker_action="reply")  # not a wait
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            thinker_config=self._thinker_cfg(),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        scheduler._maybe_defer_addressed_wait("111", self._at_trigger())
+        assert slot.wait_defer_task is None
+        await scheduler.close()
+
+    async def test_disabled_when_seconds_zero(self) -> None:
+        llm = _FakeLLM(reply=None, thinker_action="wait")
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            thinker_config=self._thinker_cfg(delay=0.0, max_def=1),  # disabled
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        scheduler._maybe_defer_addressed_wait("111", self._at_trigger())
+        assert slot.wait_defer_task is None
+        await scheduler.close()
+
+    async def test_superseded_by_new_trigger(self) -> None:
+        llm = _FakeLLM(reply=None, thinker_action="wait")
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            thinker_config=self._thinker_cfg(delay=0.05, max_def=1),
+        )
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        scheduler._maybe_defer_addressed_wait("111", self._at_trigger())
+        slot.trigger = self._at_trigger()  # a new turn queued before the window elapsed
+        await asyncio.sleep(0.15)
+        # Superseded → deferred fire skipped, no forced chat call.
+        assert not any(c.get("force_reply") is True for c in llm.calls)
+        await scheduler.close()
+
+
+class TestP7RuleLayerBoundary:
+    """P7: the rule layer (strong signals) decides before any gray-zone scoring.
+    An addressed @bot must fire by obligation without RWS ever being computed —
+    proving the boundary holds (no "should I speak" scoring above the marker)."""
+
+    def _at(self) -> TriggerContext:
+        return TriggerContext(reason="有人@了你", mode="at_mention", extra={"addressee_self": True})
+
+    async def test_at_mention_fires_without_invoking_rws(self) -> None:
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        calls: list[str] = []
+        scheduler._maybe_compute_rws = (  # type: ignore[method-assign]
+            lambda *a, **k: calls.append("rws") or None  # type: ignore[func-returns-value]
+        )
+        scheduler.notify("111", trigger=self._at(), is_addressed=True)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1  # rule layer fired the @
+        assert calls == []  # gray-zone scoring never ran
+        await scheduler.close()
+
+    async def test_non_addressed_message_reaches_gray_zone(self) -> None:
+        """A plain non-@ message (no rule-layer hit) is the only path that may
+        invoke RWS scoring — confirming the boundary is where it should be."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        calls: list[str] = []
+        scheduler._maybe_compute_rws = (  # type: ignore[method-assign]
+            lambda *a, **k: calls.append("rws") or None  # type: ignore[func-returns-value]
+        )
+        scheduler.notify("111", message_text="大家在聊什么")
+        await asyncio.sleep(0.1)
+        assert calls == ["rws"]  # gray-zone scoring ran for the non-addressed path
         await scheduler.close()

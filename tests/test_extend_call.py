@@ -60,8 +60,9 @@ async def test_maybe_extend_feature_off_does_not_call_llm(persona_runtime: Perso
     client = await _make_client(timeline, persona_runtime)
     sent: list[str] = []
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     try:
         with patch.object(client, "_call", new_callable=AsyncMock) as call:
@@ -99,8 +100,9 @@ async def test_chat_pause_extend_sends_initial_reply_then_extension(
         reply_segmentation_config=ReplySegmentationConfig(natural_split_enabled=False),
     )
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     def _record_usage(**kwargs: Any) -> None:
         usage_rows.append(kwargs)
@@ -145,8 +147,9 @@ async def test_maybe_extend_user_reply_during_wait_drops_extension(persona_runti
     client = await _make_client(timeline, persona_runtime)
     sent: list[str] = []
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     async def _sleep_then_user_reply(_delay: float) -> None:
         timeline.add("123", role="user", content="我插一句", speaker="user(222)")
@@ -186,8 +189,9 @@ async def test_pause_extend_timing_after_last_segment(persona_runtime: PersonaRu
     async def _sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     try:
         with (
@@ -221,8 +225,9 @@ async def test_maybe_extend_cancel_during_wait_re_raises_without_extension(perso
     client = await _make_client(timeline, persona_runtime)
     sent: list[str] = []
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     try:
         with (

@@ -58,6 +58,22 @@ async def test_add_and_get_card(store: CardStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_add_card_records_provenance(store: CardStore) -> None:
+    cid = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="123", content="在群里提到喜欢音游"),
+        source_msg_id="msg_42",
+        captured_at="2026-05-29T12:34:56+08:00",
+        captured_by="memo_extractor",
+    )
+
+    card = await store.get_card(cid)
+    assert card is not None
+    assert card.source_msg_id == "msg_42"
+    assert card.captured_at == "2026-05-29T12:34:56+08:00"
+    assert card.captured_by == "memo_extractor"
+
+
+@pytest.mark.asyncio
 async def test_add_card_invalid_category(store: CardStore) -> None:
     with pytest.raises(ValueError, match="Invalid category"):
         NewCard(category="bogus", scope="user", scope_id="1", content="x")

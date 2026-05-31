@@ -1,5 +1,6 @@
 """Tests for StickerConfig and StickerStore."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -319,6 +320,55 @@ def test_update_persists(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------
+# ocr_text 字段（阶段 1：OCR 入库）
+# ------------------------------------------------------------------
+
+
+def test_add_writes_ocr_text_field(store: StickerStore) -> None:
+    sid, _ = store.add(_JPEG_DATA, "desc", "hint", ocr_text="晚安")
+    entry = store.get(sid)
+    assert entry is not None
+    assert entry["ocr_text"] == "晚安"
+
+
+def test_add_default_ocr_text_empty(store: StickerStore) -> None:
+    """旧调用不传 ocr_text → 默认空，key 仍存在（向后兼容）。"""
+    sid, _ = store.add(_JPEG_DATA, "desc", "hint")
+    entry = store.get(sid)
+    assert entry is not None
+    assert entry["ocr_text"] == ""
+
+
+def test_update_ocr_text_only(store: StickerStore) -> None:
+    sid, _ = store.add(_JPEG_DATA, "desc", "hint")
+    assert store.update(sid, ocr_text="打工人")
+    entry = store.get(sid)
+    assert entry is not None
+    assert entry["ocr_text"] == "打工人"
+    assert entry["description"] == "desc"
+    assert entry["usage_hint"] == "hint"
+
+
+def test_format_prompt_view_includes_ocr(store: StickerStore) -> None:
+    sid, _ = store.add(_JPEG_DATA, "挥手", "告别时", ocr_text="拜拜")
+    view = store.format_prompt_view()
+    assert "图上文字：拜拜" in view
+    assert f"«表情包:{sid}»" in view
+
+
+def test_format_prompt_view_omits_empty_ocr(store: StickerStore) -> None:
+    store.add(_JPEG_DATA, "desc", "hint")  # ocr_text 默认空
+    view = store.format_prompt_view()
+    assert "图上文字" not in view
+
+
+def test_format_prompt_view_stable_with_ocr(store: StickerStore) -> None:
+    """prompt cache 稳定性：含 ocr 的库两次渲染一致。"""
+    store.add(_JPEG_DATA, "desc", "hint", ocr_text="晚安")
+    assert store.format_prompt_view() == store.format_prompt_view()
+
+
+# ------------------------------------------------------------------
 # lookup_by_hash()
 # ------------------------------------------------------------------
 
@@ -420,3 +470,175 @@ def test_index_persists_removal(tmp_path) -> None:
     store2 = StickerStore(storage_dir=storage)
     assert store2.get(sid) is None
     assert store2.list_all() == {}
+
+
+# ---------------------------------------------------------------------------
+# search_by_intent (BM25 over rich descriptions)
+# ---------------------------------------------------------------------------
+
+
+def test_search_by_intent_matches_description(store: StickerStore) -> None:
+    bye, _ = store.add(_JPEG_DATA, "挥手告别", "适合说再见、拜拜的场景", ocr_text="拜拜")
+    store.add(_PNG_DATA, "生气皱眉", "不满、抗议时使用", ocr_text="哼")
+    assert store.search_by_intent("告别")[:1] == [bye]
+
+
+def test_search_by_intent_matches_ocr(store: StickerStore) -> None:
+    night, _ = store.add(_JPEG_DATA, "月亮图案", "睡前道晚安", ocr_text="晚安")
+    store.add(_PNG_DATA, "生气皱眉", "抗议时使用", ocr_text="哼")
+    assert night in store.search_by_intent("晚安")
+
+
+def test_search_by_intent_empty_query(store: StickerStore) -> None:
+    store.add(_JPEG_DATA, "挥手告别", "再见")
+    assert store.search_by_intent("") == []
+    assert store.search_by_intent("   ") == []
+
+
+def test_search_by_intent_empty_library(store: StickerStore) -> None:
+    assert store.search_by_intent("告别") == []
+
+
+def test_search_by_intent_no_match(store: StickerStore) -> None:
+    store.add(_JPEG_DATA, "挥手告别", "再见", ocr_text="拜拜")
+    assert store.search_by_intent("量子色动力学") == []
+
+
+def test_search_by_intent_top_k(store: StickerStore) -> None:
+    store.add(_JPEG_DATA, "告别甲", "再见拜拜", ocr_text="拜拜")
+    store.add(_PNG_DATA, "告别乙", "再见挥手", ocr_text="再见")
+    store.add(_WEBP_DATA, "告别丙", "拜拜挥手", ocr_text="拜拜")
+    assert len(store.search_by_intent("告别 再见 拜拜", top_k=2)) <= 2
+
+
+def test_search_reflects_updates(store: StickerStore) -> None:
+    sid, _ = store.add(_JPEG_DATA, "无关描述", "无关场景")
+    assert store.search_by_intent("晚安") == []
+    store.update(sid, ocr_text="晚安")
+    assert sid in store.search_by_intent("晚安")
+
+
+def test_search_reflects_removal(store: StickerStore) -> None:
+    sid, _ = store.add(_JPEG_DATA, "挥手告别", "再见", ocr_text="拜拜")
+    assert sid in store.search_by_intent("告别")
+    store.remove(sid)
+    assert store.search_by_intent("告别") == []
+
+
+# ---------------------------------------------------------------------------
+# Legacy index.json -> SQLite migration
+# ---------------------------------------------------------------------------
+
+
+def _write_legacy_index(storage_dir: Path, stickers: dict) -> None:
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    (storage_dir / "index.json").write_text(
+        json.dumps({"stickers": stickers}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def test_migrates_legacy_index(tmp_path: Path) -> None:
+    storage = tmp_path / "stickers"
+    _write_legacy_index(
+        storage,
+        {
+            "stk_aaaaaaaa": {
+                "file": "stk_aaaaaaaa.png",
+                "description": "旧表情A",
+                "usage_hint": "场景A",
+                "source": "admin",
+                "send_count": 3,
+                "last_sent": "2026-01-01T00:00:00+00:00",
+                "created_at": "2026-01-01T00:00:00+00:00",
+            },
+            "stk_bbbbbbbb": {
+                "file": "stk_bbbbbbbb.jpg",
+                "description": "旧表情B",
+                "usage_hint": "场景B",
+                "ocr_text": "晚安",
+                "source": "auto",
+                "send_count": 0,
+                "last_sent": None,
+                "created_at": "2026-01-02T00:00:00+00:00",
+            },
+        },
+    )
+
+    store = StickerStore(storage_dir=str(storage))
+    assert len(store.list_all()) == 2
+    entry_a = store.get("stk_aaaaaaaa")
+    assert entry_a is not None
+    assert entry_a["send_count"] == 3  # volatile field preserved
+    # Pre-stage-1 entry had no ocr_text key -> stays key-absent ("never
+    # attempted") so the Dream OCR backfill can still pick it up.
+    assert "ocr_text" not in entry_a
+    entry_b = store.get("stk_bbbbbbbb")
+    assert entry_b is not None
+    assert entry_b["ocr_text"] == "晚安"  # present field migrated
+    assert store.search_by_intent("晚安") == ["stk_bbbbbbbb"]
+
+
+def test_migration_is_idempotent(tmp_path: Path) -> None:
+    storage = tmp_path / "stickers"
+    _write_legacy_index(
+        storage,
+        {
+            "stk_aaaaaaaa": {
+                "file": "stk_aaaaaaaa.png",
+                "description": "旧表情A",
+                "usage_hint": "场景A",
+                "created_at": "2026-01-01T00:00:00+00:00",
+            },
+        },
+    )
+    StickerStore(storage_dir=str(storage))
+    # index.json left frozen as a rollback snapshot.
+    assert (storage / "index.json").exists()
+    store2 = StickerStore(storage_dir=str(storage))
+    assert len(store2.list_all()) == 1  # not double-imported
+
+
+def test_no_migration_when_no_legacy_index(tmp_path: Path) -> None:
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"))
+    assert store.list_all() == {}
+
+
+def test_legacy_index_not_overwritten_by_new_adds(tmp_path: Path) -> None:
+    storage = tmp_path / "stickers"
+    _write_legacy_index(
+        storage,
+        {
+            "stk_aaaaaaaa": {
+                "file": "stk_aaaaaaaa.png",
+                "description": "旧表情A",
+                "usage_hint": "场景A",
+                "created_at": "2026-01-01T00:00:00+00:00",
+            },
+        },
+    )
+    store = StickerStore(storage_dir=str(storage))
+    store.add(_JPEG_DATA, "新表情", "新场景")
+    # The frozen JSON snapshot must not absorb post-migration writes.
+    raw = json.loads((storage / "index.json").read_text(encoding="utf-8"))
+    assert list(raw["stickers"].keys()) == ["stk_aaaaaaaa"]
+
+
+# ---------------------------------------------------------------------------
+# Cross-thread safety (silent sticker learning runs add() in to_thread workers)
+# ---------------------------------------------------------------------------
+
+
+async def test_add_works_from_worker_thread(tmp_path: Path) -> None:
+    """add() is invoked via asyncio.to_thread during silent sticker learning;
+    the SQLite connection must tolerate cross-thread use (regression: the
+    JSON->SQLite migration introduced thread-affinity that broke this)."""
+    import asyncio
+
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"))
+    sid, is_new = await asyncio.to_thread(store.add, _JPEG_DATA, "desc", "hint", "auto")
+    assert is_new
+    assert store.get(sid) is not None
+    # Reads from the loop thread still see the worker-thread write.
+    assert sid in store.list_all()
+    store.close()

@@ -17,6 +17,9 @@ import aiosqlite
 from fastapi import APIRouter, Query, Request
 
 from admin.routes.api.style import run_style_manual_extract
+from services import learning_settings as _ls
+from services.learning_autopilot.base import AggressivenessConfig
+from services.learning_autopilot.runner import AutopilotRunner
 from services.style import StyleStore
 
 TZ_SHANGHAI = timezone(timedelta(hours=8))
@@ -46,6 +49,66 @@ NOUN_LABELS: dict[str, str] = {
 _extract_all_lock = asyncio.Lock()
 _extract_all_runs: dict[str, dict[str, Any]] = {}
 _extract_all_active_run_id: str | None = None
+
+_autopilot_runner_instance: AutopilotRunner | None = None
+
+
+def _get_autopilot_runner(ctx: Any) -> AutopilotRunner | None:
+    global _autopilot_runner_instance
+    if _autopilot_runner_instance is not None:
+        return _autopilot_runner_instance
+
+    from services.learning_autopilot.episode_reviewer import EpisodeAIReviewer
+    from services.learning_autopilot.knowledge_reviewer import KnowledgeAIReviewer
+    from services.learning_autopilot.style_reviewer import StyleAIReviewer
+
+    storage_dir = Path(getattr(ctx, "storage_dir", Path("storage"))) if ctx else Path("storage")
+    llm_client = getattr(ctx, "llm_client", None) if ctx else None
+
+    runner = AutopilotRunner(llm_client=llm_client, storage_dir=storage_dir)
+
+    style_db = storage_dir / "style.db"
+    if style_db.exists():
+        runner.register(StyleAIReviewer(style_db))
+
+    episode_db = storage_dir / "episodic.db"
+    if episode_db.exists():
+        runner.register(EpisodeAIReviewer(episode_db))
+
+    kg_db = storage_dir / "knowledge_graph.db"
+    if kg_db.exists():
+        runner.register(KnowledgeAIReviewer(kg_db, domain="fact"))
+        runner.register(KnowledgeAIReviewer(kg_db, domain="graph_relation"))
+
+    # Slang adapter — only if slang_store is available
+    slang_store = getattr(ctx, "slang_store", None) if ctx else None
+    if slang_store is not None:
+        try:
+            from services.learning_autopilot.slang_adapter import SlangReviewerAdapter
+            slang_plugin = getattr(ctx, "slang_plugin", None)
+            backlog_reviewer = getattr(ctx, "slang_backlog_reviewer", None)
+            if backlog_reviewer is None and slang_plugin is not None:
+                backlog_reviewer = getattr(slang_plugin, "_backlog_reviewer", None)
+            message_log = getattr(ctx, "message_log", None)
+            tool_registry = getattr(ctx, "tool_registry", None)
+            if backlog_reviewer:
+                runner.register(SlangReviewerAdapter(
+                    backlog_reviewer=backlog_reviewer,
+                    store=slang_store,
+                    message_log=message_log,
+                    settings_loader=slang_store.load_settings,
+                    tool_registry=tool_registry,
+                ))
+        except Exception:
+            pass
+
+    _autopilot_runner_instance = runner
+    return runner
+
+
+def _autopilot_config(ap: dict[str, Any]) -> AggressivenessConfig:
+    concurrency = int(ap.get("concurrency", 20))
+    return AggressivenessConfig.from_level(str(ap.get("aggressiveness", "standard")), concurrency=concurrency)
 
 
 def create_learning_pipeline_router(*, ctx: Any = None) -> APIRouter:
@@ -104,16 +167,37 @@ def create_learning_pipeline_router(*, ctx: Any = None) -> APIRouter:
         )
 
         _refresh_totals(stages)
+
+        # Sub-stage counts for slang candidate
+        candidate_sub: dict[str, int] = {"unscanned": 0, "ai_rejected": 0, "ai_kept": 0, "all": 0}
+        slang_db = _db_path("slang_store", "slang.db")
+        if slang_db.exists():
+            try:
+                async with aiosqlite.connect(slang_db) as sdb:
+                    g_sql, g_params = _group_filter("group_id", group_id)
+                    for key in ("all", "unscanned", "ai_rejected", "ai_kept"):
+                        where = _slang_stage_where("candidate", key)
+                        cur = await sdb.execute(
+                            f"SELECT COUNT(*) FROM slang_terms WHERE {where} {g_sql}",
+                            tuple(g_params),
+                        )
+                        row = await cur.fetchone()
+                        candidate_sub[key] = int(row[0]) if row else 0
+            except Exception:
+                pass
+
         return {
             "as_of": datetime.now(TZ_SHANGHAI).isoformat(timespec="seconds"),
             "stages": stages,
+            "candidate_sub": candidate_sub,
             "warnings": warnings,
         }
 
     @router.get("/learning/items")
     async def learning_items(
         stage: str = Query("candidate", pattern="^(candidate|review|approved|hits|archived)$"),
-        noun: str = Query("all", pattern="^(all|slang|style|episode|memory|fact|graph_relation)$"),
+        sub_stage: str = Query("all", pattern="^(all|unscanned|ai_rejected|ai_kept)$"),
+        noun: str = Query("all"),
         group: str = Query(""),
         date: str = Query("all", pattern="^(today|7d|30d|all)$"),
         sort: str = Query("newest", pattern="^(newest|confidence|group)$"),
@@ -132,6 +216,7 @@ def create_learning_pipeline_router(*, ctx: Any = None) -> APIRouter:
                 _db_path("slang_store", "slang.db"),
                 items=items,
                 stage=stage,
+                sub_stage=sub_stage,
                 group_id=group_id,
                 date=date,
                 sort=sort,
@@ -190,12 +275,23 @@ def create_learning_pipeline_router(*, ctx: Any = None) -> APIRouter:
             )
 
         _sort_items(items, sort=sort)
+        date_counts: dict[str, int] = {}
+        await _count_items_by_date(
+            date_counts,
+            stage=stage,
+            sub_stage=sub_stage,
+            selected_nouns=selected_nouns,
+            group_id=group_id,
+            date=date,
+            db_path_fn=_db_path,
+        )
         page_items = items[offset:offset + limit]
         has_more = len(items) > offset + limit
         return {
             "items": page_items,
             "next_cursor": _encode_cursor(offset + limit) if has_more else "",
             "has_more": has_more,
+            "date_counts": date_counts,
             "warnings": warnings,
         }
 
@@ -216,6 +312,263 @@ def create_learning_pipeline_router(*, ctx: Any = None) -> APIRouter:
     async def learning_extract_all_status(run_id: str) -> dict[str, Any]:
         return _extract_run_status(run_id)
 
+    @router.get("/learning/settings")
+    async def learning_settings_get() -> dict[str, Any]:
+        slang_settings: dict[str, Any] = {}
+        slang_store = getattr(ctx, "slang_store", None) if ctx else None
+        if slang_store and hasattr(slang_store, "load_settings"):
+            try:
+                s = await slang_store.load_settings()
+                slang_settings = s.model_dump() if hasattr(s, "model_dump") else {}
+            except Exception:
+                pass
+        pipeline_settings = _load_pipeline_settings(_storage_dir())
+        return {
+            "autopilot": pipeline_settings.get("autopilot", {"enabled": False, "aggressiveness": "standard"}),
+            "slang": slang_settings,
+            "style": pipeline_settings.get("style", {"extract_enabled": True, "extract_interval_minutes": 120}),
+            "consolidator": pipeline_settings.get("consolidator", {"auto_enabled": False, "interval_minutes": 360}),
+            "affection": pipeline_settings.get("affection", {"scoring_enabled": True}),
+        }
+
+    @router.post("/learning/settings")
+    async def learning_settings_save(request: Request) -> dict[str, Any]:
+        body = await _read_json(request)
+        slang_payload = body.get("slang")
+        if slang_payload and isinstance(slang_payload, dict):
+            slang_store = getattr(ctx, "slang_store", None) if ctx else None
+            if slang_store and hasattr(slang_store, "load_settings"):
+                try:
+                    from services.slang.store import SlangSettings
+                    current = (await slang_store.load_settings()).model_dump()
+                    current.update(slang_payload)
+                    await slang_store.save_settings(SlangSettings.model_validate(current))
+                except Exception as exc:
+                    return {"ok": False, "error": f"slang settings: {exc}"}
+        pipeline_patch: dict[str, Any] = {}
+        for key in ("autopilot", "style", "consolidator", "affection"):
+            if key in body and isinstance(body[key], dict):
+                pipeline_patch[key] = body[key]
+        if pipeline_patch:
+            _save_pipeline_settings(_storage_dir(), pipeline_patch)
+        return {"ok": True}
+
+    @router.get("/learning/schedules")
+    async def learning_schedules() -> dict[str, Any]:
+        """Return last-run / status for each periodic learning task."""
+        pipeline_settings = _load_pipeline_settings(_storage_dir())
+        style_cfg = pipeline_settings.get("style", {})
+        consolidator_cfg = pipeline_settings.get("consolidator", {})
+        affection_cfg = pipeline_settings.get("affection", {})
+
+        slang_last_run: str | None = None
+        slang_store = getattr(ctx, "slang_store", None) if ctx else None
+        if slang_store and hasattr(slang_store, "get_last_extract_run_time"):
+            try:
+                dt = await slang_store.get_last_extract_run_time()
+                slang_last_run = dt.isoformat() if dt else None
+            except Exception:
+                pass
+
+        return {
+            "slang_extract": {
+                "enabled": True,
+                "last_run": slang_last_run,
+                "status": "idle",
+            },
+            "style_extract": {
+                "enabled": style_cfg.get("extract_enabled", True),
+                "interval_minutes": style_cfg.get("extract_interval_minutes", 120),
+                "status": "idle" if style_cfg.get("extract_enabled", True) else "disabled",
+            },
+            "consolidator": {
+                "enabled": consolidator_cfg.get("auto_enabled", False),
+                "interval_minutes": consolidator_cfg.get("interval_minutes", 360),
+                "status": "idle" if consolidator_cfg.get("auto_enabled", False) else "disabled",
+            },
+            "affection_scoring": {
+                "enabled": affection_cfg.get("scoring_enabled", True),
+                "status": "active" if affection_cfg.get("scoring_enabled", True) else "disabled",
+            },
+        }
+
+    @router.get("/learning/stats/trend")
+    async def learning_stats_trend(
+        days: int = Query(7, ge=1, le=30),
+    ) -> dict[str, Any]:
+        """Return daily new-item counts for the last N days."""
+        now = datetime.now(TZ_SHANGHAI)
+        day_counts: dict[str, dict[str, int]] = {}
+        for i in range(days):
+            d = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+            day_counts[d] = {"candidate": 0, "approved": 0, "hits": 0}
+
+        slang_db = _db_path("slang_store", "slang.db")
+        if slang_db.exists():
+            try:
+                async with aiosqlite.connect(str(slang_db)) as db:
+                    db.row_factory = aiosqlite.Row
+                    if await _table_exists(db, "slang_terms"):
+                        cutoff = (now - timedelta(days=days)).isoformat()
+                        async with db.execute(
+                            "SELECT status, created_at FROM slang_terms WHERE created_at >= ?",
+                            (cutoff,),
+                        ) as cur:
+                            async for row in cur:
+                                ts = str(row["created_at"] or "")[:10]
+                                status = row["status"] or "candidate"
+                                if ts in day_counts:
+                                    bucket = "hits" if status == "hits" else (
+                                        "approved" if status == "approved" else "candidate"
+                                    )
+                                    day_counts[ts][bucket] += 1
+            except Exception:
+                pass
+
+        points = [
+            {"date": d, **day_counts[d]}
+            for d in sorted(day_counts.keys())
+        ]
+        return {"points": points}
+
+    @router.get("/learning/activity")
+    async def learning_activity(
+        limit: int = Query(20, ge=1, le=100),
+    ) -> dict[str, Any]:
+        """Return recent pipeline activity events from all noun stores."""
+        events: list[dict[str, str]] = []
+        status_labels = {
+            "candidate": "候选",
+            "review": "待审",
+            "approved": "已生效",
+            "hits": "命中",
+            "archived": "归档",
+        }
+
+        slang_db = _db_path("slang_store", "slang.db")
+        if slang_db.exists():
+            try:
+                async with aiosqlite.connect(str(slang_db)) as db:
+                    db.row_factory = aiosqlite.Row
+                    if await _table_exists(db, "slang_terms"):
+                        async with db.execute(
+                            "SELECT term, status, created_at FROM slang_terms "
+                            "ORDER BY created_at DESC LIMIT ?",
+                            (limit,),
+                        ) as cur:
+                            async for row in cur:
+                                ts = str(row["created_at"] or "")
+                                term = row["term"] or ""
+                                status = row["status"] or "candidate"
+                                label = status_labels.get(status, status)
+                                events.append({
+                                    "time": ts,
+                                    "message": f'"{term}" → {label}',
+                                    "type": "extract",
+                                })
+            except Exception:
+                pass
+
+        style_db = _db_path("style_store", "style.db")
+        if style_db.exists():
+            try:
+                async with aiosqlite.connect(str(style_db)) as db:
+                    db.row_factory = aiosqlite.Row
+                    if await _table_exists(db, "style_expressions"):
+                        async with db.execute(
+                            "SELECT expression, status, created_at FROM style_expressions "
+                            "ORDER BY created_at DESC LIMIT ?",
+                            (limit // 2,),
+                        ) as cur:
+                            async for row in cur:
+                                ts = str(row["created_at"] or "")
+                                expr = row["expression"] or ""
+                                status = row["status"] or "candidate"
+                                label = status_labels.get(status, status)
+                                events.append({
+                                    "time": ts,
+                                    "message": f'表达 "{expr[:20]}" → {label}',
+                                    "type": "extract",
+                                })
+            except Exception:
+                pass
+
+        events.sort(key=lambda e: e.get("time", ""), reverse=True)
+        return {"events": events[:limit]}
+
+    # --- Autopilot endpoints ---
+
+    @router.get("/learning/autopilot/status")
+    async def autopilot_status() -> dict[str, Any]:
+        runner = _get_autopilot_runner(ctx)
+        if runner is None:
+            return {"ok": False, "error": "Autopilot not initialized"}
+        pipeline_settings = _load_pipeline_settings(_storage_dir())
+        ap = pipeline_settings.get("autopilot", {})
+        config = _autopilot_config(ap)
+        status = await runner.status_all(config)
+        return {
+            "ok": True,
+            "enabled": bool(ap.get("enabled", False)),
+            "aggressiveness": str(ap.get("aggressiveness", "standard")),
+            "domains": status,
+        }
+
+    @router.post("/learning/autopilot/run/{domain}")
+    async def autopilot_run_domain(domain: str) -> dict[str, Any]:
+        runner = _get_autopilot_runner(ctx)
+        if runner is None:
+            return {"ok": False, "error": "Autopilot not initialized"}
+        pipeline_settings = _load_pipeline_settings(_storage_dir())
+        ap = pipeline_settings.get("autopilot", {})
+        config = _autopilot_config(ap)
+        result = await runner.run_domain(domain, batch_size=15, config=config)
+        return {
+            "ok": result.ok,
+            "error": result.error,
+            "processed": result.processed_in_batch,
+            "approved": result.approved_in_batch,
+            "rejected": result.rejected_in_batch,
+            "kept": result.kept_in_batch,
+            "remaining": result.remaining,
+            "completed": result.completed,
+        }
+
+    @router.post("/learning/autopilot/run-all")
+    async def autopilot_run_all() -> dict[str, Any]:
+        runner = _get_autopilot_runner(ctx)
+        if runner is None:
+            return {"ok": False, "error": "Autopilot not initialized"}
+        pipeline_settings = _load_pipeline_settings(_storage_dir())
+        ap = pipeline_settings.get("autopilot", {})
+        config = _autopilot_config(ap)
+        results = await runner.run_all(batch_size=50, config=config)
+        return {
+            "ok": True,
+            "results": {
+                domain: {
+                    "ok": r.ok,
+                    "processed": r.processed_in_batch,
+                    "approved": r.approved_in_batch,
+                    "rejected": r.rejected_in_batch,
+                    "remaining": r.remaining,
+                    "completed": r.completed,
+                }
+                for domain, r in results.items()
+            },
+        }
+
+    @router.post("/learning/autopilot/reset/{domain}")
+    async def autopilot_reset_domain(domain: str) -> dict[str, Any]:
+        runner = _get_autopilot_runner(ctx)
+        if runner is None:
+            return {"ok": False, "error": "Autopilot not initialized"}
+        reviewer = runner.get_reviewer(domain)
+        if reviewer is None:
+            return {"ok": False, "error": f"Unknown domain: {domain}"}
+        await reviewer.reset_state()
+        return {"ok": True}
+
     return router
 
 
@@ -225,6 +578,27 @@ async def _read_json(request: Request) -> dict[str, Any]:
         return body if isinstance(body, dict) else {}
     except Exception:
         return {}
+
+
+def _load_pipeline_settings(storage_dir: Path) -> dict[str, Any]:
+    return _ls.load(storage_dir)
+
+
+def _save_pipeline_settings(storage_dir: Path, patch: dict[str, Any]) -> None:
+    path = storage_dir / _ls._FILENAME
+    current = _load_pipeline_settings(storage_dir)
+    for key, value in patch.items():
+        if isinstance(value, dict):
+            existing = current.get(key, {})
+            if isinstance(existing, dict):
+                existing.update(value)
+                current[key] = existing
+            else:
+                current[key] = value
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _int_body(body: dict[str, Any], key: str, *, default: int, lo: int, hi: int) -> int:
@@ -731,7 +1105,8 @@ async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
 def _selected_nouns(noun: str) -> tuple[str, ...]:
     if noun == "all":
         return NOUNS
-    return (noun,)
+    parts = tuple(n.strip() for n in noun.split(",") if n.strip() in NOUNS)
+    return parts or NOUNS
 
 
 def _encode_cursor(offset: int) -> str:
@@ -828,6 +1203,7 @@ def _item(
     deep_link: str,
     review_drawer: str | None,
     source: str = "",
+    tags: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": item_id,
@@ -843,6 +1219,7 @@ def _item(
         "deep_link": deep_link,
         "review_drawer": review_drawer,
         "source": source,
+        "tags": tags or [],
     }
 
 
@@ -863,9 +1240,11 @@ async def _collect_slang_counts(
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             group_sql, group_params = _group_filter("group_id", group_id)
-            ai_reviewed = "json_extract(meta_json, '$.ai_review.status') IS NOT NULL"
+            ai_reviewed = (
+                "(json_extract(meta_json, '$.ai_review.status') IS NOT NULL"
+                " OR json_extract(meta_json, '$.ai_reviewed_at') IS NOT NULL)"
+            )
             human_reviewed = "json_extract(meta_json, '$.human_review.status') IS NOT NULL"
-            ai_kept = "json_extract(meta_json, '$.ai_review.decision') = 'keep'"
 
             _set_count(
                 stages,
@@ -874,7 +1253,7 @@ async def _collect_slang_counts(
                 await _count_one(
                     db,
                     f"""SELECT COUNT(*) AS cnt FROM slang_terms
-                        WHERE status = 'candidate' AND NOT ({ai_reviewed} AND {ai_kept})
+                        WHERE status = 'candidate'
                         {group_sql}""",
                     group_params,
                 ),
@@ -886,7 +1265,7 @@ async def _collect_slang_counts(
                 await _count_one(
                     db,
                     f"""SELECT COUNT(*) AS cnt FROM slang_terms
-                        WHERE status = 'approved' AND {ai_reviewed} AND NOT {human_reviewed}
+                        WHERE status = 'approved' AND {ai_reviewed} AND NOT ({human_reviewed})
                         {group_sql}""",
                     group_params,
                 ),
@@ -897,7 +1276,9 @@ async def _collect_slang_counts(
                 "slang",
                 await _count_one(
                     db,
-                    f"SELECT COUNT(*) AS cnt FROM slang_terms WHERE status = 'approved' {group_sql}",
+                    f"""SELECT COUNT(*) AS cnt FROM slang_terms
+                        WHERE status = 'approved' AND NOT ({ai_reviewed} AND NOT ({human_reviewed}))
+                        {group_sql}""",
                     group_params,
                 ),
             )
@@ -1134,10 +1515,15 @@ async def _collect_consolidator_counts(
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             group_sql, group_params = _group_filter("group_id", group_id)
+            # Only fact / graph_relation are surfaced from the consolidator
+            # here — slang / style / episode candidates are promoted into
+            # their dedicated stores and counted by their own collectors,
+            # so folding the consolidator's pre-promotion rows on top would
+            # double-count them.
             cursor = await db.execute(
                 f"""SELECT domain, state, COUNT(*) AS cnt
                     FROM consolidator_candidates
-                    WHERE domain IN ('fact', 'slang', 'style', 'episode', 'graph_relation')
+                    WHERE domain IN ('fact', 'graph_relation')
                     {group_sql}
                     GROUP BY domain, state""",
                 group_params,
@@ -1157,11 +1543,143 @@ async def _collect_consolidator_counts(
         _warn(warnings, "consolidator", exc)
 
 
+async def _count_items_by_date(
+    counts: dict[str, int],
+    *,
+    stage: str,
+    sub_stage: str = "all",
+    selected_nouns: tuple[str, ...],
+    group_id: str,
+    date: str,
+    db_path_fn: Any,
+) -> None:
+    if "slang" in selected_nouns:
+        db_path = db_path_fn("slang_store", "slang.db")
+        if db_path.exists():
+            try:
+                async with aiosqlite.connect(db_path) as db:
+                    if stage == "hits":
+                        group_sql = " AND o.group_id = ?" if group_id else ""
+                        group_params: tuple[Any, ...] = (group_id,) if group_id else ()
+                        cur = await db.execute(
+                            f"""SELECT substr(MAX(o.observed_at), 1, 10) AS d, COUNT(DISTINCT t.term_id) AS cnt
+                                FROM slang_observations o
+                                JOIN slang_terms t ON t.term_id = o.term_id
+                                WHERE o.observed_at LIKE ? AND t.status = 'approved'
+                                {group_sql}
+                                GROUP BY substr(o.observed_at, 1, 10)""",
+                            (f"{_today_prefix()}%", *group_params),
+                        )
+                        for row in await cur.fetchall():
+                            d = str(row[0] or "")
+                            if d:
+                                counts[d] = counts.get(d, 0) + int(row[1])
+                    else:
+                        where = _slang_stage_where(stage, sub_stage)
+                        if where:
+                            group_sql, group_params = _group_filter("group_id", group_id)
+                            date_sql, date_params = _date_filter("created_at", date)
+                            cur = await db.execute(
+                                f"""SELECT substr(created_at, 1, 10) AS d, COUNT(*) AS cnt
+                                    FROM slang_terms
+                                    WHERE {where} {group_sql} {date_sql}
+                                    GROUP BY d""",
+                                (*group_params, *date_params),
+                            )
+                            for row in await cur.fetchall():
+                                d = str(row[0] or "")
+                                if d:
+                                    counts[d] = counts.get(d, 0) + int(row[1])
+            except Exception:
+                pass
+    if "style" in selected_nouns:
+        db_path = db_path_fn("style_store", "style.db")
+        if db_path.exists():
+            try:
+                async with aiosqlite.connect(db_path) as db:
+                    if stage == "hits":
+                        group_sql = " AND o.group_id = ?" if group_id else ""
+                        group_params = (group_id,) if group_id else ()
+                        cur = await db.execute(
+                            f"""SELECT substr(MAX(o.observed_at), 1, 10) AS d, COUNT(DISTINCT e.expression_id) AS cnt
+                                FROM style_observations o
+                                JOIN style_expressions e ON e.expression_id = o.expression_id
+                                WHERE o.observed_at LIKE ? AND e.status = 'approved'
+                                {group_sql}
+                                GROUP BY substr(o.observed_at, 1, 10)""",
+                            (f"{_today_prefix()}%", *group_params),
+                        )
+                        for row in await cur.fetchall():
+                            d = str(row[0] or "")
+                            if d:
+                                counts[d] = counts.get(d, 0) + int(row[1])
+                    else:
+                        statuses = _style_statuses_for_stage(stage)
+                        if statuses:
+                            ph = ",".join("?" * len(statuses))
+                            group_sql, group_params = _group_filter("group_id", group_id)
+                            date_sql, date_params = _date_filter("created_at", date)
+                            cur = await db.execute(
+                                f"""SELECT substr(created_at, 1, 10) AS d, COUNT(*) AS cnt
+                                    FROM style_expressions
+                                    WHERE status IN ({ph}) {group_sql} {date_sql}
+                                    GROUP BY d""",
+                                (*statuses, *group_params, *date_params),
+                            )
+                            for row in await cur.fetchall():
+                                d = str(row[0] or "")
+                                if d:
+                                    counts[d] = counts.get(d, 0) + int(row[1])
+            except Exception:
+                pass
+    if "episode" in selected_nouns:
+        db_path = db_path_fn("episode_store", "episodic.db")
+        if db_path.exists():
+            try:
+                async with aiosqlite.connect(db_path) as db:
+                    if stage == "hits":
+                        group_sql = " AND o.group_id = ?" if group_id else ""
+                        group_params = (group_id,) if group_id else ()
+                        cur = await db.execute(
+                            f"""SELECT substr(MAX(o.observed_at), 1, 10) AS d, COUNT(DISTINCT e.episode_id) AS cnt
+                                FROM episode_observations o
+                                JOIN episodes e ON e.episode_id = o.episode_id
+                                WHERE o.observed_at LIKE ? AND e.episode_state = 'enabled_for_prompt'
+                                {group_sql}
+                                GROUP BY substr(o.observed_at, 1, 10)""",
+                            (f"{_today_prefix()}%", *group_params),
+                        )
+                        for row in await cur.fetchall():
+                            d = str(row[0] or "")
+                            if d:
+                                counts[d] = counts.get(d, 0) + int(row[1])
+                    else:
+                        states = _episode_states_for_stage(stage)
+                        if states:
+                            ph = ",".join("?" * len(states))
+                            group_sql, group_params = _group_filter("group_id", group_id)
+                            date_sql, date_params = _date_filter("created_at", date)
+                            cur = await db.execute(
+                                f"""SELECT substr(created_at, 1, 10) AS d, COUNT(*) AS cnt
+                                    FROM episodes
+                                    WHERE state IN ({ph}) {group_sql} {date_sql}
+                                    GROUP BY d""",
+                                (*states, *group_params, *date_params),
+                            )
+                            for row in await cur.fetchall():
+                                d = str(row[0] or "")
+                                if d:
+                                    counts[d] = counts.get(d, 0) + int(row[1])
+            except Exception:
+                pass
+
+
 async def _collect_slang_items(
     db_path: Path,
     *,
     items: list[dict[str, Any]],
     stage: str,
+    sub_stage: str = "all",
     group_id: str,
     date: str,
     sort: str,
@@ -1176,14 +1694,14 @@ async def _collect_slang_items(
             if stage == "hits":
                 await _collect_slang_hit_items(db, items=items, group_id=group_id, sort=sort, limit=limit)
                 return
-            where = _slang_stage_where(stage)
+            where = _slang_stage_where(stage, sub_stage)
             if not where:
                 return
             group_sql, group_params = _group_filter("group_id", group_id)
             date_sql, date_params = _date_filter("created_at", date)
             cursor = await db.execute(
                 f"""SELECT term_id, term, meaning, group_id, confidence, status,
-                           created_at, updated_at
+                           created_at, updated_at, scope, repeat_policy, meta_json
                     FROM slang_terms
                     WHERE {where}
                     {group_sql}
@@ -1197,6 +1715,10 @@ async def _collect_slang_items(
                 term = str(d.get("term") or d.get("term_id") or "")
                 meaning = str(d.get("meaning") or "")
                 content_full = f"{term} = {meaning}" if meaning else term
+                ai_status = _derive_slang_ai_status(d.get("meta_json"), str(d.get("status") or ""))
+                tags = _slang_tags(d)
+                if ai_status:
+                    tags = [*tags, {"key": "ai_status", "value": ai_status, "label": _AI_STATUS_LABELS[ai_status]}]
                 items.append(_item(
                     item_id=f"slang-{d.get('term_id')}",
                     noun="slang",
@@ -1210,6 +1732,7 @@ async def _collect_slang_items(
                     deep_link=f"/slang?id={d.get('term_id')}",
                     review_drawer="slang",
                     source="slang",
+                    tags=tags,
                 ))
     except Exception as exc:
         _warn(warnings, "slang", exc)
@@ -1289,7 +1812,8 @@ async def _collect_style_items(
             date_sql, date_params = _date_filter("created_at", date)
             cursor = await db.execute(
                 f"""SELECT expression_id, situation, style, group_id, confidence,
-                           status, created_at, updated_at
+                           status, created_at, updated_at, scope, output_policy,
+                           risk_tags_json, meta_json
                     FROM style_expressions
                     WHERE status IN ({placeholders})
                     {group_sql}
@@ -1337,6 +1861,10 @@ def _style_item(d: dict[str, Any], *, stage: str) -> dict[str, Any]:
     hit_count = int(d.get("hit_count") or 0)
     if hit_count:
         full = f"{full} · 今日 {hit_count} 次"
+    tags = _style_tags(d)
+    ai_status = _derive_ai_status_from_meta(d.get("meta_json"))
+    if ai_status:
+        tags = [*tags, {"key": "ai_status", "value": ai_status, "label": _AI_STATUS_LABELS[ai_status]}]
     return _item(
         item_id=f"style-{d.get('expression_id')}",
         noun="style",
@@ -1350,6 +1878,7 @@ def _style_item(d: dict[str, Any], *, stage: str) -> dict[str, Any]:
         deep_link=f"/style?id={d.get('expression_id')}",
         review_drawer="style",
         source="style_observation" if stage == "hits" else "style",
+        tags=tags,
     )
 
 
@@ -1381,7 +1910,7 @@ async def _collect_episode_items(
             date_sql, date_params = _date_filter("created_at", date)
             cursor = await db.execute(
                 f"""SELECT episode_id, group_id, situation, reflection, confidence,
-                           episode_state, created_at, updated_at
+                           episode_state, created_at, updated_at, scope, meta_json
                     FROM episodes
                     WHERE episode_state IN ({placeholders})
                     {group_sql}
@@ -1430,6 +1959,10 @@ def _episode_item(d: dict[str, Any], *, stage: str) -> dict[str, Any]:
     hit_count = int(d.get("hit_count") or 0)
     if hit_count:
         full = f"{full} · 今日 {hit_count} 次"
+    tags = _episode_tags(d)
+    ai_status = _derive_ai_status_from_meta(d.get("meta_json"))
+    if ai_status:
+        tags = [*tags, {"key": "ai_status", "value": ai_status, "label": _AI_STATUS_LABELS[ai_status]}]
     return _item(
         item_id=f"episode-{d.get('episode_id')}",
         noun="episode",
@@ -1443,6 +1976,7 @@ def _episode_item(d: dict[str, Any], *, stage: str) -> dict[str, Any]:
         deep_link=f"/episodes?id={d.get('episode_id')}",
         review_drawer="episode",
         source="episode_observation" if stage == "hits" else "episode",
+        tags=tags,
     )
 
 
@@ -1496,6 +2030,7 @@ async def _collect_memory_items(
                     deep_link=f"/memory?view=manage&card_id={quote(card_id, safe='')}",
                     review_drawer=None,
                     source="memory",
+                    tags=_memory_tags(d),
                 ))
     except Exception as exc:
         _warn(warnings, "memory", exc)
@@ -1562,16 +2097,82 @@ async def _collect_consolidator_items(
         _warn(warnings, "consolidator", exc)
 
 
-def _slang_stage_where(stage: str) -> str:
-    ai_reviewed = "json_extract(meta_json, '$.ai_review.status') IS NOT NULL"
+_AI_STATUS_LABELS = {
+    "unscanned": "未扫描",
+    "ai_kept": "观察中",
+    "ai_approved": "AI 通过",
+    "ai_rejected": "AI 否决",
+}
+
+
+def _derive_slang_ai_status(meta_json_raw: Any, status: str) -> str:
+    if not meta_json_raw:
+        return "unscanned"
+    try:
+        meta = json.loads(meta_json_raw) if isinstance(meta_json_raw, str) else dict(meta_json_raw)
+    except Exception:
+        return "unscanned"
+    ai_review = meta.get("ai_review") or {}
+    decision = str(ai_review.get("decision") or meta.get("ai_review_decision") or "").lower()
+    reviewed_at = ai_review.get("status") or ai_review.get("reviewed_at") or meta.get("ai_reviewed_at")
+    if not reviewed_at and not decision:
+        if meta.get("ai_approved") is True or meta.get("ai_review_decision") == "approved":
+            return "ai_approved"
+        return "unscanned"
+    if decision == "rejected":
+        return "ai_rejected"
+    if decision in ("kept", "keep"):
+        return "ai_kept"
+    if decision == "approved":
+        return "ai_approved"
+    return "unscanned"
+
+
+def _derive_ai_status_from_meta(meta_json_raw: Any) -> str:
+    """Generic ai_status derivation for non-slang nouns."""
+    if not meta_json_raw:
+        return "unscanned"
+    try:
+        meta = json.loads(meta_json_raw) if isinstance(meta_json_raw, str) else dict(meta_json_raw)
+    except Exception:
+        return "unscanned"
+    decision = str(meta.get("ai_review_decision") or "").lower()
+    if not decision:
+        ai_review = meta.get("ai_review") or {}
+        decision = str(ai_review.get("decision") or "").lower()
+    if decision == "approved":
+        return "ai_approved"
+    if decision == "rejected":
+        return "ai_rejected"
+    if decision in ("kept", "keep"):
+        return "ai_kept"
+    if meta.get("ai_reviewed_at"):
+        return "ai_kept"
+    return "unscanned"
+
+
+def _slang_stage_where(stage: str, sub_stage: str = "all") -> str:
+    ai_reviewed = (
+        "(json_extract(meta_json, '$.ai_review.status') IS NOT NULL"
+        " OR json_extract(meta_json, '$.ai_reviewed_at') IS NOT NULL)"
+    )
     human_reviewed = "json_extract(meta_json, '$.human_review.status') IS NOT NULL"
-    ai_kept = "json_extract(meta_json, '$.ai_review.decision') = 'keep'"
+    ai_kept = (
+        "(json_extract(meta_json, '$.ai_review.decision') = 'keep'"
+        " OR json_extract(meta_json, '$.ai_review_decision') = 'kept')"
+    )
     if stage == "candidate":
-        return f"status = 'candidate' AND NOT ({ai_reviewed} AND {ai_kept})"
+        if sub_stage == "unscanned":
+            return f"status = 'candidate' AND NOT ({ai_reviewed})"
+        if sub_stage == "ai_rejected":
+            return f"status = 'candidate' AND {ai_reviewed} AND NOT {ai_kept}"
+        if sub_stage == "ai_kept":
+            return f"status = 'candidate' AND {ai_reviewed} AND {ai_kept}"
+        return "status = 'candidate'"
     if stage == "review":
-        return f"status = 'approved' AND {ai_reviewed} AND NOT {human_reviewed}"
+        return f"status = 'approved' AND {ai_reviewed} AND NOT ({human_reviewed})"
     if stage == "approved":
-        return "status = 'approved'"
+        return f"status = 'approved' AND NOT ({ai_reviewed} AND NOT ({human_reviewed}))"
     if stage == "archived":
         return "status IN ('muted', 'expired')"
     return ""
@@ -1678,3 +2279,76 @@ def _group_filter(column: str, group_id: str) -> tuple[str, tuple[Any, ...]]:
     if not group_id:
         return "", ()
     return f" AND {column} = ?", (group_id,)
+
+
+_SCOPE_LABELS: dict[str, str] = {"group": "群级", "global": "全局", "user": "用户级"}
+_REPEAT_POLICY_LABELS: dict[str, str] = {
+    "understand_only": "仅理解",
+    "rewrite": "可改写",
+    "use": "可使用",
+}
+_OUTPUT_POLICY_LABELS: dict[str, str] = {
+    "use": "可使用",
+    "transform": "需转化",
+    "observe": "仅观察",
+}
+_CATEGORY_LABELS: dict[str, str] = {
+    "preference": "偏好",
+    "boundary": "边界",
+    "event": "事件",
+    "commitment": "承诺",
+    "fact": "事实",
+    "habit": "习惯",
+    "relationship": "关系",
+}
+
+
+def _slang_tags(d: dict[str, Any]) -> list[dict[str, str]]:
+    tags: list[dict[str, str]] = []
+    scope = str(d.get("scope") or "group")
+    if scope in _SCOPE_LABELS:
+        tags.append({"key": "scope", "value": scope, "label": _SCOPE_LABELS[scope]})
+    policy = str(d.get("repeat_policy") or "")
+    if policy in _REPEAT_POLICY_LABELS:
+        tags.append({"key": "repeat_policy", "value": policy, "label": _REPEAT_POLICY_LABELS[policy]})
+    return tags
+
+
+def _style_tags(d: dict[str, Any]) -> list[dict[str, str]]:
+    tags: list[dict[str, str]] = []
+    scope = str(d.get("scope") or "group")
+    if scope in _SCOPE_LABELS:
+        tags.append({"key": "scope", "value": scope, "label": _SCOPE_LABELS[scope]})
+    policy = str(d.get("output_policy") or "")
+    if policy in _OUTPUT_POLICY_LABELS:
+        tags.append({"key": "output_policy", "value": policy, "label": _OUTPUT_POLICY_LABELS[policy]})
+    risk_raw = d.get("risk_tags_json") or "[]"
+    try:
+        risk_tags = json.loads(risk_raw) if isinstance(risk_raw, str) else risk_raw
+    except (json.JSONDecodeError, TypeError):
+        risk_tags = []
+    if isinstance(risk_tags, list):
+        for tag in risk_tags[:3]:
+            if tag:
+                tags.append({"key": "risk", "value": str(tag), "label": str(tag)})
+    return tags
+
+
+def _episode_tags(d: dict[str, Any]) -> list[dict[str, str]]:
+    tags: list[dict[str, str]] = []
+    scope = str(d.get("scope") or "group")
+    if scope in _SCOPE_LABELS:
+        tags.append({"key": "scope", "value": scope, "label": _SCOPE_LABELS[scope]})
+    return tags
+
+
+def _memory_tags(d: dict[str, Any]) -> list[dict[str, str]]:
+    tags: list[dict[str, str]] = []
+    scope = str(d.get("scope") or "")
+    if scope in _SCOPE_LABELS:
+        tags.append({"key": "scope", "value": scope, "label": _SCOPE_LABELS[scope]})
+    category = str(d.get("category") or "")
+    if category:
+        label = _CATEGORY_LABELS.get(category, category)
+        tags.append({"key": "category", "value": category, "label": label})
+    return tags

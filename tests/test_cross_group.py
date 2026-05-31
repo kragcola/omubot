@@ -93,8 +93,10 @@ class TestReadPath:
     def test_cross_group_where_sql(self):
         sql = cross_group_where()
         assert "cross_group_visible = 1" in sql
+        assert "cross_group_visible = 2" in sql
         assert "scope = 'global'" in sql
         assert "group_id = ?" in sql
+        assert "cross_group_enabled_for_groups" in sql
 
     async def test_get_injectable_terms_sees_cross_group(self, slang_store: SlangStore):
         term = await slang_store.create_term(
@@ -120,6 +122,29 @@ class TestReadPath:
             group_id="group_b", conversation_text="localonly", max_terms=10,
         )
         assert not any(t.term_id == term.term_id for t in results)
+
+    async def test_get_injectable_terms_respects_opt_in_groups(self, slang_store: SlangStore):
+        term = await slang_store.create_term(
+            term="inviteonly", meaning="explicitly shared",
+            group_id="group_a", scope="group", source="test",
+        )
+        await slang_store.set_status(term.term_id, "approved", actor="test")
+        await slang_store.set_cross_group_visibility(
+            term.term_id,
+            visibility="opt_in",
+            actor="admin",
+            enabled_for_groups=["group_c"],
+        )
+
+        group_b = await slang_store.get_injectable_terms(
+            group_id="group_b", conversation_text="inviteonly", max_terms=10,
+        )
+        group_c = await slang_store.get_injectable_terms(
+            group_id="group_c", conversation_text="inviteonly", max_terms=10,
+        )
+
+        assert not any(t.term_id == term.term_id for t in group_b)
+        assert any(t.term_id == term.term_id for t in group_c)
 
 
 class TestWriteGuard:
@@ -278,6 +303,7 @@ class TestReasonAndGroups:
         cluster = await normalizer_store.get_cluster(cluster_id)
         assert cluster is not None
         assert cluster.cross_group_visible is True
+        assert cluster.cross_group_visibility == "opt_out"
         assert cluster.cross_group_enabled_by == "admin"
         assert cluster.cross_group_enabled_reason == "normalizer reason"
         assert "g2" in cluster.cross_group_enabled_for_groups
@@ -312,6 +338,7 @@ class TestReasonAndGroups:
         assert ok is True
         updated = await kg_store.get_fact(fact.fact_id)
         assert updated.cross_group_visible is True
+        assert updated.cross_group_visibility == "opt_out"
         assert updated.cross_group_enabled_reason == "graph reason"
         assert "g7" in updated.cross_group_enabled_for_groups
 
@@ -328,6 +355,7 @@ class TestReasonAndGroups:
         assert ok is True
         updated = await kg_store.get_candidate(candidate.candidate_id)
         assert updated.cross_group_visible is True
+        assert updated.cross_group_visibility == "opt_out"
         assert updated.cross_group_enabled_reason == "candidate reason"
         assert set(updated.cross_group_enabled_for_groups) == {"g8", "g9"}
 
@@ -340,6 +368,7 @@ class TestReasonAndGroups:
         assert ok is True
         updated = await episode_store.get_episode(ep.episode_id)
         assert updated.cross_group_visible is True
+        assert updated.cross_group_visibility == "opt_out"
         assert updated.cross_group_enabled_by == "admin"
         assert updated.cross_group_enabled_reason == "episode reason"
         assert "g3" in updated.cross_group_enabled_for_groups

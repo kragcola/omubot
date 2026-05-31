@@ -205,12 +205,41 @@ class PluginContext:
     plugin_config_store: Any = None
     bot: Any = None  # 当前连接的 OneBot bot；断线时置空，供 admin/API 做运行期查询
     group_inventory: dict[str, dict[str, Any]] = field(default_factory=dict)  # 未经过群策略过滤的在线群清单
+    bot_start_time: float = 0.0
+    startup_triggered: bool = False
+    bot_nicknames: list[str] = field(default_factory=list)
+    allowed_groups: set[int] = field(default_factory=set)
+    admins: dict[str, str] = field(default_factory=dict)
+    allowed_private_users: set[int] = field(default_factory=set)
     slang_store: Any = None
     slang_plugin: Any = None
+    command_dispatcher: Any = None
+    vision_client: Any = None
+    vision_enabled: bool = False
+    max_images_per_message: int = 0
+    desc_cache: dict[str, str] = field(default_factory=dict)
+    memory_relation_signals: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     protocol_trace: Any = None
     protocol_connections: Any = None
     runtime_errors: Any = None
     backup_scheduler: Any = None
+    mood_engine: Any = None
+    affection_engine: Any = None
+    schedule_store: Any = None
+    schedule_gen: Any = None
+    schedule_enabled: bool = False
+    affection_store: Any = None
+    affection_enabled: bool = False
+    catchphrase_normalizer: Any = None
+    dream: Any = None
+    dream_enabled: bool = False
+    humanization_health_guard: Any = None
+    name_registry: Any = None
+    block_trace_store: Any = None
+    bot_pair_guard: Any = None
+    message_coalescer: Any = None
+    provider_bus: Any = None
+    scheduler_hawkes_refresher: Any = None
     memory_consolidator_store: Any = None
     memory_consolidator_normalizer: Any = None
     memory_consolidator: Any = None
@@ -237,7 +266,7 @@ class TriggerContext:
 
     reason: str = ""  # 人类可读的触发原因，如 "有人@了你" / "视频分享:《xxx》"
     # "at_mention" | "video_always" | "video_dedicated" | "video_autonomous"
-    # | "probability" | "manual"
+    # | "directed_followup" | "correction" | "closing" | "probability" | "manual"
     mode: str = "probability"
     target_message_id: int | None = None  # 触发消息的 QQ message_id
     target_user_id: str = ""  # 触发消息的发送者
@@ -332,6 +361,7 @@ class ThinkerContext:
     topic_intent_label: str = "闲聊"
     elapsed_ms: float = 0.0
     retrieve_mode: str = "hybrid"  # "skip" / "doc" / "fact" / "hybrid"
+    instruction_signal: str = "none"  # "none" / "low" / "medium" / "high"
 
 
 # ============================================================================

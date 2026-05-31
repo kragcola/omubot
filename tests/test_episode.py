@@ -305,6 +305,24 @@ async def test_list_for_recall_respects_limit(store: EpisodeStore):
 
 
 @pytest.mark.asyncio
+async def test_list_for_recall_include_decayed_surfaces_disabled(store: EpisodeStore):
+    ep = await store.create_episode(
+        situation="老场景",
+        group_id="g1",
+        confidence=0.82,
+        outcome_signal="用户后来还是接话了",
+    )
+    await store.transition_state(ep.episode_id, new_state="candidate")
+    await store.transition_state(ep.episode_id, new_state="approved")
+    await store.transition_state(ep.episode_id, new_state="enabled_for_prompt")
+    await store.transition_state(ep.episode_id, new_state="disabled")
+
+    assert await store.list_for_recall(group_id="g1", limit=5) == []
+    recalled = await store.list_for_recall(group_id="g1", limit=5, include_decayed=True)
+    assert [item.episode_id for item in recalled] == [ep.episode_id]
+
+
+@pytest.mark.asyncio
 async def test_update_last_used_stamps_episode(store: EpisodeStore):
     ep_id = await _seed_enabled(store)
     before = await store.get_episode(ep_id)

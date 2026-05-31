@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from services.humanization import CLOCK_CURRENT_SLOT, THINKER_LAST_DECISION_SLOT
 from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.thinker import ThinkDecision, write_clock_state, write_thinker_decision_state
+from services.memory.card_store import CardStore
 from services.memory.short_term import ShortTermMemory
 from services.persona import IdentitySnapshot, PersonaRuntime
 from services.system_module import Scope
@@ -38,6 +40,10 @@ class _Bus:
 
     async def fire_on_thinker_decision(self, thinker_ctx) -> None:
         self.thinker_calls.append(thinker_ctx)
+
+
+class _FakeCardStore:
+    pass
 
 
 class _ProviderBus:
@@ -89,6 +95,7 @@ def test_write_thinker_decision_state_happy_path() -> None:
         topic_intent_label="技术讨论",
         retrieve_mode="doc",
         rewritten_query="omubot 部署方式",
+        unknown_terms=["op"],
         sticker=True,
         tone="认真",
         usage={"input_tokens": 10},
@@ -112,6 +119,7 @@ def test_write_thinker_decision_state_happy_path() -> None:
     assert snapshot.value["topic_intent_label"] == "技术讨论"
     assert snapshot.value["retrieve_mode"] == "doc"
     assert snapshot.value["rewritten_query"] == "omubot 部署方式"
+    assert snapshot.value["unknown_terms"] == ["op"]
     assert snapshot.value["sticker"] is True
 
 
@@ -182,8 +190,10 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook(
                 retrieve_mode="doc",
                 rewritten_query="omubot 怎么部署",
                 thought="查文档",
+                unknown_terms=["op"],
                 sticker=False,
                 tone="认真",
+                instruction_signal="none",
                 usage={"input_tokens": 10, "cache_read": 0, "cache_create": 0, "output_tokens": 2},
             )
             result = await client.chat(
@@ -197,8 +207,9 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook(
 
     assert result == "reply text"
     assert len(plugin_bus.thinker_calls) == 1
-    assert plugin_bus.thinker_calls[0].topic_intent_label == "技术讨论"
-    assert plugin_bus.thinker_calls[0].retrieve_mode == "doc"
+    thinker_ctx = plugin_bus.thinker_calls[0]
+    assert getattr(thinker_ctx, "topic_intent_label", "") == "技术讨论"
+    assert getattr(thinker_ctx, "retrieve_mode", "") == "doc"
     trace = runtime_state.snapshot_all_for_trace()
     thinker_values = [
         row["value"]
@@ -211,8 +222,10 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook(
         "topic_intent_label": "技术讨论",
         "retrieve_mode": "doc",
         "rewritten_query": "omubot 怎么部署",
+        "unknown_terms": ["op"],
         "sticker": False,
         "tone": "认真",
+        "instruction_signal": "none",
         "usage": {"input_tokens": 10, "cache_read": 0, "cache_create": 0, "output_tokens": 2},
     }]
     clock_rows = [
@@ -237,7 +250,7 @@ async def test_llm_client_passes_runtime_state_and_turn_id_to_providers(
     runtime_state = create_humanization_state_bus()
     provider_bus = _ProviderBus()
     client = await _client(persona_runtime, runtime_state=runtime_state, bus=_Bus())
-    client._card_store = object()
+    client._card_store = cast(CardStore, _FakeCardStore())
     client.set_provider_bus(provider_bus)
     try:
         with (
@@ -275,7 +288,7 @@ async def test_llm_client_passes_mood_fit_target_to_providers(
     provider_bus = _ProviderBus()
     mood = SimpleNamespace(label="兴奋", energy=1.0, valence=1.0, openness=1.0, tension=0.0)
     client = await _client(persona_runtime, bus=_Bus(), mood_getter=lambda **_: mood)
-    client._card_store = object()
+    client._card_store = cast(CardStore, _FakeCardStore())
     client.set_provider_bus(provider_bus)
     try:
         with (
@@ -364,7 +377,7 @@ async def test_llm_client_uses_thinker_provider_without_legacy_double_injection(
     )
     provider_bus = _ProviderBus(blocks=[block])
     client = await _client(persona_runtime, bus=_Bus(), thinker_provider_enabled=True)
-    client._card_store = object()
+    client._card_store = cast(CardStore, _FakeCardStore())
     client.set_provider_bus(provider_bus)
     try:
         with (
@@ -482,3 +495,166 @@ def test_thinker_runtime_state_isolates_multiple_groups() -> None:
     assert second is not None
     assert first.value["action"] == "reply"
     assert second.value["action"] == "wait"
+
+
+def _think_ns(**over):
+    base = dict(
+        action="reply",
+        topic_intent_label="闲聊",
+        retrieve_mode="hybrid",
+        rewritten_query="",
+        thought="接个梗活跃气氛",
+        unknown_terms=[],
+        sticker=False,
+        tone="日常",
+        instruction_signal="none",
+        light_kind="",
+        reply_necessity="low",
+        usage={"input_tokens": 10, "cache_read": 0, "cache_create": 0, "output_tokens": 2},
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+@pytest.mark.asyncio
+async def test_necessity_gate_downgrades_low_reply_to_silence(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """B3: low-necessity proactive reply (no trigger) is suppressed to silence."""
+    client = await _client(persona_runtime)
+    client._thinker_necessity_gate_enabled = True
+    client._thinker_necessity_gate_addressed_exempt = True
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT) as main_call,
+        ):
+            mock_think.return_value = _think_ns(reply_necessity="low")
+            result = await client.chat(
+                session_id="private_100",
+                user_id="100",
+                user_content="哈哈哈",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+    assert result is None  # downgraded reply->wait → silence
+    main_call.assert_not_called()  # main LLM never invoked
+
+
+@pytest.mark.asyncio
+async def test_necessity_gate_disabled_keeps_low_reply(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """Gate disabled (default) → low necessity still replies (== status quo)."""
+    client = await _client(persona_runtime)
+    client._thinker_necessity_gate_enabled = False
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = _think_ns(reply_necessity="low")
+            result = await client.chat(
+                session_id="private_100",
+                user_id="100",
+                user_content="哈哈哈",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+    assert result == "reply text"  # no gate → replies as before
+
+
+@pytest.mark.asyncio
+async def test_necessity_gate_high_necessity_replies(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """Gate on, but high necessity → not suppressed."""
+    client = await _client(persona_runtime)
+    client._thinker_necessity_gate_enabled = True
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = _think_ns(reply_necessity="high", thought="对方在求助")
+            result = await client.chat(
+                session_id="private_100",
+                user_id="100",
+                user_content="帮我看下这个报错",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+    assert result == "reply text"
+
+
+@pytest.mark.asyncio
+async def test_necessity_gate_exempts_ratified_role(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """C1: a low-necessity reply is NOT suppressed when the unified receiver
+    role (from the scheduler via ctx.extra) is 'ratified' — i.e. the user is
+    continuing an exchange the bot is part of. Regression for 'reply 后无反应':
+    necessity_gate must use the SAME 被寻址 definition as the scheduler, not its
+    own `trigger is None` guess."""
+    from services.tools.context import ToolContext
+
+    client = await _client(persona_runtime)
+    client._thinker_necessity_gate_enabled = True
+    client._thinker_necessity_gate_addressed_exempt = True
+    ctx = ToolContext(bot=None, user_id="100", group_id="993065015", session_id="group_993065015")
+    ctx.extra["receiver_role"] = "ratified"  # scheduler decided this is a continuation
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT) as main_call,
+        ):
+            mock_think.return_value = _think_ns(reply_necessity="low", thought="接梗打回去")
+            result = await client.chat(
+                session_id="group_993065015",
+                user_id="100",
+                user_content="",
+                identity=identity_snapshot,
+                group_id="993065015",
+                ctx=ctx,
+            )
+    finally:
+        await client.close()
+    # ratified → exempt → NOT downgraded → main LLM ran, reply produced.
+    assert result == "reply text"
+    main_call.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_necessity_gate_suppresses_overhearer_role(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """C1: low-necessity + role=overhearer (not part of the exchange) → still
+    suppressed. Confirms the role exemption is selective, not a blanket pass."""
+    from services.tools.context import ToolContext
+
+    client = await _client(persona_runtime)
+    client._thinker_necessity_gate_enabled = True
+    client._thinker_necessity_gate_addressed_exempt = True
+    ctx = ToolContext(bot=None, user_id="100", group_id="993065015", session_id="group_993065015")
+    ctx.extra["receiver_role"] = "overhearer"
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT) as main_call,
+        ):
+            mock_think.return_value = _think_ns(reply_necessity="low", thought="接梗")
+            result = await client.chat(
+                session_id="group_993065015",
+                user_id="100",
+                user_content="",
+                identity=identity_snapshot,
+                group_id="993065015",
+                ctx=ctx,
+            )
+    finally:
+        await client.close()
+    assert result is None  # overhearer + low → suppressed
+    main_call.assert_not_called()

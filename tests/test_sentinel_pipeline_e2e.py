@@ -40,6 +40,7 @@ async def _client(
     trace_store: BlockTraceStore,
     *,
     guardrail_enabled: bool,
+    overshare_enabled: bool = False,
 ) -> LLMClient:
     return LLMClient(
         base_url="http://fake",
@@ -60,6 +61,23 @@ async def _client(
             thinker_phrase_ngram=2,
             thinker_phrase_threshold=0.2,
             thinker_phrase_action="rewrite",
+        ),
+        schedule_overshare_config=SimpleNamespace(
+            enabled=overshare_enabled,
+            cumulative_threshold=2,
+            bypass_patterns=["几点", "什么时候", "日程", "安排", "忙不忙", "在干嘛", "在做什么", "干啥呢"],
+            leak_patterns=[
+                r"\d{1,2}[：:]\d{2}",
+                "上午",
+                "下午",
+                "晚上",
+                "排练",
+                "吃饭",
+                "休息",
+                "上课",
+                "午饭",
+                "晚饭",
+            ],
         ),
     )
 
@@ -165,3 +183,60 @@ async def test_guardrail_pipeline_disabled_short_circuits_and_keeps_original_rep
 
     assert _normalize_visible(reply) == "«img:1»顺着这个问题轻轻接一下"
     assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_guardrail_pipeline_records_schedule_overshare_metrics_and_rewrites_reply(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+    tmp_path,
+) -> None:
+    timeline = GroupTimeline()
+    timeline.add("100", role="user", content="哈哈好搞笑", speaker="user(100)")
+    trace_store = BlockTraceStore(tmp_path / "trace-overshare.db")
+    await trace_store.init()
+    client = await _client(
+        persona_runtime,
+        timeline,
+        trace_store,
+        guardrail_enabled=False,
+        overshare_enabled=True,
+    )
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch(
+                "services.llm.client.call_api",
+                new_callable=AsyncMock,
+                return_value=_result("对吧哈哈，我下午3:00还要排练呢。先聊这个。"),
+            ),
+        ):
+            mock_think.return_value = SimpleNamespace(
+                action="reply",
+                retrieve_mode="skip",
+                rewritten_query="",
+                thought="",
+                sticker=False,
+                tone="日常",
+                usage={},
+            )
+            reply = await client.chat(
+                session_id="group_100",
+                group_id="100",
+                user_id="100",
+                user_content="哈哈好搞笑",
+                identity=identity_snapshot,
+            )
+            rows = await trace_store.list_humanization_metrics(limit=10)
+            stats = await trace_store.humanization_metric_stats(group_id="100")
+    finally:
+        await client.close()
+        await trace_store.close()
+
+    assert _normalize_visible(reply) == "先聊这个"
+    assert len(rows) == 1
+    assert rows[0]["metadata"]["schedule_overshare_hits"] == 1
+    assert rows[0]["metadata"]["schedule_overshare_rewritten"] == 1
+    assert rows[0]["metadata"]["schedule_overshare_reason"] == "unsolicited_time_mention"
+    assert stats["schedule_overshare_hits"] == 1
+    assert stats["schedule_overshare_rewritten"] == 1

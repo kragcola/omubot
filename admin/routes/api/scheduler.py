@@ -53,4 +53,17 @@ def create_scheduler_router(
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    @router.get("/scheduler/mute_state")
+    async def get_mute_state():
+        s = _sched()
+        if s is None:
+            return {"groups": {}}
+
+        try:
+            getter = getattr(s, "get_mute_state", None)
+            groups = getter() if callable(getter) else {}
+            return {"groups": groups}
+        except Exception as e:
+            return {"groups": {}, "error": str(e)}
+
     return router

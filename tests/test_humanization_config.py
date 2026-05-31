@@ -39,9 +39,29 @@ def test_humanization_config_defaults_keep_only_safe_runtime_features_on() -> No
     assert cfg.sentinel_guardrail.enabled is False
     assert cfg.sentinel_guardrail.dedup_threshold == 0.4
     assert cfg.sentinel_guardrail.thinker_phrase_threshold == 0.4
-    assert cfg.bot_pair_guard.enabled is False
+    assert cfg.schedule_overshare.enabled is False
+    assert cfg.schedule_overshare.cumulative_threshold == 2
+    assert cfg.persona_drift.enabled is False
+    assert cfg.upstream_command_filter.enabled is False
+    assert cfg.upstream_command_filter.command_patterns == ["#napcat", "#NapCat", "/napcat"]
+    assert cfg.addressee_hint.enabled is False
+    assert cfg.mention_post_processor.enabled is False
+    assert cfg.mention_post_processor.recent_speaker_limit == 20
+    assert cfg.slang_lookup.enabled is False
+    assert cfg.slang_lookup.timeout_ms == 500
+    assert cfg.sticker_placement.enabled is False
+    assert cfg.sticker_placement.cooldown_ms == 45_000
+    assert cfg.text_preflight.enabled is False
+    assert cfg.text_preflight.min_repetition_count == 3
+    assert cfg.self_mute.reconcile_enabled is False
+    assert cfg.self_mute.reconcile_interval_seconds == 300
+    assert cfg.self_mute.action_failed_reverse_mark is False
+    assert cfg.self_mute.action_failed_retcodes == [1200, 1300]
+    assert cfg.bot_pair_guard.enabled is True  # S1: P0 loop guard defaults ON
     assert cfg.bot_pair_guard.max_per_minute == 3
     assert cfg.bot_pair_guard.cooldown_seconds == 60
+    assert cfg.bot_pair_guard.loop_alt_threshold == 10
+    assert cfg.bot_pair_guard.known_peer_alt_threshold == 6
     assert cfg.bot_pair_guard.known_other_bots == {}
     assert cfg.coalesce.enabled is False
     assert cfg.coalesce.idle_window_seconds == 5.0
@@ -149,6 +169,38 @@ def test_humanization_config_from_json(tmp_path: Path) -> None:
                 "idle_window_seconds": 0,
                 "max_window_seconds": 0.05,
             },
+            "upstream_command_filter": {
+                "enabled": True,
+                "command_patterns": ["#napcat", "!天气"],
+                "log_drops": False,
+            },
+            "addressee_hint": {
+                "enabled": True,
+            },
+            "mention_post_processor": {
+                "enabled": True,
+                "fallback_keep_literal": True,
+                "recent_speaker_limit": 0,
+            },
+            "slang_lookup": {
+                "enabled": True,
+                "timeout_ms": -1,
+                "daily_limit": 0,
+            },
+            "sticker_placement": {
+                "enabled": True,
+                "cooldown_ms": -1,
+            },
+            "text_preflight": {
+                "enabled": True,
+                "min_repetition_count": 1,
+            },
+            "self_mute": {
+                "reconcile_enabled": True,
+                "reconcile_interval_seconds": 0,
+                "action_failed_reverse_mark": True,
+                "action_failed_retcodes": ["1200", "bad", 1300],
+            },
         }),
         encoding="utf-8",
     )
@@ -174,6 +226,26 @@ def test_humanization_config_from_json(tmp_path: Path) -> None:
     assert cfg.sentinel_guardrail.dedup_ngram == 1
     assert cfg.sentinel_guardrail.dedup_threshold == 1.0
     assert cfg.sentinel_guardrail.thinker_phrase_threshold == 0.0
+    assert cfg.schedule_overshare.enabled is False
+    assert cfg.schedule_overshare.cumulative_threshold == 2
+    assert cfg.persona_drift.enabled is False
+    assert cfg.upstream_command_filter.enabled is True
+    assert cfg.upstream_command_filter.command_patterns == ["#napcat", "!天气"]
+    assert cfg.upstream_command_filter.log_drops is False
+    assert cfg.addressee_hint.enabled is True
+    assert cfg.mention_post_processor.enabled is True
+    assert cfg.mention_post_processor.recent_speaker_limit == 1
+    assert cfg.slang_lookup.enabled is True
+    assert cfg.slang_lookup.timeout_ms == 1
+    assert cfg.slang_lookup.daily_limit == 1
+    assert cfg.sticker_placement.enabled is True
+    assert cfg.sticker_placement.cooldown_ms == 1
+    assert cfg.text_preflight.enabled is True
+    assert cfg.text_preflight.min_repetition_count == 2
+    assert cfg.self_mute.reconcile_enabled is True
+    assert cfg.self_mute.reconcile_interval_seconds == 1
+    assert cfg.self_mute.action_failed_reverse_mark is True
+    assert cfg.self_mute.action_failed_retcodes == [1200, 1300]
     assert cfg.bot_pair_guard.enabled is True
     assert cfg.bot_pair_guard.max_per_minute == 1
     assert cfg.bot_pair_guard.cooldown_seconds == 1
@@ -219,7 +291,7 @@ def test_humanization_resolve_profile_presets() -> None:
     performance = HumanizationConfig.model_validate({
         "profile": "performance",
         "plan_then_utter": {"group_whitelist": ["993065015"]},
-    }).resolve_profile("performance", group_id="984198159")
+    }).resolve_profile("performance", group_id="984198159", performance_degraded=False)
 
     assert economy.state_board_layout == "tail"
     assert economy.state_board_granularity == "coarse"
@@ -241,7 +313,7 @@ def test_humanization_resolve_profile_presets() -> None:
     performance_pilot = HumanizationConfig.model_validate({
         "profile": "performance",
         "plan_then_utter": {"enabled": True, "group_whitelist": ["993065015"]},
-    }).resolve_profile("performance", group_id="993065015")
+    }).resolve_profile("performance", group_id="993065015", performance_degraded=False)
     assert performance_pilot.plan_then_utter_enabled is True
 
 
@@ -252,7 +324,7 @@ def test_resolve_profile_invariants() -> None:
         HumanizationConfig.model_validate({
             "profile": "performance",
             "plan_then_utter": {"enabled": True, "group_whitelist": ["993065015"]},
-        }).resolve_profile("performance", group_id="993065015"),
+        }).resolve_profile("performance", group_id="993065015", performance_degraded=False),
         HumanizationConfig.model_validate({
             "profile": "custom",
             "streaming_segment": {"enabled": False},

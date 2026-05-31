@@ -41,6 +41,7 @@ LLMTask = Literal[
     "slang_semantic",
     # Other learning / extraction services.
     "style",
+    "style_review",
     "memo",
     "persona_import",
     # Plugin-direct call sites. Each plugin entry point gets its own
@@ -56,9 +57,13 @@ LLMTask = Literal[
     "graph_edge_classifier",
     "reflection_consolidator",
     "episode_summarizer",
+    "episode_review",
+    "fact_review",
     # Scheduler humanization probes.
     "scheduler_eot",
     "scheduler_replay_judge",
+    # Misc autonomous actions.
+    "birthday_wish",
 ]
 
 
@@ -275,6 +280,7 @@ TASK_CACHE_PROFILES: dict[str, TaskCacheProfile] = {
     "slang_semantic": TaskCacheProfile(system_breakpoints=2),
     # learning / extraction services.
     "style":           TaskCacheProfile(system_breakpoints=1),
+    "style_review":    TaskCacheProfile(system_breakpoints=1),
     "memo":            TaskCacheProfile(system_breakpoints=1),
     # persona_import — single static system prompt that wraps importer
     # extraction; no plugin contributions, no message-side reuse.
@@ -290,8 +296,12 @@ TASK_CACHE_PROFILES: dict[str, TaskCacheProfile] = {
     "graph_edge_classifier":   TaskCacheProfile(system_breakpoints=1),
     "reflection_consolidator": TaskCacheProfile(system_breakpoints=1),
     "episode_summarizer":      TaskCacheProfile(system_breakpoints=1),
+    "episode_review":          TaskCacheProfile(system_breakpoints=1),
+    "fact_review":             TaskCacheProfile(system_breakpoints=1),
     "scheduler_eot":           TaskCacheProfile(system_breakpoints=1),
     "scheduler_replay_judge":  TaskCacheProfile(system_breakpoints=1),
+    # misc autonomous actions — single static system prompt.
+    "birthday_wish":           TaskCacheProfile(system_breakpoints=1),
 }
 
 DEFAULT_TASK_CACHE_PROFILE = TaskCacheProfile(system_breakpoints=1)

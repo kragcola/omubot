@@ -34,4 +34,6 @@ def test_bandit_router_reports_and_observes() -> None:
     observed = client.post("/api/admin/bandit/rws/observe", json={"decision": True, "reward": -1})
     assert observed.status_code == 200
     assert observed.json()["ok"] is True
-    assert observed.json()["theta"] < 0.5
+    # Thompson (default): a fire that earned negative reward raises theta (fire
+    # less next time). The router just plumbs observe() through to the bandit.
+    assert observed.json()["theta"] > 0.5

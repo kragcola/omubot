@@ -6,8 +6,10 @@ import json
 import secrets
 from typing import Any
 
+import aiosqlite
 from loguru import logger
 
+from services.cross_group import cross_group_where, legacy_cross_group_visible, visibility_from_db
 from services.knowledge_graph.store import KnowledgeGraphStore, _now_iso
 from services.knowledge_graph.types import (
     GraphEdge,
@@ -29,6 +31,7 @@ def _row_to_node(row: Any) -> GraphNode:
         cg_groups = json.loads(cg_groups_raw or "[]")
     except (json.JSONDecodeError, TypeError):
         cg_groups = []
+    visibility = visibility_from_db(row["cross_group_visible"]) if "cross_group_visible" in keys else "none"
     return GraphNode(
         node_id=row["node_id"],
         node_type=row["node_type"],
@@ -41,7 +44,8 @@ def _row_to_node(row: Any) -> GraphNode:
         status=row["status"] if "status" in keys else "active",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        cross_group_visible=bool(row["cross_group_visible"]) if "cross_group_visible" in keys else False,
+        cross_group_visible=legacy_cross_group_visible(visibility),
+        cross_group_visibility=visibility,
         cross_group_enabled_by=row["cross_group_enabled_by"] if "cross_group_enabled_by" in keys else "",
         cross_group_enabled_at=row["cross_group_enabled_at"] if "cross_group_enabled_at" in keys else "",
         cross_group_enabled_for_groups=cg_groups,
@@ -66,6 +70,7 @@ def _row_to_edge(row: Any) -> GraphEdge:
         cg_groups = json.loads(cg_groups_raw or "[]")
     except (json.JSONDecodeError, TypeError):
         cg_groups = []
+    visibility = visibility_from_db(row["cross_group_visible"]) if "cross_group_visible" in keys else "none"
     return GraphEdge(
         edge_id=row["edge_id"],
         edge_type=row["edge_type"],
@@ -79,7 +84,8 @@ def _row_to_edge(row: Any) -> GraphEdge:
         status=row["status"] if "status" in keys else "active",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        cross_group_visible=bool(row["cross_group_visible"]) if "cross_group_visible" in keys else False,
+        cross_group_visible=legacy_cross_group_visible(visibility),
+        cross_group_visibility=visibility,
         cross_group_enabled_by=row["cross_group_enabled_by"] if "cross_group_enabled_by" in keys else "",
         cross_group_enabled_at=row["cross_group_enabled_at"] if "cross_group_enabled_at" in keys else "",
         cross_group_enabled_for_groups=cg_groups,
@@ -92,8 +98,8 @@ class GraphWriter:
         self._store = store
 
     @property
-    def _db(self):
-        return self._store._db
+    def _db(self) -> aiosqlite.Connection:
+        return self._store._require_db()
 
     async def write_node(self, draft: GraphNodeDraft) -> str:
         now = _now_iso()
@@ -257,7 +263,8 @@ class GraphWriter:
             values.extend([pattern, pattern])
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         cursor = await db.execute(f"SELECT COUNT(*) AS cnt FROM graph_nodes {where_sql}", values)
-        total = int((await cursor.fetchone())["cnt"])
+        count_row = await cursor.fetchone()
+        total = int(count_row["cnt"]) if count_row else 0
         cursor = await db.execute(
             f"SELECT * FROM graph_nodes {where_sql} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
             [*values, limit, offset],
@@ -296,7 +303,8 @@ class GraphWriter:
             values.append(status)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         cursor = await db.execute(f"SELECT COUNT(*) AS cnt FROM graph_edges {where_sql}", values)
-        total = int((await cursor.fetchone())["cnt"])
+        count_row = await cursor.fetchone()
+        total = int(count_row["cnt"]) if count_row else 0
         cursor = await db.execute(
             f"SELECT * FROM graph_edges {where_sql} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
             [*values, limit, offset],
@@ -315,9 +323,11 @@ class GraphWriter:
         )
         edge_counts = {row["edge_type"]: row["cnt"] for row in await cursor.fetchall()}
         cursor = await db.execute("SELECT COUNT(*) AS cnt FROM graph_nodes WHERE status = 'active'")
-        total_nodes = int((await cursor.fetchone())["cnt"])
+        nodes_row = await cursor.fetchone()
+        total_nodes = int(nodes_row["cnt"]) if nodes_row else 0
         cursor = await db.execute("SELECT COUNT(*) AS cnt FROM graph_edges WHERE status = 'active'")
-        total_edges = int((await cursor.fetchone())["cnt"])
+        edges_row = await cursor.fetchone()
+        total_edges = int(edges_row["cnt"]) if edges_row else 0
         return {
             "total_nodes": total_nodes,
             "total_edges": total_edges,
@@ -329,11 +339,12 @@ class GraphWriter:
         self, base_where: str, viewer_group_id: str, *, table_alias: str = "",
     ) -> tuple[str, list[str]]:
         prefix = f"{table_alias}." if table_alias else ""
-        cg_clause = (
-            f"({prefix}scope = 'global' "
-            f"OR ({prefix}scope = 'group' AND {prefix}group_id = ?) "
-            f"OR ({prefix}scope = 'group' AND {prefix}cross_group_visible = 1))"
+        cg_clause = cross_group_where(
+            group_id_col=f"{prefix}group_id",
+            scope_col=f"{prefix}scope",
+            visibility_col=f"{prefix}cross_group_visible",
+            enabled_groups_col=f"{prefix}cross_group_enabled_for_groups",
         )
         if base_where:
-            return f"{base_where} AND {cg_clause}", [viewer_group_id]
-        return cg_clause, [viewer_group_id]
+            return f"{base_where} AND {cg_clause}", [viewer_group_id, viewer_group_id]
+        return cg_clause, [viewer_group_id, viewer_group_id]

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import time
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
@@ -227,6 +228,8 @@ class DreamAgent:
         sticker_store: StickerStore | None = None,
         on_memo_change: Callable[[], None] | None = None,
         runtime_state: RuntimeStateBus | None = None,
+        vision_client: Any | None = None,
+        ocr_backfill_per_run: int = 10,
     ) -> None:
         self._store = store
         self._interval_hours = interval_hours
@@ -234,6 +237,8 @@ class DreamAgent:
         self._sticker_store = sticker_store
         self._on_memo_change = on_memo_change
         self._runtime_state = runtime_state
+        self._vision_client = vision_client
+        self._ocr_backfill_per_run = max(0, int(ocr_backfill_per_run))
         self._running: bool = False
         self._loop_task: asyncio.Task[None] | None = None
 
@@ -273,6 +278,51 @@ class DreamAgent:
             return 0
         return self._runtime_state.clear_stale_per_session(max_age=timedelta(minutes=30))
 
+    async def _backfill_sticker_ocr(self) -> int:
+        """Backfill OCR text for stickers missing the ocr_text key (rate-limited).
+
+        Legacy stickers stored before the OCR pass have no ocr_text key. Each run
+        enriches up to ocr_backfill_per_run of them via a single VL rich-description
+        call (reusing emit_emotion_tag's overwrite path), so the whole library is
+        covered over a few dream cycles without a VL call burst.
+        """
+        store = self._sticker_store
+        if store is None or self._vision_client is None or self._ocr_backfill_per_run <= 0:
+            return 0
+        from pathlib import Path
+
+        from services.media.sticker_capture import emit_emotion_tag, sticker_media_type
+
+        pending = [
+            sid
+            for sid, entry in store.list_all().items()
+            if "ocr_text" not in (entry or {})
+        ]
+        if not pending:
+            return 0
+
+        done = 0
+        for sticker_id in pending[: self._ocr_backfill_per_run]:
+            file_path = store.resolve_path(sticker_id)
+            if file_path is None or not Path(file_path).exists():
+                continue
+            try:
+                image_data = Path(file_path).read_bytes()
+                await emit_emotion_tag(
+                    store,
+                    sticker_id,
+                    image_data=image_data,
+                    vision_client=self._vision_client,
+                    media_type=sticker_media_type(file_path),
+                    overwrite=True,
+                )
+                done += 1
+            except Exception as exc:
+                dream_logger.debug("ocr backfill skipped | id={} err={}", sticker_id, exc)
+        if done:
+            dream_logger.info("dream ocr backfill | enriched={}", done)
+        return done
+
     async def _run(self, api_call: ApiCaller) -> None:
         """Run the dream agent with a tool loop for card consolidation."""
         self._running = True
@@ -282,6 +332,7 @@ class DreamAgent:
             cleaned_state = self._cleanup_runtime_state()
             if cleaned_state:
                 dream_logger.info("dream cleaned stale humanization state | count={}", cleaned_state)
+            await self._backfill_sticker_ocr()
             index_text = await self._store.build_global_index()
 
             sticker_section = ""
@@ -492,7 +543,9 @@ class DreamPlugin(AmadeusPlugin):
     def __init__(self) -> None:
         super().__init__()
         self._dream_agent = None
+        self._event_boundary_detector = None
         self._started = False
+        self._bot: Any = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
         from kernel.config import load_plugin_config
@@ -511,9 +564,11 @@ class DreamPlugin(AmadeusPlugin):
             sticker_store=ctx.sticker_store,
             on_memo_change=lambda: ctx.prompt_builder.invalidate(),
             runtime_state=ctx.runtime_state,
+            vision_client=getattr(ctx, "vision_client", None),
         )
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:
+        self._bot = bot
         if self._dream_agent is None or self._started:
             return
         self._dream_agent.start(ctx.llm_client._call)
@@ -526,3 +581,77 @@ class DreamPlugin(AmadeusPlugin):
             await self._dream_agent.stop()
             _L = logger.bind(channel="dream")
             _L.info("dream agent stopped")
+
+    async def on_tick(self, ctx: PluginContext) -> None:
+        from services import learning_settings
+        from services.memory_consolidator.event_boundary import EventBoundaryDetector
+
+        _L = logger.bind(channel="dream")
+
+        birthday_greeter = getattr(ctx, "birthday_greeter", None)
+        if birthday_greeter is not None and self._bot is not None:
+            try:
+                llm_client = getattr(ctx, "llm_client", None)
+                greeted = await birthday_greeter.check_and_greet(self._bot, llm_client=llm_client)
+                if greeted:
+                    _L.info("birthday_greeter sent wishes | qq={}", greeted)
+            except Exception as exc:
+                _L.warning("birthday_greeter failed | err={}", exc)
+
+        settings = learning_settings.load(getattr(ctx, "storage_dir", "storage"))
+        consolidator_cfg = settings.get("consolidator", {})
+        if not consolidator_cfg.get("auto_enabled", False):
+            return
+        consolidator = getattr(ctx, "memory_consolidator", None)
+        if consolidator is None:
+            return
+        msg_log = getattr(ctx, "msg_log", None)
+        if msg_log is None:
+            return
+        _L = logger.bind(channel="dream")
+        try:
+            group_ids = await msg_log.list_group_ids() if hasattr(msg_log, "list_group_ids") else []
+            if self._event_boundary_detector is None:
+                self._event_boundary_detector = EventBoundaryDetector()
+            if _ebr_enabled():
+                mood_engine = getattr(ctx, "mood_engine", None)
+                ebr_hits = 0
+                for gid in group_ids[:5]:
+                    triggered, reason = await self._event_boundary_detector.detect(
+                        group_id=str(gid),
+                        message_log=msg_log,
+                        mood_engine=mood_engine,
+                    )
+                    if not triggered:
+                        continue
+                    await consolidator.run_once(
+                        group_id=str(gid),
+                        triggered_by=f"event_boundary:{reason}",
+                        max_batches=1,
+                        batch_size=30,
+                    )
+                    ebr_hits += 1
+                if ebr_hits:
+                    _L.info("consolidator event-boundary tick completed | groups={}", ebr_hits)
+            interval_s = int(consolidator_cfg.get("interval_minutes", 360)) * 60
+            now = time.monotonic()
+            if not hasattr(self, "_last_consolidator_monotonic"):
+                self._last_consolidator_monotonic: float = 0.0
+            if now - self._last_consolidator_monotonic < interval_s:
+                return
+            self._last_consolidator_monotonic = now
+            for gid in group_ids[:5]:
+                await consolidator.run_once(
+                    group_id=str(gid),
+                    triggered_by="periodic_tick",
+                    max_batches=1,
+                    batch_size=30,
+                )
+            _L.info("consolidator periodic tick completed | groups={}", len(group_ids[:5]))
+        except Exception as exc:
+            _L.warning("consolidator periodic tick failed | err={}", exc)
+
+
+def _ebr_enabled() -> bool:
+    raw = os.getenv("EBR_ENABLED", "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}

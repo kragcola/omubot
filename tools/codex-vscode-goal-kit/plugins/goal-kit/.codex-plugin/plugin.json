@@ -1,0 +1,24 @@
+{
+  "name": "goal-kit",
+  "version": "0.1.0",
+  "description": "Goal helpers and slash commands for Codex goals",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Goal Kit",
+    "shortDescription": "Goal drafting and goal diagnostics",
+    "longDescription": "Adds local slash commands for drafting and troubleshooting Codex goals, plus a skill for writing durable built-in /goal objectives.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Draft a concise Codex goal for this repo",
+      "Turn docs/goal.md into a built-in /goal command",
+      "Diagnose why built-in /goal is unavailable here"
+    ]
+  }
+}

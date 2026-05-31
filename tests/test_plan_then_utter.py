@@ -136,8 +136,9 @@ async def test_chat_plan_then_utter_default_off_uses_main_path(
     sent: list[str] = []
     client = await _make_client(timeline, persona_runtime)
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     try:
         with patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_result("普通回复")) as call:
@@ -170,8 +171,9 @@ async def test_chat_plan_then_utter_sends_utterances_and_records_usage(
         humanization=ResolvedHumanization(plan_then_utter_enabled=True, disable_natural_split=True),
     )
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     def _record_usage(**kwargs: Any) -> None:
         usage_rows.append(kwargs)
@@ -227,8 +229,8 @@ async def test_chat_plan_then_utter_writes_block_trace_parent_span(
         budget_manager=SimpleNamespace(_store=store),
     )
 
-    async def _on_segment(_segment: str) -> None:
-        return None
+    async def _on_segment(_segment: str) -> bool:
+        return True
 
     try:
         with (
@@ -276,8 +278,9 @@ async def test_chat_plan_then_utter_invalid_plan_falls_back_to_main_path(
         humanization=ResolvedHumanization(plan_then_utter_enabled=True),
     )
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     def _record_usage(**kwargs: Any) -> None:
         usage_rows.append(kwargs)
@@ -322,8 +325,9 @@ async def test_chat_plan_then_utter_plan_cancel_re_raises_without_dirty_write(
         humanization=ResolvedHumanization(plan_then_utter_enabled=True),
     )
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     def _record_usage(**kwargs: Any) -> None:
         usage_rows.append(kwargs)
@@ -369,8 +373,8 @@ async def test_chat_plan_then_utter_business_tool_blocks_pilot(
         tools=registry,
     )
 
-    async def _on_segment(_segment: str) -> None:
-        return None
+    async def _on_segment(_segment: str) -> bool:
+        return True
 
     def _record_usage(**kwargs: Any) -> None:
         usage_rows.append(kwargs)

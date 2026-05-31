@@ -252,6 +252,11 @@ class FoodPlugin(AmadeusPlugin):
         except Exception:
             _L.error("failed to load food library", exc_info=True)
 
+    def _scheduler_is_muted(self, group_id: str) -> bool:
+        scheduler = getattr(self._ctx, "scheduler", None)
+        is_muted = getattr(scheduler, "is_muted", None)
+        return bool(callable(is_muted) and is_muted(group_id))
+
     def register_commands(self) -> list:
         return [
             Command(
@@ -437,6 +442,9 @@ class FoodPlugin(AmadeusPlugin):
         prefix = self._group_reply_prefix(user_id, message_id) if message_id else ""
 
         try:
+            if self._scheduler_is_muted(group_id):
+                _L.info("food | group={} muted, skip send", group_id)
+                return
             reply = await self._do_recommend(user_id, user_feedback, bypass_cache=True)
             if reply is None:
                 await bot.send_group_msg(
@@ -445,6 +453,9 @@ class FoodPlugin(AmadeusPlugin):
                 )
                 return
 
+            if self._scheduler_is_muted(group_id):
+                _L.info("food | group={} muted after recommend, skip send", group_id)
+                return
             await bot.send_group_msg(
                 group_id=int(group_id),
                 message=Message(f"{prefix}{reply}"),
@@ -915,7 +926,12 @@ class FoodPlugin(AmadeusPlugin):
 
     async def _handle_like(self, cmd_ctx: Any) -> None:
         food = cmd_ctx.args.strip()
-        await self._add_preference(cmd_ctx.user_id, "likes", food)
+        await self._add_preference(
+            cmd_ctx.user_id,
+            "likes",
+            food,
+            source_msg_id=str(getattr(cmd_ctx.event, "message_id", "") or ""),
+        )
         if cmd_ctx.is_private:
             await self._send_reply(cmd_ctx, f"记住了~你喜欢「{food}」")
         else:
@@ -923,7 +939,12 @@ class FoodPlugin(AmadeusPlugin):
 
     async def _handle_dislike(self, cmd_ctx: Any) -> None:
         food = cmd_ctx.args.strip()
-        await self._add_preference(cmd_ctx.user_id, "dislikes", food)
+        await self._add_preference(
+            cmd_ctx.user_id,
+            "dislikes",
+            food,
+            source_msg_id=str(getattr(cmd_ctx.event, "message_id", "") or ""),
+        )
         if cmd_ctx.is_private:
             await self._send_reply(cmd_ctx, f"记住了~你不喜欢「{food}」")
         else:
@@ -949,7 +970,7 @@ class FoodPlugin(AmadeusPlugin):
             content=f"位于{location}",
             confidence=0.9,
             source="user_config",
-        ))
+        ), source_msg_id=str(getattr(cmd_ctx.event, "message_id", "") or ""), captured_by="food_plugin")
         self._pref_cache.pop(cmd_ctx.user_id, None)
         _L.info("location set | user={} location={}", cmd_ctx.user_id, location)
         if cmd_ctx.is_private:
@@ -1067,7 +1088,14 @@ class FoodPlugin(AmadeusPlugin):
         self._pref_cache[user_id] = result
         return result
 
-    async def _add_preference(self, user_id: str, pref_type: str, value: str) -> None:
+    async def _add_preference(
+        self,
+        user_id: str,
+        pref_type: str,
+        value: str,
+        *,
+        source_msg_id: str = "",
+    ) -> None:
         """Add a food preference card to CardStore."""
         ctx = self._ctx
         if ctx is None or ctx.card_store is None:
@@ -1094,7 +1122,7 @@ class FoodPlugin(AmadeusPlugin):
                 confidence=0.7,
                 source="user_config",
                 series_id=series.series_id,
-            ))
+            ), source_msg_id=source_msg_id or None, captured_by="food_plugin")
             _L.info("preference added | user={} type={} value={}", user_id, pref_type, value)
 
         self._pref_cache.pop(user_id, None)
@@ -1137,7 +1165,7 @@ class FoodPlugin(AmadeusPlugin):
             confidence=0.5,
             source="food_plugin",
             series_id=series.series_id,
-        ))
+        ), captured_by="food_plugin")
         _L.info("record served | user={} food={!r} series={}", user_id, food_name, series.series_id)
 
     async def _record_served_safe(self, user_id: str, food_name: str) -> None:

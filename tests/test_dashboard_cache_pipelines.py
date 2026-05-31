@@ -9,6 +9,8 @@ None-when-no-cache-data fallback.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
@@ -152,6 +154,7 @@ async def test_cache_pipelines_endpoint_smoke(tracker) -> None:
     assert {t["task"] for t in mg["per_task"]} == {
         "graph_review", "graph_edge_classifier",
         "reflection_consolidator", "episode_summarizer",
+        "episode_review", "fact_review",
     }
 
 
@@ -213,6 +216,29 @@ async def test_dashboard_endpoint_exposes_humanization_status(tracker) -> None:
         assert humanization["degraded_count"] == 1
     finally:
         clear_degraded_groups()
+
+
+async def test_dashboard_endpoint_exposes_self_mute_status(tracker) -> None:
+    scheduler = SimpleNamespace(get_mute_state=lambda: {
+        "123456": {
+            "muted": True,
+            "source": "event",
+            "since_unix": 1_700_000_000.0,
+            "until_unix": 1_700_000_120.0,
+        }
+    })
+    app = FastAPI()
+    app.include_router(
+        create_dashboard_router(usage_tracker=tracker, ctx=SimpleNamespace(scheduler=scheduler)),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    resp = client.get("/api/admin/dashboard")
+    assert resp.status_code == 200
+    payload = resp.json()["self_mute"]
+    assert payload["count"] == 1
+    assert payload["groups"]["123456"]["source"] == "event"
 
 
 async def test_recent_calls_per_pipeline_window_query(tracker) -> None:

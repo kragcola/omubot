@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from kernel.config import ReplyWorkflowConfig
+from services.llm.thinker import THINKER_SYSTEM_PROMPT
 from services.reply_workflow import (
     ReplyGateFeatures,
     SemanticGateResult,
     build_semantic_gate_messages,
+    classify_closing_intent,
     classify_followup_text,
     evaluate_group_gate_shadow,
     evaluate_semantic_gate,
@@ -12,6 +16,7 @@ from services.reply_workflow import (
     parse_semantic_gate_output,
     private_current_path_decision,
     scheduler_shadow_decision,
+    semantic_gate_threshold,
     should_call_semantic_gate,
     should_consume_semantic_gate,
     workflow_mode,
@@ -285,3 +290,149 @@ async def test_evaluate_semantic_gate_timeout_fails_closed() -> None:
     )
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# mood二轴重构回归 (2026-05-30): mood 不再决定 whether；force_reply 硬下限
+# 依据 Forgas AIM / J. Pragmatics 2026 "How we are vs how we are feeling":
+# mood 决定 HOW(语气/长短/礼貌)，稳定特质决定 WHETHER(接不接话)。
+# ---------------------------------------------------------------------------
+
+
+def test_semantic_gate_threshold_ignores_low_mood() -> None:
+    """A1: 低能量心情不再抬高接话门槛——mood 已从 whether 轴撤出。"""
+    th = semantic_gate_threshold(
+        fixed_threshold=0.78,
+        dynamic_enabled=True,
+        familiarity=None,
+        mood_energy=0.146,  # 凌晨 incident 的实际值，旧逻辑会 +0.05 → 0.83
+    )
+    assert th.effective_threshold == 0.78
+    assert "mood_low:+0.05" not in th.adjustments
+    # mood_energy 仍记录用于可观测性，只是不参与计算
+    assert th.mood_energy == 0.146
+
+
+def test_semantic_gate_threshold_still_honors_familiarity() -> None:
+    """A1 防误删: 关系熟悉度(稳定特质)仍降低门槛——这是正确的 whether 接线。"""
+    th = semantic_gate_threshold(
+        fixed_threshold=0.78,
+        dynamic_enabled=True,
+        familiarity=0.7,
+        mood_energy=0.146,
+    )
+    assert th.effective_threshold == 0.68
+    assert "familiarity_high:-0.10" in th.adjustments
+
+
+def test_force_reply_bypasses_dynamic_threshold_inflation() -> None:
+    """C: LLM 明确 force_reply 时,门槛取 min(动态阈值, force_floor)。
+
+    凌晨 incident: force_reply conf=0.75，旧逻辑 effective=0.83 → 被拦。
+    新逻辑 floor=0.7 → consume。
+    """
+    incident = SemanticGateResult(
+        action="force_reply",
+        confidence=0.75,
+        intent="continue_or_expand",
+        reason="暗示让bot继续",
+    )
+    # 即使动态阈值被抬到 0.83，force_reply 也只看 floor=0.7
+    assert should_consume_semantic_gate(incident, threshold=0.83)
+    # 低于 floor 仍不放行
+    weak = SemanticGateResult(
+        action="force_reply",
+        confidence=0.65,
+        intent="continue_or_expand",
+        reason="不太确定",
+    )
+    assert not should_consume_semantic_gate(weak, threshold=0.83)
+    # 非 force_reply 即使高 confidence 也不放行
+    passed = SemanticGateResult(
+        action="pass",
+        confidence=0.95,
+        intent="unrelated",
+        reason="自言自语",
+    )
+    assert not should_consume_semantic_gate(passed, threshold=0.5)
+
+
+def test_force_floor_does_not_raise_already_low_threshold() -> None:
+    """C 边界: familiarity 已把门槛降到 floor 以下时,floor 不得反向抬高。"""
+    result = SemanticGateResult(
+        action="force_reply",
+        confidence=0.68,
+        intent="continue_or_expand",
+        reason="熟人接话",
+    )
+    # familiarity_high → effective 0.68; min(0.68, 0.7) = 0.68; 0.68 >= 0.68
+    assert should_consume_semantic_gate(result, threshold=0.68)
+
+
+def test_incident_full_chain_now_replies() -> None:
+    """全链复刻凌晨 incident: threshold 计算 → consume 判定 == True。"""
+    th = semantic_gate_threshold(
+        fixed_threshold=0.78,
+        dynamic_enabled=True,
+        familiarity=None,
+        mood_energy=0.146,
+    )
+    result = SemanticGateResult(
+        action="force_reply",
+        confidence=0.75,
+        intent="continue_or_expand",
+        reason="暗示让bot继续之前的对话",
+    )
+    assert should_consume_semantic_gate(result, threshold=th.effective_threshold)
+
+
+def test_thinker_prompt_decouples_mood_from_whether() -> None:
+    """A2/B1: thinker prompt 中 mood 只管 how，不再管 whether。"""
+    prompt = THINKER_SYSTEM_PROMPT.format(name="测试")
+    # whether 与 mood 解耦的显式声明
+    assert "不影响「要不要回」" in prompt
+    # AIM 反直觉特征: 低落→更礼貌更周到，而非更冷淡
+    assert "更礼貌" in prompt
+    # 旧的错配措辞已删除
+    assert "更容易选择 wait" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# classify_closing_intent (弱回复 P0: closing 收尾型检测)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    "晚安",
+    "好吧晚安",
+    "好的那晚安。",
+    "晚安啦~",
+    "睡了",
+    "我去睡了",
+    "先这样",
+    "明天见",
+    "拜拜",
+    "溜了",
+    "88",
+    "不聊了",
+])
+def test_classify_closing_intent_positive(text: str) -> None:
+    assert classify_closing_intent(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "晚安是什么意思",          # 带疑问，非 closing
+    "睡了吗",                  # 问句（你睡了吗）
+    "先这样吧我觉得X方案更好一点你看呢",  # 长句带后续内容
+    "今天好累",                # 无 closing token
+    "你为什么不理我",          # 疑问
+    "",                        # 空
+    "我们来安排一下明天的事情吧今天先到这里然后",  # 超长
+])
+def test_classify_closing_intent_negative(text: str) -> None:
+    assert classify_closing_intent(text) is False
+
+
+def test_classify_closing_intent_too_long_rejected() -> None:
+    # 句尾有 closing token 但整句过长 → 不算 closing。
+    assert classify_closing_intent("今天真的聊了好多东西好开心那就先这样") is False

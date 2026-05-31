@@ -53,6 +53,7 @@ def create_api_router(
     from admin.routes.api.auth import create_auth_router
     from admin.routes.api.backup import create_backup_router
     from admin.routes.api.bandit import create_bandit_router
+    from admin.routes.api.birthday_greeter import create_birthday_router
     from admin.routes.api.block_trace import create_block_trace_router
     from admin.routes.api.config import create_config_router
     from admin.routes.api.context import create_context_router
@@ -88,6 +89,7 @@ def create_api_router(
 
     router.include_router(create_auth_router())
     router.include_router(create_bandit_router(scheduler=scheduler, ctx=ctx))
+    router.include_router(create_birthday_router(ctx=ctx))
     router.include_router(create_dashboard_router(
         usage_tracker=usage_tracker, bot_start_time=bot_start_time,
         mood_engine=mood_engine, schedule_store=schedule_store, ctx=ctx,

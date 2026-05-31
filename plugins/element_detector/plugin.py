@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel
@@ -97,6 +98,20 @@ class ElementDetectorPlugin(AmadeusPlugin):
         self._llm_client = ctx.llm_client
         self._identity = ctx.identity
 
+    def _get_humanizer_runtime(self, group_id: str) -> dict[str, Any]:
+        runtime_getter = getattr(self._scheduler, "_humanizer_runtime", None)
+        if callable(runtime_getter):
+            runtime = runtime_getter(group_id)
+            return dict(runtime) if isinstance(runtime, dict) else {}
+        mood_getter = getattr(self._scheduler, "_get_current_mood", None)
+        mood = mood_getter(group_id) if callable(mood_getter) else None
+        return {
+            "group_id": group_id,
+            "register": None,
+            "slot": None,
+            "mood": mood,
+        }
+
     async def on_message(self, ctx: MessageContext) -> bool:
         if ctx.is_private or self._detector is None:
             return False
@@ -120,6 +135,9 @@ class ElementDetectorPlugin(AmadeusPlugin):
             content=plain_text,
             message_id=ctx.message_id or 0,
         )
+        if self._scheduler.is_muted(group_id):
+            _log.info("element_detector | group={} muted, skip send", group_id)
+            return True
 
         if match.use_llm:
             identity = self._identity
@@ -140,7 +158,7 @@ class ElementDetectorPlugin(AmadeusPlugin):
                 logger.exception("element llm call failed")
             if not reply_text:
                 reply_text = "确实 (｡･ω･｡)"
-            await self._humanizer.delay(reply_text)
+            await self._humanizer.delay(reply_text, **self._get_humanizer_runtime(group_id))
             await ctx.bot.send_group_msg(group_id=int(group_id), message=reply_text)
             self._timeline.add(
                 group_id, role="assistant", speaker="", content=reply_text, message_id=0,
@@ -151,7 +169,7 @@ class ElementDetectorPlugin(AmadeusPlugin):
             )
         else:
             reply_text = match.reply_template
-            await self._humanizer.delay(reply_text)
+            await self._humanizer.delay(reply_text, **self._get_humanizer_runtime(group_id))
             await ctx.bot.send_group_msg(group_id=int(group_id), message=reply_text)
             self._timeline.add(
                 group_id, role="assistant", speaker="", content=reply_text, message_id=0,

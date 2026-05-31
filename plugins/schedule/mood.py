@@ -120,6 +120,7 @@ class MoodEngine:
         self._anomaly_chance = anomaly_chance
         self._refresh_s = refresh_minutes * 60
         self._cache: dict[tuple[str, str], tuple[MoodProfile, float]] = {}
+        self._history: dict[tuple[str, str], list[tuple[MoodProfile, float]]] = {}
 
     def evaluate(
         self,
@@ -133,6 +134,8 @@ class MoodEngine:
         now = time.monotonic()
         if self._cache is None:  # backward-compatible with old tests that reset the cache directly
             self._cache = {}
+        if self._history is None:  # backward-compatible with old tests that reset internals directly
+            self._history = {}
         cache_key = self._cache_key(group_id=group_id, session_id=session_id)
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -142,6 +145,10 @@ class MoodEngine:
 
         profile = self._compute(schedule, recent_interaction_count)
         self._cache[cache_key] = (profile, now)
+        history = self._history.setdefault(cache_key, [])
+        history.append((self._copy_base(profile), now))
+        cutoff = now - max(self._refresh_s * 8, 7200.0)
+        self._history[cache_key] = [(item, ts) for item, ts in history if ts >= cutoff][-12:]
         return profile
 
     def cached_profile(
@@ -157,6 +164,20 @@ class MoodEngine:
         if cached is None:
             return None
         return cached[0]
+
+    def recent_profiles(
+        self,
+        *,
+        group_id: str | int | None = None,
+        session_id: str = "",
+        within_s: float = 1800.0,
+    ) -> list[MoodProfile]:
+        """Return recent mood snapshots for trend readers."""
+        if not self._history:
+            return []
+        cutoff = time.monotonic() - max(0.0, float(within_s or 0.0))
+        cache_key = self._cache_key(group_id=group_id, session_id=session_id)
+        return [profile for profile, ts in self._history.get(cache_key, []) if ts >= cutoff]
 
     @staticmethod
     def _cache_key(*, group_id: str | int | None = None, session_id: str = "") -> tuple[str, str]:

@@ -12,6 +12,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, cast
 
 import aiohttp
@@ -29,13 +30,17 @@ from services.humanization.contract import (
 from services.humanization.pause_extend import PauseExtend
 from services.humanization.scorer import HumanizationScore, StylometricScorer
 from services.humanization.state import humanization_source
+from services.llm.addressee_hint import AddresseeHintDetector
+from services.llm.anchor_reinjection import AnchorReinjector
 from services.llm.cache_diagnostic import (
     CacheDiagnostic,
     CacheDiagnosticDiff,
     compute_cache_diagnostic,
     diff_cache_diagnostics,
 )
+from services.llm.drift_detector import DriftDetector, DriftScore
 from services.llm.llm_request import LLMRequest, apply_cache_breakpoints
+from services.llm.mention_post_processor import process_mentions
 from services.llm.plan_then_utter import PlanThenUtter
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.provider import ToolUse, create_provider, is_deepseek_v4_model, provider_mode
@@ -47,17 +52,23 @@ from services.llm.segmentation import (
     reply_segment_plan as _segment_reply_segment_plan,
 )
 from services.llm.sentinel_registry import GuardrailHit, apply_guardrails
+from services.llm.slang_lookup import SlangLookupClient, SlangResult
+from services.llm.speculative_executor import SpeculativeExecutor
 from services.llm.streaming_segmenter import StreamingSegmenter
 from services.llm.usage import UsageTracker
 from services.media.image_cache import ImageCache
+from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
 from services.memory.message_log import MessageLog
 from services.memory.short_term import ChatMessage, ShortTermMemory
 from services.memory.timeline import GroupTimeline
 from services.memory.types import Content
+from services.name_registry import NameVariationRegistry
 from services.persona import IdentitySnapshot
 from services.runtime_clock import slot_features, today_key
+from services.sticker import StickerDecisionContext, StickerDecisionProvider
 from services.system_module import Scope
+from services.text_preflight import preflight
 from services.tools.context import ToolContext
 from services.tools.registry import ToolRegistry
 
@@ -109,6 +120,12 @@ _PAUSE_EXTEND_INSTRUCTION = (
     "要求：像人类停顿后追加一句；不要重复上一条；不要解释你在追发；不要开启新话题；"
     "不要使用工具或控制标记；只输出可直接发送的追发内容。\n\n"
     "上一条回复：\n{last_reply}"
+)
+_SLANG_CONTEXT_HEADER = "【黑话释义】"
+_ASK_USER_FALLBACK_TEMPLATE = "你刚才说的“{term}”是指什么呀？我怕我理解偏了。"
+_CORRECTION_TRIGGER_INSTRUCTION = (
+    "[你刚才的回复可能不完全准确。用户补充了新信息，请自然地修正或补充你的回答，"
+    "不要生硬地说“抱歉”。]"
 )
 
 
@@ -382,6 +399,20 @@ class HumanizationRewriteResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     rewrite_result: dict[str, Any] | None = None
     guardrail_hits: tuple[GuardrailHit, ...] = ()
+
+
+@dataclass
+class DriftReplyResult:
+    reply: str
+    drift_score: DriftScore
+    drift_metadata: dict[str, Any] = field(default_factory=dict)
+    repair_result: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AnchorInjectionResult:
+    messages: list[dict[str, Any]]
+    anchor_turn: int | None = None
 
 
 def _clean_text(text: str) -> str:
@@ -712,6 +743,13 @@ _ADD_CARD_TOOL: dict[str, Any] = {
 }
 
 
+@dataclass(slots=True)
+class SegmentAborted(Exception):
+    """Abort remaining visible segments after some content was already sent."""
+
+    sent_segments: list[str]
+
+
 async def call_api(
     session: aiohttp.ClientSession,
     base_url: str,
@@ -997,6 +1035,8 @@ class LLMClient:
         affection_engine: object | None = None,
         thinker_enabled: bool = True,
         thinker_max_tokens: int = 256,
+        thinker_necessity_gate_enabled: bool = False,
+        thinker_necessity_gate_addressed_exempt: bool = True,
         mood_getter: Callable[..., Any] | None = None,
         bus: object | None = None,
         runtime_state: object | None = None,
@@ -1014,6 +1054,18 @@ class LLMClient:
         pass_turn_confidence_threshold: float = 0.4,
         humanization_resolver: Callable[..., ResolvedHumanization] | None = None,
         sentinel_guardrail_config: Any | None = None,
+        schedule_overshare_config: Any | None = None,
+        persona_drift_config: Any | None = None,
+        anchor_reinjection_config: Any | None = None,
+        addressee_hint_config: Any | None = None,
+        mention_post_processor_config: Any | None = None,
+        slang_lookup_config: Any | None = None,
+        sticker_placement_config: Any | None = None,
+        text_preflight_config: Any | None = None,
+        name_registry: NameVariationRegistry | None = None,
+        instruction_gate: Any | None = None,
+        authority_store: Any | None = None,
+        admins: dict[str, str] | None = None,
     ) -> None:
         connector = aiohttp.TCPConnector(
             enable_cleanup_closed=True,
@@ -1046,6 +1098,8 @@ class LLMClient:
         self._affection_engine = affection_engine
         self._thinker_enabled = thinker_enabled
         self._thinker_max_tokens = thinker_max_tokens
+        self._thinker_necessity_gate_enabled = bool(thinker_necessity_gate_enabled)
+        self._thinker_necessity_gate_addressed_exempt = bool(thinker_necessity_gate_addressed_exempt)
         self._mood_getter = mood_getter
         self._bus = bus
         self._runtime_state = runtime_state
@@ -1060,7 +1114,20 @@ class LLMClient:
         self._pass_turn_confidence_gate = bool(pass_turn_confidence_gate)
         self._pass_turn_confidence_threshold = max(0.0, min(1.0, float(pass_turn_confidence_threshold)))
         self._humanization_resolver = humanization_resolver
-        self._sentinel_guardrail_config = sentinel_guardrail_config
+        self._addressee_hint_config = addressee_hint_config
+        self._mention_post_processor_config = mention_post_processor_config
+        self._slang_lookup_config = slang_lookup_config
+        self._sticker_placement_config = sticker_placement_config
+        self._text_preflight_config = text_preflight_config
+        self._name_registry = name_registry
+        self._instruction_gate = instruction_gate
+        self._authority_store = authority_store
+        self._admins = dict(admins or {})
+        self._sentinel_guardrail_config = self._compose_guardrail_config(
+            sentinel_guardrail_config=sentinel_guardrail_config,
+            schedule_overshare_config=schedule_overshare_config,
+            persona_drift_config=persona_drift_config,
+        )
         self._humanization_runtime_groups = frozenset(
             str(group_id).strip()
             for group_id in (humanization_runtime_groups or ())
@@ -1073,6 +1140,8 @@ class LLMClient:
             for task, profile in self._task_profiles.items()
         }
         self._profile_rate_limits: dict[str, ProfileRateLimitState] = {}
+        self._schedule_overshare_counts: dict[str, int] = {}
+        self._anchor_last_turns: dict[str, int] = {}
         # Cache-diagnostic ring buffer: per-task list of recent (snapshot, diff) pairs.
         # Ring depth tuned at 200 per task to bound memory while still letting admin
         # show last few breaks. Diffs are computed lazily against the previous entry
@@ -1081,6 +1150,44 @@ class LLMClient:
         self._cache_diag_history: dict[str, list[tuple[CacheDiagnostic, CacheDiagnosticDiff | None]]] = {}
         self._last_thinker_action = ""
         self._last_thinker_thought = ""
+        self._addressee_hint_detector = AddresseeHintDetector(name_registry) if name_registry is not None else None
+        identity = self._prompt.persona_runtime.identity_snapshot()
+        voice_block = self._prompt.persona_runtime.block_for("core.voice")
+        examples_block = self._prompt.persona_runtime.block_for("core.examples")
+        self._anchor_reinjector = AnchorReinjector(
+            bot_name=identity.name,
+            personality=identity.personality,
+            proactive=identity.proactive,
+            voice_text=voice_block.text if voice_block is not None else "",
+            examples_text=examples_block.text if examples_block is not None else "",
+            config=anchor_reinjection_config,
+        )
+        drift_cfg = persona_drift_config or getattr(self._sentinel_guardrail_config, "persona_drift", None)
+        self._drift_detector = DriftDetector(
+            bot_name=identity.name,
+            personality=identity.personality,
+            voice_text=voice_block.text if voice_block is not None else "",
+            examples_text=examples_block.text if examples_block is not None else "",
+            lambda_=float(getattr(drift_cfg, "lambda_ewma", 0.3) or 0.3),
+            theta_repair=float(getattr(drift_cfg, "theta_repair", 0.6) or 0.6),
+            theta_block=float(getattr(drift_cfg, "theta_block", 0.85) or 0.85),
+            repair_max_retries=int(getattr(drift_cfg, "repair_max_retries", 1) or 1),
+            enabled=bool(getattr(drift_cfg, "enabled", False)),
+        )
+        self._slang_lookup_client = SlangLookupClient(
+            store_getter=self._slang_store_getter,
+            api_key=str(getattr(self._slang_lookup_config, "tianapi_key", "") or ""),
+            timeout_ms=int(getattr(self._slang_lookup_config, "timeout_ms", 500) or 500),
+            daily_limit=int(getattr(self._slang_lookup_config, "daily_limit", 100) or 100),
+            cache_size=int(getattr(self._slang_lookup_config, "cache_size", 500) or 500),
+            circuit_breaker_threshold=int(
+                getattr(self._slang_lookup_config, "circuit_breaker_threshold", 3) or 3
+            ),
+            circuit_breaker_cooldown_s=int(
+                getattr(self._slang_lookup_config, "circuit_breaker_cooldown_s", 300) or 300
+            ),
+            session=self._session,
+        )
 
     async def close(self) -> None:
         await self._session.close()
@@ -1123,12 +1230,85 @@ class LLMClient:
             logger.debug("humanization health guard snapshot failed | group={}", group_id)
             return None
 
+    @staticmethod
+    def _compose_guardrail_config(
+        *,
+        sentinel_guardrail_config: Any | None,
+        schedule_overshare_config: Any | None,
+        persona_drift_config: Any | None,
+    ) -> Any | None:
+        if (
+            sentinel_guardrail_config is None
+            and schedule_overshare_config is None
+            and persona_drift_config is None
+        ):
+            return None
+        payload: dict[str, Any] = {}
+        if sentinel_guardrail_config is not None:
+            if hasattr(sentinel_guardrail_config, "model_dump"):
+                payload.update(cast(Any, sentinel_guardrail_config).model_dump())
+            else:
+                payload.update(vars(sentinel_guardrail_config))
+        payload["schedule_overshare"] = schedule_overshare_config
+        payload["persona_drift"] = persona_drift_config
+        return SimpleNamespace(**payload)
+
     def _sentinel_guardrail_enabled(self, group_id: str | None) -> bool:
         cfg = self._sentinel_guardrail_config
-        if cfg is None or not bool(getattr(cfg, "enabled", False)):
+        overshare_cfg = getattr(cfg, "schedule_overshare", None) if cfg is not None else None
+        drift_cfg = getattr(cfg, "persona_drift", None) if cfg is not None else None
+        if cfg is None:
+            return False
+        if (
+            not bool(getattr(cfg, "enabled", False))
+            and not bool(getattr(overshare_cfg, "enabled", False))
+            and not bool(getattr(drift_cfg, "enabled", False))
+        ):
             return False
         if group_id is None:
             return True
+        return self._humanization_group_allowed(group_id)
+
+    def _drift_detector_enabled(self, group_id: str | None) -> bool:
+        if not self._drift_detector.enabled:
+            return False
+        if group_id is None:
+            return True
+        return self._humanization_group_allowed(group_id)
+
+    def _addressee_hint_enabled(self, group_id: str | None) -> bool:
+        if not bool(getattr(self._addressee_hint_config, "enabled", False)):
+            return False
+        if group_id is None:
+            return False
+        return self._humanization_group_allowed(group_id)
+
+    def _mention_post_processor_enabled(self, group_id: str | None) -> bool:
+        if not bool(getattr(self._mention_post_processor_config, "enabled", False)):
+            return False
+        if group_id is None or self._name_registry is None:
+            return False
+        return self._humanization_group_allowed(group_id)
+
+    def _slang_lookup_enabled(self, group_id: str | None) -> bool:
+        if not bool(getattr(self._slang_lookup_config, "enabled", False)):
+            return False
+        if group_id is None:
+            return False
+        return self._humanization_group_allowed(group_id)
+
+    def _text_preflight_enabled(self, group_id: str | None) -> bool:
+        if not bool(getattr(self._text_preflight_config, "enabled", False)):
+            return False
+        if group_id is None:
+            return False
+        return self._humanization_group_allowed(group_id)
+
+    def _sticker_placement_enabled(self, group_id: str | None) -> bool:
+        if not bool(getattr(self._sticker_placement_config, "enabled", False)):
+            return False
+        if group_id is None:
+            return False
         return self._humanization_group_allowed(group_id)
 
     def _latest_assistant_text(self, *, session_id: str, group_id: str | None, is_group: bool) -> str:
@@ -1142,11 +1322,324 @@ class LLMClient:
                 return content_text(message["content"])
         return ""
 
+    def _build_addressee_hint(
+        self,
+        *,
+        group_id: str | None,
+        trigger: object | None,
+        fallback_user_id: str,
+    ) -> str:
+        if (
+            group_id is None
+            or self._addressee_hint_detector is None
+            or not self._addressee_hint_enabled(group_id)
+        ):
+            return ""
+        result = self._addressee_hint_detector.detect(
+            group_id=group_id,
+            trigger=trigger,
+            fallback_user_id=fallback_user_id,
+            bot_self_id=self._bot_self_id,
+        )
+        if result is None:
+            return ""
+        return self._addressee_hint_detector.build_hint(result)
+
+    @staticmethod
+    def _extract_unknown_terms_from_text(text: str, *, max_terms: int = 4) -> list[str]:
+        candidate_re = re.compile(
+            r"(?<![A-Za-z0-9_+\-])[A-Za-z][A-Za-z0-9_+\-]{1,15}(?![A-Za-z0-9_+\-])|[一-龥]{2,8}"
+        )
+        blocked = {
+            "今天", "明天", "这个", "那个", "我们", "你们", "他们", "哈哈", "好的",
+            "一下", "现在", "然后", "真的", "可以", "应该", "还是", "就是",
+        }
+        out: list[str] = []
+        seen: set[str] = set()
+        for match in candidate_re.finditer(text or ""):
+            term = match.group(0).strip()
+            if not term or term in blocked:
+                continue
+            if term.isdigit():
+                continue
+            key = term.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(term)
+            if len(out) >= max_terms:
+                break
+        return out
+
+    @staticmethod
+    def _build_slang_context_block(resolved_terms: dict[str, SlangResult]) -> str:
+        if not resolved_terms:
+            return ""
+        items = [
+            f"- {term}：{result.explanation}"
+            for term, result in resolved_terms.items()
+            if result.explanation
+        ]
+        if not items:
+            return ""
+        return _SLANG_CONTEXT_HEADER + "\n" + "\n".join(items)
+
+    def _slang_ask_user_fallback(self, terms: list[str]) -> str | None:
+        if not bool(getattr(self._slang_lookup_config, "ask_user_fallback_enabled", True)):
+            return None
+        if not terms:
+            return None
+        return _ASK_USER_FALLBACK_TEMPLATE.format(term=terms[0])
+
+    async def _resolve_slang_results(
+        self,
+        *,
+        decision: object | None,
+        conversation_text: str,
+        group_id: str | None,
+        speculative_task: asyncio.Task[Any] | None,
+    ) -> tuple[dict[str, SlangResult], list[str]]:
+        if not self._slang_lookup_enabled(group_id):
+            return {}, []
+        terms = list(getattr(decision, "unknown_terms", []) or [])
+        if not terms:
+            terms = self._extract_unknown_terms_from_text(conversation_text)
+        if not terms:
+            return {}, []
+        results: dict[str, SlangResult | None] = {}
+        if speculative_task is not None:
+            try:
+                speculative_result = await speculative_task
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                speculative_result = {}
+            if isinstance(speculative_result, dict):
+                results.update(speculative_result)
+        unresolved = [term for term in terms if term not in results]
+        if unresolved:
+            looked_up = await self._slang_lookup_client.batch_lookup(unresolved, group_id=group_id)
+            results.update(looked_up)
+        resolved_terms = {
+            term: result
+            for term, result in results.items()
+            if isinstance(result, SlangResult) and str(result.explanation or "").strip()
+        }
+        unresolved_terms = [term for term in terms if term not in resolved_terms]
+        return resolved_terms, unresolved_terms
+
+    def _sticker_extra_candidates(self) -> Callable[[], Awaitable[list[str]]]:
+        async def _loader() -> list[str]:
+            store = self._sticker_store()
+            if store is None:
+                return []
+            all_items = store.list_all()
+            return [str(sticker_id).strip() for sticker_id in all_items if str(sticker_id).strip()]
+
+        return _loader
+
+    def _sticker_store(self) -> StickerStore | None:
+        registry = getattr(self._tools, "_tools", {})
+        if isinstance(registry, dict):
+            tool = registry.get("send_sticker")
+            store = getattr(tool, "_store", None)
+            if isinstance(store, StickerStore):
+                return store
+        return None
+
+    def _sticker_usage_counts(self) -> dict[str, int]:
+        store = self._sticker_store()
+        if store is None:
+            return {}
+        usage: dict[str, int] = {}
+        for sticker_id, entry in store.list_all().items():
+            try:
+                usage[str(sticker_id)] = int((entry or {}).get("send_count", 0) or 0)
+            except Exception:
+                continue
+        return usage
+
+    @staticmethod
+    def _sticker_segment_index(reply: str) -> int:
+        if "。" in reply or "！" in reply or "!" in reply:
+            return 1
+        return -1
+
+    async def _send_post_reply_sticker_if_needed(
+        self,
+        *,
+        reply: str,
+        thinker_decision: object | None,
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        turn_id: str,
+        ctx: ToolContext | None,
+        already_sent: bool,
+    ) -> bool:
+        if already_sent or not self._sticker_placement_enabled(group_id):
+            return False
+        if not bool(getattr(thinker_decision, "sticker", False)):
+            return False
+        scope = self._humanization_scope(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=turn_id,
+        )
+        store = self._sticker_store()
+        if store is None:
+            return False
+        tool = self._tools.get("send_sticker")
+        if tool is None:
+            return False
+        context = StickerDecisionContext(
+            register_label=self._humanization_state_label(
+                self._humanization_register(scope),
+                keys=("label", "register", "name"),
+            ),
+            mood_label=self._humanization_state_label(
+                self._current_humanization_mood(group_id=group_id, session_id=session_id),
+                keys=("label", "mood", "name"),
+            ),
+            cooldown_active=False,
+            cooldown_ms=int(getattr(self._sticker_placement_config, "cooldown_ms", 45_000) or 45_000),
+            thinker_candidates=tuple(self._recent_sticker_ids(scope)),
+            frequent_candidates=tuple(
+                str(sticker_id).strip()
+                for sticker_id, entry in store.list_all().items()
+                if str((entry or {}).get("usage_hint", "") or "").strip()
+            ),
+        )
+        decision = await StickerDecisionProvider().decide(
+            context,
+            extra_candidates=self._sticker_extra_candidates(),
+            runtime_state=cast(Any, self._runtime_state),
+            scope=scope,
+            usage_counts=self._sticker_usage_counts(),
+        )
+        if not decision.should_send or not decision.candidate_pool:
+            return False
+        tool_ctx = ctx or ToolContext(user_id=user_id, group_id=group_id, session_id=session_id)
+        result = await tool.execute(tool_ctx, sticker_id=decision.candidate_pool[0])
+        return str(result).startswith("已发送")
+
+    def _apply_mention_post_processor(self, reply: str, *, group_id: str | None) -> str:
+        if (
+            group_id is None
+            or self._name_registry is None
+            or not self._mention_post_processor_enabled(group_id)
+        ):
+            return reply
+        return process_mentions(
+            reply,
+            group_id,
+            self._name_registry,
+            bot_self_id=self._bot_self_id,
+            recent_speaker_limit=int(getattr(self._mention_post_processor_config, "recent_speaker_limit", 20) or 20),
+        )
+
+    def _schedule_overshare_count_key(self, *, session_id: str, group_id: str | None, is_group: bool) -> str:
+        if is_group and group_id is not None:
+            return f"group:{group_id}"
+        return f"session:{session_id}"
+
+    def _anchor_state_key(self, *, session_id: str, group_id: str | None, is_group: bool) -> str:
+        if is_group and group_id is not None:
+            return f"group:{group_id}"
+        return f"session:{session_id}"
+
+    def _maybe_inject_anchor_message(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        session_id: str,
+        group_id: str | None,
+        is_group: bool,
+    ) -> AnchorInjectionResult:
+        if not self._anchor_reinjector.enabled:
+            return AnchorInjectionResult(messages=messages)
+        key = self._anchor_state_key(session_id=session_id, group_id=group_id, is_group=is_group)
+        last_anchor_turn = self._anchor_last_turns.get(key, 0)
+        if not self._anchor_reinjector.should_inject(messages, last_anchor_turn):
+            return AnchorInjectionResult(messages=messages)
+        current_turn = self._anchor_reinjector.current_turn(messages)
+        if current_turn <= 0:
+            return AnchorInjectionResult(messages=messages)
+        return AnchorInjectionResult(
+            messages=[*messages, self._anchor_reinjector.build_anchor_message()],
+            anchor_turn=current_turn,
+        )
+
+    def _commit_anchor_injection(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None,
+        is_group: bool,
+        anchor_turn: int | None,
+    ) -> None:
+        if anchor_turn is None or anchor_turn <= 0:
+            return
+        key = self._anchor_state_key(session_id=session_id, group_id=group_id, is_group=is_group)
+        self._anchor_last_turns[key] = max(anchor_turn, int(self._anchor_last_turns.get(key, 0) or 0))
+
+    def _schedule_overshare_session_count(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None,
+        is_group: bool,
+    ) -> int:
+        key = self._schedule_overshare_count_key(
+            session_id=session_id,
+            group_id=group_id,
+            is_group=is_group,
+        )
+        return max(0, int(self._schedule_overshare_counts.get(key, 0)))
+
+    def _record_schedule_overshare_hit(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None,
+        is_group: bool,
+    ) -> None:
+        key = self._schedule_overshare_count_key(
+            session_id=session_id,
+            group_id=group_id,
+            is_group=is_group,
+        )
+        self._schedule_overshare_counts[key] = self._schedule_overshare_session_count(
+            session_id=session_id,
+            group_id=group_id,
+            is_group=is_group,
+        ) + 1
+
+    def _maybe_record_schedule_overshare_hit(
+        self,
+        *,
+        hits: tuple[GuardrailHit, ...],
+        session_id: str,
+        group_id: str | None,
+        is_group: bool,
+    ) -> None:
+        if any(hit.name == "schedule_overshare" for hit in hits):
+            self._record_schedule_overshare_hit(
+                session_id=session_id,
+                group_id=group_id,
+                is_group=is_group,
+            )
+
     def _guardrail_metrics_metadata(self, hits: tuple[GuardrailHit, ...]) -> dict[str, Any]:
         metadata: dict[str, Any] = {
             "near_duplicate_hits": 0,
             "near_duplicate_dropped": 0,
             "near_duplicate_rewritten": 0,
+            "persona_drift_hits": 0,
+            "persona_drift_rewritten": 0,
+            "schedule_overshare_hits": 0,
+            "schedule_overshare_rewritten": 0,
             "thinker_phrase_hits": 0,
             "sentinel_strip_hits": 0,
             "sentinel_redact_hits": 0,
@@ -1162,6 +1655,14 @@ class LLMClient:
                     metadata["near_duplicate_dropped"] += 1
                 elif hit.action == "rewrite":
                     metadata["near_duplicate_rewritten"] += 1
+            if hit.name == "persona_drift":
+                metadata["persona_drift_hits"] += 1
+                if hit.action == "rewrite":
+                    metadata["persona_drift_rewritten"] += 1
+            if hit.name == "schedule_overshare":
+                metadata["schedule_overshare_hits"] += 1
+                if hit.action == "rewrite":
+                    metadata["schedule_overshare_rewritten"] += 1
             if hit.name == "thinker_phrase":
                 metadata["thinker_phrase_hits"] += 1
             if hit.name.startswith("sentinel_"):
@@ -1172,6 +1673,85 @@ class LLMClient:
                 elif hit.action == "block":
                     metadata["sentinel_block_hits"] += 1
         return metadata
+
+    async def _maybe_repair_persona_drift(
+        self,
+        *,
+        reply: str,
+        system_blocks: list[dict[str, Any]],
+        messages: list[Any],
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        repaired: bool = False,
+    ) -> DriftReplyResult:
+        if not self._drift_detector_enabled(group_id):
+            return DriftReplyResult(reply=reply, drift_score=DriftScore(raw=0.0, ewma=0.0, action="pass"))
+        drift_score = self._drift_detector.evaluate(
+            reply,
+            group_id=group_id,
+            session_id=session_id,
+        )
+        metadata = {
+            "persona_drift_detector_raw": round(drift_score.raw, 4),
+            "persona_drift_detector_ewma": round(drift_score.ewma, 4),
+            "persona_drift_detector_action": drift_score.action,
+        }
+        if drift_score.action == "block":
+            return DriftReplyResult(
+                reply="我重新整理一下再接。",
+                drift_score=drift_score,
+                drift_metadata=metadata,
+            )
+        if drift_score.action != "repair" or repaired or self._drift_detector.repair_max_retries <= 0:
+            return DriftReplyResult(reply=reply, drift_score=drift_score, drift_metadata=metadata)
+        repair_request = LLMRequest(
+            task="main",
+            user_id=user_id,
+            group_id=group_id,
+            static_blocks=list(system_blocks),
+            user_messages=[
+                *list(messages),
+                {
+                    "role": "user",
+                    "content": self._drift_detector.build_repair_instruction(reply),
+                },
+            ],
+            max_tokens=max(128, min(1024, len(reply) * 3 + 64)),
+            auto_record_usage=False,
+            requires_capabilities=("chat",),
+        )
+        repair_result = await self._call(repair_request)
+        candidate, _stripped = _strip_control_tokens(_clean_reply(str(repair_result.get("text", "") or "")))
+        candidate = candidate.strip() or reply
+        metadata["persona_drift_detector_repaired"] = True
+        return DriftReplyResult(
+            reply=candidate,
+            drift_score=drift_score,
+            drift_metadata=metadata,
+            repair_result=repair_result,
+        )
+
+    def _apply_drift_block_fallback(
+        self,
+        *,
+        reply: str,
+        drift_metadata: dict[str, Any],
+    ) -> tuple[str, dict[str, Any], tuple[GuardrailHit, ...]]:
+        hit = GuardrailHit(
+            name="persona_drift_detector",
+            severity="high",
+            action="block",
+            metadata=dict(drift_metadata),
+        )
+        fallback = self._guardrail_fallback(
+            reply=reply,
+            hits=(hit,),
+            thinker_thought="",
+        )
+        metadata = dict(drift_metadata)
+        metadata["persona_drift_detector_blocked"] = True
+        return fallback, metadata, (hit,)
 
     def _guardrail_fallback(
         self,
@@ -1198,6 +1778,7 @@ class LLMClient:
         group_id: str | None,
         is_group: bool,
         thinker_thought: str,
+        user_message: str,
     ) -> tuple[str, dict[str, Any], tuple[GuardrailHit, ...]]:
         if not reply.strip() or not self._sentinel_guardrail_enabled(group_id):
             return reply, {}, ()
@@ -1206,13 +1787,23 @@ class LLMClient:
             group_id=group_id,
             is_group=is_group,
         )
+        session_count = self._schedule_overshare_session_count(
+            session_id=session_id,
+            group_id=group_id,
+            is_group=is_group,
+        )
         result = apply_guardrails(
             reply,
             thinker_thought=thinker_thought,
             last_assistant_text=last_assistant_text,
+            user_message=user_message,
+            session_count=session_count,
+            bot_name=self._prompt.persona_runtime.identity_snapshot().name,
             config=self._sentinel_guardrail_config,
         )
         metadata = self._guardrail_metrics_metadata(result.hits)
+        if result.metadata:
+            metadata.update(result.metadata)
         if not result.hits:
             return result.text or reply, metadata, ()
         if result.passed:
@@ -1761,6 +2352,7 @@ class LLMClient:
         topic_intent_label: str = "闲聊",
         elapsed_ms: float,
         retrieve_mode: str = "hybrid",
+        instruction_signal: str = "none",
     ) -> None:
         if self._bus is None:
             return
@@ -1775,8 +2367,118 @@ class LLMClient:
                 topic_intent_label=topic_intent_label,
                 elapsed_ms=elapsed_ms,
                 retrieve_mode=retrieve_mode,
+                instruction_signal=instruction_signal,
             )
         )
+
+    async def _apply_instruction_gate(
+        self,
+        *,
+        user_message: str,
+        user_id: str,
+        group_id: str | None,
+        trigger: object | None,
+        thinker_instruction_signal: str,
+        on_segment: Callable[[str], Awaitable[bool]] | None,
+    ) -> str | None:
+        """Issue 15 instruction authority gate.
+
+        Returns:
+          - ""           : gate passed / not applicable — no hint, continue normally
+          - <hint str>   : ALLOW/COMPLY/REFUSE_SOFT — inject hint into plugin_dynamic
+          - None         : DENY — refusal already emitted; caller must stop (no main LLM)
+        """
+        gate = self._instruction_gate
+        if gate is None:
+            return ""
+        try:
+            overrides = self._authority_store.snapshot() if self._authority_store is not None else {}
+            mood = None
+            if self._mood_getter is not None:
+                try:
+                    mood = self._mood_getter(group_id=group_id, session_id=f"group_{group_id}" if group_id else "")
+                except TypeError:
+                    mood = self._mood_getter()
+            result = gate.evaluate(
+                user_message=user_message,
+                user_id=user_id,
+                admins=self._admins,
+                authority_overrides=overrides,
+                mood=mood,
+                thinker_signal=thinker_instruction_signal,
+            )
+        except Exception as exc:
+            _log_msg_out.warning("instruction_gate eval failed | err={}", exc)
+            return ""
+
+        if result.action == "pass":
+            return ""
+
+        mode = str(getattr(getattr(gate, "_config", None), "mode", "shadow") or "shadow")
+        _log_msg_out.info(
+            "instruction_gate | mode={} action={} severity={} authority={}/{} user={} reason={}",
+            mode, result.action, result.severity,
+            result.user_authority, result.required_authority, user_id, result.reason,
+        )
+
+        # Shadow mode: log only, never enforce.
+        if mode != "active":
+            return ""
+
+        if result.action == "deny":
+            if on_segment and result.deny_text:
+                quote_id = getattr(trigger, "target_message_id", None) if trigger is not None else None
+                deny_text = f"[CQ:reply,id={quote_id}]{result.deny_text}" if quote_id else result.deny_text
+                try:
+                    await on_segment(deny_text)
+                except Exception as exc:
+                    _log_msg_out.warning("instruction_gate deny emit failed | err={}", exc)
+            return None
+
+        return result.response_hint or ""
+
+    async def _gen_closing_token(
+        self,
+        *,
+        conversation_text: str,
+        mood_text: str,
+        user_id: str,
+        group_id: str | None,
+        identity_name: str,
+    ) -> str:
+        """Generate a short, symmetric farewell token for a closing turn.
+
+        Runs speculatively (in parallel with the thinker). Returns "" on any
+        failure — the caller falls back to a static token, so this never raises
+        into the main path.
+        """
+        system = (
+            f"你是{identity_name}。对方正在向你道别或给对话收尾。"
+            "回一个对称、简短、口语化、有温度的告别 token（像「晚安哦」「好的呀明天见」「拜拜～」）。"
+            "贴合对方的语气，越短越好，只输出这一句，不要解释、不要引号、不要加表情符号说明。"
+        )
+        dynamic_blocks: list[str | dict[str, Any]] = []
+        if mood_text:
+            dynamic_blocks.append(mood_text)
+        request = LLMRequest(
+            task="thinker",
+            user_id=user_id,
+            group_id=group_id,
+            static_blocks=[system],
+            dynamic_blocks=dynamic_blocks,
+            user_messages=[{"role": "user", "content": conversation_text or "（对方在道别）"}],
+            max_tokens=24,
+            auto_record_usage=False,
+            requires_capabilities=("chat",),
+        )
+        try:
+            result = await self._call(request)
+        except Exception as exc:
+            _log_msg_out.debug("closing token gen failed | err={}", exc)
+            return ""
+        text = str(result.get("text", "") or "") if isinstance(result, dict) else str(result or "")
+        cleaned, _ = _strip_control_tokens(_clean_reply(text))
+        return cleaned.strip().strip('"').strip("'").strip()[:32]
 
     async def _fire_post_reply(
         self,
@@ -1896,7 +2598,7 @@ class LLMClient:
         self,
         humanization: ResolvedHumanization,
         *,
-        on_segment: Callable[[str], Awaitable[None]] | None,
+        on_segment: Callable[[str], Awaitable[bool]] | None,
         tool_defs: list[dict[str, Any]],
         is_group: bool,
         force_reply: bool,
@@ -1918,7 +2620,7 @@ class LLMClient:
         self,
         request: LLMRequest,
         *,
-        on_segment: Callable[[str], Awaitable[None]],
+        on_segment: Callable[[str], Awaitable[bool]],
         session_id: str,
         group_id: str | None,
         user_id: str,
@@ -1956,7 +2658,9 @@ class LLMClient:
                     return
             if quote_reply_enabled and quote_msg_id and not emitted:
                 visible = _apply_quote_reply_anchor(visible, quote_msg_id)
-            await on_segment(visible)
+            should_continue = await on_segment(visible)
+            if not should_continue:
+                raise SegmentAborted(sent_segments=[*emitted, visible])
             last_segment_emitted_at = time.monotonic()
             emitted.append(visible)
 
@@ -1985,7 +2689,7 @@ class LLMClient:
         self,
         humanization: ResolvedHumanization,
         *,
-        on_segment: Callable[[str], Awaitable[None]] | None,
+        on_segment: Callable[[str], Awaitable[bool]] | None,
         tool_defs: list[dict[str, Any]],
         is_group: bool,
         force_reply: bool,
@@ -2086,7 +2790,7 @@ class LLMClient:
         user_id: str,
         turn_id: str,
         humanization: ResolvedHumanization,
-        on_segment: Callable[[str], Awaitable[None]] | None,
+        on_segment: Callable[[str], Awaitable[bool]] | None,
         tool_defs: list[dict[str, Any]],
         is_group: bool,
         force_reply: bool,
@@ -2256,7 +2960,9 @@ class LLMClient:
         last_segment_emitted_at: float | None = None
         try:
             for index, candidate in enumerate(candidates):
-                await on_segment(candidate)
+                should_continue = await on_segment(candidate)
+                if not should_continue:
+                    raise SegmentAborted(sent_segments=list(candidates[: index + 1]))
                 last_segment_emitted_at = time.monotonic()
                 await self._record_plan_then_utter_trace(
                     session_id=session_id,
@@ -2324,7 +3030,7 @@ class LLMClient:
         self,
         humanization: ResolvedHumanization,
         *,
-        on_segment: Callable[[str], Awaitable[None]] | None,
+        on_segment: Callable[[str], Awaitable[bool]] | None,
         is_group: bool,
         group_id: str | None,
     ) -> bool:
@@ -2387,7 +3093,7 @@ class LLMClient:
         user_id: str,
         turn_id: str,
         humanization: ResolvedHumanization,
-        on_segment: Callable[[str], Awaitable[None]] | None,
+        on_segment: Callable[[str], Awaitable[bool]] | None,
         last_segment_emitted_at: float | None = None,
     ) -> list[str]:
         is_group = group_id is not None and self._timeline is not None
@@ -2529,7 +3235,9 @@ class LLMClient:
                 break
 
             try:
-                await on_segment(candidate)
+                should_continue = await on_segment(candidate)
+                if not should_continue:
+                    raise SegmentAborted(sent_segments=[*emitted, candidate])
                 last_segment_emitted_at = time.monotonic()
             except asyncio.CancelledError:
                 asyncio.create_task(self._record_pause_extend_trace(  # noqa: RUF006
@@ -3065,8 +3773,9 @@ class LLMClient:
         identity: IdentitySnapshot,
         group_id: str | None = None,
         ctx: ToolContext | None = None,
-        on_segment: Callable[[str], Awaitable[None]] | None = None,
+        on_segment: Callable[[str], Awaitable[bool]] | None = None,
         force_reply: bool = False,
+        trigger: object | None = None,
         *,
         privacy_mask: bool = True,
     ) -> str | None:
@@ -3119,6 +3828,13 @@ class LLMClient:
                 )
                 await self._compact(session_id)
             messages = self._build_private_messages(session_id)
+        anchor_injection = self._maybe_inject_anchor_message(
+            messages=messages,
+            session_id=session_id,
+            group_id=group_id,
+            is_group=is_group,
+        )
+        messages = anchor_injection.messages
 
         # Extract conversation text for retrieval gating
         recent_text = ""
@@ -3134,6 +3850,23 @@ class LLMClient:
         else:
             conversation_text = content_text(user_content) if user_content else ""
 
+        if self._text_preflight_enabled(group_id):
+            trigger_extra = getattr(trigger, "extra", {}) if trigger is not None else {}
+            preflight_result = preflight(
+                conversation_text,
+                is_reply_to_bot=bool(trigger_extra.get("reply_sender_id")),
+                is_at_bot=bool(getattr(trigger, "mode", "") == "at_mention"),
+                config=self._text_preflight_config,
+            )
+            if preflight_result.should_skip:
+                _log_thinking.info(
+                    "text_preflight_skip | session={} reason={} density={:.2f}",
+                    session_id,
+                    preflight_result.reason,
+                    preflight_result.density,
+                )
+                return None
+
         # ------------------------------------------------------------------
         # Pre-reply thinker: decide whether to speak before building full prompt
         # ------------------------------------------------------------------
@@ -3143,6 +3876,11 @@ class LLMClient:
         thinker_rewritten_query = ""
         thinker_topic_intent_label = "闲聊"
         thinker_turn_id = ""
+        slang_context_block = ""
+        slang_ask_user_fallback: str | None = None
+        speculative_slang_task: asyncio.Task[Any] | None = None
+        closing_token: str | None = None
+        instruction_hint = ""
         if self._thinker_enabled and not force_reply:
             from services.llm.thinker import (
                 build_thinker_time_text,
@@ -3169,24 +3907,68 @@ class LLMClient:
             mood_text = self._build_thinker_mood_text(group_id=group_id, session_id=session_id)
             affection_text = self._build_thinker_affection_text(user_id)
             slang_hint = await self._build_thinker_slang_hint(group_id, conversation_text)
-            thinker_decision = await think(
-                api_call=lambda req: self._call(req),
-                recent_messages=recent_for_thinker,
-                max_tokens=self._thinker_max_tokens,
-                mood_text=mood_text,
-                affection_text=affection_text,
-                time_text=time_text,
-                identity_name=identity.name,
-                user_id=user_id,
-                group_id=group_id,
-                slang_hint=slang_hint,
-            )
+            async with SpeculativeExecutor() as speculative:
+                if self._slang_lookup_enabled(group_id):
+                    candidate_terms = self._extract_unknown_terms_from_text(conversation_text)
+                    if candidate_terms:
+                        speculative_slang_task = speculative.submit(
+                            self._slang_lookup_client.batch_lookup,
+                            candidate_terms,
+                            group_id=group_id,
+                            timeout=max(0.05, float(getattr(self._slang_lookup_config, "timeout_ms", 500)) / 1000.0),
+                        )
+                # Weak-reply P0: when the router flagged this turn as a closing,
+                # pre-generate the terminal token in parallel with the thinker so
+                # the short-circuit below pays no extra serial latency.
+                closing_token_task: asyncio.Task[Any] | None = None
+                if str(getattr(trigger, "mode", "") or "") == "closing":
+                    closing_token_task = speculative.submit(
+                        self._gen_closing_token,
+                        conversation_text=conversation_text,
+                        mood_text=mood_text,
+                        user_id=user_id,
+                        group_id=group_id,
+                        identity_name=identity.name,
+                        timeout=2.0,
+                    )
+                thinker_decision = await think(
+                    api_call=lambda req: self._call(req),
+                    recent_messages=recent_for_thinker,
+                    max_tokens=self._thinker_max_tokens,
+                    mood_text=mood_text,
+                    affection_text=affection_text,
+                    time_text=time_text,
+                    identity_name=identity.name,
+                    user_id=user_id,
+                    group_id=group_id,
+                    slang_hint=slang_hint,
+                    trigger_mode=str(getattr(trigger, "mode", "") or ""),
+                )
+                resolved_terms, unresolved_terms = await self._resolve_slang_results(
+                    decision=thinker_decision,
+                    conversation_text=conversation_text,
+                    group_id=group_id,
+                    speculative_task=speculative_slang_task,
+                )
+                slang_context_block = self._build_slang_context_block(resolved_terms)
+                if unresolved_terms:
+                    slang_ask_user_fallback = self._slang_ask_user_fallback(unresolved_terms)
+                if closing_token_task is not None:
+                    try:
+                        closing_token = await closing_token_task
+                    except Exception:
+                        # Speculative gen failed/timed out → fall back to a static
+                        # token at the short-circuit. (Outer cancellation propagates:
+                        # if the chat task itself is cancelled, the SpeculativeExecutor
+                        # __aexit__ cancels this task and CancelledError is re-raised.)
+                        closing_token = None
             # Persist decision in prompt context so plugins can see it
             thinker_action = thinker_decision.action
             thinker_thought = thinker_decision.thought
             thinker_topic_intent_label = getattr(thinker_decision, "topic_intent_label", "闲聊")
             thinker_retrieve_mode = getattr(thinker_decision, "retrieve_mode", "hybrid")
             thinker_rewritten_query = getattr(thinker_decision, "rewritten_query", "")
+            thinker_instruction_signal = getattr(thinker_decision, "instruction_signal", "none")
             thinker_turn_id = f"{session_id}:{int(time.monotonic() * 1000)}"
             write_clock_state(
                 self._runtime_state,
@@ -3206,6 +3988,35 @@ class LLMClient:
             )
             self._last_thinker_action = thinker_action
             self._last_thinker_thought = thinker_thought
+
+            # B3: reply-necessity gate. A low-necessity *proactive* reply is the
+            # bot showing off rather than being needed — downgrade it to wait
+            # (reuses the wait short-circuit below → silence). C1: exemption uses
+            # the SINGLE receiver-role decided by the scheduler (addressed OR
+            # ratified = the bot is in this exchange → never suppress), not a
+            # local `trigger is None` guess. This is what stops a user's direct
+            # follow-up to the bot ("eyelids fighting" → "fight back") from being
+            # silently dropped. light_reply (companion/closing) never suppressed.
+            if (
+                self._thinker_necessity_gate_enabled
+                and thinker_action == "reply"
+                and str(getattr(thinker_decision, "reply_necessity", "high")) == "low"
+            ):
+                receiver_role = str(
+                    (ctx.extra.get("receiver_role") if ctx is not None else "") or "",
+                )
+                # Addressed/ratified = the bot is part of this exchange → exempt.
+                role_exempt = receiver_role in ("addressed", "ratified")
+                # Back-compat: explicit trigger also exempts (e.g. private chat,
+                # or any path that didn't set receiver_role).
+                addressed_turn = trigger is not None or role_exempt
+                if not (self._thinker_necessity_gate_addressed_exempt and addressed_turn):
+                    _log_msg_out.info(
+                        "necessity_gate | session={} downgraded reply->wait (low, role={!r}) thought={!r}",
+                        session_id, receiver_role, thinker_thought,
+                    )
+                    thinker_action = "wait"
+                    self._last_thinker_action = thinker_action
             u13_trace_request_id = str(
                 (ctx.extra.get("u13_double_haiku_request_id") if ctx is not None else "") or ""
             )
@@ -3239,6 +4050,7 @@ class LLMClient:
                 topic_intent_label=thinker_topic_intent_label,
                 elapsed_ms=(time.monotonic() - t0) * 1000,
                 retrieve_mode=thinker_retrieve_mode,
+                instruction_signal=thinker_instruction_signal,
             )
 
             if thinker_action == "wait":
@@ -3257,6 +4069,62 @@ class LLMClient:
                     cache_create_tokens=thinker_decision.usage.get("cache_create", 0),
                     output_tokens=thinker_decision.usage.get("output_tokens", 0),
                     tool_rounds=0, elapsed_s=elapsed,
+                )
+                return None
+
+            # Issue 15 — instruction authority gate (between thinker reply and
+            # main LLM). DENY short-circuits with an in-character line (no main
+            # LLM call); ALLOW/COMPLY/REFUSE_SOFT inject a hint into the prompt.
+            instruction_hint = await self._apply_instruction_gate(
+                user_message=conversation_text,
+                user_id=user_id,
+                group_id=group_id,
+                trigger=trigger,
+                thinker_instruction_signal=thinker_instruction_signal,
+                on_segment=on_segment,
+            )
+            if instruction_hint is None:
+                return None  # DENY: refusal already emitted
+
+            # Weak-reply P0: closing short-circuit. When the thinker (or the
+            # router-set trigger) classifies this turn as a farewell, emit a
+            # symmetric terminal token directly — no main LLM call. Structurally
+            # mirrors the instruction_gate DENY path (on_segment + return None).
+            light_kind = str(getattr(thinker_decision, "light_kind", "") or "")
+            is_closing_turn = light_kind == "closing" or (
+                str(getattr(trigger, "mode", "") or "") == "closing"
+                and thinker_action != "wait"
+            )
+            if is_closing_turn:
+                token = (closing_token or "").strip() or _PASS_TURN_LIGHT_ACK
+                emitted = False
+                if on_segment is not None:
+                    quote_id = getattr(trigger, "target_message_id", None) if trigger is not None else None
+                    seg = f"[CQ:reply,id={quote_id}]{token}" if quote_id else token
+                    try:
+                        await on_segment(seg)
+                        emitted = True
+                    except Exception as exc:
+                        _log_msg_out.warning("closing emit failed | err={}", exc)
+                if emitted and group_id is not None and self._timeline is not None:
+                    try:
+                        self._timeline.add(group_id, role="assistant", content=token)
+                    except Exception as exc:
+                        _log_msg_out.debug("closing timeline write skipped | err={}", exc)
+                self._record_usage(
+                    call_type="proactive",
+                    user_id=user_id, group_id=group_id,
+                    model=self._profile_for_task("thinker")[3],
+                    provider_kind=self._profile_for_task("thinker")[4],
+                    input_tokens=thinker_decision.usage.get("input_tokens", 0),
+                    cache_read_tokens=thinker_decision.usage.get("cache_read", 0),
+                    cache_create_tokens=thinker_decision.usage.get("cache_create", 0),
+                    output_tokens=thinker_decision.usage.get("output_tokens", 0),
+                    tool_rounds=0, elapsed_s=time.monotonic() - t0,
+                )
+                _log_msg_out.info(
+                    "closing_light_reply | session={} token={!r} speculative={}",
+                    session_id, token, closing_token is not None,
                 )
                 return None
         else:
@@ -3350,6 +4218,15 @@ class LLMClient:
                             plugin_stable.append(block_dict)
                         else:
                             plugin_dynamic.append(block_dict)
+                addressee_hint = self._build_addressee_hint(
+                    group_id=group_id,
+                    trigger=trigger,
+                    fallback_user_id=user_id,
+                )
+                if addressee_hint:
+                    plugin_dynamic.append({"type": "text", "text": addressee_hint})
+                if instruction_hint:
+                    plugin_dynamic.append({"type": "text", "text": instruction_hint})
 
                 if deepseek_native_main:
                     state_board_block = await self._prompt.build_state_board_block(
@@ -3405,6 +4282,10 @@ class LLMClient:
                 "text": "【" + "】【".join(hints) + "】",
             }
             system_blocks = [*system_blocks, thinker_block]
+        if slang_context_block:
+            system_blocks = [*system_blocks, {"type": "text", "text": slang_context_block}]
+        if getattr(trigger, "mode", "") == "correction":
+            system_blocks = [*system_blocks, {"type": "text", "text": _CORRECTION_TRIGGER_INSTRUCTION}]
 
         messages, image_tag_map = await resolve_image_refs(messages, self._image_cache)
 
@@ -3479,18 +4360,30 @@ class LLMClient:
                 requires_capabilities=("chat",),
             )
             streamed_segments: list[str] = []
-            if streaming_segment and round_i == 0 and on_segment is not None:
-                result, streamed_segments = await self._stream_with_segments(
-                    main_request,
-                    on_segment=on_segment,
-                    session_id=session_id,
-                    group_id=group_id,
-                    user_id=user_id,
-                    turn_id=reply_turn_id,
-                    quote_reply_enabled=_quote_reply_enabled(humanization),
-                )
-            else:
-                result = await self._call(main_request)
+            try:
+                if streaming_segment and round_i == 0 and on_segment is not None:
+                    result, streamed_segments = await self._stream_with_segments(
+                        main_request,
+                        on_segment=on_segment,
+                        session_id=session_id,
+                        group_id=group_id,
+                        user_id=user_id,
+                        turn_id=reply_turn_id,
+                        quote_reply_enabled=_quote_reply_enabled(humanization),
+                    )
+                else:
+                    result = await self._call(main_request)
+            except SegmentAborted as exc:
+                full_reply = "\n".join(exc.sent_segments)
+                if is_group and group_id is not None and self._timeline is not None and full_reply:
+                    self._timeline.add(group_id, role="assistant", content=full_reply)
+                return ""
+            self._commit_anchor_injection(
+                session_id=session_id,
+                group_id=group_id,
+                is_group=is_group,
+                anchor_turn=anchor_injection.anchor_turn,
+            )
             acc_llm_elapsed += float(result.get("call_elapsed_s", 0.0) or 0.0)
             acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
             acc_output += result.get("output_tokens", 0)
@@ -3642,13 +4535,29 @@ class LLMClient:
                     )
                     return None
 
-                guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_visible_reply_guardrails(
+                drift_reply = await self._maybe_repair_persona_drift(
                     reply=reply,
+                    system_blocks=system_blocks,
+                    messages=messages,
                     session_id=session_id,
                     group_id=group_id,
-                    is_group=is_group,
-                    thinker_thought=thinker_thought,
+                    user_id=user_id,
                 )
+                if drift_reply.drift_score.action == "block":
+                    guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_drift_block_fallback(
+                        reply=reply,
+                        drift_metadata=drift_reply.drift_metadata,
+                    )
+                else:
+                    guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_visible_reply_guardrails(
+                        reply=drift_reply.reply,
+                        session_id=session_id,
+                        group_id=group_id,
+                        is_group=is_group,
+                        thinker_thought=thinker_thought,
+                        user_message=content_text(user_content) if user_content else "",
+                    )
+                    guardrail_metadata.update(drift_reply.drift_metadata)
                 rewrite = await self._maybe_rewrite_humanization_reply(
                     reply=guardrail_reply,
                     system_blocks=system_blocks,
@@ -3661,6 +4570,23 @@ class LLMClient:
                     guardrail_hits=guardrail_hits,
                 )
                 reply = rewrite.reply
+                if drift_reply.repair_result is not None:
+                    repair_usage = drift_reply.repair_result
+                    acc_llm_elapsed += float(repair_usage.get("call_elapsed_s", 0.0) or 0.0)
+                    acc_input += (
+                        int(repair_usage.get("input_tokens", 0) or 0)
+                        - int(repair_usage.get("cache_read", 0) or 0)
+                        - int(repair_usage.get("cache_create", 0) or 0)
+                    )
+                    acc_output += int(repair_usage.get("output_tokens", 0) or 0)
+                    acc_cache_read += int(repair_usage.get("cache_read", 0) or 0)
+                    acc_cache_create += int(repair_usage.get("cache_create", 0) or 0)
+                    repair_cache_hit, repair_cache_miss, repair_reasoning_replay = _usage_observability_fields(
+                        repair_usage
+                    )
+                    acc_prompt_cache_hit += repair_cache_hit
+                    acc_prompt_cache_miss += repair_cache_miss
+                    acc_reasoning_replay += repair_reasoning_replay
                 if rewrite.rewrite_result is not None:
                     rewrite_usage = rewrite.rewrite_result
                     acc_llm_elapsed += float(rewrite_usage.get("call_elapsed_s", 0.0) or 0.0)
@@ -3684,6 +4610,7 @@ class LLMClient:
                 if not quote_reply_enabled:
                     reply = _strip_cq_reply_codes(reply)
                 reply = _apply_quote_reply_anchor(reply, quote_msg_id)
+                reply = self._apply_mention_post_processor(reply, group_id=group_id)
 
                 # Kaomoji enforcement: if the reply contains a kaomoji / action
                 # description but the LLM forgot to call send_sticker, inject a
@@ -3746,27 +4673,45 @@ class LLMClient:
                     group_id=group_id,
                 )
                 if extend_enabled and on_segment:
-                    for idx, seg in enumerate(segments):
-                        await on_segment(seg)
-                        last_segment_emitted_at = time.monotonic()
-                        if idx < len(segments) - 1:
+                    try:
+                        for idx, seg in enumerate(segments):
+                            should_continue = await on_segment(seg)
+                            if not should_continue:
+                                raise SegmentAborted(sent_segments=segments[: idx + 1])
+                            last_segment_emitted_at = time.monotonic()
+                            if idx < len(segments) - 1:
+                                delay = (
+                                    plan.inter_segment_delays[idx]
+                                    if idx < len(plan.inter_segment_delays)
+                                    else _SEGMENT_DELAY
+                                )
+                                await asyncio.sleep(delay)
+                        last_seg = ""
+                    except SegmentAborted as exc:
+                        partial_reply = "\n".join(exc.sent_segments)
+                        if is_group and group_id is not None and self._timeline is not None and partial_reply:
+                            self._timeline.add(group_id, role="assistant", content=partial_reply)
+                            self._timeline.set_input_tokens(group_id, result["input_tokens"])
+                        return ""
+                elif on_segment and len(segments) > 1:
+                    try:
+                        for idx, seg in enumerate(segments[:-1]):
+                            should_continue = await on_segment(seg)
+                            if not should_continue:
+                                raise SegmentAborted(sent_segments=segments[: idx + 1])
                             delay = (
                                 plan.inter_segment_delays[idx]
                                 if idx < len(plan.inter_segment_delays)
                                 else _SEGMENT_DELAY
                             )
                             await asyncio.sleep(delay)
-                    last_seg = ""
-                elif on_segment and len(segments) > 1:
-                    for idx, seg in enumerate(segments[:-1]):
-                        await on_segment(seg)
-                        delay = (
-                            plan.inter_segment_delays[idx]
-                            if idx < len(plan.inter_segment_delays)
-                            else _SEGMENT_DELAY
-                        )
-                        await asyncio.sleep(delay)
-                    last_seg = segments[-1] if segments else reply
+                        last_seg = segments[-1] if segments else reply
+                    except SegmentAborted as exc:
+                        partial_reply = "\n".join(exc.sent_segments)
+                        if is_group and group_id is not None and self._timeline is not None and partial_reply:
+                            self._timeline.add(group_id, role="assistant", content=partial_reply)
+                            self._timeline.set_input_tokens(group_id, result["input_tokens"])
+                        return ""
                 elif not on_segment and len(segments) > 1:
                     # No callback to send segments — rejoin so caller gets full text
                     last_seg = "\n".join(segments)
@@ -3792,6 +4737,12 @@ class LLMClient:
                         await self._message_log.record_session_msg(
                             session_id, "assistant", full_reply[:2000]
                         )
+                self._maybe_record_schedule_overshare_hit(
+                    hits=guardrail_hits,
+                    session_id=session_id,
+                    group_id=group_id,
+                    is_group=is_group,
+                )
                 self._record_usage(
                     call_type="proactive" if is_group else "chat",
                     user_id=user_id, group_id=group_id,
@@ -3827,6 +4778,8 @@ class LLMClient:
                     on_segment=on_segment,
                     last_segment_emitted_at=last_segment_emitted_at,
                 )
+                if slang_ask_user_fallback and not full_reply.strip():
+                    return slang_ask_user_fallback
 
                 return last_seg
 
@@ -3894,6 +4847,12 @@ class LLMClient:
             requires_capabilities=("chat",),
         )
         result = await self._call(final_main_request)
+        self._commit_anchor_injection(
+            session_id=session_id,
+            group_id=group_id,
+            is_group=is_group,
+            anchor_turn=anchor_injection.anchor_turn,
+        )
         acc_llm_elapsed += float(result.get("call_elapsed_s", 0.0) or 0.0)
         acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
         acc_output += result.get("output_tokens", 0)
@@ -3933,14 +4892,32 @@ class LLMClient:
                 tool_rounds=MAX_TOOL_ROUNDS, elapsed_s=acc_llm_elapsed,
             )
             return None
+        if slang_ask_user_fallback and not slang_context_block:
+            reply = slang_ask_user_fallback
         reply_turn_id = thinker_turn_id or f"{session_id}:tool_exhausted:{int(time.monotonic() * 1000)}"
-        guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_visible_reply_guardrails(
+        drift_reply = await self._maybe_repair_persona_drift(
             reply=reply,
+            system_blocks=system_blocks,
+            messages=messages,
             session_id=session_id,
             group_id=group_id,
-            is_group=is_group,
-            thinker_thought=thinker_thought,
+            user_id=user_id,
         )
+        if drift_reply.drift_score.action == "block":
+            guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_drift_block_fallback(
+                reply=reply,
+                drift_metadata=drift_reply.drift_metadata,
+            )
+        else:
+            guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_visible_reply_guardrails(
+                reply=drift_reply.reply,
+                session_id=session_id,
+                group_id=group_id,
+                is_group=is_group,
+                thinker_thought=thinker_thought,
+                user_message=content_text(user_content) if user_content else "",
+            )
+            guardrail_metadata.update(drift_reply.drift_metadata)
         rewrite = await self._maybe_rewrite_humanization_reply(
             reply=guardrail_reply,
             system_blocks=system_blocks,
@@ -3953,6 +4930,23 @@ class LLMClient:
             guardrail_hits=guardrail_hits,
         )
         reply = rewrite.reply
+        if drift_reply.repair_result is not None:
+            repair_usage = drift_reply.repair_result
+            acc_llm_elapsed += float(repair_usage.get("call_elapsed_s", 0.0) or 0.0)
+            acc_input += (
+                int(repair_usage.get("input_tokens", 0) or 0)
+                - int(repair_usage.get("cache_read", 0) or 0)
+                - int(repair_usage.get("cache_create", 0) or 0)
+            )
+            acc_output += int(repair_usage.get("output_tokens", 0) or 0)
+            acc_cache_read += int(repair_usage.get("cache_read", 0) or 0)
+            acc_cache_create += int(repair_usage.get("cache_create", 0) or 0)
+            repair_cache_hit, repair_cache_miss, repair_reasoning_replay = _usage_observability_fields(
+                repair_usage
+            )
+            acc_prompt_cache_hit += repair_cache_hit
+            acc_prompt_cache_miss += repair_cache_miss
+            acc_reasoning_replay += repair_reasoning_replay
         if rewrite.rewrite_result is not None:
             rewrite_usage = rewrite.rewrite_result
             acc_llm_elapsed += float(rewrite_usage.get("call_elapsed_s", 0.0) or 0.0)
@@ -3973,6 +4967,7 @@ class LLMClient:
         if not quote_reply_enabled:
             reply = _strip_cq_reply_codes(reply)
         reply = _apply_quote_reply_anchor(reply, quote_msg_id)
+        reply = self._apply_mention_post_processor(reply, group_id=group_id)
         plan = self._visible_reply_segment_plan(
             reply,
             session_id=session_id,
@@ -4003,27 +4998,45 @@ class LLMClient:
             group_id=group_id,
         )
         if extend_enabled and on_segment:
-            for idx, seg in enumerate(segments):
-                await on_segment(seg)
-                last_segment_emitted_at = time.monotonic()
-                if idx < len(segments) - 1:
+            try:
+                for idx, seg in enumerate(segments):
+                    should_continue = await on_segment(seg)
+                    if not should_continue:
+                        raise SegmentAborted(sent_segments=segments[: idx + 1])
+                    last_segment_emitted_at = time.monotonic()
+                    if idx < len(segments) - 1:
+                        delay = (
+                            plan.inter_segment_delays[idx]
+                            if idx < len(plan.inter_segment_delays)
+                            else _SEGMENT_DELAY
+                        )
+                        await asyncio.sleep(delay)
+                last_seg = ""
+            except SegmentAborted as exc:
+                partial_reply = "\n".join(exc.sent_segments)
+                if is_group and group_id is not None and self._timeline is not None and partial_reply:
+                    self._timeline.add(group_id, role="assistant", content=partial_reply)
+                    self._timeline.set_input_tokens(group_id, result["input_tokens"])
+                return ""
+        elif on_segment and len(segments) > 1:
+            try:
+                for idx, seg in enumerate(segments[:-1]):
+                    should_continue = await on_segment(seg)
+                    if not should_continue:
+                        raise SegmentAborted(sent_segments=segments[: idx + 1])
                     delay = (
                         plan.inter_segment_delays[idx]
                         if idx < len(plan.inter_segment_delays)
                         else _SEGMENT_DELAY
                     )
                     await asyncio.sleep(delay)
-            last_seg = ""
-        elif on_segment and len(segments) > 1:
-            for idx, seg in enumerate(segments[:-1]):
-                await on_segment(seg)
-                delay = (
-                    plan.inter_segment_delays[idx]
-                    if idx < len(plan.inter_segment_delays)
-                    else _SEGMENT_DELAY
-                )
-                await asyncio.sleep(delay)
-            last_seg = segments[-1] if segments else reply
+                last_seg = segments[-1] if segments else reply
+            except SegmentAborted as exc:
+                partial_reply = "\n".join(exc.sent_segments)
+                if is_group and group_id is not None and self._timeline is not None and partial_reply:
+                    self._timeline.add(group_id, role="assistant", content=partial_reply)
+                    self._timeline.set_input_tokens(group_id, result["input_tokens"])
+                return ""
         elif not on_segment and len(segments) > 1:
             last_seg = "\n".join(segments)
         else:
@@ -4040,6 +5053,12 @@ class LLMClient:
                 await self._message_log.record_session_msg(
                     session_id, "assistant", full_reply[:2000]
                 )
+        self._maybe_record_schedule_overshare_hit(
+            hits=guardrail_hits,
+            session_id=session_id,
+            group_id=group_id,
+            is_group=is_group,
+        )
         elapsed = time.monotonic() - t0
         _log_msg_out.info(
             "tool_exhausted_reply | session={} segments={} raw={} llm={:.1f}s send={:.1f}s total={:.1f}s",
@@ -4079,6 +5098,16 @@ class LLMClient:
             humanization=humanization,
             on_segment=on_segment,
             last_segment_emitted_at=last_segment_emitted_at,
+        )
+        await self._send_post_reply_sticker_if_needed(
+            reply=full_reply,
+            thinker_decision=thinker_decision,
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            turn_id=reply_turn_id,
+            ctx=ctx,
+            already_sent=_sticker_sent,
         )
         return last_seg
 
@@ -4177,7 +5206,7 @@ class LLMClient:
                                 content=content,
                                 confidence=0.6,
                                 source=source,
-                            ))
+                            ), captured_by=source)
                             memo_writes += 1
                             _log_compact.debug("compact card add | scope={}/{} category={}", scope, scope_id, category)
                             tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "已添加"})

@@ -152,8 +152,9 @@ async def test_chat_uses_injected_reply_segmentation_config(
     text = "第一句很长很长。第二句很长很长。第三句很长很长。"
     sent: list[str] = []
 
-    async def _on_segment(seg: str) -> None:
+    async def _on_segment(seg: str) -> bool:
         sent.append(seg)
+        return True
 
     async for client in _client(
         prompt,

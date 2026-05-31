@@ -37,14 +37,17 @@ from kernel.types import (
 )
 from services.humanization import AFFECTION_FAMILIARITY_SLOT
 from services.humanization.qq_interactions import (
+    QQInteractionSignal,
     dispatch_qq_interaction_signal,
     parse_qq_interaction_signal,
 )
+from services.name_registry import NameVariationRegistry
 from services.private_conversation import (
     get_private_conversation_actor,
     log_private_transition,
 )
 from services.system_module import Scope
+from services.upstream_filter import should_drop_message
 
 logger = _base_logger
 _log_msg_in = _base_logger.bind(channel="message_in")
@@ -82,7 +85,7 @@ def _content_to_text(content: Content) -> str:
     return " ".join(
         block.get("text", "")
         for block in content
-        if isinstance(block, dict) and block.get("type") == "text"
+        if isinstance(block, dict) and block.get("type") == "text" and "text" in block
     )
 
 
@@ -181,6 +184,41 @@ def _reply_targets_bot(reply: object | None, self_id: str) -> bool:
     if sender is None:
         return False
     return str(getattr(sender, "user_id", "") or "") == str(self_id)
+
+
+def _extract_topic_block_signals(
+    event: object | None, self_id: str,
+) -> dict[str, Any]:
+    """Pull reply-to / @-mention structure for B1 topic-block attribution.
+
+    All keys default empty so callers without an event (e.g. coalesced
+    flush) pass nothing extra and the tracker simply uses time/text.
+    """
+    if event is None:
+        return {}
+    reply = getattr(event, "reply", None)
+    reply_sender_id = str(getattr(getattr(reply, "sender", None), "user_id", "") or "")
+    at_targets: list[str] = []
+    at_self = False
+    try:
+        for seg in event.get_message():  # type: ignore[attr-defined]
+            if getattr(seg, "type", "") == "at":
+                qq = str(seg.data.get("qq", "") or "")
+                if qq == "all":
+                    continue
+                if qq == str(self_id):
+                    at_self = True
+                elif qq:
+                    at_targets.append(qq)
+    except Exception:
+        pass
+    return {
+        "message_id": getattr(event, "message_id", None),
+        "reply_to_sender_id": "" if reply_sender_id == str(self_id) else reply_sender_id,
+        "reply_to_self": _reply_targets_bot(reply, self_id),
+        "at_targets": tuple(at_targets),
+        "at_self": at_self,
+    }
 
 
 async def _at_trigger_targets_self(
@@ -360,14 +398,25 @@ async def _notify_group_scheduler(
     trigger: object | None,
     is_addressed: bool,
     message: Any,
+    event: object | None = None,
+    self_id: str = "",
 ) -> None:
     scheduler = getattr(ctx, "scheduler", None)
     if scheduler is None:
         return
+    message_text = _content_to_text(message) if message is not None else ""
+    tb = _extract_topic_block_signals(event, self_id)
+    tb["is_addressed"] = is_addressed
     coalescer = getattr(ctx, "message_coalescer", None)
     bypass = _should_bypass_coalescer(trigger=trigger, is_addressed=is_addressed)
     if not _coalesce_enabled(ctx) or coalescer is None:
-        scheduler.notify(group_id, trigger=cast(Any, trigger), user_id=user_id)
+        scheduler.notify(
+            group_id,
+            trigger=cast(Any, trigger),
+            user_id=user_id,
+            message_text=message_text,
+            **tb,
+        )
         return
 
     if bypass:
@@ -391,7 +440,13 @@ async def _notify_group_scheduler(
                 "discarded_messages": dropped_count,
             },
         )
-        scheduler.notify(group_id, trigger=cast(Any, trigger), user_id=user_id)
+        scheduler.notify(
+            group_id,
+            trigger=cast(Any, trigger),
+            user_id=user_id,
+            message_text=message_text,
+            **tb,
+        )
         return
 
     async def _flush(messages: list[Any]) -> None:
@@ -401,7 +456,8 @@ async def _notify_group_scheduler(
             group_id=group_id,
             metadata={"sender_id": user_id, "message_count": len(messages)},
         )
-        scheduler.notify(group_id, user_id=user_id)
+        merged_text = " ".join(_content_to_text(item) for item in messages if item is not None).strip()
+        scheduler.notify(group_id, user_id=user_id, message_text=merged_text)
 
     await coalescer.enqueue(
         group_id,
@@ -420,7 +476,7 @@ async def _notify_group_scheduler(
     )
 
 
-def _has_recent_assistant_reply(timeline: object, group_id: str, *, within_s: float) -> bool:
+def _has_recent_assistant_reply(timeline: Any, group_id: str, *, within_s: float) -> bool:
     try:
         turns = timeline.get_turns(group_id)
     except Exception:
@@ -439,7 +495,7 @@ def _has_recent_assistant_reply(timeline: object, group_id: str, *, within_s: fl
 
 
 def _latest_assistant_reply_info(
-    timeline: object,
+    timeline: Any,
     group_id: str,
     *,
     within_s: float,
@@ -465,7 +521,7 @@ def _latest_assistant_reply_info(
 
 
 def _last_assistant_replied_to_user(
-    timeline: object,
+    timeline: Any,
     group_id: str,
     user_id: str,
     *,
@@ -488,9 +544,13 @@ def _last_assistant_replied_to_user(
             return False
         if turn_time <= 0 or now - turn_time > within_s:
             return False
-        if idx <= 0:
+        # Walk backwards past consecutive assistant turns (pause_then_extend)
+        prev_idx = idx - 1
+        while prev_idx >= 0 and turns[prev_idx].get("role") == "assistant":
+            prev_idx -= 1
+        if prev_idx < 0:
             return False
-        previous = turns[idx - 1]
+        previous = turns[prev_idx]
         if previous.get("role") != "user":
             return False
         content = str(previous.get("content", ""))
@@ -505,7 +565,12 @@ def _last_assistant_replied_to_user(
         ]
         if not active_user_lines:
             return False
-        return all(current_user_suffix in line for line in active_user_lines)
+        # timeline lazy-flush merges every user's messages during a bot-silence
+        # window into ONE user turn, so requiring all() lines to belong to the
+        # current user mis-fires whenever anyone else spoke in that gap. The last
+        # real user line is the message that actually triggered the previous
+        # assistant reply — check only its ownership.
+        return current_user_suffix in active_user_lines[-1]
     return False
 
 
@@ -589,14 +654,14 @@ async def _render_message(
     reply: object | None = None,
     session: aiohttp.ClientSession | None = None,
     self_id: str = "",
-    vision_client: object | None = None,
+    vision_client: Any | None = None,
     bot: Bot | None = None,
     *,
     in_group: bool = False,
     vision_enabled: bool = True,
     max_images_per_message: int = 5,
-    sticker_store: object | None = None,
-    image_cache: object | None = None,
+    sticker_store: Any | None = None,
+    image_cache: Any | None = None,
     desc_cache: dict[str, str] | None = None,
 ) -> Content:
     from kernel.qq_face import face_to_text
@@ -641,11 +706,25 @@ async def _render_message(
                         t = seg.data.get("text", "").strip()
                         if t:
                             seg_descs.append(t)
+                    elif seg.type == "json":
+                        # QQ mini-program card (B站视频等): extract_plain_text is
+                        # empty, so a quoted video would otherwise render as an
+                        # empty [QUOTED_MSG] shell — the bot then has nothing to
+                        # respond to and drifts to other topics (F-γ, §19). Pull
+                        # the card's title/desc so the quote carries real content.
+                        from services.json_card import extract_json_card_text
+                        card = extract_json_card_text(str(seg.data.get("data", "") or ""))
+                        if card:
+                            seg_descs.append(f"[卡片: {card}]")
                 original = "".join(seg_descs)
             if len(original) > cap:
                 original = original[:cap] + "…"
-            label = "回复 我" if is_reply_to_bot else f"回复 {nick}({uid})"
-            text_parts.append(f"«{label}: {original}» ")
+            sender_name = "我" if is_reply_to_bot else nick
+            text_parts.append(
+                f"[QUOTED_MSG sender_id={uid} sender_name={sender_name}]\n"
+                f"{original}\n"
+                "[/QUOTED_MSG] "
+            )
 
     image_tasks: list[tuple[asyncio.Task[ImageRefBlock | None], str]] = []
 
@@ -667,7 +746,7 @@ async def _render_message(
             if image_count < max_images_per_message:
                 url = seg.data.get("url", "")
                 file_id = seg.data.get("file", "")
-                if url and file_id:
+                if url and file_id and image_cache is not None:
                     file_id = file_id.split(".")[0] if "." in file_id else file_id
                     task = asyncio.ensure_future(
                         image_cache.save(session, url=url, file_id=file_id)
@@ -814,6 +893,20 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         ctx.state_board.bot_self_id = bot.self_id
         ctx.persona_runtime.bind_bot_self_id(str(bot.self_id))
         ctx.scheduler.set_bot(bot)
+        registry = getattr(ctx, "name_registry", None)
+        if isinstance(registry, NameVariationRegistry):
+            try:
+                preload_groups = await bot.get_group_list()
+            except Exception:
+                preload_groups = []
+            for item in preload_groups or ():
+                gid = str(item.get("group_id", "") or "").strip() if isinstance(item, dict) else ""
+                if not gid:
+                    continue
+                try:
+                    await registry.refresh(bot, gid)
+                except Exception:
+                    _log_debug.debug("name registry refresh skipped | group={}", gid)
 
         # Track whether this is the first connect (vs reconnect)
         is_first_connect = not getattr(ctx, "startup_triggered", False)
@@ -880,7 +973,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 raw = info.get("shut_up_timestamp") or 0
                 shut_until = int(str(raw))
                 if shut_until > time.time():
-                    ctx.scheduler.mute(gid)
+                    ctx.scheduler.mute(gid, source="reconcile", until_unix=float(shut_until))
                     muted_count += 1
             except Exception:
                 _log_debug.debug("failed to query mute status | group={}", gid)
@@ -924,6 +1017,14 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         if event.user_id in resolved.blocked_users:
             return
         group_id = str(event.group_id)
+        registry = getattr(ctx, "name_registry", None)
+        if isinstance(registry, NameVariationRegistry):
+            registry.update_from_event(
+                group_id,
+                int(event.user_id),
+                getattr(event.sender, "nickname", "") or str(event.user_id),
+                getattr(event.sender, "card", "") or "",
+            )
         if await _maybe_drop_pair_guard(
             ctx,
             group_id=group_id,
@@ -936,6 +1037,25 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         msg = event.get_message()
         echo_key = build_echo_key(msg)
         plain_text = event.get_plaintext()
+        upstream_cfg = getattr(ctx.config, "upstream_command_filter", None)
+        upstream_result = should_drop_message(
+            int(event.user_id),
+            plain_text,
+            group_id,
+            enabled=bool(getattr(upstream_cfg, "enabled", False)),
+            known_other_bots=getattr(getattr(ctx.config, "bot_pair_guard", None), "known_other_bots", {}) or {},
+            command_patterns=list(getattr(upstream_cfg, "command_patterns", []) or []),
+        )
+        if upstream_result.should_drop:
+            if bool(getattr(upstream_cfg, "log_drops", True)):
+                _log_msg_in.info(
+                    "group={} upstream_filter {}({}) | reason={}",
+                    group_id,
+                    getattr(event.sender, "nickname", "") or event.user_id,
+                    event.user_id,
+                    upstream_result.reason,
+                )
+            return
 
         is_addressed = event.is_tome()
         if not is_addressed and getattr(ctx, "bot_nicknames", []) and any(
@@ -1005,7 +1125,10 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 mode="at_mention",
                 target_message_id=event.message_id,
                 target_user_id=str(event.user_id),
-                extra={"addressee_self": addressee_self},
+                extra={
+                    "addressee_self": addressee_self,
+                    "reply_sender_id": str(getattr(getattr(event.reply, "sender", None), "user_id", "") or ""),
+                },
             )
 
         # Check slash commands before timeline/scheduler.
@@ -1064,12 +1187,15 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                         trigger=trigger,
                         is_addressed=is_addressed,
                         message="@我",
+                        event=event,
+                        self_id=str(bot.self_id),
                     )
             return
 
         preview = content if isinstance(content, str) else "".join(
-            b["text"] for b in content
-            if isinstance(b, dict) and b.get("type") == "text"  # type: ignore[union-attr]
+            str(b.get("text", ""))
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and "text" in b
         )
         if len(preview) > 120:
             preview = preview[:120] + "…"
@@ -1231,11 +1357,90 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 semantic_result,
                 threshold=semantic_effective_threshold,
             )
+        correction_triggered = False
+        scheduler = getattr(ctx, "scheduler", None)
+        # Weak-reply P0: closing/farewell detection. A terminal token ("晚安") in an
+        # ongoing two-person exchange demands a symmetric reply (Schegloff & Sacks).
+        # Injected like directed_followup; scheduler bypasses the probability gate.
+        # Higher priority than followup — a bare "晚安" should close, not be treated
+        # as a continuation request.
+        if (
+            trigger is None
+            and not is_addressed
+            and has_recent_assistant
+            and last_assistant_to_user
+        ):
+            from services.reply_workflow import classify_closing_intent
+
+            if classify_closing_intent(_content_to_text(content)):
+                from kernel.types import TriggerContext
+
+                _log_reply_workflow.info(
+                    "closing_intent | group={} user={}", group_id, event.user_id,
+                )
+                trigger = TriggerContext(
+                    reason="用户在收尾告别，回一个对称的告别 token",
+                    mode="closing",
+                    target_message_id=event.message_id,
+                    target_user_id=str(event.user_id),
+                )
+        arbiter = getattr(scheduler, "_arbiter", None) if scheduler is not None else None
+        arbiter_config = getattr(scheduler, "_arbiter_config", None) if scheduler is not None else None
+        if (
+            trigger is None
+            and not is_addressed
+            and scheduler is not None
+            and arbiter is not None
+            and arbiter_config is not None
+            and last_assistant_to_user
+            and bool(getattr(arbiter_config, "correction_enabled", False))
+            and bool(getattr(arbiter_config, "enabled", False))
+        ):
+            slot = scheduler.get_slot(group_id) if hasattr(scheduler, "get_slot") else None
+            correction_window_s = float(getattr(arbiter_config, "correction_window_s", 30.0) or 30.0)
+            last_reply_content = str(getattr(slot, "last_reply_content", "") or "")
+            last_reply_time = float(getattr(slot, "last_reply_time", 0.0) or 0.0)
+            if (
+                last_reply_content
+                and last_reply_time > 0.0
+                and time.time() - last_reply_time <= correction_window_s
+            ):
+                correction = await arbiter.judge_correction(
+                    bot_reply=last_reply_content,
+                    new_message=_content_to_text(content),
+                    user_id=str(event.user_id),
+                    group_id=group_id,
+                )
+                if correction.needs_correction:
+                    from kernel.types import TriggerContext
+
+                    _log_reply_workflow.info(
+                        "arbiter_c_correction | group={} user={} type={}",
+                        group_id,
+                        event.user_id,
+                        correction.correction_type or "unknown",
+                    )
+                    trigger = TriggerContext(
+                        reason="用户补充了改变语义的信息，请自然修正上一条回复",
+                        mode="correction",
+                        target_message_id=event.message_id,
+                        target_user_id=str(event.user_id),
+                        extra={
+                            "correction_type": correction.correction_type,
+                            "original_reply": last_reply_content,
+                            "reply_sender_id": str(getattr(getattr(event.reply, "sender", None), "user_id", "") or ""),
+                        },
+                    )
+                    if slot is not None:
+                        slot.last_reply_content = ""
+                        slot.last_reply_time = 0.0
+                    correction_triggered = True
         if (
             trigger is None
             and not is_addressed
             and has_recent_assistant
             and (legacy_directed or semantic_consumed)
+            and not correction_triggered
         ):
             from kernel.types import TriggerContext
             trigger = TriggerContext(
@@ -1245,6 +1450,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 target_user_id=str(event.user_id),
                 extra={
                     "u13_double_haiku_request_id": semantic_trace_request_id,
+                    "reply_sender_id": str(getattr(getattr(event.reply, "sender", None), "user_id", "") or ""),
                 } if semantic_trace_request_id else {},
             )
         if not muted:
@@ -1255,6 +1461,8 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 trigger=trigger,
                 is_addressed=is_addressed,
                 message=content,
+                event=event,
+                self_id=str(bot.self_id),
             )
 
     # ---- QQ inbound interaction notices ----
@@ -1266,6 +1474,22 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         signal = parse_qq_interaction_signal(event, self_id=str(bot.self_id))
         if signal is None:
             return
+        if not signal.is_tome and signal.kind == "message_reaction" and signal.raw_message_id:
+            try:
+                msg_data = await bot.get_msg(message_id=signal.raw_message_id)
+                sender_id = str(msg_data.get("sender", {}).get("user_id", ""))
+                if sender_id == str(bot.self_id):
+                    signal = QQInteractionSignal(
+                        kind=signal.kind,
+                        group_id=signal.group_id,
+                        actor_user_id=signal.actor_user_id,
+                        target_user_id=str(bot.self_id),
+                        raw_message_id=signal.raw_message_id,
+                        emoji_code=signal.emoji_code,
+                        is_tome=True,
+                    )
+            except Exception:
+                pass
         dispatch_qq_interaction_signal(ctx, signal, now=time.time())
 
     # ---- group ban notice ----
@@ -1278,7 +1502,8 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             return
         group_id = str(event.group_id)
         if event.sub_type == "ban":
-            ctx.scheduler.mute(group_id)
+            until_unix = time.time() + float(getattr(event, "duration", 0) or 0)
+            ctx.scheduler.mute(group_id, source="event", until_unix=until_unix)
             logger.warning("bot muted | group={} duration={}s", group_id, event.duration)
         elif event.sub_type == "lift_ban":
             ctx.scheduler.unmute(group_id)

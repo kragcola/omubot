@@ -162,6 +162,11 @@ class LLMConfig(BaseModel):
                 else self.task_profiles.get("slang", fallback)
             ),
             "style": "style" if "style" in self.profiles else fallback,
+            "style_review": (
+                "style_review"
+                if "style_review" in self.profiles
+                else self.task_profiles.get("style", fallback)
+            ),
             "memo": "memo" if "memo" in self.profiles else fallback,
             "persona_import": "persona_import" if "persona_import" in self.profiles else fallback,
             "vision": "vision" if "vision" in self.profiles else fallback,
@@ -184,8 +189,11 @@ class LLMConfig(BaseModel):
             "graph_edge_classifier",
             "reflection_consolidator",
             "episode_summarizer",
+            "episode_review",
+            "fact_review",
             "scheduler_eot",
             "scheduler_replay_judge",
+            "birthday_wish",
         ):
             self.task_profiles.setdefault(task, fallback)
         return self
@@ -718,6 +726,7 @@ class VisionConfig(BaseModel):
     max_dimension: int = 768
     cache_dir: str = "storage/image_cache"
     cache_max_age_hours: int = 24
+    describe_max_tokens: int = 200  # 描述输出上限；留出 OCR 文字空间（原硬编码 128）
     qwen: QwenVLConfig = QwenVLConfig()
 
 
@@ -734,6 +743,23 @@ class ThinkerConfig(BaseModel):
 
     enabled: bool = False
     max_tokens: int = 256
+    necessity_gate_enabled: bool = Field(
+        default=False,
+        description="B3: downgrade a low-necessity proactive reply to wait (suppress 'showing off').",
+    )
+    necessity_gate_addressed_exempt: bool = Field(
+        default=True,
+        description="When True, addressed/triggered turns are never suppressed by the necessity gate.",
+    )
+    wait_deferral_seconds: float = Field(
+        default=8.0,
+        description="When an addressed (@) turn's thinker chooses wait, re-fire after this quiet window so "
+        "the @ obligation is honored if the user said nothing more. 0 disables (wait drops silently).",
+    )
+    wait_max_deferrals: int = Field(
+        default=1,
+        description="Max times an addressed wait may defer before forcing a reply (prevents waiting forever).",
+    )
 
 
 # ============================================================================
@@ -1422,6 +1448,90 @@ class HumanizationConfig(BaseModel):
             "restart_hint": "recommended",
         },
     )
+    rws_reward: bool = Field(
+        default=False,
+        description="P1: close the RWS reward loop — enqueue fire/skip, feed delayed reaction reward to bandit.",
+        json_schema_extra={
+            "display_label": "RWS Reward 回路",
+            "help": "开启后 bot 发言/沉默的后续群反应会算成 reward 回灌 bandit；关闭则 bandit 空转（现状）。",
+            "risk_level": "danger",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_reward_window_s: float = Field(
+        default=300.0,
+        description="Settlement window (seconds) before a fire/skip decision's reaction is measured.",
+    )
+    rws_bandit_algo: str = Field(
+        default="thompson",
+        description="P4: RWS bandit learner — 'thompson' (Beta-Bernoulli, default) or 'epsilon' (legacy rollback).",
+        json_schema_extra={
+            "display_label": "RWS Bandit 算法",
+            "help": "thompson=Beta-Bernoulli Thompson 采样（对稀疏/延迟反馈鲁棒）；epsilon=旧 epsilon-greedy 回退。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_bandit_min_obs: int = Field(
+        default=50,
+        description="P4: keep the bandit frozen (prior-only theta) until this many reward observations accrue.",
+        json_schema_extra={
+            "display_label": "RWS Bandit 观测门槛",
+            "help": "观测数低于该值时只用先验 theta，避免早期噪声驱动漂移；默认 50。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_bandit_decay_per_obs: float = Field(
+        default=0.99,
+        description="P4: multiplicative decay of the bandit's Beta counts per observation (non-stationary groups).",
+        json_schema_extra={
+            "display_label": "RWS Bandit 衰减",
+            "help": "每次观测对历史证据的乘性衰减；<1 让旧数据逐步让位于近期群氛围，默认 0.99。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_dual_threshold: bool = Field(
+        default=False,
+        description="P5: gate firing on BOTH the intent (im) and timing (interrupt) scores, Inner-Thoughts style.",
+        json_schema_extra={
+            "display_label": "RWS 双阈值",
+            "help": "开启后只有「值得说」(im) 且「此刻合适」(interrupt) 同时达标才发言；主动插话的 interrupt 门更高。",
+            "risk_level": "danger",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_im_threshold: float = Field(
+        default=0.5,
+        description="P5: minimum intent score (worth speaking) required to fire under dual-threshold mode.",
+        json_schema_extra={
+            "display_label": "RWS im 阈值",
+            "help": "「值得说」最低分；越高越话少，默认 0.5。仅在双阈值开启时生效。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_interrupt_threshold: float = Field(
+        default=0.5,
+        description="P5: base timing/interrupt threshold for addressed replies under dual-threshold mode.",
+        json_schema_extra={
+            "display_label": "RWS interrupt 阈值",
+            "help": "被寻址回复的「此刻合适」最低分，默认 0.5。仅在双阈值开启时生效。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    rws_interrupt_threshold_proactive: float = Field(
+        default=0.65,
+        description="P5: higher interrupt threshold for proactive (non-addressed) interjection — stay quieter.",
+        json_schema_extra={
+            "display_label": "RWS 主动插话 interrupt 阈值",
+            "help": "未被寻址时主动插话需达到的更高「此刻合适」分，默认 0.65，让 bot 在进行中的话轮里更克制。",
+            "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
     counterfactual_replay: bool = Field(
         default=False,
         description="Enable counterfactual scheduler replay collection and admin reporting.",
@@ -1595,21 +1705,284 @@ class SentinelGuardrailConfig(BaseModel):
         return max(1, int(value))
 
 
+class ScheduleOvershareConfig(BaseModel):
+    """D-cluster unsolicited schedule overshare guard config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Dampen unsolicited schedule/time disclosures in visible replies.",
+    )
+    cumulative_threshold: int = 2
+    bypass_patterns: list[str] = Field(default_factory=lambda: [
+        "几点",
+        "什么时候",
+        "日程",
+        "安排",
+        "忙不忙",
+        "在干嘛",
+        "在做什么",
+        "干啥呢",
+    ])
+    leak_patterns: list[str] = Field(default_factory=lambda: [
+        r"\d{1,2}[：:]\d{2}",
+        "上午",
+        "下午",
+        "晚上",
+        "排练",
+        "吃饭",
+        "休息",
+        "上课",
+        "午饭",
+        "晚饭",
+    ])
+
+    @field_validator("cumulative_threshold")
+    @classmethod
+    def _clamp_cumulative_threshold(cls, value: int) -> int:
+        return max(0, int(value))
+
+
+class PersonaDriftConfig(BaseModel):
+    """D-cluster Layer 5 visible declaration stripper config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Strip visible self-declaration / persona drift phrases before reply segmentation.",
+    )
+    lambda_ewma: float = 0.3
+    theta_repair: float = 0.6
+    theta_block: float = 0.85
+    repair_max_retries: int = 1
+
+    @field_validator("lambda_ewma", "theta_repair", "theta_block")
+    @classmethod
+    def _clamp_probability(cls, value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    @field_validator("repair_max_retries")
+    @classmethod
+    def _clamp_repair_retries(cls, value: int) -> int:
+        return max(0, int(value))
+
+
+class AnchorReinjectionConfig(BaseModel):
+    """D-cluster Layer 2 transient anchor reinjection config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Inject transient persona anchor reminders at semantic boundaries.",
+    )
+    min_turns_between_anchors: int = 5
+    max_turns_without_anchor: int = 7
+    anchor_token_budget: int = 80
+
+    @field_validator(
+        "min_turns_between_anchors",
+        "max_turns_without_anchor",
+        "anchor_token_budget",
+    )
+    @classmethod
+    def _clamp_positive_anchor_int(cls, value: int) -> int:
+        return max(1, int(value))
+
+
+class UpstreamCommandFilterConfig(BaseModel):
+    """E-cluster upstream command filter config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Drop peer-bot receipts and user commands aimed at other bots before timeline ingestion.",
+    )
+    command_patterns: list[str] = Field(default_factory=lambda: [
+        "#napcat",
+        "#NapCat",
+        "/napcat",
+    ])
+    log_drops: bool = True
+
+
+class AddresseeHintConfig(BaseModel):
+    """E-cluster addressee request-side hint config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Inject request-time addressee hint blocks for group replies.",
+    )
+
+
+class MentionPostProcessorConfig(BaseModel):
+    """E-cluster mention literal to CQ:at conversion config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Rewrite literal @昵称 tokens to CQ:at codes before outbound send.",
+    )
+    fallback_keep_literal: bool = True
+    recent_speaker_limit: int = 20
+
+    @field_validator("recent_speaker_limit")
+    @classmethod
+    def _clamp_recent_speaker_limit(cls, value: int) -> int:
+        return max(1, int(value))
+
+
+class SlangLookupConfig(BaseModel):
+    """F-cluster OOV slang lookup config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable OOV slang cascade with local slang DB lookup and optional TianAPI fallback.",
+    )
+    tianapi_key: str = ""
+    timeout_ms: int = 500
+    daily_limit: int = 100
+    cache_size: int = 500
+    circuit_breaker_threshold: int = 3
+    circuit_breaker_cooldown_s: int = 300
+    ask_user_fallback_enabled: bool = True
+
+    @field_validator(
+        "timeout_ms",
+        "daily_limit",
+        "cache_size",
+        "circuit_breaker_threshold",
+        "circuit_breaker_cooldown_s",
+    )
+    @classmethod
+    def _clamp_positive_slang_lookup_ints(cls, value: int) -> int:
+        return max(1, int(value))
+
+
+class StickerPlacementConfig(BaseModel):
+    """F-cluster post-reply sticker placement config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable post-reply sticker decision provider and segment-aware placement.",
+    )
+    cooldown_ms: int = 45_000
+
+    @field_validator("cooldown_ms")
+    @classmethod
+    def _clamp_positive_sticker_cooldown(cls, value: int) -> int:
+        return max(1, int(value))
+
+
+class TextPreflightConfig(BaseModel):
+    """G-cluster low-signal text short-circuit config."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Skip thinker/main reply path for obviously low-signal group messages.",
+    )
+    skip_punctuation_only: bool = True
+    skip_single_emoji: bool = True
+    skip_single_char: bool = True
+    skip_repetition: bool = True
+    min_repetition_count: int = 3
+    bypass_on_reply_to_bot: bool = True
+    bypass_on_at_bot: bool = True
+
+    @field_validator("min_repetition_count")
+    @classmethod
+    def _clamp_min_repetition_count(cls, value: int) -> int:
+        return max(2, int(value))
+
+
+class TopicBlockConfig(BaseModel):
+    """B1 topic-block attribution config (parallel-topic understanding)."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Anchor probability-fire replies to the bot's topic block instead of the latest message.",
+    )
+    stale_seconds: float = Field(default=300.0, description="Inactive block archived after this many seconds.")
+    attrib_recent_seconds: float = Field(
+        default=120.0, description="Window for same-speaker / @-continuation attribution.",
+    )
+    sim_threshold: float = Field(default=0.4, description="Lexical-similarity floor for same-block fallback.")
+    max_blocks: int = Field(default=6, description="Max blocks retained per group.")
+    overhearer_mode: str = Field(
+        default="shadow",
+        description="B2 role gating: shadow (log only) / threshold (lower fire prob) / silent (no fire).",
+    )
+    overhearer_threshold_boost: float = Field(
+        default=0.0,
+        description="In threshold mode, subtract this from fire threshold when the bot is an overhearer.",
+    )
+    ratified_continuation_floor: float = Field(
+        default=0.0,
+        description="Min fire probability for a ratified continuation (user follows up in a block the bot is in). "
+        "0 disables. A positive floor stops low time-of-day multipliers from crushing a live back-and-forth.",
+    )
+
+    @field_validator("overhearer_mode")
+    @classmethod
+    def _validate_overhearer_mode(cls, value: str) -> str:
+        v = str(value or "shadow").strip().lower()
+        return v if v in {"shadow", "threshold", "silent"} else "shadow"
+
+
+class SelfMuteConfig(BaseModel):
+    """P2 self-mute lifecycle config."""
+
+    reconcile_enabled: bool = Field(
+        default=False,
+        description="Enable periodic reconcile against get_group_member_info shut_up_timestamp.",
+    )
+    reconcile_interval_seconds: int = 300
+    action_failed_reverse_mark: bool = False
+    action_failed_retcodes: list[int] = Field(default_factory=lambda: [1200, 1300])
+
+    @field_validator("reconcile_interval_seconds")
+    @classmethod
+    def _clamp_reconcile_interval(cls, value: int) -> int:
+        return max(1, int(value))
+
+    @field_validator("action_failed_retcodes", mode="before")
+    @classmethod
+    def _normalize_action_failed_retcodes(cls, value: object) -> list[int]:
+        normalized: list[int] = []
+        items = value if isinstance(value, list) else [value]
+        for item in items or []:
+            if not isinstance(item, (int, str)):
+                continue
+            try:
+                normalized.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return normalized or [1200, 1300]
+
+
 class BotPairGuardConfig(BaseModel):
     """B-cluster inbound loop guard config."""
 
     enabled: bool = Field(
-        default=False,
-        description="Suppress reply loops between this bot and known peer bots in a group.",
+        default=True,
+        description="Suppress reply loops between this bot and any peer in a group via direction-alternation guard.",
     )
     max_per_minute: int = 3
     cooldown_seconds: int = 60
+    loop_alt_threshold: int = Field(
+        default=10,
+        description="Suppress when a self↔peer back-and-forth shows ≥N direction flips within 60s (any peer). "
+        "10 ≈ 5 full round-trips; a human burst (same direction) never trips it.",
+    )
+    known_peer_alt_threshold: int = Field(
+        default=6,
+        description="Stricter alternation threshold for peers listed in known_other_bots (faster suppression).",
+    )
     known_other_bots: dict[str, list[str]] = Field(default_factory=dict)
 
     @field_validator("max_per_minute", "cooldown_seconds")
     @classmethod
     def _clamp_positive_int(cls, value: int) -> int:
         return max(1, int(value))
+
+    @field_validator("loop_alt_threshold", "known_peer_alt_threshold")
+    @classmethod
+    def _clamp_alt_threshold(cls, value: int) -> int:
+        return max(2, int(value))
 
     @field_validator("known_other_bots", mode="before")
     @classmethod
@@ -1647,6 +2020,175 @@ class CoalesceConfig(BaseModel):
         return max(0.1, float(value))
 
 
+class ArbiterConfig(BaseModel):
+    """Concurrent LLM arbiter config for burst @mention handling."""
+
+    enabled: bool = False
+    api_base: str = ""
+    api_key: str = ""
+    model: str = ""
+    timeout_ms: int = 500
+    completeness_confidence_threshold: float = 0.8
+    completeness_poll_interval_s: float = 0.3
+    completeness_max_wait_s: float = 5.0
+    interruption_enabled: bool = True
+    correction_enabled: bool = True
+    correction_window_s: float = 30.0
+    runtime_groups: list[str] = Field(default_factory=list)
+
+    resolved_api_base: str = Field(default="", exclude=True)
+    resolved_api_key: str = Field(default="", exclude=True)
+    resolved_model: str = Field(default="", exclude=True)
+
+    @field_validator("timeout_ms")
+    @classmethod
+    def _clamp_timeout_ms(cls, value: int) -> int:
+        return max(50, int(value))
+
+    @field_validator(
+        "completeness_confidence_threshold",
+    )
+    @classmethod
+    def _clamp_probability(cls, value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    @field_validator(
+        "completeness_poll_interval_s",
+        "completeness_max_wait_s",
+        "correction_window_s",
+    )
+    @classmethod
+    def _clamp_positive_float(cls, value: float) -> float:
+        return max(0.0, float(value))
+
+    @field_validator("runtime_groups", mode="before")
+    @classmethod
+    def _coerce_runtime_groups(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise TypeError("runtime_groups must be a list")
+        normalized: list[str] = []
+        for raw in value:
+            text = str(raw).strip()
+            if text:
+                normalized.append(text)
+        return normalized
+
+
+class InstructionGateConfig(BaseModel):
+    """Issue 15 — instruction authority gate.
+
+    Numeric authority levels (0-4) decide who can issue what kind of
+    directive to the bot. Each severity class has a required level; a user
+    passes only when their authority >= required. Admins (config.admins keys)
+    map to the max level automatically. severity is detected by regex
+    fast-path + an optional thinker `instruction_signal` field (most-restrictive
+    merge). See docs/tracking/omubot-grayscale-issue15-instruction-gate-landing-design.md.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Master switch for the instruction authority gate.",
+    )
+    mode: str = Field(
+        default="shadow",
+        description="shadow = log gate decisions without enforcing; active = enforce.",
+    )
+    default_authority: int = Field(
+        default=2,
+        description="Authority level for users without an explicit override (0-4).",
+    )
+    authority_overrides: dict[str, int] = Field(
+        default_factory=dict,
+        description="Seed map qq_id -> level (0-4). Runtime changes via /authority "
+        "are persisted to storage/instruction_authority.json and win over this seed.",
+    )
+    required_authority: dict[str, int] = Field(
+        default_factory=lambda: {"low": 2, "medium": 3, "high": 4},
+        description="severity -> minimum authority level required to pass. "
+        "Set high=5 to deny persona-breaking directives even for admins.",
+    )
+    severity_patterns: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "high": [
+                r"你是\s*(ai|AI|人工智能|机器人|程序|bot)",
+                r"你(其实|到底|真的)?是不是\s*(ai|AI|机器人|程序)",
+                r"从现在(开始|起)你(是|叫)",
+                r"忘记?(你的)?(设定|人设|身份|角色)",
+                r"(重置|清空|无视)(你的)?(设定|人设|指令|prompt|提示词)",
+                r"你的?(系统)?(提示词|prompt|指令)是什么",
+            ],
+            "medium": [
+                r"帮我\s*@",
+                r"去\s*@",
+                r"帮(我|忙)?(发|发送|转发)",
+                r"帮(我|忙)?(骂|怼|喷|损)",
+                r"替我(说|告诉|转告)",
+                r"去(跟|和|对).{0,8}说",
+            ],
+            "low": [
+                r"(撒|卖)个?(娇|萌)",
+                r"说话?(带|加)个?\s*喵",
+                r"夸(夸|一下)?我",
+                r"哄(哄)?我",
+                r"叫我?(一声)?(主人|哥哥|姐姐)",
+            ],
+        },
+        description="severity -> regex patterns (fast-path). Matched against the "
+        "current user message only.",
+    )
+    mood_threshold: dict[str, float] = Field(
+        default_factory=lambda: {
+            "openness_min": 0.6,
+            "valence_min": 0.3,
+            "energy_floor": 0.3,
+            "tension_ceiling": 0.8,
+        },
+        description="Mood thresholds for low-severity comply/refuse modulation.",
+    )
+    deny_responses: list[str] = Field(
+        default_factory=lambda: [
+            "我又不是你的工具人……",
+            "你谁啊，凭什么指使我",
+            "不想，你自己来",
+            "这个我可不接",
+        ],
+        description="In-character refusal lines for DENY (picked at random).",
+    )
+    refuse_soft_responses: list[str] = Field(
+        default_factory=lambda: [
+            "现在没心情……",
+            "累了，下次吧",
+            "嗯……不太想动",
+        ],
+        description="Soft refusal hints injected when mood blocks a low-severity request.",
+    )
+
+    @field_validator("mode")
+    @classmethod
+    def _normalize_mode(cls, value: str) -> str:
+        text = str(value or "shadow").strip().lower()
+        return text if text in {"shadow", "active"} else "shadow"
+
+    @field_validator("default_authority")
+    @classmethod
+    def _clamp_default_authority(cls, value: int) -> int:
+        return max(0, min(4, int(value)))
+
+    @field_validator("required_authority", mode="before")
+    @classmethod
+    def _coerce_required_authority(cls, value: object) -> dict[str, int]:
+        base = {"low": 2, "medium": 3, "high": 4}
+        if isinstance(value, dict):
+            for key in ("low", "medium", "high"):
+                if key in value:
+                    # high may be 5 (= unreachable, denies all incl. admin); others 0-4
+                    ceiling = 5 if key == "high" else 4
+                    base[key] = max(0, min(ceiling, int(value[key])))
+        return base
+
+
 # ============================================================================
 # 根配置
 # ============================================================================
@@ -1674,8 +2216,21 @@ class BotConfig(BaseModel):
     persona_v2: PersonaV2Config = Field(default_factory=PersonaV2Config)
     humanization: HumanizationConfig = Field(default_factory=HumanizationConfig)
     sentinel_guardrail: SentinelGuardrailConfig = Field(default_factory=SentinelGuardrailConfig)
+    schedule_overshare: ScheduleOvershareConfig = Field(default_factory=ScheduleOvershareConfig)
+    persona_drift: PersonaDriftConfig = Field(default_factory=PersonaDriftConfig)
+    anchor_reinjection: AnchorReinjectionConfig = Field(default_factory=AnchorReinjectionConfig)
+    upstream_command_filter: UpstreamCommandFilterConfig = Field(default_factory=UpstreamCommandFilterConfig)
+    addressee_hint: AddresseeHintConfig = Field(default_factory=AddresseeHintConfig)
+    mention_post_processor: MentionPostProcessorConfig = Field(default_factory=MentionPostProcessorConfig)
+    slang_lookup: SlangLookupConfig = Field(default_factory=SlangLookupConfig)
+    sticker_placement: StickerPlacementConfig = Field(default_factory=StickerPlacementConfig)
+    text_preflight: TextPreflightConfig = Field(default_factory=TextPreflightConfig)
+    topic_block: TopicBlockConfig = Field(default_factory=TopicBlockConfig)
+    self_mute: SelfMuteConfig = Field(default_factory=SelfMuteConfig)
     bot_pair_guard: BotPairGuardConfig = Field(default_factory=BotPairGuardConfig)
     coalesce: CoalesceConfig = Field(default_factory=CoalesceConfig)
+    arbiter: ArbiterConfig = Field(default_factory=ArbiterConfig)
+    instruction_gate: InstructionGateConfig = Field(default_factory=InstructionGateConfig)
 
     # 管理员 & 白名单
     admins: dict[str, str] = {}

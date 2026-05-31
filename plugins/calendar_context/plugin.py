@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from kernel.config import load_plugin_config
 from kernel.types import AmadeusPlugin, PluginContext
+from plugins.calendar_context.birthday_greeter import BirthdayGreeter
 from plugins.calendar_context.service import CalendarContextService
 
 
@@ -80,6 +81,10 @@ class CalendarContextPlugin(AmadeusPlugin):
             service.set_self_names(ctx.identity.name)
         self._service = service
         ctx.calendar_service = service
+
+        greeter_path = Path(cfg.cache_dir).expanduser() / "member_birthdays.json"
+        self._greeter = BirthdayGreeter(greeter_path)
+        ctx.birthday_greeter = self._greeter
 
     def runtime_meta(self) -> dict[str, object]:
         return self._service.runtime_meta if self._service is not None else {}

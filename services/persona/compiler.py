@@ -24,6 +24,7 @@ from typing import Any
 
 import yaml
 
+from services.llm.persona_patterns import DECLARATION_PATTERNS
 from services.system_module import catalog_contracts, validate_module_graph
 
 from .writer import PersonaDraftWriter, persona_namespace
@@ -65,6 +66,14 @@ class CompileResult:
             "warnings": list(self.warnings),
             "errors": list(self.errors),
         }
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def compile_persona_dry_run(
@@ -140,8 +149,20 @@ def _compile_internal(
 
     blocks = tuple(block for block in _build_prompt_blocks(draft) if block.text.strip())
     warnings: list[str] = []
+    errors: list[str] = []
+    errors.extend(_validate_no_declarations(blocks))
     if not blocks:
         warnings.append("no prompt blocks generated")
+    if errors:
+        return CompileResult(
+            False,
+            mode,
+            namespace,
+            prompt_blocks=blocks,
+            module_order=graph.module_order,
+            warnings=tuple(warnings),
+            errors=tuple(errors),
+        )
     return CompileResult(
         True,
         mode,
@@ -168,13 +189,13 @@ def _read_draft_files(draft_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def _build_prompt_blocks(draft: dict[str, dict[str, Any]]) -> list[CompilePromptBlock]:
-    persona = draft.get("persona.yaml", {})
-    voice = draft.get("voice.yaml", {})
-    adapter = draft.get("adapter.yaml", {})
-    knowledge = draft.get("knowledge.yaml", {})
-    examples = draft.get("examples.yaml", {})
-    guard = draft.get("guard.yaml", {})
-    runtime = draft.get("runtime.yaml", {})
+    persona = _as_dict(draft.get("persona.yaml"))
+    voice = _as_dict(draft.get("voice.yaml"))
+    adapter = _as_dict(draft.get("adapter.yaml"))
+    knowledge = _as_dict(draft.get("knowledge.yaml"))
+    examples = _as_dict(draft.get("examples.yaml"))
+    guard = _as_dict(draft.get("guard.yaml"))
+    runtime = _as_dict(draft.get("runtime.yaml"))
     return [
         CompilePromptBlock("core.identity", "身份宪法", _identity_text(persona)),
         CompilePromptBlock("runtime.adapter", "平台身份", _adapter_text(adapter), position="static"),
@@ -187,34 +208,34 @@ def _build_prompt_blocks(draft: dict[str, dict[str, Any]]) -> list[CompilePrompt
 
 
 def _identity_text(persona: dict[str, Any]) -> str:
-    identity = persona.get("identity") if isinstance(persona.get("identity"), dict) else {}
-    constitution = persona.get("constitution") if isinstance(persona.get("constitution"), dict) else {}
+    identity = _as_dict(persona.get("identity"))
+    constitution = _as_dict(persona.get("constitution"))
     lines = [
         f"名字：{identity.get('canonical_name', '')}",
         f"角色：{identity.get('role', '')}",
         f"自称：{identity.get('self_reference', '')}",
         f"静态身份块：{identity.get('personality', '')}",
-        "性格底色：" + "；".join(identity.get("essence") or []),
-        "价值观：" + "；".join(constitution.get("values") or []),
+        "性格底色：" + "；".join(str(item) for item in _as_list(identity.get("essence"))),
+        "价值观：" + "；".join(str(item) for item in _as_list(constitution.get("values"))),
     ]
     return "\n".join(line for line in lines if not line.endswith("：") and line.strip())
 
 
 def _voice_text(voice: dict[str, Any]) -> str:
-    principles = voice.get("style_principles") if isinstance(voice.get("style_principles"), dict) else {}
-    tones = voice.get("tone_palette") or []
+    principles = _as_dict(voice.get("style_principles"))
+    tones = _as_list(voice.get("tone_palette"))
     lines = [
-        "句子形态：" + "；".join(principles.get("sentence_shape") or []),
-        "禁用句式：" + "；".join(principles.get("banned_patterns") or []),
-        "语气集合：" + "；".join(tones),
+        "句子形态：" + "；".join(str(item) for item in _as_list(principles.get("sentence_shape"))),
+        "禁用句式：" + "；".join(str(item) for item in _as_list(principles.get("banned_patterns"))),
+        "语气集合：" + "；".join(str(item) for item in tones),
     ]
     return "\n".join(line for line in lines if not line.endswith("：") and line.strip())
 
 
 def _adapter_text(adapter: dict[str, Any]) -> str:
-    bot_identity = adapter.get("bot_identity") if isinstance(adapter.get("bot_identity"), dict) else {}
-    policy = bot_identity.get("prompt_policy") if isinstance(bot_identity.get("prompt_policy"), dict) else {}
-    known_ids = bot_identity.get("known_self_ids") if isinstance(bot_identity.get("known_self_ids"), list) else []
+    bot_identity = _as_dict(adapter.get("bot_identity"))
+    policy = _as_dict(bot_identity.get("prompt_policy"))
+    known_ids = _as_list(bot_identity.get("known_self_ids"))
     lines = [
         f"bot self id hint：{bot_identity.get('self_id_hint', '')}",
         "known self ids：" + "；".join(str(item) for item in known_ids),
@@ -234,8 +255,8 @@ def _adapter_text(adapter: dict[str, Any]) -> str:
 
 
 def _admins_line(adapter: dict[str, Any]) -> str:
-    permissions = adapter.get("permissions") if isinstance(adapter.get("permissions"), dict) else {}
-    raw = permissions.get("admins") if isinstance(permissions.get("admins"), list) else []
+    permissions = _as_dict(adapter.get("permissions"))
+    raw = _as_list(permissions.get("admins"))
     fragments: list[str] = []
     for entry in raw:
         if isinstance(entry, dict):
@@ -309,16 +330,16 @@ def _format_group_profile_fragment(field: str, value: Any) -> str:
 
 def _knowledge_text(knowledge: dict[str, Any]) -> str:
     lines = [
-        "已知事实：" + "；".join(knowledge.get("known_facts") or []),
-        "不知道边界：" + "；".join(knowledge.get("unknown_boundaries") or []),
-        "禁说事实：" + "；".join(knowledge.get("forbidden_claims") or []),
+        "已知事实：" + "；".join(str(item) for item in _as_list(knowledge.get("known_facts"))),
+        "不知道边界：" + "；".join(str(item) for item in _as_list(knowledge.get("unknown_boundaries"))),
+        "禁说事实：" + "；".join(str(item) for item in _as_list(knowledge.get("forbidden_claims"))),
     ]
     return "\n".join(line for line in lines if not line.endswith("：") and line.strip())
 
 
 def _examples_text(examples: dict[str, Any]) -> str:
-    positives = examples.get("positive") or []
-    negatives = examples.get("negative") or []
+    positives = _as_list(examples.get("positive"))
+    negatives = _as_list(examples.get("negative"))
     lines = []
     for item in positives[:3]:
         if isinstance(item, dict):
@@ -332,16 +353,16 @@ def _examples_text(examples: dict[str, Any]) -> str:
 
 
 def _guard_text(persona: dict[str, Any], guard: dict[str, Any]) -> str:
-    constitution = persona.get("constitution") if isinstance(persona.get("constitution"), dict) else {}
-    hard_rules = constitution.get("hard_rules") or []
+    constitution = _as_dict(persona.get("constitution"))
+    hard_rules = _as_list(constitution.get("hard_rules"))
     rules = []
     for item in hard_rules:
         if isinstance(item, dict):
             rules.append(str(item.get("text", "")).strip())
-    memory_write = guard.get("memory_write") if isinstance(guard.get("memory_write"), dict) else {}
-    behavior = guard.get("behavior_instructions") if isinstance(guard.get("behavior_instructions"), dict) else {}
+    memory_write = _as_dict(guard.get("memory_write"))
+    behavior = _as_dict(guard.get("behavior_instructions"))
     lines = ["硬规则：" + "；".join(rule for rule in rules if rule)]
-    behavior_items = behavior.get("items") if isinstance(behavior.get("items"), list) else []
+    behavior_items = _as_list(behavior.get("items"))
     instruction_texts = [
         str(item.get("text", "")).strip()
         for item in behavior_items
@@ -351,8 +372,32 @@ def _guard_text(persona: dict[str, Any], guard: dict[str, Any]) -> str:
         lines.append("行为指令：" + "；".join(instruction_texts))
     if memory_write:
         lines.append(f"记忆写入默认状态：{memory_write.get('default_status', 'candidate')}")
-    identity = persona.get("identity") if isinstance(persona.get("identity"), dict) else {}
+    identity = _as_dict(persona.get("identity"))
     proactive = str(identity.get("proactive_rules", "")).strip()
     if proactive:
         lines.append("插话方式：" + proactive)
     return "\n".join(line for line in lines if not line.endswith("：") and line.strip())
+
+
+_DECLARATION_VALIDATION_MODULES: tuple[str, ...] = (
+    "core.identity",
+    "core.voice",
+    "core.guard",
+)
+
+
+def _validate_no_declarations(blocks: tuple[CompilePromptBlock, ...]) -> list[str]:
+    errors: list[str] = []
+    for block in blocks:
+        if block.module_id not in _DECLARATION_VALIDATION_MODULES:
+            continue
+        for pattern in DECLARATION_PATTERNS:
+            match = pattern.search(block.text)
+            if match is None:
+                continue
+            matched = match.group(0).strip()
+            errors.append(
+                f"{block.module_id} contains declaration pattern: {matched}"
+            )
+            break
+    return errors

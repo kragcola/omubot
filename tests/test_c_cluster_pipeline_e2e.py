@@ -12,6 +12,7 @@ from services.llm.thinker import (
     _ALLOWED_TOPIC_INTENT_LABELS,
     ThinkDecision,
     _normalize_topic_intent_label,
+    _normalize_unknown_terms,
     _parse_structured_think_output_details,
     think,
 )
@@ -32,6 +33,9 @@ class TestThinkDecisionSchema:
         assert _normalize_topic_intent_label("") == "闲聊"
         assert _normalize_topic_intent_label(None) == "闲聊"
 
+    def test_unknown_terms_normalization_present_and_deduped(self):
+        assert _normalize_unknown_terms(["op", "OP", " awsl "]) == ["op", "awsl"]
+
 
 class TestThinkerBlockEnumInjection:
     """Verify thinker_block injects enum labels, not free-text thought."""
@@ -45,12 +49,14 @@ class TestThinkerBlockEnumInjection:
             "thought": "对方似乎心情不好",
             "sticker": False,
             "tone": "安慰",
+            "unknown_terms": ["op"],
         })
         decision, mode = _parse_structured_think_output_details(raw)
         assert decision is not None
         assert decision.topic_intent_label == "关心"
         assert decision.tone == "安慰"
         assert decision.thought == "对方似乎心情不好"
+        assert decision.unknown_terms == ["op"]
         assert mode in {"direct", "fenced", "embedded"}
 
     def test_missing_topic_intent_label_defaults(self):
@@ -192,4 +198,3 @@ class TestCancelPaths:
         assert decision.action == "reply"
         assert decision.topic_intent_label == "闲聊"
         assert decision.thought == ""
-

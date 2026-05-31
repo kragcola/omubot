@@ -30,6 +30,13 @@ def create_bandit_router(
             return {"available": False}
         return sched.get_rws_bandit_state()
 
+    @router.get("/bandit/rws/summary")
+    async def rws_reward_summary():
+        sched = _scheduler()
+        if sched is None or not hasattr(sched, "get_rws_reward_summary"):
+            return {"available": False}
+        return await sched.get_rws_reward_summary()
+
     @router.post("/bandit/rws/observe")
     async def observe_rws_bandit(payload: BanditObservationPayload):
         sched = _scheduler()

@@ -50,6 +50,7 @@ def create_stickers_router(
                     "id": sid,
                     "description": info.get("description", ""),
                     "usage_hint": info.get("usage_hint", ""),
+                    "ocr_text": info.get("ocr_text", ""),
                     "send_count": info.get("send_count", 0),
                     "source": info.get("source", ""),
                 })
@@ -72,6 +73,7 @@ def create_stickers_router(
                 "id": sticker_id,
                 "description": info.get("description", ""),
                 "usage_hint": info.get("usage_hint", ""),
+                "ocr_text": info.get("ocr_text", ""),
                 "send_count": info.get("send_count", 0),
                 "source": info.get("source", ""),
             }
@@ -88,7 +90,7 @@ def create_stickers_router(
         desc = body.get("description") or body.get("desc")
         hint = body.get("usage_hint") or body.get("hint")
 
-        ok = store.update(sticker_id, desc=desc, hint=hint)
+        ok = store.update(sticker_id, description=desc, usage_hint=hint)
         return {"ok": ok}
 
     @router.delete("/stickers/{sticker_id}")

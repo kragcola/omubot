@@ -1,10 +1,27 @@
-"""Sticker store: persistent storage and index for collected stickers."""
+"""Sticker store: persistent storage and index for collected stickers.
+
+Backed by a directory of image files plus a small SQLite index database
+(``stickers.db``). Earlier versions used a JSON index (``index.json``); on
+first run the store transparently migrates any legacy ``index.json`` into
+SQLite, then leaves the JSON file frozen as a rollback snapshot. Reads are
+served from an in-memory mirror of the table (the library is small,
+<= max_count); writes go write-through to SQLite. Intent search reuses the
+dependency-free ``KeywordBM25Retriever`` from the knowledge service.
+"""
+
+from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from services.knowledge.retrievers import KeywordBM25Retriever
+from services.knowledge.types import KnowledgeChunk
+from services.storage import close_with_checkpoint_sync
 
 # ---------------------------------------------------------------------------
 # Magic byte constants for image format detection
@@ -16,8 +33,21 @@ _MAGIC_WEBP_RIFF = b"RIFF"
 _MAGIC_GIF87 = b"GIF87a"
 _MAGIC_GIF89 = b"GIF89a"
 
-_INDEX_FILE = "index.json"
+_INDEX_FILE = "index.json"  # legacy JSON index (migration source / rollback snapshot)
+_DB_FILE = "stickers.db"
 
+_CREATE_STICKERS = """\
+CREATE TABLE IF NOT EXISTS stickers (
+    sticker_id   TEXT PRIMARY KEY,
+    file         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    usage_hint   TEXT NOT NULL DEFAULT '',
+    ocr_text     TEXT,
+    source       TEXT NOT NULL DEFAULT 'auto',
+    send_count   INTEGER NOT NULL DEFAULT 0,
+    last_sent    TEXT,
+    created_at   TEXT NOT NULL
+)"""
 
 def _detect_format(data: bytes) -> str:
     """Detect image format from magic bytes.
@@ -42,14 +72,51 @@ def _compute_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:8]
 
 
+def _row_to_entry(row: sqlite3.Row) -> dict[str, Any]:
+    """Convert a stickers row into the legacy entry dict shape.
+
+    ocr_text uses NULL as "OCR never attempted" — those rows omit the key
+    entirely (matching pre-stage-1 entries), so the Dream backfill can still
+    detect them via ``"ocr_text" not in entry``. A non-NULL value (including
+    "") means a rich-description pass has run and is surfaced as the key.
+    """
+    entry: dict[str, Any] = {
+        "file": row["file"],
+        "description": row["description"],
+        "usage_hint": row["usage_hint"],
+        "source": row["source"],
+        "send_count": int(row["send_count"]),
+        "last_sent": row["last_sent"],
+        "created_at": row["created_at"],
+    }
+    if row["ocr_text"] is not None:
+        entry["ocr_text"] = row["ocr_text"]
+    return entry
+
+
 class StickerStore:
-    """Persistent sticker library backed by a directory and index.json."""
+    """Persistent sticker library backed by a directory and a SQLite index."""
 
     def __init__(self, storage_dir: str, max_count: int = 200) -> None:
         self._storage_dir = Path(storage_dir)
         self._max_count = max_count
         self._storage_dir.mkdir(parents=True, exist_ok=True)
+        # add() runs inside asyncio.to_thread workers (silent sticker learning),
+        # while reads/updates run on the event loop thread. Allow cross-thread
+        # use and serialize every DB + mirror access with a re-entrant lock.
+        self._lock = threading.RLock()
+        self._db = sqlite3.connect(
+            str(self._storage_dir / _DB_FILE),
+            check_same_thread=False,
+        )
+        self._db.row_factory = sqlite3.Row
+        self._init_schema()
+        self._migrate_legacy_index()
+        # In-memory mirror of the table (library is small, <= max_count).
         self._index: dict[str, Any] = self._load_index()
+        # Lazy BM25 index over rich descriptions; rebuilt on demand when dirty.
+        self._retriever = KeywordBM25Retriever()
+        self._search_dirty = True
 
     # ------------------------------------------------------------------
     # Properties
@@ -65,33 +132,74 @@ class StickerStore:
         """Return the configured maximum sticker count."""
         return self._max_count
 
+    def close(self) -> None:
+        """Checkpoint the WAL and close the SQLite connection."""
+        close_with_checkpoint_sync(self._db, name="stickers")
+
     # ------------------------------------------------------------------
-    # Index I/O
+    # Schema / migration / load
     # ------------------------------------------------------------------
 
-    def _index_path(self) -> Path:
-        return self._storage_dir / _INDEX_FILE
+    def _init_schema(self) -> None:
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA synchronous=NORMAL")
+        self._db.execute(_CREATE_STICKERS)
+        self._db.commit()
+
+    def _migrate_legacy_index(self) -> None:
+        """One-time import of a legacy index.json into SQLite.
+
+        Idempotent: keyed off an empty table, not the presence of index.json,
+        so re-runs after migration are no-ops. The JSON file is left in place
+        as a frozen rollback snapshot (never rewritten after migration).
+        """
+        row = self._db.execute("SELECT COUNT(*) AS n FROM stickers").fetchone()
+        if row is not None and int(row["n"]) > 0:
+            return  # table already populated
+        legacy = self._storage_dir / _INDEX_FILE
+        if not legacy.exists():
+            return
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            stickers = dict(data.get("stickers", {}))
+        except (json.JSONDecodeError, OSError):
+            return
+        rows = [
+            (
+                sticker_id,
+                entry.get("file", ""),
+                entry.get("description", ""),
+                entry.get("usage_hint", ""),
+                # Preserve the "OCR never attempted" signal: a pre-stage-1 entry
+                # has no ocr_text key -> store NULL so the Dream backfill still
+                # sees it as pending. An explicit value (incl. "") is kept.
+                (str(entry["ocr_text"]) if entry.get("ocr_text") is not None else "")
+                if "ocr_text" in entry
+                else None,
+                entry.get("source", "auto"),
+                int(entry.get("send_count", 0) or 0),
+                entry.get("last_sent"),
+                entry.get("created_at") or datetime.now(UTC).isoformat(),
+            )
+            for sticker_id, entry in stickers.items()
+            if isinstance(entry, dict)
+        ]
+        if not rows:
+            return
+        with self._db:
+            self._db.executemany(
+                "INSERT OR IGNORE INTO stickers "
+                "(sticker_id, file, description, usage_hint, ocr_text, source, "
+                "send_count, last_sent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
 
     def _load_index(self) -> dict[str, Any]:
-        """Load index from disk. Returns empty index if file doesn't exist."""
-        path = self._index_path()
-        if not path.exists():
-            return {}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return dict(data.get("stickers", {}))
-        except (json.JSONDecodeError, OSError):
-            return {}
-
-    def _save_index(self) -> None:
-        """Persist the current index to disk atomically."""
-        path = self._index_path()
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps({"stickers": self._index}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        """Load the full table into the in-memory mirror."""
+        return {
+            row["sticker_id"]: _row_to_entry(row)
+            for row in self._db.execute("SELECT * FROM stickers ORDER BY created_at, sticker_id")
+        }
 
     # ------------------------------------------------------------------
     # Read operations
@@ -99,15 +207,18 @@ class StickerStore:
 
     def list_all(self) -> dict[str, Any]:
         """Return a copy of all sticker entries."""
-        return dict(self._index)
+        with self._lock:
+            return {sticker_id: dict(entry) for sticker_id, entry in self._index.items()}
 
     def get(self, sticker_id: str) -> dict[str, Any] | None:
         """Return entry for the given sticker_id, or None if not found."""
-        return self._index.get(sticker_id)
+        with self._lock:
+            return self._index.get(sticker_id)
 
     def resolve_path(self, sticker_id: str) -> Path | None:
         """Return the absolute file path for the sticker, or None if not found."""
-        entry = self._index.get(sticker_id)
+        with self._lock:
+            entry = self._index.get(sticker_id)
         if entry is None:
             return None
         return self._storage_dir / entry["file"]
@@ -115,8 +226,9 @@ class StickerStore:
     def lookup_by_hash(self, image_data: bytes) -> str | None:
         """Return sticker_id if image_data matches an existing sticker, else None."""
         sticker_id = "stk_" + _compute_hash(image_data)
-        if sticker_id in self._index:
-            return sticker_id
+        with self._lock:
+            if sticker_id in self._index:
+                return sticker_id
         return None
 
     # ------------------------------------------------------------------
@@ -129,11 +241,15 @@ class StickerStore:
         description: str,
         usage_hint: str,
         source: str = "auto",
+        ocr_text: str = "",
     ) -> tuple[str, bool]:
         """Add a sticker to the store.
 
         Rejects GIFs and unknown formats.
         Deduplicates by content hash.
+
+        Args:
+            ocr_text: text extracted from the image (OCR), empty if none.
 
         Returns:
             (sticker_id, is_new) — is_new=False means it already existed.
@@ -142,25 +258,35 @@ class StickerStore:
         hash_prefix = _compute_hash(image_data)
         sticker_id = f"stk_{hash_prefix}"
 
-        # Dedup: already known
-        if sticker_id in self._index:
-            return (sticker_id, False)
+        with self._lock:
+            # Dedup: already known
+            if sticker_id in self._index:
+                return (sticker_id, False)
 
-        filename = f"{sticker_id}.{ext}"
-        file_path = self._storage_dir / filename
-        file_path.write_bytes(image_data)
+            filename = f"{sticker_id}.{ext}"
+            file_path = self._storage_dir / filename
+            file_path.write_bytes(image_data)
 
-        now_iso = datetime.now(UTC).isoformat()
-        self._index[sticker_id] = {
-            "file": filename,
-            "description": description,
-            "usage_hint": usage_hint,
-            "source": source,
-            "send_count": 0,
-            "last_sent": None,
-            "created_at": now_iso,
-        }
-        self._save_index()
+            now_iso = datetime.now(UTC).isoformat()
+            entry = {
+                "file": filename,
+                "description": description,
+                "usage_hint": usage_hint,
+                "ocr_text": ocr_text,
+                "source": source,
+                "send_count": 0,
+                "last_sent": None,
+                "created_at": now_iso,
+            }
+            with self._db:
+                self._db.execute(
+                    "INSERT INTO stickers "
+                    "(sticker_id, file, description, usage_hint, ocr_text, source, "
+                    "send_count, last_sent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (sticker_id, filename, description, usage_hint, ocr_text, source, 0, None, now_iso),
+                )
+            self._index[sticker_id] = entry
+            self._search_dirty = True
         return (sticker_id, True)
 
     def remove(self, sticker_id: str) -> bool:
@@ -168,15 +294,17 @@ class StickerStore:
 
         Returns True if the sticker was found and removed, False otherwise.
         """
-        entry = self._index.pop(sticker_id, None)
-        if entry is None:
-            return False
+        with self._lock:
+            entry = self._index.pop(sticker_id, None)
+            if entry is None:
+                return False
+            with self._db:
+                self._db.execute("DELETE FROM stickers WHERE sticker_id = ?", (sticker_id,))
+            self._search_dirty = True
 
         file_path = self._storage_dir / entry["file"]
         if file_path.exists():
             file_path.unlink()
-
-        self._save_index()
         return True
 
     def update(
@@ -184,29 +312,100 @@ class StickerStore:
         sticker_id: str,
         description: str | None = None,
         usage_hint: str | None = None,
+        ocr_text: str | None = None,
     ) -> bool:
-        """Update description and/or usage_hint for a sticker.
+        """Update description, usage_hint, and/or ocr_text for a sticker.
 
         Returns True if the sticker was found and updated, False otherwise.
         """
-        entry = self._index.get(sticker_id)
-        if entry is None:
-            return False
-        if description is not None:
-            entry["description"] = description
-        if usage_hint is not None:
-            entry["usage_hint"] = usage_hint
-        self._save_index()
+        with self._lock:
+            entry = self._index.get(sticker_id)
+            if entry is None:
+                return False
+            sets: list[str] = []
+            params: list[Any] = []
+            if description is not None:
+                entry["description"] = description
+                sets.append("description = ?")
+                params.append(description)
+            if usage_hint is not None:
+                entry["usage_hint"] = usage_hint
+                sets.append("usage_hint = ?")
+                params.append(usage_hint)
+            if ocr_text is not None:
+                entry["ocr_text"] = ocr_text
+                sets.append("ocr_text = ?")
+                params.append(ocr_text)
+            if sets:
+                params.append(sticker_id)
+                with self._db:
+                    self._db.execute(
+                        f"UPDATE stickers SET {', '.join(sets)} WHERE sticker_id = ?",
+                        params,
+                    )
+                self._search_dirty = True
         return True
 
     def record_send(self, sticker_id: str) -> None:
         """Increment send_count and update last_sent timestamp."""
-        entry = self._index.get(sticker_id)
-        if entry is None:
+        with self._lock:
+            entry = self._index.get(sticker_id)
+            if entry is None:
+                return
+            new_count = entry.get("send_count", 0) + 1
+            now_iso = datetime.now(UTC).isoformat()
+            entry["send_count"] = new_count
+            entry["last_sent"] = now_iso
+            with self._db:
+                self._db.execute(
+                    "UPDATE stickers SET send_count = ?, last_sent = ? WHERE sticker_id = ?",
+                    (new_count, now_iso, sticker_id),
+                )
+
+    # ------------------------------------------------------------------
+    # Intent search (BM25 over rich descriptions)
+    # ------------------------------------------------------------------
+
+    def _ensure_search_index(self) -> None:
+        """Rebuild the BM25 index from the in-memory mirror if dirty.
+
+        The library is small (<= max_count), so a full rebuild is cheap; we
+        only pay it when the store has been mutated since the last search.
+        """
+        if not self._search_dirty:
             return
-        entry["send_count"] = entry.get("send_count", 0) + 1
-        entry["last_sent"] = datetime.now(UTC).isoformat()
-        self._save_index()
+        chunks: dict[str, KnowledgeChunk] = {}
+        for sticker_id, entry in self._index.items():
+            description = str(entry.get("description", "") or "")
+            usage_hint = str(entry.get("usage_hint", "") or "")
+            ocr_text = str(entry.get("ocr_text", "") or "")
+            content = "\n".join(part for part in (usage_hint, ocr_text) if part)
+            chunks[sticker_id] = KnowledgeChunk(
+                chunk_id=sticker_id,
+                title=description,
+                content=content,
+                source="sticker",
+                source_path="",
+                source_hash="",
+            )
+        self._retriever.rebuild(chunks)
+        self._search_dirty = False
+
+    def search_by_intent(self, query: str, top_k: int = 5) -> list[str]:
+        """Return up to ``top_k`` sticker_ids best matching an intent query.
+
+        Scores each sticker's rich description (description + usage_hint +
+        ocr_text) against the query with BM25. Returns [] for an empty query,
+        an empty library, or when nothing matches.
+        """
+        if not query or not query.strip():
+            return []
+        with self._lock:
+            if not self._index:
+                return []
+            self._ensure_search_index()
+            scored = self._retriever.score(query)
+        return [sticker_id for sticker_id, _score in scored[:top_k]]
 
     # ------------------------------------------------------------------
     # Prompt injection
@@ -215,21 +414,26 @@ class StickerStore:
     def format_prompt_view(self) -> str:
         """Return a compact view of the sticker library for system prompt injection.
 
-        Only includes id, format, description, and usage_hint — volatile fields
-        (send_count, last_sent, created_at) are excluded for prompt cache stability.
+        Only includes id, format, description, usage_hint, and ocr_text — volatile
+        fields (send_count, last_sent, created_at) are excluded for prompt cache
+        stability. ocr_text is stable (does not change on send) and safe to include.
         """
         if not self._index:
             return "当前表情包库为空"
 
         lines = ["当前表情包库："]
-        for sticker_id, entry in self._index.items():
+        with self._lock:
+            entries = list(self._index.items())
+        for sticker_id, entry in entries:
             description = entry.get("description", "")
             usage_hint = entry.get("usage_hint", "")
+            ocr_text = str(entry.get("ocr_text", "") or "").strip()
             file_name = entry.get("file", "")
             fmt = file_name.rsplit(".", 1)[-1].upper() if "." in file_name else "?"
             fmt_tag = "动图" if fmt == "GIF" else "静态"
-            lines.append(
-                f"«表情包:{sticker_id}» [{fmt_tag}] {description} | {usage_hint}"
-            )
+            line = f"«表情包:{sticker_id}» [{fmt_tag}] {description} | {usage_hint}"
+            if ocr_text:
+                line += f" | 图上文字：{ocr_text}"
+            lines.append(line)
 
         return "\n".join(lines)

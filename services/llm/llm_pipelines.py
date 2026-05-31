@@ -71,6 +71,7 @@ LLM_PIPELINES: tuple[LLMPipeline, ...] = (
         "学习与工具",
         (
             "style",
+            "style_review",
             "memo",
             "persona_import",
             "chat_private",
@@ -79,12 +80,20 @@ LLM_PIPELINES: tuple[LLMPipeline, ...] = (
             "vision",
             "scheduler_eot",
             "scheduler_replay_judge",
+            "birthday_wish",
         ),
     ),
     LLMPipeline(
         "memory_graph",
         "多层记忆 (预留)",
-        ("graph_review", "graph_edge_classifier", "reflection_consolidator", "episode_summarizer"),
+        (
+            "graph_review",
+            "graph_edge_classifier",
+            "reflection_consolidator",
+            "episode_summarizer",
+            "episode_review",
+            "fact_review",
+        ),
     ),
 )
 

@@ -15,7 +15,15 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 from loguru import logger
 
-from services.cross_group import cross_group_where
+from services.cross_group import (
+    CrossGroupVisibility,
+    cross_group_allows_viewer,
+    cross_group_where,
+    legacy_cross_group_visible,
+    resolve_cross_group_visibility,
+    visibility_from_db,
+    visibility_to_db,
+)
 from services.similarity import NgramSimilarityProvider, normalize_text_key
 from services.slang.errors import (
     SlangCollisionError,
@@ -182,6 +190,24 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(8)}"
 
 
+async def _fetch_scalar(cursor: aiosqlite.Cursor, key: str, default: Any = 0) -> Any:
+    """Read one aggregate column from a single-row cursor.
+
+    ``COUNT(*)`` / ``AVG(...)`` queries always return exactly one row, but
+    ``fetchone()`` is typed ``Row | None`` (and ``AVG`` over an empty table
+    yields a SQL ``NULL`` column). Collapse both cases to ``default`` so
+    callers can wrap the result in ``int()`` / ``float()`` without tripping
+    pyright's optional-subscript check — preserving the previous ``... or 0``
+    runtime behavior in one place.
+    """
+    row = await cursor.fetchone()
+    if row is None:
+        return default
+    value = row[key]
+    return default if value is None else value
+
+
+
 def normalize_term(value: str) -> str:
     """Normalize a slang term for lookup and merging."""
     return normalize_text_key(value)
@@ -242,6 +268,7 @@ def _row_to_term(row: aiosqlite.Row) -> SlangTerm:
     aliases = _json_loads(row["aliases_json"], [])
     unique_users = _json_loads(row["unique_users_json"], [])
     meta = _json_loads(row["meta_json"], {})
+    visibility = visibility_from_db(row["cross_group_visible"])
     return SlangTerm(
         term_id=row["term_id"],
         term=row["term"],
@@ -262,7 +289,8 @@ def _row_to_term(row: aiosqlite.Row) -> SlangTerm:
         meta=meta if isinstance(meta, dict) else {},
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        cross_group_visible=bool(row["cross_group_visible"]),
+        cross_group_visible=legacy_cross_group_visible(visibility),
+        cross_group_visibility=visibility,
         cross_group_enabled_by=row["cross_group_enabled_by"] or "",
         cross_group_enabled_at=row["cross_group_enabled_at"] or "",
         cross_group_enabled_for_groups=[
@@ -343,6 +371,10 @@ def _term_revision_snapshot(term: SlangTerm | None) -> dict[str, Any]:
         "repeat_policy": term.repeat_policy,
         "notes": term.notes,
         "meta": term.meta,
+        "cross_group_visible": term.cross_group_visible,
+        "cross_group_visibility": term.cross_group_visibility,
+        "cross_group_enabled_for_groups": list(term.cross_group_enabled_for_groups),
+        "cross_group_enabled_reason": term.cross_group_enabled_reason,
     }
 
 
@@ -552,7 +584,7 @@ class SlangStore:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_slang_cross_group "
                 "ON slang_terms(cross_group_visible, status) "
-                "WHERE cross_group_visible = 1"
+                "WHERE cross_group_visible IN (1, 2)"
             )
             await db.commit()
         except aiosqlite.DatabaseError as exc:
@@ -1236,7 +1268,8 @@ class SlangStore:
                 updates["meaning"] = meaning.strip()
             if repeat_policy and existing.repeat_policy == "understand_only":
                 updates["repeat_policy"] = repeat_policy
-            await self.update_term(existing.term_id, **updates)
+            with contextlib.suppress(SlangCollisionError):
+                await self.update_term(existing.term_id, **updates)
             await self.record_hit(
                 existing.term_id,
                 group_id=group_id,
@@ -1553,7 +1586,8 @@ class SlangStore:
             }
             if meaning and (not existing.meaning or confidence_value >= existing.confidence):
                 updates["meaning"] = meaning.strip()
-            await self.update_term(existing.term_id, **updates)
+            with contextlib.suppress(SlangCollisionError):
+                await self.update_term(existing.term_id, **updates)
             await self._attach_normalizer(
                 term_id=existing.term_id,
                 raw_text=f"{existing.term} {updates.get('meaning', existing.meaning)}",
@@ -1865,7 +1899,7 @@ class SlangStore:
             where.append("status IN ('muted', 'expired')")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         count_cursor = await db.execute(f"SELECT COUNT(*) AS cnt FROM slang_terms {where_sql}", values)
-        total = int((await count_cursor.fetchone())["cnt"])
+        total = int(await _fetch_scalar(count_cursor, "cnt"))
         # Sort presets — secondary keys keep ordering stable when the primary key ties.
         sort_clauses: dict[str, str] = {
             "updated_desc": "updated_at DESC, confidence DESC, term_id DESC",
@@ -2005,7 +2039,7 @@ class SlangStore:
             values.extend([pattern, pattern, pattern, pattern])
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         count_cursor = await db.execute(f"SELECT COUNT(*) AS cnt FROM slang_drift_reviews {where_sql}", values)
-        total = int((await count_cursor.fetchone())["cnt"] or 0)
+        total = int(await _fetch_scalar(count_cursor, "cnt"))
         cursor = await db.execute(
             f"""SELECT * FROM slang_drift_reviews {where_sql}
                 ORDER BY
@@ -2312,9 +2346,9 @@ class SlangStore:
             "source", "repeat_policy", "notes", "meta", "last_inferred_at",
         }
         updates = {key: value for key, value in fields.items() if key in allowed}
-        if "cross_group_visible" in fields:
+        if "cross_group_visible" in fields or "cross_group_visibility" in fields:
             raise ValueError(
-                "cross_group_visible can only be set via set_cross_group_visibility()"
+                "cross_group_visibility can only be set via set_cross_group_visibility()"
             )
         if not updates:
             return False
@@ -2379,7 +2413,9 @@ class SlangStore:
                 check_aliases = list(check_aliases or [])
             else:
                 check_aliases = list(term.aliases)
-            check_scope = str(updates.get("scope", term.scope))
+            # scope is a SlangScope Literal; normalize to it explicitly so a
+            # raw ``updates['scope']`` (typed Any) can't widen the call below.
+            check_scope: SlangScope = "global" if updates.get("scope", term.scope) == "global" else "group"
             check_group = str(updates.get("group_id", term.group_id)) if check_scope != "global" else ""
             collision = await self.find_existing(
                 term=check_term,
@@ -2428,7 +2464,8 @@ class SlangStore:
         self,
         term_id: str,
         *,
-        visible: bool,
+        visible: bool | None = None,
+        visibility: CrossGroupVisibility | None = None,
         actor: str,
         reason: str = "",
         enabled_for_groups: list[str] | None = None,
@@ -2440,14 +2477,16 @@ class SlangStore:
             return False
         before_snapshot = _term_revision_snapshot(term)
         now = _now_iso()
-        enabled_by = actor if visible else ""
-        enabled_at = now if visible else ""
+        resolved_visibility = resolve_cross_group_visibility(visible=visible, visibility=visibility)
+        enabled = resolved_visibility != "none"
+        enabled_by = actor if enabled else ""
+        enabled_at = now if enabled else ""
         groups_payload = (
             [str(g).strip() for g in (enabled_for_groups or []) if str(g).strip()]
-            if visible
+            if enabled
             else []
         )
-        reason_payload = reason if visible else ""
+        reason_payload = reason if enabled else ""
         cursor = await db.execute(
             """UPDATE slang_terms
                SET cross_group_visible = ?, cross_group_enabled_by = ?,
@@ -2457,7 +2496,7 @@ class SlangStore:
                    updated_at = ?
                WHERE term_id = ?""",
             (
-                int(visible),
+                visibility_to_db(resolved_visibility),
                 enabled_by,
                 enabled_at,
                 json.dumps(groups_payload, ensure_ascii=False),
@@ -2471,11 +2510,11 @@ class SlangStore:
             after = await self.get_term(term_id)
             await self.record_revision(
                 term_id,
-                action="cross_group_enable" if visible else "cross_group_disable",
+                action="cross_group_enable" if enabled else "cross_group_disable",
                 actor=actor,
                 before=before_snapshot,
                 after=_term_revision_snapshot(after),
-                reason=reason or f"cross_group_visible={'true' if visible else 'false'}",
+                reason=reason or f"cross_group_visibility={resolved_visibility}",
             )
             return True
         return False
@@ -2665,7 +2704,7 @@ class SlangStore:
             values.extend([pattern, pattern, pattern])
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         cursor = await db.execute(f"SELECT COUNT(*) AS cnt FROM slang_pending_candidates {where_sql}", values)
-        total = int((await cursor.fetchone())["cnt"])
+        total = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute(
             f"""SELECT * FROM slang_pending_candidates {where_sql}
                 ORDER BY count DESC, confidence DESC, last_seen_at DESC
@@ -2893,12 +2932,20 @@ class SlangStore:
             f"""SELECT * FROM slang_terms
                 WHERE status IN ({placeholders})
                   AND {cross_group_where()}""",
-            [*statuses, group_id],
+            [*statuses, group_id, group_id],
         )
         normalized_text = normalize_term(text)
         result: list[SlangTerm] = []
         for row in await cursor.fetchall():
             term = _row_to_term(row)
+            if not cross_group_allows_viewer(
+                viewer_group_id=group_id,
+                owner_group_id=term.group_id,
+                scope=term.scope,
+                visibility=term.cross_group_visibility,
+                enabled_for_groups=term.cross_group_enabled_for_groups,
+            ):
+                continue
             candidates = [term.term, *term.aliases]
             for candidate in candidates:
                 key = normalize_term(candidate)
@@ -2925,9 +2972,20 @@ class SlangStore:
                WHERE status = 'approved'
                  AND confidence >= ?
                  AND {cross_group_where()}""",
-            (max(0.0, min(1.0, float(min_confidence or 0.0))), group_id),
+            (max(0.0, min(1.0, float(min_confidence or 0.0))), group_id, group_id),
         )
-        terms = [_row_to_term(row) for row in await cursor.fetchall()]
+        terms = []
+        for row in await cursor.fetchall():
+            term = _row_to_term(row)
+            if not cross_group_allows_viewer(
+                viewer_group_id=group_id,
+                owner_group_id=term.group_id,
+                scope=term.scope,
+                visibility=term.cross_group_visibility,
+                enabled_for_groups=term.cross_group_enabled_for_groups,
+            ):
+                continue
+            terms.append(term)
         normalized_text = normalize_term(conversation_text)
 
         def is_direct_hit(term: SlangTerm) -> bool:
@@ -2985,7 +3043,7 @@ class SlangStore:
         values: list[Any] = [min_conf]
         if group_id:
             where.append(cross_group_where())
-            values.append(str(group_id))
+            values.extend([str(group_id), str(group_id)])
         else:
             where.append("scope = 'global'")
         if query_value:
@@ -2999,11 +3057,22 @@ class SlangStore:
                 LIMIT ?""",
             [*values, max(1, min(int(limit or 6), 20))],
         )
-        terms = [_row_to_term(row) for row in await cursor.fetchall()]
+        terms = []
+        for row in await cursor.fetchall():
+            term = _row_to_term(row)
+            if group_id and not cross_group_allows_viewer(
+                viewer_group_id=str(group_id),
+                owner_group_id=term.group_id,
+                scope=term.scope,
+                visibility=term.cross_group_visibility,
+                enabled_for_groups=term.cross_group_enabled_for_groups,
+            ):
+                continue
+            terms.append(term)
         if terms or not key:
             return terms
         scope_sql = "scope = 'global'" if not group_id else cross_group_where()
-        scope_values: list[Any] = [] if not group_id else [str(group_id)]
+        scope_values: list[Any] = [] if not group_id else [str(group_id), str(group_id)]
         cursor = await db.execute(
             f"""SELECT * FROM slang_terms
                 WHERE status = 'approved'
@@ -3016,6 +3085,14 @@ class SlangStore:
         matches: list[SlangTerm] = []
         for row in await cursor.fetchall():
             term = _row_to_term(row)
+            if group_id and not cross_group_allows_viewer(
+                viewer_group_id=str(group_id),
+                owner_group_id=term.group_id,
+                scope=term.scope,
+                visibility=term.cross_group_visibility,
+                enabled_for_groups=term.cross_group_enabled_for_groups,
+            ):
+                continue
             names = [term.term, *term.aliases]
             meaning_similarity = _ngram_similarity(query_value, term.meaning)
             if (
@@ -3153,19 +3230,19 @@ class SlangStore:
         reviewed = status_counts.get("approved", 0) + status_counts.get("muted", 0) + status_counts.get("expired", 0)
         total_terms = sum(status_counts.values())
         cursor = await db.execute("SELECT COUNT(*) AS cnt FROM slang_pending_candidates")
-        pending_count = int((await cursor.fetchone())["cnt"] or 0)
+        pending_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute("SELECT COUNT(*) AS cnt FROM slang_drift_reviews WHERE status = 'open'")
-        drift_count = int((await cursor.fetchone())["cnt"] or 0)
+        drift_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute("SELECT AVG(confidence) AS avg_conf FROM slang_terms WHERE status = 'approved'")
-        avg_confidence = float((await cursor.fetchone())["avg_conf"] or 0.0)
+        avg_confidence = float(await _fetch_scalar(cursor, "avg_conf", 0.0))
         cursor = await db.execute(
             "SELECT COUNT(*) AS cnt FROM slang_terms WHERE scope = 'global' AND status = 'candidate'"
         )
-        global_candidates = int((await cursor.fetchone())["cnt"] or 0)
+        global_candidates = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute(
             "SELECT COUNT(*) AS cnt FROM slang_terms WHERE scope = 'global' AND status = 'approved'"
         )
-        global_approved = int((await cursor.fetchone())["cnt"] or 0)
+        global_approved = int(await _fetch_scalar(cursor, "cnt"))
 
         return {
             "popular_terms": [_term_stats_dict(term) for term in popular_terms],
@@ -3199,13 +3276,13 @@ class SlangStore:
             "SELECT COUNT(*) AS cnt FROM slang_observations WHERE observed_at LIKE ?",
             (f"{today_prefix}%",),
         )
-        today_hits = int((await cursor.fetchone())["cnt"])
+        today_hits = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute("SELECT COUNT(DISTINCT group_id) AS cnt FROM slang_terms WHERE group_id != ''")
-        group_count = int((await cursor.fetchone())["cnt"])
+        group_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute("SELECT COUNT(*) AS cnt FROM slang_pending_candidates")
-        pending_count = int((await cursor.fetchone())["cnt"] or 0)
+        pending_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute("SELECT COUNT(*) AS cnt FROM slang_drift_reviews WHERE status = 'open'")
-        drift_count = int((await cursor.fetchone())["cnt"] or 0)
+        drift_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute(
             """SELECT * FROM slang_extraction_runs
                ORDER BY started_at DESC
@@ -3221,30 +3298,30 @@ class SlangStore:
         cursor = await db.execute(
             f"SELECT COUNT(*) AS cnt FROM slang_terms WHERE status = 'approved' AND {ai_reviewed}"
         )
-        ai_review_count = int((await cursor.fetchone())["cnt"] or 0)
+        ai_review_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute(
             f"""SELECT COUNT(*) AS cnt FROM slang_terms
                 WHERE status = 'approved' AND {ai_reviewed} AND NOT {human_reviewed}"""
         )
-        ai_pending_review_count = int((await cursor.fetchone())["cnt"] or 0)
+        ai_pending_review_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute(
             f"""SELECT COUNT(*) AS cnt FROM slang_terms
                 WHERE status = 'candidate' AND {ai_reviewed_any} AND {ai_kept}"""
         )
-        under_observation_count = int((await cursor.fetchone())["cnt"] or 0)
+        under_observation_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute(
             f"""SELECT COUNT(*) AS cnt FROM slang_terms
                 WHERE status = 'muted' AND {ai_rejected} AND NOT {human_reviewed}"""
         )
-        ai_rejected_count = int((await cursor.fetchone())["cnt"] or 0)
+        ai_rejected_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute(
             f"SELECT COUNT(*) AS cnt FROM slang_terms WHERE status = 'approved' AND {human_reviewed}"
         )
-        human_reviewed_count = int((await cursor.fetchone())["cnt"] or 0)
+        human_reviewed_count = int(await _fetch_scalar(cursor, "cnt"))
         cursor = await db.execute(
             "SELECT COUNT(*) AS cnt FROM slang_terms WHERE status = 'candidate' AND usage_count >= 3"
         )
-        eligible_backlog_count = int((await cursor.fetchone())["cnt"] or 0)
+        eligible_backlog_count = int(await _fetch_scalar(cursor, "cnt"))
         candidate_unreviewed_count = counts.get("candidate", 0) - under_observation_count
         return {
             "candidate_count": counts.get("candidate", 0),

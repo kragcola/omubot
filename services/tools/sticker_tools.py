@@ -197,7 +197,11 @@ class SendStickerTool(Tool):
 
     @property
     def description(self) -> str:
-        return "发送一张表情包（作为单独的图片消息）。从表情包库中选择合适的表情包发送。"
+        return (
+            "发送一张表情包（作为单独的图片消息）。"
+            "可二选一：给 sticker_id 精确发送某张；或给 intent 用文字描述想要的表情"
+            "（如「告别」「开心」「无语」），由系统按语义检索库里最贴合的一张发送。"
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -206,19 +210,32 @@ class SendStickerTool(Tool):
             "properties": {
                 "sticker_id": {
                     "type": "string",
-                    "description": "表情包 ID，如 stk_a1b2c3d4",
+                    "description": "表情包 ID，如 stk_a1b2c3d4（与 intent 二选一）",
+                },
+                "intent": {
+                    "type": "string",
+                    "description": "想发送的表情意图/情绪，如「挥手告别」「开心」（与 sticker_id 二选一，按语义检索）",
                 },
             },
-            "required": ["sticker_id"],
         }
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         import base64 as _b64
 
-        sticker_id: str = kwargs["sticker_id"]
+        sticker_id: str = str(kwargs.get("sticker_id") or "").strip()
+        intent: str = str(kwargs.get("intent") or "").strip()
 
         if not ctx.bot:
             return "Bot 不可用"
+
+        # Resolve by intent (semantic search) when no explicit id is given.
+        if not sticker_id and intent:
+            matches = self._store.search_by_intent(intent, top_k=1)
+            if not matches:
+                return f"没有匹配「{intent}」的表情包"
+            sticker_id = matches[0]
+        if not sticker_id:
+            return "请提供 sticker_id 或 intent"
 
         file_path = self._store.resolve_path(sticker_id)
         if file_path is None:

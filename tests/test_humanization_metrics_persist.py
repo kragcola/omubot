@@ -86,6 +86,8 @@ async def test_humanization_metric_stats_include_issue_counts(
         "mood.low_energy_overexcited": 1,
     }
     assert stats["near_duplicate_hits"] == 0
+    assert stats["persona_drift_hits"] == 0
+    assert stats["schedule_overshare_hits"] == 0
     assert stats["thinker_phrase_hits"] == 0
 
 
@@ -99,6 +101,10 @@ async def test_humanization_metric_stats_aggregate_guardrail_metadata(
         metadata={
             "near_duplicate_hits": 1,
             "near_duplicate_rewritten": 1,
+            "persona_drift_hits": 2,
+            "persona_drift_rewritten": 2,
+            "schedule_overshare_hits": 1,
+            "schedule_overshare_rewritten": 1,
             "thinker_phrase_hits": 2,
             "sentinel_strip_hits": 3,
         },
@@ -119,6 +125,10 @@ async def test_humanization_metric_stats_aggregate_guardrail_metadata(
     assert stats["near_duplicate_hits"] == 3
     assert stats["near_duplicate_rewritten"] == 1
     assert stats["near_duplicate_dropped"] == 1
+    assert stats["persona_drift_hits"] == 2
+    assert stats["persona_drift_rewritten"] == 2
+    assert stats["schedule_overshare_hits"] == 1
+    assert stats["schedule_overshare_rewritten"] == 1
     assert stats["thinker_phrase_hits"] == 2
     assert stats["sentinel_strip_hits"] == 3
     assert stats["sentinel_block_hits"] == 1

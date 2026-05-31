@@ -18,6 +18,8 @@ _STICKER_DESCRIBE_PROMPT = (
     "适合在什么聊天场景中使用。描述要像真人随手发的表情包说明，不要用学术语言。"
     "如果是表情包/梗图，重点抓住它的'用法'——什么情况下发这个。"
     "如果是普通图片，简要描述画面内容即可。"
+    "如果图片上有文字（梗图配字、艺术字等），请在最后单独用固定格式附上：图上文字：xxx（把图上的文字原样写出）；"
+    "如果图上没有任何文字，则省略这一句，不要写'图上文字'。"
 )
 
 
@@ -30,11 +32,13 @@ class VisionClient:
         api_key: str,
         model: str,
         timeout_s: float = 15.0,
+        max_tokens: int = 200,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._timeout_s = timeout_s
+        self._max_tokens = max(1, int(max_tokens))
 
     async def describe_image(
         self,
@@ -60,7 +64,7 @@ class VisionClient:
                     ],
                 }
             ],
-            "max_tokens": 128,
+            "max_tokens": self._max_tokens,
             "temperature": 0.3,
         }
 

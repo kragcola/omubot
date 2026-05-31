@@ -15,6 +15,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext
+from services.json_card import extract_json_card_text as _extract_json_card_text
 from services.llm.llm_request import LLMRequest
 
 _log = logger.bind(channel="bilibili")
@@ -200,36 +201,6 @@ _HTML_TAG = re.compile(r"<[^>]+>")
 def _strip_html(text: str) -> str:
     """Remove HTML tags and decode entities from text."""
     return _html_unescape(_HTML_TAG.sub("", text))
-
-
-def _extract_json_card_text(raw: str) -> str:
-    """Extract low-noise human-readable fields from a QQ mini-program JSON card."""
-    import json
-
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return ""
-
-    parts: list[str] = []
-    prompt = data.get("prompt", "")
-    if isinstance(prompt, str) and prompt.strip():
-        parts.append(prompt.strip())
-
-    meta = data.get("meta", {})
-    if isinstance(meta, dict):
-        detail = meta.get("detail_1", {})
-        if isinstance(detail, dict):
-            for key in ("title", "desc"):
-                value = detail.get(key, "")
-                if isinstance(value, str) and value.strip():
-                    parts.append(value.strip())
-
-    deduped: list[str] = []
-    for part in parts:
-        if part not in deduped:
-            deduped.append(part)
-    return " ".join(deduped)
 
 
 # === Interest evaluation for autonomous reply mode ===

@@ -215,7 +215,8 @@ def _build_alert_entry(
 def _decide_alert(service: dict[str, Any]) -> dict[str, Any] | None:
     status = str(service.get("status", "unknown"))
     service_id = str(service.get("id", "service"))
-    meta = service.get("meta") if isinstance(service.get("meta"), dict) else {}
+    meta_raw = service.get("meta")
+    meta = meta_raw if isinstance(meta_raw, dict) else {}
 
     if status == "error":
         return _build_alert_entry(service, severity="error")
@@ -265,7 +266,8 @@ def _decide_alert(service: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     if service_id == "memory":
-        semantic = meta.get("semantic") if isinstance(meta.get("semantic"), dict) else {}
+        semantic_raw = meta.get("semantic")
+        semantic = semantic_raw if isinstance(semantic_raw, dict) else {}
         semantic_errors = int(semantic.get("errors", 0) or 0)
         semantic_queries = int(semantic.get("queries", 0) or 0)
         if semantic_errors >= 2 and semantic_queries >= 5:

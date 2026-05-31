@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS memory_cards (
     priority      INTEGER NOT NULL DEFAULT 5,
     supersedes    TEXT,
     source        TEXT NOT NULL DEFAULT 'manual',
+    source_msg_id TEXT DEFAULT NULL,
+    captured_at   TEXT DEFAULT NULL,
+    captured_by   TEXT NOT NULL DEFAULT 'unknown',
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL,
     last_seen_at  TEXT,
@@ -61,8 +64,9 @@ _CREATE_INDEXES = [
 _INSERT = """\
 INSERT INTO memory_cards
     (card_id, category, scope, scope_id, content, confidence, status, priority,
-     supersedes, source, created_at, updated_at, last_seen_at, ttl_turns, series_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+     supersedes, source, source_msg_id, captured_at, captured_by,
+     created_at, updated_at, last_seen_at, ttl_turns, series_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 _CREATE_SERIES_TABLE = """\
 CREATE TABLE IF NOT EXISTS card_series (
@@ -109,6 +113,9 @@ class Card:
     priority: int
     supersedes: str | None
     source: str
+    source_msg_id: str | None
+    captured_at: str | None
+    captured_by: str
     created_at: str
     updated_at: str
     last_seen_at: str | None
@@ -176,6 +183,9 @@ def _row_to_card(row: aiosqlite.Row) -> Card:
         priority=row["priority"],
         supersedes=row["supersedes"],
         source=row["source"],
+        source_msg_id=row["source_msg_id"] if "source_msg_id" in row.keys() else None,  # noqa: SIM118
+        captured_at=row["captured_at"] if "captured_at" in row.keys() else None,  # noqa: SIM118
+        captured_by=row["captured_by"] if "captured_by" in row.keys() else "unknown",  # noqa: SIM118
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         last_seen_at=row["last_seen_at"],
@@ -218,14 +228,23 @@ class CardStore:
             await self._db.execute(idx)
         with contextlib.suppress(Exception):
             await self._db.execute("ALTER TABLE memory_cards ADD COLUMN series_id TEXT")
+        with contextlib.suppress(Exception):
+            await self._db.execute("ALTER TABLE memory_cards ADD COLUMN source_msg_id TEXT DEFAULT NULL")
+        with contextlib.suppress(Exception):
+            await self._db.execute("ALTER TABLE memory_cards ADD COLUMN captured_at TEXT DEFAULT NULL")
+        with contextlib.suppress(Exception):
+            await self._db.execute(
+                "ALTER TABLE memory_cards ADD COLUMN captured_by TEXT NOT NULL DEFAULT 'unknown'"
+            )
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_cards_series ON memory_cards(series_id)")
         await self._db.commit()
 
         await self._backfill_food_series()
 
         if migrate_from_md:
-            cursor = await self._db.execute(_COUNT_ALL)
-            count = (await cursor.fetchone())[0]
+            cursor = await self._require_db().execute(_COUNT_ALL)
+            count_row = await cursor.fetchone()
+            count = count_row[0] if count_row else 0
             if count == 0 and Path(migrate_from_md).exists():
                 from services.memory.migrate import migrate_md_to_cards
                 n = await migrate_md_to_cards(migrate_from_md, self)
@@ -236,12 +255,18 @@ class CardStore:
             await close_with_checkpoint(self._db, name="cards")
             self._db = None
 
+    def _require_db(self) -> aiosqlite.Connection:
+        if self._db is None:
+            raise RuntimeError("CardStore is not initialized")
+        return self._db
+
     async def _backfill_food_series(self) -> None:
         """Assign series_id to old food cards that predate the series feature."""
         migrated = 0
+        db = self._require_db()
 
         # Repair early recommendation cards that were mistakenly stored as preferences.
-        cursor = await self._db.execute(
+        cursor = await db.execute(
             "SELECT DISTINCT scope, scope_id FROM memory_cards "
             "WHERE source = 'food_plugin' AND category = 'preference' AND content LIKE '推荐了%'",
         )
@@ -251,7 +276,7 @@ class CardStore:
                 f"food_served:{scope_id}", scope=scope, scope_id=scope_id,
                 label="食物推荐记录", source="food_plugin",
             )
-            cur = await self._db.execute(
+            cur = await db.execute(
                 "UPDATE memory_cards SET category = 'event', series_id = ?, updated_at = ? "
                 "WHERE source = 'food_plugin' AND category = 'preference' "
                 "AND content LIKE '推荐了%' AND scope = ? AND scope_id = ?",
@@ -260,7 +285,7 @@ class CardStore:
             migrated += cur.rowcount
 
         # Food event cards → food_served:{scope_id}
-        cursor = await self._db.execute(
+        cursor = await db.execute(
             "SELECT DISTINCT scope, scope_id FROM memory_cards "
             "WHERE source = 'food_plugin' AND category = 'event' AND series_id IS NULL",
         )
@@ -270,7 +295,7 @@ class CardStore:
                 f"food_served:{scope_id}", scope=scope, scope_id=scope_id,
                 label="食物推荐记录", source="food_plugin",
             )
-            cur = await self._db.execute(
+            cur = await db.execute(
                 "UPDATE memory_cards SET series_id = ? "
                 "WHERE source = 'food_plugin' AND category = 'event' "
                 "AND scope = ? AND scope_id = ? AND series_id IS NULL",
@@ -279,7 +304,7 @@ class CardStore:
             migrated += cur.rowcount
 
         # Food preference cards → food_pref:{scope_id}
-        cursor = await self._db.execute(
+        cursor = await db.execute(
             "SELECT DISTINCT scope, scope_id FROM memory_cards "
             "WHERE source = 'food_plugin' AND category = 'preference' AND series_id IS NULL",
         )
@@ -289,7 +314,7 @@ class CardStore:
                 f"food_pref:{scope_id}", scope=scope, scope_id=scope_id,
                 label="食物口味偏好", source="food_plugin",
             )
-            cur = await self._db.execute(
+            cur = await db.execute(
                 "UPDATE memory_cards SET series_id = ? "
                 "WHERE source = 'food_plugin' AND category = 'preference' "
                 "AND scope = ? AND scope_id = ? AND series_id IS NULL",
@@ -298,7 +323,7 @@ class CardStore:
             migrated += cur.rowcount
 
         # Also backfill preference cards with source='user_config' (from _add_preference)
-        cursor = await self._db.execute(
+        cursor = await db.execute(
             "SELECT DISTINCT scope, scope_id FROM memory_cards "
             "WHERE source = 'user_config' AND category = 'preference' "
             "AND (content LIKE '喜欢吃%' OR content LIKE '不喜欢吃%') AND series_id IS NULL",
@@ -309,7 +334,7 @@ class CardStore:
                 f"food_pref:{scope_id}", scope=scope, scope_id=scope_id,
                 label="食物口味偏好", source="food_plugin",
             )
-            cur = await self._db.execute(
+            cur = await db.execute(
                 "UPDATE memory_cards SET series_id = ? "
                 "WHERE source = 'user_config' AND category = 'preference' "
                 "AND (content LIKE '喜欢吃%' OR content LIKE '不喜欢吃%') "
@@ -318,7 +343,7 @@ class CardStore:
             )
             migrated += cur.rowcount
 
-        await self._db.commit()
+        await db.commit()
         if migrated:
             logger.info("CardStore backfilled {} food cards into series", migrated)
 
@@ -326,19 +351,36 @@ class CardStore:
     # CRUD
     # ------------------------------------------------------------------
 
-    async def add_card(self, card: NewCard) -> str:
+    async def add_card(
+        self,
+        card: NewCard,
+        *,
+        source_msg_id: str | None = None,
+        captured_at: str | None = None,
+        captured_by: str = "unknown",
+    ) -> str:
         card_id = _generate_card_id()
         now = _now_iso()
-        await self._db.execute(
+        source_msg_id_value = str(source_msg_id).strip() if source_msg_id is not None else None
+        if source_msg_id_value == "":
+            source_msg_id_value = None
+        captured_by_value = str(captured_by or "").strip() or "unknown"
+        captured_at_value = str(captured_at).strip() if captured_at is not None else ""
+        if not captured_at_value and source_msg_id_value is not None:
+            captured_at_value = now
+        db = self._require_db()
+        await db.execute(
             _INSERT,
             (
                 card_id, card.category, card.scope, card.scope_id, card.content,
                 card.confidence, "active", card.priority,
-                card.supersedes, card.source, now, now, None, card.ttl_turns,
+                card.supersedes, card.source, source_msg_id_value,
+                captured_at_value or None, captured_by_value,
+                now, now, None, card.ttl_turns,
                 card.series_id,
             ),
         )
-        await self._db.commit()
+        await db.commit()
         logger.debug("card added | id={} category={} scope={}/{}", card_id, card.category, card.scope, card.scope_id)
         return card_id
 
@@ -353,15 +395,16 @@ class CardStore:
         updates["updated_at"] = _now_iso()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = [*updates.values(), card_id]
-        cursor = await self._db.execute(
+        db = self._require_db()
+        cursor = await db.execute(
             f"UPDATE memory_cards SET {set_clause} WHERE card_id = ?",
             values,
         )
-        await self._db.commit()
+        await db.commit()
         return cursor.rowcount > 0
 
     async def get_card(self, card_id: str) -> Card | None:
-        cursor = await self._db.execute(_SELECT_BY_ID, (card_id,))
+        cursor = await self._require_db().execute(_SELECT_BY_ID, (card_id,))
         row = await cursor.fetchone()
         return _row_to_card(row) if row else None
 
@@ -373,10 +416,11 @@ class CardStore:
         status: str = "active",
         category: str | None = None,
     ) -> list[Card]:
+        db = self._require_db()
         if category:
-            cursor = await self._db.execute(_SELECT_ENTITY_CATEGORY, (scope, scope_id, status, category))
+            cursor = await db.execute(_SELECT_ENTITY_CATEGORY, (scope, scope_id, status, category))
         else:
-            cursor = await self._db.execute(_SELECT_ENTITY, (scope, scope_id, status))
+            cursor = await db.execute(_SELECT_ENTITY, (scope, scope_id, status))
         rows = await cursor.fetchall()
         cards = [_row_to_card(r) for r in rows]
         cards.sort(key=lambda c: (-c.priority, c.updated_at), reverse=False)
@@ -399,12 +443,12 @@ class CardStore:
     # ------------------------------------------------------------------
 
     async def list_entities(self, scope: str) -> list[str]:
-        cursor = await self._db.execute(_SELECT_ENTITIES, (scope,))
+        cursor = await self._require_db().execute(_SELECT_ENTITIES, (scope,))
         rows = await cursor.fetchall()
         return [r["scope_id"] for r in rows]
 
     async def count_entity_cards(self, scope: str, scope_id: str) -> dict[str, int]:
-        cursor = await self._db.execute(_COUNT_ENTITY, (scope, scope_id))
+        cursor = await self._require_db().execute(_COUNT_ENTITY, (scope, scope_id))
         rows = await cursor.fetchall()
         return {r["category"]: r["cnt"] for r in rows}
 
@@ -428,7 +472,7 @@ class CardStore:
             params.append(scope_id)
         sql += " ORDER BY priority DESC, updated_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        cursor = await self._db.execute(sql, params)
+        cursor = await self._require_db().execute(sql, params)
         rows = await cursor.fetchall()
         return [_row_to_card(r) for r in rows]
 
@@ -440,7 +484,7 @@ class CardStore:
             params.append(scope)
         sql += " ORDER BY priority DESC, updated_at DESC LIMIT ?"
         params.append(limit)
-        cursor = await self._db.execute(sql, params)
+        cursor = await self._require_db().execute(sql, params)
         rows = await cursor.fetchall()
         return [_row_to_card(r) for r in rows]
 
@@ -451,13 +495,14 @@ class CardStore:
     async def create_series(self, series: NewCardSeries) -> CardSeries:
         series_id = "ser_" + secrets.token_hex(4)
         now = _now_iso()
-        await self._db.execute(
+        db = self._require_db()
+        await db.execute(
             "INSERT INTO card_series (series_id, series_key, scope, scope_id, label, source, "
             "created_at, updated_at, meta_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (series_id, series.series_key, series.scope, series.scope_id,
              series.label, series.source, now, now, series.meta_json),
         )
-        await self._db.commit()
+        await db.commit()
         return CardSeries(
             series_id=series_id, series_key=series.series_key,
             scope=series.scope, scope_id=series.scope_id,
@@ -466,13 +511,13 @@ class CardStore:
         )
 
     async def get_series(self, series_id: str) -> CardSeries | None:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM card_series WHERE series_id = ?", (series_id,))
         row = await cursor.fetchone()
         return _row_to_series(row) if row else None
 
     async def get_series_by_key(self, series_key: str) -> CardSeries | None:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM card_series WHERE series_key = ?", (series_key,))
         row = await cursor.fetchone()
         return _row_to_series(row) if row else None
@@ -490,21 +535,21 @@ class CardStore:
         ))
 
     async def get_series_cards(self, series_id: str, *, status: str = "active") -> list[Card]:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM memory_cards WHERE series_id = ? AND status = ? ORDER BY created_at DESC",
             (series_id, status))
         rows = await cursor.fetchall()
         return [_row_to_card(r) for r in rows]
 
     async def list_entity_series(self, scope: str, scope_id: str) -> list[CardSeries]:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM card_series WHERE scope = ? AND scope_id = ? ORDER BY created_at DESC",
             (scope, scope_id))
         rows = await cursor.fetchall()
         return [_row_to_series(r) for r in rows]
 
     async def list_all_series(self) -> list[CardSeries]:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM card_series ORDER BY created_at DESC")
         rows = await cursor.fetchall()
         return [_row_to_series(r) for r in rows]
@@ -527,7 +572,7 @@ class CardStore:
             sql += " AND category = ?"
             params.append(category)
         sql += " ORDER BY confidence DESC LIMIT 1"
-        cursor = await self._db.execute(sql, params)
+        cursor = await self._require_db().execute(sql, params)
         row = await cursor.fetchone()
         if row is None:
             return None

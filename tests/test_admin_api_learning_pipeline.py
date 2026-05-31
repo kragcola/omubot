@@ -59,7 +59,12 @@ def test_learning_pipeline_counts_schema_and_memory_scalars(tmp_path: Path) -> N
 
     assert stages["candidate"]["by_noun"]["slang"] == 2
     assert stages["review"]["by_noun"]["slang"] == 1
-    assert stages["approved"]["by_noun"]["slang"] == 2
+    # Pipeline stages are a disjoint partition: a term in the AI-reviewed /
+    # awaiting-human bucket counts under ``review`` only, not ``approved``.
+    # Of the two status='approved' seed rows, ``review_ai`` is awaiting
+    # human review (→ review) and ``approved_human`` is fully approved
+    # (→ approved), so ``approved`` counts exactly one.
+    assert stages["approved"]["by_noun"]["slang"] == 1
     assert stages["hits"]["by_noun"]["slang"] == 2
     assert stages["archived"]["by_noun"]["slang"] == 2
 

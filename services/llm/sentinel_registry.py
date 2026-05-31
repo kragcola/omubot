@@ -43,6 +43,9 @@ class GuardrailResult:
 class GuardrailContext:
     thinker_thought: str = ""
     last_assistant_text: str = ""
+    user_message: str = ""
+    session_count: int = 0
+    bot_name: str = ""
     config: Any = None
 
 
@@ -56,6 +59,7 @@ _DEFAULT_SENTINELS: tuple[SentinelEntry, ...] = (
     SentinelEntry("sentinel_reply", re.compile(r"«回复[^»]*»"), action="strip"),
     SentinelEntry("sentinel_sticker", re.compile(r"«表情包:[^»]+»"), action="strip"),
     SentinelEntry("sentinel_img_tag", re.compile(r"«img:\d+»"), action="strip"),
+    SentinelEntry("sparkle_symbol_watcher", re.compile(r"[✨☆★✧⭐]"), severity="low", action="warn"),
 )
 
 
@@ -63,6 +67,13 @@ def _compile_pattern(pattern: str | re.Pattern[str]) -> re.Pattern[str]:
     if isinstance(pattern, re.Pattern):
         return pattern
     return re.compile(pattern)
+
+
+def sentinel_guardrail_enabled(config: object | None) -> bool:
+    if config is None:
+        return True
+    guardrail = getattr(config, "sentinel_guardrail", config)
+    return bool(getattr(guardrail, "enabled", False))
 
 
 def _dedupe_hits(existing: list[GuardrailHit], new_hits: Sequence[GuardrailHit]) -> None:
@@ -87,7 +98,9 @@ class SentinelRegistry:
     def register(self, entry: SentinelEntry) -> None:
         pattern = _compile_pattern(entry.pattern)
 
-        def _rule(text: str, _ctx: GuardrailContext) -> GuardrailResult:
+        def _rule(text: str, ctx: GuardrailContext) -> GuardrailResult:
+            if not sentinel_guardrail_enabled(ctx.config):
+                return GuardrailResult(passed=True, text=text)
             matches = list(pattern.finditer(text))
             if not matches:
                 return GuardrailResult(passed=True, text=text)
@@ -122,6 +135,9 @@ class SentinelRegistry:
         *,
         thinker_thought: str = "",
         last_assistant_text: str = "",
+        user_message: str = "",
+        session_count: int = 0,
+        bot_name: str = "",
         config: Any = None,
     ) -> GuardrailResult:
         current = text
@@ -131,6 +147,9 @@ class SentinelRegistry:
         context = GuardrailContext(
             thinker_thought=thinker_thought,
             last_assistant_text=last_assistant_text,
+            user_message=user_message,
+            session_count=session_count,
+            bot_name=bot_name,
             config=config,
         )
         for rule in self._rules:
@@ -183,16 +202,24 @@ def apply_guardrails(
     *,
     thinker_thought: str = "",
     last_assistant_text: str = "",
+    user_message: str = "",
+    session_count: int = 0,
+    bot_name: str = "",
     config: Any = None,
 ) -> GuardrailResult:
     return _REGISTRY.apply(
         text,
         thinker_thought=thinker_thought,
         last_assistant_text=last_assistant_text,
+        user_message=user_message,
+        session_count=session_count,
+        bot_name=bot_name,
         config=config,
     )
 
 
 # Register non-sentinel A-cluster rules on import.
 from services.llm import dedup_gate as _dedup_gate  # noqa: E402,F401
+from services.llm import persona_drift_stripper as _persona_drift_stripper  # noqa: E402,F401
+from services.llm import schedule_overshare_detector as _schedule_overshare_detector  # noqa: E402,F401
 from services.llm import thinker_phrase_detector as _thinker_phrase_detector  # noqa: E402,F401

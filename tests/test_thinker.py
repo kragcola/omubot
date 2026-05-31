@@ -291,3 +291,92 @@ def test_thinker_system_prompt_clears_deepseek_cache_threshold() -> None:
         f"threshold with margin. Adding new sections is fine; trimming below "
         f"this floor will silently regress cache hit rate."
     )
+
+
+# ---------------------------------------------------------------------------
+# light_reply / light_kind (弱回复 P0)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_think_output_closing_light_reply() -> None:
+    decision = parse_think_output(
+        '{"action":"light_reply","light_kind":"closing","thought":"对方道晚安","tone":"日常"}'
+    )
+    assert decision is not None
+    assert decision.action == "light_reply"
+    assert decision.light_kind == "closing"
+    # A light reply skips retrieval (no information payload).
+    assert decision.retrieve_mode == "skip"
+
+
+def test_parse_think_output_light_reply_defaults_to_companion() -> None:
+    decision = parse_think_output('{"action":"light_reply","thought":"轻轻应一声"}')
+    assert decision is not None
+    assert decision.light_kind == "companion"
+
+
+def test_parse_think_output_light_kind_cleared_for_non_light() -> None:
+    # light_kind only meaningful on light_reply; a stray value on reply is dropped.
+    decision = parse_think_output('{"action":"reply","light_kind":"closing","thought":"正常回复"}')
+    assert decision is not None
+    assert decision.action == "reply"
+    assert decision.light_kind == ""
+
+
+def test_parse_think_output_invalid_light_kind_falls_back_empty() -> None:
+    decision = parse_think_output('{"action":"light_reply","light_kind":"nonsense","thought":"x"}')
+    assert decision is not None
+    # invalid light_kind normalized to "" then defaulted to companion for light_reply
+    assert decision.light_kind == "companion"
+
+
+def test_parse_think_output_missing_light_kind_defaults_empty() -> None:
+    # Old JSON without light_kind still parses; non-light actions keep "".
+    decision = parse_think_output('{"action":"reply","thought":"普通"}')
+    assert decision is not None
+    assert decision.light_kind == ""
+
+
+def test_thinker_prompt_mentions_closing_light_reply() -> None:
+    prompt = THINKER_SYSTEM_PROMPT.format(name="测试")
+    assert "light_reply" in prompt
+    assert "closing" in prompt
+    assert "收尾" in prompt
+
+
+# ---------------------------------------------------------------------------
+# reply_necessity (B3 — suppress 'showing off')
+# ---------------------------------------------------------------------------
+
+
+def test_parse_think_output_accepts_reply_necessity() -> None:
+    for value in ("high", "medium", "low"):
+        decision = parse_think_output(
+            f'{{"action":"reply","thought":"x","reply_necessity":"{value}"}}'
+        )
+        assert decision is not None
+        assert decision.reply_necessity == value
+
+
+def test_parse_think_output_invalid_necessity_falls_back_high() -> None:
+    decision = parse_think_output('{"action":"reply","thought":"x","reply_necessity":"nonsense"}')
+    assert decision is not None
+    assert decision.reply_necessity == "high"  # safe default = do not suppress
+
+
+def test_parse_think_output_missing_necessity_defaults_high() -> None:
+    decision = parse_think_output('{"action":"reply","thought":"x"}')
+    assert decision is not None
+    assert decision.reply_necessity == "high"
+
+
+def test_think_decision_default_necessity_is_high() -> None:
+    from services.llm.thinker import ThinkDecision
+
+    assert ThinkDecision(action="reply", thought="x").reply_necessity == "high"
+
+
+def test_thinker_prompt_mentions_reply_necessity() -> None:
+    prompt = THINKER_SYSTEM_PROMPT.format(name="测试")
+    assert "reply_necessity" in prompt
+    assert "刷存在感" in prompt

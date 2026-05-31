@@ -85,12 +85,24 @@ async def test_b_cluster_pipeline_records_ingress_and_outbound_metrics(tmp_path)
     ctx = _ctx(scheduler=scheduler, guard=guard, coalescer=coalescer, store=store)
 
     try:
-        for idx in range(4):
+        # S1: suppression keys off direction alternation. Drive a real-time
+        # out/in ping-pong for known peer "2" (known_peer_alt_threshold=6) so
+        # both the inbound metric (via pipeline) and outbound metric fire, and
+        # the loop guard trips. Inbound goes through _maybe_drop_pair_guard
+        # (records + emits metric); outbound via guard.record_outbound.
+        guard.record_outbound("100", "2")  # seed outbound (no flip)
+        inbound_recorded = 0
+        suppressed = 0
+        # 6 inbound interleaved with 5 outbound → 11 events, ≥6 direction flips
+        for i in range(6):
             dropped = await _maybe_drop_pair_guard(ctx, group_id="100", sender_id="2")
-            assert dropped is False
-            if idx < 3:
-                assert guard.is_suppressed("100", "2") is False
-        assert await _maybe_drop_pair_guard(ctx, group_id="100", sender_id="2") is True
+            if dropped:
+                suppressed += 1
+            else:
+                inbound_recorded += 1
+                if i < 5:
+                    guard.record_outbound("100", "2")  # flip back to out
+        assert suppressed >= 1  # the ping-pong eventually got suppressed
 
         await _notify_group_scheduler(
             ctx,
@@ -113,8 +125,9 @@ async def test_b_cluster_pipeline_records_ingress_and_outbound_metrics(tmp_path)
         await scheduler._send_to_group("100", "outbound", target_user_id="2")
         stats = await store.stats()
 
-        assert stats["pair_guard_inbound_recorded"] == 4
-        assert stats["pair_guard_suppressed"] == 1
+        # inbound recorded == non-suppressed _maybe_drop calls; suppressed == drops
+        assert stats["pair_guard_inbound_recorded"] == inbound_recorded
+        assert stats["pair_guard_suppressed"] == suppressed
         assert stats["coalesce_enqueued"] == 2
         assert stats["coalesce_flushed"] == 1
         assert stats["pair_guard_outbound_recorded"] == 1

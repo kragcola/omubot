@@ -170,7 +170,7 @@ class CardUpdateTool(Tool):
                     content=content,
                     confidence=float(kwargs.get("confidence", 0.7)),
                     source=f"tool:{session_id}",
-                ))
+                ), captured_by=f"tool:{session_id}")
                 return f"已添加卡片 {cid}"
             except ValueError as e:
                 return str(e)

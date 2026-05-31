@@ -50,7 +50,15 @@ class _Scheduler:
     def is_muted(self, group_id: str) -> bool:
         return False
 
-    def notify(self, group_id: str, *, trigger: object | None = None, user_id: str = "") -> None:
+    def notify(
+        self,
+        group_id: str,
+        *,
+        trigger: object | None = None,
+        user_id: str = "",
+        message_text: str = "",
+    ) -> None:
+        del message_text
         self.calls.append({
             "group_id": group_id,
             "trigger": trigger,

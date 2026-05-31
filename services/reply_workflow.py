@@ -243,6 +243,77 @@ def classify_followup_text(text: str, *, legacy_directed: bool = False) -> Follo
     return FollowupClassification(False, "none", "none", normalized, "no_followup_signal")
 
 
+# Closing / terminal-exchange tokens (Schegloff & Sacks 1973: 道别须双方对称完成).
+# A closing message demands a symmetric terminal token back; ignoring it = 拒绝完成
+# terminal exchange. Detection is rule-based — terminal tokens are a highly
+# conventionalized closed set, so rules are accurate and zero-cost.
+_CLOSING_TOKENS = (
+    "晚安",
+    "安安",
+    "睡了",
+    "睡觉了",
+    "去睡了",
+    "去睡觉",
+    "我去睡",
+    "睡啦",
+    "碎觉",
+    "碎了",
+    "先这样",
+    "就这样",
+    "先酱",
+    "下了",
+    "下线了",
+    "撤了",
+    "溜了",
+    "润了",
+    "走了",
+    "闪了",
+    "明天见",
+    "明天聊",
+    "回头聊",
+    "回聊",
+    "改天聊",
+    "拜拜",
+    "拜",
+    "bye",
+    "byebye",
+    "88",
+    "886",
+    "晚安啦",
+    "不聊了",
+    "歇了",
+)
+# Question/continuation markers that disqualify a closing match. "晚安是什么意思"
+# and "睡了吗" (= "are you asleep?", a question) must not count as closing.
+_CLOSING_QUESTION_RE = re.compile(r"[?？]|是什么|什么意思|怎么|为什么|吗|呢")
+_CLOSING_MAX_LEN = 12
+
+
+def classify_closing_intent(text: str) -> bool:
+    """Return True when ``text`` is a conversation-closing terminal token.
+
+    Requires a short message whose normalized form is, or ends with, a closing
+    token, with no question/continuation marker. Long sentences with trailing
+    content ("先这样吧我觉得X更好") and questions ("晚安是什么意思") are rejected,
+    so the closing weak-reply only fires on genuine 收尾.
+    """
+    normalized = normalize_followup_text(text)
+    if not normalized:
+        return False
+    if len(normalized) > _CLOSING_MAX_LEN:
+        return False
+    lowered = normalized.lower()
+    if _CLOSING_QUESTION_RE.search(normalized):
+        return False
+    # Exact match, or the message ends with a closing token (e.g. "好吧晚安").
+    for token in _CLOSING_TOKENS:
+        tok = token.lower()
+        if lowered == tok or lowered.endswith(tok):
+            return True
+    return False
+
+
+
 def should_call_semantic_gate(features: ReplyGateFeatures, *, max_chars: int = 48) -> tuple[bool, str]:
     text = normalize_followup_text(features.current_text)
     if features.has_current_trigger:
@@ -262,10 +333,21 @@ def should_call_semantic_gate(features: ReplyGateFeatures, *, max_chars: int = 4
     return True, "short_contextual_candidate"
 
 
-def should_consume_semantic_gate(result: SemanticGateResult | None, *, threshold: float) -> bool:
+def should_consume_semantic_gate(
+    result: SemanticGateResult | None,
+    *,
+    threshold: float,
+    force_floor: float = 0.7,
+) -> bool:
     if result is None:
         return False
-    return result.action == "force_reply" and result.confidence >= threshold
+    if result.action != "force_reply":
+        return False
+    # The LLM explicitly chose force_reply — itself the strongest whether-to-reply
+    # signal (a holistic trait+context judgment). Honor it as long as confidence
+    # clears a fixed floor, bypassing dynamic threshold inflation. Dynamic tuning
+    # may LOWER the bar (familiarity) but must never raise it above the floor.
+    return result.confidence >= min(threshold, force_floor)
 
 
 def semantic_gate_threshold(
@@ -280,8 +362,9 @@ def semantic_gate_threshold(
     """Compute the effective semantic gate threshold.
 
     Dynamic mode is deliberately small and bounded: closer users can continue
-    a recent bot reply a bit more easily, while low-energy mood makes the bot
-    slightly less eager to jump back in.
+    a recent bot reply a bit more easily (familiarity lowers the bar). Mood does
+    NOT enter here — whether to reply is a stable-trait decision; mood only
+    shapes how the reply is written (handled on the generation side).
     """
     fixed = _coerce_confidence(fixed_threshold)
     familiarity_value = _optional_confidence(familiarity)
@@ -297,12 +380,15 @@ def semantic_gate_threshold(
 
     threshold = fixed
     adjustments: list[str] = []
+    # whether-to-reply is governed by stable traits (relationship/familiarity),
+    # NOT by momentary mood: psycholinguistic evidence (Forgas AIM; J. Pragmatics
+    # 2026 "How we are vs how we are feeling") shows mood shapes HOW one replies,
+    # while stable traits drive WHETHER one engages. mood_energy is still recorded
+    # for observability but must not move this gate; its real effect lives on the
+    # generation side (thinker mood block).
     if familiarity_value is not None and familiarity_value > 0.6:
         threshold -= 0.1
         adjustments.append("familiarity_high:-0.10")
-    if mood_energy_value is not None and mood_energy_value < 0.3:
-        threshold += 0.05
-        adjustments.append("mood_low:+0.05")
     effective = max(min_threshold, min(max_threshold, threshold))
     if effective != threshold:
         adjustments.append("clamped")

@@ -56,7 +56,7 @@ async def migrate_md_to_cards(md_base_dir: str, card_store: CardStore) -> int:
                         content=_truncate(body, 500),
                         confidence=0.7,
                         source="migration",
-                    ))
+                    ), captured_by="migration")
                     created += 1
 
                 # Each pending bullet → one fact card (lower confidence)
@@ -75,7 +75,7 @@ async def migrate_md_to_cards(md_base_dir: str, card_store: CardStore) -> int:
                                     content=_truncate(note, 300),
                                     confidence=0.6,
                                     source="migration",
-                                ))
+                                ), captured_by="migration")
                                 created += 1
 
                 # Rename original to mark as migrated

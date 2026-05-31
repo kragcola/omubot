@@ -202,8 +202,9 @@ async def test_stream_with_segments_cleans_buffer_on_cancel(persona_runtime: Per
             self.buffer = ""
             return []
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     async def _cancelled_call(request: LLMRequest, *, on_text_delta: Any = None) -> dict[str, Any]:
         await on_text_delta("未完成的旧内容")
@@ -255,8 +256,9 @@ async def test_chat_streaming_sends_segments_and_returns_empty_to_avoid_duplicat
     timeline = GroupTimeline()
     sent: list[str] = []
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     async def _fake_call_api(*args: Any, **kwargs: Any) -> dict[str, Any]:
         await kwargs["on_text_delta"]("第一段很长很长。")
@@ -305,8 +307,9 @@ async def test_balanced_long_reply_with_business_tools_streams_segments(
     tools = ToolRegistry()
     tools.register(_StaticTool("send_sticker"))
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     async def _fake_call_api(*args: Any, **kwargs: Any) -> dict[str, Any]:
         assert kwargs.get("on_text_delta") is not None
@@ -414,8 +417,9 @@ async def test_streaming_disabled_fallback_uses_natural_split(
         "乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙乙。"
     )
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     async def _fake_call_api(*args: Any, **kwargs: Any) -> dict[str, Any]:
         assert kwargs.get("on_text_delta") is None
@@ -471,8 +475,9 @@ async def test_chat_balanced_streaming_handles_quote_anchor(
     timeline = GroupTimeline()
     sent: list[str] = []
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     async def _fake_call_api(*args: Any, **kwargs: Any) -> dict[str, Any]:
         await kwargs["on_text_delta"]('<quote msg_id="42"/>第一段很长很长。')
@@ -524,8 +529,9 @@ async def test_quote_reply_disabled_strips_cq_reply_on_non_streaming_path(
     tools = ToolRegistry()
     tools.register(_StaticTool("lookup_cards"))
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     async def _fake_call_api(*args: Any, **kwargs: Any) -> dict[str, Any]:
         assert kwargs.get("on_text_delta") is None
@@ -571,8 +577,9 @@ async def test_quote_reply_disabled_strips_cq_reply_on_streaming_path(
     timeline = GroupTimeline()
     sent: list[str] = []
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     async def _fake_call_api(*args: Any, **kwargs: Any) -> dict[str, Any]:
         await kwargs["on_text_delta"]("[CQ:reply,id=42]第一段很长很长。")
@@ -623,8 +630,9 @@ async def test_stream_with_segments_falls_back_to_result_text_without_deltas(per
     )
     sent: list[str] = []
 
-    async def _on_segment(segment: str) -> None:
+    async def _on_segment(segment: str) -> bool:
         sent.append(segment)
+        return True
 
     async def _call_without_delta(request: LLMRequest, *, on_text_delta: Any = None) -> dict[str, Any]:
         del request, on_text_delta

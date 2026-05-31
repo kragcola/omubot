@@ -95,6 +95,7 @@ async def _main() -> int:
         print(f"{sticker_id}\t{current_hint or '-'}\t{tag}")
 
     print(f"done updated={updated} skipped={skipped} failed={failed} total={len(rows)}")
+    store.close()
     return 0
 
 

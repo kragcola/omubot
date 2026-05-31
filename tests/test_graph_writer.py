@@ -251,11 +251,12 @@ async def test_cross_group_filter(tmp_path) -> None:
         assert "scope = 'global'" in clause
         assert "scope = 'group' AND group_id = ?" in clause
         assert "cross_group_visible = 1" in clause
-        assert params == ["g_42"]
+        assert "cross_group_visible = 2" in clause
+        assert params == ["g_42", "g_42"]
 
         clause2, params2 = writer.apply_cross_group_filter("status = 'active'", "g_42")
         assert clause2.startswith("status = 'active' AND ")
-        assert params2 == ["g_42"]
+        assert params2 == ["g_42", "g_42"]
 
         clause3, _ = writer.apply_cross_group_filter("", "g_1", table_alias="n")
         assert "n.scope" in clause3

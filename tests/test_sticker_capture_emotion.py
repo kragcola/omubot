@@ -8,7 +8,11 @@ from kernel.types import MessageContext
 from plugins.history_loader import _extract_content
 from plugins.sticker import StickerPlugin
 from services.media.image_cache import ImageCache
-from services.media.sticker_capture import DEFAULT_STICKER_USAGE_HINT, emit_emotion_tag
+from services.media.sticker_capture import (
+    DEFAULT_STICKER_USAGE_HINT,
+    emit_emotion_tag,
+    split_desc_and_ocr,
+)
 from services.media.sticker_store import StickerStore
 
 _JPEG_DATA = b"\xff\xd8\xff\xe0" + b"\x11" * 64 + b"sticker-emotion"
@@ -155,3 +159,55 @@ async def test_auto_learn_paths_emit_emotion_tag(tmp_path: Path, monkeypatch) ->
             learn_new_stickers=True,
         )
     history_emit.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# OCR 入库（阶段 1）回归
+# ---------------------------------------------------------------------------
+
+
+def test_split_desc_and_ocr_with_text() -> None:
+    desc, ocr = split_desc_and_ocr("一只猫在挥手告别，适合道别时发。图上文字：晚安啦")
+    assert "挥手告别" in desc
+    assert "图上文字" not in desc
+    assert ocr == "晚安啦"
+
+
+def test_split_desc_and_ocr_colon_variants() -> None:
+    # 半角冒号也能切
+    _, ocr = split_desc_and_ocr("描述内容 图上文字:打工人")
+    assert ocr == "打工人"
+
+
+def test_split_desc_and_ocr_no_text() -> None:
+    desc, ocr = split_desc_and_ocr("纯画面，没有任何文字")
+    assert desc == "纯画面，没有任何文字"
+    assert ocr == ""
+
+
+def test_split_desc_and_ocr_empty() -> None:
+    assert split_desc_and_ocr("") == ("", "")
+    assert split_desc_and_ocr(None) == ("", "")
+
+
+async def test_emit_emotion_tag_writes_ocr(tmp_path: Path) -> None:
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"))
+    sticker_id, _ = store.add(_JPEG_DATA, "测试表情", DEFAULT_STICKER_USAGE_HINT, source="auto")
+    vision = MagicMock()
+    vision.describe_image = AsyncMock(return_value="挥手告别时发。图上文字：拜拜")
+
+    tag = await emit_emotion_tag(store, sticker_id, image_data=_JPEG_DATA, vision_client=vision)
+
+    assert tag == "挥手告别时发"
+    assert store.get(sticker_id)["ocr_text"] == "拜拜"  # type: ignore[index]
+
+
+async def test_emit_emotion_tag_no_ocr_keeps_empty(tmp_path: Path) -> None:
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"))
+    sticker_id, _ = store.add(_JPEG_DATA, "测试表情", DEFAULT_STICKER_USAGE_HINT, source="auto")
+    vision = MagicMock()
+    vision.describe_image = AsyncMock(return_value="开心时发，没有文字")
+
+    await emit_emotion_tag(store, sticker_id, image_data=_JPEG_DATA, vision_client=vision)
+
+    assert store.get(sticker_id)["ocr_text"] == ""  # type: ignore[index]

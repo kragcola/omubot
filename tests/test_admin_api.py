@@ -17,6 +17,7 @@ from admin.routes.api.memory import create_memory_router
 from admin.routes.api.plugins import create_plugins_router
 from admin.routes.api.protocol import create_protocol_router
 from admin.routes.api.providers import create_providers_router
+from admin.routes.api.scheduler import create_scheduler_router
 from admin.routes.api.slang import create_slang_router
 from admin.routes.api.system import create_system_router
 from kernel.bus import PluginBus
@@ -48,6 +49,9 @@ class _DummyMessageLog:
 class _DummyScheduler:
     def get_all_slots(self) -> dict[str, dict]:
         return {"444": {"msg_count": 1}}
+
+    def get_mute_state(self) -> dict[str, dict]:
+        return {"444": {"muted": True, "source": "event", "since_unix": 1_700_000_000.0, "until_unix": None}}
 
 
 class _DummyBot:
@@ -602,6 +606,21 @@ def test_groups_endpoint_discovers_groups_and_normalizes_messages() -> None:
     assert msg["message"] == "hello"
     assert isinstance(msg["timestamp"], str)
     assert len(msg["timestamp"]) == 19
+
+
+def test_scheduler_mute_state_endpoint_exposes_groups() -> None:
+    app = FastAPI()
+    app.include_router(
+        create_scheduler_router(scheduler=_DummyScheduler()),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    resp = client.get("/api/admin/scheduler/mute_state")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["groups"]["444"]["muted"] is True
+    assert payload["groups"]["444"]["source"] == "event"
 
 
 def test_groups_profile_endpoint_persists_override_and_resets(tmp_path: Path) -> None:
@@ -2167,5 +2186,4 @@ def test_persona_hot_reload_rejects_invalid_persona_id() -> None:
     assert data["ok"] is False
     assert "persona_id" in data["error"]
     assert runtime.loaded_paths == []
-
 

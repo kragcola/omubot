@@ -17,6 +17,7 @@ from services.humanization.contract import (
     REGISTER_RECENT_USED_SLOT,
     STICKER_RECENT_USED_SLOT,
     THINKER_LAST_DECISION_SLOT,
+    WILLINGNESS_STAGE_SLOT,
 )
 from services.humanization.coupling import (
     CouplingFeatures,
@@ -50,6 +51,7 @@ __all__ = [
     "REGISTER_RECENT_USED_SLOT",
     "STICKER_RECENT_USED_SLOT",
     "THINKER_LAST_DECISION_SLOT",
+    "WILLINGNESS_STAGE_SLOT",
     "CouplingFeatures",
     "CouplingPolicy",
     "HumanizationScore",

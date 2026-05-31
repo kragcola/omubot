@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+shopt -s nullglob
+
+codex_bin=""
+for candidate in "$HOME"/.vscode/extensions/openai.chatgpt-*/bin/macos-aarch64/codex; do
+  if [[ -x "$candidate" ]]; then
+    codex_bin="$candidate"
+  fi
+done
+
+if [[ -z "$codex_bin" ]]; then
+  echo "Could not find the VS Code bundled Codex binary." >&2
+  echo "Expected a path like ~/.vscode/extensions/openai.chatgpt-*/bin/macos-aarch64/codex" >&2
+  exit 1
+fi
+
+exec "$codex_bin" --enable goals "$@"

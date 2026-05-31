@@ -12,7 +12,14 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 from loguru import logger
 
-from services.knowledge_graph.types import GraphCandidate, GraphFact
+from services.cross_group import (
+    CrossGroupVisibility,
+    legacy_cross_group_visible,
+    resolve_cross_group_visibility,
+    visibility_from_db,
+    visibility_to_db,
+)
+from services.knowledge_graph.types import GraphCandidate, GraphFact, GraphStatus
 from services.storage import close_with_checkpoint, connect_sqlite
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -160,35 +167,41 @@ class KnowledgeGraphStore:
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_facts_cross_group "
             "ON graph_facts(cross_group_visible, status) "
-            "WHERE cross_group_visible = 1"
+            "WHERE cross_group_visible IN (1, 2)"
         )
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_candidates_cross_group "
             "ON extraction_candidates(cross_group_visible, status) "
-            "WHERE cross_group_visible = 1"
+            "WHERE cross_group_visible IN (1, 2)"
         )
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_gn_cross_group "
             "ON graph_nodes(cross_group_visible, status) "
-            "WHERE cross_group_visible = 1"
+            "WHERE cross_group_visible IN (1, 2)"
         )
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_ge_cross_group "
             "ON graph_edges(cross_group_visible, status) "
-            "WHERE cross_group_visible = 1"
+            "WHERE cross_group_visible IN (1, 2)"
         )
         await self._db.commit()
 
     async def _ensure_column(self, table: str, column: str, definition: str) -> None:
-        cursor = await self._db.execute(f"PRAGMA table_info({table})")
+        db = self._require_db()
+        cursor = await db.execute(f"PRAGMA table_info({table})")
         columns = {row["name"] for row in await cursor.fetchall()}
         if column not in columns:
-            await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     async def close(self) -> None:
         if self._db is not None:
             await close_with_checkpoint(self._db, name="knowledge_graph")
             self._db = None
+
+    def _require_db(self) -> aiosqlite.Connection:
+        if self._db is None:
+            raise RuntimeError("KnowledgeGraphStore is not initialized")
+        return self._db
 
     async def add_fact(
         self,
@@ -199,7 +212,7 @@ class KnowledgeGraphStore:
         confidence: float,
         source: str,
         evidence: dict[str, Any],
-        status: str = "active",
+        status: GraphStatus = "active",
         scope: str = "global",
         scope_id: str = "global",
         supersedes: str | None = None,
@@ -208,7 +221,8 @@ class KnowledgeGraphStore:
         self._require_evidence(evidence)
         fact_id = "gf_" + secrets.token_hex(6)
         now = _now_iso()
-        await self._db.execute(
+        db = self._require_db()
+        await db.execute(
             "INSERT INTO graph_facts "
             "(fact_id, subject, predicate, object, confidence, status, scope, scope_id, source, supersedes, "
             "metadata_json, created_at, updated_at) "
@@ -230,7 +244,7 @@ class KnowledgeGraphStore:
             ),
         )
         await self._insert_evidence(fact_id, evidence)
-        await self._db.commit()
+        await db.commit()
         return GraphFact(
             fact_id=fact_id,
             subject=subject,
@@ -257,13 +271,14 @@ class KnowledgeGraphStore:
         confidence: float,
         source: str,
         evidence: dict[str, Any],
-        status: str = "pending",
+        status: GraphStatus = "pending",
         scope: str = "global",
         scope_id: str = "global",
     ) -> GraphCandidate:
         candidate_id = "gc_" + secrets.token_hex(6)
         now = _now_iso()
-        await self._db.execute(
+        db = self._require_db()
+        await db.execute(
             "INSERT INTO extraction_candidates "
             "(candidate_id, subject, predicate, object, confidence, status, scope, scope_id, source, evidence_json, "
             "review_note, created_at, updated_at) "
@@ -284,7 +299,7 @@ class KnowledgeGraphStore:
                 now,
             ),
         )
-        await self._db.commit()
+        await db.commit()
         return GraphCandidate(
             candidate_id=candidate_id,
             subject=subject,
@@ -301,7 +316,7 @@ class KnowledgeGraphStore:
         )
 
     async def list_facts(self, *, status: str = "active", limit: int = 100) -> list[GraphFact]:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM graph_facts WHERE status = ? ORDER BY confidence DESC, updated_at DESC LIMIT ?",
             (status, limit),
         )
@@ -309,7 +324,7 @@ class KnowledgeGraphStore:
 
     async def list_scope_risk_facts(self, *, limit: int = 100) -> list[GraphFact]:
         """List legacy global facts that appear to come from memory-card evidence."""
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT DISTINCT f.* FROM graph_facts f "
             "JOIN graph_evidence e ON e.fact_id = f.fact_id "
             "WHERE f.status = 'active' AND f.scope = 'global' AND f.scope_id = 'global' "
@@ -320,7 +335,7 @@ class KnowledgeGraphStore:
         return [_row_to_fact(row) for row in await cursor.fetchall()]
 
     async def get_fact(self, fact_id: str) -> GraphFact | None:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM graph_facts WHERE fact_id = ?",
             (fact_id,),
         )
@@ -338,7 +353,7 @@ class KnowledgeGraphStore:
         statuses: tuple[str, ...] = ("active",),
     ) -> GraphFact | None:
         placeholders = ", ".join("?" for _ in statuses)
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM graph_facts "
             f"WHERE subject = ? AND predicate = ? AND object = ? AND scope = ? AND scope_id = ? "
             f"AND status IN ({placeholders}) "
@@ -359,7 +374,7 @@ class KnowledgeGraphStore:
         statuses: tuple[str, ...] = ("pending",),
     ) -> GraphCandidate | None:
         placeholders = ", ".join("?" for _ in statuses)
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM extraction_candidates "
             f"WHERE subject = ? AND predicate = ? AND object = ? AND scope = ? AND scope_id = ? "
             f"AND status IN ({placeholders}) "
@@ -370,14 +385,14 @@ class KnowledgeGraphStore:
         return _row_to_candidate(row) if row else None
 
     async def list_candidates(self, *, status: str = "pending", limit: int = 100) -> list[GraphCandidate]:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM extraction_candidates WHERE status = ? ORDER BY confidence DESC, updated_at DESC LIMIT ?",
             (status, limit),
         )
         return [_row_to_candidate(row) for row in await cursor.fetchall()]
 
     async def get_candidate(self, candidate_id: str) -> GraphCandidate | None:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM extraction_candidates WHERE candidate_id = ?",
             (candidate_id,),
         )
@@ -385,11 +400,12 @@ class KnowledgeGraphStore:
         return _row_to_candidate(row) if row else None
 
     async def set_candidate_status(self, candidate_id: str, status: str, *, review_note: str = "") -> bool:
-        cursor = await self._db.execute(
+        db = self._require_db()
+        cursor = await db.execute(
             "UPDATE extraction_candidates SET status = ?, review_note = ?, updated_at = ? WHERE candidate_id = ?",
             (status, review_note, _now_iso(), candidate_id),
         )
-        await self._db.commit()
+        await db.commit()
         return cursor.rowcount > 0
 
     async def set_fact_status(
@@ -405,18 +421,20 @@ class KnowledgeGraphStore:
         metadata = dict(fact.metadata)
         if metadata_update:
             metadata.update(metadata_update)
-        cursor = await self._db.execute(
+        db = self._require_db()
+        cursor = await db.execute(
             "UPDATE graph_facts SET status = ?, metadata_json = ?, updated_at = ? WHERE fact_id = ?",
             (status, json.dumps(metadata, ensure_ascii=False), _now_iso(), fact_id),
         )
-        await self._db.commit()
+        await db.commit()
         return cursor.rowcount > 0
 
     async def set_fact_cross_group_visibility(
         self,
         fact_id: str,
         *,
-        visible: bool,
+        visible: bool | None = None,
+        visibility: CrossGroupVisibility | None = None,
         actor: str,
         reason: str = "",
         enabled_for_groups: list[str] | None = None,
@@ -430,22 +448,25 @@ class KnowledgeGraphStore:
         if fact is None:
             return False
         now = _now_iso()
-        enabled_by = actor if visible else ""
-        enabled_at = now if visible else ""
+        resolved_visibility = resolve_cross_group_visibility(visible=visible, visibility=visibility)
+        enabled = resolved_visibility != "none"
+        enabled_by = actor if enabled else ""
+        enabled_at = now if enabled else ""
         groups_payload = (
             [str(g).strip() for g in (enabled_for_groups or []) if str(g).strip()]
-            if visible
+            if enabled
             else []
         )
-        reason_payload = reason if visible else ""
-        cursor = await self._db.execute(
+        reason_payload = reason if enabled else ""
+        db = self._require_db()
+        cursor = await db.execute(
             """UPDATE graph_facts
                SET cross_group_visible = ?, cross_group_enabled_by = ?,
                    cross_group_enabled_at = ?, cross_group_enabled_for_groups = ?,
                    cross_group_enabled_reason = ?, updated_at = ?
                WHERE fact_id = ?""",
             (
-                int(visible),
+                visibility_to_db(resolved_visibility),
                 enabled_by,
                 enabled_at,
                 json.dumps(groups_payload, ensure_ascii=False),
@@ -454,12 +475,12 @@ class KnowledgeGraphStore:
                 fact_id,
             ),
         )
-        await self._db.commit()
+        await db.commit()
         if cursor.rowcount <= 0:
             return False
         logger.info(
             "graph_fact cross_group {} by={} reason={!r} groups={} fact_id={}",
-            "enable" if visible else "disable",
+            "enable" if enabled else "disable",
             actor,
             reason,
             groups_payload,
@@ -471,7 +492,8 @@ class KnowledgeGraphStore:
         self,
         candidate_id: str,
         *,
-        visible: bool,
+        visible: bool | None = None,
+        visibility: CrossGroupVisibility | None = None,
         actor: str,
         reason: str = "",
         enabled_for_groups: list[str] | None = None,
@@ -481,22 +503,25 @@ class KnowledgeGraphStore:
         if candidate is None:
             return False
         now = _now_iso()
-        enabled_by = actor if visible else ""
-        enabled_at = now if visible else ""
+        resolved_visibility = resolve_cross_group_visibility(visible=visible, visibility=visibility)
+        enabled = resolved_visibility != "none"
+        enabled_by = actor if enabled else ""
+        enabled_at = now if enabled else ""
         groups_payload = (
             [str(g).strip() for g in (enabled_for_groups or []) if str(g).strip()]
-            if visible
+            if enabled
             else []
         )
-        reason_payload = reason if visible else ""
-        cursor = await self._db.execute(
+        reason_payload = reason if enabled else ""
+        db = self._require_db()
+        cursor = await db.execute(
             """UPDATE extraction_candidates
                SET cross_group_visible = ?, cross_group_enabled_by = ?,
                    cross_group_enabled_at = ?, cross_group_enabled_for_groups = ?,
                    cross_group_enabled_reason = ?, updated_at = ?
                WHERE candidate_id = ?""",
             (
-                int(visible),
+                visibility_to_db(resolved_visibility),
                 enabled_by,
                 enabled_at,
                 json.dumps(groups_payload, ensure_ascii=False),
@@ -505,12 +530,12 @@ class KnowledgeGraphStore:
                 candidate_id,
             ),
         )
-        await self._db.commit()
+        await db.commit()
         if cursor.rowcount <= 0:
             return False
         logger.info(
             "graph_candidate cross_group {} by={} reason={!r} groups={} candidate_id={}",
-            "enable" if visible else "disable",
+            "enable" if enabled else "disable",
             actor,
             reason,
             groups_payload,
@@ -519,7 +544,7 @@ class KnowledgeGraphStore:
         return True
 
     async def list_entities(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT subject AS name, COUNT(*) AS fact_count FROM graph_facts WHERE status = 'active' "
             "GROUP BY subject UNION ALL "
             "SELECT object AS name, COUNT(*) AS fact_count FROM graph_facts WHERE status = 'active' GROUP BY object "
@@ -535,7 +560,7 @@ class KnowledgeGraphStore:
         ]
 
     async def list_evidence(self, fact_id: str) -> list[dict[str, Any]]:
-        cursor = await self._db.execute(
+        cursor = await self._require_db().execute(
             "SELECT * FROM graph_evidence WHERE fact_id = ? ORDER BY created_at ASC",
             (fact_id,),
         )
@@ -545,7 +570,7 @@ class KnowledgeGraphStore:
         evidence_type = _evidence_type(evidence)
         evidence_id = str(evidence.get("id") or evidence.get("card_id") or evidence.get("chunk_id") or "")
         quote = str(evidence.get("quote") or "")
-        await self._db.execute(
+        await self._require_db().execute(
             "INSERT INTO graph_evidence (evidence_row_id, fact_id, evidence_type, evidence_id, quote, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             ("ge_" + secrets.token_hex(6), fact_id, evidence_type, evidence_id, quote, _now_iso()),
@@ -560,6 +585,7 @@ class KnowledgeGraphStore:
 
 def _row_to_fact(row: aiosqlite.Row) -> GraphFact:
     keys = row.keys()
+    visibility = visibility_from_db(row["cross_group_visible"]) if "cross_group_visible" in keys else "none"
     return GraphFact(
         fact_id=row["fact_id"],
         subject=row["subject"],
@@ -575,7 +601,8 @@ def _row_to_fact(row: aiosqlite.Row) -> GraphFact:
         evidence=[],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        cross_group_visible=bool(row["cross_group_visible"]) if "cross_group_visible" in keys else False,
+        cross_group_visible=legacy_cross_group_visible(visibility),
+        cross_group_visibility=visibility,
         cross_group_enabled_by=row["cross_group_enabled_by"] if "cross_group_enabled_by" in keys else "",
         cross_group_enabled_at=row["cross_group_enabled_at"] if "cross_group_enabled_at" in keys else "",
         cross_group_enabled_for_groups=_parse_groups_list(
@@ -613,6 +640,7 @@ def _row_to_evidence(row: aiosqlite.Row) -> dict[str, Any]:
 
 def _row_to_candidate(row: aiosqlite.Row) -> GraphCandidate:
     keys = row.keys()
+    visibility = visibility_from_db(row["cross_group_visible"]) if "cross_group_visible" in keys else "none"
     return GraphCandidate(
         candidate_id=row["candidate_id"],
         subject=row["subject"],
@@ -627,7 +655,8 @@ def _row_to_candidate(row: aiosqlite.Row) -> GraphCandidate:
         review_note=row["review_note"] or "",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        cross_group_visible=bool(row["cross_group_visible"]) if "cross_group_visible" in keys else False,
+        cross_group_visible=legacy_cross_group_visible(visibility),
+        cross_group_visibility=visibility,
         cross_group_enabled_by=row["cross_group_enabled_by"] if "cross_group_enabled_by" in keys else "",
         cross_group_enabled_at=row["cross_group_enabled_at"] if "cross_group_enabled_at" in keys else "",
         cross_group_enabled_for_groups=_parse_groups_list(

@@ -419,7 +419,9 @@ def test_send_sticker_schema(store: StickerStore) -> None:
     schema = tool.parameters
     assert schema["type"] == "object"
     assert "sticker_id" in schema["properties"]
-    assert schema["required"] == ["sticker_id"]
+    assert "intent" in schema["properties"]
+    # Either sticker_id or intent works — no hard-required field anymore.
+    assert "required" not in schema
 
 
 def test_send_sticker_name_and_description(store: StickerStore) -> None:
@@ -638,3 +640,66 @@ async def test_send_sticker_exception_handled(
     assert stk_id in result
     # record_send should NOT have been called
     assert store.get(stk_id)["send_count"] == 0  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# SendStickerTool — intent (semantic) path
+# ---------------------------------------------------------------------------
+
+
+async def test_send_sticker_by_intent_resolves_and_sends(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    bye_id, _ = store.add(_JPEG_DATA, "挥手告别", "适合说再见、拜拜", ocr_text="拜拜")
+    store.add(_PNG_DATA, "生气皱眉", "不满抗议时使用", ocr_text="哼")
+    tool = SendStickerTool(store)
+    ctx = ToolContext(bot=mock_bot, user_id="123456", group_id="987654")
+
+    with patch("nonebot.adapters.onebot.v11.MessageSegment.image", return_value=MagicMock()):
+        result = await tool.execute(ctx, intent="告别")
+
+    assert f"已发送 {bye_id}" in result
+    mock_bot.send_group_msg.assert_awaited_once()
+    assert store.get(bye_id)["send_count"] == 1  # type: ignore[index]
+
+
+async def test_send_sticker_by_intent_no_match(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    store.add(_JPEG_DATA, "挥手告别", "适合说再见", ocr_text="拜拜")
+    tool = SendStickerTool(store)
+    ctx = ToolContext(bot=mock_bot, user_id="123456", group_id="987654")
+
+    result = await tool.execute(ctx, intent="量子力学")
+
+    assert "没有匹配" in result
+    mock_bot.send_group_msg.assert_not_awaited()
+
+
+async def test_send_sticker_id_takes_precedence_over_intent(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    bye_id, _ = store.add(_JPEG_DATA, "挥手告别", "适合说再见", ocr_text="拜拜")
+    angry_id, _ = store.add(_PNG_DATA, "生气皱眉", "不满抗议", ocr_text="哼")
+    tool = SendStickerTool(store)
+    ctx = ToolContext(bot=mock_bot, user_id="123456", group_id="987654")
+
+    # Explicit id should win even when intent points elsewhere.
+    with patch("nonebot.adapters.onebot.v11.MessageSegment.image", return_value=MagicMock()):
+        result = await tool.execute(ctx, sticker_id=angry_id, intent="告别")
+
+    assert f"已发送 {angry_id}" in result
+    assert store.get(bye_id)["send_count"] == 0  # type: ignore[index]
+
+
+async def test_send_sticker_no_id_no_intent(
+    store: StickerStore, mock_bot: MagicMock
+) -> None:
+    store.add(_JPEG_DATA, "挥手告别", "适合说再见")
+    tool = SendStickerTool(store)
+    ctx = ToolContext(bot=mock_bot, user_id="123456", group_id="987654")
+
+    result = await tool.execute(ctx)
+
+    assert "请提供" in result
+    mock_bot.send_group_msg.assert_not_awaited()

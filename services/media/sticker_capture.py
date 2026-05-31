@@ -12,6 +12,8 @@ _STICKER_SUMMARY_TOKENS = ("动画表情", "表情", "mface", "sticker")
 _EMOTION_TAG_PROMPT = (
     "请只输出一句简短中文，概括这张表情包最适合在什么情绪或聊天场景下发送。"
     "像给 sticker 写 usage_hint，一句话就够，不要解释分析，不要编号。"
+    "如果表情包上有文字（梗图配字、艺术字等），请在这句话之后另起，用固定格式附上：图上文字：xxx（原样写出图上的字）；"
+    "如果图上没有任何文字，则省略这一句。"
 )
 _MEDIA_TYPE_BY_SUFFIX = {
     ".jpg": "image/jpeg",
@@ -21,6 +23,8 @@ _MEDIA_TYPE_BY_SUFFIX = {
     ".gif": "image/gif",
 }
 _MAX_EMOTION_TAG_LEN = 32
+_MAX_OCR_LEN = 64
+_OCR_MARKERS = ("图上文字：", "图上文字:")
 
 _L = logger.bind(channel="system")
 
@@ -83,6 +87,29 @@ def normalize_emotion_tag(text: str | None) -> str:
     return compact[:_MAX_EMOTION_TAG_LEN].rstrip(" \t，。！？；：,.!?;:")
 
 
+def split_desc_and_ocr(raw: str | None) -> tuple[str, str]:
+    """Split a VL rich-description into (description, ocr_text).
+
+    The VL prompt asks the model to append "图上文字：xxx" when the image
+    contains text. This splits on that marker; if absent, ocr_text is "".
+    The description part keeps everything before the marker.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "", ""
+    for marker in _OCR_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            desc = text[:idx].strip().rstrip(" \t，。！？；：,.!?;:|").strip()
+            ocr = text[idx + len(marker):].strip()
+            # OCR may span trailing punctuation/newlines; keep one line, bounded.
+            ocr = " ".join(ocr.replace("\n", " ").split()).strip()
+            if len(ocr) > _MAX_OCR_LEN:
+                ocr = ocr[:_MAX_OCR_LEN].rstrip()
+            return (desc or text), ocr
+    return text, ""
+
+
 async def emit_emotion_tag(
     sticker_store: Any | None,
     sticker_id: str,
@@ -102,7 +129,11 @@ async def emit_emotion_tag(
         return fallback
 
     current_hint = str(entry.get("usage_hint") or "").strip()
-    if current_hint and current_hint != fallback and not overwrite:
+    current_ocr = str(entry.get("ocr_text") or "").strip()
+    # Skip only when the hint is already enriched AND OCR has been attempted.
+    # (ocr_text key present means a prior rich-description pass ran.)
+    ocr_done = "ocr_text" in entry
+    if current_hint and current_hint != fallback and ocr_done and not overwrite:
         return current_hint
     if vision_client is None:
         return current_hint or fallback
@@ -117,19 +148,32 @@ async def emit_emotion_tag(
         _L.debug("sticker emotion tag skipped | sticker_id={} reason={}", sticker_id, exc)
         return current_hint or fallback
 
-    tag = normalize_emotion_tag(raw_tag)
+    emotion_part, ocr = split_desc_and_ocr(raw_tag)
+    tag = normalize_emotion_tag(emotion_part)
     if not tag:
         return current_hint or fallback
     if dry_run:
         return tag
-    if tag == current_hint:
+    # Update usage_hint (if changed) and ocr_text (if newly found) in one write.
+    update_kwargs: dict[str, str] = {}
+    if tag != current_hint:
+        update_kwargs["usage_hint"] = tag
+    if ocr and ocr != current_ocr:
+        update_kwargs["ocr_text"] = ocr
+    elif not ocr_done:
+        # Mark OCR as attempted (empty) so we don't re-run forever on no-text stickers.
+        update_kwargs["ocr_text"] = current_ocr
+    if not update_kwargs:
         return tag
     try:
-        updated = bool(sticker_store.update(sticker_id, usage_hint=tag))
+        updated = bool(sticker_store.update(sticker_id, **update_kwargs))
     except Exception as exc:
         _L.warning("sticker emotion tag update failed | sticker_id={} err={}", sticker_id, exc)
         return current_hint or fallback
     if updated:
-        _L.debug("sticker emotion tag updated | sticker_id={} tag={!r}", sticker_id, tag)
+        _L.debug(
+            "sticker emotion tag updated | sticker_id={} tag={!r} ocr={!r}",
+            sticker_id, tag, ocr,
+        )
         return tag
     return current_hint or fallback

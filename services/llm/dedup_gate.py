@@ -11,6 +11,7 @@ from services.llm.sentinel_registry import (
     GuardrailHit,
     GuardrailResult,
     register_rule,
+    sentinel_guardrail_enabled,
 )
 
 _PUNCT_RE = re.compile(r"[\s\W_]+", re.UNICODE)
@@ -79,6 +80,8 @@ def _dedup_ngram(config: object | None) -> int:
 
 
 def dedup_rule(text: str, ctx: GuardrailContext) -> GuardrailResult:
+    if not sentinel_guardrail_enabled(ctx.config):
+        return GuardrailResult(passed=True, text=text)
     decision = is_near_duplicate(
         text,
         ctx.last_assistant_text,

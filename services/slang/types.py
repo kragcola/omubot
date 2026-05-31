@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from services.cross_group import CrossGroupVisibility
+
 SlangStatus = Literal["candidate", "approved", "muted", "expired"]
 SlangScope = Literal["group", "global"]
 RepeatPolicy = Literal["understand_only", "allow_rephrase", "allow_use"]
@@ -161,6 +163,7 @@ class SlangTerm:
     meta: dict[str, Any] = field(default_factory=dict)
     last_inferred_at: str | None = None
     cross_group_visible: bool = False
+    cross_group_visibility: CrossGroupVisibility = "none"
     cross_group_enabled_by: str = ""
     cross_group_enabled_at: str = ""
     cross_group_enabled_for_groups: list[str] = field(default_factory=list)

@@ -20,7 +20,9 @@ from kernel.bot_pair_guard import BotPairLoopGuard
 from kernel.config import BotConfig, ResolvedHumanization, load_plugin_config
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext
 from services.coalesce import MessageCoalescer
+from services.llm.arbiter import ArbiterClient
 from services.llm.llm_request import LLMRequest
+from services.name_registry import NameVariationRegistry
 
 _L = logger.bind(channel="system")
 
@@ -93,6 +95,63 @@ def _register_classifier_window(ctx: PluginContext, msg_ctx: MessageContext, cur
     return rows[-5:]
 
 
+def _timeline_reply_delay_s(ctx: PluginContext, group_id: str) -> float:
+    timeline = getattr(ctx, "timeline", None)
+    if timeline is None:
+        return 0.0
+    try:
+        turns = list(timeline.get_turns(group_id))
+    except Exception:
+        return 0.0
+    for index in range(len(turns) - 1, -1, -1):
+        turn = turns[index]
+        if str(turn.get("role") or "").strip().lower() != "assistant":
+            continue
+        try:
+            ts = float(timeline.get_turn_time(group_id, index))
+        except Exception:
+            return 0.0
+        return max(0.0, time.time() - ts) if ts > 0 else 0.0
+    return 0.0
+
+
+def _timeline_consecutive_no_reply(ctx: PluginContext, group_id: str) -> int:
+    timeline = getattr(ctx, "timeline", None)
+    if timeline is None:
+        return 1
+    try:
+        turns = list(timeline.get_turns(group_id))
+    except Exception:
+        return 1
+    streak = 1  # current inbound message has not been replied to yet
+    for turn in reversed(turns):
+        role = str(turn.get("role") or "").strip().lower()
+        if role == "assistant":
+            break
+        if role == "user":
+            streak += 1
+    return max(0, streak)
+
+
+def _runtime_register_confidence(ctx: PluginContext, *, scope: Any) -> float:
+    from services.humanization import REGISTER_LABEL_SLOT
+
+    runtime_state = getattr(ctx, "runtime_state", None)
+    if runtime_state is None:
+        return 0.0
+    try:
+        snapshot = runtime_state.get(REGISTER_LABEL_SLOT, scope=scope)
+    except Exception:
+        return 0.0
+    value = getattr(snapshot, "value", None)
+    if not isinstance(value, dict):
+        return 0.0
+    try:
+        return float(value.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _humanization_runtime_groups(config: BotConfig) -> frozenset[str]:
     return frozenset(str(group_id).strip() for group_id in config.humanization.runtime_groups if str(group_id).strip())
 
@@ -159,6 +218,15 @@ class ChatPlugin(AmadeusPlugin):
         from kernel.types import Command
         return [
             Command(
+                name="authority",
+                handler=self._handle_authority,
+                description="查看/设置用户指令权限等级（0-4），管理员专用",
+                usage="/authority <QQ号> [0-4]  （省略等级=查询；用 reset 清除）",
+                admin_only=True,
+                hidden=True,
+                aliases=["权限", "授权"],
+            ),
+            Command(
                 name="debug",
                 handler=self._handle_debug,
                 description="进入调试模式：跳过 thinker，注入实时状态数据，用纯文本回答",
@@ -202,6 +270,20 @@ class ChatPlugin(AmadeusPlugin):
         else:
             ctx.humanization_register_classifier = None
 
+    def _build_arbiter_client(self, config: BotConfig, llm: Any, usage_tracker: Any) -> ArbiterClient | None:
+        arbiter_config = getattr(config, "arbiter", None)
+        session = getattr(llm, "_session", None)
+        if arbiter_config is None or session is None:
+            return None
+        arbiter_config.resolved_api_base = str(getattr(arbiter_config, "api_base", "") or config.llm.base_url)
+        arbiter_config.resolved_api_key = str(getattr(arbiter_config, "api_key", "") or config.llm.api_key)
+        arbiter_config.resolved_model = str(getattr(arbiter_config, "model", "") or config.llm.model)
+        return ArbiterClient(
+            arbiter_config,
+            session,
+            usage_tracker=usage_tracker,
+        )
+
     async def on_message(self, ctx: MessageContext) -> bool:
         plugin_ctx = self._ctx
         if plugin_ctx is None or ctx.group_id is None or ctx.is_private:
@@ -209,39 +291,121 @@ class ChatPlugin(AmadeusPlugin):
         if not ctx.allow_speaking:
             return False
         config = getattr(plugin_ctx, "config", None)
-        if not bool(getattr(getattr(config, "humanization", None), "register_classifier", False)):
-            return False
         if not isinstance(config, BotConfig) or not _humanization_group_allowed(config, ctx.group_id):
             return False
-        classifier = getattr(plugin_ctx, "humanization_register_classifier", None)
         runtime_state = getattr(plugin_ctx, "runtime_state", None)
-        if classifier is None or runtime_state is None:
-            return False
         current_text = _message_content_text(ctx.content)
         if not current_text:
             return False
 
+        from services.humanization import WILLINGNESS_STAGE_SLOT, humanization_source
+        from services.persona.willingness import episodic_situation_lookup, willingness_stage
+        from services.scheduler_rws.memory_signals import (
+            familiarity_score,
+            mood_trend,
+            recent_outcome_ratio,
+            willingness_phase_score,
+        )
         from services.system_module import Scope
 
-        try:
-            await classifier.classify_and_write(
-                _register_classifier_window(plugin_ctx, ctx, current_text),
-                bus=runtime_state,
-                scope=Scope(
-                    session_id=ctx.session_id,
-                    group_id=ctx.group_id,
-                    user_id=ctx.user_id,
-                ),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _L.debug(
-                "humanization register classifier failed | session={} user={} err={}",
-                ctx.session_id,
-                ctx.user_id,
-                exc,
-            )
+        scope = Scope(
+            session_id=ctx.session_id,
+            group_id=ctx.group_id,
+            user_id=ctx.user_id,
+        )
+        register_decision = None
+        classifier = getattr(plugin_ctx, "humanization_register_classifier", None)
+        if (
+            bool(getattr(getattr(config, "humanization", None), "register_classifier", False))
+            and classifier is not None
+            and runtime_state is not None
+        ):
+            try:
+                register_decision = await classifier.classify_and_write(
+                    _register_classifier_window(plugin_ctx, ctx, current_text),
+                    bus=runtime_state,
+                    scope=scope,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _L.debug(
+                    "humanization register classifier failed | session={} user={} err={}",
+                    ctx.session_id,
+                    ctx.user_id,
+                    exc,
+                )
+
+        if runtime_state is not None:
+            try:
+                register_consistency = (
+                    float(getattr(register_decision, "confidence", 0.0))
+                    if register_decision is not None
+                    else _runtime_register_confidence(plugin_ctx, scope=scope)
+                )
+                interaction_count = 0
+                timeline = getattr(plugin_ctx, "timeline", None)
+                if timeline is not None:
+                    try:
+                        interaction_count = len(list(timeline.get_turns(str(ctx.group_id)))) + 1
+                    except Exception:
+                        interaction_count = 1
+                recent_episodes = await episodic_situation_lookup(
+                    getattr(plugin_ctx, "episode_store", None),
+                    str(ctx.group_id),
+                    current_text,
+                )
+                willingness = willingness_stage(
+                    recent_reply_delay_s=_timeline_reply_delay_s(plugin_ctx, str(ctx.group_id)),
+                    register_consistency=register_consistency,
+                    interaction_count=interaction_count,
+                    consecutive_no_reply=_timeline_consecutive_no_reply(plugin_ctx, str(ctx.group_id)),
+                    recent_outcomes=[
+                        str(getattr(episode, "outcome_signal", "") or "")
+                        for episode in recent_episodes
+                    ],
+                )
+                runtime_state.set(
+                    WILLINGNESS_STAGE_SLOT,
+                    willingness.to_state_value(),
+                    scope=scope,
+                    source=humanization_source("willingness:classify"),
+                    confidence=willingness.confidence,
+                )
+                signal_cache = getattr(plugin_ctx, "memory_relation_signals", None)
+                if not isinstance(signal_cache, dict):
+                    signal_cache = {}
+                    plugin_ctx.memory_relation_signals = signal_cache
+                signal_cache[(str(ctx.group_id), str(ctx.user_id))] = {
+                    "outcome_ratio": await recent_outcome_ratio(
+                        getattr(plugin_ctx, "episode_store", None),
+                        str(ctx.group_id),
+                    ),
+                    "familiarity": await familiarity_score(
+                        getattr(plugin_ctx, "card_store", None),
+                        str(ctx.user_id),
+                    ),
+                    "willingness_stage": willingness.stage,
+                    "willingness_phase": await willingness_phase_score(willingness.stage),
+                    "mood_trend": await mood_trend(
+                        getattr(plugin_ctx, "mood_engine", None),
+                        str(ctx.group_id),
+                    ),
+                    "recent_outcomes": [
+                        str(getattr(episode, "outcome_signal", "") or "")
+                        for episode in recent_episodes
+                    ][:3],
+                    "updated_at": time.time(),
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _L.debug(
+                    "willingness memory signal update failed | session={} user={} err={}",
+                    ctx.session_id,
+                    ctx.user_id,
+                    exc,
+                )
         return False
 
     async def _handle_debug(self, cmd_ctx: Any) -> None:
@@ -455,6 +619,58 @@ class ChatPlugin(AmadeusPlugin):
         except Exception:
             logger.exception("debug command LLM call failed")
             await cmd_ctx.bot.send(cmd_ctx.event, Message("调试查询失败，请稍后重试"))
+
+    async def _handle_authority(self, cmd_ctx: Any) -> None:
+        """Handle /authority — view/set per-user instruction authority level (no LLM)."""
+        from nonebot.adapters.onebot.v11 import Message
+
+        ctx = self._ctx
+        if ctx is None or ctx.llm_client is None:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("系统未就绪"))
+            return
+        store = getattr(ctx.llm_client, "_authority_store", None)
+        gate = getattr(ctx.llm_client, "_instruction_gate", None)
+        if store is None or gate is None:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("指令门禁未启用（instruction_gate.enabled=false）"))
+            return
+
+        parts = str(cmd_ctx.args or "").split()
+        if not parts:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("用法：/authority <QQ号> [0-4|reset]"))
+            return
+
+        target = parts[0].strip()
+        if not target.isdigit():
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("QQ号需为纯数字"))
+            return
+
+        admins = dict(getattr(ctx.config, "admins", {}))
+        # Query mode.
+        if len(parts) == 1:
+            level = gate.resolve_authority(target, admins, store.snapshot())
+            source = "管理员" if target in admins else ("覆盖" if store.get(target) is not None else "默认")
+            await cmd_ctx.bot.send(cmd_ctx.event, Message(f"用户 {target} 当前权限等级：{level}（{source}）"))
+            return
+
+        # Set / reset mode.
+        value = parts[1].strip().lower()
+        if value in {"reset", "clear", "默认"}:
+            if target in admins:
+                await cmd_ctx.bot.send(cmd_ctx.event, Message("管理员等级固定为 4，无法重置"))
+                return
+            cleared = store.clear(target)
+            msg = f"已重置用户 {target} 的权限覆盖" if cleared else f"用户 {target} 本就无覆盖"
+            await cmd_ctx.bot.send(cmd_ctx.event, Message(msg))
+            return
+
+        if not value.isdigit() or not (0 <= int(value) <= 4):
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("等级须为 0-4 的整数，或 reset"))
+            return
+        if target in admins:
+            await cmd_ctx.bot.send(cmd_ctx.event, Message("管理员等级固定为 4，无法调整"))
+            return
+        applied = store.set(target, int(value))
+        await cmd_ctx.bot.send(cmd_ctx.event, Message(f"已设置用户 {target} 的权限等级为 {applied}"))
 
     async def _handle_debug_save(self, cmd_ctx: Any) -> None:
         """Handle /debug save — save recent image as sticker (no LLM)."""
@@ -1015,6 +1231,7 @@ class ChatPlugin(AmadeusPlugin):
 
         ctx.humanization_health_guard = HumanizationHealthGuard(db_path="storage/usage.db")
         ctx.humanization_health_guard.start()
+        ctx.name_registry = NameVariationRegistry()
 
         # ---- tool registry ----
         from services.tools.registry import ToolRegistry
@@ -1036,6 +1253,8 @@ class ChatPlugin(AmadeusPlugin):
             known_other_bots=config.bot_pair_guard.known_other_bots,
             max_per_minute=config.bot_pair_guard.max_per_minute,
             cooldown_seconds=config.bot_pair_guard.cooldown_seconds,
+            loop_alt_threshold=config.bot_pair_guard.loop_alt_threshold,
+            known_peer_alt_threshold=config.bot_pair_guard.known_peer_alt_threshold,
         )
         ctx.message_coalescer = MessageCoalescer(
             idle_window_seconds=config.coalesce.idle_window_seconds,
@@ -1085,6 +1304,18 @@ class ChatPlugin(AmadeusPlugin):
             schedule = ctx.schedule_store.current if ctx.schedule_store else None
             return slot_features(now=now, schedule=schedule, day_context=get_day_context(now))
 
+        # Issue 15 — instruction authority gate (additive, default-off).
+        instruction_gate = None
+        authority_store = None
+        if getattr(config, "instruction_gate", None) and config.instruction_gate.enabled:
+            from services.llm.instruction_gate import AuthorityStore, InstructionAuthorityGate
+
+            instruction_gate = InstructionAuthorityGate(config.instruction_gate)
+            authority_store = AuthorityStore(
+                storage_dir="storage",
+                seed=dict(getattr(config.instruction_gate, "authority_overrides", {}) or {}),
+            )
+
         llm = LLMClient(
             base_url=main_profile.base_url,
             api_key=main_profile.api_key,
@@ -1105,6 +1336,8 @@ class ChatPlugin(AmadeusPlugin):
             affection_engine=ctx.affection_engine,
             thinker_enabled=config.thinker.enabled,
             thinker_max_tokens=config.thinker.max_tokens,
+            thinker_necessity_gate_enabled=config.thinker.necessity_gate_enabled,
+            thinker_necessity_gate_addressed_exempt=config.thinker.necessity_gate_addressed_exempt,
             mood_getter=runtime_mood_getter if ctx.mood_engine else None,
             bus=ctx.bus,
             runtime_state=ctx.runtime_state,
@@ -1129,6 +1362,18 @@ class ChatPlugin(AmadeusPlugin):
             pass_turn_confidence_gate=config.humanization.pass_turn_confidence_gate,
             pass_turn_confidence_threshold=config.humanization.pass_turn_confidence_threshold,
             sentinel_guardrail_config=config.sentinel_guardrail,
+            schedule_overshare_config=config.schedule_overshare,
+            persona_drift_config=config.persona_drift,
+            anchor_reinjection_config=config.anchor_reinjection,
+            addressee_hint_config=config.addressee_hint,
+            mention_post_processor_config=config.mention_post_processor,
+            slang_lookup_config=config.slang_lookup,
+            sticker_placement_config=config.sticker_placement,
+            text_preflight_config=config.text_preflight,
+            name_registry=getattr(ctx, "name_registry", None),
+            instruction_gate=instruction_gate,
+            authority_store=authority_store,
+            admins=dict(getattr(config, "admins", {})),
         )
         llm.set_task_profile_names(task_profile_names)
 
@@ -1248,7 +1493,8 @@ class ChatPlugin(AmadeusPlugin):
             app.include_router(create_usage_router(usage_tracker))
 
         # ---- desc cache (for vision) ----
-        ctx.desc_cache: dict[str, str] = {}
+        ctx.desc_cache = {}
+        ctx.memory_relation_signals = {}
 
         # ---- scheduler Hawkes cache refresher ----
         hawkes_cache = None
@@ -1274,15 +1520,24 @@ class ChatPlugin(AmadeusPlugin):
             timeline=ctx.timeline,
             persona_runtime=persona_runtime,
             group_config=config.group,
+            arbiter_config=config.arbiter,
             humanizer=humanizer,
             talk_schedule=talk_schedule,
             mood_getter=runtime_mood_getter if ctx.mood_engine else None,
             runtime_state=ctx.runtime_state,
             humanization_config=config.humanization,
+            memory_signal_getter=lambda group_id, user_id: (
+                getattr(ctx, "memory_relation_signals", {}) or {}
+            ).get((str(group_id), str(user_id))),
             hawkes_cache=hawkes_cache,
             bot_pair_guard=ctx.bot_pair_guard if config.bot_pair_guard.enabled else None,
             block_trace_store=trace_store,
+            self_mute_config=config.self_mute,
+            group_inventory_getter=lambda: getattr(ctx, "group_inventory", None),
+            topic_block_config=config.topic_block,
+            thinker_config=config.thinker,
         )
+        ctx.scheduler.set_arbiter(self._build_arbiter_client(config, llm, usage_tracker))
 
         _L.info("ChatPlugin startup complete")
 
@@ -1325,4 +1580,7 @@ class ChatPlugin(AmadeusPlugin):
         episode_store = getattr(ctx, "episode_store", None)
         if episode_store is not None:
             await episode_store.close()
+        sticker_store = getattr(ctx, "sticker_store", None)
+        if sticker_store is not None:
+            sticker_store.close()
         _L.info("ChatPlugin shutdown complete")
