@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pmubot 控制台</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --pm-primary: #316c72;
+        --pm-primary-soft: rgba(49, 108, 114, 0.12);
+        --pm-bg: #eef2f4;
+        --pm-surface: #ffffff;
+        --pm-surface-2: #f7fafb;
+        --pm-border: #d9e1e5;
+        --pm-border-soft: #e6ecef;
+        --pm-text: #1f2a30;
+        --pm-text-2: #607078;
+        --pm-ok: #2f9e6f;
+        --pm-warn: #c9803a;
+        --pm-danger: #c0504d;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--pm-bg); color: var(--pm-text); }
+      main { max-width: 1080px; margin: 0 auto; padding: 28px 20px 56px; }
+      a { color: var(--pm-primary); }
+      .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+      h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.01em; }
+      .sub { margin: 0; color: var(--pm-text-2); font-size: 14px; }
+      .eyebrow { color: var(--pm-text-2); font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; margin: 0 0 8px; }
+      .panel { background: var(--pm-surface); border: 1px solid var(--pm-border); border-radius: 14px; box-shadow: 0 8px 24px rgba(23,42,48,0.05); margin-top: 18px; overflow: hidden; }
+      .panel__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--pm-border-soft); background: var(--pm-surface-2); }
+      .panel__title { font-size: 15px; font-weight: 700; }
+      .panel__body { padding: 8px 0; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { padding: 12px 18px; text-align: left; border-bottom: 1px solid var(--pm-border-soft); font-size: 13px; vertical-align: middle; }
+      th { background: var(--pm-surface-2); font-weight: 600; color: var(--pm-text-2); font-size: 12px; }
+      tbody tr:last-child td { border-bottom: 0; }
+      .muted { color: var(--pm-text-2); }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+      .nums { font-variant-numeric: tabular-nums; }
+      .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 1.7; }
+      .badge--ok { color: var(--pm-ok); background: rgba(47,158,111,0.12); }
+      .badge--warn { color: var(--pm-warn); background: rgba(201,128,58,0.14); }
+      .badge--danger { color: var(--pm-danger); background: rgba(192,80,77,0.14); }
+      .badge--muted { color: var(--pm-text-2); background: rgba(96,112,120,0.12); }
+      .dot { width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
+      .btn { appearance: none; border: 1px solid var(--pm-border); background: var(--pm-surface); color: var(--pm-text); padding: 5px 12px; border-radius: 9px; font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color .15s, background .15s, color .15s; }
+      .btn:hover { border-color: var(--pm-primary); color: var(--pm-primary); }
+      .btn--primary { background: var(--pm-primary); border-color: var(--pm-primary); color: #fff; }
+      .btn--primary:hover { background: #2a5e63; color: #fff; }
+      .btn--danger:hover { border-color: var(--pm-danger); color: var(--pm-danger); }
+      .btn:disabled { opacity: .5; cursor: not-allowed; }
+      .btn-row { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+      .auth { display: inline-flex; align-items: center; gap: 8px; }
+      .auth input { border: 1px solid var(--pm-border); background: var(--pm-surface); border-radius: 9px; padding: 6px 10px; font-size: 12px; width: 220px; color: var(--pm-text); }
+      .auth input:focus { outline: none; border-color: var(--pm-primary); box-shadow: 0 0 0 3px var(--pm-primary-soft); }
+      .kv { display: flex; gap: 18px; flex-wrap: wrap; padding: 12px 18px; }
+      .kv > div { font-size: 13px; }
+      .kv b { display: block; color: var(--pm-text-2); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
+      .bar { position: relative; height: 6px; border-radius: 999px; background: var(--pm-border-soft); width: 84px; overflow: hidden; display: inline-block; vertical-align: middle; }
+      .bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--pm-primary); border-radius: 999px; }
+      .toast { position: fixed; right: 20px; bottom: 20px; max-width: 360px; padding: 12px 16px; border-radius: 10px; font-size: 13px; box-shadow: 0 10px 30px rgba(0,0,0,.16); z-index: 50; display: none; }
+      .toast--ok { background: var(--pm-ok); color: #fff; }
+      .toast--err { background: var(--pm-danger); color: #fff; }
+      .drawer-mask { position: fixed; inset: 0; background: rgba(20,30,34,.42); display: none; z-index: 40; }
+      .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 92vw); background: var(--pm-surface); box-shadow: -12px 0 40px rgba(0,0,0,.18); display: none; flex-direction: column; z-index: 41; }
+      .drawer__head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--pm-border-soft); }
+      .drawer__body { flex: 1; overflow: auto; padding: 16px 20px; }
+      .drawer pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--pm-text); }
+      .stale { opacity: .55; }
+      @media (prefers-color-scheme: dark) {
+        :root { --pm-bg: #10171a; --pm-surface: #1a262c; --pm-surface-2: #162025; --pm-border: #2a3940; --pm-border-soft: #22323a; --pm-text: #e7f0f2; --pm-text-2: #9cb0b8; }
+        .panel { box-shadow: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="head">
+        <div>
+          <p class="eyebrow">pmubot Control Plane</p>
+          <h1>容器编排控制台</h1>
+          <p class="sub">统管 napcat / qq-bot / sidecar：状态、资源、日志、更新与受控写操作。</p>
+        </div>
+        <div class="auth">
+          <input id="token" type="password" placeholder="PMUBOT_TOKEN（写操作需要）" autocomplete="off" />
+          <button class="btn" id="token-save">保存</button>
+          <span id="token-state" class="badge badge--muted"><span class="dot"></span>未登录</span>
+        </div>
+      </div>
+
+      <!-- 容器面板 -->
+      <section class="panel">
+        <div class="panel__head">
+          <span class="panel__title">容器</span>
+          <span class="muted nums" id="containers-meta">—</span>
+        </div>
+        <div class="panel__body">
+          <table>
+            <thead>
+              <tr>
+                <th>容器</th><th>状态</th><th>镜像 Tag</th><th>CPU</th><th>内存</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="containers-rows">
+              <tr><td colspan="6" class="muted">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- napcat #napcat 开关 -->
+      <section class="panel">
+        <div class="panel__head">
+          <span class="panel__title">NapCat 内置回复（#napcat）</span>
+          <span id="builtin-state" class="badge badge--muted"><span class="dot"></span>未知</span>
+        </div>
+        <div class="kv">
+          <div style="flex:1; min-width:240px;">
+            <b>说明</b>
+            内置 <span class="mono">napcat-plugin-builtin</span> 的 <span class="mono">#napcat</span> 命令回复开关。关闭后群里发 <span class="mono">#napcat</span> 不再返回版本信息。
+          </div>
+          <div style="align-self:center;">
+            <div class="btn-row">
+              <button class="btn" id="builtin-refresh">刷新状态</button>
+              <button class="btn btn--danger" id="builtin-disable">关闭 #napcat</button>
+              <button class="btn btn--primary" id="builtin-enable">开启 #napcat</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 更新面板 -->
+      <section class="panel">
+        <div class="panel__head">
+          <span class="panel__title">更新</span>
+          <button class="btn" id="updates-refresh">检查更新</button>
+        </div>
+        <div class="panel__body">
+          <table>
+            <thead><tr><th>组件</th><th>策略</th><th>当前</th><th>最新 / 状态</th><th>操作</th></tr></thead>
+            <tbody id="updates-rows">
+              <tr><td colspan="5" class="muted">点「检查更新」拉取（只读探测，不会自动更新）。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 审计面板 -->
+      <section class="panel">
+        <div class="panel__head">
+          <span class="panel__title">审计日志</span>
+          <button class="btn" id="audit-refresh">刷新</button>
+        </div>
+        <div class="panel__body">
+          <table>
+            <thead><tr><th>时间</th><th>操作</th><th>对象</th><th>结果</th><th>备注</th></tr></thead>
+            <tbody id="audit-rows">
+              <tr><td colspan="5" class="muted">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div class="drawer-mask" id="drawer-mask"></div>
+    <aside class="drawer" id="drawer">
+      <div class="drawer__head">
+        <span class="panel__title" id="drawer-title">日志</span>
+        <div class="btn-row">
+          <button class="btn" id="drawer-reload">重新读取</button>
+          <button class="btn" id="drawer-close">关闭</button>
+        </div>
+      </div>
+      <div class="drawer__body"><pre id="drawer-content">加载中…</pre></div>
+    </aside>
+
+    <div class="toast" id="toast"></div>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let token = sessionStorage.getItem("pmubot_token") || "";
+
+      function setTokenState() {
+        const el = $("token-state");
+        if (token) { el.className = "badge badge--ok"; el.innerHTML = '<span class="dot"></span>已登录'; }
+        else { el.className = "badge badge--muted"; el.innerHTML = '<span class="dot"></span>未登录'; }
+      }
+      $("token-save").onclick = () => {
+        token = $("token").value.trim();
+        sessionStorage.setItem("pmubot_token", token);
+        $("token").value = "";
+        setTokenState();
+        toast(token ? "Token 已保存（本会话）" : "Token 已清空", token ? "ok" : "err");
+      };
+
+      let toastTimer = null;
+      function toast(msg, kind) {
+        const el = $("toast");
+        el.textContent = msg;
+        el.className = "toast toast--" + (kind === "err" ? "err" : "ok");
+        el.style.display = "block";
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => { el.style.display = "none"; }, 4200);
+      }
+
+      async function apiGet(path) {
+        const res = await fetch(path);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      }
+      async function apiWrite(path) {
+        if (!token) { toast("请先在右上角填入 PMUBOT_TOKEN", "err"); throw new Error("no token"); }
+        const sep = path.includes("?") ? "&" : "?";
+        const res = await fetch(path + sep + "confirm=1", {
+          method: "POST",
+          headers: { Authorization: "Bearer " + token },
+        });
+        let body = null;
+        try { body = await res.json(); } catch (_) {}
+        if (!res.ok) {
+          const detail = body && body.detail ? body.detail : "HTTP " + res.status;
+          throw new Error(detail);
+        }
+        return body;
+      }
+      function confirmDanger(msg) { return window.confirm(msg); }
+
+      // ===== 容器面板 =====
+      const statsCache = {};
+      function stateBadge(item) {
+        const running = item.state === "running";
+        const h = item.health;
+        let cls = running ? "badge--ok" : "badge--danger";
+        let txt = item.state;
+        if (running && h && h !== "ok" && h !== "unknown") { cls = "badge--warn"; txt = item.state + " (" + h + ")"; }
+        else if (running && h === "ok") { txt = "running (healthy)"; }
+        return '<span class="badge ' + cls + '"><span class="dot"></span>' + txt + "</span>";
+      }
+      function memCell(s) {
+        if (!s || s.mem_mb == null) return '<span class="muted">—</span>';
+        const pct = s.mem_pct != null ? s.mem_pct : 0;
+        const limit = s.mem_limit_mb != null ? " / " + s.mem_limit_mb + "M" : "";
+        return '<span class="bar"><i style="width:' + Math.min(100, pct) + '%"></i></span> '
+          + '<span class="nums mono">' + s.mem_mb + "M" + limit + "</span>";
+      }
+      function cpuCell(s) {
+        if (!s || s.cpu_pct == null) return '<span class="muted">—</span>';
+        return '<span class="nums mono">' + s.cpu_pct + "%</span>";
+      }
+      function actionsCell(item) {
+        const n = item.name;
+        const restartable = /^(napcat|qq-bot)(-.+)?$/.test(n);
+        let btns = '<button class="btn" data-logs="' + n + '">日志</button>';
+        if (restartable) btns += ' <button class="btn btn--danger" data-restart="' + n + '">重启</button>';
+        return '<span class="btn-row">' + btns + "</span>";
+      }
+      async function loadContainers() {
+        let items;
+        try { items = await apiGet("/api/containers"); }
+        catch (e) { $("containers-rows").innerHTML = '<tr><td colspan="6" class="muted">加载失败：' + e.message + "</td></tr>"; return; }
+        $("containers-meta").textContent = items.length + " 个受管容器";
+        $("containers-rows").innerHTML = items.map((it) => {
+          const s = statsCache[it.name];
+          return "<tr>"
+            + "<td><b>" + it.name + "</b></td>"
+            + "<td>" + stateBadge(it) + "</td>"
+            + '<td class="mono">' + it.image_tag + "</td>"
+            + '<td class="cpu" data-c="' + it.name + '">' + cpuCell(s) + "</td>"
+            + '<td class="mem" data-c="' + it.name + '">' + memCell(s) + "</td>"
+            + "<td>" + actionsCell(it) + "</td>"
+            + "</tr>";
+        }).join("");
+        bindContainerButtons();
+        items.filter((it) => it.state === "running").forEach((it) => loadStats(it.name));
+      }
+      async function loadStats(name) {
+        try {
+          const s = await apiGet("/api/containers/" + encodeURIComponent(name) + "/stats");
+          statsCache[name] = s;
+          const cpu = document.querySelector('.cpu[data-c="' + CSS.escape(name) + '"]');
+          const mem = document.querySelector('.mem[data-c="' + CSS.escape(name) + '"]');
+          if (cpu) cpu.innerHTML = cpuCell(s);
+          if (mem) mem.innerHTML = memCell(s);
+        } catch (_) { /* stats best-effort */ }
+      }
+      function bindContainerButtons() {
+        document.querySelectorAll("[data-logs]").forEach((b) => { b.onclick = () => openLogs(b.dataset.logs); });
+        document.querySelectorAll("[data-restart]").forEach((b) => { b.onclick = () => restartContainer(b.dataset.restart); });
+      }
+      async function restartContainer(name) {
+        const isNap = name.startsWith("napcat");
+        if (isNap) {
+          if (!confirmDanger("⚠️ 高危：重启 " + name + " 会断开 OneBot，NapCat 可能掉回二维码 / 需手机扫码恢复登录态。确定继续？")) return;
+        } else {
+          if (!confirmDanger("重启 " + name + "？（bot 重启无害，会短暂断连）")) return;
+        }
+        const path = "/api/containers/" + encodeURIComponent(name) + "/restart" + (isNap ? "?ack_relogin=1" : "");
+        try {
+          const r = await apiWrite(path);
+          toast(r && r.warning ? r.warning : name + " 已重启", "ok");
+          setTimeout(loadContainers, 1500);
+          setTimeout(loadAudit, 1800);
+        } catch (e) { toast("重启失败：" + e.message, "err"); }
+      }
+
+      // ===== 日志抽屉 =====
+      let currentLogName = "";
+      function showDrawer(show) {
+        $("drawer").style.display = show ? "flex" : "none";
+        $("drawer-mask").style.display = show ? "block" : "none";
+      }
+      async function openLogs(name) {
+        currentLogName = name;
+        $("drawer-title").textContent = "日志 · " + name;
+        $("drawer-content").textContent = "加载中…";
+        showDrawer(true);
+        await reloadLogs();
+      }
+      async function reloadLogs() {
+        if (!currentLogName) return;
+        try {
+          const r = await apiGet("/api/containers/" + encodeURIComponent(currentLogName) + "/logs?tail=300");
+          $("drawer-content").textContent = (r.content || "").trim() || "(空)";
+          $("drawer-content").parentElement.scrollTop = $("drawer-content").parentElement.scrollHeight;
+        } catch (e) { $("drawer-content").textContent = "读取失败：" + e.message; }
+      }
+      $("drawer-close").onclick = () => showDrawer(false);
+      $("drawer-mask").onclick = () => showDrawer(false);
+      $("drawer-reload").onclick = reloadLogs;
+
+      // ===== #napcat 开关 =====
+      async function loadBuiltin() {
+        const el = $("builtin-state");
+        try {
+          const r = await apiGet("/api/napcat/builtin-reply");
+          if (r.enableReply === true) { el.className = "badge badge--warn"; el.innerHTML = '<span class="dot"></span>开启中'; }
+          else if (r.enableReply === false) { el.className = "badge badge--ok"; el.innerHTML = '<span class="dot"></span>已关闭'; }
+          else { el.className = "badge badge--muted"; el.innerHTML = '<span class="dot"></span>未知'; }
+        } catch (e) { el.className = "badge badge--muted"; el.innerHTML = '<span class="dot"></span>读取失败'; }
+      }
+      $("builtin-refresh").onclick = loadBuiltin;
+      $("builtin-disable").onclick = async () => {
+        if (!confirmDanger("关闭 NapCat 内置 #napcat 回复？")) return;
+        try { await apiWrite("/api/napcat/disable-builtin-reply"); toast("#napcat 已关闭", "ok"); loadBuiltin(); loadAudit(); }
+        catch (e) { toast("操作失败：" + e.message, "err"); }
+      };
+      $("builtin-enable").onclick = async () => {
+        if (!confirmDanger("开启 NapCat 内置 #napcat 回复？")) return;
+        try { await apiWrite("/api/napcat/enable-builtin-reply"); toast("#napcat 已开启", "ok"); loadBuiltin(); loadAudit(); }
+        catch (e) { toast("操作失败：" + e.message, "err"); }
+      };
+
+      // ===== 更新面板 =====
+      async function loadUpdates() {
+        $("updates-rows").innerHTML = '<tr><td colspan="5" class="muted">探测中…</td></tr>';
+        let u;
+        try { u = await apiGet("/api/updates/check"); }
+        catch (e) { $("updates-rows").innerHTML = '<tr><td colspan="5" class="muted">探测失败：' + e.message + "</td></tr>"; return; }
+        const rows = [];
+        const nap = u.napcat || {};
+        const napLatest = nap.update_available
+          ? '<span class="badge badge--warn"><span class="dot"></span>有新版 ' + (nap.latest_tag || "") + "</span>"
+          : '<span class="badge badge--ok"><span class="dot"></span>已最新</span>';
+        rows.push("<tr><td><b>napcat</b></td><td>仅通知</td><td class='mono'>" + (nap.current_tag || "—")
+          + "</td><td>" + napLatest + "</td><td class='muted'>D6 红线，不自动更新</td></tr>");
+        const bot = u.bot || {};
+        rows.push("<tr><td><b>qq-bot</b></td><td>CI 构建</td><td class='mono'>" + (bot.current_tag || "—")
+          + "</td><td class='muted'>本地 rebuild</td><td><button class='btn btn--primary' id='bot-update-btn'>更新 bot</button></td></tr>");
+        const wt = u.watchtower || {};
+        rows.push("<tr><td><b>watchtower</b></td><td>label-only</td><td class='muted'>—</td><td class='mono'>"
+          + ((wt.managed_containers || []).join(", ") || "无") + "</td><td class='muted'>sidecar 自动</td></tr>");
+        $("updates-rows").innerHTML = rows.join("");
+        const btn = $("bot-update-btn");
+        if (btn) btn.onclick = updateBot;
+      }
+      $("updates-refresh").onclick = loadUpdates;
+      async function updateBot() {
+        if (!confirmDanger("更新 qq-bot？将先备份数据库，再 rebuild + recreate（仅 bot，不碰 napcat）。耗时数分钟。")) return;
+        const btn = $("bot-update-btn");
+        if (btn) { btn.disabled = true; btn.textContent = "更新中…"; }
+        try {
+          const r = await apiWrite("/api/bot/update");
+          const att = r && r.result && r.result.update_attempts;
+          toast("bot 更新成功" + (att ? "（attempts=" + att + "）" : ""), "ok");
+          setTimeout(loadContainers, 1500);
+        } catch (e) { toast("更新失败：" + e.message, "err"); }
+        finally { if (btn) { btn.disabled = false; btn.textContent = "更新 bot"; } loadAudit(); }
+      }
+
+      // ===== 审计面板 =====
+      function fmtTs(ts) {
+        if (!ts) return "—";
+        const d = new Date(ts * 1000);
+        const p = (n) => String(n).padStart(2, "0");
+        return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+      }
+      async function loadAudit() {
+        let r;
+        try { r = await apiGet("/api/audit?tail=100"); }
+        catch (e) { $("audit-rows").innerHTML = '<tr><td colspan="5" class="muted">加载失败：' + e.message + "</td></tr>"; return; }
+        const entries = r.entries || [];
+        if (!entries.length) { $("audit-rows").innerHTML = '<tr><td colspan="5" class="muted">暂无审计记录</td></tr>'; return; }
+        $("audit-rows").innerHTML = entries.map((e) => {
+          const ok = e.result === "ok";
+          const badge = '<span class="badge ' + (ok ? "badge--ok" : "badge--danger") + '"><span class="dot"></span>' + e.result + "</span>";
+          const extra = [];
+          if (e.warning) extra.push(e.warning);
+          if (e.ack_relogin) extra.push("ack_relogin");
+          if (e.attempts) extra.push("attempts=" + e.attempts);
+          if (e.detail) extra.push(e.detail);
+          return "<tr><td class='nums mono'>" + fmtTs(e.ts) + "</td><td>" + e.action
+            + "</td><td class='mono'>" + (e.target || "—") + "</td><td>" + badge
+            + "</td><td class='muted'>" + (extra.join(" · ") || "—") + "</td></tr>";
+        }).join("");
+      }
+      $("audit-refresh").onclick = loadAudit;
+
+      // ===== 初始化 + 轮询 =====
+      setTokenState();
+      loadContainers();
+      loadBuiltin();
+      loadAudit();
+      setInterval(loadContainers, 5000);
+    </script>
+  </body>
+</html>

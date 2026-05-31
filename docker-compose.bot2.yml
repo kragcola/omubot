@@ -1,0 +1,50 @@
+services:
+  napcat-bot2:
+    image: mlikiowa/napcat-docker:v4.15.0
+    container_name: napcat-bot2
+    restart: unless-stopped
+    ports:
+      - "6100:6099"
+      - "29310:29300"
+      - "29311:29301"
+    volumes:
+      - ./napcat/bots/bot2/config:/app/napcat/config
+      - ./napcat/bots/bot2/data:/app/.config/QQ
+    environment:
+      - NAPCAT_GID=0
+      - NAPCAT_UID=0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  bot-bot2:
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    container_name: qq-bot-bot2
+    restart: unless-stopped
+    command:
+      - .venv/bin/python
+      - bot.py
+      - --config
+      - config/bots/bot2/config.toml
+    ports:
+      - "8082:8080"
+    env_file: config/.env
+    environment:
+      - BOT_CONFIG_PATH=config/bots/bot2/config.toml
+      - TZ=Asia/Shanghai
+    depends_on:
+      - napcat-bot2
+    volumes:
+      - omubot-storage-bot2:/app/storage
+      - ./config:/app/config:rw
+      - ./admin/static:/app/admin/static:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 2g
+    mem_reservation: 512m
+
+volumes:
+  omubot-storage-bot2:
+    name: omubot-storage-bot2

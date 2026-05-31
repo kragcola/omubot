@@ -49,6 +49,13 @@ napcat/config/onebot11_*.json
 napcat/config/passkey.json
 napcat/config/webui.json
 napcat/config/plugins/
+# multi-bot (P4): per-instance napcat runtime data + credentials — never commit
+# (login.db / mmkv / msf = device fingerprint, D6 anti-fraud; webui/passkey = secrets)
+napcat/bots/*/data/
+napcat/bots/*/config/napcat.json
+napcat/bots/*/config/onebot11.json
+napcat/bots/*/config/passkey.json
+napcat/bots/*/config/webui.json
 .pytest_cache/
 .worktrees/
 .research/

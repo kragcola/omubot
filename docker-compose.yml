@@ -41,7 +41,126 @@ services:
     mem_limit: 2g
     mem_reservation: 512m
 
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: socket-proxy
+    restart: unless-stopped
+    environment:
+      - CONTAINERS=1
+      - POST=0
+    volumes:
+      - ${HOME}/.docker/run/docker.sock:/var/run/docker.sock:ro
+
+  socket-proxy-write:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: socket-proxy-write
+    restart: unless-stopped
+    environment:
+      - ALLOW_RESTARTS=1
+      - CONTAINERS=0
+      - POST=1
+    volumes:
+      - ${HOME}/.docker/run/docker.sock:/var/run/docker.sock:ro
+
+  socket-proxy-update:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: socket-proxy-update
+    restart: unless-stopped
+    environment:
+      - AUTH=1
+      - BUILD=1
+      - CONTAINERS=1
+      - DISTRIBUTION=1
+      - EVENTS=1
+      - EXEC=1
+      - GRPC=1
+      - IMAGES=1
+      - INFO=1
+      - NETWORKS=1
+      - PING=1
+      - POST=1
+      - SESSION=1
+      - VERSION=1
+      - VOLUMES=1
+    volumes:
+      - ${HOME}/.docker/run/docker.sock:/var/run/docker.sock:ro
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    depends_on:
+      - socket-proxy-update
+    environment:
+      - DOCKER_HOST=tcp://socket-proxy-update:2375
+      - NO_PROXY=localhost,127.0.0.1,host.docker.internal,socket-proxy,socket-proxy-write,socket-proxy-update
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - no_proxy=localhost,127.0.0.1,host.docker.internal,socket-proxy,socket-proxy-write,socket-proxy-update
+    command:
+      - --interval
+      - "300"
+
+  pmubot:
+    build:
+      context: ./pmubot
+    container_name: pmubot
+    restart: unless-stopped
+    ports:
+      - "8610:8080"
+    env_file:
+      - config/pmubot.env
+    environment:
+      - DOCKER_HOST=tcp://socket-proxy:2375
+      - DOCKER_UPDATE_HOST=tcp://socket-proxy-update:2375
+      - DOCKER_WRITE_HOST=tcp://socket-proxy-write:2375
+      - COMPOSE_PROJECT_NAME=omubot
+      - NAPCAT_WEBUI_BASE_URL=http://host.docker.internal:6099
+      - NAPCAT_WEBUI_TOKEN_FILE=/run/secrets/napcat-webui.json
+      - NO_PROXY=localhost,127.0.0.1,host.docker.internal,socket-proxy,socket-proxy-write,socket-proxy-update
+      - PMUBOT_REPO_ROOT=/Volumes/OmubotDisk/omubot
+      - no_proxy=localhost,127.0.0.1,host.docker.internal,socket-proxy,socket-proxy-write,socket-proxy-update
+    depends_on:
+      - socket-proxy
+      - socket-proxy-update
+      - socket-proxy-write
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./napcat/config/webui.json:/run/secrets/napcat-webui.json:ro
+      - /Volumes/OmubotDisk/omubot:/Volumes/OmubotDisk/omubot:ro
+      - pmubot-audit:/var/lib/pmubot
+
+  ccip-sidecar:
+    build:
+      context: ./ccip-sidecar
+    container_name: ccip-sidecar
+    restart: unless-stopped
+    ports:
+      - "8620:8080"
+    environment:
+      - CCIP_PACKS_DIR=/app/config/character_packs
+      - HF_HOME=/data/huggingface
+      - HUGGINGFACE_HUB_CACHE=/data/huggingface/hub
+    volumes:
+      - ./config:/app/config:ro
+      - ccip-hf-cache:/data/huggingface
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
 volumes:
   omubot-storage:
     external: true
     name: omubot-storage
+  ccip-hf-cache:
+  pmubot-audit:

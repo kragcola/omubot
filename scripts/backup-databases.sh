@@ -33,4 +33,4 @@ if ! docker ps --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
 fi
 
 exec docker exec "${CONTAINER}" \
-  uv run python -m services.storage.backup create --host-mode "$@"
+  /app/.venv/bin/python -m services.storage.backup create --host-mode "$@"
