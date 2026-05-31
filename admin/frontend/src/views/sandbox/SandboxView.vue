@@ -108,6 +108,7 @@ function onEnter(event: KeyboardEvent) {
     title="沙盒"
     eyebrow="Conversation Sandbox"
     description="模拟私聊或群聊上下文，快速观察 Omubot 的回复链路、输入身份和输出节奏。"
+    fill
   >
     <template #action>
       <div class="sandbox-hero-actions">

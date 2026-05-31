@@ -6,6 +6,11 @@ const props = withDefaults(defineProps<{
   title?: string
   description?: string
   eyebrow?: string
+  /** Opt the page into a definite-height flex chain so a child terminal/panel
+   *  (e.g. logs / sandbox) can fill the viewport's remaining space. Replaces the
+   *  former `:has(.om-fill-page)` auto-detection, which silently failed when the
+   *  `:has()` match didn't resolve, collapsing the terminal to content height. */
+  fill?: boolean
 }>(), {
   showHeader: true,
 })
@@ -19,7 +24,7 @@ const resolvedEyebrow = computed(() => props.eyebrow ?? 'Omubot Console')
 </script>
 
 <template>
-  <main class="om-page h-full flex-col flex-1 overflow-hidden">
+  <main class="om-page h-full flex-col flex-1 overflow-hidden" :class="{ 'om-page--fill': fill }">
     <div data-page-scroll-root class="cus-scroll om-page__body h-0 flex-1">
       <AppCard
         v-if="showHeader"
@@ -200,21 +205,23 @@ const resolvedEyebrow = computed(() => props.eyebrow ?? 'Omubot Console')
   background: var(--om-surface);
 }
 
-/* Fill-intent pages (those whose slot uses .om-fill-page, e.g. logs / sandbox)
- * opt into a definite-height flex chain so a child terminal/panel can fill the
- * viewport's remaining space. Scoped via :has() so all other pages keep their
- * natural content-height surface card unchanged. */
-.om-page__body:has(.om-fill-page) {
+/* Fill-intent pages (pass `fill` prop, e.g. logs / sandbox) opt into a definite-
+ * height flex chain so a child terminal/panel can fill the viewport's remaining
+ * space. Driven by an explicit prop+class rather than `:has(.om-fill-page)`,
+ * which silently failed when the `:has()` match didn't resolve and collapsed
+ * the terminal to content height. All other pages keep their natural
+ * content-height surface card unchanged. */
+.om-page--fill .om-page__body {
   display: flex;
   flex-direction: column;
 }
 
-.om-page__body:has(.om-fill-page) .om-page__surface-wrap {
+.om-page--fill .om-page__surface-wrap {
   min-height: 0;
   flex: 1;
 }
 
-.om-page__body:has(.om-fill-page) .om-page__surface {
+.om-page--fill .om-page__surface {
   display: flex;
   min-height: 0;
   flex-direction: column;

@@ -14,6 +14,7 @@ import {
   AnalyticsOutline,
   SparklesOutline,
   GiftOutline,
+  ScanOutline,
 } from '@vicons/ionicons5'
 import { useAppStore } from '../../stores/app'
 
@@ -36,6 +37,7 @@ const menuOptions: MenuOption[] = [
       { label: '群管理', key: '/groups', icon: renderIcon(PeopleOutline) },
       { label: '群聊记忆', key: '/memory', icon: renderIcon(LayersOutline) },
       { label: '表情包', key: '/stickers', icon: renderIcon(HappyOutline) },
+      { label: '角色识别', key: '/characters', icon: renderIcon(ScanOutline) },
       { label: '生日祝福', key: '/birthday', icon: renderIcon(GiftOutline) },
     ],
   },

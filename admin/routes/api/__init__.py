@@ -55,6 +55,7 @@ def create_api_router(
     from admin.routes.api.bandit import create_bandit_router
     from admin.routes.api.birthday_greeter import create_birthday_router
     from admin.routes.api.block_trace import create_block_trace_router
+    from admin.routes.api.characters import create_characters_router
     from admin.routes.api.config import create_config_router
     from admin.routes.api.context import create_context_router
     from admin.routes.api.cross_group import create_cross_group_router
@@ -173,6 +174,14 @@ def create_api_router(
         usage_tracker=usage_tracker,
     ))
     router.include_router(create_block_trace_router(ctx=ctx, bus=bus))
+    router.include_router(create_characters_router(
+        ctx=ctx,
+        sidecar_url=getattr(
+            getattr(getattr(config, "vision", None), "character_recognition", None),
+            "sidecar_url",
+            "http://host.docker.internal:8620",
+        ),
+    ))
     router.include_router(create_backup_router(
         backup_scheduler=getattr(ctx, "backup_scheduler", None),
         config_path=config_path,

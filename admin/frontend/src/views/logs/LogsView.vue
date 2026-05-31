@@ -462,6 +462,7 @@ function lineLevelClass(level: string): string {
     title="日志"
     eyebrow="Live Logs"
     description="默认先看实时事件流，按需回翻归档文件。默认筛选已隐藏 DEBUG 噪音。"
+    fill
   >
     <template #action>
       <NSpace align="center" :size="10">

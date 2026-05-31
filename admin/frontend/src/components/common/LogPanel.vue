@@ -47,6 +47,11 @@ function scrollToBottom() {
   el.scrollTop = el.scrollHeight
 }
 
+function jumpToLatest() {
+  stickToBottom.value = true
+  nextTick(scrollToBottom)
+}
+
 function onScroll() {
   const el = bodyRef.value
   if (!el) return
@@ -54,17 +59,36 @@ function onScroll() {
   stickToBottom.value = distance < 24
 }
 
+// Track the *last* line's identity, not just the count. The live stream caps
+// its buffer (LogsView slices to 150, useSSE to ~200), so once full the array
+// length stays constant while new lines keep arriving — old ones drop off the
+// top. Watching `length` alone would stop firing at that point, freezing the
+// scroll: newest lines land below the fold ("never reach the bottom") and the
+// dropping-off top makes the visible window appear to get "pushed up". Keying
+// on the tail identity keeps auto-follow alive at a full buffer.
+const tailKey = computed(() => {
+  const n = props.lines.length
+  if (!n) return ''
+  const last = props.lines[n - 1]
+  return `${n}|${last.id ?? last.timestamp ?? ''}|${last.text}`
+})
+
+watch(tailKey, () => {
+  if (!props.autoScroll || !stickToBottom.value || props.paused) return
+  nextTick(scrollToBottom)
+})
+
+// Re-pin to bottom when resuming from pause (the buffer may have jumped ahead).
 watch(
-  () => props.lines.length,
-  () => {
-    if (!props.autoScroll || !stickToBottom.value || props.paused) return
-    nextTick(scrollToBottom)
+  () => props.paused,
+  (isPaused) => {
+    if (!isPaused && props.autoScroll && stickToBottom.value) nextTick(scrollToBottom)
   },
 )
 
 onMounted(() => nextTick(scrollToBottom))
 
-defineExpose({ scrollToBottom })
+defineExpose({ scrollToBottom, jumpToLatest })
 </script>
 
 <template>
@@ -112,6 +136,16 @@ defineExpose({ scrollToBottom })
       </div>
     </div>
 
+    <button
+      v-if="lines.length && !stickToBottom"
+      type="button"
+      class="log-panel__jump"
+      title="回到最新"
+      @click="jumpToLatest"
+    >
+      ↓ 回到最新
+    </button>
+
     <footer v-if="$slots.footer || paused" class="log-panel__foot">
       <span v-if="paused" class="log-panel__paused">已暂停</span>
       <slot name="footer" />
@@ -121,6 +155,7 @@ defineExpose({ scrollToBottom })
 
 <style scoped>
 .log-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--om-border);
@@ -166,6 +201,7 @@ defineExpose({ scrollToBottom })
 }
 
 .log-panel__body {
+  position: relative;
   flex: 1;
   min-height: 0;
   padding: 12px 16px;
@@ -240,6 +276,32 @@ defineExpose({ scrollToBottom })
   color: var(--om-text-3);
   font-family: inherit;
   font-size: 12px;
+}
+
+.log-panel__jump {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border: 1px solid color-mix(in srgb, rgb(var(--primary-color)) 40%, var(--om-border));
+  border-radius: 999px;
+  background: var(--om-surface-2);
+  color: rgb(var(--primary-color));
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--om-shadow-sm);
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.log-panel__jump:hover {
+  transform: translateY(-1px);
+  background: color-mix(in srgb, rgb(var(--primary-color)) 12%, var(--om-surface-2));
 }
 
 .log-panel__foot {

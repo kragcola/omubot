@@ -73,6 +73,12 @@ const router = createRouter({
       component: () => import('../views/stickers/StickersView.vue'),
     },
     {
+      path: '/characters',
+      name: 'characters',
+      meta: { title: '角色识别', keepAlive: true },
+      component: () => import('../views/characters/CharactersView.vue'),
+    },
+    {
       path: '/knowledge',
       name: 'knowledge',
       meta: { title: '知识库' },
