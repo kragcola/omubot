@@ -1374,6 +1374,7 @@ class ChatPlugin(AmadeusPlugin):
             instruction_gate=instruction_gate,
             authority_store=authority_store,
             admins=dict(getattr(config, "admins", {})),
+            known_other_bots=dict(getattr(config.bot_pair_guard, "known_other_bots", {}) or {}),
         )
         llm.set_task_profile_names(task_profile_names)
 

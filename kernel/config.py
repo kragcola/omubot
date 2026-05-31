@@ -2154,7 +2154,13 @@ class InstructionGateConfig(BaseModel):
             "不想，你自己来",
             "这个我可不接",
         ],
-        description="In-character refusal lines for DENY (picked at random).",
+        description="Legacy hardcoded refusal lines for DENY (only used when deny_direct_emit=true).",
+    )
+    deny_direct_emit: bool = Field(
+        default=False,
+        description="P1 rollback switch. false (default) = DENY routes an in-persona refusal hint "
+        "through the main LLM (in-character, deduped, timeline-written, usage-counted). "
+        "true = legacy: emit a random hardcoded deny_responses line directly, bypassing the LLM.",
     )
     refuse_soft_responses: list[str] = Field(
         default_factory=lambda: [
