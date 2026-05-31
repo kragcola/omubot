@@ -830,12 +830,16 @@ async def _render_message(
                                 )
                             except Exception:
                                 _log_debug.debug("mood recognition-nudge skipped")
+                        # Name (+ source work for AnimeTrace hits) prefixes the desc.
+                        char_label = recognition.character_name
+                        if recognition.work:
+                            char_label = f"{recognition.character_name}（{recognition.work}）"
                         if vision_client is not None:
                             vision_desc = await vision_client.describe_image(data)
                             if vision_desc:
-                                desc = f"{recognition.character_name}：{vision_desc}"
+                                desc = f"{char_label}：{vision_desc}"
                         if desc is None:
-                            desc = f"{recognition.character_name}表情包"
+                            desc = f"{char_label}表情包"
 
                 if desc is None:
                     _log_debug.debug("desc cache MISS | hash={} file={} -> Qwen VL", img_hash, Path(img_path).name)

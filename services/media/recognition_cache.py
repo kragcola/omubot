@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS image_recognition_cache (
     character_id   TEXT,
     character_name TEXT,
     relation       TEXT,
+    work           TEXT,
     source         TEXT NOT NULL DEFAULT 'ccip-sidecar',
     confidence     REAL,
     created_at     REAL NOT NULL,
@@ -47,6 +48,13 @@ class RecognitionCache:
         db = await connect_sqlite(self._db_path)
         await db.execute(_CREATE)
         await db.execute(_INDEX)
+        # Idempotent migration: add `work` to a pre-existing table (AnimeTrace
+        # source-work context). SQLite has no "ADD COLUMN IF NOT EXISTS".
+        cur = await db.execute("PRAGMA table_info(image_recognition_cache)")
+        cols = {str(r[1]) for r in await cur.fetchall()}
+        await cur.close()
+        if "work" not in cols:
+            await db.execute("ALTER TABLE image_recognition_cache ADD COLUMN work TEXT")
         await db.commit()
         self._db = db
 
@@ -59,7 +67,7 @@ class RecognitionCache:
         if self._db is None or not image_sha256:
             return None
         cur = await self._db.execute(
-            "SELECT character_id, character_name, relation, source, confidence "
+            "SELECT character_id, character_name, relation, work, source, confidence "
             "FROM image_recognition_cache WHERE image_sha256 = ?",
             (image_sha256,),
         )
@@ -80,6 +88,7 @@ class RecognitionCache:
             "character_id": row["character_id"],
             "character_name": row["character_name"],
             "relation": row["relation"],
+            "work": row["work"],
             "source": row["source"],
             "confidence": row["confidence"],
         }
@@ -91,6 +100,7 @@ class RecognitionCache:
         character_id: str | None,
         character_name: str | None,
         relation: str | None,
+        work: str | None = None,
         source: str = "ccip-sidecar",
         confidence: float | None = None,
     ) -> None:
@@ -99,13 +109,13 @@ class RecognitionCache:
         now = time.time()
         await self._db.execute(
             "INSERT INTO image_recognition_cache "
-            "(image_sha256, character_id, character_name, relation, source, confidence, created_at, accessed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "(image_sha256, character_id, character_name, relation, work, source, confidence, created_at, accessed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(image_sha256) DO UPDATE SET "
             "character_id=excluded.character_id, character_name=excluded.character_name, "
-            "relation=excluded.relation, source=excluded.source, confidence=excluded.confidence, "
-            "accessed_at=excluded.accessed_at",
-            (image_sha256, character_id, character_name, relation, source, confidence, now, now),
+            "relation=excluded.relation, work=excluded.work, source=excluded.source, "
+            "confidence=excluded.confidence, accessed_at=excluded.accessed_at",
+            (image_sha256, character_id, character_name, relation, work, source, confidence, now, now),
         )
         await self._db.commit()
         await self._prune()

@@ -725,6 +725,10 @@ class CharacterRecognitionConfig(BaseModel):
     sidecar_url: str = "http://host.docker.internal:8620"
     packs_dir: str = "config/character_packs"
     timeout_seconds: float = 5.0
+    # AnimeTrace 在线已知动漫角色识别（与 CCIP 并行 merge）。
+    animetrace_enabled: bool = True
+    animetrace_model: str = "anime_model_lovelive"
+    animetrace_timeout_seconds: float = 8.0
 
 
 class VisionConfig(BaseModel):

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
 import os
+import re
+import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from imgutils.metrics.ccip import ccip_difference, ccip_extract_feature
 from PIL import Image
 
@@ -260,3 +263,111 @@ async def embed(image: UploadFile = IMAGE_UPLOAD) -> dict[str, Any]:
         return _embed(image_data)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"ccip embed failed: {exc}") from exc
+
+
+_SLUG_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+_IMAGES = File(...)
+# Each Form() must be a distinct instance — FastAPI tracks parameter binding by
+# the marker object's identity, so sharing one Form(...) across two params makes
+# the second silently fail to bind (it falls back to a default).
+_FORM_ID = Form(...)
+_FORM_NAME = Form(...)
+_FORM_REL = Form(default="known")
+_SAMPLE_MAX = 256  # px, longest edge of stored sample thumbnails
+
+
+def _slug(value: str) -> str:
+    s = _SLUG_RE.sub("_", value.strip()).strip("_")
+    return s or "character"
+
+
+def _build_pack(
+    images: list[bytes],
+    *,
+    character_id: str,
+    name: str,
+    relation: str,
+    sample_count: int = 3,
+) -> dict[str, Any]:
+    """Embed images → mean vector → charpack zip bytes (manifest + npz +
+    downscaled samples). The sidecar owns numpy/model; the config mount is
+    read-only here, so we return the zip for the bot to land on disk."""
+    cid = _slug(character_id)
+    vectors: list[np.ndarray] = []
+    samples: list[bytes] = []
+    embedded = 0
+    for raw in images:
+        try:
+            image = Image.open(io.BytesIO(raw)).convert("RGB")
+        except Exception:
+            continue
+        feature = ccip_extract_feature(image, model=MODEL_NAME)
+        vec = np.asarray(feature, dtype=np.float32).reshape(-1)
+        if vec.size == 0:
+            continue
+        vectors.append(vec)
+        embedded += 1
+        if len(samples) < sample_count:
+            thumb = image.copy()
+            thumb.thumbnail((_SAMPLE_MAX, _SAMPLE_MAX))
+            sbuf = io.BytesIO()
+            thumb.save(sbuf, format="JPEG", quality=82)
+            samples.append(sbuf.getvalue())
+    if not vectors:
+        raise ValueError("no image produced a valid embedding")
+
+    mean_vec = np.mean(np.stack(vectors), axis=0).astype(np.float32)
+    rel = relation if relation in ("self", "friend", "known") else "known"
+    manifest = {
+        "pack": cid,
+        "relation_default": rel,
+        "characters": [{
+            "character_id": cid,
+            "name": name.strip() or cid,
+            "embedding_key": cid,
+            "relation": rel,
+            "aliases": [],
+        }],
+    }
+    npz_buf = io.BytesIO()
+    np.savez(npz_buf, **{cid: mean_vec})
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        root = f"{cid}.charpack"
+        zf.writestr(f"{root}/manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        zf.writestr(f"{root}/embeddings.npz", npz_buf.getvalue())
+        for idx, sample in enumerate(samples):
+            zf.writestr(f"{root}/samples/{idx}.jpg", sample)
+    return {
+        "charpack_zip_b64": base64.b64encode(zip_buf.getvalue()).decode("ascii"),
+        "pack_dir": f"{cid}.charpack",
+        "character_id": cid,
+        "embedded": embedded,
+        "total": len(images),
+        "samples": len(samples),
+        "dim": int(mean_vec.size),
+        "api_version": API_VERSION,
+    }
+
+
+@app.post("/build-pack")
+async def build_pack(
+    images: list[UploadFile] = _IMAGES,
+    character_id: str = _FORM_ID,
+    name: str = _FORM_NAME,
+    relation: str = _FORM_REL,
+) -> dict[str, Any]:
+    """Build a charpack from raw reference images. Returns the zip as base64
+    for the caller (bot admin route) to land on the rw config mount — the
+    sidecar's own config mount is read-only."""
+    payloads = [await img.read() for img in images]
+    payloads = [p for p in payloads if p]
+    if not payloads:
+        raise HTTPException(status_code=400, detail="no images provided")
+    try:
+        return _build_pack(payloads, character_id=character_id, name=name, relation=relation)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"build-pack failed: {exc}") from exc

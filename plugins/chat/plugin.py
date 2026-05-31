@@ -1011,19 +1011,28 @@ class ChatPlugin(AmadeusPlugin):
             from services.media.character_registry_db import CharacterRegistryDB
             from services.media.recognition_cache import RecognitionCache
 
+            cr_cfg = config.vision.character_recognition
             registry_db = CharacterRegistryDB(db_path="storage/character_recognition.db")
             await registry_db.init()
-            await registry_db.scan_and_sync(config.vision.character_recognition.packs_dir)
+            await registry_db.scan_and_sync(cr_cfg.packs_dir)
             recognition_cache = RecognitionCache(db_path="storage/character_recognition.db")
             await recognition_cache.init()
+            animetrace_client = None
+            if cr_cfg.animetrace_enabled:
+                from services.media.animetrace_client import AnimeTraceClient
+                animetrace_client = AnimeTraceClient(
+                    model=cr_cfg.animetrace_model,
+                    timeout_seconds=cr_cfg.animetrace_timeout_seconds,
+                )
             ctx.character_registry_db = registry_db
             ctx.recognition_cache = recognition_cache
             ctx.character_recognizer = CharacterRecognizer(
-                base_url=config.vision.character_recognition.sidecar_url,
-                packs_dir=config.vision.character_recognition.packs_dir,
-                timeout_seconds=config.vision.character_recognition.timeout_seconds,
+                base_url=cr_cfg.sidecar_url,
+                packs_dir=cr_cfg.packs_dir,
+                timeout_seconds=cr_cfg.timeout_seconds,
                 registry_db=registry_db,
                 recognition_cache=recognition_cache,
+                animetrace_client=animetrace_client,
             )
 
         # ---- card store ----
