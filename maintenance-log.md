@@ -4,6 +4,113 @@
 
 ---
 
+## 2026-06-01 issue17 角色识别全套落地（sidecar 基线，flag 默认关）
+
+**变更类型**：功能落地（sidecar + omubot 多文件 + admin 前后端；rebuild bot + ccip-sidecar；admin 前端 bind-mount 即生效）。承接「issue17 剩余全套完成」。**架构基线订正**：v2 文档假设进程内 CCIP，但 P3 已落地 ccip-sidecar，用户拍板**以 sidecar 为准**——recognizer 维持 HTTP client，CCIP 重依赖留 sidecar，bot 镜像不装 numpy/onnxruntime（保 P3 依赖隔离）。
+
+**五阶段（详见 [migrations/issue17-character-recognition-2026-06-01.md](docs/migrations/issue17-character-recognition-2026-06-01.md) 四列清单）**：
+
+- **Phase A**：ccip-sidecar 加 `POST /embed`（图→768维特征）；新增 `tools/build_character_pack.py`（参考图目录→借 sidecar 提嵌入→写 .charpack）。
+- **Phase B**：新增 `services/media/character_registry_db.py`（本地 `character_registry` 表，relation/name/aliases per-bot 真相源，scan_and_sync 不覆盖 admin 编辑）+ `recognition_cache.py`（L2 持久缓存，完整 SHA-256 PK，aiosqlite+WAL+checkpoint，照搬 slang.db 治理）；recognizer 改优先读本地 DB + L2 缓存短路；plugin flag 开时构造并注入 ctx。
+- **Phase C**：缓存逻辑内聚进 recognizer.identify（router 无需改缓存接线）。
+- **Phase D**：`admin/routes/api/characters.py`（列表+stats+sidecar健康 / PATCH relation / reload / upload zip）+ SPA `CharactersView.vue`（Calm Ops 风格，挂「角色识别」菜单）。
+- **Phase E**：`MoodEngine.register_recognition_signal`（self→valence+ / friend→openness+，30min 线性衰减，cap 0.2，invalidate cache）；router 识别命中 self/friend 经 ctx.mood_engine 注册，session_id 约定对齐 client（群 `group_{gid}` / 私聊 `private_{uid}`）。
+
+**验证（D4）**：sidecar /embed dim=768；build pack 2角色 e2e identify 命中 diff=0.0001；**部署镜像内链路测试**（scan_and_sync + admin-edit-survive-resync + cache roundtrip）全过；mood nudge 累加/衰减/cap/known-noop 单测过；新增 tests/test_character_registry_db.py（含 D2 cancel-path）；**全量 pytest 2321 passed / 8 skipped**；ruff/pyright 0 err；vue-tsc + npm run build 通过；bot rebuild 后 OneBot 重连正常收消息；**napcat Created=05-28 未变（D6 守住）**。
+
+**现状与开启前提**：**flag `vision.character_recognition.enabled` 默认 false，线上零行为变更**（全旁路回 desc_cache→sticker_store→VL）。开 flag 才有「认出角色→描述变准 + relation→mood 微调」可见价值，前提需**真实角色参考图**（凤笑梦/熟人立绘，仓库现无）：① `build_character_pack.py` 建真 pack → ② 放 config/character_packs/ → ③ config 开 enabled → ④ restart bot。**回滚**：flag 关即全旁路；`git restore` 新文件；DB 在 named volume 可单清。
+
+---
+
+## 2026-05-31 pmubot P5a+P5b：Web 控制台 + 可观测层（日志/资源/审计）
+
+**变更类型**：pmubot 功能扩展（`pmubot/` 代码 + `docker-compose.yml` 加可写卷；rebuild pmubot 独立容器，不碰 omubot/napcat）。承接「pmubot 还差什么」诊断——后端 P0–P4 已齐，但 web UI 停在 P0 只读骨架（153 行单表格），5 个写端点无界面、无日志/资源/审计可观测。本轮做 P5a（写操作上 UI）+ P5b（可观测层）。
+
+**P5a（UI 全量 + token 登录）**：
+
+- `pmubot/static/index.html` 重写（153 → ~430 行），原生单页 + 雾青 `#316C72` 配色对齐 omubot admin 视觉（按用户决策：不引 Vue 构建链，保持独立轻量控制平面）。
+- 面板：容器（状态/Tag/CPU/内存/日志/重启）、#napcat 开关（状态回显 + disable/enable）、更新（/api/updates/check 结果 + bot update 按钮）、审计。
+- token 登录框（存 sessionStorage，写操作带 `Bearer` + `confirm=1`）；napcat 重启走 `ack_relogin=1` 二次确认弹窗（明示掉线风险）；容器状态 + stats 每 5s 轮询。
+
+**P5b（可观测层，3 新只读端点 + 审计持久化）**：
+
+- `app.py` 加 4 只读端点：`GET /api/containers/{name}/logs`（走只读 proxy 拉日志，二进制帧 demux 成干净文本）、`/stats`（CPU%/内存 MB/limit/%）、`/api/napcat/builtin-reply`（开关回显）、`/api/audit`（审计读取）。**经实测只读 proxy 已能拿 logs/stats，无需动代理权限。**
+- 新增 `pmubot/audit.py`：结构化 JSON lines 审计（ts/action/target/result/extra），写入可写 named volume `pmubot-audit:/var/lib/pmubot`（repo 是 `:ro` 挂载、无法落盘 → 按用户决策加可写卷）。restart/disable/enable/bot-update 四个写端点接入 `audit.record()`，同时保留 stdout LOGGER 作第二记录。
+- `docker-compose.yml`：pmubot 服务加 `pmubot-audit` 卷 + volumes 段登记。
+- `Dockerfile`：补 `COPY audit.py`（首次 rebuild 漏拷导致 ModuleNotFoundError 崩溃，已修）。
+
+**验证（D4）**：rebuild 后实测——6 个只读端点全 200；logs demux 输出干净无帧头乱码；stats 解析正确（qq-bot CPU 1.25% / 143.8M of 2048M）；写端点无 token 401、带 token 200；**审计落盘后重启 pmubot 仍在（named volume 持久，2 条不丢）**。`#napcat` 测试后已恢复验收基线（关闭态 False）。ruff `--fix` 清 import 后无错。napcat `Created=05-28` 未变，全程只 restart pmubot 独立容器，**D6 守住**。
+
+**边界（本轮不做，留 P5c / 后续）**：socket-proxy-update 权限收窄；napcat WebUI 完整中间人（扫码/登录态）；多 bot 切换面板。**回滚路径**：`git restore pmubot/ docker-compose.yml` + `docker compose up -d --build --no-deps pmubot`；审计卷可 `docker volume rm omubot_pmubot-audit`（仅清审计历史，不影响运行）。
+
+---
+
+## 2026-05-31 pmubot 阶段验收通过（P0–P4 全绿，D6 红线守住）
+
+**变更类型**：验收里程碑（无新增代码改动；验收人独立运行态复核 + 回填执行追踪文档 §6 自审表 + 新增 §7 验收人复核段）。
+
+**验收方式**：不照单全收执行人回执，按 D4 逐条用运行态外部证据复核。关键实证：
+
+- **D6 红线守住**：napcat `Created=2026-05-28`（验收期间未 recreate）、镜像仍 v4.15.0 未换 tag；`socket-proxy` 与 `socket-proxy-write` 双双对 `POST /containers/create` 返回 403（无 recreate 物理入口）；`/api/napcat/update` 404；watchtower napcat/bot 无 enable label、实际 `Scanned=1 Updated=0` 只扫 ccip-sidecar。
+- **权限/鉴权**：三档 proxy 边界实测成立（只读 GET 200/create 403/restart 403；只写 GET 403/create 403）；pmubot 三个写端点无 token 全 401。
+- **更新分档**：`/api/updates/check` 实测 napcat=notify-only（探到 v4.18.4 只通知）、bot=ci-build、watchtower 只管 ccip-sidecar。
+- **依赖隔离**：bot 镜像 import numpy/onnxruntime 均 ModuleNotFoundError；ccip-sidecar 自带 numpy 1.26.4（<2 守住）+ onnxruntime 1.26.0。
+- **运行态/门禁**：qq-bot OneBot 在线持续收消息；执行人改的 .py ruff All passed、pyright 0 errors、CCIP 测试 26 passed。
+
+**残余风险（非阻断）**：`socket-proxy-update` 全权限理论上能 create，但 Ports=null 不对外暴露 + 唯一消费方 bot_update 硬编码 `--no-deps` 只动 bot + 无 napcat 调用路径 = 能力存在但无调用路径。**后续收窄建议**：bot_update 只需 BUILD/IMAGES/POST/CONTAINERS，可砍 EXEC/AUTH/VOLUMES（另起派单）。
+
+**结论**：pmubot P0–P4 准予收口。证据见 [pmubot-dispatch-execution-2026-05-31.md](docs/tracking/pmubot-dispatch-execution-2026-05-31.md) §7。**回滚路径**：pmubot/ccip-sidecar/socket-proxy* 均为独立新增容器，`docker compose rm -sf` 即可下线、不影响 omubot/napcat（P0 回滚演练已验）。
+
+---
+
+## 2026-05-31 admin 日志页终端只显示 7-8 行修复（撑高链改 fill prop，弃 :has）+ 实时自动跟随修复
+
+**变更类型**：admin/frontend bug 修复（纯前端，`npm run build` 即生效，bind mount 无需 rebuild）。用户报告分两层：①「实时终端只显示 7-8 条」②「当前消息没触到底部就被下面消息顶掉」。
+
+**根因 1（终端高度塌陷 — 主因，用户实际看到的）**：撑高链靠 AppPage 里的 `.om-page__body:has(.om-fill-page){display:flex;...}` 自动探测。`:has()` 这条一旦不命中就**静默失效**——`.om-page__surface` 退回内容高度，子级 `.om-fill-page` 的 `height:100%` 撑在 auto 高度父级上 = 塌成内容高度，LogPanel 只剩 7-8 行。上一版 commit (ae3e2a5) 引入这条 `:has()` 时就没真正生效，所以用户"刷新无变化"。
+- **修复**：弃用 `:has()` 自动探测，改 AppPage 显式 `fill` prop → `.om-page--fill` class 驱动同一套 flex 撑高。撑高规则现全部落在 AppPage 自身元素（`.om-page--fill .om-page__body/.om-page__surface-wrap/.om-page__surface`），scope 确定、跨浏览器零依赖。`LogsView` 与 `SandboxView` 两个 fill 页已加 `fill` prop。
+
+**根因 2（满缓冲自动跟随失效 — 高度修好后才显现）**：`LogPanel.vue` auto-scroll watcher 只监听 `props.lines.length`；实时流封顶缓冲（`LogsView` slice 150 / `useSSE` slice 200）填满后 `length` 恒定，watcher 不再触发 → 新行落折叠线下到不了底、顶部旧行掉出像被"顶飞"。
+- **修复**：watcher 改监听末行 identity（`tailKey`），满缓冲下每行都触发；新增「↓ 回到最新」浮动按钮（翻历史时浮现右下角，一键吸底）；暂停→继续若在吸底态自动重新吸底。
+
+**同模式扫描（D1）**：`om-fill-page` 仅 `LogsView` / `SandboxView` 两个消费方，均已补 `fill` prop，无其它页面依赖旧 `:has()` 路径。`LogPanel` 三处消费方（Dashboard/Playground/Logs）共享，修一处全收益；`SandboxView` 另一套命令式滚动、历史不封顶，无同类 bug。
+
+**验证（D4）**：`vue-tsc --noEmit` 通过；`npm run build` 5.6s 成功。服务端实测：`curl localhost:8081/admin/` 入口已切 `index-DjICSeXY.js`；产物中旧 `:has(.om-fill-page)` 已移除、新 `.om-page--fill` 规则在 CSS 内。**回滚路径**：还原 AppPage 的 `:has(.om-fill-page)` 三条规则 + 去掉 `fill` prop/class；LogPanel watcher 还原为 `() => props.lines.length` 并删 jump 按钮。
+
+## 2026-05-31 pmubot P3/P4 收口：共享 sidecar 上线 + 多 bot 参数化验证完成
+
+**变更类型**：pmubot 控制平面继续落地（`ccip-sidecar/` + `pmubot/` + `docker-compose.bot2.yml` + `config/bots/bot2/` + `napcat/bots/bot2/` + 执行追踪回填）。这轮把此前漏记的 **P3** 和本次新做完的 **P4** 一次收口，并补了运行态回滚证据。
+
+**本轮完成**：
+- **P3 正式补齐维护交接**：`ccip-sidecar` 现在是独立容器（`8620`），CCIP 重依赖只留在 sidecar；`pmubot /api/containers` 已纳管并可自愈拉起；`omubot` 的 `CharacterRecognizer` 已切到 HTTP sidecar，默认 flag 仍关。arm64 构建漂移（`bchlib` 需 `gcc`）已通过 sidecar Dockerfile 补 `build-essential` 解决。
+- **P4 部署层参数化落地**：新增 [docker-compose.bot2.yml](docker-compose.bot2.yml) 作为第二组实例 override，起出 `napcat-bot2` / `qq-bot-bot2` / `omubot-storage-bot2`；第二组独立配置走 [config/bots/bot2/config.toml](config/bots/bot2/config.toml)，第二组 NapCat 也有独立目录 [napcat/bots/bot2/config](napcat/bots/bot2/config) / `data/`。`pmubot` 的容器发现从“硬编码单例名”改成“按 compose project + `napcat*` / `qq-bot*` 模式发现”，运行态能看见多 bot。
+- **sidecar 接口版本化补齐**：`ccip-sidecar /health` 和 `/identify` 现都返回 `api_version=2026-05-31.v1`；`pmubot /api/containers` 会把这个版本字段带出来；`CharacterRecognition` 也保留 `api_version`，为共享 sidecar 后续更新兼容做了显式契约。
+- **多 bot + 共享 sidecar 核心证据拿到**：验证窗口内临时写入共享 pack 后，sidecar `/health` 报 `pack_count=1 character_count=1 api_version=2026-05-31.v1`；同图第一次 `/identify` 命中 `character_id=emu_multi cache_hit=false`，第二次 `cache_hit=true`。随后在两个 bot 容器里分别跑 `CharacterRecognizer`：主 bot 读到 `relation='self'`，bot2 读到 `relation='known'`，但两边 `character_id` 都是 `emu_multi`。这证明“识别共享 + relation per-bot”已经成立。
+
+**运行态与回滚**：
+- 主 bot 本轮重建后已重新连回：`qq-bot` 日志再次出现 `OneBot V11 | Bot 384801062 connected`，时间点是 **2026-05-31 21:46:33**。之后持续正常收消息，说明 P3/P4 代码部署没有把现有 live bot 打挂。
+- 第二组实例在验证时成功拉起：`napcat-bot2` 用独立 host 端口 `6100/29310/29311`，其日志停在二维码登录态；这符合“隔离验证，不碰主账号”的预期。验证完成后已执行 `docker compose -f docker-compose.yml -f docker-compose.bot2.yml rm -sf bot-bot2 napcat-bot2` 回滚，`/api/containers` 已恢复只剩单 bot 组。
+- 临时共享 pack 已删除；当前 `curl http://localhost:8620/health` 回到 `pack_count=0 character_count=0 api_version=2026-05-31.v1 cache_entries=0`。期间顺手修了一个观测口径小偏差：此前删 pack 后 `/health.cache_entries` 可能残留旧值，现已在 health 路径先按 `registry_version` reset。
+
+**影响与交接**：
+- 代码侧现已具备多 bot 编排骨架，但默认运行态仍保持单 bot；若要再起第二组，只需用 `docker compose -f docker-compose.yml -f docker-compose.bot2.yml up -d --build napcat-bot2 bot-bot2`。
+- `omubot-storage-bot2` volume 已创建并保留，说明第二组 storage 隔离路径有效；主 `napcat` 从头到尾**未被 recreate**。
+
+## 2026-05-31 admin 日志页实时终端自动跟随失效修复（满缓冲 stick-to-bottom）
+
+**变更类型**：admin/frontend bug 修复（纯前端，`npm run build` 即生效，bind mount 无需 rebuild）。用户报告：实时终端「当前消息没触到底部就被下面消息顶掉」「为什么不做成成熟终端那种带拖动条、默认最底端的」。
+
+**根因（代码实证）**：`LogPanel.vue` 的自动滚动 watcher 只监听 `props.lines.length`。实时流是有上限缓冲——`LogsView` `.slice(-150)`、`useSSE` `.slice(-200)`——缓冲填满后 **`length` 恒定不变**，新行进来只是把旧行从顶部挤掉，watcher 不再触发 → 自动跟随死掉。表现正是：新行落在折叠线以下「永远到不了底部」；顶部旧行掉出、滚动位置冻结 → 可见窗口像被下面的消息「顶上去」。stick-to-bottom 与滚动条逻辑本来就对，只是不再被触发。
+
+**修复**：
+- watcher 改为监听**末行 identity**（`n|last.id/ts|last.text` 组成的 `tailKey` computed），满缓冲下每来一行都触发，自动跟随恢复。
+- 新增「↓ 回到最新」浮动按钮：用户向上翻历史（`stickToBottom=false`）时浮现在终端右下角，点击 `jumpToLatest()` 重新吸底。补齐成熟终端观察器的拖动条 + 默认吸底 + 一键回最新形态。
+- 暂停→继续时若处于吸底态自动重新吸底（缓冲可能已跳进）。
+
+**同模式扫描（D1）**：`LogPanel` 三个消费方（Dashboard / Playground / Logs）共享此组件，修一处全收益。`SandboxView` 是另一套滚动（push 后命令式 `scrollBottom()`、历史不封顶），无同类 bug。
+
+**验证（D4）**：`vue-tsc --noEmit` 通过；`npm run build` 6.2s 成功（`admin/static` bind mount 已带新 bundle）。**回滚路径**：还原 `LogPanel.vue` watcher 为 `() => props.lines.length` 并删除 jump 按钮相关代码即可。
+
 ## 2026-05-31 pmubot P1/P2 落地完成（当前 napcat 因高危验收再次待手Q验证）
 
 **变更类型**：pmubot 控制平面继续落地（`docker-compose.yml` + `pmubot/` + `scripts/backup-databases.sh` + 执行追踪回填）。本轮把 P1 高危护栏与 P2 更新接线真正做完，并补了运行态验证。
