@@ -4,6 +4,47 @@
 
 ---
 
+## 2026-06-01 AnimeTrace 在线动漫角色识别（与 CCIP 并行 merge）
+
+**变更类型**：功能扩展（omubot 侧多文件；rebuild bot）。承接「推进 animetrace」。让 bot 无需本地参考图就能认出大量已知动漫/galgame 角色，补足 CCIP 空库短板。
+
+**真实 API 契约（实测确认，非照搬 v2 文档的过期 `aiapiv2.animedb.cn`）**：`POST https://api.animetrace.com/v1/search`，JSON body `{model, is_multi, base64, ai_detect}` → `{code, data:[{box, box_id, character:[{character, work}]}], ai, trace_id}`；code 0=ok、17737=限流、其它=错。
+
+**架构（沿用 sidecar 基线）**：AnimeTrace 是纯外部 HTTP 调用（无模型/无 numpy）→ 放 omubot 侧，不进 sidecar。与 CCIP（sidecar，原创/已注册角色）**并行 merge**。
+
+- **新增 `services/media/animetrace_client.py`**：aiohttp POST base64，浏览器 UA + Referer（过 WAF）；限流/超时/网络异常**静默降级 None**。
+- **`character_recognizer.py` merge 矩阵**：`asyncio.gather(CCIP, AnimeTrace)` 并行 → ① CCIP 命中（有 per-bot relation）**优先 CCIP**（bot 自己/熟人是第一性价值），缺 work 时借 AnimeTrace 的 work 补上下文；② CCIP 未命中 + AnimeTrace 命中 → 用 AnimeTrace（relation=known，带 work=出处，source=animetrace）；③ 都未命中 → 回退 VL。`CharacterRecognition` 加 `work` 字段。
+- **`recognition_cache.py`**：加 `work` 列 + 幂等 ALTER 迁移（旧 DB 无此列时补）；只在确定结果时缓存，**不缓存 None**（避免把 AnimeTrace 瞬时限流/超时固化成永久 miss）。
+- **config**：`CharacterRecognitionConfig` 加 `animetrace_enabled`(默认 true)/`animetrace_model`(anime_model_lovelive)/`animetrace_timeout_seconds`(8.0)。
+- **plugin**：flag 开时构造 AnimeTraceClient 注入 recognizer。
+- **router**：AnimeTrace 命中描述带出处 → `«初音未来（VOCALOID）：跳舞»`。
+
+**验证（D4）**：新增 tests/test_animetrace_merge.py（client 解析:命中/限流/空/脏数据 + merge 四档:CCIP优先/AnimeTrace兜底/都miss/禁用CCIP-only），**全量 pytest 2327 passed**（+6）；ruff/pyright 0 err；rebuild bot OneBot 重连正常。**降级实证**：容器内令 CCIP+AnimeTrace 同时失败，merged identify 返回 None 不抛异常,渲染回退 VL —— 韧性达标。napcat 未动（D6）。
+
+**现场网络说明**：验证时本机到 `api.animetrace.com` 的外网出口临时不可达（host 直连 + 代理均 000/SSL EOF，环境问题非代码）。契约此前已实测通（返回 code 0 / 17737）。**正向命中待外网恢复后自然生效**；期间 AnimeTrace 静默降级、不影响 bot 与 CCIP。回滚：`animetrace_enabled=false` 即 CCIP-only。
+
+---
+
+## 2026-06-01 角色识别网页录入 + flag 正式开启（CCIP 已上线）
+
+**变更类型**：功能扩展 + 上线（sidecar + bot 后端 + admin 前端；rebuild sidecar + bot；config 开 flag）。承接「直接收原始图、网页录入角色、显示收录信息+样例照片」。
+
+**网页录入链路（关键约束：bot 镜像无 numpy 写不了 npz → 由 sidecar 产 charpack bytes 回传，bot 落盘到 rw config 挂载）**：
+
+- **sidecar 加 `POST /build-pack`**（`ccip-sidecar/server.py`）：收多图 + character_id/name/relation → 每图 CCIP 提特征 → 均值向量 → numpy 打包 charpack（manifest + npz + 降采样样例图 ≤256px ×3）→ zip 成 base64 **回传**（sidecar config 只读，自己不落盘）。
+- **bot 后端 `admin/routes/api/characters.py`**：`POST /characters/build`（多图录入，转发 sidecar → 落盘 `config/character_packs/<id>.charpack/` → scan_and_sync）；`GET /characters/{id}/sample`（FileResponse 返回样例缩略）；`/characters/upload` 改智能分流（图→build，.zip→直接解压）；list 返回带 `has_sample`。
+- **admin SPA `CharactersView.vue`**：「录入角色」对话框（character_id + 显示名 + relation 下拉 + 多图选择），raw fetch FormData 提交；角色表加样例缩略图列。
+
+**踩坑修复**：① **上传 422** —— 共享 api wrapper 强制 `Content-Type: application/json`,误标 multipart body,改 raw `fetch` 让浏览器自设 boundary。② **Form 字段绑定 bug（实证）** —— sidecar + bot 端 `character_id` 与 `name` 复用了**同一个 `Form(...)` 单例**,FastAPI 按 marker 对象 identity 绑参,第二个参数（name）静默不绑定、回退默认值（fallback 成 cid）。ASCII/中文都中招,排除编码问题后定位。修复:每个 Form 字段独立 `Form(...)` 实例（`_FORM_ID`/`_FORM_NAME`/`_FORM_REL`）。
+
+**flag 正式开启**：`config/config.json` 写入 `vision.character_recognition`（enabled=**true**、sidecar_url、packs_dir、timeout）。restart bot 后 registry/recognizer/recognition_cache 已构造,scan_and_sync 跑通。**识别链路现已激活**（此前默认关、零行为变更；现在真正生效）。
+
+**验证（D4，全程 live web API + cookie 鉴权）**：登录 → `/characters` enabled=true、sidecar=ok → `/characters/build`（3图）embedded 3/3、samples 3 → charpack 落盘（manifest+npz+samples/0-2.jpg）→ 列表 name='凤笑梦' relation=self has_sample=true → `/sample` HTTP 200 image/jpeg → sidecar character_count=1 → identify matched id=命中。pyright 0 err、ruff 通过、相关 pytest 4 passed、vue-tsc+build 通过。napcat 未动（D6）。测试残留 charpack + DB 行已清。
+
+**已知小缺口（非阻断）**：`scan_and_sync` 只 insert 不删 orphan —— 删 charpack 后 registry 行残留,需手动清。后续可加「删除角色」端点收口。**回滚**：flag 关即全旁路；删 charpack + 清 DB 行。
+
+---
+
 ## 2026-06-01 issue17 角色识别全套落地（sidecar 基线，flag 默认关）
 
 **变更类型**：功能落地（sidecar + omubot 多文件 + admin 前后端；rebuild bot + ccip-sidecar；admin 前端 bind-mount 即生效）。承接「issue17 剩余全套完成」。**架构基线订正**：v2 文档假设进程内 CCIP，但 P3 已落地 ccip-sidecar，用户拍板**以 sidecar 为准**——recognizer 维持 HTTP client，CCIP 重依赖留 sidecar，bot 镜像不装 numpy/onnxruntime（保 P3 依赖隔离）。

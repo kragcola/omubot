@@ -50,7 +50,6 @@ declare module 'vue' {
     NTag: typeof import('naive-ui')['NTag']
     NText: typeof import('naive-ui')['NText']
     NTooltip: typeof import('naive-ui')['NTooltip']
-    NUpload: typeof import('naive-ui')['NUpload']
     PageToolbar: typeof import('./components/common/PageToolbar.vue')['default']
     RestartBotButton: typeof import('./components/common/RestartBotButton.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
