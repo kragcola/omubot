@@ -4,6 +4,147 @@
 
 ---
 
+## 2026-05-31 pmubot P1/P2 落地完成（当前 napcat 因高危验收再次待手Q验证）
+
+**变更类型**：pmubot 控制平面继续落地（`docker-compose.yml` + `pmubot/` + `scripts/backup-databases.sh` + 执行追踪回填）。本轮把 P1 高危护栏与 P2 更新接线真正做完，并补了运行态验证。
+
+**本轮完成**：
+- **P1 收口**：`pmubot/app.py` 给 `restart napcat` 加了 `ack_relogin=1` 强制确认、警示返回体与审计日志；同时把 restart 写超时从旧 5s 假失败修成 30s，`POST /api/containers/qq-bot/restart?confirm=1` 现稳定返回 `200`。
+- **P1.2 验证过正反回滚**：恢复 QQ 在线后，`disable-builtin-reply` 能把 builtin `#napcat` 的 `enableReply` 从 `true` 改到 `false`；随后 `enable-builtin-reply` 可回到 `true`，再 `disable` 回 `false`。这条链路在本轮前半段已完整跑通。
+- **P2.1 / P2.2 / P2.3 已落地**：新增 `socket-proxy-update`（build/exec/update 专用宽权限 proxy）和 `watchtower`；`/api/updates/check` 已可返回 napcat 当前 `v4.15.0`、Docker Hub 最新稳定 tag `v4.18.4` 与 `update_available=true`；`POST /api/bot/update?confirm=1` 已成功跑通一次，返回 `backup_summary=Backup daily-20260531-202004: trusted=True ok=14 failed=0 skipped=0`、`update_attempts=2`，并把 bot 镜像从 `sha256:848c2f...` 更新到 `sha256:e034ff...`。
+- **把几条现场漂移顺手修平了**：`scripts/backup-databases.sh` 里原先写死 `docker exec qq-bot uv run ...`，但当前 `qq-bot` 镜像里没有 `uv`；已改为 `/app/.venv/bin/python -m services.storage.backup create --host-mode`。另外，pmubot / watchtower 默认继承了宿主 `HTTP_PROXY`，内部 Docker API 会被错误送去代理；本轮已补 `NO_PROXY/no_proxy` 让 `socket-proxy*` 直连。pmubot 里 repo 挂载也改成与宿主一致的绝对路径 `/Volumes/OmubotDisk/omubot`，避免容器内 `docker compose` 把 bind mount 解析成宿主不存在的 `/workspace/...`。
+
+**重要现场状态（必须交接）**：
+- 为了完成 P1.4 的高危验收，本轮真实执行了 `POST /api/containers/napcat/restart?confirm=1&ack_relogin=1`。接口行为符合预期：返回警示 `napcat 已重启，可能需手机扫码恢复，请检查登录态`，但副作用也再次实锤：NapCat 日志重新出现二维码与 `登录需要手Q验证。`，`qq-bot` 日志再次出现 `WebSocket ... closed by peer` / `bot disconnected`。
+- 因此，**当前 live 现场是：容器都在，但 NapCat QQ 会话再次回到二维码 / 手Q验证态；`qq-bot` 进程在跑，但 OneBot 连接已断。** 本次验收结论不是“没事”，而是“高危守卫正确、风险真实存在且再次复现”。
+
+**交接 / 下一步**：
+- 先人工完成 NapCat 手机侧确认或扫码；当前二维码仍在 `napcat/cache/qrcode.png`（容器内 `/app/napcat/cache/qrcode.png`）。
+- 验证恢复完成的标准是：`qq-bot` 日志再次出现 `OneBot V11 384801062 connected`，此后再去碰 builtin plugin config 或继续 P3/P4。
+
+## 2026-05-31 instruction_gate DENY 路径深度审计 + 修复（P0 两防线 + P1 LLM-hint，rebuild）
+
+**变更类型**：bug 修复（代码 + config，rebuild bot）。承接上条「DENY 连发硬话术出戏」用户报告 → 深度审计 7 个极限场景 → P0+P1 修复。改 `services/llm/client.py` + `kernel/config.py` + `plugins/chat/plugin.py` + `config/config.json` + 测试。
+
+**审计暴露的 7 个极限场景缺陷（均代码实证）**：① bot↔bot 互刷"你是AI"→ 同句硬话术连发（DENY 无去重/冷却,`_EmissionGate` 首段无条件放行 arbiter 拦不住）；② severity 跨消息污染（gate 吃聚合 `conversation_text`,旧"你是AI"留在 last-3-turn 窗口对之后每条不相关消息重触发 DENY）；③ DENY 不写 timeline（bot 不记得拒绝过,对比 closing 路径会写）；④ scheduler 把 DENY 当成功 FIRE 但 `last_reply_time` 不推进（概率状态错乱）；⑤ DENY 不计 usage（thinker token 已花却漏记）；⑥ mute/异常时 DENY 仍 return None → 零输出但吞指令；⑦ 私聊也发硬话术更出戏。根因:DENY"绕过主 LLM 直发硬编码"设计在 bot↔bot burst 下四个盲区全爆（不入戏/无去重/状态三不管/不认 bot）。
+
+**修复（P0 两防线 + P1 主方案）**：
+- **P0 防线1（peer-bot 沉默）**：`LLMClient` 加 `known_other_bots` 参数（从 `config.bot_pair_guard.known_other_bots` 拍平成 QQ set）；`_apply_instruction_gate` 开头若 `user_id` 是已知 bot → 直接 return ""（pass,不 DENY 不注 hint）。把 instruction_gate 与 S1 串起来,根治 bot↔bot 反喂。
+- **P0 防线2（severity 只看当前消息）**：gate 新增 `current_message` 入参,severity 只扫当前触发消息（新增 `_latest_pending_message` 取末条 pending）,不再扫聚合 buffer。根治跨消息污染。
+- **P1 主方案（DENY 走 LLM 落人设）**：DENY 默认不再直发硬编码 + return None,改返回**人设化拒绝 hint**（`_deny_refusal_hint`,high=拒认 AI 保持人设、其它=自然回绝）注入 plugin_dynamic → 主 LLM 按凤笑梦语气生成拒绝。自动获得:入戏 + 走 sentinel dedup（治连发）+ 写 timeline + 计 usage + scheduler 状态正确。**保留 `deny_direct_emit` config（默认 false）作 legacy 直发回滚开关。**
+- **config**：`config.json` 登记 `known_other_bots={"993065015":["2708815230"]}`（🍟薯条,日志实证的 peer bot）→ 同时激活防线1 + S1 更严阈值。
+
+**验证（D4）**：重写 `test_instruction_gate_client.py`（8 例:DENY→hint 不直发 / legacy 直发 / **peer-bot 不被 gate** / **current_message 限定 severity** / ALLOW / shadow / disabled）；`test_instruction_gate.py` 纯 evaluate 不受影响。全量 `pytest`（D5 先 pkill）→ **2316 passed, 8 skipped**；ruff/pyright clean。config 实测 `deny_direct_emit=False`（新行为生效）+ `known_other_bots` 已登记。
+
+**影响 & 回滚**：改 .py + config → rebuild。回滚:`instruction_gate.deny_direct_emit=true`（回硬编码直发）或 `mode=shadow`（整体不拦）。`known_other_bots` 改 config 即调整。**注意**:防线1 只对已登记 bot 生效,未来出现新 peer bot 需登记进 `known_other_bots`。
+
+---
+
+## 2026-05-31 pmubot P0/P1 验收 + 决策（restart napcat 定级高危）+ 三文档订正
+
+**变更类型**：验收（独立实证核对执行人 P0/P1 产出）+ 用户决策固化 + 文档订正。承接下条「执行人 P0/P1 落地」。**未改执行人代码,只核对 + 改三份 tracking 文档。**
+
+**独立验收（逐项实证,非轻信声明）**：
+- ✅ **双 proxy D6 边界成立**：实测写 proxy `POST /containers/create`=403、读 proxy 写=403、写 proxy 读=403；pmubot `/api/containers` 干净 JSON；napcat/bot 全程 Up；socket `:ro`、`pmubot.env` gitignored。
+- ✅ **代码质量高**：`hmac.compare_digest`、restart 白名单、`confirm` 守卫、`trust_env=False`；`napcat_client.py` 真逆向出 WebUI 契约（`hash=sha256(token+".napcat")`→Credential→bearer），改 enableReply 非破坏式合并。
+- 🔴 **执行人的「restart napcat 重大偏差」属实**：复核 napcat 日志确认 restart 后掉回二维码（19:28/19:30 二维码,本次约 5min 自愈）。执行人按纪律停 P1+ 并记偏差表——处置正确。
+
+**用户决策（2026-05-31）**：`restart napcat` **保留但定级高危**（非删除）——`?confirm=1` 外加 `?ack_relogin=1` 守卫 + 调用后提示查登录态 + 审计 + 默认 UI 不放常用区。bot restart 仍无害。执行人将按此续做 P1.4。
+
+**三文档订正（植入实证教训,清除「restart napcat 无害」错误假设）**：派发单 §3.2（⚠️订正块 + 双 proxy P1.1 + 新增 P1.4 高危处置 + 收口订正 + 冻结决策④）；最终方案 F4/§1自愈/§4 P1 行；设计文档 §4.2 D6 实证订正块 / §5.2 接口标高危 / §A 自愈改「napcat 掉线只告警不自动 restart」。全扫确认无残留错误表述。
+
+**影响 & 回滚**：纯验收 + 文档,未动运行态/执行人代码。**遗留**：pmubot/ 未 git commit、`__pycache__` 建议 ignore。
+
+---
+
+## 2026-05-31 pmubot P0 落地完成，P1 因 NapCat 实机登录态偏差中止（代码 + 运行态辅助）
+
+**变更类型**：新增独立控制平面代码与 compose 服务（`docker-compose.yml` + `pmubot/`）；执行追踪回填到 [pmubot-dispatch-execution-2026-05-31.md](docs/tracking/pmubot-dispatch-execution-2026-05-31.md)。另有本地忽略配置 `config/pmubot.env`（`PMUBOT_TOKEN`）与运行态 WebUI `autoLoginAccount` 更新，不进 git。
+
+**已完成**：
+- P0 全绿：新增 `socket-proxy` 只读服务 + `pmubot` FastAPI/静态页，`/api/containers` 可读 `napcat/qq-bot/pmubot/socket-proxy` 状态；已做回滚演练，停掉 `pmubot/socket-proxy` 不影响 `http://localhost:8081/admin/`。
+- P1 代码已接线但**未收口**：为守 D6，最终不是单 proxy，而是 `socket-proxy`（读）+ `socket-proxy-write`（仅 restart 写）双 proxy；`pmubot` 写端已加 `PMUBOT_TOKEN` Bearer 鉴权 + `?confirm=1`。
+- NapCat WebUI client 已按真实契约封装：`hash=sha256(token + ".napcat")` 登录；后续插件配置前会先尝试 `Plugin/RegisterManager`。
+
+**关键偏差 / 当前阻塞**：
+- 官方 `docker-socket-proxy` 权限模型与原方案假设不一致：`ALLOW_RESTARTS=1` 单独开启不够；若单 proxy 改 `POST=1 + CONTAINERS=1` 又会把 `POST /containers/create` 一并放开，因此必须读写双 proxy 才守得住 D6。
+- 更严重的是：**本机实测 `restart napcat` 会直接把 NapCat 打回二维码 / 手Q验证**，`qq-bot` 已记录 `WebSocket ... closed by peer` / `bot disconnected`。这与方案里“restart 无害”相反，所以 P1+ 已停止继续推进。
+- 已通过 WebUI `QQLogin/SetQuickLoginQQ` 把 `napcat/config/webui.json` 的 `autoLoginAccount` 写成 `384801062`；当前二维码已导出到 `/tmp/napcat-qrcode-2026-05-31.png` 供本机扫码。`QQLogin/SetQuickLogin` 仍返回“登录需要手Q验证”，说明恢复需要人工手机侧确认。
+
+**交接 / 继续条件**：
+- 先人工完成手机验证或扫码，让 NapCat QQ 会话恢复。
+- 恢复后优先确认 `qq-bot` 重新连回，再继续 `pmubot` 的 P1.2（关闭 builtin `#napcat`）及后续 Wave。
+- 本轮留下的权威现场记录：追踪文档 §5 `P1 执行回执` + `偏差表`。
+
+## 2026-05-31 admin 日志页三问题修复（前端，npm build 即生效，无需 rebuild）
+
+**变更类型**：admin 前端 bug 修复 + UX（`admin/frontend`，config bind-mount，`npm run build` 已生效，无需 rebuild bot）。改 `LogsView.vue` + `global.css` + `AppPage.vue`，未动后端 .py。
+
+**问题 3「观察模式无信息」（根因最硬）**：channel 筛选 chip 用**中文 key**（`调度/收消息/…`），但 SSE 实际推的 channel 是 loguru `bind(channel=)` 的**英文值**（`scheduler/message_in/…`，events.py:206 + bot.py:81 `_CHANNEL_LABELS` 为权威映射）。精确匹配永不命中 → 观察模式（及所有 channel chip）对 live 流**全部失效**，不止观察模式；且旧 `发消息` chip 无对应 channel（实际发送 channel=`message_out`=回复）。**修**：chip 改 `{key:英文channel, label:中文}`（调度→scheduler/日程→schedule/好感→affection/心情→mood/收消息→message_in/回复→message_out/思考→thinking/系统→system/梦境→dream/B站→bilibili，删无效发消息），`OBSERVE_CHANNELS` 同步英文集合。
+
+**问题 2「刷新后无旧消息、要等重新写入」**：SSE `logs` 是 module 级**内存** ref（useSSE.ts:44），整页刷新清零；后端只推**新增**不回放 → 干等。**修**：live 模式 `onMounted` 后 `seedLiveStreamFromTail()`——取最新 bot 日志文件 tail 200 行（复用现有 `/api/admin/logs/view`）→ `parseFileLines` 解析 → 文件中文 channel 标签经 `fileLabelToChannel` 反查回英文 channel（与 live 过滤一致）→ 播种进 `sseLogs`；流非空或在看具体文件则跳过；await 期间 SSE 已到则放弃播种（防重复）。零后端改动。
+
+**问题 1「终端固定太小、不随窗口撑满」**：LogPanel `height="100%"` 依赖 flex-fill 链，但链路中 `om-fill-page`(`min-height:100%`) + AppPage 的 `om-page__surface-wrap`/`surface` 非 column-flex、无确定高度传导 → 终端塌到内容高。**修**：① `global.css` `om-fill-page` 改 `flex:1 + height:100% + min-height:0`；② `AppPage.vue` 用 `:has(.om-fill-page)` **作用域化**——仅含 fill 页（logs/sandbox）时让 `om-page__body` 转 column-flex、surface-wrap/surface `flex:1 min-height:0 column`，**其余所有页保持原内容高 surface 卡片不变**（`:has` 现代浏览器通用，admin 内部工具可用）。
+
+**验证（D4）**：`vue-tsc --noEmit` clean；`npm run build` ✓；新 bundle 实证含 `message_in`/`seedLiveStream`（LogsView-Dj41kMk2.js）+ `:has(.om-fill-page)`（AppPage CSS）；admin `/admin/` HTTP 200。**诚实说明**：问题 1 是纯 CSS flex 高度，构建保证不破坏，但**铺满效果需刷新页面目视确认**；若一次没到位按实际表现再调。问题 2/3 是逻辑修复，行为可推断。
+
+**影响 & 回滚**：纯前端，`git restore admin/frontend/src/views/logs/LogsView.vue admin/frontend/src/styles/global.css admin/frontend/src/components/common/AppPage.vue` + 重新 build 即回滚。无后端/config/DB 改动。`:has` 作用域化确保只影响 logs/sandbox 两页。
+
+---
+
+## 2026-05-31 pmubot 控制平面定稿 + 执行派发文档（纯文档，未编码）
+
+**变更类型**：架构立项收口（纯文档）。承接 supervisor 三轮审计，产出定稿 + 可交付执行的派发追踪。
+
+**两份新文档**：
+- [pmubot-final-plan-2026-05-31.md](docs/tracking/pmubot-final-plan-2026-05-31.md)：最终方案定稿，§0 决策冻结表 8 条（F1–F8）。
+- [pmubot-dispatch-execution-2026-05-31.md](docs/tracking/pmubot-dispatch-execution-2026-05-31.md)：执行派发追踪，参照 grayscale dispatch-execution 格式（状态头+执行原则 → §1 自审订正 → §2 Wave 0 前置验证 → §3 P0–P4 Wave 表（编号/一句话/关键文件/D1 grep/验证/回滚 + 收口）→ §4 总收口 → §5 偏差表+Wave0 回执 → §6 自审表）。强引导性，交能力较弱执行者。
+
+**冻结的关键架构决策（后续会话/执行者依此，勿擅改）**：
+- **薄控制平面，非重框架**——MCDReforged 式应用框架被四战线横向审计否定（Portainer/Dockge/Komodo、docker-socket-proxy、Watchtower/Diun、LitServe/BentoML）。
+- **docker 权限 = docker-socket-proxy（Tecnativa 2.5k★）**，不裸挂 sock、不自写白名单（`POST=0` 只读 / `ALLOW_RESTARTS=1` 只放行 restart）。
+- **「统一更新」是伪命题**——三组件更新档不兼容：napcat=Diun 式只通知（D6 永不自动，设备指纹反风控）、bot=CI、sidecar=Watchtower 可自动。写平面绝不统一。
+- **D6 编码化**——napcat 物理上只暴露 restart，proxy 不开 recreate 相关 API。
+- **CCIP 外挂为共享 sidecar**（~80 行 FastAPI `/identify`，不上 Triton/BentoML）——多 bot 把外挂从可选升为必然（不让 N 个 bot 各内置 numpy<2 的 CCIP）。
+- **多 bot 分野**：无状态推理（识别）多 bot 共享，relation 等 per-bot 状态留各 bot storage 绝不进共享 sidecar；napcat 必须 per-bot。
+- **pre-part0 v2 改走外挂路线**：CCIP 推理落地依赖 pmubot P3（sidecar 编排），「先内置后抽离」路线作废。
+
+**已核实的落地前置（派发 Wave 0 必验）**：① NapCat v4.15 WebUI REST API 契约未摸清（`/api/auth/login` 当前 Cannot GET）；② bot↔napcat 容器间 6099 不通（实测 502，宿主→napcat 200），pmubot 代理 WebUI 需走宿主网络或修路由；③ docker socket 在 macOS 为 `~/.docker/run/docker.sock`。
+
+**影响 & 回滚**：仅文档，无代码/配置/运行态改动。pmubot 设计为独立容器，未来落地后停掉不影响 omubot/napcat。**待用户定何时进 Wave 0。**
+
+---
+
+## 2026-05-31 E/F 簇组件分批启用 + 指令门禁/上游过滤上线（运行时 config，非 git）
+
+**变更类型**：运行时配置启用（`config/config.json`，gitignored；`docker compose restart bot` 生效，未 rebuild，napcat 未动 D6）。本条记录一串「代码早已上线但 flag 默认关」的功能本次被逐个激活的决策与证据，供后续会话审计（config.json 不进 git，否则无痕）。
+
+**背景**：全盘扫描生效配置发现一批「装好没通电」的功能——和 instruction_gate 同源，均为 grayscale Issue 15/17 E/F 簇产物，实现+测试齐全但保守默认 `enabled=false`，从未在运行态开启。逐个核实前置条件后分批启用。
+
+**本次启用清单（含核实证据）**：
+
+| 组件 | 段 | 启用值 | 前置核实 | 风险定级 |
+| --- | --- | --- | --- | --- |
+| 指令门禁 | `instruction_gate` | `enabled=true, mode=active, required_authority.high=5` | admins 名单存在；high=5 → 连管理员的破人设指令也 DENY（用户定）。容器实测：admin 破人设→deny、普通用户帮我@→deny、撒娇→comply、闲聊→pass | 中（active 真拦，普通用户指使被回怼） |
+| 上游指令过滤 | `upstream_command_filter` | `enabled=true` | `#napcat` 前缀消息实测被 `upstream_command` 拦（不入 timeline）；peer-bot 拦截依赖 `bot_pair_guard.known_other_bots`（现空，仅前缀路生效） | 低 |
+| @昵称→CQ:at | `mention_post_processor` | `enabled=true` | `name_registry` 已构造并传入（plugin.py:1234/1373）；未知名保留字面、自己不@自己 | 低（注意 LLM 乱写 `@全体成员`→全员 ping） |
+| 回复后表情 | `sticker_placement` | `enabled=true` | `send_sticker` 工具在线（日志 `[send_sticker ok]`）；群 `sticker_mode=inherit`≠off 不被禁（client.py:2195）；最多补1个+cooldown 45s+冷mood硬阻+density降频 | 低 |
+
+**重要澄清（本次排查副产物）**：用户报「bot 仍触发 napcat」——经定位**与 bot 无关**。`#napcat` 是 NapCat 容器内置插件 `napcat-plugin-builtin` 直接响应（napcat 日志 `[Plugin: napcat-plugin-builtin] 已回复版本信息`），在 OneBot 协议**之上自治**，omubot 的 upstream_filter 只能拦「这条消息不进 bot timeline」，**拦不住 NapCat 自己抢发版本信息**。要关需改 NapCat 侧（WebUI 关 `napcat-plugin-builtin` 的 `enableReply`，或容器内 index.mjs），不在 omubot 可控范围——由此引出「supervisor 控制平面」立项设计文档 [supervisor-control-plane-design-2026-05-31.md](docs/tracking/supervisor-control-plane-design-2026-05-31.md)（纯文档，未实施，用户已暂停该线）。
+
+**仍未启用（保留默认关，本次评估结论）**：
+- 🟡 观察批（中风险，开后需盯日志）：`anchor_reinjection`（[ANCHOR] 以 user 注入有复述风险）、`persona_drift`（`我是<botname>` 误伤面）、`text_preflight`（误跳单字有效消息 `好`/`6`）。
+- ⚠️ 暂缓批（需先改参数）：`schedule_overshare`（leak 裸子串 `吃饭/休息/上课` 整句删，误伤大，须先收紧正则）、`addressee_hint`（置信度算了不卡阈值，低置信指错人，应配 mention 一起 + 加门槛）、`slang_lookup`（TianAPI key 空→仅本地库，确认库有料或配 key 再开）。
+- B 类（关闭有因）：`coalesce`（待调 idle 窗口）、`memory.semantic`（embedding 需模型）、`self_mute.reconcile_enabled`（轮询成本）。
+
+**验证（D4）**：每次改 config 后 `load_config()` 实测目标值生效 + `docker compose restart bot` 后 `ChatPlugin startup complete` + 0 error；instruction_gate/upstream 走容器内 `_apply`/`should_drop_message` 行为实测。**全部 group-only + 受 `_humanization_group_allowed` 名单门控（空名单=所有群）。**
+
+**影响 & 回滚**：均为运行时 config flag，回滚 = 对应 `enabled=false` + `docker compose restart bot`（config bind mount，无需 rebuild）。无 .py 改动、无 git commit、无 DB/迁移。
+
+**观察**：活跃群目前仅 993065015（其余 silent_learn）。盯 ① mention 是否误把散文 `@词`转真@/`@全体成员`全员 ping；② sticker 补发频率是否合理、冷 mood 下应几乎不发；③ instruction_gate active 是否误拦正常请求。
+
+---
+
 ## 2026-05-31 RWS 激活 P1–P7 全量收尾 + 开 flag 激活（从空壳到名副其实的回复价值打分）
 
 **变更类型**：功能收尾 + 激活（代码 + 前端 + config）；落地 [rws-activation-plan-2026-05-31.md](docs/tracking/rws-activation-plan-2026-05-31.md) P1–P7 全量并开 flag。D3 清单 [docs/migrations/rws-activation-2026-05-31.md](docs/migrations/rws-activation-2026-05-31.md)。**注意：本批为代码改动，admin 前端已 `npm run build` 生效（D6 bind mount），但 .py 改动需 rebuild bot 才上线——本条记录截至「代码完成 + 全绿验证」，rebuild 待执行。**
