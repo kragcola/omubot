@@ -128,6 +128,7 @@ function updateValue(key: string, value: any) {
         type="error"
         size="small"
         class="config-kv__remove"
+        aria-label="删除该键值项"
         @click="removeEntry(entryKey)"
       >
         <template #icon>

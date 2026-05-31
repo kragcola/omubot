@@ -22,6 +22,7 @@ import type { LogPanelLine } from '../../components/common/LogPanel.vue'
 import RestartBotButton from '../../components/common/RestartBotButton.vue'
 import StateBadge from '../../components/common/StateBadge.vue'
 import { useSSE, type SSELogEntry } from '../../composables/useSSE'
+import { onRovingKeydown } from '../../utils/a11y'
 
 /** Level filter state.
  *  `default` = hide DEBUG but show everything else (UX choice for noise reduction).
@@ -37,6 +38,23 @@ const levelSegments: Array<{ key: LevelFilter, label: string, hint?: string }> =
   { key: 'DEBUG', label: 'DEBUG' },
 ]
 
+interface ChannelOption { key: string, label: string }
+const channelOptions: ChannelOption[] = [
+  { key: '调度', label: '调度' },
+  { key: '日程', label: '日程' },
+  { key: '好感', label: '好感' },
+  { key: '心情', label: '心情' },
+  { key: '收消息', label: '收消息' },
+  { key: '发消息', label: '发消息' },
+  { key: '回复', label: '回复' },
+  { key: '系统', label: '系统' },
+  { key: '梦境', label: '梦境' },
+  { key: 'B站', label: 'B站' },
+]
+
+type GroupFilter = 'all' | 'active' | string
+const ACTIVE_GROUPS = ['993065015', '984198159']
+
 const files = ref<string[]>([])
 const selectedFile = ref<string>('')
 const content = ref('')
@@ -45,6 +63,8 @@ const loading = ref(true)
 const viewing = ref(false)
 const refreshing = ref(false)
 const filterLevel = ref<LevelFilter>('default')
+const filterChannels = ref<Set<string>>(new Set())
+const filterGroup = ref<GroupFilter>('all')
 const searchText = ref('')
 const paused = ref(false)
 const pausedSnapshot = ref<SSELogEntry[]>([])
@@ -53,7 +73,7 @@ const fileError = ref('')
 
 // Collapsed state per source group (default: dream collapsed, bot expanded, others collapsed)
 const groupCollapsed = reactive<Record<string, boolean>>({
-  bot: false,
+  bot: true,
   dream: true,
   other: true,
 })
@@ -70,6 +90,19 @@ const filteredEntries = computed(() => {
     list = list.filter(log => log.level !== 'DEBUG')
   } else {
     list = list.filter(log => log.level === filterLevel.value)
+  }
+
+  if (filterChannels.value.size > 0) {
+    list = list.filter(log => filterChannels.value.has(log.channel || ''))
+  }
+
+  if (filterGroup.value !== 'all') {
+    const allowed = filterGroup.value === 'active' ? ACTIVE_GROUPS : [filterGroup.value]
+    list = list.filter((log) => {
+      const gMatch = log.message.match(/group=(\d+)/)
+      if (!gMatch) return true
+      return allowed.includes(gMatch[1])
+    })
   }
 
   if (searchText.value.trim()) {
@@ -114,7 +147,15 @@ const fileEntries = computed<FileEntry[]>(() => {
     const dateMatch = name.match(/(\d{4})-(\d{2})-(\d{2})/)
     const dateStr = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : ''
     const isActive = dateStr === today
-    const dateLabel = formatRelativeDate(dateStr) || name
+
+    // For rotate files, extract the time segment (e.g. "08-35" from the second timestamp)
+    const rotateMatch = name.match(/\.(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-\d{2}_\d+\.log$/)
+    let dateLabel: string
+    if (rotateMatch) {
+      dateLabel = `${formatRelativeDate(dateStr)} ${rotateMatch[2]}:${rotateMatch[3]}`
+    } else {
+      dateLabel = formatRelativeDate(dateStr) || name
+    }
 
     return {
       name,
@@ -159,7 +200,7 @@ const sourceSummary = computed(() => {
   return paused.value ? '实时流已暂停' : '实时流'
 })
 
-const filterActive = computed(() => filterLevel.value !== 'default' || !!searchText.value.trim())
+const filterActive = computed(() => filterLevel.value !== 'default' || !!searchText.value.trim() || filterChannels.value.size > 0 || filterGroup.value !== 'all')
 
 onMounted(() => {
   void loadLogFiles()
@@ -229,10 +270,38 @@ function clearSearch() {
 function resetFilters() {
   filterLevel.value = 'default'
   searchText.value = ''
+  filterChannels.value = new Set()
+  filterGroup.value = 'all'
 }
 
 function toggleGroup(key: 'bot' | 'dream' | 'other') {
   groupCollapsed[key] = !groupCollapsed[key]
+}
+
+function toggleChannel(ch: string) {
+  const s = new Set(filterChannels.value)
+  if (s.has(ch)) s.delete(ch)
+  else s.add(ch)
+  filterChannels.value = s
+}
+
+const OBSERVE_CHANNELS = new Set(['调度', '日程', '好感', '心情', '收消息', '发消息', '回复'])
+
+const isObserveMode = computed(() =>
+  filterGroup.value === 'active'
+  && filterChannels.value.size === OBSERVE_CHANNELS.size
+  && [...OBSERVE_CHANNELS].every(ch => filterChannels.value.has(ch)),
+)
+
+function toggleObservePreset() {
+  if (isObserveMode.value) {
+    resetFilters()
+  } else {
+    filterLevel.value = 'default'
+    filterChannels.value = new Set(OBSERVE_CHANNELS)
+    filterGroup.value = 'active'
+    searchText.value = ''
+  }
 }
 
 function logLevel(level: string): LogPanelLine['level'] {
@@ -371,11 +440,14 @@ function lineLevelClass(level: string): string {
             <!-- Live mode: level segment + search on left; pause + clear on right -->
             <template v-if="isLiveMode">
               <div class="logs-toolbar__group logs-toolbar__filters">
-                <div class="logs-segment" role="tablist">
+                <div class="logs-segment" role="radiogroup" aria-label="日志级别筛选" @keydown="onRovingKeydown">
                   <button
                     v-for="seg in levelSegments"
                     :key="seg.key"
                     type="button"
+                    role="radio"
+                    :aria-checked="filterLevel === seg.key"
+                    :tabindex="filterLevel === seg.key ? 0 : -1"
                     class="logs-segment__btn"
                     :class="{ 'logs-segment__btn--active': filterLevel === seg.key }"
                     :title="seg.hint"
@@ -383,6 +455,25 @@ function lineLevelClass(level: string): string {
                   >
                     {{ seg.label }}
                   </button>
+                </div>
+                <div class="logs-channel-chips">
+                  <button
+                    v-for="ch in channelOptions"
+                    :key="ch.key"
+                    type="button"
+                    class="logs-chip"
+                    :class="{ 'logs-chip--active': filterChannels.has(ch.key) }"
+                    @click="toggleChannel(ch.key)"
+                  >
+                    {{ ch.label }}
+                  </button>
+                </div>
+                <div class="logs-group-filter">
+                  <select v-model="filterGroup" class="logs-group-select">
+                    <option value="all">全部群</option>
+                    <option value="active">仅活跃群</option>
+                    <option v-for="gid in ACTIVE_GROUPS" :key="gid" :value="gid">{{ gid }}</option>
+                  </select>
                 </div>
                 <div class="logs-search">
                   <NIcon :component="SearchOutline" :size="14" class="logs-search__icon" />
@@ -397,6 +488,7 @@ function lineLevelClass(level: string): string {
                     type="button"
                     class="logs-search__clear"
                     title="清除搜索"
+                    aria-label="清除搜索"
                     @click="clearSearch"
                   >
                     <NIcon :component="CloseOutline" :size="12" />
@@ -414,6 +506,9 @@ function lineLevelClass(level: string): string {
                 </NButton>
               </div>
               <div class="logs-toolbar__actions">
+                <NButton size="small" :secondary="!isObserveMode" :type="isObserveMode ? 'primary' : 'default'" @click="toggleObservePreset">
+                  {{ isObserveMode ? '退出观察' : '观察模式' }}
+                </NButton>
                 <NButton size="small" secondary @click="togglePause">
                   <template #icon>
                     <NIcon :component="paused ? PlayOutline : PauseOutline" />
@@ -611,6 +706,13 @@ function lineLevelClass(level: string): string {
   padding: 20px;
 }
 
+.logs-sources {
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  overflow: hidden;
+}
+
 .logs-main {
   display: flex;
   flex-direction: column;
@@ -788,6 +890,72 @@ function lineLevelClass(level: string): string {
 .logs-search__clear:hover {
   color: var(--om-text-1);
   background: var(--om-surface-2);
+}
+
+/* ============ Channel Chips ============ */
+.logs-channel-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.logs-chip {
+  appearance: none;
+  border: 1px solid var(--om-border);
+  background: var(--om-surface-solid);
+  padding: 3px 10px;
+  color: var(--om-text-2);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  border-radius: 14px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.logs-chip:hover {
+  color: var(--om-text-1);
+  border-color: var(--om-border-strong);
+}
+
+.logs-chip--active,
+.logs-chip--active:hover {
+  color: rgb(var(--primary-color));
+  background: color-mix(in srgb, rgb(var(--primary-color)) 12%, transparent);
+  border-color: color-mix(in srgb, rgb(var(--primary-color)) 40%, var(--om-border));
+}
+
+/* ============ Group Filter ============ */
+.logs-group-filter {
+  display: inline-flex;
+  align-items: center;
+}
+
+.logs-group-select {
+  appearance: none;
+  border: 1px solid var(--om-border);
+  background: var(--om-surface-solid);
+  padding: 4px 24px 4px 10px;
+  color: var(--om-text-1);
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M3 5l3 3 3-3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  transition: border-color 0.15s ease;
+}
+
+.logs-group-select:hover {
+  border-color: var(--om-border-strong);
+}
+
+.logs-group-select:focus {
+  outline: none;
+  border-color: color-mix(in srgb, rgb(var(--primary-color)) 45%, var(--om-border-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, rgb(var(--primary-color)) 14%, transparent);
 }
 
 /* ============ Body ============ */
@@ -1030,6 +1198,8 @@ function lineLevelClass(level: string): string {
   flex-direction: column;
   gap: 6px;
   min-height: 0;
+  flex: 1;
+  overflow-y: auto;
   padding-right: 2px;
 }
 

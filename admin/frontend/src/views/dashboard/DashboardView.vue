@@ -25,6 +25,7 @@ import RestartBotButton from '../../components/common/RestartBotButton.vue'
 import StateBadge from '../../components/common/StateBadge.vue'
 import { onCachePipelines, useSSE } from '../../composables/useSSE'
 import type { SSECachePipelinePayload } from '../../composables/useSSE'
+import { useNowTick } from '../../composables/useNowTick'
 import CachePipelinePanel from './components/CachePipelinePanel.vue'
 import type { CachePipelineData } from './types'
 
@@ -69,12 +70,25 @@ interface DashboardHumanization {
   degraded_count?: number
 }
 
+interface DashboardSelfMuteGroup {
+  muted: boolean
+  source?: string
+  since_unix?: number | null
+  until_unix?: number | null
+}
+
+interface DashboardSelfMute {
+  groups: Record<string, DashboardSelfMuteGroup>
+  count: number
+}
+
 interface DashboardData {
   uptime_seconds: number
   usage?: DashboardUsage
   mood?: DashboardMood | null
   schedule?: DashboardSchedule | null
   humanization?: DashboardHumanization
+  self_mute?: DashboardSelfMute
 }
 
 interface DashboardHealth {
@@ -215,10 +229,12 @@ const loading = ref(true)
 const refreshing = ref(false)
 const loadError = ref('')
 const lastLoadedAt = ref('')
-const nowTick = ref(Date.now())
-let clockTimer: ReturnType<typeof setInterval> | null = null
 let unsubCachePipelines: (() => void) | null = null
 const { logs, connected } = useSSE()
+
+// Relative-time ticker — keepAlive-aware via useNowTick (pauses while this
+// page is cached). Dashboard timeline needs sub-minute freshness, so 20s.
+const { now: nowTick } = useNowTick(20_000)
 
 const compactFormatter = new Intl.NumberFormat('zh-CN', {
   notation: 'compact',
@@ -308,6 +324,15 @@ const nextSlot = computed(() => scheduleTimelineSlots.value.find(s => !s.isPast)
 const maintenanceWindow = computed(() => servicesHealth.value?.maintenance_window || null)
 const healthAlerts = computed(() => servicesHealth.value?.alerts || [])
 const humanizationStatus = computed(() => data.value?.humanization || null)
+const selfMuteStatus = computed(() => data.value?.self_mute || { groups: {}, count: 0 })
+const selfMuteEntries = computed(() =>
+  Object.entries(selfMuteStatus.value.groups || {}).map(([groupId, value]) => ({
+    groupId,
+    source: value.source || 'unknown',
+    since: formatUnixTime(value.since_unix),
+    until: formatUnixTime(value.until_unix),
+  })),
+)
 
 const usageTopGroups = computed(() => {
   const rows = usageData.value?.top_groups ?? []
@@ -472,7 +497,6 @@ const statusBadges = computed(() => {
 })
 
 onMounted(() => {
-  startClockTicker()
   unsubCachePipelines = onCachePipelines((payload: SSECachePipelinePayload) => {
     cachePipelines.value = payload as unknown as CachePipelineData
   })
@@ -480,10 +504,6 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (clockTimer) {
-    clearInterval(clockTimer)
-    clockTimer = null
-  }
   if (unsubCachePipelines) {
     unsubCachePipelines()
     unsubCachePipelines = null
@@ -543,13 +563,6 @@ function normalizeCenteredPercent(value: number | null | undefined) {
   return Math.max(0, Math.min(100, Math.round((value + 1) * 50)))
 }
 
-function startClockTicker() {
-  if (clockTimer) clearInterval(clockTimer)
-  clockTimer = setInterval(() => {
-    nowTick.value = Date.now()
-  }, 20_000)
-}
-
 function getNowMinute(timestamp: number) {
   const now = new Date(timestamp)
   return now.getHours() * 60 + now.getMinutes()
@@ -579,6 +592,16 @@ function formatGroupId(id: string) {
   if (!id) return '--'
   if (id.length <= 6) return id
   return `${id.slice(0, 3)}…${id.slice(-3)}`
+}
+
+function formatUnixTime(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '--'
+  return new Date(value * 1000).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 function logLevel(level: string): LogPanelLine['level'] {
@@ -791,6 +814,46 @@ function goTo(route: string) {
             </AppPanelSection>
           </div>
 
+          <AppPanelSection
+            class="mt-16"
+            eyebrow="SELF MUTE"
+            title="Bot 禁言状态"
+            :description="selfMuteEntries.length ? '展示当前被禁言的群及其来源。' : '当前没有检测到 bot 自身禁言。'"
+          >
+            <template #aside>
+              <StateBadge
+                :status="selfMuteEntries.length ? 'warning' : 'success'"
+                :label="selfMuteEntries.length ? `${selfMuteEntries.length} 个群` : '正常'"
+                compact
+              />
+            </template>
+            <div v-if="selfMuteEntries.length" class="dash-mute-list">
+              <AppCard
+                v-for="item in selfMuteEntries"
+                :key="item.groupId"
+                bordered
+                embedded
+                class="dash-mute-item"
+              >
+                <div class="dash-mute-item__head">
+                  <strong>{{ item.groupId }}</strong>
+                  <StateBadge status="warning" :label="item.source" compact />
+                </div>
+                <div class="dash-mute-item__meta">
+                  <span>开始 {{ item.since }}</span>
+                  <span v-if="item.until !== '--'">解除 {{ item.until }}</span>
+                </div>
+              </AppCard>
+            </div>
+            <EmptyState
+              v-else
+              compact
+              title="当前无禁言"
+              description="事件、reconcile 与 ActionFailed 反向标记都会汇总到这里。"
+              :icon="CheckmarkCircleOutline"
+            />
+          </AppPanelSection>
+
           <!-- Today learning — 3 columns: slang / style / stickers -->
           <AppPanelSection
             class="mt-16"
@@ -809,7 +872,7 @@ function goTo(route: string) {
               <!-- Slang card -->
               <div class="dash-learn" @click="goTo('/learning?stage=approved&noun=slang&date=today')">
                 <div class="dash-learn__head">
-                  <span class="dash-learn__icon" style="--tone: var(--om-warning)">
+                  <span class="dash-learn__icon dash-learn__icon--warning">
                     <NIcon :component="ChatbubbleEllipsesOutline" :size="16" />
                   </span>
                   <div class="dash-learn__head-main">
@@ -847,7 +910,7 @@ function goTo(route: string) {
               <!-- Style card -->
               <div class="dash-learn" @click="goTo('/learning?stage=approved&noun=style&date=today')">
                 <div class="dash-learn__head">
-                  <span class="dash-learn__icon" style="--tone: var(--om-info)">
+                  <span class="dash-learn__icon dash-learn__icon--info">
                     <NIcon :component="SparklesOutline" :size="16" />
                   </span>
                   <div class="dash-learn__head-main">
@@ -883,7 +946,7 @@ function goTo(route: string) {
               <!-- Stickers card -->
               <div class="dash-learn" @click="goTo('/stickers')">
                 <div class="dash-learn__head">
-                  <span class="dash-learn__icon" style="--tone: var(--om-success)">
+                  <span class="dash-learn__icon dash-learn__icon--success">
                     <NIcon :component="HappyOutline" :size="16" />
                   </span>
                   <div class="dash-learn__head-main">
@@ -1307,6 +1370,41 @@ function goTo(route: string) {
   font-variant-numeric: tabular-nums;
 }
 
+.dash-mute-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dash-mute-item {
+  padding: 14px;
+  border-radius: 12px;
+}
+
+.dash-mute-item__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dash-mute-item__head strong {
+  color: var(--om-text-1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dash-mute-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--om-text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ============ Today learning grid ============ */
 .dash-learn-grid {
   display: grid;
@@ -1347,6 +1445,18 @@ function goTo(route: string) {
   border-radius: 10px;
   color: var(--tone, var(--om-text-2));
   background: color-mix(in srgb, var(--tone, var(--om-text-2)) 12%, transparent);
+}
+
+.dash-learn__icon--warning {
+  --tone: var(--om-warning);
+}
+
+.dash-learn__icon--info {
+  --tone: var(--om-info);
+}
+
+.dash-learn__icon--success {
+  --tone: var(--om-success);
 }
 
 .dash-learn__head-main {
@@ -1732,6 +1842,9 @@ function goTo(route: string) {
 }
 
 @media (max-width: 1200px) {
+  .dash-mute-list {
+    grid-template-columns: 1fr;
+  }
   .dash-layout {
     grid-template-columns: 1fr;
   }

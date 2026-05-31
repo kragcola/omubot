@@ -28,6 +28,7 @@ import {
   type SSEGroupMessage,
   useSSE,
 } from '../../composables/useSSE'
+import { useNowTick } from '../../composables/useNowTick'
 import AppDrawerHeader from '../../components/common/AppDrawerHeader.vue'
 import AppDrawerLayout from '../../components/common/AppDrawerLayout.vue'
 import AppPanelSection from '../../components/common/AppPanelSection.vue'
@@ -515,18 +516,15 @@ function applyGroupActivitySnapshot(snapshot: SSEGroupActivitySnapshot) {
 const unsubscribeGroupMessage = onGroupMessage(applyGroupMessageEvent)
 const unsubscribeGroupActivity = onGroupActivity(applyGroupActivitySnapshot)
 
-// Drives re-render of relative-time labels ("刚刚 / N 分钟前") when no
-// new SSE event arrives — without this, a row would stay frozen on
-// "刚刚" forever until the next group message updates last_message_at.
-const nowTick = ref(0)
-const nowTickTimer = window.setInterval(() => {
-  nowTick.value += 1
-}, 30_000)
+// Drives re-render of relative-time labels ("刚刚 / N 分钟前") when no new SSE
+// event arrives — without this, a row would stay frozen on "刚刚" until the
+// next group message updates last_message_at. keepAlive-aware via useNowTick
+// (this view is meta.keepAlive, so the timer must pause while cached).
+const { now: nowTick } = useNowTick(30_000)
 
 onUnmounted(() => {
   unsubscribeGroupMessage()
   unsubscribeGroupActivity()
-  window.clearInterval(nowTickTimer)
 })
 
 function deepClone<T>(value: T): T {
@@ -1401,7 +1399,7 @@ function resetGroupPolicyDraft() {
                         :min="0"
                         :max="1"
                         :step="0.05"
-                        style="width: 100%"
+                        class="w-full"
                       />
                     </NFormItemGi>
 
@@ -1411,7 +1409,7 @@ function resetGroupPolicyDraft() {
                         :min="0"
                         :max="120"
                         :step="0.5"
-                        style="width: 100%"
+                        class="w-full"
                       />
                     </NFormItemGi>
 
@@ -1421,7 +1419,7 @@ function resetGroupPolicyDraft() {
                         :min="0"
                         :max="300"
                         :step="0.5"
-                        style="width: 100%"
+                        class="w-full"
                       />
                     </NFormItemGi>
 
@@ -1431,7 +1429,7 @@ function resetGroupPolicyDraft() {
                         :min="1"
                         :max="100"
                         :step="1"
-                        style="width: 100%"
+                        class="w-full"
                       />
                     </NFormItemGi>
 
@@ -1441,7 +1439,7 @@ function resetGroupPolicyDraft() {
                         :min="1"
                         :max="200"
                         :step="1"
-                        style="width: 100%"
+                        class="w-full"
                       />
                     </NFormItemGi>
                   </NGrid>

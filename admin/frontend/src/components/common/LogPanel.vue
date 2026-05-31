@@ -88,6 +88,11 @@ defineExpose({ scrollToBottom })
       ref="bodyRef"
       class="log-panel__body cus-scroll"
       :style="{ height: heightStyle }"
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions"
+      :aria-label="title || '实时日志'"
+      :aria-busy="paused ? 'false' : 'true'"
       @scroll="onScroll"
     >
       <ul v-if="lines.length" class="log-panel__list">

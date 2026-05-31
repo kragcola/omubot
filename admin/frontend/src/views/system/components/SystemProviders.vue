@@ -48,6 +48,7 @@ const providerTaskOrder: ProviderTaskKey[] = [
   'slang_drift',
   'slang_semantic',
   'style',
+  'style_review',
   'memo',
   'persona_import',
   'chat_private',
@@ -57,8 +58,11 @@ const providerTaskOrder: ProviderTaskKey[] = [
   'graph_edge_classifier',
   'reflection_consolidator',
   'episode_summarizer',
+  'episode_review',
+  'fact_review',
   'scheduler_eot',
   'scheduler_replay_judge',
+  'birthday_wish',
 ]
 
 const providerTaskLabels: Record<ProviderTaskKey, string> = {
@@ -72,6 +76,7 @@ const providerTaskLabels: Record<ProviderTaskKey, string> = {
   slang_drift: '黑话漂移',
   slang_semantic: '黑话语义',
   style: '风格学习',
+  style_review: '风格审核',
   memo: '记忆卡片',
   persona_import: '人设导入',
   chat_private: '私聊',
@@ -81,8 +86,11 @@ const providerTaskLabels: Record<ProviderTaskKey, string> = {
   graph_edge_classifier: '图谱边分类',
   reflection_consolidator: '反思聚合',
   episode_summarizer: '剧集摘要',
+  episode_review: '剧集审核',
+  fact_review: '事实审核',
   scheduler_eot: '调度 EOT',
   scheduler_replay_judge: '调度重放评审',
+  birthday_wish: '生日祝福',
 }
 
 const activeProvider = computed(() =>

@@ -110,6 +110,7 @@ export type ProviderTaskKey =
   | 'slang_drift'
   | 'slang_semantic'
   | 'style'
+  | 'style_review'
   | 'memo'
   | 'persona_import'
   | 'chat_private'
@@ -119,8 +120,11 @@ export type ProviderTaskKey =
   | 'graph_edge_classifier'
   | 'reflection_consolidator'
   | 'episode_summarizer'
+  | 'episode_review'
+  | 'fact_review'
   | 'scheduler_eot'
   | 'scheduler_replay_judge'
+  | 'birthday_wish'
 
 export interface ProviderTaskProfile {
   task: ProviderTaskKey | string

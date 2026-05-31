@@ -250,35 +250,35 @@ onMounted(() => {
             <div class="settings-group__title">每日自动备份</div>
             <NSpace vertical size="small">
               <NSpace align="center">
-                <NText style="width: 120px; font-size: 13px">启用</NText>
+                <NText class="bk-field-label">启用</NText>
                 <NSwitch v-model:value="settings.enabled" size="small" />
               </NSpace>
               <NSpace align="center">
-                <NText style="width: 120px; font-size: 13px">执行时间</NText>
+                <NText class="bk-field-label">执行时间</NText>
                 <NInput
                   v-model:value="settings.daily_time"
                   size="small"
                   placeholder="HH:MM"
-                  style="width: 100px"
+                  class="bk-control-sm"
                 />
               </NSpace>
               <NSpace align="center">
-                <NText style="width: 120px; font-size: 13px">保留天数</NText>
+                <NText class="bk-field-label">保留天数</NText>
                 <NInputNumber
                   v-model:value="settings.keep_days"
                   size="small"
                   :min="1"
                   :max="90"
-                  style="width: 100px"
+                  class="bk-control-sm"
                 />
               </NSpace>
               <NSpace align="center">
-                <NText style="width: 120px; font-size: 13px">默认 Profile</NText>
+                <NText class="bk-field-label">默认 Profile</NText>
                 <NSelect
                   v-model:value="settings.default_profile"
                   :options="profileOptions"
                   size="small"
-                  style="width: 180px"
+                  class="bk-control-md"
                 />
               </NSpace>
             </NSpace>
@@ -288,20 +288,20 @@ onMounted(() => {
             <div class="settings-group__title">SQLite 完整性巡检</div>
             <NSpace vertical size="small">
               <NSpace align="center">
-                <NText style="width: 120px; font-size: 13px">启用</NText>
+                <NText class="bk-field-label">启用</NText>
                 <NSwitch v-model:value="settings.quick_check_enabled" size="small" />
               </NSpace>
               <NSpace align="center">
-                <NText style="width: 120px; font-size: 13px">间隔（分钟）</NText>
+                <NText class="bk-field-label">间隔（分钟）</NText>
                 <NInputNumber
                   v-model:value="settings.quick_check_interval_minutes"
                   size="small"
                   :min="15"
                   :max="1440"
-                  style="width: 120px"
+                  class="bk-control-md-sm"
                 />
               </NSpace>
-              <NText depth="3" style="font-size: 12px; line-height: 1.6">
+              <NText depth="3" class="bk-hint">
                 巡检失败会触发紧急 pre-change 备份并发布运行时告警。
               </NText>
             </NSpace>
@@ -318,7 +318,7 @@ onMounted(() => {
     >
       <template #aside>
         <NSpace>
-          <NText depth="3" style="font-size: 12px">
+          <NText depth="3" class="bk-hint">
             上次执行：{{ lastQuickCheckLabel }}
           </NText>
           <NButton size="small" :loading="probing" @click="runQuickCheck">
@@ -331,7 +331,7 @@ onMounted(() => {
       <NSpin :show="quickCheckLoading">
         <div
           v-if="!quickCheck.results.length"
-          style="color: var(--text-color-3); font-size: 13px"
+          class="bk-empty"
         >
           尚无巡检数据；调度器开启后会按配置周期自动巡检。
         </div>
@@ -345,13 +345,13 @@ onMounted(() => {
               {{ r.ok ? 'ok' : r.quick_check }}
             </NTag>
             <span class="quick-check-row__id">{{ r.db_id }}</span>
-            <NText depth="3" style="font-size: 12px">
+            <NText depth="3" class="bk-hint">
               journal_mode={{ r.journal_mode || '?' }}
             </NText>
             <NText
               v-if="r.error"
               depth="3"
-              style="font-size: 12px; color: var(--error-color)"
+              class="bk-hint bk-hint--error"
             >
               {{ r.error }}
             </NText>
@@ -371,7 +371,7 @@ onMounted(() => {
           v-model:value="selectedProfile"
           :options="profileOptions"
           size="small"
-          style="width: 200px"
+          class="bk-control-lg"
           @update:value="loadBackups"
         />
         <NButton type="primary" :loading="backupLoading" @click="createBackup">
@@ -396,7 +396,7 @@ onMounted(() => {
       <NSpin :show="listLoading">
         <div
           v-if="displayBackups.length === 0"
-          style="color: var(--text-color-3); font-size: 13px"
+          class="bk-empty"
         >
           暂无备份记录
         </div>
@@ -424,17 +424,17 @@ onMounted(() => {
               <NIcon
                 :component="expandedId === b.backup_id ? ChevronUpOutline : ChevronDownOutline"
                 size="14"
-                style="margin-left: auto; opacity: 0.5"
+                class="backup-item__chevron"
               />
             </div>
             <div v-if="expandedId === b.backup_id" class="backup-item__detail">
               <div v-if="b.skipped_host_only?.length" class="backup-item__skipped">
-                <NText depth="3" style="font-size: 12px">
+                <NText depth="3" class="bk-hint">
                   跳过 (host-only): {{ b.skipped_host_only.join(', ') }}
                 </NText>
               </div>
               <div class="backup-item__meta">
-                <NText depth="3" style="font-size: 12px">
+                <NText depth="3" class="bk-hint">
                   路径: {{ b.path }}
                 </NText>
               </div>
@@ -530,5 +530,46 @@ onMounted(() => {
 
 .backup-item__skipped {
   color: var(--warning-color);
+}
+
+/* Form-row label column + control widths (Phase B: ex-inline) */
+.bk-field-label {
+  width: 120px;
+  font-size: 13px;
+}
+
+.bk-control-sm {
+  width: 100px;
+}
+
+.bk-control-md-sm {
+  width: 120px;
+}
+
+.bk-control-md {
+  width: 180px;
+}
+
+.bk-control-lg {
+  width: 200px;
+}
+
+.bk-hint {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.bk-hint--error {
+  color: var(--error-color);
+}
+
+.bk-empty {
+  color: var(--text-color-3);
+  font-size: 13px;
+}
+
+.backup-item__chevron {
+  margin-left: auto;
+  opacity: 0.5;
 }
 </style>

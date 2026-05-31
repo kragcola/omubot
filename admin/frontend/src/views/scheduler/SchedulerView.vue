@@ -31,7 +31,7 @@ import PageToolbar from '../../components/common/PageToolbar.vue'
 interface SlotInfo {
   consecutive_skip: number
   msg_count: number
-  pending_at: number | null
+  pending_during_generation: number
   last_fire_time: number | null
   last_user_id: string
   has_trigger: boolean
@@ -43,9 +43,26 @@ interface SlotEntry extends SlotInfo {
   groupId: string
 }
 
+interface RwsSummary {
+  available: boolean
+  flags: Record<string, boolean>
+  bandit: { available: boolean, theta?: number, observations?: number, frozen?: boolean }
+  reward: {
+    enabled: boolean
+    window_s: number
+    pending: number
+    settled: number
+    fired: number
+    skipped: number
+    avg_reward: number | null
+    positive_rate: number | null
+  }
+}
+
 const loading = ref(true)
 const refreshing = ref(false)
 const slots = ref<Record<string, SlotInfo>>({})
+const rws = ref<RwsSummary | null>(null)
 const searchText = ref('')
 const statusFilter = ref<'all' | 'muted' | 'running' | 'pending'>('all')
 const lastLoadedAt = ref('')
@@ -77,7 +94,7 @@ const filteredSlots = computed(() => {
   return slotEntries.value.filter((slot) => {
     if (statusFilter.value === 'muted' && !slot.is_muted) return false
     if (statusFilter.value === 'running' && !slot.has_running_task) return false
-    if (statusFilter.value === 'pending' && !(slot.has_trigger || slot.pending_at)) return false
+    if (statusFilter.value === 'pending' && !(slot.has_trigger || slot.pending_during_generation > 0)) return false
     if (!query) return true
 
     return `${slot.groupId} ${slot.last_user_id || ''}`.toLowerCase().includes(query)
@@ -87,7 +104,7 @@ const filteredSlots = computed(() => {
 const totalSlots = computed(() => slotEntries.value.length)
 const mutedSlots = computed(() => slotEntries.value.filter(slot => slot.is_muted).length)
 const runningSlots = computed(() => slotEntries.value.filter(slot => slot.has_running_task).length)
-const pendingSlots = computed(() => slotEntries.value.filter(slot => slot.has_trigger || slot.pending_at).length)
+const pendingSlots = computed(() => slotEntries.value.filter(slot => slot.has_trigger || slot.pending_during_generation > 0).length)
 
 onMounted(() => {
   void loadSlots()
@@ -115,7 +132,34 @@ async function loadSlots(silent = false) {
     loading.value = false
     refreshing.value = false
   }
+
+  try {
+    rws.value = await api('/api/admin/bandit/rws/summary')
+  } catch (error) {
+    console.error('Failed to load RWS summary:', error)
+    rws.value = null
+  }
 }
+
+const RWS_FLAG_LABELS: Record<string, string> = {
+  primary: '主决策',
+  shadow: '影子',
+  reward: 'Reward 回路',
+  eot: 'EOT 特征',
+  hawkes: '群热度',
+  bandit: 'Bandit',
+  dual_threshold: '双阈值',
+}
+
+const rwsFlagChips = computed(() => {
+  const flags = rws.value?.flags
+  if (!flags) return []
+  return Object.entries(RWS_FLAG_LABELS).map(([key, label]) => ({
+    key,
+    label,
+    on: Boolean(flags[key]),
+  }))
+})
 
 async function toggleMute(groupId: string, muted: boolean) {
   const action = muted ? 'unmute' : 'mute'
@@ -157,14 +201,14 @@ function formatTimestamp(timestamp: number | null) {
 function statusType(slot: SlotEntry) {
   if (slot.is_muted) return 'error'
   if (slot.has_running_task) return 'info'
-  if (slot.has_trigger || slot.pending_at) return 'warning'
+  if (slot.has_trigger || slot.pending_during_generation > 0) return 'warning'
   return 'success'
 }
 
 function statusLabel(slot: SlotEntry) {
   if (slot.is_muted) return '已静音'
   if (slot.has_running_task) return '生成中'
-  if (slot.has_trigger || slot.pending_at) return '待发送'
+  if (slot.has_trigger || slot.pending_during_generation > 0) return '待发送'
   return '正常'
 }
 </script>
@@ -222,6 +266,55 @@ function statusLabel(slot: SlotEntry) {
         accent="success"
       />
     </div>
+
+    <AppPanelSection
+      v-if="rws && rws.available"
+      eyebrow="Reply Worthiness Score"
+      title="RWS 回复价值打分"
+      class="mb-16 rws-panel"
+    >
+      <template #aside>
+        <NTag round size="small" :type="rws.reward.enabled ? 'success' : 'default'">
+          {{ rws.reward.enabled ? 'Reward 回路已接通' : 'Reward 回路未启用' }}
+        </NTag>
+      </template>
+
+      <div class="rws-panel__flags">
+        <NTag
+          v-for="chip in rwsFlagChips"
+          :key="chip.key"
+          round
+          size="small"
+          :type="chip.on ? 'info' : 'default'"
+          :bordered="!chip.on"
+        >
+          {{ chip.label }}：{{ chip.on ? '开' : '关' }}
+        </NTag>
+      </div>
+
+      <div class="rws-panel__stats">
+        <div class="rws-panel__stat">
+          <span>Bandit θ 阈值</span>
+          <strong>{{ rws.bandit.theta != null ? rws.bandit.theta.toFixed(3) : '--' }}</strong>
+          <NText depth="3">{{ rws.bandit.frozen ? '已冻结' : '学习中' }} · {{ rws.bandit.observations ?? 0 }} 观测</NText>
+        </div>
+        <div class="rws-panel__stat">
+          <span>待结算 / 已结算</span>
+          <strong>{{ rws.reward.pending }} / {{ rws.reward.settled }}</strong>
+          <NText depth="3">窗口 {{ Math.round(rws.reward.window_s) }}s</NText>
+        </div>
+        <div class="rws-panel__stat">
+          <span>发言 / 沉默</span>
+          <strong>{{ rws.reward.fired }} / {{ rws.reward.skipped }}</strong>
+          <NText depth="3">已结算决策分布</NText>
+        </div>
+        <div class="rws-panel__stat">
+          <span>平均 reward</span>
+          <strong>{{ rws.reward.avg_reward != null ? rws.reward.avg_reward.toFixed(3) : '--' }}</strong>
+          <NText depth="3">正向率 {{ rws.reward.positive_rate != null ? `${Math.round(rws.reward.positive_rate * 100)}%` : '--' }}</NText>
+        </div>
+      </div>
+    </AppPanelSection>
 
     <PageToolbar class="mb-16">
       <template #left>
@@ -307,15 +400,15 @@ function statusLabel(slot: SlotEntry) {
                 <strong>{{ formatTimestamp(slot.last_fire_time) }}</strong>
               </div>
               <div class="scheduler-slot-card__stat">
-                <span>待发时间</span>
-                <strong>{{ formatTimestamp(slot.pending_at) }}</strong>
+                <span>积压条数</span>
+                <strong>{{ slot.pending_during_generation }}</strong>
               </div>
             </div>
 
             <AppCard bordered embedded class="scheduler-slot-card__summary">
               <div class="scheduler-slot-card__summary-item">
                 <span>触发状态</span>
-                <NText>{{ slot.has_trigger ? '已排队' : '暂无待发' }}</NText>
+                <NText>{{ slot.has_trigger || slot.pending_during_generation > 0 ? '已排队' : '暂无待发' }}</NText>
               </div>
               <div class="scheduler-slot-card__summary-item">
                 <span>任务状态</span>
@@ -366,6 +459,40 @@ function statusLabel(slot: SlotEntry) {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 24px;
+}
+
+.rws-panel__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.rws-panel__stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.rws-panel__stat {
+  padding: 14px;
+  border: 1px solid var(--om-border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--om-surface-solid) 72%, transparent);
+}
+
+.rws-panel__stat span {
+  display: block;
+  color: var(--om-text-3);
+  font-size: 12px;
+}
+
+.rws-panel__stat strong {
+  display: block;
+  margin: 8px 0 4px;
+  color: var(--om-text-1);
+  font-size: 18px;
+  line-height: 1.4;
 }
 
 .scheduler-slot-grid {
@@ -444,12 +571,20 @@ function statusLabel(slot: SlotEntry) {
   .scheduler-slot-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .rws-panel__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
   .scheduler-metric-grid,
   .scheduler-slot-grid,
   .scheduler-slot-card__stats {
+    grid-template-columns: 1fr;
+  }
+
+  .rws-panel__stats {
     grid-template-columns: 1fr;
   }
 

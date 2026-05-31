@@ -13,6 +13,7 @@ import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
+import { onRovingKeydown } from '../../utils/a11y'
 
 type PluginMode = 'user' | 'system' | 'store' | 'governance'
 type PluginDetailTab = 'overview' | 'settings' | 'commands' | 'health' | 'source'
@@ -222,6 +223,10 @@ const modeOptions = [
   { key: 'store', label: '插件商店' },
   { key: 'governance', label: '治理队列' },
 ] as const
+
+// 'system' mode shares the user-plugins panel/tab — fold it onto 'user' so the
+// tablist always has exactly one aria-selected tab.
+const activeModeTab = computed(() => (mode.value === 'system' ? 'user' : mode.value))
 
 const detailTabOptions = [
   { key: 'overview', label: '概览' },
@@ -755,11 +760,16 @@ function formatCount(value: number | undefined) {
         <NSpin :show="detailLoading">
           <EmptyState v-if="detailError" title="插件详情不可用" :description="detailError" compact />
           <div v-else-if="selectedDetail" class="detail-content">
-            <div class="detail-tabs" role="tablist">
+            <div class="detail-tabs" role="tablist" aria-label="插件详情" @keydown="onRovingKeydown">
               <button
                 v-for="item in detailTabOptions"
                 :key="item.key"
+                :id="`detail-tab-${item.key}`"
                 type="button"
+                role="tab"
+                :aria-selected="detailTab === item.key"
+                :aria-controls="`detail-panel-${item.key}`"
+                :tabindex="detailTab === item.key ? 0 : -1"
                 :class="{ active: detailTab === item.key }"
                 @click="setDetailTab(item.key)"
               >
@@ -767,7 +777,14 @@ function formatCount(value: number | undefined) {
               </button>
             </div>
 
-            <section v-if="detailTab === 'overview'" class="detail-panel">
+            <section
+              v-if="detailTab === 'overview'"
+              id="detail-panel-overview"
+              role="tabpanel"
+              aria-labelledby="detail-tab-overview"
+              tabindex="0"
+              class="detail-panel"
+            >
               <h3>概览</h3>
               <div class="meta-grid">
                 <span>英文名</span><strong>{{ englishName(selectedDetail) }}</strong>
@@ -784,7 +801,14 @@ function formatCount(value: number | undefined) {
               </NSpace>
             </section>
 
-            <section v-else-if="detailTab === 'settings'" class="detail-panel">
+            <section
+              v-else-if="detailTab === 'settings'"
+              id="detail-panel-settings"
+              role="tabpanel"
+              aria-labelledby="detail-tab-settings"
+              tabindex="0"
+              class="detail-panel"
+            >
               <div class="panel-title-row">
                 <h3>配置</h3>
                 <NSpace align="center">
@@ -932,7 +956,14 @@ function formatCount(value: number | undefined) {
               </div>
             </section>
 
-            <section v-else-if="detailTab === 'commands'" class="detail-panel">
+            <section
+              v-else-if="detailTab === 'commands'"
+              id="detail-panel-commands"
+              role="tabpanel"
+              aria-labelledby="detail-tab-commands"
+              tabindex="0"
+              class="detail-panel"
+            >
               <h3>命令工具</h3>
               <div class="runtime-list">
                 <article v-for="command in selectedDetail.commands || []" :key="command.name">
@@ -951,7 +982,14 @@ function formatCount(value: number | undefined) {
               />
             </section>
 
-            <section v-else-if="detailTab === 'health'" class="detail-panel">
+            <section
+              v-else-if="detailTab === 'health'"
+              id="detail-panel-health"
+              role="tabpanel"
+              aria-labelledby="detail-tab-health"
+              tabindex="0"
+              class="detail-panel"
+            >
               <h3>健康</h3>
               <div class="meta-grid wide">
                 <span>展示状态</span><strong>{{ healthLabel(selectedDetail) }}</strong>
@@ -966,7 +1004,14 @@ function formatCount(value: number | undefined) {
               </div>
             </section>
 
-            <section v-else class="detail-panel">
+            <section
+              v-else
+              id="detail-panel-source"
+              role="tabpanel"
+              aria-labelledby="detail-tab-source"
+              tabindex="0"
+              class="detail-panel"
+            >
               <h3>包来源</h3>
               <div class="meta-grid wide">
                 <span>入口</span><strong>{{ selectedDetail.package?.entry_path || selectedDetail.package?.source_label || '系统能力声明' }}</strong>
@@ -994,11 +1039,16 @@ function formatCount(value: number | undefined) {
       <AppCard elevated bordered>
         <PageToolbar>
           <template #left>
-            <div class="plugin-tabs" role="tablist">
+            <div class="plugin-tabs" role="tablist" aria-label="插件视图" @keydown="onRovingKeydown">
               <button
                 v-for="item in modeOptions"
                 :key="item.key"
+                :id="`plugin-tab-${item.key}`"
                 type="button"
+                role="tab"
+                :aria-selected="activeModeTab === item.key"
+                :aria-controls="`plugin-panel-${item.key}`"
+                :tabindex="activeModeTab === item.key ? 0 : -1"
                 :class="{ active: mode === item.key }"
                 @click="mode = item.key"
               >
@@ -1021,7 +1071,14 @@ function formatCount(value: number | undefined) {
         </PageToolbar>
 
         <NSpin :show="loading">
-          <div v-if="mode === 'store'" class="store-view">
+          <div
+            v-if="mode === 'store'"
+            id="plugin-panel-store"
+            role="tabpanel"
+            aria-labelledby="plugin-tab-store"
+            tabindex="0"
+            class="store-view"
+          >
             <div class="store-banner">
               <NIcon :component="StorefrontOutline" />
               <div>
@@ -1049,7 +1106,14 @@ function formatCount(value: number | undefined) {
             <EmptyState v-if="!storeEntries.length" title="没有匹配的插件包" compact />
           </div>
 
-          <div v-else-if="mode === 'governance'" class="governance-list">
+          <div
+            v-else-if="mode === 'governance'"
+            id="plugin-panel-governance"
+            role="tabpanel"
+            aria-labelledby="plugin-tab-governance"
+            tabindex="0"
+            class="governance-list"
+          >
             <article v-for="entry in governanceQueue" :key="entry.name" class="governance-item">
               <div>
                 <strong>{{ entry.display_name?.zh || entry.name }}</strong>
@@ -1060,7 +1124,14 @@ function formatCount(value: number | undefined) {
             <EmptyState v-if="!governanceQueue.length" title="治理队列为空" description="本地插件包来源、manifest 与兼容性暂未发现阻塞项。" compact />
           </div>
 
-          <div v-else class="plugin-grid">
+          <div
+            v-else
+            id="plugin-panel-user"
+            role="tabpanel"
+            aria-labelledby="plugin-tab-user"
+            tabindex="0"
+            class="plugin-grid"
+          >
             <article
               v-for="plugin in visiblePlugins"
               :key="plugin.name"

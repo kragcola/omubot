@@ -87,6 +87,7 @@ function updateItem(index: number, value: any) {
         type="error"
         size="small"
         class="config-list__remove"
+        aria-label="删除该列表项"
         @click="removeItem(index)"
       >
         <template #icon>

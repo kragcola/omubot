@@ -22,14 +22,16 @@ function handleLogout() {
     <div class="flex flex-shrink-0 items-center px-12 text-18">
       <ToggleTheme />
       <Fullscreen />
-      <NIcon
-        :size="20"
-        title="退出登录"
-        class="cursor-pointer opacity-70 hover:opacity-100"
+      <button
+        type="button"
+        class="om-iconbtn"
+        aria-label="退出登录"
         @click="handleLogout"
       >
-        <LogOutOutline />
-      </NIcon>
+        <NIcon :size="20">
+          <LogOutOutline />
+        </NIcon>
+      </button>
     </div>
   </AppCard>
 </template>

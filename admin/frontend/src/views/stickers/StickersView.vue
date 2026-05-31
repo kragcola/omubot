@@ -33,6 +33,7 @@ interface Sticker {
   id: string
   description: string
   usage_hint: string
+  ocr_text: string
   send_count: number
   source: string
 }
@@ -57,7 +58,7 @@ const filteredStickers = computed(() => {
   if (!query) return stickers.value
 
   return stickers.value.filter(sticker =>
-    [sticker.id, sticker.description, sticker.usage_hint, sticker.source]
+    [sticker.id, sticker.description, sticker.usage_hint, sticker.ocr_text, sticker.source]
       .join(' ')
       .toLowerCase()
       .includes(query),
@@ -73,6 +74,7 @@ const pagedStickers = computed(() => {
 
 const describedCount = computed(() => stickers.value.filter(sticker => Boolean(sticker.description?.trim())).length)
 const hintedCount = computed(() => stickers.value.filter(sticker => Boolean(sticker.usage_hint?.trim())).length)
+const ocrCount = computed(() => stickers.value.filter(sticker => Boolean(sticker.ocr_text?.trim())).length)
 const totalUsage = computed(() => stickers.value.reduce((sum, sticker) => sum + Number(sticker.send_count || 0), 0))
 
 onMounted(() => {
@@ -218,6 +220,13 @@ function resetFilters() {
         accent="info"
       />
       <MetricCard
+        title="已识别文字"
+        :value="ocrCount"
+        hint="已提取图上文字（OCR）的素材数量"
+        :icon="SearchOutline"
+        accent="info"
+      />
+      <MetricCard
         title="累计发送"
         :value="totalUsage"
         hint="当前素材库累计发送次数"
@@ -313,6 +322,10 @@ function resetFilters() {
             <p class="sticker-card__hint">
               {{ sticker.usage_hint || '还没有编写使用提示。' }}
             </p>
+
+            <NTag v-if="sticker.ocr_text?.trim()" size="small" round :bordered="false" type="info">
+              图上文字：{{ sticker.ocr_text }}
+            </NTag>
           </div>
         </AppCard>
 
@@ -365,6 +378,10 @@ function resetFilters() {
                   <span>来源</span>
                   <strong>{{ selected.source || '--' }}</strong>
                 </div>
+                <div class="stickers-detail__stat stickers-detail__stat--full">
+                  <span>图上文字（OCR 自动识别）</span>
+                  <strong>{{ selected.ocr_text?.trim() || '未识别到文字' }}</strong>
+                </div>
               </div>
             </AppPanelSection>
 
@@ -414,7 +431,7 @@ function resetFilters() {
 <style scoped>
 .stickers-metric-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -522,6 +539,10 @@ function resetFilters() {
   border: 1px solid var(--om-border);
   border-radius: 14px;
   background: color-mix(in srgb, var(--om-surface-solid) 72%, transparent);
+}
+
+.stickers-detail__stat--full {
+  grid-column: 1 / -1;
 }
 
 .stickers-detail__stat span,

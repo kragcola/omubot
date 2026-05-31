@@ -5,10 +5,12 @@ const app = useAppStore()
 </script>
 
 <template>
-  <NIcon
-    :size="20"
-    :component="app.isDark ? SunnyOutline : MoonOutline"
-    class="mr-16 cursor-pointer opacity-70 hover:opacity-100 transition-opacity"
+  <button
+    type="button"
+    class="om-iconbtn mr-16"
+    :aria-label="app.isDark ? '切换到浅色主题' : '切换到深色主题'"
     @click="app.toggleTheme()"
-  />
+  >
+    <NIcon :size="20" :component="app.isDark ? SunnyOutline : MoonOutline" />
+  </button>
 </template>

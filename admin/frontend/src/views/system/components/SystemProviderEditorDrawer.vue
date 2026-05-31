@@ -129,7 +129,7 @@ const visible = computed({
                     :min="1"
                     :step="128"
                     clearable
-                    style="width: 100%"
+                    class="w-full"
                     @update:value="value => emit('patch', index, { max_tokens: typeof value === 'number' ? value : null })"
                   />
                 </NFormItemGi>

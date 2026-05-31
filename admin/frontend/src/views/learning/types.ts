@@ -72,6 +72,12 @@ export interface StageStripItem {
   byNoun: Record<LearningNounKey, number | null>
 }
 
+export interface LearningItemTag {
+  key: string
+  value: string
+  label: string
+}
+
 export interface LearningItem {
   id: string
   noun: LearningNounKey
@@ -86,6 +92,7 @@ export interface LearningItem {
   deep_link: string
   review_drawer: 'slang' | 'style' | 'episode' | 'consolidator' | null
   source: string
+  tags: LearningItemTag[]
 }
 
 export interface LearningItemsResponse {
