@@ -96,7 +96,7 @@
 | U1 - U13 | ✅ | 所有 utterance 工具链已收敛 | 同上 |
 | V0 - V17 | ✅ | context_providers / register_classifier 等 7 旗标已配置启用 | 同上 |
 | 灰度-1 | 🟡 | rws_shadow=true 影子比对在线，待最终验收 | 同上 |
-| 灰度-2 / 灰度-3 | ⏸ | 阻塞于 Part 6 bugfix（balanced 故障未结案前不推进） | — |
+| 灰度-2 / 灰度-3 | 🟡 | bugfix Phase 1 全绿，阻塞解除；待灰度验收 | — |
 
 ### 4.2 Part 2-3（输入感知 + 群上下文，多 wave 合并执行）
 
@@ -126,8 +126,8 @@
 | 段位 | 状态 | 当前内容 / 阻塞 | 关联 |
 |---|---|---|---|
 | P5.0 - P5.4 | ✅ | 分段决策器与字数 / 标点 / 子句切分主路径已收敛（P5.4 用户授权代验收）| [part5-execution](omubot-humanization-part5-execution.md) |
-| P5.5 | 🟡 ⚠️ | 代码已落地（default 翻 True + `_legacy_segment_path` 删除 + 1980 passed），但 2026-05-27 误判验收已撤回 — 与 Part 6 bugfix §1.2 故障强耦合（bugfix Phase 1A 改名 `disable_natural_split`→`streaming_already_emitted` 会重构 P5 fallback 路径），且 balanced 实测「单段死锁」证伪 P5 默认 True 在 profile 干预下真正分段 | 同上 |
-| P5.6 | ⏳ | 阻塞于 bugfix Phase 1 全绿后 P5.5 重新判定 | 同上 |
+| P5.5 | ✅ | bugfix Phase 1 全绿（2072 passed），`streaming_already_emitted` 重构已落地，`disable_natural_split` invariant 对齐；阻塞解除 | 同上 |
+| P5.6 | 🟡 | bugfix Phase 1 全绿，P5.5 阻塞解除；待文档收口 | 同上 |
 
 ### 4.6 Part 6（三档 profile + 源生侧）
 
@@ -138,7 +138,7 @@
 | P6.0.x1 - P6.0.x5 | 🟡 | profile 注入链路 | 同上 |
 | P6.0.y1 - P6.0.y4 | 🟡 | QQInteractionsConfig 11 字段 ResolvedHumanization 已就位（5/27 重 build 镜像后） | 同上 |
 | P6.1 - P6.13 | 🟡 | Wave 1-6 全部落地，pytest 45 全 pass | 同上 |
-| 最终验收 | 🔥 阻塞 | balanced 上线后单段死锁，审查 + 派单已出 | [bugfix-part1](omubot-humanization-part6-bugfix-part1.md) |
+| 最终验收 | 🟡 | bugfix Phase 1 全绿（2072 passed），全 wave 代码已部署，待灰度体感验收 | [bugfix-part1](omubot-humanization-part6-bugfix-part1.md) |
 
 ### 4.7 Part 6 Bugfix Part 1（balanced 故障紧急审查）
 

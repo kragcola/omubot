@@ -1,6 +1,7 @@
 # Omubot 拟人 Part 4 v2 — 记忆与关系系统的修订版
 
 > 状态：2026-05-24 v1（已废）→ 2026-05-26 v2（已废，过度工程化）→ 2026-05-26 v2-修订版（本文）。
+> **2026-05-29：本文为设计文档，执行派单见 [omubot-humanization-part4-execution.md](./omubot-humanization-part4-execution.md)（经代码库审计修正 7 处过时假设）。**
 > 触发：v2 把 MaiBot 当作同代基线后，为了"超越同代"反而堆砌了 4 件 surpass-style 中间层（HEG 超图 / 5 信号 EBR + generative replay / ε-budget + 红队 / Chronos SVO + BDI 校准子表）——逐项审查后发现 8/14 项在 Omubot 实际部署语境（个人运行的 QQ 熟人群闲聊 bot、admin = 用户本人）下 **ROI 负向**：威胁模型不匹配、需求频率极低、为套用论文形式而引入。
 > 本版只保留 ROI 正向的 6 项改动，并明确区分「机制层面的代际差」（RWS 跨层联动）与「形式层面的代际差」（论文 keyword 形式）：前者是真正的超越，后者是创新泡沫。
 

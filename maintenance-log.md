@@ -4,6 +4,1371 @@
 
 ---
 
+## 2026-05-31 RWS 激活 P1–P7 全量收尾 + 开 flag 激活（从空壳到名副其实的回复价值打分）
+
+**变更类型**：功能收尾 + 激活（代码 + 前端 + config）；落地 [rws-activation-plan-2026-05-31.md](docs/tracking/rws-activation-plan-2026-05-31.md) P1–P7 全量并开 flag。D3 清单 [docs/migrations/rws-activation-2026-05-31.md](docs/migrations/rws-activation-2026-05-31.md)。**注意：本批为代码改动，admin 前端已 `npm run build` 生效（D6 bind mount），但 .py 改动需 rebuild bot 才上线——本条记录截至「代码完成 + 全绿验证」，rebuild 待执行。**
+
+**接手现场（前一会话中断）**：P1 reward 回路 / P3 关系信号 / P4 thompson bandit 已写但**未提交、维护日志无条目、三处红**——`bandit.py` 残留 `import time`/`_last_decay_ts`(ruff)、`memory_signals.py` 8 个 pyright `object` narrow 错、`test_admin_bandit.py`/`test_rws.py` 旧 epsilon 断言被 thompson 默认打破(2 failed)；且 config.json 只开 shadow/primary，reward 回路空转、特征空置、bandit 不学。
+
+**改动**：
+- **收尾(让全绿)**：删 bandit 死代码；memory_signals getattr 标 `: Any` + 调用点 `cast(Any, fn)`(8 错→0)；拆 `test_rws` 旧断言为 epsilon(显式 algo) + thompson 方向测试、改 `test_admin_bandit` 为 thompson 语义(坏 fire 升 theta)；补 P1 **D2 cancel-path** 测试(CancelledError 必上抛、不重复 observe、不污染下次 run)。
+- **P4**：config 加 `rws_bandit_algo`/`min_obs`/`decay_per_obs`；scheduler 加 `_hint_global`/`_hstr_global` 并在 bandit 构造时读入(此前写死类默认)。
+- **P5 双阈值**：`RWSExplanation` 加 `im_score`(值不值得说)/`interrupt_score`(此刻合不合适)——同一组 term 拆 intent vs timing(eot/hawkes/skip_pressure/schedule) 双 sigmoid；新增 `dual_decision()`；scheduler 在 `rws_dual_threshold` 开时按 role 选 interrupt 门(主动插话 0.65 > 被寻址 0.5)，两门同过才发。**additive——旧 `score`/`decision` 不动，关 flag 即回单 score。**
+- **P6 看板**：scheduler 加 `get_rws_reward_summary`(读 `rws_reward` runtime_metric + bandit state + flags，复用 block_trace store 无新 schema)；bandit router 加 `GET /bandit/rws/summary`；SchedulerView 加 RWS 面板(7 个 flag chip + 待结算/已结算 + 发言/沉默 + 平均 reward/正向率 + bandit θ/观测)。
+- **P7 边界固化**：notify 内插 `RULE LAYER`(@/closing/followup/correction/video → `_fire()`+`return`，规则在前)与 `GRAY ZONE`(RWS/role/概率仅在此)双标记注释 + 防回潮约束(打分不得复活规则层 skip、不得否决规则层 fire)。
+- **激活**：config.json 开 `rws_reward`+`rws_eot`+`rws_hawkes`+`rws_bandit`(unfreeze)+`rws_dual_threshold` + 全阈值显式写(window 300s / im 0.5 / interrupt 0.5 / proactive 0.65 / min_obs 50 / decay 0.99 / algo thompson)。
+
+**P1 机制(中断前实现、本次验证)**：fire/skip 决策入 `RWSRewardQueue` → 后台 settle loop 过 300s 窗口读 timeline turn 增量算反应(有 turn=被理睬/无=致冷) → reward 公式 `ack(+1)−cold(.8)−neg(1)` clamp[-1,1](**ack 压不过 neg=P6 结构性防挑衅，Pang et al. 写死权重符号**) → `observe` 回灌 bandit + 落 `rws_reward` metric。
+
+**集成验证(激活后无崩)**：eot 自建 classifier、`_eot_probability` 只读 cache+异步刷、miss 回退 0.5(非阻塞优雅降级)；hawkes 由 chat plugin 建 cache+refresher 传入、miss 回退 estimate_rho；bandit thompson+unfrozen、`observations<50` 只用先验 theta(冷启动不漂移)。全 flag 开构造 scheduler 实测：reward_queue/bandit(thompson,unfrozen,min_obs50)/eot_classifier 全在、`get_rws_reward_summary().available=True`、close 干净。
+
+**验证(D4)**：全量 `pytest`(D5 先 pkill) → **2314 passed, 8 skipped, 0 failed**(中断基线 2 failed→全绿)；ruff All passed；pyright `scheduler_rws/`+`config.py`+`bandit router` 0 errors；前端 vue-tsc clean + `npm run build` ✓。config `load_config()` dump 15 个 RWS flag 全为目标值。**D1 同模式**：compute_rws/observe/feature 注入点全核对，P5/P4 additive 不破现有调用者。
+
+**已知非阻塞**：`scheduler.py` 5 个 `slot.* reportOptionalMemberAccess` pyright 告警是 `_do_chat` 深嵌套 narrowing 假阳性、**本次未触碰**、C0/C1/C3 维护日志已记为既有 pyright 债(顶部 `if slot is None: return` 已护)，不在本次范围。
+
+**影响 & 回滚**：改 .py + 前端 + config.json。**回滚**：`config.json rws_primary=false` 一键退回固定阈值概率；分阶退 `rws_reward`/`rws_eot`/`rws_hawkes`/`rws_dual_threshold`=false 或 `rws_bandit_freeze=true`/`rws_bandit_algo=epsilon`。纯内存 + 复用 runtime_metric 落盘，**无新 DB schema/迁移**；flag 回退无需 rebuild。
+
+**待执行 & 观察**：① **rebuild bot 上线**(本批含 .py 改动)；② 上线后看 admin 调度器页 RWS 面板——确认 reward 回路真结算(settled 增长)、bandit 过 min_obs 后 theta 开始动、cold/neg 硬负在压制(无 reward-hacking 漂移)、@bot 走规则层不打分(P7 边界生效)。
+
+---
+
+## 2026-05-31 S1 bot↔bot 循环行为熔断 — 编码上线（治 P0 复发）
+
+**变更类型**：bug 修复（代码 + config，已 rebuild 上线）；治 bot↔bot 互@死循环（P0 反复复发）。D3 清单 [docs/migrations/s1-botloop-guard-2026-05-31.md](docs/migrations/s1-botloop-guard-2026-05-31.md)。
+
+**根因（前已查）**：`BotPairLoopGuard._pair_key` 只在 `is_known_peer` 真时建 key → 熔断只对已登记 QQ 的 bot 生效，未登记新 bot（如 03:46 薯条 2708815230）完全不设防；且 `enabled=False`。
+
+**改动**：① `kernel/bot_pair_guard.py`：deque 存 `(ts, direction)`；`_pair_key` 去 `is_known_peer` 门槛（对**任意 peer** 建 key，仅排除 self/空）；熔断改 **方向翻转计数** `_count_alternations >= 阈值`（out/in 来回才算，同向连发=0 翻转→不误伤用户刷屏）；双阈值（任意 peer `loop_alt_threshold` / 已知 bot 更严 `known_peer_alt_threshold`）。② `kernel/config.py`：enabled 默认改 **True**（P0 防护不该默认关）+ 两阈值字段（默认 10/6）。③ `plugins/chat/plugin.py`：构造传两阈值。④ `config/config.json`：enabled=true + loop_alt=10 + known_alt=6 + 注释。**用户定阈值：5 个来回=10 次方向翻转；无回退 flag。** inbound(router:362)/outbound(scheduler:1520) 接线本已就绪，未动。
+
+**验证（D4）**：重写 `tests/test_bot_pair_guard.py` 10 用例（含**未登记 peer 也熔断**=P0 直接回归、**同向连发不误伤**）；改 `test_humanization_config.py`（默认 True + 阈值）、`test_b_cluster_pipeline_e2e.py`（交替序列触发）。全量 `pytest` → **2295 passed, 8 skipped**；ruff/pyright clean。rebuild 后启动无 error，容器实测 enabled=True/loop_alt=10/known_alt=6/交替逻辑在。
+
+**关键设计**：用"方向翻转数"而非"消息计数"判对刷——bot↔bot 你来我往(out,in,out,in…)翻转密集；用户连发(in,in,in…)0 翻转。天然区分"对刷"vs"刷屏"，10 次翻转(5 来回)真人极罕见，不误伤。`known_other_bots` 清单降级为"加严信号"，不再是熔断前提（治"靠清单太脆"）。
+
+**影响 & 回滚**：改 .py + config.json → 已 rebuild。回滚 = `config.json bot_pair_guard.enabled=false`（guard=None 旁路，无需 rebuild）。纯内存计数，无 DB/状态。
+
+**观察**：扒 `pair_guard_suppressed` metric，确认 bot↔bot 对刷被掐断、suppressed 的确是对刷方。（S3 触发分层已迁出至 RWS plan P7；S4 coalesce 启用待审。）
+
+---
+
+## 2026-05-31 回复调度同类方案 S1/S3/S4 实施方案（待审查，未编码）
+
+**变更类型**：实施方案（纯文档，无代码改动）。文档 [docs/tracking/reply-scheduling-impl-plan-2026-05-31.md](docs/tracking/reply-scheduling-impl-plan-2026-05-31.md)。承接同类项目代码审读（见下条）。**S2（弱回复 prompt 逃生口）按用户意见剔除——弱回复多档状态机是有意设计，保留不动。**
+
+**核实到的现状缺陷（决定方案形态）**：① OneBot/QQ **无平台级 bot 标志**（sub_type 只有 normal/anonymous/notice，sender.role 是群角色），无法照搬 Discord `author.bot` 入口过滤；② `kernel/bot_pair_guard.py` `BotPairLoopGuard` 已实现且接在 router 入口（:1028），但 `_pair_key`（:70-77）**只在 `is_known_peer` 为真时建 key → 熔断只对已登记 QQ 清单的 bot 生效，未登记的新 bot 完全不设防**（P0 复发的代码根因），且线上 `enabled=False`、`known_other_bots={}`；③ `MessageCoalescer` 已实现、router 已接，但线上 `enabled=False`（idle 5s/max 12s）。
+
+**三条方案**：
+- **S1（最优先，治 P0 根）**：改 `BotPairLoopGuard._pair_key` 去掉 `is_known_peer` 前提——对**任意 peer** 按 per-pair 60s 滑窗算"互回轮数"，行为熔断为主、known 清单降级为加严信号；outbound 也计数（双向才能识别对刷）；enabled 默认改 true。防误伤靠"只计涉及 bot 自身的 self↔peer 对刷 + 保守阈值（60s≥6轮）+ 误伤代价仅 60s cooldown"。
+- **S3（边界固化）**：规则层（@/熔断/黑名单，确定性）在前、RWS 退为仅灰区（非寻址）打分，固化 scheduler 现有 bypass 分层、防未来再往"要不要说"塞互相否决的层（呼应通道审计分裂点 A）。
+- **S4（启用+调参）**：开 `coalesce.enabled=true`，评估 idle_window 5s→2-3s（体感灰度）；只作用非寻址消息、@bot 不被 debounce。
+
+**三条均为改造/启用既有件，非新建**：S1 改造 BotPairLoopGuard、S3 固化 scheduler bypass、S4 启用 MessageCoalescer。
+
+**二次复审（避免重复造轮子，全仓 Explore 确权后写入方案"复用基线"小节）**：确认净新建工作量极小，并纠正初稿两处高估——① S1 的 **outbound 已接线**（`scheduler.py:1520` `_send_to_group` 后已调 `record_outbound`，初稿误写"需确认"，实为已接、只是被 known 门槛 no-op，放开即生效）；② S3 的规则层 **`evaluate_group_gate_shadow`（reply_workflow.py:588）已产出完整 rule 决策**（现为 shadow），S3 可"提权"而非"搭骨架"；黑名单 `blocked_users` 已在 router.py:1017 拦截。**最终净新建**：S4=改 flag；S1=改 `bot_pair_guard.py` 的 `_pair_key`/`is_known_peer` 一处门槛 + config 阈值字段（滑窗 `_events` deque / cooldown / inbound+outbound 接线 / metric / bind_self_id 全复用）；S3=收敛/提权现有 bypass 链与 shadow gate，无新分层骨架。is_bot 判定放开 known 后不需要（名单降级为加权输入）。
+
+**S3 迁移（用户决定）**：S3（触发分层：规则在前、RWS 退灰区）本质是 RWS 作用域界定，按用户意见从本实施方案**迁出至 [rws-activation-plan-2026-05-31.md](docs/tracking/rws-activation-plan-2026-05-31.md) P7**，与 P1–P6 一同推进（P7 界定"RWS 只管灰区、不碰规则层"，是 RWS 激活的边界前提）。本实施方案现仅剩 **S1 + S4**。
+
+**影响 & 回滚**：仅方案文档。**待用户审查（S1 互回阈值 N=6 是否合理 / S4 idle 是否收到 2-3s）；确认后每条出 D3 清单再编码。**
+
+---
+
+## 2026-05-31 同类项目代码审读 → 回复调度同类方案（调研，未改代码）
+
+**变更类型**：同类开源项目源码审读 + 方案（纯文档，无代码改动）。报告 [docs/tracking/peer-projects-codeaudit-reply-scheduling-2026-05-31.md](docs/tracking/peer-projects-codeaudit-reply-scheduling-2026-05-31.md)。
+
+**方法**：拉取三个成熟同类项目至本地审读（**只读 .py 源码，不读 README/文档**，审毕已删本地副本）：① nonebot-plugin-moellmchats ② nonebot-plugin-llmchat ③ LangBot（pipeline 架构）。
+
+**代码实证三结论**：① **三项目"何时回"全是规则/概率（`random.random()<p` + `to_me()` + 可插拔规则 OR），无一用 logistic 打分**——omubot 的 RWS 是这一类里最复杂的，复杂度未换收益。② **防 bot↔bot 循环：两项目完全没有，LangBot 也只在 Telegram/Discord adapter 入口各写一份 `author.bot`/`==self.user.id` 硬过滤、覆盖不全**——正解是**消息入口基于发送方身份的集中式硬过滤**，而非 omubot 那种"pair_guard 默认关 + 靠登记 QQ 清单"的脆弱配置。③ **弱回复成熟做法 = prompt 逃生口（llmchat 让 LLM 输出 `<botbr>` 表示不回）+ 攒批合并**，比 omubot 的 closing/companion 多档状态机简洁、且无"与 @ 路径不相交"的盲区。
+
+**同类方案（S1–S4，否决此前"开 pair_guard 配置 + 弱回复打补丁"）**：S1 防循环改成消息入口集中硬过滤 + 行为熔断（治 P0 复发根，最优先）；S2 引入 `<botbr>` 式 prompt 逃生口替代弱回复多档（同治"缓一下/接住你"敷衍套话——force_reply 逼回 + 无逃生口的产物）；S3 触发分层"规则在前、RWS 退为灰区打分"（呼应通道审计分裂点 A）；S4 复用已有 `MessageCoalescer` 对齐 debounce。
+
+**定性**：omubot 在这一类里是"过度工程"端（别人一行掷骰+一个逃生口的事，omubot 用了 RWS+B2+necessity+多档弱回复+wait 兜底→多层互相否决、P0 反复）；但 omubot 的拟人/关系驱动方向比三个参照更高级。结论非"削成 llmchat"，而是**用三项目验证过的简洁底座（入口硬过滤+prompt 逃生口+规则在前）兜住"必须对"的部分，打分/拟人只用在灰区**。
+
+**影响 & 回滚**：仅调研文档，无改动。**待用户定是否按 S1→S4 推进；S1 是 P0、独立、比开 pair_guard 配置更根本。**
+
+---
+
+## 2026-05-31 烤群三问题排查（bot↔bot 循环 / 扁平化用语 / 弱回复失效，未改代码）
+
+**变更类型**：线上日志排查（纯文档，未改代码/配置）。报告 [docs/tracking/fix-botloop-flat-weakreply-2026-05-31.md](docs/tracking/fix-botloop-flat-weakreply-2026-05-31.md)。
+
+**三现象同源**：03:46–03:48 群 993065015，bot `384801062`(emu) 与另一 bot `2708815230`(🍟薯条) 每 8–10s 互@一次连续 15+ 轮（晚安/剪视频客套空转），其间 bot 两次发 "我先缓一下\n马上接你" 占位语。
+
+**根因（关联链）**：
+- **① bot↔bot 循环（P0 复发）**：`bot_pair_guard.enabled=False` + `known_other_bots={}` 实测——防循环机制**线上没开**，对方 bot 未登记 → 每条对方@都 `force_reply`(is_addressed=True/at_mention) → 无限对@。**核实 `_maybe_drop_pair_guard`(router.py:1028) 先于 @判定/fire → ① 是纯配置修复**：`config.json` 开 enabled + 登记对方 QQ + restart，无需 rebuild。
+- **② 扁平化套话**："缓一下/接住你" 是 LLM 在 force_reply 逼回 + 对方全是无内容客套时的逃避占位模板；force_reply 跳过 thinker（client.py:3884 `if not force_reply`）连"值不值得实质回"都没判。根治依赖①。
+- **③ 弱回复失效**：closing 注入要求 `not is_addressed`（router.py:1369），而 bot↔bot 晚安全是@（is_addressed=True）→ 永不进 closing 分支；且 force_reply 跳过 thinker → light_kind/closing 判定无从触发。全天 thinker 仅跑 5 次、closing 注入 0 次。**弱回复与 @ 路径结构性不相交**（设计盲区）。
+
+**修复优先级（待用户定）**：① 最高（纯配置，待对方 bot QQ 清单）；③ 次之（评估 force_reply 路径是否该让 closing/light 有机会跑）；② 顺带（①断后复看）。
+
+**影响 & 回滚**：仅排查文档，无改动。**待用户确认对方 bot QQ 清单后执行①配置修复。**
+
+---
+
+## 2026-05-31 RWS 激活方案文档（方案，未实施）
+
+**变更类型**：方案文档（纯文档，无代码改动）
+
+**背景**：承接 RWS 全量审计（[rws-necessity-reaudit-2026-05-31.md](docs/tracking/rws-necessity-reaudit-2026-05-31.md)，缺陷 D1–D7 + 前沿调研）。审计结论：RWS 方向对但被配成空壳、reward 回路断路（`bandit.observe` 仅 admin 手动可达，运行时无反馈）。将激活路径写成可执行方案 [docs/tracking/rws-activation-plan-2026-05-31.md](docs/tracking/rws-activation-plan-2026-05-31.md)。
+
+**方案要点（P1–P6，接缝已核实行号）**：P1 修 reward 回路（延迟归因队列 + 组合 reward「被理睬−致冷−强负」+ 复用 `block_trace_store.record_runtime_metric` 落盘，治 D1/D7，地基）；P2 开 eot（话轮完整概率连续值，治 D2 最强特征）；P3 addressee 门控化 + hawkes EMA 近似（治 D2/D3）；P4 bandit epsilon-greedy→Beta-Bernoulli Thompson Sampling + warm-start + 观测门槛/衰减（治 D5）；P5 单 sigmoid→双阈值 imThreshold/interruptThreshold（治 D6，呼应通道审计分裂点 A）；P6 防 reward hacking/dark pattern（多目标 + KPI 看板，与 P1 绑定非可选——Pang/De Freitas 实证 reward 选错会训出挑衅型/纠缠型 bot）。
+
+**最小关键路径 = P1+P2+P6**：reward 回路接通 + 最强特征开 + 防护到位。全程 shadow 优先、每阶独立 flag、`rws_primary=false` 一键回退、复用既有落盘无新 DB schema。
+
+**复审更正（避免重复造轮子，全仓 Explore 复审后写入方案 §0.5）**：RWS 的"算分—决策—bandit—落盘—replay"框架几乎全已搭好并接进 scheduler，真正缺的只是反馈闭环接线。**P2 eot 不用新建**——`scheduler_eot/classifier.py` EOTClassifier 已接进 `RWSFeatures.eot_probability`，只是 `rws_eot` flag 关着，开关即生效；**P3 hawkes 不用新建**——`scheduler_hawkes` proxy 已创建/已 start/已喂 RWS，`rws_hawkes` flag 关着；KPI 落盘复用 `record_runtime_metric`、bandit 状态复用 `GET /bandit/rws`、replay 复用 `ReplayStore`（`record_run` 全仓无生产调用方，补喂数即可）。**真正要新建的只有四样**：① P1 待结算队列（复用 `_reconcile_self_mute_loop` loop 范式 + `on_post_reply` 入队挂点 + 现成 `_latest_assistant_reply_after`/`recent_interaction_count`/`qq_interactions.is_tome` 测反应 + 现成 `observe_rws_bandit` 回灌）；② Thompson bandit（P4 后期，先用现成 epsilon 跑通）；③ RWS admin 看板前端；④ memory_signals 极性改用现成 MoodEngine valence。**P1 最小闭环 = 纯接线、零新数据结构。**
+
+**2026-05-31 后续修订**：① S3（触发分层）已从 reply-scheduling 实施方案**迁入本 plan 作 P7**（界定"RWS 只管灰区、规则层在前"，是 P1–P6 的作用域前提）。② **去除全部 shadow/灰度观察措辞**（用户定）——bot 尚未发布、无活跃群/测试群，shadow 观察无真实流量可看、纯空转。改为：各 flag 直接开、激活直接生效，正确性靠**单测 + offline replay + 设计审查 + 回退 flag** 保证（非"先观察 KPI 再推进"）；dark-pattern 防护(P6)由 reward 公式结构性约束在设计期写死，非靠灰度监控兜底；KPI/metric 仍落盘供发布后事后回看，不作前置门。保留的 `shadow`/`灰区` 字样均为既有代码设施名（`rws_shadow` flag、`evaluate_group_gate_shadow`）或 gray-area 术语，非灰度发布。
+
+**影响 & 回滚**：仅方案文档，无代码/配置改动。**待用户定是否实施、从 P1+P2+P6 起。**
+
+---
+
+## 2026-05-31 补 role 观测日志（prob fire/skip 行加 role=）
+
+**变更类型**：可观测性补全（代码，已 rebuild）；无行为变更
+
+**背景**：RWS 再审计（[rws-necessity-reaudit-2026-05-31.md](docs/tracking/rws-necessity-reaudit-2026-05-31.md) C 项）发现观测盲区——`_receiver_role` 判的 role(addressed/ratified/overhearer)无日志，"十分钟为何没回"这类只能复放代码推断 role。
+
+**改动**：`services/scheduler.py` 概率路径的 `prob fire` 与 `prob skip` 两条 `_L.info` 各加 `role={}` 字段（值取已算好的本地 `role`）。纯日志，不改决策。overhearer→silent 分支本就有专属日志、强信号 bypass 隐含 addressed，故只补概率路径这两行（盲区所在）。
+
+**验证（D4）**：ruff clean；`pytest tests/test_scheduler.py` 73 passed；全量 **2291 passed, 8 skipped**（无新增测试，纯日志）。rebuild 后启动无 error；镜像内 `grep "role={} rws={}" scheduler.py` = 2（fire+skip 两行到位）。下次群内非寻址消息走概率路径即可见 `role=ratified/overhearer/...`。
+
+**影响 & 回滚**：纯日志增量，删两个 `role=` 字段即回。无 DB/状态/行为变化。
+
+---
+
+## 2026-05-31 回复通道收敛 C0+C1+C3 — 统一"被寻址"定义，修 reply 后无反应（rebuild 上线）
+
+**变更类型**：架构收敛 + bug 修复（代码，已 rebuild）；落地 [reply-pipeline-coherence-audit.md](docs/tracking/reply-pipeline-coherence-audit.md) §6 的 C0/C1/C3
+
+**背景**：审计发现"要不要说话"被判三次（RWS/B2/necessity_gate）、"被寻址"两套定义、概率双通道。直接症状："眼皮打架你就打回去"（用户回 bot 上一句、layer① 判 ratified 该回）被 layer② necessity_gate 按自己的 `trigger is None` 判没寻址 → 覆盖成 wait → 没回（reply 后无反应）。
+
+**改动**：
+- **C0+C1（合并）**：`services/scheduler.py` `notify` 把统一 `_receiver_role` 存 `slot.last_role`（新增 slot 字段；强信号 bypass 默认 addressed，概率路径写计算值），`_do_chat` 经 `ctx.extra["receiver_role"]` 传给 chat；`services/llm/client.py` necessity_gate 改读该 role——`addressed`/`ratified` 豁免，删掉私有 `trigger is None` 判据。**全链路统一一个"被寻址"定义（分裂点 B 消除）。**
+- **C3**：`services/scheduler.py` 移除 ratified_floor 对 threshold 的预抬升（rws_primary 下只喂影子 old_decision），只保留决策后单次 floor OR；数学等价原双写但单写、channel-independent（分裂点 C 重复写消除）。
+- **C2**：重定性为**不做**——reply_necessity 是 thinker LLM 输出、只在 layer② 产生，无法上移 layer①（否则双 LLM）；C1 已达成其目标。
+
+**验证（D4）**：新增 **2 测试** `test_thinker_runtime_state.py`（ratified role → 低必要性不降级、main LLM 运行；overhearer role → 仍抑制）。全量 `pytest` → **2291 passed, 8 skipped**（+2）；ruff All passed。rebuild 后启动无 error，`inspect` 确认 notify 写 last_role + chat 读 receiver_role 双端到位。**D1 同模式**：role 写入点（notify 默认 + 概率路径覆盖）与读取点（chat necessity_gate）一一对应；`_fire` 各 bypass 分支共享默认 addressed。
+
+**已知非阻塞**：5 个 pyright `slot` Optional 告警是 `_do_chat` 深嵌套 narrowing 假阳性（顶部 `if slot is None: return` 已护），非本次引入、不影响正确性，归既有 pyright 债。
+
+**影响 & 回滚**：改 .py → 已 rebuild。回退 = necessity_gate 改回 `trigger is not None`、floor 改回双写（或 `topic_block.enabled=false` 整体关）。纯内存，无 DB/迁移。
+
+**仍待（按需）**：分裂点 A 彻底收敛（RWS/B2/necessity 合一为单一 obligation 打分）需动 RWS 主决策、高风险，留待 RWS 存废评估一并处理。
+
+---
+
+## 2026-05-31 回复通道一致性考察（架构审计，未改代码）
+
+**变更类型**：全代码架构考察（纯文档，无代码/配置改动）
+
+**背景**：连续多次修 ratified floor / wait 兜底 / necessity_gate 误杀，都是在给同一处架构分裂打补丁。停下来全代码盘"要不要说话"被判几次。考察写入 [docs/tracking/reply-pipeline-coherence-audit.md](docs/tracking/reply-pipeline-coherence-audit.md)。
+
+**结论**：**不是"多个无关通道"——是一条链上"要不要说话"被判三次（RWS / B2 角色门 / necessity_gate）+ "被寻址"两套互不一致定义 + 概率双通道**。三个分裂点：① 同一"该不该开口"被 RWS(层① scheduler)、B2(层①)、necessity_gate(层② chat) 各判一遍，判据重叠且层②能否决层①；② "被寻址"定义不一致——B2 `_receiver_role` 认 ratified/`last_assistant_to_user`，necessity_gate 只认 `trigger is not None`，导致"用户回 bot 上一句"在层①判 ratified 该回、层②判没寻址可压 → 没回（即"reply 后无反应"根因）；③ 概率路径 `old_decision`(roll<threshold) 与 `rws.decision` 双通道，rws_primary 下前者半失效，逼得 ratified_floor 写两遍。
+
+**入口分叉澄清**：私聊(priority=10)直奔 chat 绕过 scheduler、本就必答，干净；所有分裂都在群聊路径内。
+
+**收敛方向**：把"要不要说话"收敛成决策层① 唯一一次裁定（角色×RWS信号×节制 → 统一 ResponseClass），chat 只负责"说什么"不再否决。分阶段：C0（necessity_gate 豁免加 `last_assistant_to_user`/ratified，止血当前 bug）→ C1（necessity_gate 改读统一 `_receiver_role`）→ C2（义务收敛，删 chat 内 necessity 否决）→ C3（消概率双通道）。
+
+**影响 & 回滚**：仅考察文档，无代码改动。**待用户定走到哪一阶**——建议先 C0 修"reply 后无反应"，C1+ 是架构收敛需评审灰度。
+
+---
+
+## 2026-05-31 修复 @bot 被 thinker wait 永久丢弃（addressed-wait 兜底时限）
+
+**变更类型**：bug 修复（代码 + config，已 rebuild 上线 01:11）；治"@bot 后 thinker 判 wait → 没结果"回归
+
+**背景**：烤群观察——用户 `[reply→视频][@他人][@bot] saki怎么样`，明确 @bot 提问，但 bot 没回。扒日志（00:14）定位链路：`AddresseeDetector` 把主受话人判给被引用视频的发布者(丛非凡) → `addressee_self=False` → `_should_force_reply(at_mention)=False` → `force_reply=False` → thinker 照跑 → **thinker 判 `action=wait`("话题转向玩梗,不接更干净") → `return None` → @ 义务被永久丢弃**。用户澄清：@时 thinker wait（等用户说完）本身正常，**问题是 wait 没有时限/兜底**。
+
+**改动（wait 不是放弃，是延迟）**：① `kernel/config.py:ThinkerConfig` 加 `wait_deferral_seconds`(默认 8.0) + `wait_max_deferrals`(默认 1)。② `services/scheduler.py`：`_GroupSlot` 加 `wait_defer_task`/`wait_deferrals`（复用废弃的 debounce_task 槽位语义）；`_do_chat` 在 `sent_segments==0 and not latest_reply` 时调 `_maybe_defer_addressed_wait`——仅当 trigger 是 at_mention 且 `llm._last_thinker_action=="wait"` 且未达上限时，起一个静默定时器；`_deferred_addressed_fire` 等 N 秒后，若无新 trigger/无运行中 chat（未被新消息接管），用 `force_after_wait=True` 强制再 fire 一次（thinker 无权再 wait）。③ `_should_force_reply` 认 `force_after_wait`。④ `_fire`/`close` 取消 pending 兜底定时器；成功回复后 `wait_deferrals=0` 复位。⑤ plugin 接 `thinker_config=config.thinker`；config.json 显式写 8.0/1 + 注释。
+
+**机制**：@bot→thinker wait→不丢，静默 8s 内有新消息→notify 正常接管(取消兜底)；8s 静默→兜底必答；最多 defer 1 次→第二轮强制回，**不会无限等**。
+
+**验证（D4）**：新增 **5 测试** `tests/test_scheduler.py::TestAddressedWaitDeferral`（wait→延迟→force fire / 达上限不再 defer / 非 wait 不 defer / seconds=0 禁用 / 新 trigger 抢占取消）。全量 `pytest` → **2289 passed, 8 skipped**（+5）；ruff All passed；scheduler/config pyright 0 errors。**D2 cancel-path**：`_deferred_addressed_fire` 捕获 `CancelledError` 直接 return 不污染；`_fire`/`close` 显式 cancel 定时器。rebuild 后 01:11 启动无 error，`load_config` 实测 8.0/1 生效。
+
+**影响 & 回滚**：改 .py + config.json → 已 rebuild。回退 = `thinker.wait_deferral_seconds=0`（禁用兜底，回到 wait 直接丢弃）。纯内存定时器，无 DB/状态。
+
+**遗留**：根因之一是 `AddresseeDetector` 对"@bot + @他人 + reply他人"判主受话人为他人（`addressee_self=False`），使 @bot 未直接走 force_reply。本次用"wait 兜底"覆盖了该场景的后果；若要更根上（显式@bot 即必答），需调整 detector / `_should_force_reply` 对"消息含显式 @bot"的处理——未做，待评估。
+
+---
+
+## 2026-05-30 F-γ G1 修复 — 被引用 json 卡片内容注入（rebuild 上线）
+
+**变更类型**：bug 修复（代码，已 rebuild 上线）；治本，消除 §19.1 的"被引用视频空壳"第一性根因
+
+**背景**：F-γ 深度调研（§19）定位第一性根因——用户引用 B站视频(QQ 小程序 `[json:...]` 卡片)时，`_render_message` 用 `extract_plain_text()` 取正文返回空，fallback 只认 image/face/text，json 卡片不匹配 → 喂给 LLM 的 `[QUOTED_MSG]` 正文为空。bot 无内容可回应只能漂移到 timeline 热门话题。治本第一步是补内容注入（G1），非加聚焦指令（治标）。
+
+**改动（G1）**：① 新增 `services/json_card.py:extract_json_card_text`（从 `plugins/bilibili/plugin.py` 抽出原 `_extract_json_card_text`，提为公共共享 util，解析小程序卡片 `prompt + meta.detail_1.title/desc`）。② `plugins/bilibili/plugin.py` 改为从 util re-export（`as _extract_json_card_text`，保名兼容所有内部调用者）。③ `kernel/router.py:_render_message` reply 渲染 fallback 加 `elif seg.type == "json"` 分支，调 `extract_json_card_text` 把卡片标题/简介填进 `[QUOTED_MSG]` 正文（`[卡片: …]`）。
+
+**验证（D4）**：新增 **7 测试** `tests/test_json_card.py`——解析(prompt+title/desc / 去重 / 非法→空 / 无字段→空 / prompt-only)、bilibili re-export 一致、**render 路径回归**(引用 json 卡片 + @bot 空文本 → QUOTED_MSG 正文含"摸摸小saki"而非空壳)。`tests/test_bilibili.py` 60 全过(re-export 未破)。全量 `pytest` → **2284 passed, 8 skipped**（+7）；ruff All passed；`json_card.py`/`router.py` pyright 0 errors。rebuild 后容器内实测：引用视频卡片渲染出 `[QUOTED_MSG]…[卡片: [QQ小程序]摸摸小saki 摸摸小saki 千早糖愛音][/QUOTED_MSG]`，**空壳已消除**。
+
+**遗留（不在本次）**：① `plugins/bilibili/plugin.py` 行 399/776/787/798/806 有 5 个 pyright 错误，经 git diff 确认在**完全未触碰**的 `_search_video`/兴趣打分逻辑里，**G1 之前就存在**，属既有 pyright 债（见 memory project_pyright_debt），不在本次范围。② **G2（按需）**——若 G1 后仍偶发 drift，再上"被引用块+焦点指令搬末尾 + `<reply_target>` 标记 + 两端夹"（§19.3）。
+
+**影响 & 回滚**：改 .py（新增 json_card.py + bilibili re-export + router 渲染分支）→ 已 rebuild。回退 = 删 router 的 `elif seg.type=="json"` 分支即回空壳行为；json_card.py / re-export 是 additive。纯渲染层，无 DB/状态。
+
+**观察**：后续用户引用视频 + @bot 时，bot 是否回应视频本身而非漂移到其他话题。
+
+---
+
+## 2026-05-30 F-γ 深度调研 — 被引用内容如何成为生成焦点（治本方案，未实施）
+
+**变更类型**：深度调研 + 决定性根因定位（纯文档；治本方案待批准实施）
+
+**背景**：F-γ（@bot 引用视频却答非所问，话题偏移到前一块）的治本调研。两条 web 检索战线（被引用语锚定生成 / LLM 上下文焦点控制）+ 本地代码核实。结论写入 [docs/tracking/fix-prob-fire-stale-topic-sticker-2026-05-30.md](docs/tracking/fix-prob-fire-stale-topic-sticker-2026-05-30.md) §19。
+
+**决定性发现（本地核实，第一性根因）**：`kernel/router.py:_render_message` 的 reply 渲染（683 行）用 `extract_plain_text()` 取被引用消息正文，对 B 站视频这种 QQ 小程序 `[json:...]` 卡片**返回空**，fallback 只认 image/face/text 三种 seg，json 卡片不匹配 → `original=""`。**被引用视频喂给 LLM 的 `[QUOTED_MSG]` 块正文是空的**——不是"注意力被带跑"，而是被引用内容**语义零注入**，LLM 无内容可回应只能退回 timeline 热门话题。关键巧合：`plugins/bilibili/plugin.py:205 _extract_json_card_text` 已能从任意小程序 json 卡片抽 title/desc（bilibili 自己在用），但 reply 渲染路径没接它。
+
+**调研结论（文献交叉印证，三层机制）**：① 被引用内容是占位符/空壳（Divter, ACL 2022, arXiv:2110.08515：多模态需经文字描述才可回应）；② 结构信号被语义压倒（Is ChatGPT a Good MPC Solver?, EMNLP-F 2023, arXiv:2310.16301：reply-to 当普通文本堆入弱模型反降）；③ 位置偏置 U 形（Lost in the Middle, TACL 2024, arXiv:2307.03172 + On the Emergence of Position Bias, ICML 2025, arXiv:2502.01951）。治本方向纯 prompt、不微调、兼容闭源 API；明确排除 PASTA/注意力校准/IN2 微调（需读写注意力或训练，闭源 API 不可行）。
+
+**治本方案（§19.3，待批准，非治标）**：**G1（核心必做）**——reply 渲染对空正文 + json 卡片复用 `_extract_json_card_text` 填入 `[QUOTED_MSG]` 正文，直击空壳根因，预计解决大部分 F-γ；**G2（加固按需）**——被引用块 + 焦点指令搬到消息末尾（recency）+ `<reply_target>` 标记 + 两端夹指令，对抗位置偏置。**落地顺序：先 G1 验证，仅当仍偶发 drift 才上 G2**——避免一上来堆指令/位置工程分不清哪层起效、变成治标。
+
+**影响 & 回滚**：仅调研文档，无代码/配置改动。**待用户决定是否实施 G1。**
+
+---
+
+## 2026-05-30 B2 ratified 延续 floor（修延续被低 time_mult 压死）+ F-γ 深究记录
+
+**变更类型**：bug 修复（代码 + config，已 rebuild 上线 23:28）+ 一条暂不修复的深究记录
+
+**背景（实战验证驱动）**：真·全开后扒日志，B2 mark_bot_involved 接线**确实生效**——23:13:29「你懂雪人三项吗」对比修复前 22:43:26「这叫雪人三项」，**不再被 overhearer silent 误杀**，正确判 ratified。但暴露下一层：ratified 态无加成，延续消息跟陌生闲聊同概率 → RWS 0.18 + 夜间 `time=0.40` → 连发三条延续全 `prob skip`。即用户在跟 bot 一来一回，bot 却因时段抑制不回。
+
+**改动（ratified continuation floor）**：① `kernel/config.py:TopicBlockConfig` 加 `ratified_continuation_floor`（默认 0.0=关）。② `services/scheduler.py`：role=ratified 时把 threshold 抬到 floor；且因线上 `rws_primary=true`（`decision=rws.decision` 无视 threshold），在 RWS 决策后再 OR-in 一个 floor roll——ratified 延续「RWS 说 yes 或 floor roll 过」即 fire，保留 RWS 权威同时加延续地板。③ `config/config.json` 设 `ratified_continuation_floor=0.55`（延续约过半会回，带 `_comment`）。
+
+**验证（D4）**：新增 **2 测试**（floor 在 talk_value=0 下救活 ratified 延续 / floor=0 时保持 RWS 原行为）。全量 `pytest` → **2277 passed, 8 skipped**（+2）；ruff/pyright clean。rebuild 后 23:28 启动无 error；`load_config` 实测 `ratified_continuation_floor=0.55`。**D1 同模式**：ratified 分支在 overhearer 分支后、RWS 决策前后各介入一次，与既有 skip/fire 状态更新一致。
+
+**F-γ 深究记录（暂不修复，按用户指示）**：23:13:03 用户引用 B 站视频(《摸摸小saki》)+@bot，bot 却回了前一个话题块(雪人三项)，**话题偏移**。定位：`is_addressed=True`/`at_mention`/`[CQ:reply]` 都对，但被引用视频的内容**没有成为回应焦点**，被 timeline 里更热的近期话题带跑。这是 @ 路径内部「回什么」的焦点问题，独立于已修的「要不要回/回哪个块」。详见 [docs/tracking/fix-prob-fire-stale-topic-sticker-2026-05-30.md](docs/tracking/fix-prob-fire-stale-topic-sticker-2026-05-30.md) §18（含深究方向）。**未修复。**
+
+**影响 & 回滚**：改 .py + config.json → 已 rebuild。回退 = `ratified_continuation_floor=0.0`（关 floor，回退到纯 RWS）。纯概率地板，无 DB/状态。
+
+---
+
+## 2026-05-30 B2 修复 — mark_bot_involved 接线（修延续对话被误 silent）
+
+**变更类型**：bug 修复（代码，已 rebuild 上线）；治 B2 silent 下「bot 回一句、用户接一句、bot 却沉默」
+
+**背景**：真·全开后扒烤群日志（22:41-22:44），B2 实际生效——4 次 `overhearer -> silent`（拦表情/别人闲聊正确），@ 回复也聚焦了当前话题（B1-addressed 生效）。但暴露硬伤：22:43:26「这叫雪人三项」（明显接 bot 刚才「你喝雪碧/你跑马拉松」的玩笑）被误判 overhearer→silent；上次「你别看」同根因。**根因**：`TopicBlockTracker.mark_bot_involved` 实现了却**从未接线调用**——话题块只能靠用户消息里的 @bot/reply-bot 变 bot-involved，**bot 主动参与某块后该块不被标记**，于是用户在该块的延续被判 overhearer 沉默。silent 满档下这会切断所有 bot 发起的对话延续。
+
+**改动**：`services/scheduler.py:_do_chat` 在成功发言后（`sent_segments > 0` 且 tracker 存在）调用 `self._topic_tracker.mark_bot_involved(group_id)`（标记当前最活跃块为 bot-involved），try/except 包裹不影响主流程。覆盖流式 on_segment 与非流式 fallback 两条发送路径。
+
+**验证（D4）**：新增 **2 测试** `tests/test_scheduler.py::TestOverhearerRole`——① bot 参与块后用户同块延续判 ratified 不被 silent（回归「你别看/雪人三项」）；② 集成测试 mock `_send_to_group` 确认 `_do_chat` 成功回复后块变 bot_involved。全量 `pytest` → **2275 passed, 8 skipped**（+2）；ruff All passed；pyright 0 errors。**D1 同模式**：`mark_bot_involved` 全仓调用点 = 仅此 1 处（`_do_chat` 发言后），`pick_anchor_block(require_bot_involved=False)` 取最活跃块标记。rebuild 后 23:05 启动无 error；`inspect` 确认接线在 `_do_chat` 内。
+
+**影响 & 回滚**：改 .py → 已 rebuild。回退 = 删 `_do_chat` 那段 mark 调用，或 `overhearer_mode` 降回 shadow。纯内存标记，无 DB/状态。
+
+**机制完整性**：B2 现在闭环——用户 @/reply bot 标块 bot-involved（既有）+ **bot 主动发言也标块 bot-involved（本次补全）** → 一来一回的延续判 ratified 不 silent；只有真正旁观（没参与过的块）才 silent。
+
+---
+
+## 2026-05-30 B 系列真·全开（改对 config.json）+ 更正前次误改 config.toml
+
+**变更类型**：配置变更（生效）+ 纠错；含一条对前述日志的更正
+
+**关键更正**：前条「B 系列全开上线」记录里改的是 `config/config.toml`——但本仓运行时配置源是 **`config/config.json`**（`_resolve_config_file()` JSON 优先，config.toml 第 161 行也注明）。故那次「全开」**实际未生效**，B1/B2/B3 一直跑代码默认值（关闭）。这也解释了为何重启后 `topic-block anchor`/`overhearer`/`necessity_gate` 日志全 0——不是「群里没概率插话场景」，是**根本没启用**。"你别看" 被 skip 纯属 RWS 概率门（`rws_primary=true` 实为线上唯一生效闸门），与 B 系列无关。
+
+**本次操作**：① 改 **`config/config.json`**（真实运行源，bind mount）：`thinker` 加 `necessity_gate_enabled=true` + `necessity_gate_addressed_exempt=true`（B3）；新增 `topic_block` 块 `enabled=true, overhearer_mode="silent", overhearer_threshold_boost=0.0`（B1+B2 满档）。JSON 无原生注释，用 `_comment*` 兄弟键写说明（pydantic v2 默认 extra=ignore，已实测忽略）。② 删除前次误加到 `config/config.toml` 的 thinker/topic_block 行（该文件运行时不读，避免后续再被误导）。③ `docker compose restart bot`（json 是 bind mount + 代码已在 22:08 镜像内，无需 rebuild）。
+
+**验证（D4）**：22:36 重启无 error。容器内 `load_config()`（默认解析路径=config.json）实测：`topic_block.enabled=True / overhearer_mode=silent / thinker.necessity_gate_enabled=True / humanization.rws_primary=True`；`_comment*` 键被安全忽略，真实开关全部解析。**这才是真正的四项全开**（B1 锚点 + B2 silent + B3 gate + 已有 B1-addressed 聚焦指令），叠加在 RWS 概率门之上。
+
+**影响 & 回滚**：改 config.json → `docker compose restart bot` 即生效/回退（无需 rebuild）。回退 = json 里 `topic_block.enabled=false` + `thinker.necessity_gate_enabled=false`。
+
+**RWS 存废待议**：RWS（humanization Part 3.5 引入，`services/scheduler_rws/`）当前是概率插话路径唯一生效闸门，与 B2(角色)/B3(必要性) 在「该不该 fire」意图上重叠但更黑箱。是否在 B 系列验证稳定后让 RWS 退役/瘦身，待真·全开跑一段后再判（RWS 的 Hawkes 自激 + time_mult 节奏控制是 B 系列没有的，不能直接弃）。
+
+---
+
+## 2026-05-30 B1-addressed 扩展 — @ 路径多话题堆叠修复（rebuild 上线）
+
+**变更类型**：bug 修复（代码，已 rebuild 上线）；治 @ 触发时 bot 把整条 timeline 的多个旧话题块一起回答
+
+**背景**：全开 B 系列后烤群观察——bot 被 @ 一个字（"姆"）即把上文堆积的多个话题（烤/视频/余花念张师）全抖在一条回复里。扒日志定位：**这不是 B 系列回归**（重启后 `topic-block anchor`/`overhearer`/`necessity_gate`/`prob fire` 全 0——群里全是 @ 直接对话，绕过三个门）。真因是 **@ 路径盲区**：at_mention 触发时 `chat(user_content="")` + LLM 看到完整 21 条多话题 timeline，且既有 pending-trigger reason "有人@了你" 太弱，没有"聚焦当前、勿翻旧话题"的约束。B1 锚点原本只在 prob-fire 注入，不覆盖 addressed 路径。
+
+**改动**：`services/scheduler.py` 新增 `_focused_trigger_reason(trigger)` + `_FOCUS_TRIGGER_MODES={at_mention, directed_followup, correction, qq_interaction}`；`_do_chat` 的 `add_pending_trigger(reason=...)` 改为 `reason=self._focused_trigger_reason(trigger)`——为 addressed 触发的 reason 追加指令"（只回应对方这条消息当下的话题，不要把上文里别的、已经过去的话题也一并翻出来回答）"。**gated on `topic_block.enabled`**（关闭或非 addressed 模式返回原 reason）；closing/video 等不受影响。复用既有 `add_pending_trigger` 单一写入点，无新管线。
+
+**验证（D4）**：新增 **4 测试** `tests/test_scheduler.py::TestFocusedTriggerReason`（at_mention 加指令 / directed_followup+correction+qq_interaction 加指令 / closing 不变 / tracker 关闭返回原 reason）。全量 `pytest` → **2273 passed, 8 skipped**（+4）；ruff All passed；pyright 0 errors。**D1 同模式**：`add_pending_trigger` 全仓 2 调用点核实——prob-fire 锚点（797，自建 focused reason）+ `_do_chat` 每触发写入（1481，本次包裹），无遗漏。rebuild 后 22:08 启动无 error；容器内实测 at_mention reason 已带聚焦指令。
+
+**影响 & 回滚**：改 .py → 已 rebuild。回退 = `_do_chat` 改回 `reason=trigger.reason`，或 `topic_block.enabled=false`（连带 B1/B2 一起关）。纯 prompt 文案增强，无 DB/状态。
+
+**观察**：扒后续 @ 回复是否收敛到当前话题、不再逐个翻旧话题块。
+
+---
+
+## 2026-05-30 B 系列全开上线（rebuild + config）
+
+**变更类型**：部署（rebuild bot）+ 配置变更；**B1/B2/B3 三阶全部从默认关切到生效**
+
+**操作**：① `config/config.toml` 开三开关——`[topic_block] enabled=true, overhearer_mode="silent"`（B1+B2，silent=旁听态直接沉默，满档）；`[thinker] necessity_gate_enabled=true, necessity_gate_addressed_exempt=true`（B3）。② `dot_clean . && docker compose up bot -d --build`（代码改动需 rebuild，非仅 restart；napcat 未动）。
+
+**验证（D4）**：rebuild 后 21:49 启动无 error/traceback。容器内 venv 实测：`TopicBlockTracker` 可导入、`_ALLOWED_NECESSITY={high,medium,low}`、`ThinkDecision.reply_necessity` 默认 high；`load_config` 读出 `topic_block.enabled=True / overhearer_mode=silent / thinker.necessity_gate_enabled=True`。功能探针：以 plugin 同款方式构造 `GroupChatScheduler(topic_block_config=...)` → `_topic_tracker is not None`；`_receiver_role` 正确分类（无寻址+空块→overhearer，被寻址→addressed）。运行时日志签名（`overhearer`/`topic-block anchor`/`necessity_gate`）待群消息触发 prob 路径后产生（重启后窗口内群较静，prob fire/skip 暂为 0）。
+
+**偏离纪律说明**：原 B 系列设计要求逐阶灰度（B2 shadow→threshold→silent；B3 先扒 necessity 分布再开 gate）。本次按用户「全开看状态」一次性切到满档（B2 silent + B3 gate on）。**风险**：bot 在非己话题块直接沉默 + 低必要性主动回复被压成 wait，可能明显比之前安静；B3 依赖 thinker 自评必要性的诚实度（最不确定假设），未经分布核验。**完全可逆**：改 `config/config.toml` 三开关回 false/shadow + `docker compose restart bot` 即恢复（无需 rebuild，config 是 bind mount）。
+
+**观察重点**：扒 `necessity_gate | downgraded reply->wait` 与 `overhearer -> silent` 频率——过高=过度沉默（冷漠感）；`topic-block anchor -> msg=` 确认锚点指向当前块。若过度沉默，先把 `overhearer_mode` 降到 `shadow`、`necessity_gate_enabled=false` 逐项排查。
+
+---
+
+## 2026-05-30 B3 回复必要性动机分 — 编码完成（默认关，待 rebuild 灰度）
+
+**变更类型**：功能实现（治本 B 系列第三阶，F-β 修复），代码改动 → **需 rebuild bot**；默认 `thinker.necessity_gate_enabled=false`，行为 == 现状
+
+**背景**：烤群日志见 bot 强行展现自己（F-β）——thinker 的 thought 暴露表演性动机（"夸他破纪录""接梗逗趣""活跃气氛"）。根因：裸概率 + 角色判定决定"要不要 fire"，thinker 只决定"怎么回"，缺一层"这条回复有无必要"。B3 给 thinker 加 `reply_necessity`（high/medium/low）维度，low 且非寻址 → 降级为 wait（沉默）。实施清单 [docs/migrations/b3-reply-necessity-2026-05-30.md](docs/migrations/b3-reply-necessity-2026-05-30.md)。
+
+**改动（E1–E5）**：
+
+1. **E1** `THINKER_SYSTEM_PROMPT` 加"## 回复必要性"段（low 锚点="群里没你这句话会更自然"）+ schema 加 `reply_necessity` 字段——全在 **static 段**（可缓存）。
+2. **E2** `ThinkDecision` 加 `reply_necessity="high"` slot/ctor/repr（additive，默认 high=不抑制）。
+3. **E3** `_normalize_reply_necessity` + `_ALLOWED_NECESSITY` + `_decision_from_data` 解析（非法/缺失→high 安全默认）。
+4. **E4** client gate（既有 wait 短路前）：`necessity_gate_enabled` + action=reply + necessity=low + 非 trigger（addressed 豁免）→ `thinker_action="wait"` → 复用 wait 短路沉默。只降级 reply，不动 light_reply/closing。
+5. **E5** `ThinkerConfig.necessity_gate_enabled`（默认 False）+ `necessity_gate_addressed_exempt`（默认 True）；client ctor 两参 + plugin 接线。
+
+**验证（D4 证据）**：
+
+- 新增 **8 测试**：`tests/test_thinker.py` 5（necessity 解析三值 / 非法→high / 缺失→high / 默认 high / prompt 含字段）；`tests/test_thinker_runtime_state.py` 3（gate 降级 low→沉默且 main LLM 未调 / gate 关闭 low 照常 reply / high necessity 不抑制）。
+- 全量 `pytest` → **2269 passed, 8 skipped**（+8 vs 2261）；`ruff` All passed；`pyright`（thinker/client/config）0 errors。
+- **D1 同模式**：necessity 不影响 action 分支；think() 调用点默认值不破旧；gate 走既有 wait 短路单点记账。
+- **缓存（§7.3 红线）**：维度说明 + schema 全在 thinker **static 段**；**dynamic_blocks 零新增**（necessity 纯输出字段）；gate 在决策层不进 prompt → thinker hit% 不受影响。
+
+**影响 & 回滚**：改 .py（thinker/client/config/plugin）→ **需 rebuild bot**。回退 = `necessity_gate_enabled=false`（默认，仍输出 necessity 但不降级）；纯 prompt+解析，无 DB/迁移。
+
+**待办（灰度）**：① rebuild 上线（默认关，无行为变化）；② 先扒 thinker 输出的 `reply_necessity` 分布 + thought 质量（确认不误判 high 为 low）；③ 开 `necessity_gate_enabled=true`（addressed_exempt 默认 True）；④ 据"话痨感 vs 冷漠感"调 prompt low 判定，监控 `necessity_gate | downgraded reply->wait` 频率。**B 系列 B1/B2/B3 三阶全部编码完成，均默认关/shadow，待统一 rebuild 灰度。**
+
+---
+
+## 2026-05-30 B2 overhearer 角色沉默 — 编码完成（默认 shadow，待 rebuild 灰度）
+
+**变更类型**：功能实现（治本 B 系列第二阶，F-α 主修复），代码改动 → **需 rebuild bot**；默认 `overhearer_mode=shadow`，行为 == 现状
+
+**背景**：烤群观察 bot 插进非己对话块（F-α）。B1 收紧只防"主动安排进别人块"，正解是 B2——按 Goffman 参与框架判 bot 的接收角色，overhearer（没被寻址 + 不在任何 bot 参与的话题块）默认沉默。实施清单 [docs/migrations/b2-overhearer-role-2026-05-30.md](docs/migrations/b2-overhearer-role-2026-05-30.md)。
+
+**改动（D1–D5）**：
+
+1. **D1** `scheduler.notify` 加 `is_addressed: bool = False`（additive）。
+2. **D2** `kernel/router.py:_notify_group_scheduler` 经 `tb["is_addressed"]` 透传（复用 B1 已建的 `**tb` 通道）。
+3. **D3** `scheduler._receiver_role(...)` → addressed（@/reply-bot/at-self/有 trigger）/ ratified（B1 判 bot 在某活跃块）/ overhearer（都不是）。tracker 关闭时恒返回 addressed（无 B1 无 gating）。
+4. **D4** prob-fire 阈值计算后插 overhearer 三档：`shadow`（默认，只 log）/ `threshold`（threshold − boost 降概率）/ `silent`（直接 return 不 fire，记 skip 状态）。
+5. **D5** `kernel/config.py:TopicBlockConfig` 加 `overhearer_mode`（validator 限 shadow/threshold/silent）+ `overhearer_threshold_boost`。
+
+**验证（D4 证据）**：
+
+- 新增 **5 测试** `tests/test_scheduler.py::TestOverhearerRole`：shadow 不改行为 / silent overhearer 不 fire（+skip 状态正确）/ addressed 在 silent 下仍 fire / ratified（@-self 后同块续话）在 silent 下仍 fire / tracker 关闭无 gating。修 `test_router_b_cluster_wiring.py` 的 `_Scheduler` 桩吸收新 kwargs。
+- 全量 `pytest` → **2261 passed, 8 skipped**（+5 vs 2256）；`ruff` All passed；`pyright`（scheduler/router/config）0 errors。
+- **D1 同模式**：notify 4 调用点核实；overhearer silent return 与既有 skip 分支 slot 状态一致；显式 bypass 在 `_receiver_role` 前已 fire-return 恒判 addressed。
+- **缓存**：B2 纯调度层 fire/no-fire，不进 prompt → hit% 不受影响；silent 减少 LLM 调用（token 正收益）。
+
+**影响 & 回滚**：改 .py（scheduler/router/config）→ **需 rebuild bot**。回退 = `overhearer_mode=shadow`（默认，零行为变化）或 `topic_block.enabled=false` 整体旁路；纯内存无 DB/迁移。
+
+**待办（灰度）**：① rebuild 上线（默认 shadow，无行为变化）；② 扒 `overhearer (would suppress, mode=shadow)` 日志统计误伤率；③ 转 `threshold`（配 boost）；④ 数据稳转 `silent`（完全不插非己块）。**F-β「强行展现自己」仍需 B3（动机分），未做。**
+
+---
+
+## 2026-05-30 B1 收紧（防插非己块）+ B2 立项（overhearer 沉默）
+
+**变更类型**：B1 行为收紧（代码，需 rebuild）+ B2 D3 实施清单（纯文档）
+
+**背景**：烤群日志观察到 bot 插进本不属于它的对话块、做不必要的自我展现。评估（设计文档 [§8](docs/tracking/group-multitopic-understanding-b-series-design.md)）拆成两故障：**F-α 插非己块**、**F-β 强行展现**。结论：B1 单独不能杜绝 F-α（`pick_anchor_block` 原会回退到"最活跃块"，等于更自信地插错块）；正解是 B2（overhearer 沉默）。F-β 需 B3。
+
+**B1 收紧（已编码全绿）**：`services/group/topic_block.py:pick_anchor_block` 加 `require_bot_involved=True`（默认）——bot 不在任何活跃块时返回 `None`，scheduler 不注入锚点，不再把 bot"安排"进只是旁听的块。`mark_bot_involved` 内部调用传 `False` 保持原义。测试：`test_require_bot_involved_returns_none_for_others_block` 等 +3；`test_scheduler.py` 锚点用例拆为"非己块不注入/己块注入"。§1 复现测试更新为"strict 返回 None（不插别人块）"语义。全量 **2256 passed**，ruff/pyright clean。
+
+**B2 立项（D3 清单）**：[docs/migrations/b2-overhearer-role-2026-05-30.md](docs/migrations/b2-overhearer-role-2026-05-30.md)。在 prob-fire 前判 bot 在当前块的接收角色（addressed/ratified/overhearer，Goffman），overhearer 三档灰度：`shadow`（默认，只 log）→ `threshold`（降概率）→ `silent`（不 fire）。复用 B1 已透传的 at_self/reply_to_self/at_targets + router 已算的 is_addressed；纯调度层、不进 prompt → 缓存零影响，且 silent 减少 LLM 调用。**待确认实施。**
+
+**影响 & 回滚**：B1 收紧改 .py → 需 rebuild；回退 = `pick_anchor_block` 默认改回 `require_bot_involved=False`（或整体 `topic_block.enabled=false`）。B2 仅文档。
+
+**优先级调整**：原 B1→B2→B3，因该现象正解在 B2，**B2 提前**作为 F-α 主修复。
+
+---
+
+## 2026-05-30 B1 话题块归属 — 编码完成（默认关闭，待 rebuild 灰度）
+
+**变更类型**：功能实现（治本 B 系列第一阶），代码改动 → **需 rebuild bot 上线**；默认 `topic_block.enabled=false`，行为 == 现状
+
+**背景**：承接 B 系列立项（见下条）。治 §1「回旧话题」的架构层根因——bot 用"最新消息=回应对象"的朴素模型，话题终止后被表情触发会捞起旧话题。B1 给 bot 建"话题块归属"表征：把群消息增量聚成并行话题块，prob-fire 锚点从"指向最新一条"升级为"指向 bot 该参与的块代表"。实施清单 [docs/migrations/b1-topic-block-attribution-2026-05-30.md](docs/migrations/b1-topic-block-attribution-2026-05-30.md)。
+
+**改动（C1–C6）**：
+
+1. **C1** 新增 `services/group/topic_block.py`：`TopicBlockTracker`（per-process，挂 scheduler 实例级，**不进 `_GroupSlot.__slots__`**）+ `TopicBlock`。归属算法信号强度降序：reply-to 边（QQ ground-truth=skip-connecting）> @边 > 同说话人延续 > 相似度兜底（复用 `NgramSimilarityProvider`）> 开新块。纯 CPU 无 await。
+2. **C2** `services/scheduler.py:notify` 加 4 个 additive 可选参（message_id/reply_to_sender_id/reply_to_self/at_targets/at_self，默认空）——向后兼容，4 处调用点无一报错。
+3. **C3** `kernel/router.py`：新增 `_extract_topic_block_signals`（读 `event.reply.sender` + @ 段），`_notify_group_scheduler` 透传给两处群 notify。
+4. **C4** scheduler.notify 入口（muted 检查后、gating 前）喂 `tracker.observe`，try/except 包裹不影响主流程。
+5. **C5** prob-fire 命中分支新增 `_maybe_anchor_topic_block`：仅 `slot.trigger is None` 时（与 at/followup/closing 既有锚点互斥）查块 → `add_pending_trigger`（closing-P0 同款 API）→ 锚点落 pending→最后一条消息（缓存前缀外）。
+6. **C6** `kernel/config.py` 新增 `TopicBlockConfig`（enabled 默认 False + 4 个 tunable），wire 进 BotConfig + `plugins/chat/plugin.py` scheduler 构造。
+
+**验证（D4 证据）**：
+
+- 新增 **11 测试**：`tests/test_topic_block.py` 8（含 §1 复现 `test_reproduces_stale_topic_bug`：表情块锚点不指向 stale 鱼鱼烧；skip-connecting、@归属、bot_involved 优先、新块、stale 归档、D2 幂等/reset、representative）；`tests/test_scheduler.py::TestTopicBlockAnchor` 3（注入锚点 / 关闭旁路 / 显式 trigger 不覆盖）。
+- 全量 `pytest` → **2253 passed, 8 skipped**（+11 vs 基线 2242）；`ruff` All checks passed；`pyright`（5 文件+测试）0 errors。
+- **D1 同模式**：notify 全 4 调用点核实（router ×3 透传 + qq_interactions 带 trigger 自动跳过）；reply/@ 提取唯一来源 = `_extract_topic_block_signals`；C5 与既有 add_pending_trigger 互斥。
+- **缓存（D4 + 设计 §7）**：B1 不碰 system blocks，锚点只进 pending→最后一条消息（断点在 len-2，永在前缀外）→ main/thinker hit% 结构上不受影响。运行时 before/after 对照留灰度时验。
+
+**影响 & 回滚**：改 .py（topic_block 新文件 + scheduler/router/config/chat plugin）→ **需 rebuild bot**。回滚 = `topic_block.enabled=false`（默认值）即完全旁路，行为 == 现状；纯内存无 DB/迁移，重启即清。
+
+**待办**：① rebuild 上线（默认关，无行为变化）；② 单烤群开 `topic_block.enabled=true` 灰度，扒 `topic-block anchor -> msg=` 日志确认锚点 + "回旧话题"消失 + hit% 不降，再逐群放开；③ B2（角色接管）随后。
+
+---
+
+## 2026-05-30 B 系列立项 — 群聊多话题并行理解（话题块归属→角色→开口）
+
+**变更类型**：立项 / 设计文档（纯文档，未改代码/运行时；治本路线，分阶段实施待排期）
+
+**背景**：承接同日「回旧话题」排查 + 多话题并行调研（见下条）。§17 自我审查确认 P 系列（P0′/P1′）是**治标**——在"概率插话+单点锚定"框架内修补 R1/R2/R3，下次真·多块并行仍会接错。调研指出的治本是**三段式群聊理解**：①消息属哪个并行话题块 → ②我是什么接收角色 → ③该不该开口。现正式立项 **B 系列**，设计文档 [docs/tracking/group-multitopic-understanding-b-series-design.md](docs/tracking/group-multitopic-understanding-b-series-design.md)。
+
+**立项范围（B1 先行）**：
+
+1. **B1 话题块归属（第一优先，治①）**：新增 `services/group/topic_block.py` 的 `TopicBlockTracker`（per-group 内存旁路）。按信号强度归属——reply-to 边（QQ ground-truth，直接实现 skip-connecting）> @边 > 同说话人延续 > 相似度兜底（复用现成 `NgramSimilarityProvider`）> 开新块。prob-fire 锚点从"指向最新一条"升级为"指向 bot 该参与的块代表"。**输入数据全部已存在**（router 已解析 reply-to `[QUOTED_MSG]`/@，timeline turn 带 speaker/message_id）。
+2. **B2 角色接管（治②）**：把已在 shadow 模式的 `evaluate_group_gate_shadow`（reply_workflow.py:588，已算 is_addressed/has_other_at/reply_to_bot）逐步转正，overhearer 态默认沉默。灰度三步：shadow 对照→只调 RWS 阈值→才默认沉默。
+3. **B3 动机打分（治③，风险最高，最后做）**：thinker 处增"相关性/信息缺口/会否刷屏"三维打分 + `im_threshold`（对齐 Inner Thoughts CHI25）。**必须同批节制 + 灰度 + 可一键回退**（高 im_threshold）。
+
+**缓存性能前置约束（§7，关键）**：B 系列铁律——**per-turn 内容只进 system 的 dynamic 段或消息尾，绝不前置于缓存前缀**（`apply_cache_breakpoints` 契约：static→stable→dynamic，断点段尾，dynamic 最先牺牲；消息侧断点在倒数第二条，最后一条永在前缀外）。判定：B1 锚点落最后一条消息（前缀外，零影响）；B2 是调度层决策（不进 prompt，零影响）；**B3 是唯一需缓存纪律的阶段**——打分输入只进 thinker dynamic 段，static/stable 字节不动，否则 thinker 命中（当前 35-50%）崩塌。把关用现有 `cache_debug` 逐块 hash + usage `hit%`，main/thinker hit% 不得下降（容差 ±2%）。
+
+**影响 & 回滚**：仅设计文档 + 本日志，无代码/配置改动，无需 rebuild。各阶段实施时单独出 D3 四列迁移清单 + 测试（含 B1 复现 §1 的单测、B3 的 D2 cancel-path + 缓存断点 ≤4 回归）+ 回滚路径，逐阶灰度。
+
+**待办（排期）**：① B1 实施（先行，地基）；② B2 随 B1 后灰度转正；③ B3 最后，须 before/after hit% 证据 + 节制同批方可上线。**演进关系**：B1 平滑替换 P0′ 锚点来源（"最新"→"块代表"），不推翻治标。
+
+---
+
+## 2026-05-30 群聊概率插话「回旧话题」排查 + 多话题并行调研（纯文档，未改代码/运行时）
+
+**变更类型**：运行时 bug 排查 + 文献/同类项目调研，产出 tracking 文档；**未改任何代码、配置、运行时行为**
+
+**背景**：烤群观察到——话题终止后用户连发两个表情触发 bot，bot 没回应表情也没沉默，而是把刚断掉的旧话题（鱼鱼烧）捞起来续上。排查 + 调研结论写入 [docs/tracking/fix-prob-fire-stale-topic-sticker-2026-05-30.md](docs/tracking/fix-prob-fire-stale-topic-sticker-2026-05-30.md)。
+
+**第一部分（排查，D4 证据）**：扒容器内 `/app/storage/logs/bot_2026-05-30.log` 复现群 993065015 17:33 事件。确认**不是 closing 弱回复**（全天 closing 通道 0 触发），是普通概率插话（`prob fire mode=none`）走偏。根因三因素叠加：R1 概率插话路径 `chat(user_content="", trigger=None)` 不告诉 LLM「在回哪条」（`scheduler.py:1434`）；R2 表情在 timeline 是低权重文本（`timeline.py:305`），被旧话题盖过；R3 顶过阈值的信号（表情+skip_pressure）与被回应对象（旧话题）解耦。修复方向 A（注入触发锚点）/ B（提高纯表情门槛）已记录，**未实施**。
+
+**第二部分（调研）**：四条战线（会话分析/社会语言学、计算对话解缠、多方对话 addressee/response、生产系统与前沿 LLM），引用经 web 核实。核心结论：问题不是「串行话题终止位置」而是「多 floor 并行」；bot 缺**三段式群聊理解**（话题块归属→接收角色→开口决策）。共识取舍——**时机交确定性规则、对谁/属哪个话题交结构信号、该不该回交动机打分；放弃预测「下一个具体说话人」**（Inner Thoughts CHI25 实证 self-selection 下 ≈ 随机）。给出 L0–L3 分层落地建议（L0 timeline 标注 reply-to+@ 边零成本；L1 治直接症状；L2 floor 分类+LLM 话题分簇；L3 按需训练型）。
+
+**影响 & 回滚**：仅新增 1 个 tracking 文档 + 本日志条目，无代码/配置改动，无需 rebuild，无回滚动作。
+
+**待办（待用户决策）**：是否进入 L0–L3 任一层修复、优先级；§6 方向 A/B 是否落地。closing 弱回复 P0 仍待 rebuild 后烤群验证（见下条）。
+
+---
+
+## 2026-05-30 弱回复机制 P0 — closing 收尾型弱回复落地
+
+**变更类型**：功能实现（跨 5 模块行为新增），待 rebuild 上线
+
+**背景**：线上痛点——用户「好吧晚安」被 scheduler 概率门判 skip→SILENCE，bot 毫无反应，等于拒绝完成 terminal exchange（Schegloff & Sacks「对话须双方协作关闭」）。P0 让收尾消息绕过概率门进 chat，回一个对称的告别 token。设计见 [weak-reply-mechanism-design.md](docs/tracking/weak-reply-mechanism-design.md) §第1层；实施计划 [weak-reply-p0-impl-plan.md](docs/tracking/weak-reply-p0-impl-plan.md)；四列迁移清单 [docs/migrations/weak-reply-p0-closing-2026-05-30.md](docs/migrations/weak-reply-p0-closing-2026-05-30.md)。token 生成方式（用户定）走 **SpeculativeExecutor 并行 LLM**，超时 fallback 静态池。
+
+**改动（按信号流，全程复用既有管道，无新建平行管线）**：
+
+1. `services/reply_workflow.py`：新增 `classify_closing_intent()`——规则层检测收尾 token（晚安/睡了/先这样/明天见/拜拜/溜了/88…封闭集），要求短句、token 在尾、排疑问（「晚安是什么意思」「睡了吗」判否）。
+2. `kernel/router.py`：correction 注入块之前加并列 closing 注入——`not is_addressed + has_recent_assistant + last_assistant_to_user + classify_closing_intent` → `TriggerContext(mode="closing")`。优先于 directed_followup。
+3. `kernel/types.py`：`TriggerContext.mode` 注释补 `"closing"`（自由 str，additive）。
+4. `services/scheduler.py`：notify 派生 `is_closing` + 并入 proactive=None 豁免；加与 directed_followup 并列的 closing bypass `_fire`，**前置 dedup(`closing_done`) + 冷却(`last_light_time`)**；`_GroupSlot` 加这两个字段；模块常量 `_LIGHT_COOLDOWN_S=30` / `_CLOSING_RESET_S=1800`。
+5. `services/llm/thinker.py`：`_ALLOWED_ACTIONS` 加 `light_reply`；新增 `light_kind ∈ {"",companion,closing}`（照抄 instruction_signal 9 处穿透模式）；prompt 加弱回复段 + JSON schema；`think(trigger_mode=)` 入参，closing 时注入收尾提示 block。
+6. `services/llm/client.py`：think 调用传 `trigger_mode`；新增 `_gen_closing_token()`（≤24 token 短生成）经 SpeculativeExecutor 与 thinker **并行**预取；instruction_gate DENY hook 之后加 closing 短路——`on_segment` 直发 terminal token + 写 timeline assistant turn + 记 usage + `return None` 跳过主 LLM（复刻 DENY 结构）。
+
+**验证（D4 证据）**：
+
+- 新增 **34 测试**：检测 15（test_reply_workflow）、thinker 穿透 6（test_thinker）、scheduler bypass 4（test_scheduler::TestClosingBypass）、client 短路 4（test_closing_light_reply_client，含 **D2 cancel-path：CancelledError 传播不被吞**）。
+- 全量 `pytest`：**2242 passed, 8 skipped**（+34）；`ruff` All checks passed；`pyright`（6 文件）0 errors。
+- **D1 同模式扫描**：`thinker_action` 主流程唯一 action 分支是 `=="wait"`，closing 短路在其后、instruction_gate 之后；`light_reply` 非 wait 正常流过，companion 型落主生成（P0 文档行为）；directed/correction 的 busy-queue 处理 closing 已复刻。
+- **D2**：`_gen_closing_token` 与 speculative await 的 `except Exception` 不捕 CancelledError；`closing_done` 在 `_fire` 前置位 → shutdown 取消不致重启后重复触发。
+
+**影响 & 回滚**：改 .py（reply_workflow/router/types/scheduler/thinker/client）→ **需 rebuild bot 上线**。回滚 = router closing 注入 + scheduler closing bypass 注释即回二元决策；thinker light_kind / mode=closing / slot 字段均 additive 不影响旧路径。
+
+**P0 划界（不在本期）**：companion 型弱回复、prob-skip 救济、STICKER_ONLY（依赖表情包语义检索阶段3）。token 生成失败回退静态 `_PASS_TURN_LIGHT_ACK`——degraded 不静默。**待办**：rebuild 后烤群验「晚安」是否被对称回应、是否刷屏（去重+冷却同批已上）。
+
+---
+
+## 2026-05-30 生日祝福功能 — 补测试 + 修前端 auth + 修共享默认值 bug
+
+**变更类型**：测试补全 + 前端工程规范修正 + bug 修复（待 rebuild / 前端已 build）
+
+**背景**：群友生日 @祝福功能（admin 配置 QQ+生日 → 当天 bot 自动 @祝福，每天一次）此前会话已全量实现并接线：`birthday_greeter.py`(后端)、`admin/routes/api/birthday_greeter.py`(CRUD API)、`BirthdayView.vue`(前端)、dream on_tick 调用、路由注册、`birthday_wish` LLM task profile 均到位。本轮做收口：补测试、对齐前端工程规范、修发现的 bug。
+
+**改动**：
+
+1. **修共享可变默认值 bug**（`plugins/calendar_context/birthday_greeter.py`）：`_DEFAULT_DATA.copy()` 是浅拷贝，内层 `members` list / `sent_log` dict 在所有实例与模块全局间共享——首次 `add_member` 会污染模块级 `_DEFAULT_DATA`。改为 `_empty_data()` 工厂函数每次返回全新 dict。生产单实例下是潜伏 bug，测试时暴露。
+2. **前端改用 `api()` 客户端**（`admin/frontend/src/views/birthday/BirthdayView.vue`）：原用裸 `fetch()`，无 401→重登处理、无成功/失败 toast，偏离全站 ofetch `api()` 约定。改为 `api()` + `useMessage()` toast + loading/saving 态 + 表单必填校验；顺手清理了为 `h` 导入而开的怪异双 `<script>` 块。
+3. **新增 14 个单测**（`tests/test_birthday_greeter.py`）：CRUD/持久化/同 QQ upsert、生日匹配/非生日不发、当天去重、多群发送、单群失败不中断且仍记 greeted、sent_log 7 天清理、LLM 祝福文案成功/失败 fallback、损坏 JSON 重置。
+
+**验证（D4 证据）**：全量 `pytest` **2208 passed, 8 skipped**（+14）；`ruff` All checks passed；`pyright` 0 errors；前端 `vue-tsc --noEmit` clean + `npm run build` ✓。auth 机制核实：admin 用 HMAC 签名 cookie（`admin/auth.py`），`api()`/`fetch` 均 `same-origin` 携带 cookie，`/api/admin/birthday/*` 受 `AdminAuthMiddleware` 保护。
+
+**影响 & 回滚**：改 `birthday_greeter.py`（.py）→ **需 rebuild bot** 才上线 bug 修复；`BirthdayView.vue` 走 `admin/static` bind mount，`npm run build` 已即时生效（D6，无需 rebuild）。回滚 = `git checkout` 这 3 个文件 + 删测试。
+
+**待办 / 已知限制**：去重是「每成员每天」粒度，非「每群」——某群发送失败则该成员当天整体标记 greeted，失败群当天不补发（P0 可接受）。rebuild 后建议加一条今天 MM-DD 的测试记录验证真实 @祝福。
+
+---
+
+## 2026-05-30 表情包语义检索 阶段 2A（BM25 语义检索 + SQLite）实现落地
+
+**变更类型**：功能实现（存储迁移 index.json→SQLite + 意图检索），待 rebuild 上线
+
+**背景**：承接 [sticker-semantic-retrieval-impl.md](docs/tracking/sticker-semantic-retrieval-impl.md) 阶段 2A。让 bot 能"按意图找表情"（`search_by_intent("告别")` → 挥手表情）。零向量依赖现状下先走 BM25 复用现成 `KeywordBM25Retriever`，embedding（2B）按需再上。用户核准走"完整版迁 SQLite"。
+
+**改动（按依赖序）**：
+
+1. `services/media/sticker_store.py`：由 `index.json` 全量重写 → **SQLite**（`storage/stickers/stickers.db`，WAL + `synchronous=NORMAL` + `close_with_checkpoint_sync`，对齐 `knowledge/store.py` 的 slang.db 防腐范式）。内存镜像服务读（库 ≤200）。新增 `search_by_intent(query, top_k=5)`（复用 `KeywordBM25Retriever`，dirty-flag 惰性重建）。新增 `close()`。`add/get/update/remove/record_send/list_all/format_prompt_view` 接口签名全不变。
+2. `services/tools/sticker_tools.py`：`SendStickerTool` 去 `required`，加可选 `intent`——`sticker_id` 优先，否则 `intent→search_by_intent top-1`，两路并存。F1 真实 LLM 入口。
+3. `plugins/chat/plugin.py`：`on_shutdown` 接入 `sticker_store.close()`（WAL checkpoint）。
+4. `scripts/dev/sticker_recaption.py`：收尾加 `store.close()`。
+5. `admin/routes/api/stickers.py`：**修预存 bug**——`store.update(desc=,hint=)` 关键字与 `StickerStore.update(description=,usage_hint=)` 不符（每次后台编辑必 TypeError），改对齐签名；list/detail 响应补 `ocr_text` 字段。
+
+**两处 D1 同模式扫描发现 + 修复（关键）**：
+
+- **跨线程崩溃（本次新引入并即修）**：silent sticker learning 经 `asyncio.to_thread` 调 `store.add`，SQLite 默认 `check_same_thread=True` → `ProgrammingError`（JSON 版无线程亲和）。修：`check_same_thread=False` + `threading.RLock` 串行化所有 DB+镜像访问。回归 `test_add_works_from_worker_thread`。
+- **OCR 回填三态保留（阶段 1 联动）**：Dream 回填以 `"ocr_text" not in entry` 判"未做过 OCR"。SQLite 列默认 `''` 会让 key 恒存在 → 存量库永不回填。修：`ocr_text` 列 NULL-able，迁移缺 key→NULL（key 缺席）、有值（含 `''`）保留；`_row_to_entry` NULL→省略 key。三态：NULL/缺席=未尝试、`''`=尝试无字、有字=OCR 文本。
+
+**未做（明确划界）**：`decision_provider` 的 `"semantic"` 触发 + F4 `rerank_strategy` 消费——`rerank_strategy` 全仓零下游消费者（`client.py` 只发 `candidate_pool[0]`），现在加属推测死码；F4 真正落地在阶段 3 弱回复接 `search_by_intent` 时再补。`StickersView.vue` 的 OCR 列展示（后端已出字段）属 UI 增强，未做。
+
+**验证（D4 证据）**：
+
+- 新增/改测试：`test_sticker_store.py` +14（search 8 例 + 迁移 4 例 + 跨线程 1 + 改 1 个迁移断言为三态）；`test_sticker_tools.py` +4（intent 解析发送/无匹配/id 优先/二者皆空）+ 改 schema 断言（去 required）。
+- **D1 同模式扫描**：`list_all()` 全调用方（chat/dream/admin/client/register_provider）均不 mutate 返回条目（改为深拷贝防御）；`StickerStore` 移除的内部（`_save_index/_load_index/_index_path`）无外部引用；`stickers.db*` 由 `.gitignore` `storage/stickers/` 覆盖（D7 物理护栏）。
+- 全量 `pytest`：**2194 passed, 8 skipped**（+17 净）；`ruff` All checks passed；`pyright` 0 errors。（aiosqlite "Event loop closed" 警告为预存 teardown 噪声，本 store 用 stdlib sqlite3 不涉及。）
+
+**影响 & 回滚**：改 .py → **需 rebuild bot 上线**。首次启动自动迁移旧 `index.json`→SQLite（幂等，旧 JSON 冻结作回退快照不回写）。回滚 = `git checkout` 这些文件 + 删 `storage/stickers/stickers.db*`，旧 `index.json` 自然接管（迁移后新增的表情会丢，回滚前需评估）。`send_sticker` 的 `intent` 是可选入参，去掉即回纯 ID 发送。
+
+**待办**：rebuild 上线后用真实弱回复场景看 BM25 召回够不够（"告别↔挥手"近义）；不足则推进 2B（embedding）。阶段 3 弱回复接入待弱回复主体先行。
+
+---
+
+## 2026-05-30 表情包语义检索 阶段 1（OCR 入库）实现落地
+
+**变更类型**：功能实现（VL 富描述 + OCR 入库），待 rebuild 上线
+
+**背景**：承接全阶段实施方案 [sticker-semantic-retrieval-impl.md](docs/tracking/sticker-semantic-retrieval-impl.md) 阶段 1。让表情包"知道图上写了什么字"——VL 一次调用同时产出描述/情绪 + OCR 文字，存入记录、注入 prompt。解审计 F2。
+
+**改动（按依赖序）**：
+
+1. `services/media/sticker_store.py`：`add()` 加 `ocr_text=""` 入参 + entry 字段（additive）；`update()` 加 `ocr_text` 可选更新；`format_prompt_view()` 非空时渲染"图上文字：xxx"（稳定字段，不破 prompt cache）。
+2. `services/media/vision.py`：`_STICKER_DESCRIBE_PROMPT` 加 OCR 要求（图上有字则末尾附"图上文字：xxx"）；`max_tokens` 128 硬编码 → 构造参数 `max_tokens=200`（默认）。
+3. `services/media/sticker_capture.py`：新增 `split_desc_and_ocr()`（按"图上文字："全/半角分隔，OCR 截 64 字）；`_EMOTION_TAG_PROMPT` 加 OCR 要求；`emit_emotion_tag()` 一次 VL 调用拆出 usage_hint + ocr_text，一次 `update` 写入；用 `"ocr_text" in entry` 判定是否已尝试过 OCR（避免无文字表情反复重试）。
+4. `kernel/config.py`：`VisionConfig` 加 `describe_max_tokens: int = 200`；`bot.py` 透传给 VisionClient。
+5. `plugins/dream/plugin.py`：DreamAgent 加 `vision_client` + `ocr_backfill_per_run=10`；新增 `_backfill_sticker_ocr()` 每轮限流给缺 `ocr_text` key 的存量表情补 OCR（复用 emit_emotion_tag overwrite）；`_run` 开头调用；`on_startup` 注入 `ctx.vision_client`。
+
+**验证（D4 证据）**：
+
+- 新增 15 测试：`test_sticker_store.py` +6（ocr 字段读写/默认空/prompt 渲染含/不含/稳定性）、`test_sticker_capture_emotion.py` +6（split 4 例 + emit 写 OCR/无 OCR 保持空）、`test_dream.py` +3（回填 legacy/已有跳过/无 vision no-op）。
+- **D1 同模式扫描**：其他 `describe_image` 调用方（chat:837 通用图、bilibili:789）走默认富描述 prompt，OCR 后缀对 `«img:N: desc»` 渲染无害；`format_prompt_view` 消费方（chat:451、sticker:407）透明注入；其余 `max_tokens=128` 均非 vision 调用，不受影响。
+- 全量 `pytest`：**2177 passed, 8 skipped**（+15）；`ruff` + `pyright`（media/dream）：0 error。
+
+**影响 & 回滚**：改 .py（vision/sticker_store/sticker_capture/config/bot/dream）→ **需 rebuild bot 上线**。index.json 旧条目无 `ocr_text` key，`.get("ocr_text","")` 兜底 + Dream 渐进回填，**无需迁移**。VL 调用量：新图不变（同次调用多拿 OCR），回填每轮 Dream ≤10 张。回滚 = `git checkout` 这 6 个文件 + 删测试新增；旧 index.json 自然兼容（多出字段被忽略）。
+
+**待办**：rebuild 上线后用真实群表情抽验 Qwen-VL 的 OCR 准确率；阶段 2（语义检索）见实施方案。
+
+---
+
+## 2026-05-30 表情包语义检索 — 全阶段实施方案（OCR → 检索 → 弱回复接入）
+
+**变更类型**：实施规划文档（无代码改动，待审）
+
+**触发**：承接表情包系统审计（F1-F5 + §5 前沿 + §6 pre-part0 兼容），出**全阶段**精确到文件/行的实施方案（三阶段）。
+
+**决定性约束（核准现状）**：全仓**零向量依赖**——`pyproject` 无 faiss/sqlite-vec/sentence-transformers；`EmbeddingSimilarityProvider` 是 raise 占位；知识库纯 BM25（`KeywordBM25Retriever`），相似度只有 ngram。故 sticker 语义检索引入 embedding = 全仓首次。方案据此把阶段 2 拆两步走，先 BM25 兜底验证、再按需上 embedding（修正审计 §5.4 的"直接 text-to-text embedding"）。
+
+**三阶段**：
+
+- **阶段 1（OCR 入库，解 F2）**：VL 一次调用产出"内容/情绪 + OCR"；`sticker_store` 加 `ocr_text`（additive）；`vision.py` 富描述 prompt + `max_tokens` 128→200（提为 `VisionConfig.describe_max_tokens`）+ `split_desc_and_ocr`；`emit_emotion_tag` 接通；Dream 限流回填。无新依赖、无迁移、独立可上线。
+- **阶段 2（语义检索，解 F1/F3/F4）**：2A 先 BM25——index.json→SQLite（与 pre-part0 同库）、`search_by_intent` 复用 `KeywordBM25Retriever`、`send_sticker` 加 `intent` 入口、接通 F4 占位；2B 按需——BM25 近义召回不足时才接通 `EmbeddingSimilarityProvider`（本地 bge/m3e ONNX 或 siliconflow API），内部升级 `search_by_intent`、对外签名不变。
+- **阶段 3（弱回复接入）**：`light_kind` 映射检索意图 → `search_by_intent` → STICKER_ONLY；检索空回退文字 token 不静默；共用弱回复冷却。
+
+**pre-part0 协调 checklist**：富描述 prompt 合并一次 VL 调用、SQLite 同库不起第二个 DB、OCR 进共用富描述、谁先落地谁搭骨架。
+
+**文档**：[docs/tracking/sticker-semantic-retrieval-impl.md](docs/tracking/sticker-semantic-retrieval-impl.md)（原 stage1 文件已重命名为全阶段）
+
+**影响 & 回滚**：纯文档。阶段 1 改 vision/sticker_store/sticker_capture/config/dream（rebuild，无迁移）；阶段 2A 有 index.json→SQLite 一次性迁移（备份+幂等+回退周期）；阶段 2B 引入 embedding 依赖（pyproject + 镜像 +150-300MB）。文档回滚 = `git restore docs/tracking/sticker-semantic-retrieval-impl.md maintenance-log.md`。
+
+---
+
+## 2026-05-30 表情包系统审计报告（为「表情包语义检索」立项）
+
+**变更类型**：架构审计文档（无代码改动）
+
+**触发**：弱回复机制设计中发现 STICKER_ONLY 无法实现（当前表情包不支持按语义检索）。立项前先审计全链路现状。用户点名已知问题：无语义检索、无法识别表情包自带文字。
+
+**审计范围**：六层全链路——存储（`sticker_store.py` index.json）、捕获（`sticker_capture.py`）、描述生成（`vision.py` Qwen-VL）、选择决策（`decision_provider.py` + `fairmatch.py`）、发送工具（`sticker_tools.py`）、Dream 维护。
+
+**五项发现（按严重度）**：
+
+- **F1 核心缺口**：无任何语义检索能力。候选池全是 ID 集合操作（tool_call/kaomoji/frequent/thinker 四类 ID 列表）+ mood 概率门；`fairmatch` 纯频率重排不筛选；`rerank_strategy` 的 emotion/intent/persona 是死标签无消费方。唯一"语义匹配"是主 LLM 读 `format_prompt_view()` 注入的全库文本自己挑——外包给 LLM 上下文，无独立检索机制。
+- **F2 核心缺口**：无 OCR。三条描述来源（segment summary / emotion_tag prompt / VL describe prompt）均不要求读图上文字；`normalize_emotion_tag` 截断 32 字。图上"晚安/打工人"等核心语义全丢。
+- **F3 架构债**：`index.json` 全量内存 dict 每次操作全量重写，无法承载 embedding 向量；无相似度查询接口。
+- **F4 设计债**：`rerank_strategy` 占位符空转，制造"已支持语义"假象（与 ResponseClass 四档同型——定义未接通）。
+- **F5 观察**：两条发送路径语义能力不对等（LLM 工具路径靠 prompt 伪语义；humanization 自动路径纯频率零语义）。
+
+**立项建议**：分两阶段——阶段 1 OCR 入库（改 VL prompt + index 加 `ocr_text` 字段，低成本独立可上线，解决 F2 且改善 F1 伪语义路径）；阶段 2 向量检索 + SQLite 迁移（解决 F1/F3/F4，复用 issue17 pre-part0 同款 SQLite+BLOB）。**关联但正交**于 issue17 pre-part0（那是接收侧角色识别 CCIP，本项是发送侧意图检索文本 embedding）。弱回复 STICKER_ONLY 挂阶段 2 之后。
+
+**文档**：[docs/tracking/sticker-system-audit-2026-05-30.md](docs/tracking/sticker-system-audit-2026-05-30.md)
+
+**前沿技术参考（§5，论文+项目）**：StickerCLIP/Sticker820K（arXiv 2306.06870，Tencent）——zero-shot CLIP 在 sticker 检索极差（MR 16.7→fine-tune 82.7），标注 schema = 描述+OCR+情绪+风格，**OCR 是 sticker 检索标配特征，直接印证 F2**；StickerLLM 的 `<ret>` token 范式与 omubot 工具架构契合。STICKERCONV（2402.01679）/ PEPE（EMNLP21）证对话级 sticker/gif 选择成立。**路线收敛**：阶段 2 推荐「描述文本 embedding + sqlite-vec」（复用现有 VL 描述+SQLite 栈，比通用图 embedding 零样本更稳），图 embedding（StickerCLIP）作后续增强备选。
+
+**issue17 pre-part0 兼容规划（§6，防两套工作流）**：碰撞点在 `kernel/router.py:733-768` 同一段 vision 管线，两项目都要调 VL/写缓存/拼描述。约定：① VL prompt 合并一次产出 `{情绪,内容,OCR}` 富描述（不各调一次）；② 缓存合一，共用 pre-part0 的 `character_recognition.db`（本项 ocr_text/embedding 作扩展列），不另起第二个 DB；③ 富描述单一数据源、接收侧（角色+情绪）与发送侧（内容+OCR+情绪检索）各取所需；④ 先落本项阶段 1（OCR 入库，最轻且为 pre-part0 也补 OCR），共用统一管线骨架。**反向提示 pre-part0**：实施时纳入 OCR 字段（边际成本极低），避免本项回头改它的缓存 schema。
+
+**影响 & 回滚**：纯文档，无运行时变化。回滚 = `git restore docs/tracking/sticker-system-audit-2026-05-30.md maintenance-log.md`。
+
+---
+
+## 2026-05-30 弱回复机制设计文档（强/弱回复二分 · 四档响应分级激活）
+
+**变更类型**：研究 + 设计文档（无代码改动，待审）
+
+**触发**：用户提出新机制——日常聊天很多消息不需要准确回复，而需要陪伴感 + "我看见你消息了"的确认。要求分强回复（现状）/弱回复（简短 token / 表情包），并先做社会工程学调研再出方案。烤群「好吧晚安」被判 skip 是典型痛点。
+
+**调研结论**：用户直觉有四条独立 CA 证据线支撑——① Schegloff & Sacks「Opening Up Closings」(对话须双方协作关闭，晚安强制要求对称 terminal token)；② Clark「project markers」(horizontal uh-huh / vertical okay 两类，即强/弱二分原型，且弱回复本身分陪伴/收尾两子型)；③ Malinowski「phatic communion」(交流为联结非传信息=陪伴感)；④ Williams「ostracism / left on read」(不回应有关系伤害且代价不对称→拿不准时弱回复优于 skip；但 Forbes「Noted」证明冷 ack 也有害→弱回复须带温度)。
+
+**关键代码发现**：`kernel/types.py:ResponseClass` **已定义四档**（SILENCE/LIGHT_ACK/FULL_REPLY/STICKER_ONLY）+ `_PASS_TURN_LIGHT_ACK` 占位文案，但 scheduler 决策链仍是二元（fire→FULL_REPLY / skip→SILENCE），LIGHT_ACK 仅作 pass_turn 事后兜底。本方案=激活已埋脚手架，非从零造。架构修正：弱回复主入口必须在 **scheduler 层**（skip 的消息进不了 thinker/chat），thinker 仅在 FULL_REPLY 路径内做反向降级。
+
+**第二轮架构重审（结合 omubot 近期组件）**：原方案的"scheduler 新建 `_fire_light`/`_do_light_ack` 平行管线"**整体废弃**，改为复用四个现有组件——① directed_followup scheduler bypass（commit 4e04938）：closing 注入 `TriggerContext(mode="closing")` 复用同款绕过概率通道进 chat；② instruction_gate 的 DENY 模式（`client.py:2424` `on_segment` 直发 + CQ:reply + `return None` 跳过主 LLM）= 弱回复结构原型，closing 短路在同一 hook 点（`client.py:3974`）复刻；③ addressee_hint/plugin_dynamic 注入管道：companion 弱回复注入 hint 让主 LLM 生成短句，不新建 backchannel token 池；④ SpeculativeExecutor（`client.py:3862`）：closing token 预测执行，零额外串行延迟。详见设计文档 §2.5。
+
+**文档**：[docs/tracking/weak-reply-mechanism-design.md](docs/tracking/weak-reply-mechanism-design.md)——含四证据线、现状代码地图、三层实施方案（P0 closing 入口 + LLM 生成 terminal token / P1 companion + STICKER_ONLY + prob-skip 救济 / P2 冷却去重节制）、数据结构变更、测试清单（含 D2 cancel-path）、风险回滚、落地顺序。
+
+**第三轮核实修正（用户质疑表情包载体）**：用户指出方案里"挥手/晚安表情包"想当然——核实证实当前表情包是**按 ID 从频繁/最近池挑 + mood 调概率**（`StickerDecisionProvider`），`send_sticker` 只收 `sticker_id`，**不支持按 closing/companion 语义检索对应表情**。且 issue17 pre-part0 表情包更新是**接收侧角色识别**（CCIP/AnimeTrace 识别图里是谁），与发送侧语义检索无关，且未落地。修正：① STICKER_ONLY 从 P1 主线**移出**，标注依赖新前置项「表情包语义检索」（设计文档新增 §2.6 记录定义与 pre-part0 区别）；② 弱回复本期**只做纯文字 token**（closing/companion 文字载体已覆盖烤群痛点）；③ `ResponseClass.STICKER_ONLY` 枚举保留占位。
+
+**用户决策记录**：判定层=两层协作（scheduler 为主）；载体=closing/companion 纯文字 token（LLM 现场生成）；STICKER_ONLY=另立语义检索前置项、排其后；本轮范围=设计文档（未写代码）。
+
+**影响 & 回滚**：纯文档，无运行时变化、无需 rebuild。回滚 = `git restore docs/tracking/weak-reply-mechanism-design.md maintenance-log.md`。
+
+---
+
+## 2026-05-30 mood 二轴重构：把 mood 从「接不接话」撤出，正向建出 AIM「怎么回」特征
+
+**变更类型**：行为重构（意图门 + thinker 决策逻辑）+ 回归测试。上承同日「双人接话被静默」修复——那次让 LLM 语义门能被调起，本次解决「LLM 判了 force_reply 却仍被静默」的下游断链，并修正 mood 接线错配。
+
+**触发**：上线后线上日志显示语义门已生效（`source=llm_gate`），但「你起来」一例 LLM 判 `force_reply confidence=0.75`，却因 `effective_threshold=0.83`（被 `mood_low:+0.05` + 凌晨抬高）未被 consume → 退回概率链 skip → 仍静默。
+
+**社会工程学调研结论**（依据：Forgas Affect Infusion Model 请求策略综述；EJSP "Can negative mood improve your conversation?"；*Journal of Pragmatics* 2026 "How we are vs how we are feeling"）：
+
+- **mood 决定 HOW（怎么回）**：负面情绪 → 更礼貌、更谨慎、更详尽、更守 Grice 准则（反直觉：不是更冷淡更敷衍）。
+- **稳定特质决定 WHETHER（接不接话）**：sociability / 关系 / 人设，而非当下心情。短时 mood 接到「要不要回」的闸门是把状态变量误用成特质变量。
+
+**改动（二轴重构）**：
+
+1. **A1** `services/reply_workflow.py:semantic_gate_threshold` —— 删除 `mood_low:+0.05` 调整项。mood 从语义门 whether 轴撤出；`familiarity_high:-0.10`（稳定特质）保留；`mood_energy` 仍记日志供观测，不参与计算。
+2. **A2 + B1** `services/llm/thinker.py` 「心情对决策的影响」段重写为「心情对『怎么回』的影响（不影响『要不要回』）」：删掉「能量低 → 更容易选择 wait」（whether 错配的第二处，在 LLM 决策层）；引入 energy 轴（话多话少）+ valence 轴（语气松紧），并显式写入 AIM 反直觉特征「心情低落 → 反而更礼貌、更周到、措辞更谨慎」。
+3. **B2** thinker tone「认真」档补充「也适合自己心情低落但仍想好好回应时」，给低落场景一个正向出口（而非只能收敛/冷淡）。
+4. **C** `should_consume_semantic_gate` 加 `force_floor=0.7`：LLM 明确 `force_reply` 时，门槛取 `min(动态阈值, 0.7)`，动态调整只能降（familiarity）不能抬过 floor。LLM 的 force_reply 是最强 whether 信号，不应被动态阈值否决。
+
+**D1 同模式扫描**：
+
+- 第三处 mood→行为接线 `services/scheduler.py:_get_mood_multiplier`（概率自发回复阈值）—— **判定保留**：它作用在「自发 initiation（主动凑没点名自己的群聊）」轴上，mood/energy 调节主动搭话频率符合 WTC/apathy 文献，非错配。directed（被点名/接话）路径才不该被 mood 干预——本次 A+C 正是堵住「directed 漏进 spontaneous 概率链」的洞。
+- 既有 `tests/test_semantic_gate_dynamic.py` 两处锁死旧 mood_low 行为（`low_mood_raises_bar`、`clamps_dynamic_range` 的 raised 分支）—— 反转为断言新行为：低 mood 不再抬门槛；上界 clamp 改由 `fixed_threshold=0.95` 触发。
+
+**验证（D4 证据）**：
+
+- 红→绿：凌晨 incident 全链 `test_incident_full_chain_now_replies`——`mood_energy=0.146` → `effective=0.78`（旧 0.83）；`force_reply 0.75` → consume **True**（旧 False）。
+- 新增 6 个 `test_reply_workflow.py` 用例 + 改 2 个 `test_semantic_gate_dynamic.py` 用例 + 1 个 thinker prompt 快照断言（含「不影响『要不要回』」「更礼貌」，不含「更容易选择 wait」）。
+- 全量 `pytest`：**2162 passed, 8 skipped**；`ruff` + `pyright`（reply_workflow / thinker）：0 error。
+
+**影响 & 回滚**：改 prompt + 判定逻辑，属 .py，需 rebuild bot 进生产。生成侧既有 mood 行为（`_build_thinker_mood_text` / provider `mood_fit_target`）不动。回滚 = `git checkout services/reply_workflow.py services/llm/thinker.py tests/test_reply_workflow.py tests/test_semantic_gate_dynamic.py`，可逆。
+
+**未纳入**：scheduler 自发概率链（判定正确，不动）；生成侧 mood 注入的进一步精细化（valence 已进 prompt，provider 侧 fit_target 维持现状）。
+
+---
+
+## 2026-05-30 修复群聊「双人接话被静默」根因（_last_assistant_replied_to_user 多用户 merge 误判）
+
+**变更类型**：行为修复（意图察觉判定逻辑收窄）+ 新增回归测试
+
+**故障现象**：群「烤」凌晨场景——用户追问「你为什么叫我管理员」（标准双人问答），bot 毫无反应。
+
+**根因（已用真实序列离线复现确认）**：`kernel/router.py` 的 `_last_assistant_replied_to_user` 用 `all(suffix in line for line in active_user_lines)` 判断「上轮 assistant 是否在回当前用户」。但 timeline 是 lazy-flush——bot 沉默期内所有人的消息堆在同一 pending，下次回复时被 merge 成**一个含多用户的 user turn**。只要混入一行别人的发言，`all()` 即 False。连锁：`last_assistant_to_user=False` + `reply_to_bot=False` → `should_call_semantic_gate` 入口闸短路（`services/reply_workflow.py:260`）→ LLM 语义意图门**根本没被调用** → 退回概率掷骰 → 凌晨 `time=0.20` 把阈值压到地板，`0.18 < 0.17` 失败 → 静默。
+
+**修复**：把 `all(...)` 改为只看**最后一条真实 user 行**的归属（`current_user_suffix in active_user_lines[-1]`）。merge 后 user turn 按时间顺序追加，最后一行即触发上一轮 assistant 回复的发言——这才是「bot 上轮在跟谁说话」的正解。改动单点（`kernel/router.py:525-532`），不动 timeline / 不动概率链。
+
+**验证（D4 证据）**：
+
+- **D1 同模式扫描**：grep 全仓 `all(` + `splitlines/suffix/in line/user_id` 及 addressee 层（`services/group/addressee.py`、`services/llm/addressee_hint.py`），无第二处「per-line 归属 vs merged-turn」误用——本函数是孤例。
+- **红→绿证据**：离线对照——同一 incident merge 序列（`丛非凡(20002)` + `我(10001)`），OLD `all()` 返回 `False`（误抑制），NEW `[-1]` 返回 `True`（正确）。
+- 新增 `tests/test_last_assistant_replied_to_user.py`（6 用例，覆盖单人/多用户 merge/最后一行属他人/超窗口/触发标记忽略/无 assistant turn）——此前该函数**零单测**，正是带病上线的原因。
+- 全量 `pytest`：**2156 passed, 8 skipped**；`ruff check` + `pyright kernel/router.py`：0 error。
+
+**影响 & 回滚**：纯判定逻辑收窄；改 .py 需 rebuild bot 进生产。回滚 = `git checkout kernel/router.py` + 删新测试文件，单文件可逆。
+
+**未纳入本次（留 backlog，避免掺入行为扩张）**：① 语义门入口仍依赖 `reply_to_bot or last_assistant_to_user` 两布尔，修复后标准双人场景已能进门，暂不扩宽；② 概率兜底无「被点名用户强接话」豁免（增强项，非本 bug 必需）。
+
+---
+
+## 2026-05-30 pyright 阶段 1：清 Optional-cursor 机械债（4 文件 97→0）
+
+**变更类型**：技术债清理（类型修复，无行为变更）+ 1 处签名收紧
+
+**背景**：承接同日 pyright 全量清单 `docs/tracking/pyright-type-debt-2026-05-30.md` 的阶段 1 建议。挑「纯机械修、零行为变更」的高密度户先清，复用已在 slang store 验证过的 `_require_db()` 收窄模式。
+
+**内容（4 文件，97 错）**：
+
+1. `services/memory/card_store.py`（29：28 MemberAccess + 1 Subscript）——加 `_require_db()`，逐方法把 `self._db.execute(...)` 改 `db = self._require_db()`；`_backfill_food_series` 方法首绑一次 `db`；init 的 `_COUNT_ALL` 取数加 `count_row else 0` 守护。
+2. `services/knowledge_graph/store.py`（26：24 MemberAccess + 2 ArgumentType）——加 `_require_db()` 同款；另把 `add_fact`/`add_candidate` 的 `status: str` 收紧为 `status: GraphStatus`（Literal），消除传给 `GraphFact(status=...)` 的 str→Literal 不匹配。所有调用方（service.py / test_cross_group.py）均传字面量 `"active"`/`"pending"`，收紧后仍满足。
+3. `services/knowledge_graph/graph_writer.py`（27：23 MemberAccess + 4 Subscript）——`_db` property 改委托 `self._store._require_db()` 并标注返回 `aiosqlite.Connection`（消 23 个 MemberAccess）；4 个 `int((await cursor.fetchone())["cnt"])` 加 `count_row else 0` 守护（消 4 个 Subscript）；补 `import aiosqlite`。
+4. `services/health.py`（15 MemberAccess）——根因是 `x.get("k") if isinstance(x.get("k"), dict) else {}` 两次 `.get()` 让 pyright 无法收窄绑定名；改「绑定一次 `meta_raw`/`semantic_raw` 再 isinstance 收窄」。非 db 连接问题，独立修法。
+
+**修法选择说明**：
+
+- card_store / kg store 复刻 slang 的 `_require_db()` 单源收窄，与 `[[project_docker_memory_opt]]` 无关，纯类型层。
+- graph_writer 因走 property 委托，改 property 一处即消 23 个，比逐方法 `db =` 更省。
+- kg store 的 status 收紧是**正确性提升**（之前 str 可传非法状态进 Literal 字段），非单纯压 pyright。
+
+**验证（D4 证据）**：
+
+- 四文件 `pyright`：各 **0 errors**（原 29/26/27/15）。
+- 全仓 `pyright`：**353 → 256 errors**（净消 97，与四文件相符）。
+- `ruff check`（四文件）：All checks passed。
+- 相关测试（kg/card/graph/health/memory 关键字）：276 passed, 1 skipped。
+- 全量 `uv run pytest`：**2150 passed, 8 skipped, 0 failed**（与阶段 1 前基线一致）。
+
+**影响范围**：纯类型/等价重写 + 1 处更严签名；无运行时行为变更。改 .py 需 rebuild bot 进生产，但无功能影响。`status` 收紧不影响现有调用方。
+
+**回滚路径**：`git checkout services/memory/card_store.py services/knowledge_graph/store.py services/knowledge_graph/graph_writer.py services/health.py`（注意工作树含其他在途改动，回滚需 stash 隔离本次 hunk）。
+
+**遗留**：阶段 2（src 长尾混合 ~84 + plugin override 签名债 10）与阶段 3（CI 门禁配置）仍待决策，详见清单 §五。
+
+---
+
+## 2026-05-30 清理 slang store 历史类型债（pyright 19→0，独立任务）
+
+**变更类型**：技术债清理（类型修复，无行为变更）
+
+**背景**：同日 ruff 收口时发现 `services/slang/store.py` pyright 报 19 错误。经 git blame 定位，归属为**历史遗留**——分散在 `653b7b3`(5-08 v1.4.0 release)、`165a53f`(5-18 alias 碰撞修复)、`3477163c`(5-21 collision 增强)三个早已提交的 commit，与当前工作树未提交改动**零重叠**（用错误指纹比对确认 HEAD 与工作树同为 18 OptionalSubscript + 1 SlangScope）。不属任何在途重构，无负责人可交接，故按独立任务清理。
+
+**根因（两类）**：
+
+1. **18 × `reportOptionalSubscript`**：`(await cursor.fetchone())["cnt"]` 惯用法——`fetchone()` 类型 `Row | None`，pyright 拒绝对可能为 None 的对象下标。这些全是 `SELECT COUNT(*)`/`AVG(...)` 查询，运行时必返一行，纯类型噪音（运行时安全）。集中在 `_paged_*`/`stats()`/`summary()` 等统计方法。
+2. **1 × SlangScope 参数类型(原 2403)**：`check_scope = str(updates.get("scope", term.scope))` 把 `SlangScope`(Literal["group","global"]) 拓宽成 `str`，传给要求 `SlangScope` 的 `find_existing`。
+
+**修法（最小、单源）**：
+
+1. 新增模块级 `async def _fetch_scalar(cursor, key, default=0)` helper（置于 `_new_id` 之后），吸收 `Row | None` + NULL 列两种情形，保留原 `... or 0`/`or 0.0` 运行时语义于一处；18 个调用点统一改为 `int(await _fetch_scalar(cursor, "cnt"))`（`avg_conf` 点传 `0.0` 默认值保 float 语义）。
+2. `check_scope` 改为类型安全归一化：`check_scope: SlangScope = "global" if updates.get("scope", term.scope) == "global" else "group"`——比 cast 更正确（防 updates 里混入非法 scope 值），且与下一行 `!= "global"` 逻辑一致。
+
+**验证（D4 证据）**：
+- `pyright services/slang/store.py`：**0 errors**（原 19）。
+- `ruff check`（全量）：All checks passed。
+- slang 测试 6 文件 60 passed（含 `test_slang_store.py` 对 `summary()`/`stats()` 的直接覆盖——转换最密集的两个方法有回归保护）。
+- 全量 `uv run pytest`：**2150 passed, 8 skipped, 0 failed**。
+
+**影响范围**：纯类型/等价重写，无运行时行为变更；改 .py 需 rebuild bot 才进生产，但无功能影响。`_fetch_scalar` 仅 store.py 内部使用。
+
+**回滚路径**：`git checkout services/slang/store.py`（注意：该文件含工作树其他在途改动，回滚需 stash 隔离本次 hunk）。
+
+**遗留观察**：CLAUDE.md 把 `uv run pyright` 列为检查项，但当前 CI 未卡 pyright 门禁（否则这 19 个历史错误早该红）。是否将 pyright 纳入 CI 门禁需单独决策——纳入前应先全量扫一遍其他模块的存量类型债。**已全量扫描并出清单**：`docs/tracking/pyright-type-debt-2026-05-30.md`（全仓 353 errors / 67 文件，其中 60% 是与本次同款的 Optional-cursor 机械债；含三阶段清理建议 + 假阳性白名单）。
+
+---
+
+## 2026-05-30 收口工作树 6 项 ruff 错误（echo / slang / 测试 lint 卫生）
+
+**变更类型**：缺陷修复（lint 卫生，纯风格 / 等价重写，无行为变更）
+
+**背景**：承接同日「8 失败」收口时标注的「另有 6 个 ruff 错误非本次引入」。用户指示一并解决。
+
+**内容（3 文件 6 错）**：
+
+1. `plugins/echo/__init__.py` — RUF022：`__all__` 按 isort 排序（autofix）。
+2. `tests/test_echo_humanizer_input.py` — F401：删未用的 `EchoTracker` 导入（autofix）；E501 ×2：两处 `cast(ElementDetector, SimpleNamespace(...))` 125/130 字符超长行折成多行（等价）。
+3. `services/slang/store.py` — SIM105 ×2：`try/except SlangCollisionError: pass` 改 `with contextlib.suppress(SlangCollisionError):`（contextlib 已导入，行为等价）。
+
+**验证（D4 证据）**：
+- 全量 `uv run ruff check`：**All checks passed**（原 6 errors）。
+- `tests/test_echo_humanizer_input.py`：7 passed（cast 折行不改行为）。
+- 全量 `uv run pytest`：**2150 passed, 8 skipped, 0 failed**。
+- ⚠️ `pyright services/slang/store.py` 报 **19 errors，先存且非本次引入**——已用 `git stash` 验证 HEAD 版本同为 19 errors（reportOptionalSubscript，位于 1884+ 行，与我改的 ~1253/1572 行无关）。属 slang store 工作树其他在途改动的负责人收口范围，**未代修**。
+
+**影响范围**：纯 lint，无运行时行为变更；echo `__init__`/store 改 .py（rebuild bot 才生效，但无功能影响），测试文件不影响生产。
+
+**回滚路径**：`git checkout` 这 3 个文件即还原。
+
+---
+
+## 2026-05-30 收口工作树 8 项 pytest 失败（LLMTask 覆盖漂移 + 学习管线计数语义）
+
+**变更类型**：缺陷修复（一致性守卫补全 + 计数双算修复 + 陈旧测试对齐）
+
+**背景**：承接上一条 Issue 15 落地时标注的「8 失败与本次无关」。用户指示「把失败收了」。诊断后并非单一 style_review 缺口，而是工作树里**两个独立的先存缺陷**，且修复第一个后又揭出第三个被掩盖的断言。
+
+**根因（三处独立）**：
+
+1. **`LLMTask` 字面量漂移（7 失败）**：工作树往 `services/llm/llm_request.py` 的 `LLMTask` 加了 4 个任务（`style_review`/`episode_review`/`fact_review`/`birthday_wish`），但镜像它的 6 张覆盖表未同步——`TASK_CACHE_PROFILES`、`LLM_PIPELINES`、`kernel/config.py:_ensure_main_profile` 默认、前端 `ProviderTaskKey`(types.ts)、`providerTaskOrder` + `providerTaskLabels`(SystemProviders.vue)。这些是纯一致性守卫测试，修法是**登记这 4 个任务到每张表**，不是实现它们的调用点。
+2. **consolidator 计数双算（1 失败）**：`admin/routes/api/learning_pipeline.py:_collect_consolidator_counts` 只零初始化 `fact`/`graph_relation`（证明它只该负责这两个名词），但 SQL 却 `domain IN ('fact','slang','style','episode','graph_relation')` 且用 `_add_count` 叠加到 slang/style/episode 的专属 store 计数之上 → slang 候选被 +1 双算。HEAD 时被旧 slang 过滤式（`AND NOT ai_kept` 恰好少算 1）巧合抵消；工作树的 sub-stage 重构放宽了过滤式，暴露了潜伏的 +1。修法：counts 路径 domain 收窄到 `('fact','graph_relation')`。⚠️ **items 抽屉路径（`consolidator_nouns`）刻意保留 slang/style/episode 合并**——那是抽屉「合并候选」特性（`test_learning_items_cursor_paginates_merged_candidates` 守护），与 counts 的非对称是有意的（counts 从专属 store 取，抽屉合并预晋升行）。
+3. **slang 阶段从重叠改判为不相交（被掩盖的第 1 失败）**：原失败止于 `candidate==2`，掩盖了 `approved slang` 断言。工作树把 slang 管线阶段从**重叠**（HEAD：approved=所有 `status='approved'`，是 review 的超集）重构为**不相交划分**，且 counts 收集器与 items 查询（`_slang_stage_where`）用**同一布尔谓词**改写——review=`approved AND ai_reviewed AND NOT human_reviewed`，approved=`approved AND NOT(...)`。种子两条 approved 行中 `review_ai`（待人工复核→review）、`approved_human`（→approved），故 approved=1。证据：probe 跑实际端点得 candidate=2/review=1/approved=1/archived=2，且 items 抽屉 `_slang_stage_where("approved")` 同样排除 `review_ai`——恢复重叠计数 2 反而会让 badge 与抽屉列表不一致。判定为陈旧测试，更新 `test_admin_api_learning_pipeline.py` 单条断言 2→1（含语义注释）。
+
+**同模式扫描（D1）**：① consolidator 两处查询位点（counts L1526 静态过滤、items L2070 受 `consolidator_nouns` 参数化）已对齐；`_count_items_by_date` 各名词只读专属 store、无 consolidator 分支，无双算。② 全仓 grep 任务集硬断言——仅 4 个 sync 测试文件 + `test_dashboard_cache_pipelines.py` 钉死完整集合；`test_memory_consolidator.py`/`test_client.py` 命中均为 `in`/按键查找，非完整集合断言，加任务不破。
+
+**陈旧测试对齐（均为合法期望值更新，非掩盖）**：
+- `test_admin_api_learning_pipeline.py`：approved slang `2→1`（不相交阶段语义）。
+- `test_dashboard_cache_pipelines.py`：`memory_graph.per_task` 完整集合补 `episode_review`+`fact_review`（我把它们正确归入 memory_graph 管线的直接结果）。
+
+**验证（D4 证据）**：
+- 原 8 失败的 4 个文件：`62 passed`（原 8 failed/54 passed）。
+- 前端 `vue-tsc --noEmit` exit 0（types.ts + SystemProviders.vue 改动）。
+- 我改动文件 `ruff`/`pyright` 全绿。
+- 全量 `uv run pytest`：**2150 passed, 8 skipped, 0 failed**（原 2142 passed/8 failed）。
+- ⚠️ 全量 `ruff check` 另有 **6 个错误，非本次引入**——在 `plugins/echo/__init__.py`、`services/slang/store.py`、`tests/test_echo_humanizer_input.py`（均为工作树其他在途改动）；我改动的 5 个文件单独 lint All passed。
+
+**影响范围**：① 后端 .py（llm_request/llm_pipelines/config/learning_pipeline）→ 改 .py 需 rebuild bot；② 前端 types.ts + SystemProviders.vue（admin/static bind mount，仅需 `npm run build`，D6）；③ 行为面：admin 系统页 provider 任务选择器新增 4 个任务行（生日祝福/风格审核/剧集审核/事实审核），学习管线 slang「已通过」badge 不再把待人工复核项算进去。
+
+**回滚路径**：`git checkout` 这 7 个文件即还原（4 张覆盖表 + learning_pipeline counts + 2 个测试）；纯一致性/计数修复，无数据迁移、无 storage 改动。
+
+---
+
+## 2026-05-29 Issue 15 指令门禁 — 后端实现落地（默认 enabled=false）
+
+**变更类型**：新功能（运行时 gate，纯后端，默认关闭灰度）
+
+**背景**：承接同日的落地设计文档，按用户拍板的方案实现——数值授权等级 0-4（user 默认 2、admin 恒 4、可调配）+ regex 兜底 + thinker 增强 + DENY quote 原消息 + thinker 首期就上。
+
+**内容**：
+
+1. **`services/llm/instruction_gate.py`（新增）**：`InstructionAuthorityGate`（纯函数 `evaluate`：severity 检测 → 等级门 → mood 调节）+ `InstructionGateResult`（frozen，带 to_metadata）+ `AuthorityStore`（per-user 调级，JSON 文件持久化，原子写 .tmp→replace，配置 seed 不覆盖已持久化值）。severity = max(regex, thinker_signal) 取较严。
+2. **`kernel/config.py`**：`InstructionGateConfig`——enabled/mode(shadow|active)/default_authority/authority_overrides/required_authority(low2 medium3 high4，high=5 则含 admin 全拒)/severity_patterns/mood_threshold/deny_responses/refuse_soft_responses，挂到 BotConfig。
+3. **thinker `instruction_signal` 字段**：9 处穿透（_ALLOWED 集 + _normalize + __slots__ + ctor + __repr__ + _decision_from_data + _heuristic + write_thinker_decision_state + prompt 段/输出 spec），ThinkerContext 同步（kernel/types.py）+ client `_fire_thinker_decision` 透传。fallback `"none"`。
+4. **`client.py` wire**：`_apply_instruction_gate`（插入点 thinker reply 之后、wait 早退之后、prompt build 之前）；DENY → `on_segment` 直发固定话术 + quote `trigger.target_message_id`（无 quote 开关时退化）+ return None（不调主 LLM）；ALLOW/COMPLY/REFUSE_SOFT → hint append 进 plugin_dynamic（紧邻 addressee_hint，同管道）；shadow 模式只 log 不拦。构造参数 instruction_gate/authority_store/admins。
+5. **`/authority` slash 命令**（plugins/chat/plugin.py，admin_only）：查询/设置(0-4)/reset；admin 固定 4 不可改。
+6. **测试**：`tests/test_instruction_gate.py`（28）+ `tests/test_instruction_gate_client.py`（5，含 D2 DENY 不调主 LLM + quote 断言 + shadow 不拦）。
+
+**同模式扫描（D1）**：① thinker→主生成的 hint 注入唯一活管道是 plugin_dynamic（addressee_hint 同款），已复用；② 全部 `ThinkDecision(...)` 构造点均用 kwarg + 新字段有默认值 none，679/699 fallback 与 tests 不受影响；③ `write_thinker_decision_state` 改用 `getattr(decision,...,"none")` 防御 SimpleNamespace mock；④ admin 判定沿用全仓统一的 `str(uid) in config.admins`；⑤ gate 取 user_message=conversation_text（当前用户消息，群聊 user_content="" 由 scheduler 传入，真实文本在 pending_text/conversation_text）。
+
+**验证**：
+- 新增 42 测试全绿；thinker/chat_plugin 回归全绿。
+- `ruff check` All checks passed；`pyright`（gate/thinker/config/types/client/plugin）0 errors。
+- 全量 `uv run pytest`：2142 passed，**8 failed 与本次无关**——`style_review` LLM task（来自工作树既有未提交改动 services/llm/llm_request.py + services/style/store.py）缺 TASK_CACHE_PROFILES/config defaults/pipelines/admin Vue 覆盖。已验证：stash 掉 llm_request.py 后该测试 pass，证明是先存问题，非本次引入。**未代修**（属他人在途 style_review 功能，跨 4+ 面含前端，意图不明，代实现=越界）。
+
+**影响范围**：纯后端（services/.py + kernel/*.py + plugins/chat/plugin.py）→ 改 .py 需 rebuild bot；默认 `enabled=false`，不开则零运行时影响。新增 `storage/instruction_authority.json`（运行时调级才写）。
+
+**回滚路径**：`instruction_gate.enabled=false` 即停（config-only，restart 即可）；彻底回滚 `git checkout` 新增/修改文件 + 删 `storage/instruction_authority.json`。thinker 字段 additive（fallback none），回滚不影响旧逻辑。
+
+**交接/灰度建议**：默认关。开启先置 `mode=shadow` 观察 gate 决策 log（误判率 + 各等级命中分布），再切 `active`。⚠️ 上游遗留：style_review 任务覆盖缺口（8 失败）需 style_review 功能负责人补 llm_request.py 的 4 处覆盖映射。
+
+---
+
+## 2026-05-29 Issue 15 指令门禁 — 落地前架构对齐 + 设计文档（无代码改动）
+
+**变更类型**：设计/治理文档（design-ready），无运行时改动
+
+**背景**：推进 Issue 15「指令门禁 / InstructionAuthorityGate」落地前准备。原方案文档（`docs/tracking/omubot-grayscale-issue15-instruction-gate.md`）写于 2026-05-27，此后经历 C 系列 persona v2 切换，需先对齐当前代码现状再产出可执行设计。
+
+**内容**：
+
+1. **架构核验（Explore 全仓）**：核对原方案 8 项假设，发现 4 处漂移——① MoodEngine/MoodProfile 在 `plugins/schedule/` 非 `services/`；② MoodProfile 多 `tension`/`label`/`anomaly_reason` 字段；③ persona guard `hard_check`/`soft_judge` 是 `2.1.0-proposal` **未实现**（全仓零运行时引用），只有 `sentinel_registry` 是活 gate 链；④ persona 目录是 `_pending_freeze/` 非 `freeze/`。
+2. **关键发现（修正原方案隐含错误）**：原方案 15A 的「往主 LLM 注入 hint」通道——thinker 的 `thought`/`tone`/`topic_intent_label` 当前**都不进主 prompt**（thought 仅 output-side 剥离，label 仅 trace）。但已有等价管道 `addressee_hint`（`client.py:3987`→`plugin_dynamic`→prompt 末尾），可直接复用，成本远低于新建通道。
+3. **方案选型（用户确认）**：severity = **regex 兜底 + thinker 增强**（双信号取较严）；授权模型 = **数值等级 0-4**（Koishi 式，取代原二元 admin 判断）——user 默认 2、可调配 0-4、admin 恒 4；指令按所需等级分（low req=2 / medium req=3 / high req=4，high 设 5 则含 admin 全拒=绝对人设锁）。**thinker 增强首期就上**（不拆第二 PR）；**DENY quote 原消息**。
+4. **产出**：`docs/tracking/omubot-grayscale-issue15-instruction-gate-landing-design.md`——含漂移修正表、授权等级模型（§三）、插入点（`client.py:3876-3902`）、实现清单（新建 `services/llm/instruction_gate.py` + thinker 9 处穿透 + client wire + config 等级字段 + 运行时调级 §4.6：slash 命令首期/SPA 后续 + `instruction_authority` SQLite 表）、D2 cancel-path 测试计划（17 条，含等级门/人设锁/quote）、灰度/回滚、4 条未决问题 + 已拍板清单。
+
+**同模式扫描（D1）**：插入点核验——thinker→主生成的 hint 注入唯一活管道是 `plugin_dynamic`（`addressee_hint` 同款）；admin 判定全仓统一为 `str(user_id) in config.admins`（`command.py:127`/`router.py:867`/`plugin.py:635`），gate 沿用；mood 取值复用 client 注入式 `_mood_getter`（不 import plugin）。
+
+**验证**：纯文档，无代码/测试改动。架构结论均有 file:line 证据（见设计文档 §一/§二）。
+
+**影响范围**：仅新增 1 个 tracking 文档；零运行时影响；后续实现时才触代码（services/.py + kernel/config.py，届时需 rebuild bot）。
+
+**回滚路径**：`git checkout docs/tracking/omubot-grayscale-issue15-instruction-gate-landing-design.md`（删除设计文档即可，无副作用）。
+
+---
+
+## 2026-05-29 Admin Web a11y 收尾 — tablist 三处补全 ARIA（Phase C 遗留待办）
+
+**变更类型**：前端可访问性补全（WAI-ARIA tab / radiogroup 模式），无业务逻辑变更
+
+**背景**：Phase C 收口时记下的两条 a11y 待办之一。当时三处 `role="tablist"` 只挂了容器 role，缺 `role="tab"`/`aria-selected`/`tabpanel`/键盘漫游，属"半成品 tab 模式"。本轮补全。
+
+**先分语义（关键判断）**：三处并非都是 tab——
+
+- `PluginsView.vue` `detail-tabs`（插件详情 5 段）、`plugin-tabs`（用户/商店/治理）：点了换一块互斥内容面板 → **真·标签页**，补全 WAI-ARIA tab 模式。
+- `LogsView.vue` `logs-segment`（日志级别筛选）：只筛同一份日志列表、没有"每项一个面板" → 语义其实是 **radiogroup**，不是 tablist。原 `role="tablist"` 用错（指不到 tabpanel）。本轮**改正为 `role="radiogroup"`**。
+
+**内容**：
+
+1. **共享键盘漫游 helper（`src/utils/a11y.ts`，新增）**：`onRovingKeydown` —— tablist/radiogroup 通用，←→/↑↓ 移动并激活、Home/End 跳首尾，复用子按钮已有的 `@click`。三处共用（按 Phase D「重复逻辑抽出」原则）。
+2. **`PluginsView.vue` 两处真 tab**：容器 `role="tablist"` + `aria-label` + `@keydown=onRovingKeydown`；按钮补 `role="tab"`/`:aria-selected`/`:aria-controls`/漫游 `:tabindex`（选中 0、其余 -1）；面板补 `role="tabpanel"`/`id`/`aria-labelledby`/`tabindex=0`。`mode==='system'` 折叠到 user tab（新增 `activeModeTab` computed），保证始终恰好一个 `aria-selected`。
+3. **`LogsView.vue` 改正为 radiogroup**：`role="radiogroup"` + `aria-label`；按钮 `role="radio"`/`:aria-checked`/漫游 `:tabindex` + `onRovingKeydown`。
+4. **checklist 文档**：`docs/admin-a11y-checklist.md` 新增 §6「标签页与单选段（tablist / radiogroup）」——给出 tab vs radiogroup 的判断口径（换面板=tab，筛当前=radiogroup）与两套属性清单；复用资产表加 `onRovingKeydown`。
+
+**同模式扫描（D1）**：全仓 `role="tablist"` 收口后仅剩 2 处（PluginsView 两个真 tab），且均已补齐 `role="tab"`+`tabpanel`；LogsView 已转 radiogroup，不再误用 tablist。`aria-controls`/`aria-labelledby` 全部交叉核对，每个都指向真实 id（18 条 id 配对无孤儿）。CSS 未动，`active`/`--active` 视觉类保持原样，鼠标用户无变化。
+
+**验证**：
+
+- `vue-tsc --noEmit` exit 0
+- `npm run build` exit 0（`✓ built in 4.99s`，static 已重新产出）
+- `role="tablist"` 残留扫描：2 处均为完整 tab（非半成品）
+
+**影响范围**：纯前端 SPA；`admin/static` 是 bind mount（D6），`npm run build` 后即时生效，**无需 rebuild bot**；`.py` / 业务逻辑零改动；键盘用户现可用方向键在 tab/段之间漫游、Tab 直接落到选中项。
+
+**回滚路径**：`git checkout` 涉及文件——新增 `utils/a11y.ts`；修改 `views/plugins/PluginsView.vue`、`views/logs/LogsView.vue`、`docs/admin-a11y-checklist.md`；回滚后重跑 `npm run build`。
+
+**交接**：Phase C 两条 a11y 待办完成其一（tablist ARIA 补全）。仅剩**读屏实测验收**未做（需辅助技术实测 + 专家评审，非代码层能静态保证）。
+
+---
+
+## 2026-05-29 Admin Web UI/UX Phase D — 运行态交互治理（timer/SSE 约定 + keepAlive 缓存准则 + composable 拆分规则）
+
+**变更类型**：前端运行态交互收口 + 修复 keepAlive 定时器后台泄漏，无业务逻辑变更
+
+**背景**：接 Phase C，按 `docs/audits/admin-web-ui-ux-full-audit-2026-05-29.md` §4.12 Phase D 推进。审计 P2 结论：SSE 已抽成单例，但各页仍自己写 `setInterval`/polling，节奏与清理习惯不统一；keepAlive 接线合理但「是否缓存」纯靠人工 meta，缓存语义可能漂移。
+
+**关键发现（先扫后改）**：全仓 `setInterval`/`setTimeout`/SSE/onActivated 普查（Explore agent）查明——`composables/` 下除 `useSSE.ts` **无任何 composable 层**；相对时间 ticker 在 DashboardView(20s)、GroupsView(30s) **重复手写**；且全站**无一处 `onActivated`/`onDeactivated`**，而 dashboard / groups / learning 三个 `keepAlive: true` 页的定时器只在 `onUnmounted`/`onBeforeUnmount` 清理——**缓存页切走时这俩钩子不触发**，导致相对时间 ticker 在后台空转（正是审计 P2「缓存语义不可预测」的实锤根因）。
+
+**内容**：
+
+1. **统一相对时间 ticker：`composables/useNowTick.ts`（新增）**——基于 VueUse `useIntervalFn`（scope dispose 自动 clear）+ keepAlive 友好（`onDeactivated` 暂停、`onActivated` 立即补刷 + 恢复）。作为 timer 约定的 reference 实现。
+2. **修 keepAlive 定时器泄漏（2 页迁移）**：
+   - `DashboardView.vue`：删手写 `clockTimer`/`startClockTicker`，改 `useNowTick(20_000)`，`nowTick` 消费点不变。
+   - `GroupsView.vue`：删手写 `nowTickTimer`（`window.setInterval` 计数器），改 `useNowTick(30_000)`，`void nowTick.value` 订阅点不变。
+3. **任务态轮询加兜底**：`LearningViewV2.vue` autopilot `run-all` 的 3s 进度轮询——句柄从 `async` 函数局部变量提到组件作用域（`autopilotPoll` + `stopAutopilotPoll`），补 `onUnmounted` + `onDeactivated` 双清理。修复「请求 pending 期间卸载/被缓存 → 轮询永久泄漏」的反模式。
+4. **运行态交互约定文档**：新增 `docs/admin-runtime-interaction.md`——①实时刷新选型表（SSE 优先于 polling）；②定时器与清理约定（含裸 setInterval 铁律）；③keepAlive 缓存准则（核心陷阱 + meta 取舍口径）；④composable 拆分规则（阈值 + 怎么拆 + 已沉淀资产表）；⑤验收口径。
+
+**同模式扫描（D1）**：迁移后 `grep clockTimer|startClockTicker|nowTickTimer|pollInterval` 全仓 **0 残留**。其余 `setInterval`/`setTimeout`（playground demo、login cooldown/shake、useSSE 重连、BlockTrace 防抖、PersonaImporter flash）均为非 keepAlive 页或已正确清理，逐个核对无需改动；其中 login/playground 非 keepAlive，BlockTrace 防抖已 `onUnmounted` 清理。
+
+**有意未做（克制扩张）**：
+
+- 未对 GroupsView(2544)/ConfigView(2223)/PluginsView(1709) 等大文件做实际 composable 拆分——Phase D 交付的是**规则与 reference 实现**（useNowTick），大页拆分属各自独立重构，按文档 §4 阈值后续按需推进。
+- 未改 `meta.keepAlive` 的页面取舍——现状接线合理，文档只补「加 keepAlive 前先确认清理覆盖 onDeactivated」的判断口径，不动既有配置。
+- 未引入自动化 keepAlive 决策——审计提到「纯靠人工 meta」，但自动判定成本高且易误判，本轮只给人工口径，不做框架。
+- 未碰后端 SSE 推送频率/事件设计——`useSSE.ts` 单例方向正确，仅作为消费约定写入文档。
+
+**验证**：
+
+- `vue-tsc --noEmit` exit 0
+- `npm run build` exit 0（`✓ built in 4.99s`，static 已重新产出）
+- 同模式残留扫描 0
+
+**影响范围**：纯前端 SPA；`admin/static` 是 bind mount（D6），`npm run build` 后即时生效，**无需 rebuild bot**；`.py` / 业务逻辑零改动。行为改善：三个 keepAlive 页切走后不再后台空转定时器；autopilot 轮询不再泄漏。可见行为对用户无变化（相对时间刷新节奏不变）。
+
+**回滚路径**：涉及文件 `git checkout` 即可——新增 `composables/useNowTick.ts`、`docs/admin-runtime-interaction.md`；修改 `views/dashboard/DashboardView.vue`、`views/groups/GroupsView.vue`、`views/learning/v2/LearningViewV2.vue`；回滚后重跑 `npm run build`。
+
+**交接**：Phase D 完成，审计四期路线图（A 真相收口 / B 内联样式 / C a11y / D 运行态交互）全部落地。剩余为非分期的后续项：大页（Groups/Config/Plugins）按 `docs/admin-runtime-interaction.md` §4 阈值做实际 composable 拆分；Phase C 遗留两条 a11y 待办（tablist 三处补全 ARIA tab、读屏实测）。
+
+---
+
+## 2026-05-29 Admin Web UI/UX Phase C — 可访问性与行为统一（最小 a11y 收口）
+
+**变更类型**：前端可访问性建设（地标/键盘/live region/图标按钮可访问名），无业务逻辑变更
+
+**背景**：接 Phase B，按 `docs/audits/admin-web-ui-ux-full-audit-2026-05-29.md` §4.12 Phase C 推进。审计 P1 结论：全站无障碍「局部有意识、系统未成形」，显式 a11y 标记仅 ~13 处，登录页是孤例正例。
+
+**内容**：
+
+1. **a11y 基础原语（`src/styles/global.css`）**——从零补齐全站缺失的底座：
+   - `.sr-only`（视觉隐藏、读屏可读）
+   - `.om-skip-link`（skip link 样式，聚焦滑入）
+   - `.om-iconbtn`（可聚焦图标按钮，替代裸 `<NIcon @click>`，自带 hover + focus-visible）
+   - 全站 `:focus-visible` 键盘焦点环（鼠标点击不触发）
+2. **地标 + skip link（`layouts/normal/index.vue`）**：新增「跳到主内容」skip link → `#main-content`；侧栏 `<aside>` → `<nav aria-label="主导航">`；主内容包一层 `#main-content`（tabindex=-1 聚焦目标，`AppPage` 仍渲染真正的 `<main>`）。
+3. **图标按钮可访问名（统一收口）**——裸 `<NIcon @click>`（不可聚焦、键盘不可达）改为 `<button class="om-iconbtn" aria-label>`：`ToggleTheme.vue`、`Fullscreen.vue`、`MenuCollapse.vue`(+aria-expanded)、`header/index.vue` 退出登录。已是 `<button>`/`<NButton>` 的图标按钮补 `aria-label`：`ConfigKvField.vue`、`ConfigListField.vue`、`ItemRow.vue`(+aria-expanded)、`LogsView.vue` 清除搜索。
+4. **实时区 / 图表语义**：
+   - `LogPanel.vue`（全站流式日志组件，LogsView/Dashboard 共用）→ 日志体加 `role="log"` + `aria-live="polite"` + `aria-relevant="additions"` + `aria-busy`（暂停时 false）。
+   - `TrendChart.vue` → 绘图容器 `role="img"` + `chartSummary` 文本替代（把 7 日数据写成一句话，作 data-table fallback），装饰柱子 `aria-hidden`。
+5. **最小 a11y checklist 文档**：新增 `docs/admin-a11y-checklist.md`，7 条下限 + 复用资产表 + 验收口径，供后续每个新页面自查。
+
+**同模式扫描（D1）**：全仓扫 `<NIcon @click>` 反模式——收口后 **0 残留**（perl open-tag 属性块扫描，含多行 open tag）。其余 `<NIcon>` 均为已带可见文字/aria-label 按钮内的装饰图标，无需处理。a11y 显式标记由 ~13 → 43 处。
+
+**有意未做（克制扩张）**：
+
+- `role="tablist"` 的三处（Plugins×2、Logs）未补全 `role="tab"`/`aria-selected`/`tabpanel`——属独立的 tab 模式重构，超出 Phase C「最小下限」范围，记入审计待办。
+- `SparklineChart.vue` 未动——当前全站无引用（仅 components.d.ts 自动声明），动它是无效改动。
+- `AppPage` 返回按钮已有可见文字「返回」，可访问名充分，不属 icon-only，未改。
+- 未引入 ARIA tab/grid 等复杂模式、未做读屏实测——完整 WCAG AA 需辅助技术实测 + 专家评审，本轮只保证代码层可静态保证的下限（已在 checklist 文档声明）。
+
+**验证**：
+
+- `vue-tsc --noEmit` exit 0
+- `npm run build` exit 0（`✓ built in ~5s`，static 已重新产出）
+- `<NIcon @click>` 反模式复扫 0 残留
+
+**影响范围**：纯前端 SPA；`admin/static` 是 bind mount（D6），`npm run build` 后即时生效，**无需 rebuild bot**；`.py` / 业务逻辑零改动；视觉对鼠标用户基本无变化（焦点环仅键盘触发、skip link 仅聚焦可见）。
+
+**回滚路径**：涉及文件 `git checkout` 即可——`global.css`、`layouts/normal/index.vue`、`layouts/normal/header/index.vue`、`layouts/components/{Fullscreen,MenuCollapse}.vue`、`components/common/{ToggleTheme,LogPanel}.vue`、`views/config/{ConfigKvField,ConfigListField}.vue`、`views/learning/v2/{pipeline/ItemRow,dashboard/TrendChart}.vue`、`views/logs/LogsView.vue`，新增文档 `docs/admin-a11y-checklist.md`；回滚后重跑 `npm run build`。
+
+**交接**：Phase C 完成。审计路线图剩 Phase D（运行态交互治理：polling/timer/SSE 统一约定、keepAlive 缓存准则、复杂控制台 composable 拆分规则）。另记两条 a11y 待办：tablist 三处补全 ARIA tab 模式、读屏实测验收。
+
+---
+
+## 2026-05-29 Admin Web UI/UX Phase B — 内联样式收口（静态 style → token/scoped class）
+
+**变更类型**：前端样式系统收口（纯静态值），无业务逻辑变更
+
+**内容**：
+
+- 依据 `docs/audits/admin-web-ui-ux-full-audit-2026-05-29.md` §4.12 Phase B 执行
+- 全站 inline `style`/`:style` 命中 54 处，分两类处理：
+  - **收口（29 处静态格式值）**：
+    - `views/config/components/ConfigSystemBackup.vue`（20 处，最大簇）：表单 label 列宽 / 控件宽度 / 提示字号 / 空态色 / chevron 定位 全部下沉为 scoped class（`bk-field-label`、`bk-control-sm/md-sm/md/lg`、`bk-hint`、`bk-hint--error`、`bk-empty`、`backup-item__chevron`），宽度逐项保持原值不变
+    - `views/dashboard/DashboardView.vue`（3 处）：`style="--tone: var(--om-*)"` 改为修饰类 `dash-learn__icon--warning/info/success`，保留底层 `color-mix(--tone)` 机制
+    - `views/groups/GroupsView.vue`（5 处）+ `views/system/components/SystemProviderEditorDrawer.vue`（1 处）：表单 `style="width:100%"` → `class="w-full"`（UnoCSS presetWind3 工具类）
+    - `views/learning/v2/settings/SettingsView.vue`（1 处）：并发输入框 `width:120px` → 同块 scoped class `settings-concurrency__input`
+  - **有意保留（24 处动态/惯用）**：图表柱高（BarColumnGroup/TrendChart/SparklineChart）、进度条 fill 宽度（LearningViewV2 / dashboard fill）、阈值计算色（CachePipelinePanel `cacheHitColor`）、CSS 变量数据绑定（ActivityFeed `--badge-color`、mood `--chip-color`）、按 category 计算的 Tag 色（MemosView）、prop 驱动高度（LogPanel）、`NModal preset="card"` 的 `width:420px`（Naive 卡片模态标准用法，无 width prop）、ConfigFieldEditor 隐藏锚点 `display:none`、playground 单点筛选宽度。这些是运行态/框架惯用，转 class 反而错误
+
+**影响**：
+
+- 缓解审计 P1「62 处内联样式削弱一致性」中的静态格式部分；剩余命中均为合法动态绑定
+- 视觉零变更：所有收口项宽度/字号/颜色按原值 1:1 迁移，仅改承载方式（inline → scoped/utility class）
+- 业务行为零变更，未触碰任何 `.py` 与数据流
+
+**验证**：
+
+- `vue-tsc --noEmit` exit 0
+- `npm run build` exit 0（`✓ built in ~5s`，static 资源已重新产出）
+- 收口后复扫 `grep style=` 确认 ConfigSystemBackup 0 残留，全站静态格式簇已清空
+
+**交接说明**：
+
+- Phase B 完成；下一步可推进 Phase C（最小 a11y checklist、icon-only button `aria-label`、skip link / page landmark、实时图表 pause/legend/data-table fallback）
+- 审计建议的「context strip / 抽屉 header-footer / 表格 summary / 状态带」统一组件本轮未新增——现有 `AppDrawerHeader`/`AppDrawerLayout`/`AppPanelSection` 已覆盖，无重复模式触发，遵循「不为未来预抽象」（简单优先）
+- `admin/static` 为 bind mount，前端 `npm run build` 即生效，无需 rebuild bot（D6）
+
+---
+
+## 2026-05-29 Admin Web UI/UX Phase A — 真相收口（IA 对齐 + 死文件清理）
+
+**变更类型**：前端信息架构收口 + 死代码删除 + 路由状态显式化 + 侧边栏补全
+
+**内容**：
+
+- 依据 `docs/audits/admin-web-ui-ux-full-audit-2026-05-29.md` §4.12 Phase A 执行：
+- **删除死文件（前端，取证后确认 0 外部引用）**：
+  - `views/groups/GroupsView.vue.new`（5 天前暂存文件）
+  - `views/learning/LearningView.vue` + `views/learning/components/`（6 文件）+ `views/learning/slots/`（含 slang/style/episode/memory 子树）—— V2 已全量接管 `/learning` 路由，旧子树仅自引用
+  - `views/slang/`（18 文件）—— `/slang` 路由早已 redirect 到 `/learning`，整个目录无外部引用
+  - 保留 `views/learning/types.ts`（V2 共用）
+- **路由状态显式化**：`router/index.ts` 顶部加 IA 说明注释；`/usage`、`/schedule`、`/scheduler` 三个软下线路由各自加「软下线，侧边栏已并入系统」行内注释
+- **侧边栏补全**：`SideMenu.vue` 「日常」组新增「生日祝福」`/birthday` 入口（此前路由存在但导航缺失）
+- **顺带修复 pre-existing tsc 报错**（来自本会话前序改动）：ConfigView risk_level `safe`→`normal`（5 处）；useLearningConsole candidateSub 类型补 `ai_kept`
+
+**影响**：
+
+- 消除审计 P1「路由/导航/旧文件三套并行真相」问题的文件残留部分
+- `views/learning/` 现仅剩 `types.ts` + `v2/`，结构清晰
+- 软下线路由仍可直达（兼容书签），但代码层已声明其状态
+- 业务行为零变更：所有删除项均为无引用死代码，redirect 路由保持不变
+
+**验证**：
+
+- `vue-tsc --noEmit` 0 error（修复前有 5 处 pre-existing 报错，已一并清除）
+- `npm run build` 通过
+- grep 确认无 dangling import 指向已删路径
+- D7：`git status --short` 确认删除项均为预期文件，未误删 v2/types.ts
+
+**交接说明**：
+
+- Phase A 完成；下一步可推进 Phase B（内联样式 → token/公共组件，62 处 `style` 收口）
+- `admin/static` 为 bind mount，前端 `npm run build` 即生效，无需 rebuild bot（D6）
+
+## 2026-05-29 Admin Web UI/UX 全量审计文档落地（ui-ux skill 全程基线）
+
+**变更类型**：文档审计交付 + 管理端 IA/UI/UX 结构盘点 + 后续重构基线沉淀
+
+**内容**：
+
+- 新增审计文档：
+  - `docs/audits/admin-web-ui-ux-full-audit-2026-05-29.md`
+- 本次审计按 `ui-ux-pro-max` skill 全程建立外部基线，并结合项目内：
+  - `docs/agent-ui-guidelines.md`
+  - `docs/admin-ui-style-guide.md`
+  - `admin/frontend`
+  - `admin/routes/api`
+- 审计内容已覆盖：
+  - 设计系统基线（design system / ux / chart / typography / style / vue stack）
+  - 页面 inventory、公共组件、主题 token、布局骨架
+  - 路由 / 导航 / 软下线路径 / 历史残留文件的 IA 问题
+  - 公共组件统一度、内联样式残留、可访问性覆盖不足
+  - Dashboard / Groups / Knowledge / Learning / Plugins / Config / System 的前后端契合度
+  - SSE / polling / keepAlive / auth / response layout 的工程一致性观察
+  - 页面优先级矩阵、分期整改路线图与文档验收标准
+
+**影响**：
+
+- 后续所有 `admin/frontend` UI 重构都可以以该审计文档为“当前真相 + 优先级”参考，而不是重复摸底
+- 文档已明确指出优先处理面：
+  - `groups`
+  - `config`
+  - `dashboard`
+  - `knowledge`
+  - `plugins`
+  - `learning`
+- 审计明确结论为：当前后台不需要推翻重做，重点是“收口历史分叉 + 强化系统一致性 + 把局部优秀实现升格为全站约束”
+
+**交接说明**：
+
+- 该文档已达到第一版可验收状态，后续若继续扩充，优先补：
+  - 页面逐页 checklist
+  - 图标按钮 / heading hierarchy / skip link 的专项 a11y 清单
+  - 移动端与键盘导航的实测结果
+- 本次为文档审计，不涉及运行时代码行为修改，因此未单独执行前端构建或测试命令
+
+## 2026-05-29 Omubot 拟人 Part 4（记忆与关系系统）落地
+
+**变更类型**：运行时行为增强 + 存储 schema 兼容扩展 + 调度/RWS 接线 + tracking 回填
+
+**内容**：
+
+- provenance / episodic / cross-group
+  - `services/memory/card_store.py` 为 memo card 增补 `source_msg_id` / `captured_at` / `captured_by`
+  - `services/episodic/store.py` 新增 `list_for_recall(..., include_decayed=False)`
+  - 新建 `services/cross_group.py`，统一 `cross_group_visibility` 三值映射，兼容旧 `cross_group_visible` 布尔语义
+  - `services/slang/*` / `services/style/*` / `services/knowledge_graph/*` / `services/learning_normalizer/*` / `services/episodic/store.py` 全部切到新映射层
+- willingness / memory coupling
+  - `services/persona/willingness.py` 新增 `recent_outcomes` 偏移和 `episodic_situation_lookup()`
+  - `plugins/chat/plugin.py` 在 `on_message()` 写入 `WILLINGNESS_STAGE_SLOT` 并缓存 `ctx.memory_relation_signals`
+  - `kernel/types.py` 补充 `PluginContext.memory_relation_signals`
+- scheduler / dream
+  - 新增 `services/scheduler_rws/memory_signals.py`
+  - `services/scheduler_rws/rws.py` / `weights.py` 增加 `outcome` / `familiarity` / `willingness` 三项
+  - `services/scheduler.py` 接入 `memory_signal_getter`，支持 `RWS_MEMORY_COUPLING=false`
+  - 新增 `services/memory_consolidator/event_boundary.py`
+  - `plugins/dream/plugin.py` 接入 silence + mood reversal EBR，并支持 `EBR_ENABLED=false`
+- tests / docs
+  - 新增 `tests/test_memory_signals.py` / `tests/test_event_boundary.py`
+  - 更新 `tests/test_card_store.py` / `tests/test_episode.py` / `tests/test_cross_group.py` / `tests/test_willingness.py` / `tests/test_rws.py` / `tests/test_scheduler_rws.py` / `tests/test_graph_writer.py` / `tests/test_chat_plugin_humanization_wire.py`
+  - `docs/tracking/omubot-humanization-part4-execution.md` 已按 Wave 回填完成状态、映射订正与验收证据
+
+**影响**：
+
+- 记忆卡片与 episodic 召回现在具备更完整的追溯信息与衰减后召回能力
+- 跨群可见性从二值开关升级为 `none / opt_out / opt_in` 三档，旧数据保持宽松兼容
+- scheduler 的 RWS 可读取关系/记忆信号；梦境整合可被事件边界即时触发
+
+**验证**：
+
+- `source ./scripts/dev/env.sh && uv run ruff check plugins/chat/plugin.py services/cross_group.py services/persona/willingness.py services/slang/types.py services/memory_consolidator/__init__.py tests/test_chat_plugin_humanization_wire.py tests/test_scheduler_rws.py kernel/types.py`
+  - `All checks passed!`
+- `source ./scripts/dev/env.sh && uv run pyright plugins/chat/plugin.py tests/test_scheduler_rws.py kernel/types.py`
+  - `0 errors, 0 warnings, 0 informations`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_card_store.py tests/test_episode.py tests/test_cross_group.py tests/test_willingness.py tests/test_memory_signals.py tests/test_chat_plugin_humanization_wire.py tests/test_rws.py tests/test_scheduler_rws.py tests/test_event_boundary.py tests/test_graph_writer.py tests/test_dream.py -q`
+  - `155 passed`
+- `source ./scripts/dev/env.sh && uv run pytest -q`
+  - `7 failed, 2111 passed, 8 skipped`
+  - 失败均为既有 LLM task/admin sync 漂移：`episode_review` / `fact_review` / `style_review`
+
+**交接说明**：
+
+- 30 秒回滚开关保留：`RWS_MEMORY_COUPLING=false` 与 `EBR_ENABLED=false`
+- 全量 pytest 仍未全绿，原因不在 Part 4 改动面；若后续要冲全绿，优先修 `services/llm/llm_pipelines.py`、`kernel/config.py` 与 admin system provider task 列表同步
+
+## 2026-05-28 学习管线统一化（Web 前端 + 后端聚合 API）
+
+**变更类型**：前端增强 + 后端 API 新增 + 死代码清理
+
+**范围**：
+
+- `admin/routes/api/learning_pipeline.py`
+  - `_item()` 新增 `tags` 字段，各 noun 返回 scope/policy/category 标签
+  - 新增 `GET/POST /api/admin/learning/settings` 聚合设置端点
+  - 新增 `_load_pipeline_settings` / `_save_pipeline_settings` 读写 `storage/learning_settings.json`
+  - slang/style/episode 查询扩展 scope/repeat_policy/output_policy/risk_tags 列
+- `admin/frontend/src/views/learning/`
+  - 新增 `components/LearningItemTags.vue` — 标签渲染 + 点击过滤
+  - 新增 `components/LearningSettingsDrawer.vue` — 统一管线设置抽屉
+  - `LearningTable.vue` 集成标签列
+  - `LearningView.vue` 添加"管线设置"按钮入口
+  - `types.ts` 新增 `LearningItemTag` 接口
+- 删除 `admin/frontend/src/views/affection/`（死代码，路由已 redirect 到 /memory）
+
+**审计发现**：
+
+- P1（Slang 高级功能迁入）已在之前完成——Learning slot 已完整引用 slang 组件库
+- P2（跨 noun 混合浏览）NounSwitcher "全部" 模式 + 后端 noun=all 已在之前完成
+- `views/slang/` 目录是共享组件库（被 Learning slot 引用），不可删除
+- `views/memos/MemosView.vue` 被 MemoryConsoleView 引用，不可删除
+
+**影响**：admin SPA 学习管道页面新增标签显示和统一设置入口；后端新增 2 个 API 端点
+
+**部署**：`npm run build`（前端 bind mount 即生效）+ `docker compose up bot -d --build`（后端 .py 改动）
+
+**回滚**：`git checkout -- admin/routes/api/learning_pipeline.py admin/frontend/src/views/learning/`
+
+---
+
+## 2026-05-28 Arbiter Emission Gate v2 收口（B/C/D/A）
+
+**变更类型**：代码 + admin 状态视图 + tracking；在既有 Arbiter 灰度入口态之上补齐 v2 gate 架构与 re-fire 修复。
+
+**范围**：
+
+- `services/llm/arbiter.py`
+  - `_MAX_TOKENS` 从 `15` 提升到 `48`
+  - Arbiter-A completeness prompt 改为 QQ 群聊语境，移除“句号=说完”的错误规则
+- `services/scheduler.py`
+  - 删除 `_GroupSlot.pending_at`
+  - 新增 `_GroupSlot.pending_during_generation`
+  - `notify()` 运行中强触发改为积存 `PendingMessage`
+  - `_arbiter_completeness_loop()` race 改为转存 `burst_pending`
+  - 新增 `_EmissionGate`（首段免检、L1 超时 fail-open、L2 abort budget、L3 circuit breaker）
+  - 新增 `_arbiter_b_monitor()`，`on_segment()` 改为 emit 前 gate check
+  - 修正 monitor 启动竞态：不再预吞掉 baseline 之后第一批 generation 内新消息
+- `admin/frontend/src/views/scheduler/SchedulerView.vue`
+  - 调度器后台状态展示从 `pending_at` 对齐为 `pending_during_generation`
+  - “待发时间” 改为“积压条数”，避免后台误读旧布尔语义
+- tests / tracking
+  - 新增 `tests/test_emission_gate.py`
+  - 更新 `tests/test_scheduler.py` / `tests/test_arbiter_scheduler.py` / `tests/test_arbiter_interruption.py`
+  - `docs/tracking/fix-at-mention-burst-batching-v2-execution.md` 已回填 B/C/D/A 执行证据并将状态表更新为 ✅
+
+**影响**：
+
+- 连续 `@bot` 与 generation 期间的新消息现在都能保留真实积存内容，而不是只记一个布尔待发标记
+- re-fire 路径重新经过 Arbiter-A completeness loop，不再跳过“用户是否说完”判断
+- 分段回复改为“先判后发”，Arbiter-B 能在未发送段前做 continue / abort / revise 决策
+- Arbiter-B 异常时保持 fail-open，不比当前线上行为更差
+
+**质量门**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_arbiter.py tests/test_arbiter_scheduler.py tests/test_arbiter_interruption.py tests/test_scheduler.py tests/test_emission_gate.py -q`
+  - `71 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_router_b_cluster_wiring.py tests/test_router_qq_interactions.py tests/test_chat_plugin_humanization_wire.py -q`
+  - `21 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/llm/arbiter.py services/scheduler.py kernel/router.py plugins/chat/plugin.py tests/test_arbiter.py tests/test_arbiter_scheduler.py tests/test_arbiter_interruption.py tests/test_scheduler.py tests/test_emission_gate.py tests/test_router_b_cluster_wiring.py tests/test_router_qq_interactions.py tests/test_chat_plugin_humanization_wire.py`
+  - `All checks passed`
+- `source ./scripts/dev/env.sh && uv run pyright services/llm/arbiter.py services/scheduler.py kernel/router.py plugins/chat/plugin.py tests/test_arbiter.py tests/test_arbiter_scheduler.py tests/test_arbiter_interruption.py tests/test_scheduler.py tests/test_emission_gate.py tests/test_router_b_cluster_wiring.py tests/test_router_qq_interactions.py tests/test_chat_plugin_humanization_wire.py`
+  - `0 errors, 0 warnings`
+
+**灰度说明**：
+
+- 本次只完成 v2 工程收口与本地验证，**未执行** `docker compose` 线上灰度观测
+- `docs/tracking/fix-at-mention-burst-batching-v2-execution.md` 中“灰度 Phase A（测试群/全量）”仍待后续按运行日志填数
+
+**交接说明**：
+
+- 如果要临时关闭 Arbiter-B，可直接设 `arbiter.interruption_enabled = false`
+- admin 调度器页面现在展示的是积压条数，不再代表某个时间戳
+- 先前 maintenance log 中的 Arbiter 入口态记录仍有效；这条记录补的是 v2 gate 架构与 D/A 修正
+
+## 2026-05-28 Arbiter 连发 @mention 合并与发后修正链路落地
+
+**变更类型**：代码 + 配置 + tracking；Arbiter P0-P3 落地并进入 `灰度-1` 单群入口态。
+
+**范围**：
+
+- `services/llm/arbiter.py` / `kernel/config.py` / `config/config.json`
+  - 新增 `ArbiterClient`、`PendingMessage`、`CompletenessResult`、`InterruptionResult`、`CorrectionResult`
+  - 新增 `ArbiterConfig` / `BotConfig.arbiter`
+  - `config/config.json` 已切到 `arbiter.enabled=true` + `runtime_groups=["993065015"]` 的 `灰度-1` 入口态
+- `services/scheduler.py`
+  - `notify(..., message_text=...)` 接入 Arbiter-A
+  - `GroupSlot` 新增 `burst_pending` / `arbiter_task` / `last_reply_time` / `last_reply_content`
+  - 新增 `set_arbiter()` / `get_slot()` / `_arbiter_completeness_loop()` / `_pending_messages_since()`
+  - Arbiter-B 在分段发送阶段做 interrupt continue/abort/revise 判断
+  - `correction` trigger 进入 force-reply 路径
+- `kernel/router.py`
+  - `_notify_group_scheduler()` 透传 `message_text`
+  - followup 路径接入 Arbiter-C，命中后构造 `TriggerContext(mode="correction")`
+  - correction 触发后清空 slot 最近回复窗口，避免重复自修正
+- `plugins/chat/plugin.py`
+  - 启动时构造 ArbiterClient，复用主 LLM session / usage tracker
+  - `GroupChatScheduler(...)` 显式注入 `arbiter_config=config.arbiter`
+- `services/llm/client.py`
+  - correction trigger 追加自然修正指令块
+- `kernel/types.py`
+  - 补齐 `PluginContext` 运行时字段类型，收口 router/chat plugin 的 pyright 噪音
+- tests / tracking
+  - 新增 `tests/test_arbiter_correction.py`
+  - 扩/新增 `tests/test_arbiter.py` / `tests/test_arbiter_scheduler.py` / `tests/test_arbiter_interruption.py`
+  - 更新 `tests/test_router_b_cluster_wiring.py` / `tests/test_router_qq_interactions.py` / `tests/test_chat_plugin_humanization_wire.py`
+  - `docs/tracking/fix-at-mention-burst-batching-execution.md` 已按 Phase 回填执行证据
+
+**影响**：
+
+- `@bot` 连发消息不再默认首条即 fire，而是先走 Arbiter-A completeness 轮询
+- 回复分段期间若有用户补充，Arbiter-B 可在未发送段前做 continue / abort / revise
+- bot 刚回复完 30s 内若用户补充改变语义的信息，Arbiter-C 可触发自然修正回复
+- 所有 Arbiter 路径仍保留 kill switch：`config/config.json -> arbiter.enabled=false`
+
+**质量门**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_arbiter.py tests/test_arbiter_scheduler.py tests/test_arbiter_interruption.py tests/test_arbiter_correction.py tests/test_router_b_cluster_wiring.py tests/test_router_qq_interactions.py tests/test_chat_plugin_humanization_wire.py tests/test_force_reply.py tests/test_scheduler.py -q`
+  - `95 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check services/llm/arbiter.py services/llm/client.py services/scheduler.py kernel/config.py kernel/router.py plugins/chat/plugin.py kernel/types.py tests/test_arbiter.py tests/test_arbiter_scheduler.py tests/test_arbiter_interruption.py tests/test_arbiter_correction.py tests/test_router_b_cluster_wiring.py tests/test_router_qq_interactions.py tests/test_chat_plugin_humanization_wire.py tests/test_force_reply.py`
+  - `All checks passed`
+- `source ./scripts/dev/env.sh && uv run pyright services/llm/arbiter.py services/llm/client.py services/scheduler.py kernel/config.py kernel/router.py plugins/chat/plugin.py kernel/types.py tests/test_arbiter.py tests/test_arbiter_scheduler.py tests/test_arbiter_interruption.py tests/test_arbiter_correction.py tests/test_router_b_cluster_wiring.py tests/test_router_qq_interactions.py tests/test_chat_plugin_humanization_wire.py tests/test_force_reply.py`
+  - `0 errors, 0 warnings`
+
+**灰度说明**：
+
+- 当前只完成 `灰度-1` 的工程入口态：`runtime_groups=["993065015"]`
+- **尚未**完成派单要求的 24h 观测与 8 项出口指标统计；后续需按 tracking 文档的观测命令继续填数
+
+**回滚**：
+
+```bash
+# 30 秒 kill switch
+# config/config.json 中 "arbiter": {"enabled": false}
+docker compose restart bot
+
+# 代码级回滚
+git restore services/llm/client.py services/scheduler.py kernel/router.py plugins/chat/plugin.py kernel/types.py kernel/config.py config/config.json
+git rm services/llm/arbiter.py tests/test_arbiter.py tests/test_arbiter_scheduler.py tests/test_arbiter_interruption.py tests/test_arbiter_correction.py
+```
+
+**交接说明**：
+
+- `灰度-1` 已入场，但不能宣称 24h 已观测完成
+- Phase 2 的 interrupt 判断当前按“每个已发送段后检查一次”执行；测试与文档已按该实现口径回填
+- `judge_interruption(..., unsent=[])` 仍是现阶段的保守接线，后续若要更细粒度 revise，可再扩剩余段感知
+
+---
+
+## 2026-05-27 P2/P3 H/I/J 推荐方案执行收口
+
+**变更类型**：代码 + 配置 + admin API/frontend + tracking；P2/P3 H/I/J 推荐方案执行落地。
+
+**范围**：
+
+- `plugins/echo/plugin.py` / `plugins/element_detector/plugin.py`
+  - H 簇：`humanizer.delay()` 补 runtime 参数
+  - echo 新增 `_visible_text_for_humanizer()`，将 marker-heavy `echo_key` 折算为可见字符长度，避免复读 delay 偏长
+  - I 簇：两处 plugin 发送前补 `scheduler.is_muted(group_id)` gate
+- `plugins/food/plugin.py`
+  - I 簇：`_feedback_recommend()` 后台反馈链路补 self-mute gate，bot 自身禁言时不再继续发推荐
+- `services/scheduler.py`
+  - I 簇：新增 `_MuteRecord` / `get_mute_state()` / `_active_groups()` / `_reconcile_self_mute_once()` / `_reconcile_self_mute_loop()`
+  - `mute()` 支持 `source/since_unix/until_unix`
+  - `_send_to_group()` 新增 `ActionFailed -> reverse-mark muted` 逻辑，并兼容当前 onebot `ActionFailed.info == {"info": {...}}` 的 retcode 结构
+- `kernel/config.py` + `config/config.json`
+  - 新增 `SelfMuteConfig` / `"self_mute"` 配置段，默认 `reconcile_enabled=false`、`action_failed_reverse_mark=false`
+- `plugins/chat/plugin.py`
+  - `GroupChatScheduler(...)` 新增 `self_mute_config` + `group_inventory_getter` 接线
+- `kernel/router.py`
+  - 启动时 self-mute 查询、`group_ban/lift_ban` 事件改写入 mute source / until 信息
+- `admin/routes/api/scheduler.py` + `admin/routes/api/dashboard.py`
+  - 新增 `GET /api/admin/scheduler/mute_state`
+  - dashboard payload 新增 `self_mute`
+- `admin/frontend/src/views/dashboard/DashboardView.vue`
+  - 新增 “Bot 禁言状态” 状态区块，展示当前被禁言群、来源与时间
+- `services/llm/sentinel_registry.py`
+  - J 簇：追加 `sparkle_symbol_watcher` warn-only sentinel（`[✨☆★✧⭐]`）
+- tracking / tests
+  - `docs/tracking/omubot-grayscale-p2p3-dispatch-execution.md` 已按 wave 回填 H/I/J 证据与状态
+  - 新增 `tests/test_echo_humanizer_input.py`
+  - 新增 `tests/test_plugin_mute_gate.py`
+  - 新增 `tests/test_self_mute_reconcile.py`
+  - 新增 `tests/test_sparkle_watcher.py`
+  - 扩 `tests/test_dashboard_cache_pipelines.py` / `tests/test_admin_api.py` / `tests/test_humanization_config.py`
+
+**影响**：
+
+- H 簇修复后，echo plugin 的 humanizer delay 以“可见字符长度”计，不再被 image/json marker 拉长；echo 与 element_detector 的 mood/register/slot runtime 也会真实传入 humanizer
+- I 簇修复后，bot 自身被禁言时：
+  - echo / element_detector / food feedback 不再继续发送
+  - scheduler 可通过 reconcile 与 ActionFailed reverse-mark 自动收敛状态
+  - admin dashboard 可直接看到当前 self-mute 状态
+- J 簇修复后，星号族符号命中只记录，不改写用户可见回复
+
+**质量门**：
+
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_echo_humanizer_input.py tests/test_echo.py tests/test_element_detector.py -q`
+  - `40 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_plugin_mute_gate.py tests/test_self_mute_reconcile.py tests/test_dashboard_cache_pipelines.py tests/test_admin_api.py tests/test_humanization_config.py tests/test_sparkle_watcher.py tests/test_sentinel_pipeline_e2e.py tests/test_scheduler.py -q`
+  - `130 passed`
+- `source ./scripts/dev/env.sh && uv run pytest tests/test_sparkle_watcher.py tests/test_sentinel_pipeline_e2e.py -q`
+  - `6 passed`
+- `source ./scripts/dev/env.sh && uv run ruff check ...`
+  - `All checks passed`
+- `source ./scripts/dev/env.sh && uv run pyright plugins/echo/plugin.py plugins/element_detector/plugin.py plugins/food/plugin.py services/scheduler.py kernel/config.py admin/routes/api/scheduler.py admin/routes/api/dashboard.py services/llm/sentinel_registry.py tests/test_plugin_mute_gate.py tests/test_self_mute_reconcile.py tests/test_dashboard_cache_pipelines.py tests/test_humanization_config.py tests/test_sparkle_watcher.py`
+  - `0 errors, 0 warnings`
+- `cd admin/frontend && ./node_modules/.bin/vue-tsc --noEmit && npm run build`
+  - 编译通过
+
+**回滚**：
+
+```bash
+# H
+git restore plugins/echo/plugin.py plugins/element_detector/plugin.py tests/test_echo_humanizer_input.py
+
+# I
+git restore plugins/echo/plugin.py plugins/element_detector/plugin.py plugins/food/plugin.py services/scheduler.py kernel/config.py plugins/chat/plugin.py admin/routes/api/scheduler.py admin/routes/api/dashboard.py admin/frontend/src/views/dashboard/DashboardView.vue kernel/router.py config/config.json tests/test_plugin_mute_gate.py tests/test_self_mute_reconcile.py tests/test_dashboard_cache_pipelines.py tests/test_admin_api.py tests/test_humanization_config.py
+
+# J
+git restore services/llm/sentinel_registry.py tests/test_sparkle_watcher.py
+```
+
+**交接说明**：
+
+- `self_mute` 相关新能力默认 OFF，灰度时按群开 `reconcile_enabled` / `action_failed_reverse_mark`
+- dashboard 已具备展示能力，无需额外前端开关
+- P2/P3 追踪文档状态表已全部改为 ✅，后续只需按灰度观测结论决定是否开配置
+
+---
+
 ## 2026-05-27 P0 派单 3 — C 簇 13A 字段重构收口
 
 **变更类型**：代码（thinker 字段重构 + schedule enum 化 + 类型修复）；无配置变更。

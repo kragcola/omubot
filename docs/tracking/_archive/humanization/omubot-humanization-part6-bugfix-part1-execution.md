@@ -187,25 +187,25 @@
 | 编号 | wave | 状态 | 落地证据 / 备注 |
 |---|---|---|---|
 | **审查文档** | — | ✅ | [omubot-humanization-part6-bugfix-part1.md](./omubot-humanization-part6-bugfix-part1.md) 已落地，9 条 finding A–J + 5 条契约缺陷 + 4 阶段方案完整 |
-| **P0.0** | 0 | 🟡 | 已验证：当前 streaming 只通过 `on_text_delta` 处理 provider 文本增量，`tool_use` 仅在完整 SSE parse 后进入 tool loop；未发现 runtime `streaming_to_tool_fallback` 钩子。B1C 选 A（保守允许列表） |
+| **P0.0** | 0 | ✅ | 已验证：当前 streaming 只通过 `on_text_delta` 处理 provider 文本增量，`tool_use` 仅在完整 SSE parse 后进入 tool loop；未发现 runtime `streaming_to_tool_fallback` 钩子。B1C 选 A（保守允许列表） |
 | **B0** | 1 | ⏸ | 阻塞：用户书面授权未到（主线 §9 三件事未签收）；命中"高风险" tier，本文不擅自执行 |
-| **B1A** | 2 | 🟡 | `_reply_segment_plan` / `_visible_reply_segment_plan` 改为 `streaming_already_emitted`；主路径按 `bool(streamed_segments)` 传入，rewrite 路径固定 False；profile invariant 已对齐 |
-| **B1B** | 3 | 🟡 | `_should_force_reply` 白名单加入 `qq_interaction`；`tests/test_scheduler.py::test_qq_interaction_mode_force_reply` 覆盖 |
-| **B1C** | 4 | 🟡 | 选 B1C-A：`_STREAMING_ALLOWED_TOOL_NAMES` 允许 `send_sticker` / memo / `pass_turn` 与 streaming 共存，未知/blocking tool 关闭 streaming |
-| **B2.T1** | 5 | 🟡 | `tests/test_streaming_hook.py::test_balanced_long_reply_with_business_tools_streams_segments` 覆盖 business tools + streaming 分段 |
-| **B2.T2** | 5 | 🟡 | `tests/test_scheduler.py::test_qq_interaction_mode_force_reply` 覆盖 `qq_interaction` 强制回复 |
-| **B2.T3** | 5 | 🟡 | `tests/test_streaming_hook.py::test_streaming_disabled_fallback_uses_natural_split` 覆盖 blocking tool 关闭 streaming 后回落自然分段 |
-| **B2.T4** | 5 | 🟡 | B5.C 已实施；新增 non-streaming / streaming 两条 chat 级回归，quote_reply 关闭时剥离 `[CQ:reply,...]` |
+| **B1A** | 2 | ✅ | `_reply_segment_plan` / `_visible_reply_segment_plan` 改为 `streaming_already_emitted`；主路径按 `bool(streamed_segments)` 传入，rewrite 路径固定 False；profile invariant 已对齐 |
+| **B1B** | 3 | ✅ | `_should_force_reply` 白名单加入 `qq_interaction`；`tests/test_scheduler.py::test_qq_interaction_mode_force_reply` 覆盖 |
+| **B1C** | 4 | ✅ | 选 B1C-A：`_STREAMING_ALLOWED_TOOL_NAMES` 允许 `send_sticker` / memo / `pass_turn` 与 streaming 共存，未知/blocking tool 关闭 streaming |
+| **B2.T1** | 5 | ✅ | `tests/test_streaming_hook.py::test_balanced_long_reply_with_business_tools_streams_segments` 覆盖 business tools + streaming 分段 |
+| **B2.T2** | 5 | ✅ | `tests/test_scheduler.py::test_qq_interaction_mode_force_reply` 覆盖 `qq_interaction` 强制回复 |
+| **B2.T3** | 5 | ✅ | `tests/test_streaming_hook.py::test_streaming_disabled_fallback_uses_natural_split` 覆盖 blocking tool 关闭 streaming 后回落自然分段 |
+| **B2.T4** | 5 | ✅ | B5.C 已实施；新增 non-streaming / streaming 两条 chat 级回归，quote_reply 关闭时剥离 `[CQ:reply,...]` |
 | **B3** | 6 | ⏸ | 阻塞：生产 `config/config.json` 切 balanced + restart 需用户授权；本地 Wave 5 T1/T2/T3/T4 已全绿 |
-| **B4.T5** | 7 | 🟡 | `tests/test_chat_plugin_humanization_wire.py::test_register_interaction_tools_wired_for_performance` 覆盖 performance profile 注册 QQ outbound interaction tools |
-| **B4.T6** | 7 | 🟡 | `tests/test_humanization_health_guard.py::test_health_guard_no_mid_turn_switch` 覆盖 turn 内 health_guard 快照不漂移 |
-| **B4.T7** | 7 | 🟡 | `tests/test_extend_call.py::test_pause_extend_timing_after_last_segment` 覆盖 pause_extend 从最后 segment emit 完成后计时 |
-| **B4.T8** | 7 | 🟡 | `tests/test_humanization_config.py::test_resolve_profile_invariants` 覆盖 `disable_natural_split => streaming OR plan` |
-| **B5.C** | 8 | 🟡 | `_strip_cq_reply_codes` 接入 streaming / 普通回复 / tool-exhausted 出口；`tests/test_streaming_hook.py` 覆盖开关关闭剥离与开启保留 |
-| **B5.E** | 8 | 🟡 | `_quote_reply_enabled` 收敛到显式 `qq_interactions_quote_reply_enabled` 字段；`tests/test_quote_reply_segment.py::test_explicit_quote_flag_is_single_source` 覆盖 |
-| **B5.F** | 8 | 🟡 | `plugins/chat/plugin.py::_register_humanization_interaction_tools` 已接入 startup；LLM tool execution 注入 `ToolContext.extra["resolved_humanization"]` |
-| **B5.G** | 8 | 🟡 | `chat()` 开始时采样 `performance_degraded_snapshot`，经 resolver 传入 `resolve_profile(..., performance_degraded=...)`，turn 内不再读实时 health_guard |
-| **B5.J** | 8 | 🟡 | `_stream_with_segments` / 普通分段 / tool-exhausted 路径记录 `last_segment_emitted_at` 并传给 `_maybe_extend` |
+| **B4.T5** | 7 | ✅ | `tests/test_chat_plugin_humanization_wire.py::test_register_interaction_tools_wired_for_performance` 覆盖 performance profile 注册 QQ outbound interaction tools |
+| **B4.T6** | 7 | ✅ | `tests/test_humanization_health_guard.py::test_health_guard_no_mid_turn_switch` 覆盖 turn 内 health_guard 快照不漂移 |
+| **B4.T7** | 7 | ✅ | `tests/test_extend_call.py::test_pause_extend_timing_after_last_segment` 覆盖 pause_extend 从最后 segment emit 完成后计时 |
+| **B4.T8** | 7 | ✅ | `tests/test_humanization_config.py::test_resolve_profile_invariants` 覆盖 `disable_natural_split => streaming OR plan` |
+| **B5.C** | 8 | ✅ | `_strip_cq_reply_codes` 接入 streaming / 普通回复 / tool-exhausted 出口；`tests/test_streaming_hook.py` 覆盖开关关闭剥离与开启保留 |
+| **B5.E** | 8 | ✅ | `_quote_reply_enabled` 收敛到显式 `qq_interactions_quote_reply_enabled` 字段；`tests/test_quote_reply_segment.py::test_explicit_quote_flag_is_single_source` 覆盖 |
+| **B5.F** | 8 | ✅ | `plugins/chat/plugin.py::_register_humanization_interaction_tools` 已接入 startup；LLM tool execution 注入 `ToolContext.extra["resolved_humanization"]` |
+| **B5.G** | 8 | ✅ | `chat()` 开始时采样 `performance_degraded_snapshot`，经 resolver 传入 `resolve_profile(..., performance_degraded=...)`，turn 内不再读实时 health_guard |
+| **B5.J** | 8 | ✅ | `_stream_with_segments` / 普通分段 / tool-exhausted 路径记录 `last_segment_emitted_at` 并传给 `_maybe_extend` |
 
 ---
 
