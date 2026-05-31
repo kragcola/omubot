@@ -1003,6 +1003,29 @@ class ChatPlugin(AmadeusPlugin):
         else:
             ctx.sticker_store = None
 
+        ctx.character_recognizer = None
+        ctx.character_registry_db = None
+        ctx.recognition_cache = None
+        if config.vision.character_recognition.enabled:
+            from services.media.character_recognizer import CharacterRecognizer
+            from services.media.character_registry_db import CharacterRegistryDB
+            from services.media.recognition_cache import RecognitionCache
+
+            registry_db = CharacterRegistryDB(db_path="storage/character_recognition.db")
+            await registry_db.init()
+            await registry_db.scan_and_sync(config.vision.character_recognition.packs_dir)
+            recognition_cache = RecognitionCache(db_path="storage/character_recognition.db")
+            await recognition_cache.init()
+            ctx.character_registry_db = registry_db
+            ctx.recognition_cache = recognition_cache
+            ctx.character_recognizer = CharacterRecognizer(
+                base_url=config.vision.character_recognition.sidecar_url,
+                packs_dir=config.vision.character_recognition.packs_dir,
+                timeout_seconds=config.vision.character_recognition.timeout_seconds,
+                registry_db=registry_db,
+                recognition_cache=recognition_cache,
+            )
+
         # ---- card store ----
         from plugins.memo import MemoConfig
         from services.memory.card_store import CardStore

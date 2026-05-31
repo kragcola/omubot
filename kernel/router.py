@@ -655,6 +655,7 @@ async def _render_message(
     session: aiohttp.ClientSession | None = None,
     self_id: str = "",
     vision_client: Any | None = None,
+    character_recognizer: Any | None = None,
     bot: Bot | None = None,
     *,
     in_group: bool = False,
@@ -663,6 +664,9 @@ async def _render_message(
     sticker_store: Any | None = None,
     image_cache: Any | None = None,
     desc_cache: dict[str, str] | None = None,
+    mood_engine: Any | None = None,
+    mood_group_id: str | int | None = None,
+    mood_session_id: str = "",
 ) -> Content:
     from kernel.qq_face import face_to_text
 
@@ -781,7 +785,7 @@ async def _render_message(
             len(image_tasks), len(images), elapsed_ms,
         )
 
-    if images and vision_client is not None:
+    if images and (vision_client is not None or character_recognizer is not None):
         from pathlib import Path
 
         for i, (ref, label_prefix) in enumerate(images):
@@ -804,11 +808,40 @@ async def _render_message(
                             if desc:
                                 _log_debug.debug("sticker cache HIT | id={}", sticker_id)
 
+                if desc is None and character_recognizer is not None:
+                    recognition = await character_recognizer.identify(
+                        data,
+                        media_type=str(ref.get("media_type", "image/jpeg")),
+                    )
+                    if recognition is not None and recognition.matched and recognition.character_name:
+                        _log_debug.debug(
+                            "character recognition HIT | id={} relation={} diff={}",
+                            recognition.character_id,
+                            recognition.relation,
+                            recognition.difference,
+                        )
+                        # Phase 3: self/friend sticker → transient mood nudge.
+                        if mood_engine is not None and recognition.relation in ("self", "friend"):
+                            try:
+                                mood_engine.register_recognition_signal(
+                                    recognition.relation,
+                                    group_id=mood_group_id,
+                                    session_id=mood_session_id,
+                                )
+                            except Exception:
+                                _log_debug.debug("mood recognition-nudge skipped")
+                        if vision_client is not None:
+                            vision_desc = await vision_client.describe_image(data)
+                            if vision_desc:
+                                desc = f"{recognition.character_name}：{vision_desc}"
+                        if desc is None:
+                            desc = f"{recognition.character_name}表情包"
+
                 if desc is None:
                     _log_debug.debug("desc cache MISS | hash={} file={} -> Qwen VL", img_hash, Path(img_path).name)
-                    desc = await vision_client.describe_image(data)
-                    if desc:
-                        desc_cache[img_hash] = desc
+                    desc = await vision_client.describe_image(data) if vision_client is not None else None
+                if desc:
+                    desc_cache[img_hash] = desc
 
                 if desc:
                     text_parts.append(f"«{label_prefix}{i + 1}: {desc}»")
@@ -1160,6 +1193,7 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             session=ctx.llm_client._session,
             self_id=bot.self_id,
             vision_client=ctx.vision_client,
+            character_recognizer=getattr(ctx, "character_recognizer", None),
             bot=bot,
             in_group=True,
             vision_enabled=ctx.vision_enabled,
@@ -1167,6 +1201,9 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             sticker_store=ctx.sticker_store,
             image_cache=ctx.image_cache,
             desc_cache=ctx.desc_cache,
+            mood_engine=getattr(ctx, "mood_engine", None),
+            mood_group_id=group_id,
+            mood_session_id=f"group_{group_id}",
         )
 
         if not content:
@@ -1532,12 +1569,16 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             session=ctx.llm_client._session,
             self_id=bot.self_id,
             vision_client=ctx.vision_client,
+            character_recognizer=getattr(ctx, "character_recognizer", None),
             bot=bot,
             vision_enabled=ctx.vision_enabled,
             max_images_per_message=ctx.max_images_per_message,
             sticker_store=ctx.sticker_store,
             image_cache=ctx.image_cache,
             desc_cache=ctx.desc_cache,
+            mood_engine=getattr(ctx, "mood_engine", None),
+            mood_group_id=None,
+            mood_session_id=f"private_{event.user_id}",
         )
         if not user_content:
             # NoneBot's _check_nickname strips the nickname from the message.

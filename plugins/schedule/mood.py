@@ -121,6 +121,13 @@ class MoodEngine:
         self._refresh_s = refresh_minutes * 60
         self._cache: dict[tuple[str, str], tuple[MoodProfile, float]] = {}
         self._history: dict[tuple[str, str], list[tuple[MoodProfile, float]]] = {}
+        # Transient recognition nudges: seeing self/friend stickers warms the
+        # mood slightly. Each entry decays linearly over _nudge_decay_s. Stored
+        # per cache_key so it composes with the 15-min mood cache without
+        # rewriting the base computation.
+        self._recognition_nudges: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
+        self._nudge_decay_s = 1800.0  # 30 min
+        self._nudge_cap = 0.2  # max total valence/openness added
 
     def evaluate(
         self,
@@ -144,6 +151,11 @@ class MoodEngine:
                 return cached_profile
 
         profile = self._compute(schedule, recent_interaction_count)
+        nudge_v, nudge_o = self._active_nudge(cache_key)
+        if nudge_v or nudge_o:
+            profile.valence += nudge_v
+            profile.openness += nudge_o
+            profile.clamp()
         self._cache[cache_key] = (profile, now)
         history = self._history.setdefault(cache_key, [])
         history.append((self._copy_base(profile), now))
@@ -164,6 +176,62 @@ class MoodEngine:
         if cached is None:
             return None
         return cached[0]
+
+    def register_recognition_signal(
+        self,
+        relation: str,
+        *,
+        group_id: str | int | None = None,
+        session_id: str = "",
+    ) -> None:
+        """Record a character-recognition hit as a transient mood nudge.
+
+        self → bot sees its own sticker in use (small valence+); friend → a
+        known person's sticker (small openness+). Nudges decay over 30 min and
+        are capped, so they nudge rather than dominate the base mood. Invalidates
+        the cached profile so the next evaluate() reflects the warmth promptly.
+        """
+        valence_d = 0.0
+        openness_d = 0.0
+        if relation == "self":
+            valence_d = 0.08
+        elif relation == "friend":
+            openness_d = 0.08
+        else:
+            return  # known / unknown: no signal
+        key = self._cache_key(group_id=group_id, session_id=session_id)
+        entries = self._recognition_nudges.setdefault(key, [])
+        entries.append((time.monotonic(), valence_d, openness_d))
+        # Bound list growth; decay/prune happens on read.
+        if len(entries) > 64:
+            del entries[: len(entries) - 64]
+        self._cache.pop(key, None)
+
+    def _active_nudge(self, key: tuple[str, str]) -> tuple[float, float]:
+        """Sum un-expired, linearly-decayed nudges for (valence, openness), capped."""
+        entries = self._recognition_nudges.get(key)
+        if not entries:
+            return 0.0, 0.0
+        now = time.monotonic()
+        valence = 0.0
+        openness = 0.0
+        kept: list[tuple[float, float, float]] = []
+        for ts, v_d, o_d in entries:
+            age = now - ts
+            if age >= self._nudge_decay_s:
+                continue
+            factor = 1.0 - (age / self._nudge_decay_s)
+            valence += v_d * factor
+            openness += o_d * factor
+            kept.append((ts, v_d, o_d))
+        if kept:
+            self._recognition_nudges[key] = kept
+        else:
+            self._recognition_nudges.pop(key, None)
+        return (
+            max(-self._nudge_cap, min(self._nudge_cap, valence)),
+            max(-self._nudge_cap, min(self._nudge_cap, openness)),
+        )
 
     def recent_profiles(
         self,

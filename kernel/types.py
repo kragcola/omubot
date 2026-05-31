@@ -215,6 +215,7 @@ class PluginContext:
     slang_plugin: Any = None
     command_dispatcher: Any = None
     vision_client: Any = None
+    character_recognizer: Any = None
     vision_enabled: bool = False
     max_images_per_message: int = 0
     desc_cache: dict[str, str] = field(default_factory=dict)

@@ -333,6 +333,10 @@ def test_vision_config_defaults() -> None:
     assert v.max_dimension == 768
     assert v.cache_dir == "storage/image_cache"
     assert v.cache_max_age_hours == 24
+    assert v.character_recognition.enabled is False
+    assert v.character_recognition.sidecar_url == "http://host.docker.internal:8620"
+    assert v.character_recognition.packs_dir == "config/character_packs"
+    assert v.character_recognition.timeout_seconds == 5.0
 
 
 def test_vision_config_from_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -347,6 +351,12 @@ max_images_per_message = 3
 max_dimension = 512
 cache_dir = "custom/cache"
 cache_max_age_hours = 12
+
+[vision.character_recognition]
+enabled = true
+sidecar_url = "http://localhost:8620"
+packs_dir = "config/test-packs"
+timeout_seconds = 2.5
 """,
     )
     cfg = load_config(config_path=str(toml_file))
@@ -355,6 +365,10 @@ cache_max_age_hours = 12
     assert cfg.vision.max_dimension == 512
     assert cfg.vision.cache_dir == "custom/cache"
     assert cfg.vision.cache_max_age_hours == 12
+    assert cfg.vision.character_recognition.enabled is True
+    assert cfg.vision.character_recognition.sidecar_url == "http://localhost:8620"
+    assert cfg.vision.character_recognition.packs_dir == "config/test-packs"
+    assert cfg.vision.character_recognition.timeout_seconds == 2.5
 
 
 def test_memo_config_defaults() -> None:

@@ -718,6 +718,15 @@ class QwenVLConfig(BaseModel):
     model: str = "qwen2.5-vl-7b-instruct"
 
 
+class CharacterRecognitionConfig(BaseModel):
+    """角色识别 sidecar 配置。"""
+
+    enabled: bool = False
+    sidecar_url: str = "http://host.docker.internal:8620"
+    packs_dir: str = "config/character_packs"
+    timeout_seconds: float = 5.0
+
+
 class VisionConfig(BaseModel):
     """多模态视觉配置。"""
 
@@ -728,6 +737,7 @@ class VisionConfig(BaseModel):
     cache_max_age_hours: int = 24
     describe_max_tokens: int = 200  # 描述输出上限；留出 OCR 文字空间（原硬编码 128）
     qwen: QwenVLConfig = QwenVLConfig()
+    character_recognition: CharacterRecognitionConfig = Field(default_factory=CharacterRecognitionConfig)
 
 
 
