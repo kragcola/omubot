@@ -39,18 +39,23 @@ const levelSegments: Array<{ key: LevelFilter, label: string, hint?: string }> =
 ]
 
 interface ChannelOption { key: string, label: string }
+// key = the actual loguru `bind(channel=...)` value carried over SSE (events.py:206);
+// label = the Chinese display name (mirrors bot.py _CHANNEL_LABELS). Filtering matches
+// on the English key, NOT the label — earlier the chips used Chinese keys that never
+// matched any SSE channel, so channel filtering (and observe mode) silently showed nothing.
 const channelOptions: ChannelOption[] = [
-  { key: '调度', label: '调度' },
-  { key: '日程', label: '日程' },
-  { key: '好感', label: '好感' },
-  { key: '心情', label: '心情' },
-  { key: '收消息', label: '收消息' },
-  { key: '发消息', label: '发消息' },
-  { key: '回复', label: '回复' },
-  { key: '系统', label: '系统' },
-  { key: '梦境', label: '梦境' },
-  { key: 'B站', label: 'B站' },
+  { key: 'scheduler', label: '调度' },
+  { key: 'schedule', label: '日程' },
+  { key: 'affection', label: '好感' },
+  { key: 'mood', label: '心情' },
+  { key: 'message_in', label: '收消息' },
+  { key: 'message_out', label: '回复' },
+  { key: 'thinking', label: '思考' },
+  { key: 'system', label: '系统' },
+  { key: 'dream', label: '梦境' },
+  { key: 'bilibili', label: 'B站' },
 ]
+
 
 type GroupFilter = 'all' | 'active' | string
 const ACTIVE_GROUPS = ['993065015', '984198159']
@@ -203,8 +208,43 @@ const sourceSummary = computed(() => {
 const filterActive = computed(() => filterLevel.value !== 'default' || !!searchText.value.trim() || filterChannels.value.size > 0 || filterGroup.value !== 'all')
 
 onMounted(() => {
-  void loadLogFiles()
+  void loadLogFiles().then(() => {
+    void seedLiveStreamFromTail()
+  })
 })
+
+/**
+ * Seed the live stream from the newest bot log file's tail.
+ *
+ * The SSE `logs` ref is an in-memory module singleton (useSSE.ts) and the
+ * server only pushes *new* entries — never replays backlog. So on a fresh page
+ * load the live terminal is empty until the next write lands. We bridge that by
+ * reading the latest bot log file's tail once and parsing it into the stream;
+ * subsequent SSE events append as usual. No-op if the stream already has data
+ * (navigated back to the page) or the user is viewing a specific file.
+ */
+async function seedLiveStreamFromTail() {
+  if (sseLogs.value.length > 0 || selectedFile.value) return
+  const newestBot = groupedFiles.value.bot[0] || fileEntries.value[0]
+  if (!newestBot) return
+  try {
+    const data = await api('/api/admin/logs/view', {
+      params: { file: newestBot.name, lines: 200 },
+    })
+    if (sseLogs.value.length > 0) return // SSE already delivered while we awaited
+    const seeded = parseFileLines(data.content || '')
+      .filter(line => line.time && line.message)
+      .map<SSELogEntry>(line => ({
+        ts: line.time,
+        level: line.level || inferLevel(line.channel) || 'INFO',
+        channel: fileLabelToChannel(line.channel),
+        message: line.message,
+      }))
+    if (seeded.length) sseLogs.value = [...seeded, ...sseLogs.value].slice(-200)
+  } catch {
+    // tail seeding is best-effort; SSE will fill in on next write
+  }
+}
 
 watch(paused, (value) => {
   if (value) pausedSnapshot.value = [...sseLogs.value]
@@ -285,7 +325,7 @@ function toggleChannel(ch: string) {
   filterChannels.value = s
 }
 
-const OBSERVE_CHANNELS = new Set(['调度', '日程', '好感', '心情', '收消息', '发消息', '回复'])
+const OBSERVE_CHANNELS = new Set(['scheduler', 'schedule', 'affection', 'mood', 'message_in', 'message_out', 'thinking'])
 
 const isObserveMode = computed(() =>
   filterGroup.value === 'active'
@@ -375,6 +415,32 @@ function inferLevel(channel: string): string {
   if (upper.includes('SUCCESS')) return 'SUCCESS'
   if (upper.includes('DEBUG')) return 'DEBUG'
   return ''
+}
+
+/**
+ * Map a file-line's channel token back to the English SSE channel key, so
+ * seeded (tail-parsed) entries filter identically to live SSE entries.
+ * Log files render channels as Chinese labels (bot.py _CHANNEL_LABELS); the
+ * live filter keys on the English `bind(channel=...)` value. This reverses it.
+ */
+const _FILE_LABEL_TO_CHANNEL: Record<string, string> = {
+  收消息: 'message_in',
+  回复: 'message_out',
+  思考: 'thinking',
+  心情: 'mood',
+  好感: 'affection',
+  日程: 'schedule',
+  调度: 'scheduler',
+  用量: 'usage',
+  压缩: 'compact',
+  系统: 'system',
+  调试: 'debug',
+  梦境: 'dream',
+  B站: 'bilibili',
+}
+function fileLabelToChannel(label: string): string {
+  const trimmed = (label || '').trim()
+  return _FILE_LABEL_TO_CHANNEL[trimmed] || trimmed
 }
 
 const parsedFileLines = computed(() => parseFileLines(content.value))

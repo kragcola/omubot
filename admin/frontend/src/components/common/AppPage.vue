@@ -200,6 +200,26 @@ const resolvedEyebrow = computed(() => props.eyebrow ?? 'Omubot Console')
   background: var(--om-surface);
 }
 
+/* Fill-intent pages (those whose slot uses .om-fill-page, e.g. logs / sandbox)
+ * opt into a definite-height flex chain so a child terminal/panel can fill the
+ * viewport's remaining space. Scoped via :has() so all other pages keep their
+ * natural content-height surface card unchanged. */
+.om-page__body:has(.om-fill-page) {
+  display: flex;
+  flex-direction: column;
+}
+
+.om-page__body:has(.om-fill-page) .om-page__surface-wrap {
+  min-height: 0;
+  flex: 1;
+}
+
+.om-page__body:has(.om-fill-page) .om-page__surface {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
 @media (max-width: 900px) {
   .om-page__hero-inner {
     flex-direction: column;
