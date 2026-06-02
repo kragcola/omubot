@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-06-02 Bang Dream! 系列角色包录入表准备
+
+**变更类型**：角色识别资料准备（`docs/character-packs/bangdream-character-pack-prep-2026-06-02.md`、`bangdream-characters.json`）。
+
+**背景**：CCIP 已支持系列 pack，下一批计划录入 Bang Dream! 全系列角色，需要先统一 `character_id/name/aliases` 与图片前缀规则，避免录入时临时改名导致样本归组混乱。
+
+**准备**：
+- 按 BanG Dream! 官方 Artist 页当前 12 个主线团整理 60 个角色，生成可直接粘贴到 Admin 系列 pack 录入框的 `characters_json`。
+- 约定 `pack_name=bangdream`、`series=bangdream`、`work=BanG Dream!`、`relation_default=known`。
+- 记录图片命名规则、建议采样量、Michelle/RAS/Ave Mujica 等多形态采样注意事项。
+
+**验证（D4）**：`jq 'length' docs/character-packs/bangdream-characters.json` 返回 60；`jq -r '.[].character_id' ... | sort | uniq -d` 无重复。仅文档准备，未 touch/recreate/down+up NapCat。
+
+**后续**：按 `<character_id>_*.jpg` 收集参考图后，可在 Admin「系列 pack」入口生成 `bangdream.charpack`。
+
+---
+
 ## 2026-06-02 角色识别页默认按系列聚合显示
 
 **变更类型**：Admin 前端 UX 优化（`admin/frontend/src/views/characters/CharactersView.vue`、`components.d.ts`、`admin/static/index.html`）。
