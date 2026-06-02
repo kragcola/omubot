@@ -229,17 +229,21 @@ class CharacterRecognizer:
             if cached is not None:
                 cid = cached.get("character_id")
                 cname = cached.get("character_name")
+                manifest_meta = self._metadata_for(str(cid) if cid else None)
+                cached_work = str(cached["work"]) if cached.get("work") else None
+                work = manifest_meta.work if manifest_meta else cached_work
+                context_label = (
+                    manifest_meta.context_label
+                    if manifest_meta and manifest_meta.context_label
+                    else (str(cached["context_label"]) if cached.get("context_label") else cached_work)
+                )
                 return [CharacterRecognition(
                     matched=bool(cid or cname),
                     character_id=str(cid) if cid else None,
                     character_name=str(cname) if cname else None,
                     relation=(str(cached["relation"]) if cached.get("relation") else None),
-                    work=(str(cached["work"]) if cached.get("work") else None),
-                    context_label=(
-                        str(cached["context_label"])
-                        if cached.get("context_label")
-                        else (str(cached["work"]) if cached.get("work") else None)
-                    ),
+                    work=work,
+                    context_label=context_label,
                     cache_hit=True,
                     source=str(cached.get("source") or "recognition-cache"),
                 )]

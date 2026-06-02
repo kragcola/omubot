@@ -13,17 +13,20 @@
 **修复**：
 - 新增 manifest 字段 `context_label`：`work` 继续保持粗粒度用于管理端聚合/迁移；prompt 注入优先使用 `context_label`，无字段时回退 `work`。
 - `CharacterRecognizer`、单角色 L2 `RecognitionCache`、multi/single 识别路径都携带 `context_label`；修正 `_metadata_from_db()` 缩进错误，避免 DB name/relation 路径被意外跳过。
+- 旧 L2 cache 行可能只有粗 `work`、`context_label=NULL`；cache-hit 路径改为用当前 manifest 重新富化 `work/context_label`，避免已识别过的旧图继续输出粗上下文。
 - sidecar `/build-pack` 与 `/build-series-pack`、Admin `/characters/build`、`tools/build_character_pack.py` 均保留/转发 `context_label`，避免后续重新录入丢字段。
 - `tools/enroll_bangdream_pack.py`、`tools/enroll_virtual_singers_pack.py`、`tools/batch_enroll_pjsk.py` 补入可复跑的细上下文映射；当前 runtime 的 `project_sekai.charpack`、`bangdream`、中/日V manifest 均已补齐。
 
 **验证（D4）**：
 - `git diff --check`、`.codex/hooks.json` 与 PJSK manifest JSON 校验通过。
 - `uv run ruff check ...` 通过；`uv run pyright ...` 0 errors。
-- 定向 pytest：`22 passed, 4 skipped`（含 router prompt、cache、sidecar builder、recognizer、AnimeTrace merge）。
+- 定向 pytest：`22 passed, 4 skipped`（含 router prompt、cache、sidecar builder、recognizer、AnimeTrace merge）；追加旧 cache 富化回归后 `tests/test_character_registry_db.py + test_render_message_character_recognition.py` 为 `9 passed`。
 - 结构校验：当前 4 个角色包 136 个角色 `missing_context_label=0`；PJSK 26/26，BangDream 60/60，中/日V 50/50。
 - 运行态抽检 `/identify`：天马司 → `Project SEKAI / Wonderlands×Showtime`，PJSK 初音 → `Project SEKAI / Virtual Singer`，本家初音 → `日V / Crypton 本家`，星尘 → `中V / 五维介质`，户山香澄 → `BanG Dream! / Poppin'Party`。
 - 部署：`docker compose up -d --build --no-deps bot ccip-sidecar`，只 rebuild/recreate `qq-bot` 与 `ccip-sidecar`；容器内 grep 确认新 `context_label` 代码已进入 `/app`。
 - Sidecar `/health`：`pack_count=4`、`character_count=136`；Admin 登录后 `/api/admin/characters` 返回 `enabled=true`、`count=136`，关键角色均有 pack/work/sample。
+- 容器内 cache 审计：`/app/storage/character_recognition.db` 存在 24 条旧 `context_label=NULL` 行，其中 17 条有粗 `work`；新 cache-hit 富化逻辑覆盖该残留风险。
+- 函数级最终文本验收：用临时旧 cache 行（`context_label=NULL`）走 `_describe_image_data()`，宿主输出 `初音未来（Project SEKAI / Virtual Singer）：...`，容器输出 `戸山 香澄（BanG Dream! / Poppin'Party）：...`。
 - NapCat `CreatedAt=2026-05-28T10:56:06.736616338Z` 且 `running`，未 touch/recreate/down+up。
 
 **影响与回滚**：当前 bot/sidecar 已切到新代码。回滚代码可 revert 本次提交后重新 `docker compose up -d --build --no-deps bot ccip-sidecar`；运行数据回滚可从 `config/character_packs/*/manifest.json` 移除 `context_label` 后触发重扫，但建议保留以避免 prompt 上下文退化。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -120,6 +121,53 @@ async def test_recognition_cache_short_circuits_sidecar(tmp_path: Path) -> None:
         assert r2.work == "中V"
         assert r2.context_label == "中V / 五维介质"
         assert _StubRecognizer.calls == 1
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_recognition_cache_hit_enriches_legacy_coarse_work_from_manifest(tmp_path: Path) -> None:
+    packs = tmp_path / "packs"
+    pack = packs / "series.charpack"
+    pack.mkdir(parents=True)
+    (pack / "manifest.json").write_text(
+        json.dumps({
+            "work": "中V",
+            "characters": [{
+                "character_id": "emu",
+                "name": "星尘",
+                "relation": "known",
+                "context_label": "中V / 五维介质",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    cache = RecognitionCache(str(tmp_path / "c.db"))
+    await cache.init()
+    try:
+        image_data = b"cached-image"
+        await cache.put(
+            hashlib.sha256(image_data).hexdigest(),
+            character_id="emu",
+            character_name="星尘",
+            relation="known",
+            work="中V",
+            context_label=None,
+        )
+        rec = _StubRecognizer(
+            base_url="http://127.0.0.1:8620",
+            packs_dir=packs,
+            recognition_cache=cache,
+            multi_char_enabled=False,
+        )
+        _StubRecognizer.calls = 0
+        result = await rec.identify(image_data)
+
+        assert len(result) == 1
+        assert result[0].cache_hit is True
+        assert result[0].work == "中V"
+        assert result[0].context_label == "中V / 五维介质"
+        assert _StubRecognizer.calls == 0
     finally:
         await cache.close()
 
