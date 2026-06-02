@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-06-02 合并凤笑梦与晓山瑞希单角色包
+
+**变更类型**：角色包数据归并（通过 Admin API `/api/admin/characters/merge-series`；未 rebuild；未 touch/recreate/down+up NapCat）。
+
+**操作**：把 `fengxiaomeng.charpack` 与 `xiaoshanruixi.charpack` 合并为 `omubot_characters.charpack`，`series=omubot_characters`，`work=Omubot Characters`，`relation_default=known`。角色项保留 per-character override：凤笑梦 `relation=self`，晓山瑞希 `relation=friend`。
+
+**结果**：
+- 新包 `config/character_packs/omubot_characters.charpack/` 包含 `fengxiaomeng.npy` 与 `xiaoshanruixi.npy`。
+- 原单包已归档到 `config/character_packs/.merged/omubot_characters/`，未删除。
+- 当前可扫描 pack：`omubot_characters.charpack`（2 角色）与 `series_4b4444c0b5.charpack`（PJSK 24 角色）。
+
+**验证（D4）**：Admin API 返回 `status=ok`、`character_count=2`、`archived=2`、`sync.packs=2`；Sidecar `/health` 返回 `pack_count=2`、`character_count=26`；Admin `/characters` 返回 `count=26`、packs=`omubot_characters` / `series_4b4444c0b5`、`mergeable=0`。
+
+**回滚**：删除 `config/character_packs/omubot_characters.charpack/`，把 `config/character_packs/.merged/omubot_characters/*.charpack` 移回 `config/character_packs/`，再调用 `/api/admin/characters/reload`。
+
+---
+
 ## 2026-06-02 修角色包合并页前后端错配（rebuild bot，NapCat 未动）
 
 **变更类型**：部署修正（只 rebuild/recreate `bot` 服务；未 touch/recreate/down+up NapCat）。
