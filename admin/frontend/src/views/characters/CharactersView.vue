@@ -35,8 +35,8 @@ const savingId = ref('')
 // enrollment dialog state
 const showEnroll = ref(false)
 const enrolling = ref(false)
+const dialogMode = ref<'enroll' | 'merge'>('enroll')
 const enrollTab = ref<'single' | 'series'>('single')
-const seriesMode = ref<'build' | 'merge'>('build')
 const formId = ref('')
 const formName = ref('')
 const formRelation = ref('self')
@@ -61,10 +61,11 @@ const cacheHitRate = computed(() => {
   return t > 0 ? `${Math.round((m / t) * 100)}%` : '—'
 })
 const sidecarOk = computed(() => sidecar.value.status === 'ok')
+const dialogTitle = computed(() => dialogMode.value === 'merge' ? '合并角色包' : '录入角色')
 const canSubmitSingle = computed(() => Boolean(formId.value.trim() && formName.value.trim() && formFiles.value.length > 0))
 const mergeableCharacters = computed(() => characters.value.filter(c => c.mergeable))
 const mergeOptions = computed(() => characters.value.map(c => ({
-  label: `${c.name || c.character_id} (${c.character_id}) · ${c.pack || '无 pack'}${c.mergeable ? '' : ' · 不可合并'}`,
+  label: `${c.name || c.character_id} (${c.character_id}) · ${c.pack || '无 pack'}${mergeBlockLabel(c)}`,
   value: c.character_id,
   disabled: !c.mergeable,
 })))
@@ -122,6 +123,13 @@ function sampleUrl(c: Character): string {
   return `/api/admin/characters/${encodeURIComponent(c.character_id)}/sample`
 }
 
+function mergeBlockLabel(c: Character): string {
+  if (c.mergeable) return ''
+  if ((c.pack_character_count || 0) > 1) return ' · 已在系列 pack'
+  if (!c.pack) return ' · 无 pack'
+  return ' · 缺 embeddings'
+}
+
 async function load() {
   loading.value = true
   try {
@@ -160,12 +168,24 @@ async function saveRelation(c: Character) {
 }
 
 function openEnroll() {
+  dialogMode.value = 'enroll'
   enrollTab.value = 'single'
-  seriesMode.value = 'build'
   formId.value = ''
   formName.value = ''
   formRelation.value = 'self'
   formFiles.value = []
+  resetSeriesForm()
+  showEnroll.value = true
+}
+
+function openMerge() {
+  dialogMode.value = 'merge'
+  enrollTab.value = 'series'
+  resetSeriesForm()
+  showEnroll.value = true
+}
+
+function resetSeriesForm() {
   seriesPackName.value = ''
   seriesSlug.value = ''
   seriesWork.value = ''
@@ -173,7 +193,6 @@ function openEnroll() {
   seriesCharactersJson.value = '[\n  { "character_id": "tenma_tsukasa", "name": "天马司" }\n]'
   seriesFiles.value = []
   mergeCharacterIds.value = []
-  showEnroll.value = true
 }
 
 function appendPickedFiles(target: File[], e: Event) {
@@ -303,10 +322,14 @@ onMounted(load)
     description="管理 CCIP 角色库：relation 关系（self/friend/known）在本地按 bot 维护，嵌入向量留在 sidecar。识别命中后描述会带上角色名。"
   >
     <template #action>
-      <NSpace :size="10">
+      <NSpace :size="8">
         <NButton type="primary" @click="openEnroll">
           <template #icon><NIcon :component="AddOutline" /></template>
           录入角色
+        </NButton>
+        <NButton secondary @click="openMerge">
+          <template #icon><NIcon :component="FileTrayFullOutline" /></template>
+          合并角色包
         </NButton>
         <NButton secondary @click="reload">
           <template #icon><NIcon :component="RefreshOutline" /></template>
@@ -386,11 +409,11 @@ onMounted(load)
     <NModal
       v-model:show="showEnroll"
       preset="card"
-      title="录入角色"
+      :title="dialogTitle"
       style="max-width: 720px;"
       :mask-closable="!enrolling"
     >
-      <NTabs v-model:value="enrollTab" animated>
+      <NTabs v-if="dialogMode === 'enroll'" v-model:value="enrollTab" animated>
         <NTabPane name="single" tab="单角色">
           <NSpace vertical :size="16">
             <div>
@@ -426,10 +449,6 @@ onMounted(load)
         </NTabPane>
         <NTabPane name="series" tab="系列 pack">
           <NSpace vertical :size="16">
-            <NRadioGroup v-model:value="seriesMode" :disabled="enrolling" class="char-series-mode">
-              <NRadioButton value="build">从新图片生成</NRadioButton>
-              <NRadioButton value="merge">合并已有角色</NRadioButton>
-            </NRadioGroup>
             <div class="char-series-grid">
               <div>
                 <div class="char-field-label">pack_name</div>
@@ -448,7 +467,6 @@ onMounted(load)
               <div class="char-field-label">默认关系 relation_default</div>
               <NSelect v-model:value="seriesRelation" :options="relationOptions" :disabled="enrolling" />
             </div>
-            <template v-if="seriesMode === 'build'">
             <div>
               <div class="char-field-label">characters JSON</div>
               <NInput
@@ -483,48 +501,65 @@ onMounted(load)
                 </ul>
               </div>
             </div>
-            </template>
-            <template v-else>
-              <div>
-                <div class="char-field-label">选择已有角色</div>
-                <NSelect
-                  v-model:value="mergeCharacterIds"
-                  multiple
-                  filterable
-                  :options="mergeOptions"
-                  :disabled="enrolling || mergeableCharacters.length === 0"
-                  placeholder="选择可合并的单角色 pack"
-                />
-              </div>
-              <EmptyState
-                v-if="mergeableCharacters.length === 0"
-                title="暂无可合并单角色包"
-                description="当前角色都已在系列 pack 中，或缺少完整 embeddings.npz。"
-                :icon="FileTrayFullOutline"
-                compact
-              />
-              <div v-if="selectedMergeCharacters.length" class="char-merge-grid">
-                <div v-for="item in selectedMergeCharacters" :key="item.character_id" class="char-merge-row">
-                  <span>{{ item.name }}</span>
-                  <span class="char-muted">{{ item.character_id }}</span>
-                  <NTag size="small" round>{{ item.pack || '—' }}</NTag>
-                  <NTag v-if="item.work" size="small" round type="info">{{ item.work }}</NTag>
-                  <span v-else class="char-muted">work —</span>
-                </div>
-                <div class="char-merge-row char-merge-row--summary">
-                  <span>共同出处</span>
-                  <span class="char-muted">{{ seriesWork.trim() || inferredMergeWork || '需填写 work' }}</span>
-                </div>
-              </div>
-            </template>
           </NSpace>
         </NTabPane>
       </NTabs>
+      <NSpace v-else vertical :size="16">
+        <div class="char-series-grid">
+          <div>
+            <div class="char-field-label">pack_name</div>
+            <NInput v-model:value="seriesPackName" placeholder="project_sekai" :disabled="enrolling" />
+          </div>
+          <div>
+            <div class="char-field-label">series</div>
+            <NInput v-model:value="seriesSlug" placeholder="默认同 pack_name" :disabled="enrolling" />
+          </div>
+        </div>
+        <div>
+          <div class="char-field-label">work</div>
+          <NInput v-model:value="seriesWork" placeholder="プロジェクトセカイ カラフルステージ！" :disabled="enrolling" />
+        </div>
+        <div>
+          <div class="char-field-label">默认关系 relation_default</div>
+          <NSelect v-model:value="seriesRelation" :options="relationOptions" :disabled="enrolling" />
+        </div>
+        <div>
+          <div class="char-field-label">选择已有角色</div>
+          <NSelect
+            v-model:value="mergeCharacterIds"
+            multiple
+            filterable
+            :options="mergeOptions"
+            :disabled="enrolling || mergeableCharacters.length === 0"
+            placeholder="选择可合并的单角色 pack"
+          />
+        </div>
+        <EmptyState
+          v-if="mergeableCharacters.length === 0"
+          title="没有待合并的单角色包"
+          description="已在系列 pack 中的角色已经完成归并；缺 embeddings 的旧包需要重建后才能合并。"
+          :icon="FileTrayFullOutline"
+          compact
+        />
+        <div v-if="selectedMergeCharacters.length" class="char-merge-grid">
+          <div v-for="item in selectedMergeCharacters" :key="item.character_id" class="char-merge-row">
+            <span>{{ item.name }}</span>
+            <span class="char-muted">{{ item.character_id }}</span>
+            <NTag size="small" round>{{ item.pack || '—' }}</NTag>
+            <NTag v-if="item.work" size="small" round type="info">{{ item.work }}</NTag>
+            <span v-else class="char-muted">work —</span>
+          </div>
+          <div class="char-merge-row char-merge-row--summary">
+            <span>共同出处</span>
+            <span class="char-muted">{{ seriesWork.trim() || inferredMergeWork || '需填写 work' }}</span>
+          </div>
+        </div>
+      </NSpace>
       <template #footer>
         <NSpace justify="end">
           <NButton :disabled="enrolling" @click="showEnroll = false">取消</NButton>
           <NButton
-            v-if="enrollTab === 'single'"
+            v-if="dialogMode === 'enroll' && enrollTab === 'single'"
             type="primary"
             :loading="enrolling"
             :disabled="!canSubmitSingle"
@@ -533,7 +568,7 @@ onMounted(load)
             提取特征并录入
           </NButton>
           <NButton
-            v-else-if="seriesMode === 'build'"
+            v-else-if="dialogMode === 'enroll'"
             type="primary"
             :loading="enrolling"
             :disabled="!canSubmitSeriesBuild"
@@ -579,7 +614,6 @@ export default { name: 'CharactersView' }
 .char-files__del { appearance: none; border: 0; background: transparent; color: var(--om-text-3); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px; }
 .char-files__del:hover { color: var(--om-danger); }
 .char-files__del:disabled { opacity: 0.4; cursor: not-allowed; }
-.char-series-mode { width: 100%; }
 .char-series-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-06-02 角色包合并入口从“录入角色”拆出
+
+**变更类型**：Admin 前端 UX 修正（`admin/frontend/src/views/characters/CharactersView.vue`、`admin/frontend/src/components.d.ts`、`admin/static/index.html`）。
+
+**背景**：系列 pack 支持上线后，“合并已有角色”被放在“录入角色 → 系列 pack”内部，语义上像是在录新角色；同时空状态“暂无可合并单角色包”容易被理解为“现有角色不能合成”。
+
+**修复**：
+- 顶部 action 新增独立“合并角色包”按钮，单独打开合并弹窗；“录入角色”只保留单角色录入和从新图片生成系列 pack。
+- 合并弹窗的空状态改为“没有待合并的单角色包”，并区分不可选原因：已在系列 pack、无 pack、缺 embeddings。
+- `NSpace` action 间距收敛到设计系统 8px；移除不再需要的 Radio 模式组件注册。
+
+**验证（D4）**：`admin/frontend ./node_modules/.bin/vue-tsc --noEmit` 通过；`npm run build` 通过（Rollup 仍输出依赖 PURE 注释的既有警告）。未 touch/recreate/down+up NapCat。
+
+**回滚**：`git revert <本次提交>` 或恢复 `CharactersView.vue/components.d.ts/admin/static/index.html`。
+
+---
+
 ## 2026-06-02 CCIP 系列角色 Pack 支持（继承式 manifest + 管理端录入 + 启动自动合并）
 
 **变更类型**：功能扩展（`ccip-sidecar/server.py`、`services/media/character_*`、`admin/routes/api/characters.py`、`admin/frontend/src/views/characters/CharactersView.vue`、`tools/build_character_pack.py`、`kernel/config.py`、`plugins/chat/plugin.py`；新增迁移文档和测试；前端 build 更新 `admin/static/index.html`）。
