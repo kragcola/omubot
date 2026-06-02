@@ -427,7 +427,11 @@ Omubot 管理端也叫 Web 后台、Admin Console、控制台。
 
 默认情况下，`ContextPlugin` 会统一打包 memory/doc/graph，并注入一个 `上下文资料` 动态块，避免 `MemoPlugin` 和 `KnowledgePlugin` 重复注入。`ContextPlugin` 的 manifest 为 `tier=system`、`toggle_policy=locked`；日常不应在插件中心关闭它。
 
-如果需要回滚，可在插件配置中关闭 `ContextPlugin.enabled` 或 `takeover_dynamic_prompt`。关闭后，旧路径会恢复：`KnowledgePlugin` 直接把知识库 chunk 注入动态 Prompt，`MemoPlugin` 直接注入实体记忆动态块。
+现在不再建议通过“关闭 ContextPlugin 接管”来回滚知识注入路径。`ContextPlugin` 已是系统锁定能力，常规排障应优先使用：
+
+- `/admin/knowledge` 的索引状态、搜索核对与上下文调试；
+- `knowledge` 插件配置中的扫描目录 / include / exclude；
+- `ContextPlugin` 的命中日志与 `doc_chunk` 观察结果。
 
 ## 和知识图谱的关系
 

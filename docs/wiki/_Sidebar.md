@@ -1,5 +1,6 @@
 - [Home](Home)
 - [架构](Architecture)
+- [角色识别](Character-Recognition)
 - [插件](Plugins)
 - [群内黑话](Slang)
 - [表达学习](Style-Learning)

@@ -54,6 +54,7 @@ omubot 使用声明式命令注册，在 `register_commands()` 中返回 `Comman
 | `/debug save [描述]` | `保存`, `收录` | 管理员 | 保存最近图片到表情包库 |
 | `/debug send [id\|gif]` | `发`, `发送` | 管理员 | 发送表情包（指定 ID 或随机；加 `gif` 只发动图） |
 | `/debug split <文本>` | `分段`, `分割` | 管理员 | 测试文本分段效果 |
+| `/authority <QQ号> [0-4\|reset]` | `权限`, `授权` | 管理员 | 查询或设置用户指令权限等级（隐藏管理命令） |
 | `/plugins` | `/p`, `/plg`, `/插件` | 管理员 | 列出所有已加载插件 |
 | `/version` | — | 所有人 | 查看版本并检查 GitHub 更新 |
 
@@ -73,7 +74,7 @@ omubot 使用声明式命令注册，在 `register_commands()` 中返回 `Comman
 ### `/version` 输出示例
 
 ```
-Omubot v1.4.0
+Omubot v1.5.0
 GitHub: https://github.com/kragcola/omubot
 
 （无法连接 GitHub，未检查更新）

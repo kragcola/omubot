@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-06-02 Wiki 回填到近期运行态（文档收口）
+
+**变更类型**：文档修订（`docs/wiki/Home.md`、`Architecture.md`、`Configuration.md`、`Deployment.md`、`Plugins.md`、`Commands.md`、`Stickers.md`、`Knowledge-System.md`、`Style-Learning.md`、`_Sidebar.md`，新增 `docs/wiki/Character-Recognition.md`，同步 `wiki/README.md`；无 bot/admin/sidecar 运行态变更）。
+
+**背景**：审计发现 wiki 入口页仍停留在 `v1.4.0` 口径，部署页仍指向旧工作区，角色识别/系列 pack/sidecar/pmubot 等近期主线没有进入 wiki，表情包页还停在旧 `index.json` 存储描述，知识库页还残留已不推荐的 ContextPlugin 回滚说法。
+
+**更新**：
+- 回填首页、架构、配置、部署、插件、命令页到当前运行态：版本改为 `v1.5.0`，补入 `ccip-sidecar` / `pmubot` 运行拓扑、当前插件版本、`vision.character_recognition` 配置、`/authority` 隐藏管理命令、`stickers.db` 与 `character_recognition.db` 存储口径。
+- 新增 `docs/wiki/Character-Recognition.md`，系统化记录 sidecar 分工、registry/cache、系列 pack、Admin/API、回滚路径，并把侧栏接入。
+- 删除或弱化过时表述：知识库页移除“关闭 ContextPlugin 接管”回滚建议；表达学习页明确不写回 `source.md`；顶层 `wiki/README.md` 同步到当前主线。
+
+**验证（D4）**：
+- `git diff --check -- docs/wiki wiki/README.md` 通过。
+- `rg -n "v1\\.4\\.0|takeover_dynamic_prompt|ContextPlugin\\.enabled" docs/wiki wiki/README.md` 仅剩预期保留的历史/退役说明，无旧口径残留。
+- 事实对照来源：`pyproject.toml`（版本）、`docker-compose.yml`（运行拓扑/端口）、`plugins/*/plugin.json`（插件版本与层级）、`kernel/config.py`（角色识别配置）、`admin/routes/api/characters.py` 与 `services/media/character_*`（角色识别链路）、`services/version.py`（`/version` 输出来源）、`services/media/sticker_store.py`（表情包 SQLite 口径）。
+- 未 touch/recreate/down+up NapCat。
+
+**影响与回滚**：本次仅修改 wiki 与开发文档，不影响运行代码。若需回滚，直接恢复上述 wiki 文件即可。
+
+---
+
 ## 2026-06-02 角色识别 Prompt 细上下文修复
 
 **变更类型**：角色识别语义修正（`services/media/character_*`、`kernel/router.py`、`recognition_cache.py`、`ccip-sidecar/server.py`、Admin build 转发、录入脚本与测试；运行包 manifest 为 gitignored 数据）。

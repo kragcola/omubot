@@ -78,7 +78,7 @@ admin/style     →  表达学习控制台
 
 管理员可从 approved 表达生成短风格档案：
 
-- 档案不会写入 `identity.md` 或 `instruction.md`。
+- 档案不会写入 `config/persona/<id>/source.md` 或 freeze 产物，只作为运行时动态参考。
 - 档案有 version/status，可启用、禁用、回滚。
 - 档案 Prompt 明确不能改变核心人设。
 - 每次生成和切换都会留下反馈/修订记录。

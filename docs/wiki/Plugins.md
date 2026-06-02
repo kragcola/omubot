@@ -72,18 +72,18 @@ storage/plugins/config/<name>.json
 
 | 插件包 | 版本 | 层级 | 启停策略 | 类别 | 功能 |
 | --- | --- | --- | --- | --- | --- |
-| `chat` | 1.1.7 | system | locked | core | 核心聊天：消息路由、LLM 调用、tool loop |
-| `context` | 0.1.0 | system | locked | core | 统一上下文：memory/doc/graph 检索与动态 Prompt 打包 |
-| `history_loader` | 1.1.1 | system | locked | core | 启动时加载群历史消息 |
-| `vision` | 1.1.1 | system | locked | core | 图片理解能力包，作为系统能力展示 |
-| `memo` | 1.1.3 | user | runtime | memory | 记忆卡片：7 类 3 作用域，检索门控与工具 |
-| `knowledge` | 0.1.1 | user | runtime | memory | 文档知识库：Markdown 扫描、持久索引、检索调试 |
+| `chat` | 1.1.25 | system | locked | core | 核心聊天：消息路由、LLM 调用、tool loop |
+| `context` | 0.1.9 | system | locked | core | 统一上下文：memory/doc/graph 检索与动态 Prompt 打包 |
+| `history_loader` | 1.1.2 | system | locked | core | 启动时加载群历史消息 |
+| `vision` | 1.1.2 | system | locked | core | 图片描述能力；角色识别链路通过该系统能力接线 |
+| `memo` | 1.1.5 | user | runtime | memory | 记忆卡片：7 类 3 作用域，检索门控与工具 |
+| `knowledge` | 0.1.5 | user | runtime | memory | 文档知识库：Markdown 扫描、持久索引、检索调试 |
 | `calendar_context` | 1.0.0 | user | runtime | memory | 日期上下文：节日/日历等时间语境 |
 | `affection` | 1.1.2 | user | runtime | memory | 好感度系统：分数、昵称、态度调节 |
-| `schedule` | 1.1.2 | user | runtime | memory | 模拟日程与心情状态 |
-| `slang` | 0.1.0 | user | runtime | expression | 群内黑话：候选、审核、AI 复核、backlog、漂移治理 |
-| `style` | 0.1.0 | user | runtime | expression | 表达学习：表达样本、动态风格档案、Prompt 注入 |
-| `sticker` | 1.1.4 | user | runtime | expression | 表情包：保存、发送、管理 |
+| `schedule` | 1.1.5 | user | runtime | memory | 模拟日程与心情状态 |
+| `slang` | 0.1.17 | user | runtime | expression | 群内黑话：候选、审核、AI 复核、backlog、漂移治理 |
+| `style` | 1.0.0 | user | runtime | expression | 表达学习：表达样本、动态风格档案、Prompt 注入 |
+| `sticker` | 1.1.6 | user | runtime | expression | 表情包：保存、发送、管理与 OCR / 轻量语义检索 |
 | `echo` | 1.1.2 | user | runtime | expression | 复读检测：5 分钟内同消息 3 次触发 |
 | `web_search` | 1.1.1 | user | runtime | tool | 网页搜索，用于实时信息和 AI 复核 |
 | `web_fetch` | 1.1.1 | user | runtime | tool | 网页内容抓取 |
@@ -91,8 +91,8 @@ storage/plugins/config/<name>.json
 | `http_api` | 1.1.1 | user | runtime | tool | 通用 HTTP API 调用 |
 | `group_admin` | 1.1.1 | user | runtime | tool | 群管理工具（禁言、头衔、发消息） |
 | `food` | 0.1.6 | user | runtime | tool | 饮食/点餐相关指令 |
-| `bilibili` | 1.1.3 | user | runtime | tool | B 站链接解析与封面摘要 |
-| `element_detector` | 1.1.2 | user | runtime | pipeline | 特殊消息元素检测 |
+| `bilibili` | 1.1.4 | user | runtime | tool | B 站链接解析与封面摘要 |
+| `element_detector` | 1.1.3 | user | runtime | pipeline | 特殊消息元素检测 |
 | `dream` | 1.1.3 | user | runtime | ops | 梦境整合：定期整理记忆、清理表情包 |
 | `debug_commands` | 1.3.1 | user | runtime | ops | `/plugins`、`/version` 等调试指令 |
 

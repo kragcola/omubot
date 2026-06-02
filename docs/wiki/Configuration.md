@@ -108,7 +108,7 @@ Omubot 现在支持“定义”和“任务映射”分离的 Provider 管理：
 
 - `llm.profiles`：保存各个 provider profile 的定义
 - `llm.default_profile`：主聊天任务默认使用哪个 profile
-- `llm.task_profiles`：`main / thinker / compact / slang / slang_review / slang_drift / vision / reply_gate` 分别映射到哪个 profile
+- `llm.task_profiles`：为不同调用任务映射 provider profile；常见任务包括 `main / thinker / compact / reply_gate / vision / slang / style / memo / persona_import / birthday_wish`
 - `/admin/system` → `LLM Provider`：可热切换任务映射，也可在“定义管理”抽屉里结构化编辑 profile
 
 示例：
@@ -161,6 +161,51 @@ Omubot 现在支持“定义”和“任务映射”分离的 Provider 管理：
 - `slang_review` 和 `slang_drift` 如果没有单独 profile，会回退到 `slang` 或 `default_profile`
 - `reply_gate` 如果没有单独 profile，会回退到 `thinker`
 - API Key 在 Web 端默认只显示遮罩值；替换或清空需要在“定义管理”里显式操作
+- 完整任务名以 `services/llm/llm_request.py` 的 `LLMTask` 为单一真相源；Admin System 页任务列表与它保持同步
+
+## 视觉与角色识别
+
+视觉主配置位于 `vision`，其中角色识别配置位于 `vision.character_recognition`：
+
+```json
+{
+  "vision": {
+    "enabled": true,
+    "max_images_per_message": 5,
+    "character_recognition": {
+      "enabled": false,
+      "sidecar_url": "http://host.docker.internal:8620",
+      "packs_dir": "config/character_packs",
+      "timeout_seconds": 5.0,
+      "animetrace_enabled": true,
+      "animetrace_model": "anime_model_lovelive",
+      "animetrace_timeout_seconds": 8.0,
+      "multi_char_enabled": true,
+      "auto_merge_series_packs": true
+    }
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `vision.enabled` | `true` | 是否启用多模态图片描述 |
+| `vision.max_images_per_message` | `5` | 单条消息最多处理几张图片 |
+| `vision.character_recognition.enabled` | `false` | 是否启用角色识别链路 |
+| `sidecar_url` | `http://host.docker.internal:8620` | `ccip-sidecar` 服务地址 |
+| `packs_dir` | `config/character_packs` | 角色包目录 |
+| `timeout_seconds` | `5.0` | sidecar 请求超时 |
+| `animetrace_enabled` | `true` | 是否并行使用 AnimeTrace 辅助作品判断 |
+| `multi_char_enabled` | `true` | 是否调用 sidecar `/identify-multi` |
+| `auto_merge_series_packs` | `true` | 启动前自动归并同 `work` 的安全单角色包 |
+
+说明：
+
+- `config/character_packs/*.charpack/` 属于运行时数据，默认不进入 Git。
+- `/admin/characters` 可执行单角色录入、系列 pack 构建、角色包合并和重扫。
+- 关闭 `vision.character_recognition.enabled` 后，整条识别链路会旁路回普通图片描述。
 
 ## 群访问与单群画像
 
