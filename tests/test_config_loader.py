@@ -337,6 +337,7 @@ def test_vision_config_defaults() -> None:
     assert v.character_recognition.sidecar_url == "http://host.docker.internal:8620"
     assert v.character_recognition.packs_dir == "config/character_packs"
     assert v.character_recognition.timeout_seconds == 5.0
+    assert v.character_recognition.auto_merge_series_packs is True
 
 
 def test_vision_config_from_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -357,6 +358,7 @@ enabled = true
 sidecar_url = "http://localhost:8620"
 packs_dir = "config/test-packs"
 timeout_seconds = 2.5
+auto_merge_series_packs = false
 """,
     )
     cfg = load_config(config_path=str(toml_file))
@@ -369,6 +371,7 @@ timeout_seconds = 2.5
     assert cfg.vision.character_recognition.sidecar_url == "http://localhost:8620"
     assert cfg.vision.character_recognition.packs_dir == "config/test-packs"
     assert cfg.vision.character_recognition.timeout_seconds == 2.5
+    assert cfg.vision.character_recognition.auto_merge_series_packs is False
 
 
 def test_memo_config_defaults() -> None:

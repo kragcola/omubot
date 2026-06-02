@@ -11,6 +11,13 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 from loguru import logger
 
+from services.media.character_pack_manifest import (
+    character_id,
+    effective_character_relation,
+    effective_character_work,
+    iter_manifest_characters,
+)
+
 if TYPE_CHECKING:
     from services.media.animetrace_client import AnimeTraceClient
     from services.media.character_registry_db import CharacterRegistryDB
@@ -91,19 +98,14 @@ class CharacterRecognizer:
             except (OSError, json.JSONDecodeError):
                 continue
 
-            characters = payload.get("characters") or []
-            if not isinstance(characters, list):
-                continue
-            for item in characters:
-                if not isinstance(item, dict):
+            for item in iter_manifest_characters(payload):
+                cid = character_id(item)
+                if not cid:
                     continue
-                character_id = str(item.get("character_id") or "").strip()
-                if not character_id:
-                    continue
-                name = str(item.get("name") or character_id).strip() or character_id
-                relation = str(item.get("relation") or "known").strip() or "known"
-                work = str(item.get("work") or "").strip() or None
-                catalog[character_id] = _CharacterMetadata(name=name, relation=relation, work=work)
+                name = str(item.get("name") or cid).strip() or cid
+                relation = effective_character_relation(payload, item)
+                work = effective_character_work(payload, item)
+                catalog[cid] = _CharacterMetadata(name=name, relation=relation, work=work)
 
         self._catalog = catalog
         self._signature = signature

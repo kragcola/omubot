@@ -734,6 +734,7 @@ class CharacterRecognitionConfig(BaseModel):
     # CCIP + AnimeTrace merge. Controlled on the sidecar side separately via
     # the CCIP_MULTI_CHAR_ENABLED env var.
     multi_char_enabled: bool = True
+    auto_merge_series_packs: bool = True
 
 
 class VisionConfig(BaseModel):

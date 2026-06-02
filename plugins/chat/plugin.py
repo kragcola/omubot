@@ -1007,11 +1007,16 @@ class ChatPlugin(AmadeusPlugin):
         ctx.character_registry_db = None
         ctx.recognition_cache = None
         if config.vision.character_recognition.enabled:
+            from services.media.character_pack_migrator import auto_merge_series_packs
             from services.media.character_recognizer import CharacterRecognizer
             from services.media.character_registry_db import CharacterRegistryDB
             from services.media.recognition_cache import RecognitionCache
 
             cr_cfg = config.vision.character_recognition
+            if cr_cfg.auto_merge_series_packs:
+                merge_stats = auto_merge_series_packs(cr_cfg.packs_dir)
+                if merge_stats.get("merged") or merge_stats.get("archived") or merge_stats.get("skipped"):
+                    _L.info("character pack series auto-merge | {}", merge_stats)
             registry_db = CharacterRegistryDB(db_path="storage/character_recognition.db")
             await registry_db.init()
             await registry_db.scan_and_sync(cr_cfg.packs_dir)

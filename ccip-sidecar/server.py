@@ -413,6 +413,7 @@ async def embed(image: UploadFile = IMAGE_UPLOAD) -> dict[str, Any]:
 
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+_VALID_RELATIONS = {"self", "friend", "known"}
 _IMAGES = File(...)
 # Each Form() must be a distinct instance — FastAPI tracks parameter binding by
 # the marker object's identity, so sharing one Form(...) across two params makes
@@ -421,6 +422,11 @@ _FORM_ID = Form(...)
 _FORM_NAME = Form(...)
 _FORM_REL = Form(default="known")
 _FORM_WORK = Form(default="")
+_FORM_PACK = Form(...)
+_FORM_SERIES = Form(default="")
+_FORM_REL_DEFAULT = Form(default="known")
+_FORM_CHARACTERS_JSON = Form(...)
+_FORM_SERIES_WORK = Form(default="")
 _SAMPLE_MAX = 256  # px, longest edge of stored sample thumbnails
 
 
@@ -429,19 +435,29 @@ def _slug(value: str) -> str:
     return s or "character"
 
 
-def _build_pack(
+def _relation(value: str, *, default: str = "known") -> str:
+    value = str(value or "").strip()
+    return value if value in _VALID_RELATIONS else default
+
+
+def _aliases(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _matches_prefix(filename: str, prefix: str) -> bool:
+    name = Path(filename or "").name
+    if name == prefix:
+        return True
+    return any(name.startswith(f"{prefix}{sep}") for sep in ("_", "-", "."))
+
+
+def _embed_character_images(
     images: list[bytes],
     *,
-    character_id: str,
-    name: str,
-    relation: str,
-    work: str = "",
     sample_count: int = 3,
-) -> dict[str, Any]:
-    """Embed images → mean vector → charpack zip bytes (manifest + npz +
-    downscaled samples). The sidecar owns numpy/model; the config mount is
-    read-only here, so we return the zip for the bot to land on disk."""
-    cid = _slug(character_id)
+) -> tuple[np.ndarray, int, list[bytes]]:
     vectors: list[np.ndarray] = []
     samples: list[bytes] = []
     embedded = 0
@@ -464,9 +480,24 @@ def _build_pack(
             samples.append(sbuf.getvalue())
     if not vectors:
         raise ValueError("no image produced a valid embedding")
+    return np.mean(np.stack(vectors), axis=0).astype(np.float32), embedded, samples
 
-    mean_vec = np.mean(np.stack(vectors), axis=0).astype(np.float32)
-    rel = relation if relation in ("self", "friend", "known") else "known"
+
+def _build_pack(
+    images: list[bytes],
+    *,
+    character_id: str,
+    name: str,
+    relation: str,
+    work: str = "",
+    sample_count: int = 3,
+) -> dict[str, Any]:
+    """Embed images → mean vector → charpack zip bytes (manifest + npz +
+    downscaled samples). The sidecar owns numpy/model; the config mount is
+    read-only here, so we return the zip for the bot to land on disk."""
+    cid = _slug(character_id)
+    mean_vec, embedded, samples = _embed_character_images(images, sample_count=sample_count)
+    rel = _relation(relation)
     char_entry: dict[str, Any] = {
         "character_id": cid,
         "name": name.strip() or cid,
@@ -481,6 +512,8 @@ def _build_pack(
         "relation_default": rel,
         "characters": [char_entry],
     }
+    if work.strip():
+        manifest["work"] = work.strip()
     npz_buf = io.BytesIO()
     np.savez(npz_buf, **{cid: mean_vec})
 
@@ -499,6 +532,116 @@ def _build_pack(
         "total": len(images),
         "samples": len(samples),
         "dim": int(mean_vec.size),
+        "api_version": API_VERSION,
+    }
+
+
+def _build_series_pack(
+    image_files: list[tuple[str, bytes]],
+    *,
+    pack_name: str,
+    series: str,
+    work: str,
+    relation_default: str,
+    characters_json: str,
+    sample_count: int = 3,
+) -> dict[str, Any]:
+    pack = _slug(pack_name)
+    series_slug = _slug(series) if series.strip() else pack
+    rel_default = _relation(relation_default)
+    try:
+        character_defs = json.loads(characters_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("characters_json must be a JSON array") from exc
+    if not isinstance(character_defs, list) or not character_defs:
+        raise ValueError("characters_json must be a non-empty JSON array")
+
+    vectors: dict[str, np.ndarray] = {}
+    characters: list[dict[str, Any]] = []
+    per_character: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    total_images = 0
+    total_embedded = 0
+    total_samples = 0
+    samples_by_character: dict[str, list[bytes]] = {}
+
+    for raw in character_defs:
+        if not isinstance(raw, dict):
+            raise ValueError("each characters_json item must be an object")
+        raw_cid = str(raw.get("character_id") or "").strip()
+        if not raw_cid:
+            raise ValueError("each character must include character_id")
+        cid = _slug(raw_cid)
+        if cid in seen:
+            raise ValueError(f"duplicate character_id: {cid}")
+        seen.add(cid)
+
+        prefix = str(raw.get("file_prefix") or raw_cid).strip() or cid
+        matched = [payload for filename, payload in image_files if _matches_prefix(filename, prefix)]
+        if not matched:
+            raise ValueError(f"no images matched character {cid} with prefix {prefix!r}")
+
+        mean_vec, embedded, samples = _embed_character_images(matched, sample_count=sample_count)
+        vectors[cid] = mean_vec
+        samples_by_character[cid] = samples
+        total_images += len(matched)
+        total_embedded += embedded
+        total_samples += len(samples)
+
+        entry: dict[str, Any] = {
+            "character_id": cid,
+            "name": str(raw.get("name") or cid).strip() or cid,
+            "embedding_key": cid,
+            "aliases": _aliases(raw.get("aliases")),
+        }
+        raw_relation = str(raw.get("relation") or "").strip()
+        if raw_relation:
+            rel = _relation(raw_relation, default=rel_default)
+            if rel != rel_default:
+                entry["relation"] = rel
+        raw_work = str(raw.get("work") or "").strip()
+        if raw_work and raw_work != work.strip():
+            entry["work"] = raw_work
+        characters.append(entry)
+        per_character.append({
+            "character_id": cid,
+            "embedded": embedded,
+            "total": len(matched),
+            "samples": len(samples),
+        })
+
+    manifest: dict[str, Any] = {
+        "pack": pack,
+        "series": series_slug,
+        "relation_default": rel_default,
+        "characters": characters,
+    }
+    if work.strip():
+        manifest["work"] = work.strip()
+
+    npz_buf = io.BytesIO()
+    np.savez(npz_buf, **vectors)
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        root = f"{pack}.charpack"
+        zf.writestr(f"{root}/manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        zf.writestr(f"{root}/embeddings.npz", npz_buf.getvalue())
+        for cid, samples in samples_by_character.items():
+            for idx, sample in enumerate(samples):
+                zf.writestr(f"{root}/samples/{cid}/{idx}.jpg", sample)
+
+    return {
+        "charpack_zip_b64": base64.b64encode(zip_buf.getvalue()).decode("ascii"),
+        "pack_dir": f"{pack}.charpack",
+        "pack": pack,
+        "series": series_slug,
+        "character_count": len(characters),
+        "embedded": total_embedded,
+        "total": total_images,
+        "samples": total_samples,
+        "characters": per_character,
+        "dim": int(next(iter(vectors.values())).size),
         "api_version": API_VERSION,
     }
 
@@ -524,3 +667,34 @@ async def build_pack(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"build-pack failed: {exc}") from exc
+
+
+@app.post("/build-series-pack")
+async def build_series_pack(
+    images: list[UploadFile] = _IMAGES,
+    pack_name: str = _FORM_PACK,
+    series: str = _FORM_SERIES,
+    work: str = _FORM_SERIES_WORK,
+    relation_default: str = _FORM_REL_DEFAULT,
+    characters_json: str = _FORM_CHARACTERS_JSON,
+) -> dict[str, Any]:
+    """Build a multi-character charpack. Images are grouped by each
+    character's ``file_prefix`` (or ``character_id``), then mean-pooled into one
+    centroid per character."""
+    image_files = [(img.filename or "image", await img.read()) for img in images]
+    image_files = [(name, payload) for name, payload in image_files if payload]
+    if not image_files:
+        raise HTTPException(status_code=400, detail="no images provided")
+    try:
+        return _build_series_pack(
+            image_files,
+            pack_name=pack_name,
+            series=series,
+            work=work,
+            relation_default=relation_default,
+            characters_json=characters_json,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"build-series-pack failed: {exc}") from exc

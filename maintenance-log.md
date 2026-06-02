@@ -4,6 +4,46 @@
 
 ---
 
+## 2026-06-02 CCIP 系列角色 Pack 支持（继承式 manifest + 管理端录入 + 启动自动合并）
+
+**变更类型**：功能扩展（`ccip-sidecar/server.py`、`services/media/character_*`、`admin/routes/api/characters.py`、`admin/frontend/src/views/characters/CharactersView.vue`、`tools/build_character_pack.py`、`kernel/config.py`、`plugins/chat/plugin.py`；新增迁移文档和测试；前端 build 更新 `admin/static/index.html`）。
+
+**背景**：近期 CCIP 已支持 `/identify-multi`，sidecar 运行时也能加载一个 manifest 内的多角色；但录入链路仍以“一个角色一个 `.charpack`”为主，PJSK 这类同作品角色会散成 24 个包，`work/relation_default` 重复写在角色项上，管理端样例路径也假设 pack 名等于 character_id。
+
+**修复**：
+- **manifest v2 继承**：顶层支持 `series/work/relation_default`；读取规则统一为 `character.work -> manifest.work`、`character.relation -> relation_default -> known`。旧 per-character `work/relation` 继续有效。
+- **sidecar 系列构建**：新增 `POST /build-series-pack`，按 `characters_json[].file_prefix || character_id` 给图片归组，输出一个多角色 `.charpack`；样例图写入 `samples/<character_id>/<idx>.jpg`。`/build-pack` 保持兼容。
+- **bot/admin 接线**：`CharacterRecognizer`、`CharacterRegistryDB.scan_and_sync()`、Admin 列表/样例接口全部支持继承式 manifest；新增 `/api/admin/characters/build-series` 和 `/api/admin/characters/merge-series`；角色识别页录入弹窗增加“系列 pack”tab，既可从新图片生成，也可选择现有安全单角色包快速合并；表格显示 `pack/work`，列表返回 `pack_character_count/mergeable` 供前端禁用不可合并项。
+- **启动自动合并**：新增 `auto_merge_series_packs`（默认 true），在 registry sync 前把同一非空 work 下的安全单角色包合并；bot 侧不用 numpy，直接复制 `.npz` zip 内 `.npy` 成员；原单包移动到 `config/character_packs/.merged/<series>/`，不删除。
+- **CLI 同源**：`tools/build_character_pack.py` 改调 `/build-series-pack`，新增 `--work/--series`。
+
+**D1 同模式扫描**：`rg "work|relation_default|samples|build-pack|scan_and_sync|character_recognizer"` 覆盖 sidecar builder、recognizer catalog、registry DB、admin API、CLI、启动构造与现有测试；本轮统一抽出 `character_pack_manifest.py` 避免继承规则散落多份。
+
+**验证（D4）**：`uv run ruff check ...` 全部通过；`uv run pyright ...` 0 errors；定向 pytest **54 passed, 2 skipped**（本机 `readline` import 会 139，测试命令预置 no-op `readline` module；2 个 sidecar builder 用例因 bot venv 无 numpy 跳过，符合 sidecar 依赖隔离）；`admin/frontend ./node_modules/.bin/vue-tsc --noEmit` 通过；`npm run build` 通过。未 touch/recreate/down+up NapCat。
+
+**回滚**：配置层可设 `vision.character_recognition.auto_merge_series_packs=false` 后重启 bot；数据层把 `.merged/<series>/*.charpack` 移回 `config/character_packs/` 并删除对应系列包后 `/characters/reload`；代码层撤销本次改动并 rebuild bot/sidecar，NapCat 不动。
+
+---
+
+## 2026-06-02 Codex 预提示词与 SessionStart hook 收敛（无运行态变更）
+
+**变更类型**：协作流程修正（`AGENTS.md` + `.codex/hooks.json` + `scripts/dev/codex-session-start.py`；未改 bot 运行代码）。
+
+**背景**：审计 Claude Code 与 Codex 预提示词发现两处漂移：① `AGENTS.md` 仍指向旧 `$HOME/OmubotWorkspace/omubot` 工作区，而当前活跃仓库已是 `/Volumes/OmubotDisk/omubot`；② Codex SessionStart hook 硬编码读取 `omubot/maintenance-log.md`，当 cwd 是 repo root 时会读成不存在的 `omubot/omubot/...`，导致会话开头丢维护日志上下文。
+
+**修复**：
+- `AGENTS.md` 改为以 `/Volumes/OmubotDisk/omubot` 为 primary workspace，并补入 Claude 侧高频规则：NapCat 不 recreate 红线、D1-D7 纪律、`omubot-admin-console` skill 触发、维护日志更新规则。
+- 新增 `scripts/dev/codex-session-start.py`，自动探测 repo root，兼容 hook 从 repo root 或 parent root 运行。
+- `.codex/hooks.json` 的 SessionStart 改为调用脚本；PostToolUse 路径先归一化绝对路径 / `omubot/` / `./` 前缀，不再硬编码 `omubot/maintenance-log.md`。
+
+**影响范围**：只影响 Codex/agent 会话启动提示与编辑后提醒，不影响 bot、sidecar、admin runtime。后续 agent 应能在 repo root cwd 下正确读取最新维护日志和日志尾部。
+
+**验证**：`python3 -m json.tool .codex/hooks.json` 通过；`python3 scripts/dev/codex-session-start.py` 在 repo root 输出 SessionStart JSON；从 parent root 执行 `python3 omubot/scripts/dev/codex-session-start.py` 同样输出；`bash scripts/dev/doctor.sh` 0 fail / 0 warn。
+
+**回滚**：`git checkout AGENTS.md .codex/hooks.json scripts/dev/codex-session-start.py maintenance-log.md`。
+
+---
+
 ## 2026-06-01/02 修昵称寻址语境丢失——"姆怎么是龙王"被拆成"怎么是龙王"（rebuild bot）
 
 **变更类型**：bug 修复（`kernel/router.py` 新增 `_match_nickname_addressing` + 改 `TriggerContext.reason`；rebuild bot）。

@@ -160,6 +160,31 @@ async def test_merge_ccip_manifest_work_wins_over_animetrace(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_merge_ccip_inherited_manifest_work_wins_over_animetrace(tmp_path) -> None:
+    pack = tmp_path / "pjsk.charpack"
+    pack.mkdir(parents=True)
+    (pack / "manifest.json").write_text(
+        json.dumps(
+            {
+                "pack": "pjsk",
+                "work": "プロジェクトセカイ",
+                "relation_default": "known",
+                "characters": [{"character_id": "emu", "name": "凤笑梦"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _MergeRecognizer.ccip_payload = _ccip_hit()
+    rec = _MergeRecognizer(
+        base_url="http://x", packs_dir=tmp_path,
+        animetrace_client=_StubAT(AnimeTraceMatch("MikuWrong", "がっこうぐらし！")),
+    )
+    r = await _identify_single(rec, b"img")
+    assert r is not None and r.work == "プロジェクトセカイ"
+
+
+@pytest.mark.asyncio
 async def test_merge_animetrace_fills_when_ccip_miss(tmp_path) -> None:
     _MergeRecognizer.ccip_payload = _ccip_miss()
     rec = _MergeRecognizer(

@@ -19,6 +19,12 @@ from pathlib import Path
 import aiosqlite
 from loguru import logger
 
+from services.media.character_pack_manifest import (
+    character_aliases,
+    character_id,
+    effective_character_relation,
+    iter_manifest_characters,
+)
 from services.storage import close_with_checkpoint, connect_sqlite
 
 _L = logger.bind(channel="debug")
@@ -131,23 +137,16 @@ class CharacterRegistryDB:
                 continue
             pack_count += 1
             source_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-            characters = manifest.get("characters") or []
-            if not isinstance(characters, list):
-                continue
-            for item in characters:
-                if not isinstance(item, dict):
-                    continue
-                cid = str(item.get("character_id") or "").strip()
+            for item in iter_manifest_characters(manifest):
+                cid = character_id(item)
                 if not cid:
                     continue
                 if await self.get(cid) is not None:
                     skipped += 1
                     continue
                 name = str(item.get("name") or cid).strip() or cid
-                relation = str(item.get("relation") or "known").strip()
-                if relation not in _VALID_RELATIONS:
-                    relation = "known"
-                aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
+                relation = effective_character_relation(manifest, item)
+                aliases = character_aliases(item)
                 await self._db.execute(
                     "INSERT INTO character_registry "
                     "(character_id, name, aliases_json, relation, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -175,4 +174,3 @@ class CharacterRegistryDB:
             "aliases": aliases if isinstance(aliases, list) else [],
             "relation": row["relation"],
         }
-

@@ -56,6 +56,29 @@ async def test_registry_scan_sync_and_admin_edit_survives_resync(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_registry_scan_sync_inherits_relation_default(tmp_path: Path) -> None:
+    packs = tmp_path / "packs"
+    pack = packs / "series.charpack"
+    pack.mkdir(parents=True)
+    (pack / "manifest.json").write_text(
+        json.dumps({
+            "relation_default": "friend",
+            "characters": [{"character_id": "emu", "name": "凤笑梦"}],
+        }),
+        encoding="utf-8",
+    )
+    db = CharacterRegistryDB(str(tmp_path / "c.db"))
+    await db.init()
+    try:
+        await db.scan_and_sync(str(packs))
+        row = await db.get("emu")
+        assert row is not None
+        assert row["relation"] == "friend"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_recognition_cache_short_circuits_sidecar(tmp_path: Path) -> None:
     cache = RecognitionCache(str(tmp_path / "c.db"))
     await cache.init()
