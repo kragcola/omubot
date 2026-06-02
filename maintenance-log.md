@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-06-02 Bang Dream! 系列角色包录入完成
+
+**变更类型**：角色识别运行数据录入 + 可复跑脚本（`tools/enroll_bangdream_pack.py`；生成 `config/character_packs/bangdream.charpack/`，该目录为 gitignored runtime data）。
+
+**背景**：前序已整理 Bang Dream! 60 人 roster；本轮按用户要求正式录入，并要求兼顾正比图与表情包/缩略形态，避免 centroid 被单一正比卡面“一遍倒”。
+
+**录入**：
+- 从官方 Bang Dream! Artist 资源、Bestdori card trim、LiveSD、stamp 拉取样本；生成 `pack=series=bangdream`、`work=BanG Dream!`、`relation_default=known` 的系列 pack。
+- 样本总计 300 张：normal 155、expression 145。旧 40 人基本为 `3 normal / 3 expression`；Ave Mujica 5 人为 `2/2`；OurNotes 新 15 人至少保留 official full/list 与 thumb 的正比/表情态覆盖。
+- 当前 8620 sidecar 运行版仍是 `2026-06-01.v1`，没有 `/build-series-pack`；脚本已补 404 兜底：继续调用 sidecar `/embed` 抽特征，本地仅负责均值、manifest、npz、样例 zip 落盘，未重启 sidecar。
+
+**验证（D4）**：
+- `uv run ruff check tools/enroll_bangdream_pack.py` 通过。
+- manifest：`character_count=60`，npz：60 个 key、每个 768 维；样例：60 个角色目录、175 张缩略图。
+- Sidecar `/health` 自动扫描后返回 `pack_count=2`、`character_count=86`、`registry_version=11e828ae2f4a`。
+- `CharacterRegistryDB.scan_and_sync("config/character_packs")` 返回 `packs=2 inserted=86 skipped=0`，registry DB 当前 86 行。
+- 抽检 `/identify`：`toyama_kasumi` 正比 full 与 stamp、`takamatsu_tomori` 正比 full 与 stamp、`togawa_sakiko` stamp、`shinomiya_shizuku` thumb 均命中对应角色，diff 约 `0.015-0.087`，低于阈值 `0.178475`。
+
+**D6**：未 touch/recreate/down+up NapCat；未重启 bot/sidecar，仅写入角色包并让 sidecar/registry 扫描。
+
+**回滚**：移动或删除 `config/character_packs/bangdream.charpack/` 后重新执行角色 reload/registry sync；如需保留数据可先归档到 `config/character_packs/.merged/bangdream/`。
+
+---
+
 ## 2026-06-02 Bang Dream! 系列角色包录入表准备
 
 **变更类型**：角色识别资料准备（`docs/character-packs/bangdream-character-pack-prep-2026-06-02.md`、`bangdream-characters.json`）。
