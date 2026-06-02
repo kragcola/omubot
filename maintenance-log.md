@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-06-02 纠正 PJSK 系列拆包：统一为 project_sekai
+
+**变更类型**：角色包数据归并修正（手工用 zipfile 归并现有系列包；未 rebuild；未 touch/recreate/down+up NapCat）。
+
+**背景**：上一轮把凤笑梦与晓山瑞希合并为 `omubot_characters.charpack`，但业务真相是它们也属于同一个 PJSK 系列；Admin 列表因此显示 `project_sekai` 角色被拆成 `series_4b4444c0b5` 与 `omubot_characters` 两个 pack。
+
+**修复**：新建 `config/character_packs/project_sekai.charpack/`，把 `series_4b4444c0b5.charpack`（PJSK 24 角色）与 `omubot_characters.charpack`（凤笑梦、晓山瑞希）归并为一个 26 角色系列包；`pack=series=project_sekai`，`work=プロジェクトセカイ カラフルステージ！`，`relation_default=known`。凤笑梦保留 `relation=self`，晓山瑞希保留 `relation=friend`。
+
+**结果**：
+- 当前可扫描角色包只剩 `config/character_packs/project_sekai.charpack/manifest.json`。
+- 旧包归档到 `config/character_packs/.merged/project_sekai/series_4b4444c0b5.charpack` 与 `.../omubot_characters.charpack`，未删除。
+
+**验证（D4）**：`POST /api/admin/characters/reload` 返回 `sync.packs=1`、`skipped=26`；Admin `/characters` 返回 `count=26`、`packs=['project_sekai']`、凤笑梦/晓山瑞希 work 均为 PJSK 且 relation 分别为 `self/friend`；Sidecar `/health` 返回 `pack_count=1`、`character_count=26`、`registry_version=b6e7cbea6737`。
+
+**回滚**：删除 `config/character_packs/project_sekai.charpack/`，把 `.merged/project_sekai/*.charpack` 移回 `config/character_packs/`，再调用 `/api/admin/characters/reload`。
+
+---
+
 ## 2026-06-02 合并凤笑梦与晓山瑞希单角色包
 
 **变更类型**：角色包数据归并（通过 Admin API `/api/admin/characters/merge-series`；未 rebuild；未 touch/recreate/down+up NapCat）。
