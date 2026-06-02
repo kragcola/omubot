@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"项目内 Skill 可用：omubot-admin-console（Codex 路径 .agents/skills/omubot-admin-console/；Claude 镜像 .claude/skills/omubot-admin-console/）。当任务涉及 admin/frontend 重构、旧 wiki/代码审计、或 Omubot 增量修改时优先使用；执行规则见 docs/agent-ui-guidelines.md 与 docs/admin-ui-style-guide.md。\"}}'",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"项目内 Skill 可用：omubot-admin-console（Admin/代码/文档增量修改）与 omubot-deep-delivery（用户指出思考/验证不足、需要 web 调研、角色包/数据集录入、prompt/skill/hook、生产运行态变更）。Codex 路径 .agents/skills/；Claude 镜像 .claude/skills/。Admin UI 规则见 docs/agent-ui-guidelines.md 与 docs/admin-ui-style-guide.md。\"}}'",
             "timeout": 3,
             "statusMessage": "加载项目技能..."
           }

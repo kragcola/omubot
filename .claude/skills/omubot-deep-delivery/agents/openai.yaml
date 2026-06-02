@@ -1,0 +1,6 @@
+interface:
+  display_name: "Omubot Deep Delivery"
+  short_description: "深度调研、可复跑脚本、碰撞校验与运行态验收工作流"
+  default_prompt: "Use $omubot-deep-delivery when a task needs web research, dataset/character-pack enrollment, runtime validation, or stronger verification."
+policy:
+  allow_implicit_invocation: true

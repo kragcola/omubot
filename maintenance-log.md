@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-06-02 新增深度交付 Skill 与触发规则
+
+**变更类型**：协作流程修正（`AGENTS.md`、`.codex/hooks.json`、`.agents/skills/omubot-deep-delivery/`、`.claude/skills/omubot-deep-delivery/`；无 bot/admin/sidecar 运行态变更）。
+
+**背景**：用户反馈 Codex 当前存在思考深度不足、主动检索不足、完成后校验不透彻的问题；要求联网搜索 skill 与其他方式来改善。
+
+**调研结论**：外部资料与本地 `skill-creator` 规则共同指向：高频失败模式不应只靠临场提醒，应固化为可触发的 Skill；对于生产/数据/录入类任务，要把调研、假设、碰撞检查、dry-run、运行态验证和 rollback 作为交付门槛。
+
+**修复**：
+- 新增 `omubot-deep-delivery` skill，并同时镜像到 `.agents/skills/` 与 `.claude/skills/`。
+- skill 规定：用户指出质量问题、需要 web 调研、角色包/数据集录入、prompt/skill/hook、生产运行态变更时触发；必须覆盖 static/structural/semantic/runtime/negative-collision/idempotency 验证矩阵。
+- `AGENTS.md` 补入触发条件和“不只做静态检查”的完成门槛。
+- `.codex/hooks.json` SessionStart 提醒新增 `omubot-deep-delivery`，让后续会话启动时可见。
+
+**验证（D4）**：`python3 -m json.tool .codex/hooks.json` 通过；两侧 skill 均有 `SKILL.md` 与 `agents/openai.yaml`；`git diff --check` 通过。未 touch/recreate/down+up NapCat。
+
+**后续**：遇到角色包/数据集录入时必须先 dry-run 并做重复 id/错源/运行态 `/identify` 抽检；遇到用户要求 web 或事实不稳定时必须主动检索并在最终回复给出来源。
+
+---
+
 ## 2026-06-02 虚拟歌姬中V/日V系列包录入完成
 
 **变更类型**：角色识别运行数据录入 + 可复跑脚本（`tools/virtual_singers_roster.py`、`tools/enroll_virtual_singers_pack.py`；生成 `zh_virtual_singers.charpack` 与 `ja_virtual_singers.charpack`，均为 gitignored runtime data）。

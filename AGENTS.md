@@ -93,10 +93,24 @@ maintenance notes, services, plugins, or incremental project changes, use the
 `omubot-admin-console` skill first. Follow `docs/agent-ui-guidelines.md` and
 `docs/admin-ui-style-guide.md` for admin UI work.
 
+Use `omubot-deep-delivery` when any of these are true:
+
+- the user criticizes reasoning depth, initiative, or verification quality
+- the task asks to search the web or depends on current/upstream facts
+- the task enrolls/builds datasets or character packs
+- the task touches agent prompts, skills, hooks, or cross-agent workflow rules
+- the task is production-facing and needs research, dry-runs, runtime checks,
+  collision checks, and rollback notes
+
+For these tasks, do not finish with only static checks. Include structural,
+semantic, runtime, and collision/negative verification where relevant.
+
 The skill bodies are mirrored in:
 
 - `.agents/skills/omubot-admin-console/`
+- `.agents/skills/omubot-deep-delivery/`
 - `.claude/skills/omubot-admin-console/`
+- `.claude/skills/omubot-deep-delivery/`
 
 ## Maintenance Log
 
