@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-06-02 修角色包合并页前后端错配（rebuild bot，NapCat 未动）
+
+**变更类型**：部署修正（只 rebuild/recreate `bot` 服务；未 touch/recreate/down+up NapCat）。
+
+**现象**：Admin 前端已经显示独立“合并角色包”弹窗，但合并下拉为空并提示“没有待合并的单角色包”。截图背后 `pack` 信息未落到页面，用户无法选择现有录入角色。
+
+**根因**：Admin 静态文件通过 `./admin/static:/app/admin/static:ro` bind mount，前端 build 后立即生效；但 `/api/admin/characters` 后端代码在 `qq-bot` 镜像内，上一轮提交后未 rebuild bot，运行中的 `/app/admin/routes/api/characters.py` 仍是旧版本，没有 `mergeable` / `pack_character_count` / `/characters/merge-series`。
+
+**修复**：执行 `docker compose up -d --build --no-deps bot`，只重建并重启 `qq-bot`；不带依赖，NapCat 未被 recreate。
+
+**验证（D4/D6）**：
+- 容器内 `admin.routes.api.characters._pack_catalog()`：`manifest_count=3`、`catalog=26`、`mergeable=2`，并确认后端代码包含 `merge-series`。
+- HTTP `/api/admin/characters`：`enabled=true`、`count=26`、`mergeable=2`、packs=`fengxiaomeng` / `xiaoshanruixi` / `series_4b4444c0b5`。
+- PJSK 24 角色已在 `series_4b4444c0b5` 系列包中，不再作为待合并单包出现；剩余 `fengxiaomeng`、`xiaoshanruixi` 为可选单包。
+- `docker inspect napcat --format '{{.Created}} {{.State.Status}}'`：`2026-05-28T10:56:06.736616338Z running`，NapCat 创建时间未变。
+
+**回滚**：如需回旧后端，`git checkout` 到上一提交后 `docker compose up -d --build --no-deps bot`；NapCat 仍不动。
+
+---
+
 ## 2026-06-02 角色包合并入口从“录入角色”拆出
 
 **变更类型**：Admin 前端 UX 修正（`admin/frontend/src/views/characters/CharactersView.vue`、`admin/frontend/src/components.d.ts`、`admin/static/index.html`）。
