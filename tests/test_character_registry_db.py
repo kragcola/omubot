@@ -80,12 +80,27 @@ async def test_registry_scan_sync_inherits_relation_default(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_recognition_cache_short_circuits_sidecar(tmp_path: Path) -> None:
+    packs = tmp_path / "packs"
+    pack = packs / "series.charpack"
+    pack.mkdir(parents=True)
+    (pack / "manifest.json").write_text(
+        json.dumps({
+            "work": "中V",
+            "characters": [{
+                "character_id": "emu",
+                "name": "星尘",
+                "relation": "known",
+                "context_label": "中V / 五维介质",
+            }],
+        }),
+        encoding="utf-8",
+    )
     cache = RecognitionCache(str(tmp_path / "c.db"))
     await cache.init()
     try:
         rec = _StubRecognizer(
             base_url="http://127.0.0.1:8620",
-            packs_dir=tmp_path / "packs",
+            packs_dir=packs,
             recognition_cache=cache,
             multi_char_enabled=False,  # test single-char L2 cache path
         )
@@ -94,12 +109,16 @@ async def test_recognition_cache_short_circuits_sidecar(tmp_path: Path) -> None:
         assert len(r1_list) == 1
         r1 = r1_list[0]
         assert r1.character_id == "emu"
+        assert r1.work == "中V"
+        assert r1.context_label == "中V / 五维介质"
         assert _StubRecognizer.calls == 1
         # second identify of same bytes → served from L2 cache, no sidecar call
         r2_list = await rec.identify(b"img-bytes")
         assert len(r2_list) == 1
         r2 = r2_list[0]
         assert r2.cache_hit is True
+        assert r2.work == "中V"
+        assert r2.context_label == "中V / 五维介质"
         assert _StubRecognizer.calls == 1
     finally:
         await cache.close()

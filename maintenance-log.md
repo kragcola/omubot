@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-06-02 角色识别 Prompt 细上下文修复
+
+**变更类型**：角色识别语义修正（`services/media/character_*`、`kernel/router.py`、`recognition_cache.py`、`ccip-sidecar/server.py`、Admin build 转发、录入脚本与测试；运行包 manifest 为 gitignored 数据）。
+
+**背景**：系列 pack 支持后，`work` 被用作 pack/grouping 维度（如 `中V`、`日V`、`BanG Dream!`、PJSK 作品名）。`kernel/router.py` 直接把 `character_name（work）` 注入 VL 描述，导致回复里只剩“中V 的星尘”“BanG Dream 的某角色”这类粗上下文，角色语义变稀。
+
+**修复**：
+- 新增 manifest 字段 `context_label`：`work` 继续保持粗粒度用于管理端聚合/迁移；prompt 注入优先使用 `context_label`，无字段时回退 `work`。
+- `CharacterRecognizer`、单角色 L2 `RecognitionCache`、multi/single 识别路径都携带 `context_label`；修正 `_metadata_from_db()` 缩进错误，避免 DB name/relation 路径被意外跳过。
+- sidecar `/build-pack` 与 `/build-series-pack`、Admin `/characters/build`、`tools/build_character_pack.py` 均保留/转发 `context_label`，避免后续重新录入丢字段。
+- `tools/enroll_bangdream_pack.py`、`tools/enroll_virtual_singers_pack.py`、`tools/batch_enroll_pjsk.py` 补入可复跑的细上下文映射；当前 runtime 的 `project_sekai.charpack`、`bangdream`、中/日V manifest 均已补齐。
+
+**验证（D4）**：
+- `git diff --check`、`.codex/hooks.json` 与 PJSK manifest JSON 校验通过。
+- `uv run ruff check ...` 通过；`uv run pyright ...` 0 errors。
+- 定向 pytest：`22 passed, 4 skipped`（含 router prompt、cache、sidecar builder、recognizer、AnimeTrace merge）。
+- 结构校验：当前 4 个角色包 136 个角色 `missing_context_label=0`；PJSK 26/26，BangDream 60/60，中/日V 50/50。
+- 运行态抽检 `/identify`：天马司 → `Project SEKAI / Wonderlands×Showtime`，PJSK 初音 → `Project SEKAI / Virtual Singer`，本家初音 → `日V / Crypton 本家`，星尘 → `中V / 五维介质`，户山香澄 → `BanG Dream! / Poppin'Party`。
+- 部署：`docker compose up -d --build --no-deps bot ccip-sidecar`，只 rebuild/recreate `qq-bot` 与 `ccip-sidecar`；容器内 grep 确认新 `context_label` 代码已进入 `/app`。
+- Sidecar `/health`：`pack_count=4`、`character_count=136`；Admin 登录后 `/api/admin/characters` 返回 `enabled=true`、`count=136`，关键角色均有 pack/work/sample。
+- NapCat `CreatedAt=2026-05-28T10:56:06.736616338Z` 且 `running`，未 touch/recreate/down+up。
+
+**影响与回滚**：当前 bot/sidecar 已切到新代码。回滚代码可 revert 本次提交后重新 `docker compose up -d --build --no-deps bot ccip-sidecar`；运行数据回滚可从 `config/character_packs/*/manifest.json` 移除 `context_label` 后触发重扫，但建议保留以避免 prompt 上下文退化。
+
+---
+
 ## 2026-06-02 新增深度交付 Skill 与触发规则
 
 **变更类型**：协作流程修正（`AGENTS.md`、`.codex/hooks.json`、`.agents/skills/omubot-deep-delivery/`、`.claude/skills/omubot-deep-delivery/`；无 bot/admin/sidecar 运行态变更）。

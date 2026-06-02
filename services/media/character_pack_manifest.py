@@ -33,6 +33,19 @@ def effective_character_work(manifest: dict[str, Any], item: dict[str, Any]) -> 
     return work or None
 
 
+def effective_character_context_label(manifest: dict[str, Any], item: dict[str, Any]) -> str | None:
+    """Human-facing source/context label for prompt injection.
+
+    ``work`` intentionally stays broad for pack migration and admin grouping
+    (for example "中V" or "BanG Dream!").  ``context_label`` is the richer
+    label shown to the LLM when a character is recognized.
+    """
+    label = str(item.get("context_label") or manifest.get("context_label") or "").strip()
+    if label:
+        return label
+    return effective_character_work(manifest, item)
+
+
 def character_aliases(item: dict[str, Any]) -> list[str]:
     aliases = item.get("aliases")
     if not isinstance(aliases, list):

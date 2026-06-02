@@ -13,6 +13,7 @@ from loguru import logger
 
 from services.media.character_pack_manifest import (
     character_id,
+    effective_character_context_label,
     effective_character_relation,
     effective_character_work,
     iter_manifest_characters,
@@ -33,6 +34,7 @@ class CharacterRecognition:
     character_name: str | None = None
     relation: str | None = None
     work: str | None = None
+    context_label: str | None = None
     difference: float | None = None
     threshold: float | None = None
     cache_hit: bool = False
@@ -46,6 +48,7 @@ class _CharacterMetadata:
     name: str
     relation: str
     work: str | None = None
+    context_label: str | None = None
 
 
 class CharacterRecognizer:
@@ -105,7 +108,13 @@ class CharacterRecognizer:
                 name = str(item.get("name") or cid).strip() or cid
                 relation = effective_character_relation(payload, item)
                 work = effective_character_work(payload, item)
-                catalog[cid] = _CharacterMetadata(name=name, relation=relation, work=work)
+                context_label = effective_character_context_label(payload, item)
+                catalog[cid] = _CharacterMetadata(
+                    name=name,
+                    relation=relation,
+                    work=work,
+                    context_label=context_label,
+                )
 
         self._catalog = catalog
         self._signature = signature
@@ -226,6 +235,11 @@ class CharacterRecognizer:
                     character_name=str(cname) if cname else None,
                     relation=(str(cached["relation"]) if cached.get("relation") else None),
                     work=(str(cached["work"]) if cached.get("work") else None),
+                    context_label=(
+                        str(cached["context_label"])
+                        if cached.get("context_label")
+                        else (str(cached["work"]) if cached.get("work") else None)
+                    ),
                     cache_hit=True,
                     source=str(cached.get("source") or "recognition-cache"),
                 )]
@@ -241,6 +255,7 @@ class CharacterRecognizer:
                 character_name=result.character_name,
                 relation=result.relation,
                 work=result.work,
+                context_label=result.context_label,
                 source=result.source,
                 confidence=(1.0 / (1.0 + result.difference)) if result.difference is not None else None,
             )
@@ -267,6 +282,7 @@ class CharacterRecognizer:
             metadata = await self._metadata_from_db(character_id) or self._metadata_for(character_id)
             manifest_meta = self._metadata_for(character_id)
             work = manifest_meta.work if manifest_meta else None
+            context_label = manifest_meta.context_label if manifest_meta else work
             remote_name = str(item.get("character_name") or "").strip() or None
             results.append(CharacterRecognition(
                 matched=matched,
@@ -274,6 +290,7 @@ class CharacterRecognizer:
                 character_name=(metadata.name if metadata else remote_name),
                 relation=(metadata.relation if metadata else None),
                 work=work,
+                context_label=context_label,
                 difference=float(item["difference"]) if item.get("difference") is not None else None,
                 threshold=float(payload["threshold"]) if payload.get("threshold") is not None else None,
                 cache_hit=False,
@@ -358,6 +375,7 @@ class CharacterRecognizer:
                 character_name=at_res.character_name,
                 relation="known",
                 work=at_res.work or None,
+                context_label=at_res.work or None,
                 source="animetrace",
             )
         return ccip_res  # CCIP miss object (matched=False) or None
@@ -379,6 +397,7 @@ class CharacterRecognizer:
         # always comes from the charpack manifest catalog — never the DB.
         manifest_meta = self._metadata_for(character_id)
         work = manifest_meta.work if manifest_meta else None
+        context_label = manifest_meta.context_label if manifest_meta else work
         remote_name = str(payload.get("character_name") or "").strip() or None
         return CharacterRecognition(
             matched=matched,
@@ -386,6 +405,7 @@ class CharacterRecognizer:
             character_name=(metadata.name if metadata else remote_name),
             relation=(metadata.relation if metadata else None),
             work=work,
+            context_label=context_label,
             difference=float(payload["difference"]) if payload.get("difference") is not None else None,
             threshold=float(payload["threshold"]) if payload.get("threshold") is not None else None,
             cache_hit=bool(payload.get("cache_hit")),

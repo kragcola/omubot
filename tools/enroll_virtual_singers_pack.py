@@ -125,6 +125,7 @@ class CharacterDef:
     aliases: list[str]
     source_id: str
     query_names: list[str]
+    context_label: str
 
 
 @dataclass(frozen=True)
@@ -171,22 +172,91 @@ def load_roster(path: Path) -> tuple[list[CharacterDef], list[CharacterDef]]:
     spec.loader.exec_module(module)
 
     zh_chars = [
-        _character_def(zh=zh, jp=jp, cid=cid, prefer_jp_name=False, home_vocaloid=False)
+        _character_def(
+            zh=zh,
+            jp=jp,
+            cid=cid,
+            context_label=_zh_context_label(cid),
+            prefer_jp_name=False,
+            home_vocaloid=False,
+        )
         for zh, jp, cid, _tier, _notes in module.ZH_V
     ]
     ja_chars = [
-        _character_def(zh=zh, jp=jp, cid=cid, prefer_jp_name=True, home_vocaloid=False)
+        _character_def(
+            zh=zh,
+            jp=jp,
+            cid=cid,
+            context_label=_ja_context_label(cid),
+            prefer_jp_name=True,
+            home_vocaloid=False,
+        )
         for zh, jp, cid, _tier, _notes in module.JA_V
     ]
     ja_chars.extend(
-        _character_def(zh=zh, jp=jp, cid=cid, prefer_jp_name=True, home_vocaloid=True)
+        _character_def(
+            zh=zh,
+            jp=jp,
+            cid=cid,
+            context_label="日V / Crypton 本家",
+            prefer_jp_name=True,
+            home_vocaloid=True,
+        )
         for zh, jp, cid, _tier, _notes in module.ALREADY_ENROLLED
     )
     _ensure_unique([*zh_chars, *ja_chars])
     return zh_chars, ja_chars
 
 
-def _character_def(*, zh: str, jp: str, cid: str, prefer_jp_name: bool, home_vocaloid: bool) -> CharacterDef:
+def _zh_context_label(cid: str) -> str:
+    if cid in {"luo_tianyi", "yan_he", "yuezheng_ling", "yuezheng_longya", "zhiyu_moke", "mo_qingxian"}:
+        return "中V / Vsinger"
+    if cid in {"xingchen", "hai_yi", "cang_qiong", "chi_yu", "shi_an", "mu_xin", "yongye_minus"}:
+        return "中V / 五维介质"
+    if cid == "xia_yuyao":
+        return "中V / E-CAPSULE"
+    if cid in {"xin_hua", "dongfang_zhizi"}:
+        return "中V / 中文虚拟歌姬"
+    return "中V"
+
+
+def _ja_context_label(cid: str) -> str:
+    if cid in {"gumi", "kamui_gakupo", "lily", "otomachi_una", "mayu", "v_flower"}:
+        return "日V / VOCALOID"
+    if cid in {"ia", "one"}:
+        return "日V / 1st Place"
+    if cid in {
+        "kasane_teto",
+        "yuzuki_yukari",
+        "kizuna_akari",
+        "kaai_yuki",
+        "nekomura_iroha",
+        "tohoku_zunko",
+        "tohoku_kiritan",
+        "kotonoha_akane",
+        "kotonoha_aoi",
+        "koharu_rikka",
+        "tsurumaki_maki",
+        "natsuki_karin",
+        "hanakuma_chifuyu",
+        "kyomachi_seika",
+        "tsuina_chan",
+    }:
+        return "日V / AHS・TOKYO6"
+    if cid in {"kafu", "sekai", "rime", "coko", "haru"}:
+        return "日V / KAMITSUBAKI 音乐的同位体"
+    return "日V"
+
+
+def _character_def(
+    *,
+    zh: str,
+    jp: str,
+    cid: str,
+    context_label: str,
+    prefer_jp_name: bool,
+    home_vocaloid: bool,
+) -> CharacterDef:
     character_id = HOME_VOCALOID_IDS[cid] if home_vocaloid else cid
     name = jp if prefer_jp_name else zh
     aliases = dedupe([
@@ -209,6 +279,7 @@ def _character_def(*, zh: str, jp: str, cid: str, prefer_jp_name: bool, home_voc
         aliases=aliases,
         source_id=character_id,
         query_names=query_names,
+        context_label=context_label,
     )
 
 
@@ -347,6 +418,7 @@ def character_payloads(characters: list[CharacterDef]) -> list[dict[str, Any]]:
             "character_id": item.character_id,
             "name": item.name,
             "aliases": item.aliases,
+            "context_label": item.context_label,
         }
         for item in characters
     ]
@@ -457,6 +529,7 @@ def build_pack_via_embed(
             "name": character.name,
             "embedding_key": character.character_id,
             "aliases": character.aliases,
+            "context_label": character.context_label,
         })
 
     manifest = {

@@ -422,6 +422,7 @@ _FORM_ID = Form(...)
 _FORM_NAME = Form(...)
 _FORM_REL = Form(default="known")
 _FORM_WORK = Form(default="")
+_FORM_CONTEXT_LABEL = Form(default="")
 _FORM_PACK = Form(...)
 _FORM_SERIES = Form(default="")
 _FORM_REL_DEFAULT = Form(default="known")
@@ -490,6 +491,7 @@ def _build_pack(
     name: str,
     relation: str,
     work: str = "",
+    context_label: str = "",
     sample_count: int = 3,
 ) -> dict[str, Any]:
     """Embed images → mean vector → charpack zip bytes (manifest + npz +
@@ -507,6 +509,8 @@ def _build_pack(
     }
     if work.strip():
         char_entry["work"] = work.strip()
+    if context_label.strip():
+        char_entry["context_label"] = context_label.strip()
     manifest = {
         "pack": cid,
         "relation_default": rel,
@@ -602,6 +606,9 @@ def _build_series_pack(
         raw_work = str(raw.get("work") or "").strip()
         if raw_work and raw_work != work.strip():
             entry["work"] = raw_work
+        raw_context_label = str(raw.get("context_label") or "").strip()
+        if raw_context_label:
+            entry["context_label"] = raw_context_label
         characters.append(entry)
         per_character.append({
             "character_id": cid,
@@ -653,6 +660,7 @@ async def build_pack(
     name: str = _FORM_NAME,
     relation: str = _FORM_REL,
     work: str = _FORM_WORK,
+    context_label: str = _FORM_CONTEXT_LABEL,
 ) -> dict[str, Any]:
     """Build a charpack from raw reference images. Returns the zip as base64
     for the caller (bot admin route) to land on the rw config mount — the
@@ -662,7 +670,14 @@ async def build_pack(
     if not payloads:
         raise HTTPException(status_code=400, detail="no images provided")
     try:
-        return _build_pack(payloads, character_id=character_id, name=name, relation=relation, work=work)
+        return _build_pack(
+            payloads,
+            character_id=character_id,
+            name=name,
+            relation=relation,
+            work=work,
+            context_label=context_label,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

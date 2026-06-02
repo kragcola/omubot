@@ -37,6 +37,7 @@ class _FakeCharacterRecognizer:
             character_id="emu_otori",
             character_name="凤笑梦",
             relation="self",
+            context_label="世界计划 / ワンダショ",
             difference=0.02,
             threshold=0.18,
         )]
@@ -54,6 +55,7 @@ class _FakeCharacterRecognizer:
             character_id="emu_otori",
             character_name="凤笑梦",
             relation="self",
+            context_label="世界计划 / ワンダショ",
             difference=0.02,
             threshold=0.18,
         )
@@ -99,7 +101,44 @@ async def test_render_message_prefixes_vl_description_with_character_name(tmp_pa
         block.get("text", "") for block in rendered if isinstance(block, dict)
     )
     assert "凤笑梦" in text
+    assert "世界计划 / ワンダショ" in text
     assert "开心地跳起来" in text
+
+
+@pytest.mark.asyncio
+async def test_render_message_prefers_context_label_over_broad_work(tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.png"
+    image_path.write_bytes(b"fake-png")
+    message = Message([
+        MessageSegment("image", {"url": "http://example.invalid/sample.png", "file": "sample.png"})
+    ])
+
+    class _Recognizer:
+        async def identify(self, image_data: bytes, *, media_type: str = "image/jpeg") -> list[CharacterRecognition]:
+            del image_data, media_type
+            return [CharacterRecognition(
+                matched=True,
+                character_id="xingchen",
+                character_name="星尘",
+                relation="known",
+                work="中V",
+                context_label="中V / 五维介质",
+            )]
+
+    rendered = await _render_message(
+        message,
+        session=cast(aiohttp.ClientSession, object()),
+        vision_client=_FakeVisionClient(),
+        character_recognizer=_Recognizer(),
+        vision_enabled=True,
+        image_cache=_FakeImageCache(image_path),
+    )
+
+    text = rendered if isinstance(rendered, str) else "".join(
+        block.get("text", "") for block in rendered if isinstance(block, dict)
+    )
+    assert "星尘（中V / 五维介质）" in text
+    assert "星尘（中V）" not in text
 
 
 class _Sender:

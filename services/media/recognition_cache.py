@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS image_recognition_cache (
     character_name TEXT,
     relation       TEXT,
     work           TEXT,
+    context_label  TEXT,
     source         TEXT NOT NULL DEFAULT 'ccip-sidecar',
     confidence     REAL,
     created_at     REAL NOT NULL,
@@ -53,8 +54,13 @@ class RecognitionCache:
         cur = await db.execute("PRAGMA table_info(image_recognition_cache)")
         cols = {str(r[1]) for r in await cur.fetchall()}
         await cur.close()
-        if "work" not in cols:
-            await db.execute("ALTER TABLE image_recognition_cache ADD COLUMN work TEXT")
+        migrations = {
+            "work": "ALTER TABLE image_recognition_cache ADD COLUMN work TEXT",
+            "context_label": "ALTER TABLE image_recognition_cache ADD COLUMN context_label TEXT",
+        }
+        for col, sql in migrations.items():
+            if col not in cols:
+                await db.execute(sql)
         await db.commit()
         self._db = db
 
@@ -67,7 +73,7 @@ class RecognitionCache:
         if self._db is None or not image_sha256:
             return None
         cur = await self._db.execute(
-            "SELECT character_id, character_name, relation, work, source, confidence "
+            "SELECT character_id, character_name, relation, work, context_label, source, confidence "
             "FROM image_recognition_cache WHERE image_sha256 = ?",
             (image_sha256,),
         )
@@ -89,6 +95,7 @@ class RecognitionCache:
             "character_name": row["character_name"],
             "relation": row["relation"],
             "work": row["work"],
+            "context_label": row["context_label"],
             "source": row["source"],
             "confidence": row["confidence"],
         }
@@ -101,6 +108,7 @@ class RecognitionCache:
         character_name: str | None,
         relation: str | None,
         work: str | None = None,
+        context_label: str | None = None,
         source: str = "ccip-sidecar",
         confidence: float | None = None,
     ) -> None:
@@ -109,13 +117,15 @@ class RecognitionCache:
         now = time.time()
         await self._db.execute(
             "INSERT INTO image_recognition_cache "
-            "(image_sha256, character_id, character_name, relation, work, source, confidence, created_at, accessed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "(image_sha256, character_id, character_name, relation, work, context_label, source, "
+            "confidence, created_at, accessed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(image_sha256) DO UPDATE SET "
             "character_id=excluded.character_id, character_name=excluded.character_name, "
-            "relation=excluded.relation, work=excluded.work, source=excluded.source, "
+            "relation=excluded.relation, work=excluded.work, context_label=excluded.context_label, "
+            "source=excluded.source, "
             "confidence=excluded.confidence, accessed_at=excluded.accessed_at",
-            (image_sha256, character_id, character_name, relation, work, source, confidence, now, now),
+            (image_sha256, character_id, character_name, relation, work, context_label, source, confidence, now, now),
         )
         await self._db.commit()
         await self._prune()
@@ -147,4 +157,3 @@ class RecognitionCache:
         row = await cur.fetchone()
         await cur.close()
         return {"total": int(row[0]) if row else 0, "matched": int(row[1]) if row else 0}
-

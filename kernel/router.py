@@ -816,11 +816,14 @@ async def _describe_image_data(
                         except Exception:
                             _log_debug.debug("mood recognition-nudge skipped")
                         break
-            # Build comma-separated label: "A（出处）、B（出处）：描述"
+            # Build comma-separated label: "A（细上下文）、B（细上下文）：描述".
+            # `work` is intentionally broad for pack grouping/migration; when a
+            # pack provides `context_label`, use that richer prompt-facing label.
             labels: list[str] = []
             for r in matched:
-                if r.work:
-                    labels.append(f"{r.character_name}（{r.work}）")
+                context_label = getattr(r, "context_label", None) or r.work
+                if context_label:
+                    labels.append(f"{r.character_name}（{context_label}）")
                 else:
                     labels.append(r.character_name)
             char_label = "、".join(labels)

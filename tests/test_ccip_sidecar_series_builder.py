@@ -74,6 +74,45 @@ def test_build_series_pack_writes_manifest_npz_and_nested_samples(monkeypatch: p
             assert {"a.npy", "b.npy"}.issubset(set(npz.namelist()))
 
 
+def test_build_pack_preserves_context_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    sidecar = _load_sidecar(monkeypatch)
+
+    payload = sidecar._build_pack(
+        [_image_bytes()],
+        character_id="xingchen",
+        name="星尘",
+        relation="known",
+        work="中V",
+        context_label="中V / 五维介质",
+    )
+
+    import base64
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(payload["charpack_zip_b64"]))) as zf:
+        manifest = json.loads(zf.read("xingchen.charpack/manifest.json").decode("utf-8"))
+    assert manifest["work"] == "中V"
+    assert manifest["characters"][0]["context_label"] == "中V / 五维介质"
+
+
+def test_build_series_pack_preserves_per_character_context_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    sidecar = _load_sidecar(monkeypatch)
+
+    payload = sidecar._build_series_pack(
+        [("a_0.jpg", _image_bytes())],
+        pack_name="my_series",
+        series="series_slug",
+        work="Series",
+        relation_default="known",
+        characters_json=json.dumps([
+            {"character_id": "a", "name": "A", "context_label": "Series / Unit A"},
+        ]),
+    )
+
+    import base64
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(payload["charpack_zip_b64"]))) as zf:
+        manifest = json.loads(zf.read("my_series.charpack/manifest.json").decode("utf-8"))
+    assert manifest["characters"][0]["context_label"] == "Series / Unit A"
+
+
 def test_build_series_pack_rejects_missing_character_images(monkeypatch: pytest.MonkeyPatch) -> None:
     sidecar = _load_sidecar(monkeypatch)
 

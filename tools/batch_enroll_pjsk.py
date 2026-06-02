@@ -47,6 +47,35 @@ HEADERS = {"User-Agent": UA}
 MYSEKAI_VIEWS = ("front", "left", "right", "back")  # 3D tofu orientations
 PJSK_WORK = "プロジェクトセカイ カラフルステージ！"  # series/出处, shared by all PJSK chars
 
+PJSK_CONTEXT_LABELS = {
+    "aoyagi_toya": "Project SEKAI / Vivid BAD SQUAD",
+    "asahina_mafuyu": "Project SEKAI / 25時、ナイトコードで。",
+    "azusawa_kohane": "Project SEKAI / Vivid BAD SQUAD",
+    "fengxiaomeng": "Project SEKAI / Wonderlands×Showtime",
+    "hanasato_minori": "Project SEKAI / MORE MORE JUMP!",
+    "hatsune_miku": "Project SEKAI / Virtual Singer",
+    "hinomori_shiho": "Project SEKAI / Leo/need",
+    "hinomori_shizuku": "Project SEKAI / MORE MORE JUMP!",
+    "hoshino_ichika": "Project SEKAI / Leo/need",
+    "kagamine_len": "Project SEKAI / Virtual Singer",
+    "kagamine_rin": "Project SEKAI / Virtual Singer",
+    "kaito": "Project SEKAI / Virtual Singer",
+    "kamishiro_rui": "Project SEKAI / Wonderlands×Showtime",
+    "kiritani_haruka": "Project SEKAI / MORE MORE JUMP!",
+    "kusanagi_nene": "Project SEKAI / Wonderlands×Showtime",
+    "megurine_luka": "Project SEKAI / Virtual Singer",
+    "meiko": "Project SEKAI / Virtual Singer",
+    "mochizuki_honami": "Project SEKAI / Leo/need",
+    "momoi_airi": "Project SEKAI / MORE MORE JUMP!",
+    "shinonome_akito": "Project SEKAI / Vivid BAD SQUAD",
+    "shinonome_ena": "Project SEKAI / 25時、ナイトコードで。",
+    "shiraishi_an": "Project SEKAI / Vivid BAD SQUAD",
+    "tenma_saki": "Project SEKAI / Leo/need",
+    "tenma_tsukasa": "Project SEKAI / Wonderlands×Showtime",
+    "xiaoshanruixi": "Project SEKAI / 25時、ナイトコードで。",
+    "yoisaki_kanade": "Project SEKAI / 25時、ナイトコードで。",
+}
+
 # (sekaipedia full name, 中文名, character_id, relation, given-name for chibi/3D)
 # Already enrolled (skip unless --force): Otori Emu=凤笑梦, Akiyama Mizuki=晓山瑞希.
 ROSTER = [
@@ -193,7 +222,13 @@ def make_session(admin: str, token: str) -> requests.Session:
 def enroll(sess: requests.Session, admin: str, cid: str, name: str, relation: str,
            images: list[tuple[str, bytes]], work: str = PJSK_WORK) -> dict:
     files = [("images", (n, data, "image/png")) for n, data in images]
-    form = {"character_id": cid, "name": name, "relation": relation, "work": work}
+    form = {
+        "character_id": cid,
+        "name": name,
+        "relation": relation,
+        "work": work,
+        "context_label": PJSK_CONTEXT_LABELS.get(cid, work),
+    }
     r = sess.post(f"{admin.rstrip('/')}/api/admin/characters/build",
                   data=form, files=files, timeout=240)
     try:

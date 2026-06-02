@@ -51,6 +51,22 @@ class RosterEntry:
     bestdori_id: int | None = None
 
 
+BAND_LABELS = {
+    "poppinparty": "BanG Dream! / Poppin'Party",
+    "afterglow": "BanG Dream! / Afterglow",
+    "pastel-palettes": "BanG Dream! / Pastel*Palettes",
+    "roselia": "BanG Dream! / Roselia",
+    "hello-happy-world": "BanG Dream! / Hello, Happy World!",
+    "morfonica": "BanG Dream! / Morfonica",
+    "raise-a-suilen": "BanG Dream! / RAISE A SUILEN",
+    "mygo": "BanG Dream! / MyGO!!!!!",
+    "avemujica": "BanG Dream! / Ave Mujica",
+    "yumemita": "BanG Dream! / 夢限大みゅーたいぷ",
+    "millsage": "BanG Dream! / Ma'cherie",
+    "ikka-dumb-rock": "BanG Dream! / Mugendai Mewtype",
+}
+
+
 ROSTER: list[RosterEntry] = [
     RosterEntry("toyama_kasumi", "poppinparty", "toyama-kasumi", 1),
     RosterEntry("hanazono_tae", "poppinparty", "hanazono-tae", 2),
@@ -329,6 +345,9 @@ def build_pack_via_embed(
             "embedding_key": cid,
             "aliases": aliases(raw.get("aliases")),
         }
+        context_label = str(raw.get("context_label") or "").strip()
+        if context_label:
+            entry["context_label"] = context_label
         raw_relation = str(raw.get("relation") or "").strip()
         if raw_relation:
             rel = relation(raw_relation, default=rel_default)
@@ -431,6 +450,12 @@ def main() -> None:
     args = ap.parse_args()
 
     characters = load_characters(args.characters)
+    roster_by_id = {entry.character_id: entry for entry in ROSTER}
+    for item in characters:
+        cid = str(item.get("character_id") or "")
+        roster_entry = roster_by_id.get(cid)
+        if roster_entry is not None:
+            item.setdefault("context_label", BAND_LABELS.get(roster_entry.band_slug, "BanG Dream!"))
     known_ids = {str(item.get("character_id") or "") for item in characters}
     missing = [entry.character_id for entry in ROSTER if entry.character_id not in known_ids]
     if missing:

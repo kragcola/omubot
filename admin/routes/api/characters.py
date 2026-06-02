@@ -44,6 +44,7 @@ _FORM_ID = Form(...)
 _FORM_NAME = Form(...)
 _FORM_REL = Form(default="known")
 _FORM_WORK = Form(default="")
+_FORM_CONTEXT_LABEL = Form(default="")
 _FORM_PACK = Form(...)
 _FORM_SERIES = Form(default="")
 _FORM_REL_DEFAULT = Form(default="known")
@@ -230,6 +231,7 @@ def create_characters_router(
         name: str = _FORM_NAME,
         relation: str = _FORM_REL,
         work: str = _FORM_WORK,
+        context_label: str = _FORM_CONTEXT_LABEL,
     ):
         """Enroll a character from raw reference images: forward to sidecar
         /build-pack (it owns numpy + model), land the returned charpack on the
@@ -248,7 +250,13 @@ def create_characters_router(
             async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
                 resp = await client.post(
                     f"{base}/build-pack",
-                    data={"character_id": character_id, "name": name, "relation": relation, "work": work},
+                    data={
+                        "character_id": character_id,
+                        "name": name,
+                        "relation": relation,
+                        "work": work,
+                        "context_label": context_label,
+                    },
                     files=files,
                 )
         except httpx.HTTPError as exc:

@@ -62,6 +62,7 @@ def build(
     out_dir: Path,
     work: str = "",
     series: str = "",
+    context_label: str = "",
 ) -> Path:
     characters: list[dict[str, object]] = []
     files: list[tuple[str, tuple[str, bytes, str]]] = []
@@ -79,6 +80,7 @@ def build(
             "character_id": cid,
             "name": cid,
             "aliases": [],
+            **({"context_label": context_label} if context_label else {}),
         })
         for image in images:
             files.append(("images", (f"{cid}_{image.name}", image.read_bytes(), "application/octet-stream")))
@@ -115,12 +117,14 @@ def main() -> None:
     ap.add_argument("--relation", default="known", choices=["self", "friend", "known"])
     ap.add_argument("--work", default="", help="series/work display name inherited by characters")
     ap.add_argument("--series", default="", help="stable series slug; defaults to pack name")
+    ap.add_argument("--context-label", default="", help="prompt-facing context inherited by generated characters")
     ap.add_argument("--sidecar", default="http://localhost:8620", help="ccip-sidecar base url")
     ap.add_argument("--out", type=Path, default=Path("config/character_packs"))
     args = ap.parse_args()
 
     pack = build(args.root, name=args.name, relation=args.relation,
-                 sidecar=args.sidecar, out_dir=args.out, work=args.work, series=args.series)
+                 sidecar=args.sidecar, out_dir=args.out, work=args.work, series=args.series,
+                 context_label=args.context_label)
     print(f"\nwrote {pack} ({(pack / 'embeddings.npz').stat().st_size} bytes npz)")
     print("reload sidecar: it auto-detects the new pack on next /identify or /health")
 
