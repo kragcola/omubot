@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import io
@@ -107,7 +108,44 @@ _STREAMING_ALLOWED_TOOL_NAMES = frozenset({
     "update_memo",
 })
 _DEEPSEEK_V4_COMPACT_RATIO = 0.88
-_EMPTY_VISIBLE_REPLY_FALLBACK = "我先缓一下，马上接你。"
+# Emitted when an addressed turn (@/昵称) forces a reply but the LLM produced no
+# visible text — e.g. the user only sent the bot's name or bare punctuation
+# ("emu。"). The old single占位 sentence ("我先缓一下，马上接你。") read as a
+# mechanical stall in-group; a short, varied ack/反问 fits 凤笑梦's 元气 register
+# and invites the user to actually say something.
+_EMPTY_VISIBLE_REPLY_FALLBACKS = (
+    "在的~怎么啦？",
+    "？",
+    "嗯？怎么了",
+    "在呢，叫我有事呀？",
+    "诶，怎么啦~",
+)
+
+
+def _pick_empty_visible_reply_fallback() -> str:
+    """Random text ack for when no stickers are available."""
+    return secrets.choice(_EMPTY_VISIBLE_REPLY_FALLBACKS)
+
+
+def _build_sticker_cq(store: StickerStore, sticker_id: str) -> str | None:
+    """Read a sticker from disk and return a OneBot CQ image code (base64).
+
+    Returns None if the file cannot be read (stale entry, missing file, etc.).
+    The caller falls back to a text ack.
+    """
+    file_path = store.resolve_path(sticker_id)
+    if file_path is None:
+        return None
+    try:
+        raw = file_path.read_bytes()
+    except OSError:
+        return None
+    if len(raw) > 2 * 1024 * 1024:  # 2 MiB — pragmatic cap for inline base64 in a text message
+        return None
+    b64 = base64.b64encode(raw).decode()
+    return f"[CQ:image,file=base64://{b64},sub_type=1,summary=[动画表情]]"
+
+
 _PASS_TURN_LIGHT_ACK = "嗯，我在。"
 _PAUSE_EXTEND_MAX_COUNT = 2
 _CONTROL_TOKEN_RE = re.compile(
@@ -497,6 +535,11 @@ def content_text(content: Content) -> str:
     if isinstance(content, str):
         return content
     return " ".join(b["text"] for b in content if b["type"] == "text")
+
+
+def _group_id_from_session(session_id: str) -> str:
+    """Extract the raw group_id from a session_id like ``group_12345``."""
+    return session_id.removeprefix("group_")
 
 
 def _pending_conversation_text(timeline: GroupTimeline | None, group_id: str | None) -> str:
@@ -2613,10 +2656,71 @@ class LLMClient:
                 return "", "suppressed"
             if force_reply or not is_group:
                 _log_msg_out.info("reply_fallback_emitted | session={}", session_id)
-                return _EMPTY_VISIBLE_REPLY_FALLBACK, "fallback"
+                return self._fallback_ack(session_id=session_id, is_group=is_group), "fallback"
             _log_msg_out.info("reply_suppressed_empty | session={} reason=autonomous", session_id)
             return "", "suppressed"
         return normalized, "reply"
+
+    def _fallback_ack(self, *, session_id: str, is_group: bool) -> str:
+        """Ack when addressed but the LLM produced no visible text.
+
+        Search the sticker library by the last user message(s) in this
+        conversation — if the user said something emotional / reactive the
+        library likely has a matching sticker. Fall back to a short text ack
+        when no stickers are available or nothing matches the context.
+        """
+        store = self._sticker_store()
+        if store is not None:
+            query = self._fallback_query(session_id=session_id, is_group=is_group)
+            if query:
+                candidates = store.search_by_intent(query, top_k=3)
+                for sid in candidates:
+                    cq = _build_sticker_cq(store, sid)
+                    if cq is not None:
+                        _log_msg_out.info(
+                            "reply_fallback_sticker | session={} query={!r} sticker={}",
+                            session_id, query, sid,
+                        )
+                        return cq
+        return _pick_empty_visible_reply_fallback()
+
+    def _fallback_query(self, *, session_id: str, is_group: bool) -> str:
+        """Derive a short BM25 query from the most recent user message(s)."""
+        messages: list[str] = []
+        if is_group and self._timeline is not None:
+            try:
+                group_id = _group_id_from_session(session_id)
+                turns = list(self._timeline.get_turns(group_id))
+                # Walk backwards; collect last 2 user turns (the addressed message
+                # plus the preceding line for context).
+                for turn in reversed(turns):
+                    if turn.get("role") != "user":
+                        continue
+                    text = content_text(turn.get("content", ""))
+                    if text:
+                        messages.append(text)
+                    if len(messages) >= 2:
+                        break
+            except Exception:
+                pass
+        if not messages and self._short_term is not None:
+            try:
+                history = self._short_term.get(session_id)
+                for msg in reversed(history):
+                    if msg["role"] == "user":
+                        raw_content = msg["content"]
+                        text = raw_content.strip() if isinstance(raw_content, str) else ""
+                        if text:
+                            messages.append(text)
+                        if len(messages) >= 1:
+                            break
+            except Exception:
+                pass
+        if not messages:
+            return ""
+        # Take the most recent user utterance; truncate to 80 chars for BM25.
+        raw = messages[0]
+        return raw[:80]
 
     def _humanization_scope(
         self,

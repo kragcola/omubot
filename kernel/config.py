@@ -729,6 +729,11 @@ class CharacterRecognitionConfig(BaseModel):
     animetrace_enabled: bool = True
     animetrace_model: str = "anime_model_lovelive"
     animetrace_timeout_seconds: float = 8.0
+    # Multi-character detection: head detection + per-crop CCIP via sidecar
+    # /identify-multi. When False, falls back to the classic single full-image
+    # CCIP + AnimeTrace merge. Controlled on the sidecar side separately via
+    # the CCIP_MULTI_CHAR_ENABLED env var.
+    multi_char_enabled: bool = True
 
 
 class VisionConfig(BaseModel):

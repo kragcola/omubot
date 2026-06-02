@@ -64,14 +64,19 @@ async def test_recognition_cache_short_circuits_sidecar(tmp_path: Path) -> None:
             base_url="http://127.0.0.1:8620",
             packs_dir=tmp_path / "packs",
             recognition_cache=cache,
+            multi_char_enabled=False,  # test single-char L2 cache path
         )
         _StubRecognizer.calls = 0
-        r1 = await rec.identify(b"img-bytes")
-        assert r1 is not None and r1.character_id == "emu"
+        r1_list = await rec.identify(b"img-bytes")
+        assert len(r1_list) == 1
+        r1 = r1_list[0]
+        assert r1.character_id == "emu"
         assert _StubRecognizer.calls == 1
         # second identify of same bytes → served from L2 cache, no sidecar call
-        r2 = await rec.identify(b"img-bytes")
-        assert r2 is not None and r2.cache_hit is True
+        r2_list = await rec.identify(b"img-bytes")
+        assert len(r2_list) == 1
+        r2 = r2_list[0]
+        assert r2.cache_hit is True
         assert _StubRecognizer.calls == 1
     finally:
         await cache.close()

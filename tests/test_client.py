@@ -10,6 +10,7 @@ import pytest
 
 from kernel.config import GroupConfig, GroupOverride, ReplySegmentationConfig
 from services.llm.client import (
+    _EMPTY_VISIBLE_REPLY_FALLBACKS,
     LLMClient,
     RateLimitError,
     ToolUse,
@@ -787,11 +788,13 @@ class TestPassTurn:
                     identity=identity_snapshot,
                 )
 
-            assert _normalize_reply(result) == _normalize_reply("我先缓一下，马上接你。")
+            assert _normalize_reply(result) in {
+                _normalize_reply(f) for f in _EMPTY_VISIBLE_REPLY_FALLBACKS
+            }
             assert len(bus.post_reply_calls) == 1
-            assert _normalize_reply(bus.post_reply_calls[0].reply_content) == _normalize_reply(
-                "我先缓一下，马上接你。",
-            )
+            assert _normalize_reply(bus.post_reply_calls[0].reply_content) in {
+                _normalize_reply(f) for f in _EMPTY_VISIBLE_REPLY_FALLBACKS
+            }
 
     async def test_pass_turn_tool_omitted_when_force_reply(
         self, identity_snapshot, prompt, short_term, tools, timeline, card_store,

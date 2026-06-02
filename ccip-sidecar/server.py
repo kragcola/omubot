@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import zipfile
@@ -14,10 +16,13 @@ from typing import Any
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from imgutils.metrics.ccip import ccip_difference, ccip_extract_feature
+from imgutils.detect import detect_heads
+from imgutils.metrics.ccip import ccip_batch_extract_features, ccip_difference, ccip_extract_feature
 from PIL import Image
 
-API_VERSION = os.getenv("CCIP_API_VERSION", "2026-05-31.v1").strip() or "2026-05-31.v1"
+_L = logging.getLogger("ccip-sidecar")
+
+API_VERSION = os.getenv("CCIP_API_VERSION", "2026-06-01.v1").strip() or "2026-06-01.v1"
 
 @dataclass(frozen=True)
 class CharacterEntry:
@@ -147,6 +152,7 @@ MODEL_NAME = os.getenv("CCIP_MODEL", "ccip-caformer-24-randaug-pruned").strip()
 MATCH_THRESHOLD = float(os.getenv("CCIP_MATCH_THRESHOLD", "0.17847511429108218"))
 PACKS_DIR = Path(os.getenv("CCIP_PACKS_DIR", "/app/config/character_packs")).resolve()
 CACHE_MAX_ENTRIES = int(os.getenv("CCIP_CACHE_MAX_ENTRIES", "1024"))
+_MULTI_CHAR_ENABLED = os.getenv("CCIP_MULTI_CHAR_ENABLED", "1").strip() in ("1", "true", "yes")
 IMAGE_UPLOAD = File(...)
 
 registry = CharacterRegistry(PACKS_DIR)
@@ -212,6 +218,129 @@ def _identify(image_data: bytes) -> dict[str, Any]:
     return payload
 
 
+def _find_nearest(feature: np.ndarray, entries: list[CharacterEntry]) -> tuple[CharacterEntry | None, float | None]:
+    """Return the (entry, difference) of the nearest centroid, or (None, None)."""
+    best_entry: CharacterEntry | None = None
+    best_diff: float | None = None
+    for entry in entries:
+        diff = float(ccip_difference(feature, entry.embedding, model=MODEL_NAME))
+        if best_diff is None or diff < best_diff:
+            best_entry = entry
+            best_diff = diff
+    return best_entry, best_diff
+
+
+def _identify_multi(image_data: bytes) -> dict[str, Any]:
+    """Multi-character CCIP: detect heads → per-crop CCIP.
+
+    When ``CCIP_MULTI_CHAR_ENABLED`` is false (or the image has ≤1 head), falls
+    back to the existing single full-image CCIP path.  Otherwise crops each
+    detected head, runs batch CCIP extraction, and returns one result per crop.
+
+    The response always includes a ``characters`` list so the caller can handle
+    single and multi results uniformly.
+    """
+    registry_entries = registry.entries
+    registry_version = registry.registry_version
+
+    if not _MULTI_CHAR_ENABLED:
+        single = _identify(image_data)
+        cid = single.get("character_id")
+        cname = single.get("character_name")
+        return {
+            "matched": bool(single.get("matched")),
+            "characters": [{
+                "character_id": str(cid) if cid else None,
+                "character_name": str(cname) if cname else None,
+                "difference": single.get("difference"),
+                "matched": bool(single.get("matched")),
+            }] if cid or cname else [],
+            "detection_count": 0,
+            "threshold": MATCH_THRESHOLD,
+            "registry_version": registry_version,
+            "api_version": API_VERSION,
+            "source": "ccip-sidecar",
+        }
+
+    image = Image.open(io.BytesIO(image_data)).convert("RGB")
+    try:
+        heads: list[tuple[tuple[int, int, int, int], str, float]] = detect_heads(image)
+    except Exception:
+        # detection model unavailable → degrade to single full-image path
+        _L.warning("detect_heads failed, falling back to single full-image CCIP")
+        single = _identify(image_data)
+        cid = single.get("character_id")
+        cname = single.get("character_name")
+        return {
+            "matched": bool(single.get("matched")),
+            "characters": [{
+                "character_id": str(cid) if cid else None,
+                "character_name": str(cname) if cname else None,
+                "difference": single.get("difference"),
+                "matched": bool(single.get("matched")),
+            }] if cid or cname else [],
+            "detection_count": 0,
+            "threshold": MATCH_THRESHOLD,
+            "registry_version": registry_version,
+            "api_version": API_VERSION,
+            "source": "ccip-sidecar",
+        }
+
+    if len(heads) <= 1:
+        # Single or no character — full-image CCIP is accurate enough.
+        single = _identify(image_data)
+        cid = single.get("character_id")
+        cname = single.get("character_name")
+        return {
+            "matched": bool(single.get("matched")),
+            "characters": [{
+                "character_id": str(cid) if cid else None,
+                "character_name": str(cname) if cname else None,
+                "difference": single.get("difference"),
+                "matched": bool(single.get("matched")),
+            }] if cid or cname else [],
+            "detection_count": len(heads),
+            "threshold": MATCH_THRESHOLD,
+            "registry_version": registry_version,
+            "api_version": API_VERSION,
+            "source": "ccip-sidecar",
+        }
+
+    # Multi-character: batch CCIP on each detected head crop.
+    crops: list[Image.Image] = []
+    for (x0, y0, x1, y1), _label, _score in heads:
+        crops.append(image.crop((int(x0), int(y0), int(x1), int(y1))))
+
+    try:
+        features = ccip_batch_extract_features(crops, model=MODEL_NAME)
+    except Exception:
+        _L.warning("ccip_batch_extract_features failed, degrading to per-crop inference")
+        features = [ccip_extract_feature(c, model=MODEL_NAME) for c in crops]
+
+    characters: list[dict[str, Any]] = []
+    for feat, ((x0, y0, x1, y1), _label, score) in zip(features, heads, strict=True):
+        best_entry, best_diff = _find_nearest(feat, registry_entries)
+        matched = best_entry is not None and best_diff is not None and best_diff <= MATCH_THRESHOLD
+        characters.append({
+            "character_id": best_entry.character_id if best_entry and matched else None,
+            "character_name": best_entry.character_name if best_entry and matched else None,
+            "difference": best_diff,
+            "matched": matched,
+            "detection_score": float(score),
+            "bbox": [float(x0), float(y0), float(x1), float(y1)],
+        })
+
+    return {
+        "matched": any(c["matched"] for c in characters),
+        "characters": characters,
+        "detection_count": len(heads),
+        "threshold": MATCH_THRESHOLD,
+        "registry_version": registry_version,
+        "api_version": API_VERSION,
+        "source": "ccip-sidecar",
+    }
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     cache.reset(registry.registry_version)
@@ -236,6 +365,24 @@ async def identify(image: UploadFile = IMAGE_UPLOAD) -> dict[str, Any]:
         return _identify(image_data)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"ccip identify failed: {exc}") from exc
+
+
+@app.post("/identify-multi")
+async def identify_multi(image: UploadFile = IMAGE_UPLOAD) -> dict[str, Any]:
+    """Multi-character identification: detect heads → per-crop CCIP.
+
+    Returns a ``characters`` list with one entry per detected head.  Use
+    ``CCIP_MULTI_CHAR_ENABLED=0`` to disable detection and fall back to the
+    single full-image CCIP result (same output shape, one-element list).
+    """
+    image_data = await image.read()
+    if not image_data:
+        raise HTTPException(status_code=400, detail="image is empty")
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _identify_multi, image_data)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"ccip identify-multi failed: {exc}") from exc
 
 
 def _embed(image_data: bytes) -> dict[str, Any]:
@@ -273,6 +420,7 @@ _IMAGES = File(...)
 _FORM_ID = Form(...)
 _FORM_NAME = Form(...)
 _FORM_REL = Form(default="known")
+_FORM_WORK = Form(default="")
 _SAMPLE_MAX = 256  # px, longest edge of stored sample thumbnails
 
 
@@ -287,6 +435,7 @@ def _build_pack(
     character_id: str,
     name: str,
     relation: str,
+    work: str = "",
     sample_count: int = 3,
 ) -> dict[str, Any]:
     """Embed images → mean vector → charpack zip bytes (manifest + npz +
@@ -318,16 +467,19 @@ def _build_pack(
 
     mean_vec = np.mean(np.stack(vectors), axis=0).astype(np.float32)
     rel = relation if relation in ("self", "friend", "known") else "known"
+    char_entry: dict[str, Any] = {
+        "character_id": cid,
+        "name": name.strip() or cid,
+        "embedding_key": cid,
+        "relation": rel,
+        "aliases": [],
+    }
+    if work.strip():
+        char_entry["work"] = work.strip()
     manifest = {
         "pack": cid,
         "relation_default": rel,
-        "characters": [{
-            "character_id": cid,
-            "name": name.strip() or cid,
-            "embedding_key": cid,
-            "relation": rel,
-            "aliases": [],
-        }],
+        "characters": [char_entry],
     }
     npz_buf = io.BytesIO()
     np.savez(npz_buf, **{cid: mean_vec})
@@ -357,6 +509,7 @@ async def build_pack(
     character_id: str = _FORM_ID,
     name: str = _FORM_NAME,
     relation: str = _FORM_REL,
+    work: str = _FORM_WORK,
 ) -> dict[str, Any]:
     """Build a charpack from raw reference images. Returns the zip as base64
     for the caller (bot admin route) to land on the rw config mount — the
@@ -366,7 +519,7 @@ async def build_pack(
     if not payloads:
         raise HTTPException(status_code=400, detail="no images provided")
     try:
-        return _build_pack(payloads, character_id=character_id, name=name, relation=relation)
+        return _build_pack(payloads, character_id=character_id, name=name, relation=relation, work=work)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

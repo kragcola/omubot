@@ -1033,6 +1033,7 @@ class ChatPlugin(AmadeusPlugin):
                 registry_db=registry_db,
                 recognition_cache=recognition_cache,
                 animetrace_client=animetrace_client,
+                multi_char_enabled=cr_cfg.multi_char_enabled,
             )
 
         # ---- card store ----

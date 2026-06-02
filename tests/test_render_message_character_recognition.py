@@ -30,6 +30,23 @@ class _FakeCharacterRecognizer:
         image_data: bytes,
         *,
         media_type: str = "image/jpeg",
+    ) -> list[CharacterRecognition]:
+        del image_data, media_type
+        return [CharacterRecognition(
+            matched=True,
+            character_id="emu_otori",
+            character_name="凤笑梦",
+            relation="self",
+            difference=0.02,
+            threshold=0.18,
+        )]
+
+    # Also expose a single-result wrapper used by some tests
+    async def identify_single(
+        self,
+        image_data: bytes,
+        *,
+        media_type: str = "image/jpeg",
     ) -> CharacterRecognition | None:
         del image_data, media_type
         return CharacterRecognition(
@@ -83,3 +100,112 @@ async def test_render_message_prefixes_vl_description_with_character_name(tmp_pa
     )
     assert "凤笑梦" in text
     assert "开心地跳起来" in text
+
+
+class _Sender:
+    def __init__(self, user_id: str, nickname: str) -> None:
+        self.user_id = user_id
+        self.nickname = nickname
+
+
+class _Reply:
+    """Minimal stand-in for nonebot's Reply object."""
+
+    def __init__(self, message: Message, *, message_id: int, sender: _Sender) -> None:
+        self.message = message
+        self.message_id = message_id
+        self.sender = sender
+
+
+class _FakeSession:
+    """aiohttp.ClientSession.get(url) stand-in returning fixed image bytes."""
+
+    def __init__(self, payload: bytes = b"fake-quoted-png") -> None:
+        self._payload = payload
+
+    def get(self, url: str):
+        del url
+        payload = self._payload
+
+        class _Resp:
+            status = 200
+
+            async def read(self) -> bytes:
+                return payload
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc) -> bool:
+                return False
+
+        return _Resp()
+
+
+@pytest.mark.asyncio
+async def test_quoted_reply_image_runs_character_recognition() -> None:
+    """A quoted image (@bot 引用图 这是谁) must go through CCIP recognition,
+    not just plain VL — previously the quoted branch skipped the recognizer."""
+    quoted = Message(
+        [MessageSegment("image", {"url": "http://example.invalid/q.png", "file": "q.png"})]
+    )
+    reply = _Reply(quoted, message_id=12345, sender=_Sender("99999", "群友"))
+    message = Message([MessageSegment.text("这是谁")])
+
+    rendered = await _render_message(
+        message,
+        reply=reply,
+        session=cast(aiohttp.ClientSession, _FakeSession()),
+        self_id="384801062",
+        vision_client=_FakeVisionClient(),
+        character_recognizer=_FakeCharacterRecognizer(),
+        vision_enabled=True,
+    )
+
+    text = rendered if isinstance(rendered, str) else "".join(
+        block.get("text", "") for block in rendered if isinstance(block, dict)
+    )
+    # Quoted preview carries the recognized character name + VL desc.
+    assert "凤笑梦" in text
+    assert "QUOTED_MSG" in text
+
+
+@pytest.mark.asyncio
+async def test_quoted_reply_image_refetches_stale_url() -> None:
+    """When the quoted image segment has no url, _render_message must re-fetch
+    the original message by message_id via bot.get_msg to recover it."""
+    # Quoted segment carries NO url (stale) — only a summary.
+    quoted = Message([MessageSegment("image", {"file": "q.png", "summary": "[动画表情]"})])
+    reply = _Reply(quoted, message_id=678, sender=_Sender("99999", "群友"))
+    message = Message([MessageSegment.text("这是谁")])
+
+    class _FakeBot:
+        def __init__(self) -> None:
+            self.called_with: int | None = None
+
+        async def get_msg(self, message_id: int):
+            self.called_with = message_id
+            # Authoritative copy now has a working url.
+            return {
+                "message": [
+                    {"type": "image", "data": {"url": "http://example.invalid/fresh.png"}}
+                ]
+            }
+
+    bot = _FakeBot()
+    rendered = await _render_message(
+        message,
+        reply=reply,
+        session=cast(aiohttp.ClientSession, _FakeSession()),
+        self_id="384801062",
+        vision_client=_FakeVisionClient(),
+        character_recognizer=_FakeCharacterRecognizer(),
+        bot=cast(object, bot),  # type: ignore[arg-type]
+        vision_enabled=True,
+    )
+
+    text = rendered if isinstance(rendered, str) else "".join(
+        block.get("text", "") for block in rendered if isinstance(block, dict)
+    )
+    assert bot.called_with == 678  # get_msg was invoked to recover the url
+    assert "凤笑梦" in text

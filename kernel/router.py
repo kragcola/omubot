@@ -179,6 +179,67 @@ def _message_has_other_at(msg: Message, self_id: str) -> bool:
     return False
 
 
+def _match_nickname_addressing(
+    event: MessageEvent,
+    bot_nicknames: list[str] | tuple[str, ...],
+) -> str | None:
+    """If the user addressed the bot by text nickname (not @), return the
+    matched name.
+
+    NoneBot's ``_check_nickname`` strips the matched nickname from
+    ``event.message`` and sets ``to_me=True``, but the strip loses the only
+    signal that tells the LLM *how* it was addressed — it sees "怎么是龙王"
+    instead of "姆 怎么是龙王" and has no idea the user called it "姆".
+    ``event.original_message`` is a deep copy made before any stripping
+    (``model_validator("before")`` in ``MessageEvent.__init__``), so we can
+    recover the matched nickname from it.
+
+    Returns ``None`` when the user was NOT addressed by text nickname (e.g.
+    pure @-mention, or the message didn't start with a bot name).
+    """
+    if not bot_nicknames:
+        return None
+    original = getattr(event, "original_message", None)
+    if original is None or not original:
+        return None
+    first_seg = original[0]  # type: ignore[index]
+    if getattr(first_seg, "type", "") != "text":
+        return None
+    first_text = str(first_seg.data.get("text", "") or "")
+    if not first_text:
+        return None
+    # Replicate _check_nickname's matching: ^nickname followed by optional
+    # whitespace/punctuation or end-of-string.
+    regex = "|".join(
+        re.escape(str(nick).strip())
+        for nick in bot_nicknames
+        if str(nick).strip()
+    )
+    if not regex:
+        return None
+    m = re.search(rf"^({regex})([\s,，]*|$)", first_text, re.IGNORECASE)
+    return str(m.group(1)) if m else None
+
+
+def _message_ats_self(msg: Message, self_id: str) -> bool:
+    """True if the message @-mentions the bot in ANY segment position.
+
+    NoneBot's ``event.is_tome()`` only fires when the @ is the first or last
+    segment (see onebot v11 ``_check_at_me``). A sandwiched @ — e.g.
+    ``[image][at:bot]这是谁`` — leaves ``is_tome()`` False even though the user
+    clearly addressed the bot. ``_extract_topic_block_signals`` already scans
+    every segment for ``at_self``, so without this the two @-detection paths
+    disagree: the message gets ``role=addressed`` (via at_self) yet falls into
+    the probabilistic gray zone and can be silently skipped by the RWS roll.
+    """
+    if not self_id:
+        return False
+    return any(
+        seg.type == "at" and str(seg.data.get("qq", "")) == str(self_id)
+        for seg in msg
+    )
+
+
 def _reply_targets_bot(reply: object | None, self_id: str) -> bool:
     sender = getattr(reply, "sender", None)
     if sender is None:
@@ -649,6 +710,136 @@ async def _render_forward_msg(forward_id: str, bot: Bot) -> str:
     return f"«合并转发消息»\n{body}"
 
 
+def _group_ingest_lock(ctx: PluginContext, group_id: str) -> asyncio.Lock:
+    """Per-group ingest lock, lazily created and memoized on the context.
+
+    The group listener runs with ``block=False`` so handlers for concurrent
+    messages execute interleaved. Image messages stall their handler inside
+    ``_render_message`` (download + recognition, up to a few seconds); a later
+    text message can then overtake, commit to the timeline first, and fire a
+    reply that doesn't yet see the image. Holding this lock across the
+    render→timeline-commit section forces commits to follow message arrival
+    order within a group.
+    """
+    locks = getattr(ctx, "group_ingest_locks", None)
+    if locks is None:
+        locks = {}
+        ctx.group_ingest_locks = locks
+    lock = locks.get(group_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[group_id] = lock
+    return lock
+
+
+async def _refetch_reply_image_url(bot: Bot, message_id: object) -> str | None:
+    """Re-fetch a quoted message via get_msg and return its first image URL.
+
+    Quoted-reply image segments frequently arrive with a stale/empty url; the
+    authoritative message (with a fresh url) must be pulled by message_id. The
+    OneBot get_msg payload's `message` is a list of raw `{type, data}` dicts
+    (same shape parsed by _render_forward_msg), not a nonebot Message.
+    """
+    try:
+        msg_data = await bot.get_msg(message_id=int(message_id))  # type: ignore[arg-type]
+    except Exception:
+        _log_debug.debug("get_msg refetch failed | message_id={}", message_id)
+        return None
+    raw = msg_data.get("message") if isinstance(msg_data, dict) else None
+    if not isinstance(raw, list):
+        return None
+    for seg in raw:
+        if isinstance(seg, dict) and seg.get("type") == "image":
+            url = str(seg.get("data", {}).get("url", "") or "")
+            if url:
+                return url
+    return None
+
+
+async def _describe_image_data(
+    data: bytes,
+    *,
+    media_type: str = "image/jpeg",
+    vision_client: Any | None = None,
+    character_recognizer: Any | None = None,
+    sticker_store: Any | None = None,
+    desc_cache: dict[str, str] | None = None,
+    mood_engine: Any | None = None,
+    mood_group_id: str | int | None = None,
+    mood_session_id: str = "",
+) -> str | None:
+    """Describe one image via the full pipeline, shared by the main and quoted
+    branches: desc_cache → sticker_store → character_recognizer (+ mood nudge) →
+    Qwen VL fallback. Recognized characters prefix the description with
+    `角色名（出处）：`. Returns None when no describer is available/succeeds.
+
+    Centralizing this keeps quoted-reply images (`@bot 引用图 这是谁`) on the
+    same recognition path as directly-posted images — previously the quoted
+    branch only ran plain VL and never consulted CCIP/AnimeTrace/stickers.
+    """
+    if desc_cache is None:
+        desc_cache = {}
+    img_hash = hashlib.sha256(data).hexdigest()[:8]
+
+    if img_hash in desc_cache:
+        _log_debug.debug("desc cache HIT | hash={}", img_hash)
+        return desc_cache[img_hash]
+
+    desc: str | None = None
+
+    if sticker_store is not None:
+        sticker_id = sticker_store.lookup_by_hash(data)
+        if sticker_id is not None:
+            entry = sticker_store.get(sticker_id)
+            if entry is not None and entry.get("description"):
+                desc = entry.get("description")
+                _log_debug.debug("sticker cache HIT | id={}", sticker_id)
+
+    if desc is None and character_recognizer is not None:
+        results = await character_recognizer.identify(data, media_type=media_type)
+        matched = [r for r in results if r.matched and r.character_name]
+        if matched:
+            _log_debug.debug(
+                "character recognition HIT | count={} ids={}",
+                len(matched), [r.character_id for r in matched],
+            )
+            # Phase 3: self/friend → transient mood nudge (first self/friend wins).
+            if mood_engine is not None:
+                for r in matched:
+                    if r.relation in ("self", "friend"):
+                        try:
+                            mood_engine.register_recognition_signal(
+                                r.relation,
+                                group_id=mood_group_id,
+                                session_id=mood_session_id,
+                            )
+                        except Exception:
+                            _log_debug.debug("mood recognition-nudge skipped")
+                        break
+            # Build comma-separated label: "A（出处）、B（出处）：描述"
+            labels: list[str] = []
+            for r in matched:
+                if r.work:
+                    labels.append(f"{r.character_name}（{r.work}）")
+                else:
+                    labels.append(r.character_name)
+            char_label = "、".join(labels)
+            if vision_client is not None:
+                vision_desc = await vision_client.describe_image(data)
+                if vision_desc:
+                    desc = f"{char_label}：{vision_desc}"
+            if desc is None:
+                desc = f"{char_label}表情包"
+
+    if desc is None and vision_client is not None:
+        _log_debug.debug("desc cache MISS | hash={} -> Qwen VL", img_hash)
+        desc = await vision_client.describe_image(data)
+
+    if desc:
+        desc_cache[img_hash] = desc
+    return desc
+
+
 async def _render_message(
     msg: Message,
     reply: object | None = None,
@@ -686,19 +877,40 @@ async def _render_message(
             cap = _REPLY_PREVIEW_MAX_SELF if is_reply_to_bot else _REPLY_PREVIEW_MAX
             original = reply_msg.extract_plain_text().strip()
             if not original:
+                reply_message_id = getattr(reply, "message_id", None)
+                refetched_url: str | None = None
+                refetch_done = False
                 seg_descs: list[str] = []
                 for seg in reply_msg:
                     if seg.type == "image":
-                        desc: str | None = None
                         url = seg.data.get("url", "")
-                        if url and vision_client is not None and session is not None:
+                        # Quoted-message image segments often carry a stale/empty
+                        # url; re-fetch the original via get_msg to recover it.
+                        if not url and bot is not None and reply_message_id is not None:
+                            if not refetch_done:
+                                refetched_url = await _refetch_reply_image_url(bot, reply_message_id)
+                                refetch_done = True
+                            if refetched_url:
+                                url = refetched_url
+                        desc: str | None = None
+                        if url and session is not None:
                             try:
                                 async with session.get(url) as img_resp:
                                     if img_resp.status == 200:
                                         img_data = await img_resp.read()
-                                        desc = await vision_client.describe_image(img_data)
+                                        # Full pipeline: sticker → CCIP/AnimeTrace → VL.
+                                        desc = await _describe_image_data(
+                                            img_data,
+                                            vision_client=vision_client,
+                                            character_recognizer=character_recognizer,
+                                            sticker_store=sticker_store,
+                                            desc_cache=desc_cache,
+                                            mood_engine=mood_engine,
+                                            mood_group_id=mood_group_id,
+                                            mood_session_id=mood_session_id,
+                                        )
                             except Exception:
-                                pass
+                                _log_debug.debug("quoted image fetch/describe failed | url={}", url[:80])
                         if desc:
                             seg_descs.append(f"[图片: {desc}]")
                         else:
@@ -792,60 +1004,19 @@ async def _render_message(
             img_path = ref["path"]
             try:
                 data = Path(img_path).read_bytes()
-                img_hash = hashlib.sha256(data).hexdigest()[:8]
-                desc: str | None = None
-
-                if img_hash in desc_cache:
-                    desc = desc_cache[img_hash]
-                    _log_debug.debug("desc cache HIT | hash={} file={}", img_hash, Path(img_path).name)
-
-                if desc is None and sticker_store is not None:
-                    sticker_id = sticker_store.lookup_by_hash(data)
-                    if sticker_id is not None:
-                        entry = sticker_store.get(sticker_id)
-                        if entry is not None:
-                            desc = entry.get("description")
-                            if desc:
-                                _log_debug.debug("sticker cache HIT | id={}", sticker_id)
-
-                if desc is None and character_recognizer is not None:
-                    recognition = await character_recognizer.identify(
-                        data,
-                        media_type=str(ref.get("media_type", "image/jpeg")),
-                    )
-                    if recognition is not None and recognition.matched and recognition.character_name:
-                        _log_debug.debug(
-                            "character recognition HIT | id={} relation={} diff={}",
-                            recognition.character_id,
-                            recognition.relation,
-                            recognition.difference,
-                        )
-                        # Phase 3: self/friend sticker → transient mood nudge.
-                        if mood_engine is not None and recognition.relation in ("self", "friend"):
-                            try:
-                                mood_engine.register_recognition_signal(
-                                    recognition.relation,
-                                    group_id=mood_group_id,
-                                    session_id=mood_session_id,
-                                )
-                            except Exception:
-                                _log_debug.debug("mood recognition-nudge skipped")
-                        # Name (+ source work for AnimeTrace hits) prefixes the desc.
-                        char_label = recognition.character_name
-                        if recognition.work:
-                            char_label = f"{recognition.character_name}（{recognition.work}）"
-                        if vision_client is not None:
-                            vision_desc = await vision_client.describe_image(data)
-                            if vision_desc:
-                                desc = f"{char_label}：{vision_desc}"
-                        if desc is None:
-                            desc = f"{char_label}表情包"
-
-                if desc is None:
-                    _log_debug.debug("desc cache MISS | hash={} file={} -> Qwen VL", img_hash, Path(img_path).name)
-                    desc = await vision_client.describe_image(data) if vision_client is not None else None
-                if desc:
-                    desc_cache[img_hash] = desc
+                # Full pipeline (desc_cache → sticker → CCIP/AnimeTrace → VL),
+                # shared with the quoted-reply branch via _describe_image_data.
+                desc = await _describe_image_data(
+                    data,
+                    media_type=str(ref.get("media_type", "image/jpeg")),
+                    vision_client=vision_client,
+                    character_recognizer=character_recognizer,
+                    sticker_store=sticker_store,
+                    desc_cache=desc_cache,
+                    mood_engine=mood_engine,
+                    mood_group_id=mood_group_id,
+                    mood_session_id=mood_session_id,
+                )
 
                 if desc:
                     text_parts.append(f"«{label_prefix}{i + 1}: {desc}»")
@@ -1095,6 +1266,12 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             return
 
         is_addressed = event.is_tome()
+        # is_tome() misses a sandwiched @ (e.g. [image][at:bot]这是谁) — the @ is
+        # neither first nor last segment. Backfill from a full-segment scan so an
+        # explicit @ always takes the rule-layer addressed path (fire) instead of
+        # the probabilistic gray zone where it can lose the RWS roll.
+        if not is_addressed and _message_ats_self(msg, bot.self_id):
+            is_addressed = True
         if not is_addressed and getattr(ctx, "bot_nicknames", []) and any(
             nick in plain_text for nick in ctx.bot_nicknames
         ):
@@ -1149,16 +1326,35 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         if trigger is None and is_addressed:
             from kernel.types import TriggerContext
 
+            # When the message @'s another human in addition to the bot,
+            # the question is likely directed at that person, not us — a
+            # bare "这是谁" with a double-@ means "hey Alice, who is this",
+            # and the bot should not chip in.  We still let the LLM
+            # addressee detector override (it may confidently say "bot"),
+            # but the fallback flips from "me" to "not me".
+            has_other_at = _message_has_other_at(msg, bot.self_id)
+
             addressee_self = await _at_trigger_targets_self(
                 rendered_message=str(msg),
                 plain_text=plain_text,
                 reply_sender_id=str(getattr(getattr(event.reply, "sender", None), "user_id", "") or ""),
                 self_id=str(bot.self_id),
                 bot_nicknames=getattr(ctx, "bot_nicknames", ()),
-                addressed_fallback=is_addressed,
+                addressed_fallback=is_addressed and not has_other_at,
             )
+            # Preserve the addressing form: when the user said "姆怎么是龙王"
+            # the nickname gets stripped, the LLM sees only "怎么是龙王" and
+            # doesn't know it's being talked about.  Injecting the matched
+            # nickname into the trigger reason gives the LLM the missing
+            # anchor ("有人叫你「姆」") without restoring the stripped
+            # nickname into the user-message text (which would read as the
+            # user talking to someone else named "姆").
+            nickname = _match_nickname_addressing(
+                event, getattr(ctx, "bot_nicknames", ()),
+            )
+            reason = f"有人叫你「{nickname}」" if nickname else "有人@了你"
             trigger = TriggerContext(
-                reason="有人@了你",
+                reason=reason,
                 mode="at_mention",
                 target_message_id=event.message_id,
                 target_user_id=str(event.user_id),
@@ -1191,64 +1387,70 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             ctx.scheduler.clear_pending(group_id, cancel_running=command_text.startswith("/debug"))
             return
 
-        content = await _render_message(
-            msg,
-            reply=event.reply,
-            session=ctx.llm_client._session,
-            self_id=bot.self_id,
-            vision_client=ctx.vision_client,
-            character_recognizer=getattr(ctx, "character_recognizer", None),
-            bot=bot,
-            in_group=True,
-            vision_enabled=ctx.vision_enabled,
-            max_images_per_message=ctx.max_images_per_message,
-            sticker_store=ctx.sticker_store,
-            image_cache=ctx.image_cache,
-            desc_cache=ctx.desc_cache,
-            mood_engine=getattr(ctx, "mood_engine", None),
-            mood_group_id=group_id,
-            mood_session_id=f"group_{group_id}",
-        )
+        # Serialize render→timeline-commit per group so a slow image render can't
+        # be overtaken by a faster later message that commits + fires a reply
+        # before the image lands in the timeline (the "bot replies without seeing
+        # the image" race). The lock is released right after the commit below;
+        # the reply-workflow/notify tail stays concurrent.
+        async with _group_ingest_lock(ctx, group_id):
+            content = await _render_message(
+                msg,
+                reply=event.reply,
+                session=ctx.llm_client._session,
+                self_id=bot.self_id,
+                vision_client=ctx.vision_client,
+                character_recognizer=getattr(ctx, "character_recognizer", None),
+                bot=bot,
+                in_group=True,
+                vision_enabled=ctx.vision_enabled,
+                max_images_per_message=ctx.max_images_per_message,
+                sticker_store=ctx.sticker_store,
+                image_cache=ctx.image_cache,
+                desc_cache=ctx.desc_cache,
+                mood_engine=getattr(ctx, "mood_engine", None),
+                mood_group_id=group_id,
+                mood_session_id=f"group_{group_id}",
+            )
 
-        if not content:
-            if is_addressed:
-                _log_msg_in.info("group={} @-only (empty content)", group_id)
-                ctx.timeline.add(
-                    group_id,
-                    role="user",
-                    speaker=f"{nickname}({event.user_id})",
-                    content="@我",
-                    message_id=event.message_id,
-                )
-                if not muted:
-                    await _notify_group_scheduler(
-                        ctx,
-                        group_id=group_id,
-                        user_id=str(event.user_id),
-                        trigger=trigger,
-                        is_addressed=is_addressed,
-                        message="@我",
-                        event=event,
-                        self_id=str(bot.self_id),
+            if not content:
+                if is_addressed:
+                    _log_msg_in.info("group={} @-only (empty content)", group_id)
+                    ctx.timeline.add(
+                        group_id,
+                        role="user",
+                        speaker=f"{nickname}({event.user_id})",
+                        content="@我",
+                        message_id=event.message_id,
                     )
-            return
+                    if not muted:
+                        await _notify_group_scheduler(
+                            ctx,
+                            group_id=group_id,
+                            user_id=str(event.user_id),
+                            trigger=trigger,
+                            is_addressed=is_addressed,
+                            message="@我",
+                            event=event,
+                            self_id=str(bot.self_id),
+                        )
+                return
 
-        preview = content if isinstance(content, str) else "".join(
-            str(b.get("text", ""))
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text" and "text" in b
-        )
-        if len(preview) > 120:
-            preview = preview[:120] + "…"
-        _log_msg_in.info("group={} {}({}) | {}", group_id, nickname, event.user_id, preview)
+            preview = content if isinstance(content, str) else "".join(
+                str(b.get("text", ""))
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text" and "text" in b
+            )
+            if len(preview) > 120:
+                preview = preview[:120] + "…"
+            _log_msg_in.info("group={} {}({}) | {}", group_id, nickname, event.user_id, preview)
 
-        ctx.timeline.add(
-            group_id,
-            role="user",
-            speaker=f"{nickname}({event.user_id})",
-            content=content,
-            message_id=event.message_id,
-        )
+            ctx.timeline.add(
+                group_id,
+                role="user",
+                speaker=f"{nickname}({event.user_id})",
+                content=content,
+                message_id=event.message_id,
+            )
         reply_workflow_config = getattr(ctx.config, "reply_workflow", None)
         legacy_directed = _is_directed_followup_text(_content_to_text(content))
         followup_window_s = float(

@@ -140,6 +140,7 @@ services:
       - "8620:8080"
     environment:
       - CCIP_PACKS_DIR=/app/config/character_packs
+      - CCIP_MULTI_CHAR_ENABLED=1
       - HF_HOME=/data/huggingface
       - HUGGINGFACE_HUB_CACHE=/data/huggingface/hub
     volumes:

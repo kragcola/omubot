@@ -4,6 +4,169 @@
 
 ---
 
+## 2026-06-01/02 修昵称寻址语境丢失——"姆怎么是龙王"被拆成"怎么是龙王"（rebuild bot）
+
+**变更类型**：bug 修复（`kernel/router.py` 新增 `_match_nickname_addressing` + 改 `TriggerContext.reason`；rebuild bot）。
+
+**现象**：用户发"姆怎么是龙王"（"姆"是 bot 昵称之一），bot 回复"哈哈叁玖你自己话最多当然是你当龙王啦"——完全没意识到"姆"指自己，把"龙王"理解为在说对方（叁玖）。用户纠错"姆好笨"，bot 仍不理解，因为那条也变成了"好笨"。
+
+**根因**：NoneBot 的 `_check_nickname`（[bot.py:124-145](.venv/lib/python3.13/site-packages/nonebot/adapters/onebot/v11/bot.py#L124)）匹配到开头的"姆"后，从 `event.message` 剥离并置 `to_me=True`。剥离后的 `plain_text` = "怎么是龙王"→ LLM 看到的是残缺文本，丢失了"用'姆'称呼我"的语义锚点。
+
+`is_addressed=True` 传递了"被寻址"信号——但 LLM 只知道"有人叫我"，不知道**用什么名字叫**。
+
+NoneBot 在 `MessageEvent.__init__` 的 `model_validator("before")` 中保存了 `event.original_message`（剥离前的 deep copy），这是天然的恢复源。
+
+**修复**：
+- 新增 `_match_nickname_addressing(event, bot_nicknames)`：在 `original_message[0]` 上复现 `_check_nickname` 的匹配。`original_message[0]` 是文本段 → 正则 `^nickname[\s,，]*` 匹配 → 返回命中的昵称。`original_message[0]` 不是文本（@ 在前）→ 返回 None。
+- `TriggerContext.reason` 从固定 `"有人@了你"` 改为动态：检测到昵称 → `"有人叫你「姆」"`，否则 `"有人@了你"`。
+- prompt 里 `«触发原因: 有人叫你「姆」（只回应对方这条消息当下的话题...）»` → LLM 同时理解"被寻址"和"被称为什么"。
+
+**验证（D4）**：`_match_nickname_addressing` 五个 case 手动验证通过（纯文本"姆…" ✓、"emu不吃小杯面，…" ✓、@ 在前→None ✓、空 nicknames→None ✓、纯 @→None ✓）。全量 pytest **2343 passed**；ruff 0 err。rebuild bot，napcat 未动（D6）。
+
+**回滚**：`git checkout kernel/router.py` + rebuild bot。`_match_nickname_addressing` 和 `reason` 变更都在 trigger 构造路径，不影响非寻址消息流。
+
+---
+
+## 2026-06-01 CCIP 多角色识别上线（head detection + per-crop CCIP，rebuild sidecar + bot）
+
+**变更类型**：特性（`ccip-sidecar/server.py` + `services/media/character_recognizer.py` + `kernel/router.py` + `kernel/config.py` + `plugins/chat/plugin.py` + `docker-compose.yml`；测试更新 4 文件；方案 `docs/migrations/ccip-multi-character-2026-06-01.md`；rebuild sidecar + bot）。承接「CCIP 无法识别同图多角色」评估。
+
+**现象**：CCIP 对整张图提一个 768 维全局特征，做 single-nearest-neighbor 返回单角色。实测 2×2 四人图只命中 1/4（全局特征被压缩混合，最近邻只有一个）。
+
+**方案（方案 B — 检测器 + per-crop CCIP）**：`dghs-imgutils`（sidecar 已有依赖，v0.19.0）内置 `detect_heads`（YOLO-based ONNX 动漫头部检测器，`deepghs/anime_head_detection` head_detect_v2.0_s）→ 逐 head crop 跑 CCIP batch extraction，返回每角色的最近邻。CCIP 模型/centroids/阈值全不变。
+
+**修复**：
+- **Phase 1 — sidecar**：新增 `POST /identify-multi` 端点 + `_identify_multi()`。detection-first：detect_heads → ≤1 head 退化为全图 CCIP，≥2 heads 走 batch CCIP per crop。用 `ccip_batch_extract_features`（1.3× 加速）。双开关：sidecar 端 `CCIP_MULTI_CHAR_ENABLED` 环控变量；bot 端 `CharacterRecognitionConfig.multi_char_enabled`。模型自动从 HF Hub 下载 → `/data/huggingface/hub/models--deepghs--anime_head_detection`。
+- **Phase 2 — recognizer**：`CharacterRecognizer.identify()` 返回 `list[CharacterRecognition]`（空列表=无匹配）；`_identify_multi_path()` 调 `/identify-multi`，每 item 查 metadata 补 relation/name/work。多角色路径不跑 AnimeTrace（detection 已占满 CPU，AT 的 work 也不可靠）。
+- **Phase 3 — router**：`_describe_image_data` 适配列表——逗号分隔角色名 `A（出处）、B（出处）：描述`；mood nudge 取第一个 self/friend。
+- **Phase 4 — config**：`multi_char_enabled: bool = True` 默认开启。
+- **Phase 5 — L2 缓存**：多角色路径不写 L2（SHA-256 单键无法正确表示多角色结果；首版不做，后续可加）。
+
+**改动文件**：`ccip-sidecar/server.py` (+~150 行)，`services/media/character_recognizer.py` (+~80 行)，`kernel/router.py` (+~20 行)，`kernel/config.py` (+4 行)，`plugins/chat/plugin.py` (+1 行)，`docker-compose.yml` (+1 行)，测试更新 4 文件（merge 适配 wrapper、render 适配 list、config 新增）。
+
+**验证（D4，容器内真实链路 + 留出图）**：
+- 全量 pytest **2343 passed, 8 skipped**；ruff + pyright 0 err
+- 侧边车 `/identify-multi` curl 测试：4 角色 4/4 正确、单角色 1/1、空白 0 heads → 空列表
+- **容器内 `/app/.venv/bin/python` 跑真实 CharacterRecognizer**：
+  - 单角色（天马司）→ 1 char, elapsed 0.5s ✓
+  - 2×2 四角色格 → **4/4 正确**（凤笑梦/self + 青柳冬弥/known + 朝比奈真冬/known + 小豆泽心羽/known），elapsed 1.9s ✓
+  - 关闭开关 → 单角色 0.5s，正确 ✓
+- rebuild sidecar + bot，OneBot 重连正常，**napcat 未动（D6）**
+
+**D1 同模式扫描**：grep `identify(` 全仓——仅 `_describe_image_data`（已改）一处消费方，`_animetrace_client.identify` 是内部调用不涉及。
+
+**回滚**：`CCIP_MULTI_CHAR_ENABLED=0` 重启 sidecar + `multi_char_enabled=False` 重启 bot → 退化为旧单角色路径。API 保持向后兼容（`characters: [{...}]` 单元素列表）。
+
+---
+
+## 2026-06-01 修群聊两宗：夹心 @ 被 RWS 概率跳过 + 慢识图被快文本抢跑（rebuild bot）
+
+**变更类型**：bug 修复（`kernel/router.py` + `kernel/types.py` + `services/media/character_recognizer.py`；新增 `tests/test_ingest_ordering_and_at_detection.py`；merge 短路测试加进 `tests/test_animetrace_merge.py`；rebuild bot，sidecar/napcat 未动）。承接「查看日志」诊断的两个现象。
+
+**现象**：① 群里 `[图片][@bot]这是谁` 这种**夹心 @**，日志 `role=addressed` 却走 `prob skip (rws=0.22 < 0.31)`——被寻址了反而被概率门跳过。② 连发图时 bot 在图识别完成**前**就回复（thinker 实测说"对方没发成功图，我先等等看后续"），CCIP 解析有延迟导致及时回复不带角色识别。
+
+**根因**：
+- **问题1（夹心@）**：NoneBot `_check_at_me`（[bot.py:88-118](.venv/lib/python3.13/site-packages/nonebot/adapters/onebot/v11/bot.py#L88)）只在 @ 是**首段或末段**时置 `to_me`；`[image][at:bot]text` 的 @ 在中间 → `is_tome()=False`。但 `_extract_topic_block_signals` 全段扫描置 `at_self=True` → `role=addressed`。两条 @ 检测路径打架：消息既没建 `at_mention` trigger（错过规则层 @ 必触发），又因 `role=addressed` 落入概率灰区输了 RWS roll。
+- **问题2（抢跑）**：`group_listener = on_message(priority=1, block=False)`（[router.py:1115](kernel/router.py#L1115)）并发分发；识图在 `_render_message` 内**同步**跑（CCIP ~0.8s 冷 / AnimeTrace ~1.8s），在 `timeline.add` 之前。慢图 handler 阻塞时，后到的快文本 handler **超车**先入 timeline 并触发回复——回复时图还没进 timeline。叠加：`_identify_merged` 用 `asyncio.gather` 等到**更慢的** AnimeTrace（self/friend 命中根本不借 work，白等）。
+
+**修复**：
+- **Fix1**：新增 `_message_ats_self(msg, self_id)` 全段扫描，`is_tome()=False` 时回填 `is_addressed=True` → 夹心 @ 走规则层 @ 必触发，不再进概率灰区。
+- **Fix2a（merge 短路）**：CCIP 先 await；命中且 work 不会被借（self/friend，或 known 带 manifest work）时**取消** AnimeTrace 立即返回，不阻塞 ingest。只有 known 无 work 这一种才等 AnimeTrace 借 work。
+- **Fix2b（每群 ingest 串行）**：`PluginContext.group_ingest_locks` + `_group_ingest_lock(ctx, gid)`，把 `render→timeline.add` 临界区用每群 `asyncio.Lock` 串行——慢图先持锁，快文本阻塞到图 commit 后才入 timeline，保证 timeline 按到达序提交。锁只罩 render+commit，reply-workflow/notify 尾段仍并发；render 内各 await 均有超时上限（下载15s/CCIP5s/AT8s/VL15s）。
+
+**验证（D4，容器内真实组件 + 留出图）**：① 新增 9 个单测 + 4 个 merge 短路测试，**全量 pytest 2343 passed, 8 skipped**；ruff + pyright 0 err。② rebuild bot 后 `ChatPlugin startup complete` + `Bot 就绪`，**napcat 未动（D6）**。③ 容器内 `/app/.venv/bin/python` 真实链路：`[Fix1]` 夹心 `[image][at:bot]这是谁`→`_message_ats_self=True`（msg[0]=image，is_tome 会 False）；`[Fix2a]` aoyagi_toya(known+work) merge **0.03s** work 正确；凤笑梦(self) merge **0.66s**（非 2s），SlowAT `cancelled=True completed=False` work=None（无污染）。临时脚本清理。
+
+**D1 同模式扫描**：grep `is_tome/is_addressed/at_self` 全仓——`router.py:1176`（已修）、`qq_interactions.py`（notice 路径，自有 `is_tome` 逻辑，@ 在 reaction 语义里非首末段不适用，无需改）、`scheduler._receiver_role`（消费 `is_addressed/at_self`，上游修正后自动受益）。`block=False` 抢跑模式仅此一处群 listener 做重 I/O 后 commit。
+
+**回滚**：`git checkout kernel/router.py kernel/types.py services/media/character_recognizer.py` + rebuild bot。`group_ingest_locks` 是 PluginContext 增量字段，旧代码不引用即无副作用。
+
+---
+
+## 2026-06-01 修角色作品出处张冠李戴（CCIP 认对身份被 AnimeTrace 错 work 污染，rebuild sidecar+bot）
+
+**变更类型**：bug 修复（`services/media/character_recognizer.py` merge 逻辑 + `ccip-sidecar/server.py` + `admin/routes/api/characters.py` + `tools/batch_enroll_pjsk.py`；rebuild sidecar + bot；重录 24 角色带 work）。承接「引用上下文注入错误」诊断的问题 3（hot-reload 修了问题 1 后日志暴露的新 bug）。
+
+**现象**：bot 把凤笑梦说成 `凤笑梦（がっこうぐらし！）`——**身份对、作品错**（がっこうぐらし＝学园孤岛，非 PJSK）。
+
+**根因**（[character_recognizer.py:224](services/media/character_recognizer.py#L224)）：merge 矩阵里"CCIP 命中但 work 为 None 时借 AnimeTrace 的 work"。① 我录入的 charpack manifest 根本没 work 字段 → CCIP 路径 work 恒 None；② 于是每次都借 AnimeTrace，而 AnimeTrace 把图误判成《学园孤岛》→ **CCIP 认对的身份被 AnimeTrace 认错的作品覆盖**。对 self/friend/已注册 PJSK 角色，身份是第一性可信的，借外部 work 是净损害。
+
+**修复（方案 A，治本+轻量）**：
+- **merge 收紧**：CCIP 命中时**仅** `relation=="known"` 且无 manifest work 才借 AnimeTrace work；**self/friend 永不借**（身份确定，作品不靠外部猜）。
+- **work 进 charpack**：sidecar `_build_pack` + `/build-pack` 加 `work` Form 参数写进 manifest；admin `/characters/build` 透传；`recognizer` catalog 读 manifest `work`（work 是角色固有属性、非 per-bot，恒从 manifest 取，不走 registry DB）。
+- **录入脚本**：`batch_enroll_pjsk.py` 给 24 角色统一传 `work="プロジェクトセカイ カラフルステージ！"`。
+
+**验证（D4，容器内真实 merge 链路 + 留出图）**：① 改 3 个 merge 单测（self 不借 / known 借 / manifest work 优先），**全量 pytest 2331 passed**；ruff + pyright 0 err。② rebuild 后重录 24 角色 `enrolled=24 failed=0`，manifest 现含 `work`；清掉 6 条旧错认缓存。③ **容器内 `/app/.venv/bin/python` 跑真实 CharacterRecognizer（CCIP+AnimeTrace 并行）**：天马司(known)→`work='プロジェクトセカイ カラフルステージ！'` src=ccip；凤笑梦(self)→`work=None` src=ccip（**がっこうぐらし！污染消失**）。④ sidecar/registry 各 26，OneBot 重连正常，**napcat Created=2026-05-28 未变（D6）**。测试图清理（host+容器）。
+
+**边界 / 待办**：① self/friend（凤笑梦/晓山瑞希）未重录，但 self/friend 本就不借 work、原 None 即正确，无需重录。② 问题 2（多角色图被 CCIP 误判成单角色）仍未动，需 top-N 多中心另评。**回滚**：`git checkout` 4 文件 + rebuild；work 字段是 manifest 增量，旧 recognizer 忽略即可。
+
+---
+
+## 2026-06-01 修人设「看不到图片」矛盾指令（识别描述已注入却仍说看不到，hot-reload）
+
+**变更类型**：人设 prompt 修正（`config/persona/fengxiaomeng-v2/_pending_freeze/guard.yaml` + 同步 legacy 镜像 `config/soul/SKILL.md`；**hot-reload 生效，无 rebuild**）。承接「引用上下文注入错误」诊断的问题 1。
+
+**诊断（先证伪我自己的改动）**：本地确定性复现引用图渲染 —— `_render_message` 输出 `[QUOTED_MSG ...][图片: 宵崎奏：四位美少女角色的主菜单截图][/QUOTED_MSG] @我 图里面都是谁`，**注入完全正确**，识别结果+描述都进了 QUOTED_MSG 和 timeline。所以引用注入逻辑没 bug。真正问题在 **persona 指令与新能力打架**：guard.yaml line 439（来自 legacy instruction.md#L296）写死 `«图片» — 图片，你看不到内容，根据前后文推断`。角色识别上线后 bot 其实"能看到"（CCIP/VL 已产出描述并注入），但人设仍按旧指令回"图片我看不到具体内容啦"（14:35:04 实测：同张图 14:34:26 已识别为宵崎奏，回复却说看不到）。
+
+**修复**：把该指令改成**区分裸标记与带描述标记** —— `«图片»`（无描述）保持"看不到，靠前后文推断"；但 `«图片1: …»`、`«动画表情1: …»`、引用消息里的 `[图片: …]` 这类**带冒号描述**的，冒号后是图片真实内容（含已认出角色名），直接当作"看到的"来回答，别再说看不到。指令措辞对齐 router 实际产出的 marker 格式（主图 `«{label}{i+1}: desc»`、引用图 `[图片: desc]`）。同步改 legacy 镜像 SKILL.md L423 保持项目真相一致。
+
+**验证（D4）**：① guard.yaml YAML 解析 OK（内含中文冒号，已加单引号避免被当 mapping key —— 第一版漏引号触发 ScannerError，已修）；② `POST /api/admin/persona/hot-reload/fengxiaomeng` 两次返回 `ok:true loaded=fengxiaomeng-v2`；③ 容器内 grep 确认 bind-mount 的 guard.yaml 已是新文本；④ behavior_instructions.items=233 条无损。**未碰 napcat、未 rebuild（guard.yaml 是 _pending_freeze 运行时源，hot-reload 即生效）**。
+
+**边界 / 待观察**：问题 2（多角色图被 CCIP 误判成单角色，如四人主菜单→宵崎奏）是 CCIP 取最近单中心的固有局限，**本轮未动**，需 top-N 多中心方案另评。本次只解"能看到却说看不到"的指令矛盾。**回滚**：guard.yaml line 439 + SKILL.md L423 还原原句 + hot-reload。
+
+---
+
+## 2026-06-01 引用图识别打通（quoted-reply 走全识别链路 + get_msg URL 兜底，rebuild bot）
+
+**变更类型**：bug 修复（`kernel/router.py` 核心消息渲染；rebuild bot）。承接「查日志似乎没识图」的诊断。
+
+**诊断（先证伪再定位）**：用 4 张录入外新图直打 live sidecar `/identify`，Kanade 0.029 / Kohane 0.035 / Tsukasa 0.102 / Miku 0.111 全命中 —— **24 角色 CCIP 录入本身完全正常**；识别缓存里 `xiaoshanruixi` 经 `ccip-sidecar` conf 0.95 命中也证明线上链路在跑。"没识图"是两件事叠加：① 新角色还没人在群里发过清晰主图，没被测到；② 用户试的 `@bot 引用一张图 这是谁` 撞上一个**真实老 bug**。
+
+**根因（D1 同模式扫描定位）**：`_render_message` 的**引用回复分支**（[kernel/router.py:782](kernel/router.py#L782)）只调 `vision_client.describe_image()` 纯 VL，**完全不走 `character_recognizer`、不查 sticker_store、不共享 desc_cache** —— 与直接发图的主分支（desc_cache→sticker→CCIP/AnimeTrace→VL 全链路）行为不一致。所以引用角色图永远只得泛描述、认不出角色。另：引用消息的 image 段 `url` 常为空/失效，旧代码直接放弃 → 渲染成空 `«图片»`。
+
+**修复**：① 抽出共享 `_describe_image_data()`（desc_cache→sticker_store→character_recognizer + self/friend mood nudge→VL 兜底，识别命中前缀 `角色名（出处）：`），**主分支与引用分支都调它**，消除重复、保证两条路径永远一致；② 新增 `_refetch_reply_image_url()`：引用图 `url` 为空时用 `bot.get_msg(message_id)` 重新拉原消息取 url（照搬 `_render_forward_msg` 的 raw-dict 解析法，不建 nonebot Message）。**表情包/图片/引用/上下文四条都覆盖**：sticker 走 sticker_store + sub_type 动画表情标签；主图原链路不变；引用图新接全链路；引用文本预览/cap/QUOTED_MSG 上下文保持原样。
+
+**验证（D4）**：新增 2 回归测试（`test_quoted_reply_image_runs_character_recognition` 断言引用图出 `凤笑梦` + `QUOTED_MSG`；`test_quoted_reply_image_refetches_stale_url` 断言空 url 时 `get_msg(678)` 被调且识别命中）—— **测试当场抓出我第一版的 `Message(raw_dicts)` ValueError**（nonebot 不收 raw dict），改回 raw-dict 解析后过。**全量 pytest 2329 passed / 8 skipped**（+2）；ruff All passed；pyright kernel/router.py 0 err。rebuild 后 `OneBot V11 Bot 384801062 connected` 无 traceback；registry 26 行、sidecar character_count=26 status=ok（识别数据 rebuild 后完整）；**napcat Created=2026-05-28 未变（D6 守住）**。
+
+**回滚**：`git checkout kernel/router.py tests/test_render_message_character_recognition.py` + rebuild bot。引用分支恢复纯 VL 即回旧行为。
+
+---
+
+## 2026-06-01 PJSK 角色批量录入（多形态池化，24 角色上线）
+
+**变更类型**：数据录入 + 工具改写（`tools/batch_enroll_pjsk.py`；通过 admin HTTP `/characters/build` 录入，未碰 napcat/容器生命周期）。承接 issue17 收尾「批量录入 PJSK 全角色」。详见 [migrations/pjsk-multiform-enrollment-2026-06-01.md](docs/migrations/pjsk-multiform-enrollment-2026-06-01.md) 四列清单。
+
+**核心设计问题（用户提出）**：PJSK 一角色三形态 —— ① 正比立绘 ② 表情包 Q 版（chibi）③ My Sekai 3D 豆腐人，视觉域差异大，担心混入一个 charpack 后 CCIP 均值向量互相稀释。
+
+**结论（实测推翻稀释假设，未改 sidecar/registry 代码）**：在 sidecar 内跑 CCIP difference 矩阵 + centroid 池化对比实证 —— 同角色四形态（正比+chibi+stamp+MySEKAI 正面）互距 **≤0.12**，跨角色 **≥0.36**，阈值 0.1785 卡宽缝里。**单 centroid 池化不稀释**（Emu 控制组始终 ≥0.39 远拒），反而把 chibi/stamp 命中收紧（0.082→0.029），并把侧/背面 3D 豆腐人从「漏」（art-only 0.221）拉回「命中」（池化 0.154）。所以 sidecar `_build_pack` 均值池化、registry character_id 去重均零改动，只改批量脚本拉多形态喂进去。
+
+**脚本改动**：① 三形态拉取（`Cutouts of <Full Name>` + `<Given>-chibi-circle.png` + `MySEKAI <given> front/left/right/back.png`）；② curl 去 `-6`、加 `-e Referer`（static.wikitide.net 防盗链，cutout 无 Referer 直接 403 —— 旧脚本写时是教育网 IPv6 环境，现 IPv4/v6 双通）；③ ROSTER 加 given-name 列；④ `--force` flag + 分形态计数打印。
+
+**验证（D4，全程留出图）**：全量 `enrolled=20 skipped=4(pilot) failed=0`；sidecar `/health` `pack_count=26 character_count=26 status=ok`；registry DB 26 行（known=24 / self=凤笑梦 / friend=晓山瑞希），26 全有样例缩略图。**/identify 留出抽查**（trained-cutout 被录入 filter 排除 = 真留出）：An/Ena/Rui/Nene 正比 0.026~0.074、Miku 3D 侧面 0.099，全 roster 26 角竞争下 **5/5 零互串**。**假阳性自纠实证**：未录的 Saki chibi 一度误命中 Mizuki(0.128)，录入 Saki 后同图翻正 tenma_saki(0.0425) —— 证明 roster 录满后每角自匹配胜出。`ruff` All passed。napcat 未动（D6）。测试图全清。
+
+**边界 / 残余风险**：① VS（Rin/Len/Luka/MEIKO/KAITO）的 3D/chibi 多为 unit-prefixed（`MySEKAI 25ji miku`），plain-name 拉不到 → 仅 cutout+chibi（11 图），2D 形态已覆盖；Miku 有 default-unit plain-name 拿到全 15 图。② roster 外角色 nearest-neighbor 固有假阳性风险。③ 纯侧/背面豆腐人（无脸）仍可能漏，但群聊正面/2D 占绝大多数。**回滚**：`git checkout tools/batch_enroll_pjsk.py`；清角色删 charpack 目录 + reload + 手动 DELETE registry 行（scan_and_sync 不删 orphan，issue17 已记缺口）；flag 关即整条旁路。
+
+---
+
+## 2026-06-01 CCIP 识别质量泛化测试（训练集外，满分通过）+ 留档
+
+**变更类型**：验证（只读 `/identify`，未改库；测试文件已清理）。issue17 落地后首次量化识别质量。
+
+**测试方法**：全部用**训练集外新图**（sekaipedia 官方卡面 cutout），dhash 实证与训练样例距离 ≥18 bit（重复阈值 8），排除"测了训练集"的假象。阈值 0.1785。
+
+**正样本（15 张训练外新图）**：
+
+- 晓山瑞希 8 张（卡面 2-7 + 特训版 11/13）→ **8/8 命中**，diff 0.015~0.063
+- 凤笑梦 7 张（卡面 1-6 + 特训版）→ **7/7 命中**，diff 0.027~0.069
+- 两角色零互串。
+
+**对抗样本（7 个，期望全部拒识）**：Ena/Kanade/Mafuyu/Nene/Rui/Tsukasa（同作品未注册角色）+ 纯色图 → **全部 matched=False**，diff 0.19~0.40，零假阳性。
+
+**结论**：判别边界清晰——正样本 diff ≤0.069、负样本 ≥0.19，中间宽缝，阈值 0.1785 卡缝里正负分明。泛化能力强（特训版/新卡面稳认）、不靠"粉发"泛特征乱认、同作品其他角色正确拒掉。两个角色达生产可用质量。**诚实边界**：测试图为干净官方立绘；真实群聊图（截图/表情包/低清/多人/二创）diff 会更高、识别率可能略降，但 0.069↔0.19 余量有容错空间。
+
+**当前已注册**：`fengxiaomeng`（凤笑梦, self）、`xiaoshanruixi`（晓山瑞希, friend）。下一步：批量录入 PJSK 同作品全 OC + V 家角色。
+
+---
+
 ## 2026-06-01 AnimeTrace 在线动漫角色识别（与 CCIP 并行 merge）
 
 **变更类型**：功能扩展（omubot 侧多文件；rebuild bot）。承接「推进 animetrace」。让 bot 无需本地参考图就能认出大量已知动漫/galgame 角色，补足 CCIP 空库短板。

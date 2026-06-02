@@ -51,14 +51,17 @@ async def test_character_recognizer_prefers_local_name_and_relation(tmp_path: Pa
     recognizer = _StubCharacterRecognizer(
         base_url="http://127.0.0.1:8620",
         packs_dir=tmp_path / "character_packs",
+        multi_char_enabled=False,  # test single-char path
     )
 
     result = await recognizer.identify(b"fake-image")
 
     assert result is not None
-    assert result.matched is True
-    assert result.character_id == "emu_otori"
-    assert result.character_name == "凤笑梦"
-    assert result.relation == "self"
-    assert result.registry_version == "test-version"
-    assert result.api_version == "2026-05-31.v1"
+    assert len(result) == 1
+    r = result[0]
+    assert r.matched is True
+    assert r.character_id == "emu_otori"
+    assert r.character_name == "凤笑梦"
+    assert r.relation == "self"
+    assert r.registry_version == "test-version"
+    assert r.api_version == "2026-05-31.v1"

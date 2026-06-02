@@ -220,6 +220,10 @@ class PluginContext:
     max_images_per_message: int = 0
     desc_cache: dict[str, str] = field(default_factory=dict)
     memory_relation_signals: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    # Per-group ingest serialization: render→timeline-commit runs under one lock
+    # per group so a fast later message can't overtake a slow image render and
+    # land in the timeline (and trigger a reply) before the image is committed.
+    group_ingest_locks: dict[str, Any] = field(default_factory=dict)  # group_id -> asyncio.Lock
     protocol_trace: Any = None
     protocol_connections: Any = None
     runtime_errors: Any = None

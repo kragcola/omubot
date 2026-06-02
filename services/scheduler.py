@@ -45,6 +45,7 @@ _CB_HALF_OPEN_S: float = 30.0
 # Weak-reply (closing) P0 — anti-spam knobs.
 _LIGHT_COOLDOWN_S: float = 30.0  # min gap between two light replies in one group
 _CLOSING_RESET_S: float = 1800.0  # after this quiet gap, a new closing is allowed again
+_RATIFIED_FLOOR_COOLDOWN_S: float = 15.0  # min gap between bot's last fire and next ratified-floor fire
 
 
 @dataclass(slots=True)
@@ -564,10 +565,11 @@ class GroupChatScheduler:
         resolved = self._group_config.resolve(int(group_id))
 
         slot = self._slots.setdefault(group_id, _GroupSlot())
-        slot.msg_count += 1
-        # Default role for strong-signal bypass paths (@/closing/followup/video):
-        # they fire by obligation → addressed. The probability path overrides
-        # this with the computed _receiver_role before firing.
+        # msg_count is incremented only when the message reaches the probability /
+        # gray-zone scoring path below.  Rule-layer fire/skip paths (@, closing,
+        # followup, correction, video_always, at_only, busy, interval) either fire
+        # immediately (→ msg_count reset in _fire) or skip definitively — neither
+        # wants to bump the counter that the _do_chat finally block uses to re-fire.
         slot.last_role = "addressed"
         if user_id:
             slot.last_user_id = user_id
@@ -704,6 +706,8 @@ class GroupChatScheduler:
             _L.info("scheduler | group={} interval too short, skip (msgs={})", group_id, slot.msg_count)
             slot.trigger = None  # clear trigger on skip — prevent leak
             return
+
+        slot.msg_count += 1
 
         # Dynamic threshold: become more responsive after prolonged silence.
         # Use bilibili-specific talk_value when a video trigger is present.
