@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { h } from 'vue'
 import { NSelect, NImage, NTag, useMessage } from 'naive-ui'
-import { ScanOutline, RefreshOutline, AddOutline, ServerOutline, FileTrayFullOutline } from '@vicons/ionicons5'
+import {
+  AddOutline,
+  ChevronDownOutline,
+  ChevronForwardOutline,
+  FileTrayFullOutline,
+  RefreshOutline,
+  ScanOutline,
+  ServerOutline,
+} from '@vicons/ionicons5'
 import { api } from '../../api/client'
 import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
@@ -23,6 +31,14 @@ interface Character {
 }
 interface CacheStats { total?: number, matched?: number }
 interface SidecarHealth { status?: string, character_count?: number, pack_count?: number, registry_version?: string, api_version?: string }
+interface SeriesGroup {
+  key: string
+  title: string
+  series: string
+  work: string
+  packs: string[]
+  characters: Character[]
+}
 
 const message = useMessage()
 const loading = ref(true)
@@ -31,6 +47,8 @@ const characters = ref<Character[]>([])
 const cache = ref<CacheStats>({})
 const sidecar = ref<SidecarHealth>({})
 const savingId = ref('')
+const displayMode = ref<'series' | 'characters'>('series')
+const expandedSeries = ref<string[]>([])
 
 // enrollment dialog state
 const showEnroll = ref(false)
@@ -63,6 +81,35 @@ const cacheHitRate = computed(() => {
 const sidecarOk = computed(() => sidecar.value.status === 'ok')
 const dialogTitle = computed(() => dialogMode.value === 'merge' ? '合并角色包' : '录入角色')
 const canSubmitSingle = computed(() => Boolean(formId.value.trim() && formName.value.trim() && formFiles.value.length > 0))
+const seriesGroups = computed<SeriesGroup[]>(() => {
+  const byKey = new Map<string, SeriesGroup>()
+  for (const item of characters.value) {
+    const pack = String(item.pack || '').trim()
+    const series = String(item.series || '').trim()
+    const work = String(item.work || '').trim()
+    const key = series || work || pack || 'unknown'
+    const existing = byKey.get(key)
+    if (existing) {
+      existing.characters.push(item)
+      if (!existing.work && work) existing.work = work
+      if (!existing.series && series) existing.series = series
+      if (pack && !existing.packs.includes(pack)) existing.packs.push(pack)
+      continue
+    }
+    byKey.set(key, {
+      key,
+      title: work || series || pack || '未归类角色',
+      series,
+      work,
+      packs: pack ? [pack] : [],
+      characters: [item],
+    })
+  }
+  return Array.from(byKey.values()).sort((left, right) => {
+    if (right.characters.length !== left.characters.length) return right.characters.length - left.characters.length
+    return left.title.localeCompare(right.title)
+  })
+})
 const mergeableCharacters = computed(() => characters.value.filter(c => c.mergeable))
 const mergeOptions = computed(() => characters.value.map(c => ({
   label: `${c.name || c.character_id} (${c.character_id}) · ${c.pack || '无 pack'}${mergeBlockLabel(c)}`,
@@ -121,6 +168,33 @@ const canSubmitSeriesMerge = computed(() => Boolean(
 
 function sampleUrl(c: Character): string {
   return `/api/admin/characters/${encodeURIComponent(c.character_id)}/sample`
+}
+
+function relationSummary(group: SeriesGroup): string {
+  const counts = group.characters.reduce<Record<string, number>>((acc, item) => {
+    const relation = item.relation || 'known'
+    acc[relation] = (acc[relation] || 0) + 1
+    return acc
+  }, {})
+  return ['self', 'friend', 'known']
+    .filter(key => counts[key])
+    .map(key => `${key} ${counts[key]}`)
+    .join(' · ')
+}
+
+function seriesMeta(group: SeriesGroup): string {
+  if (group.packs.length > 1) return `${group.packs.length} packs · ${group.packs.slice(0, 2).join('、')}`
+  return group.packs[0] || group.series || '未归类 pack'
+}
+
+function isSeriesExpanded(key: string): boolean {
+  return expandedSeries.value.includes(key)
+}
+
+function toggleSeries(key: string): void {
+  expandedSeries.value = isSeriesExpanded(key)
+    ? expandedSeries.value.filter(item => item !== key)
+    : [...expandedSeries.value, key]
 }
 
 function mergeBlockLabel(c: Character): string {
@@ -361,41 +435,109 @@ onMounted(load)
         <AppCard bordered elevated class="char-table-card">
           <PageToolbar>
             <template #left><span class="char-toolbar-title">注册角色</span></template>
-            <template #right><span class="char-muted">relation 改动即时持久化，重扫角色包不会覆盖</span></template>
+            <template #right>
+              <div class="char-view-toolbar">
+                <span class="char-muted">relation 改动即时持久化，重扫角色包不会覆盖</span>
+                <NRadioGroup v-model:value="displayMode" size="small">
+                  <NRadioButton value="series">按系列查看</NRadioButton>
+                  <NRadioButton value="characters">按角色查看</NRadioButton>
+                </NRadioGroup>
+              </div>
+            </template>
           </PageToolbar>
-          <NDataTable
-            v-if="characters.length"
-            :data="characters"
-            :bordered="false"
-            :single-line="false"
-            size="small"
-            :columns="[
-              {
-                title: '样例', key: 'sample', width: 72,
-                render: (r) => r.has_sample
-                  ? h(NImage, { src: sampleUrl(r), width: 40, height: 40, objectFit: 'cover', style: 'border-radius:8px;' })
-                  : h('span', { class: 'char-muted' }, '—'),
-              },
-              { title: 'character_id', key: 'character_id', width: 170 },
-              { title: '名称', key: 'name' },
-              {
-                title: '出处', key: 'work', minWidth: 180,
-                render: (r) => r.work
-                  ? h(NTag, { size: 'small', round: true }, { default: () => r.work })
-                  : h('span', { class: 'char-muted' }, '—'),
-              },
-              { title: 'pack', key: 'pack', width: 150, render: (r) => r.pack || '—' },
-              { title: '别名', key: 'aliases', render: (r) => (r.aliases || []).join('、') || '—' },
-              {
-                title: 'relation', key: 'relation', width: 190,
-                render: (r) => h(NSelect, {
-                  value: r.relation, size: 'small', options: relationOptions,
-                  loading: savingId === r.character_id,
-                  'onUpdate:value': (v: string) => { r.relation = v; saveRelation(r) },
-                }),
-              },
-            ]"
-          />
+          <template v-if="characters.length">
+            <div v-if="displayMode === 'series'" class="char-series-list">
+              <div v-for="group in seriesGroups" :key="group.key" class="char-series-item">
+                <button
+                  type="button"
+                  class="char-series-head"
+                  :aria-expanded="isSeriesExpanded(group.key)"
+                  @click="toggleSeries(group.key)"
+                >
+                  <span class="char-series-toggle">
+                    <NIcon :component="isSeriesExpanded(group.key) ? ChevronDownOutline : ChevronForwardOutline" />
+                  </span>
+                  <span class="char-sample-strip">
+                    <img
+                      v-for="item in group.characters.filter(c => c.has_sample).slice(0, 4)"
+                      :key="item.character_id"
+                      :src="sampleUrl(item)"
+                      width="32"
+                      height="32"
+                      alt=""
+                      class="char-sample-strip__img"
+                    >
+                  </span>
+                  <span class="char-series-main">
+                    <span class="char-series-title">{{ group.title }}</span>
+                    <span class="char-series-meta">{{ seriesMeta(group) }}</span>
+                  </span>
+                  <NTag size="small" round type="info">{{ group.characters.length }} 角色</NTag>
+                  <span class="char-series-relation">{{ relationSummary(group) || 'known 0' }}</span>
+                </button>
+                <div v-if="isSeriesExpanded(group.key)" class="char-series-detail">
+                  <div v-for="item in group.characters" :key="item.character_id" class="char-series-character">
+                    <span class="char-series-character__sample">
+                      <NImage
+                        v-if="item.has_sample"
+                        :src="sampleUrl(item)"
+                        width="32"
+                        height="32"
+                        object-fit="cover"
+                        class="char-series-character__img"
+                      />
+                      <span v-else class="char-muted">—</span>
+                    </span>
+                    <span class="char-series-character__name">
+                      <strong>{{ item.name }}</strong>
+                      <span>{{ item.character_id }}</span>
+                    </span>
+                    <span class="char-series-character__aliases">{{ (item.aliases || []).join('、') || '—' }}</span>
+                    <NSelect
+                      :value="item.relation"
+                      size="small"
+                      :options="relationOptions"
+                      :loading="savingId === item.character_id"
+                      @update:value="(v: string) => { item.relation = v; saveRelation(item) }"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+            <NDataTable
+              v-else
+              :data="characters"
+              :bordered="false"
+              :single-line="false"
+              size="small"
+              :columns="[
+                {
+                  title: '样例', key: 'sample', width: 72,
+                  render: (r) => r.has_sample
+                    ? h(NImage, { src: sampleUrl(r), width: 40, height: 40, objectFit: 'cover', style: 'border-radius:8px;' })
+                    : h('span', { class: 'char-muted' }, '—'),
+                },
+                { title: 'character_id', key: 'character_id', width: 170 },
+                { title: '名称', key: 'name' },
+                {
+                  title: '出处', key: 'work', minWidth: 180,
+                  render: (r) => r.work
+                    ? h(NTag, { size: 'small', round: true }, { default: () => r.work })
+                    : h('span', { class: 'char-muted' }, '—'),
+                },
+                { title: 'pack', key: 'pack', width: 150, render: (r) => r.pack || '—' },
+                { title: '别名', key: 'aliases', render: (r) => (r.aliases || []).join('、') || '—' },
+                {
+                  title: 'relation', key: 'relation', width: 190,
+                  render: (r) => h(NSelect, {
+                    value: r.relation, size: 'small', options: relationOptions,
+                    loading: savingId === r.character_id,
+                    'onUpdate:value': (v: string) => { r.relation = v; saveRelation(r) },
+                  }),
+                },
+              ]"
+            />
+          </template>
           <EmptyState
             v-else
             title="还没有注册角色"
@@ -605,7 +747,125 @@ export default { name: 'CharactersView' }
 .char-table-card { padding: 16px; }
 .char-toolbar-title { font-size: 15px; font-weight: 700; color: var(--om-text-1); }
 .char-muted { color: var(--om-text-3); font-size: 12px; }
+.char-view-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 .char-field-label { font-size: 12px; font-weight: 600; color: var(--om-text-2); margin-bottom: 8px; }
+.char-series-list {
+  display: grid;
+  gap: 8px;
+}
+.char-series-item {
+  border: 1px solid var(--om-border);
+  border-radius: 12px;
+  background: var(--om-surface-solid);
+  overflow: hidden;
+}
+.char-series-head {
+  appearance: none;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  display: grid;
+  grid-template-columns: 24px auto minmax(0, 1fr) auto minmax(120px, auto);
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  color: var(--om-text-1);
+  cursor: pointer;
+  text-align: left;
+}
+.char-series-head:hover {
+  background: var(--om-surface-2);
+}
+.char-series-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--om-text-3);
+}
+.char-sample-strip {
+  display: flex;
+  align-items: center;
+  min-width: 32px;
+  gap: 4px;
+}
+.char-sample-strip__img,
+.char-series-character__img {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.char-sample-strip__img {
+  display: block;
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+}
+.char-series-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 4px;
+}
+.char-series-title {
+  color: var(--om-text-1);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.char-series-meta,
+.char-series-relation {
+  color: var(--om-text-3);
+  font-size: 12px;
+}
+.char-series-detail {
+  display: grid;
+  gap: 4px;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--om-border);
+  background: var(--om-surface-2);
+}
+.char-series-character {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1.2fr) minmax(0, 1fr) 180px;
+  gap: 12px;
+  align-items: center;
+  min-height: 40px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--om-surface-solid);
+}
+.char-series-character__sample {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.char-series-character__name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 4px;
+}
+.char-series-character__name strong,
+.char-series-character__name span,
+.char-series-character__aliases {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.char-series-character__name strong {
+  color: var(--om-text-1);
+}
+.char-series-character__name span,
+.char-series-character__aliases {
+  color: var(--om-text-3);
+  font-size: 12px;
+}
 .char-files { margin-top: 8px; border: 1px solid var(--om-border); border-radius: 8px; padding: 8px 12px; }
 .char-files__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .char-files__list { list-style: none; margin: 0; padding: 0; max-height: 160px; overflow-y: auto; }
@@ -659,6 +919,10 @@ export default { name: 'CharactersView' }
   font-weight: 600;
 }
 @media (max-width: 720px) {
+  .char-series-head,
+  .char-series-character {
+    grid-template-columns: 1fr;
+  }
   .char-series-grid,
   .char-prefix-row,
   .char-merge-row,

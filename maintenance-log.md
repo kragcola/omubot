@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-06-02 角色识别页默认按系列聚合显示
+
+**变更类型**：Admin 前端 UX 优化（`admin/frontend/src/views/characters/CharactersView.vue`、`components.d.ts`、`admin/static/index.html`）。
+
+**背景**：PJSK 角色包已统一为一个 26 角色系列包，但角色识别页仍默认铺开逐角色表格，观察时需要滚动大量角色行。
+
+**修复**：
+- 角色列表默认切换为“按系列查看”：按 `series -> work -> pack` 归组，同作品角色即使拆在不同 pack 也会聚合为一行，显示系列名、pack 摘要、角色数、relation 摘要和样例缩略图。
+- 系列行默认折叠，点击展开后显示角色明细；展开区仍可直接编辑每个角色的 relation。
+- 保留“按角色查看”模式，作为排查单个角色时的完整表格视图。
+
+**验证（D4）**：`admin/frontend ./node_modules/.bin/vue-tsc --noEmit` 通过；`npm run build` 通过（Rollup 仍输出依赖 PURE 注释的既有警告）。未 touch/recreate/down+up NapCat。
+
+**回滚**：恢复本次 `CharactersView.vue/components.d.ts/admin/static/index.html` 改动即可。
+
+---
+
 ## 2026-06-02 纠正 PJSK 系列拆包：统一为 project_sekai
 
 **变更类型**：角色包数据归并修正（手工用 zipfile 归并现有系列包；未 rebuild；未 touch/recreate/down+up NapCat）。
