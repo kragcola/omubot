@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-06-02 虚拟歌姬中V/日V系列包录入完成
+
+**变更类型**：角色识别运行数据录入 + 可复跑脚本（`tools/virtual_singers_roster.py`、`tools/enroll_virtual_singers_pack.py`；生成 `zh_virtual_singers.charpack` 与 `ja_virtual_singers.charpack`，均为 gitignored runtime data）。
+
+**背景**：按 roster 里的中日V表单正式录入虚拟歌姬；只区分 `中V` / `日V` 两个 work，不按引擎/VOCALOID/SynthV/CeVIO 再拆。PJSK 已录的 Crypton 6 人也需要重新录“本家”形态，但不能复用 PJSK 的 `character_id`。
+
+**录入**：
+- 新增 `zh_virtual_singers`：16 人，22 张图，`work=中V`。
+- 新增 `ja_virtual_singers`：34 人，46 张图，`work=日V`；其中 Crypton 6 人 remap 为 `vocaloid_hatsune_miku` / `vocaloid_kagamine_rin` / `vocaloid_kagamine_len` / `vocaloid_megurine_luka` / `vocaloid_meiko` / `vocaloid_kaito`，避免和 PJSK 的 `hatsune_miku` 等 id 撞 metadata。
+- 取图源采用 UtaiteDB artist 主图 + 萌娘百科精确标题白名单；不使用盲 opensearch 首条，避免 `苍穹`、`ONE` 等短名误命中无关作品。
+- 当前 8620 sidecar 仍是 `2026-06-01.v1`，没有 `/build-series-pack`；脚本沿用 `/embed` 兜底构建。
+
+**验证（D4）**：
+- `uv run ruff check tools/enroll_virtual_singers_pack.py tools/virtual_singers_roster.py` 通过。
+- 两包 manifest/npz 校验：`zh=16`、`ja=34`，所有 embedding 均 768 维；样例目录分别 16/34 个角色目录、22/46 张样例。
+- 全部 `config/character_packs/*.charpack` 扫描无重复 `character_id`。
+- Sidecar `/health` 自动扫描后返回 `pack_count=4`、`character_count=136`、`registry_version=7a60b4f27c86`。
+- `CharacterRegistryDB.scan_and_sync("config/character_packs")` 返回 `packs=4 inserted=50 skipped=86`，registry DB 当前 136 行。
+- 抽检 `/identify`：洛天依、苍穹、GUMI、重音テト、本家初音均命中；PJSK 初音样例仍命中 `hatsune_miku`，本家初音样例命中 `vocaloid_hatsune_miku`。
+
+**D6**：未 touch/recreate/down+up NapCat；未重启 bot/sidecar，仅写入角色包并同步 registry。
+
+**回滚**：移动或删除 `config/character_packs/zh_virtual_singers.charpack/` 与 `ja_virtual_singers.charpack/` 后重新执行角色 reload/registry sync；如需保留数据可先归档到 `config/character_packs/.merged/virtual_singers/`。
+
+---
+
 ## 2026-06-02 Bang Dream! 系列角色包录入完成
 
 **变更类型**：角色识别运行数据录入 + 可复跑脚本（`tools/enroll_bangdream_pack.py`；生成 `config/character_packs/bangdream.charpack/`，该目录为 gitignored runtime data）。
