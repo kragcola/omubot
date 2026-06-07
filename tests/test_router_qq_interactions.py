@@ -66,7 +66,35 @@ class _Scheduler:
         })
 
 
-def _ctx(*, poke_enabled: bool = True, reaction_enabled: bool = True) -> PluginContext:
+class _MoodEngine:
+    def __init__(self) -> None:
+        self.signals: list[dict[str, float]] = []
+        self.sessions: list[str] = []
+
+    def register_interaction_signal(
+        self,
+        *,
+        valence_d: float = 0.0,
+        openness_d: float = 0.0,
+        tension_d: float = 0.0,
+        group_id: str | int | None = None,
+        session_id: str = "",
+    ) -> None:
+        del group_id
+        self.signals.append({
+            "valence_d": valence_d,
+            "openness_d": openness_d,
+            "tension_d": tension_d,
+        })
+        self.sessions.append(session_id)
+
+
+def _ctx(
+    *,
+    poke_enabled: bool = True,
+    reaction_enabled: bool = True,
+    mood_engine: object | None = None,
+) -> PluginContext:
     ctx = SimpleNamespace(
         config=SimpleNamespace(
             group=_GroupConfig(),
@@ -79,6 +107,7 @@ def _ctx(*, poke_enabled: bool = True, reaction_enabled: bool = True) -> PluginC
         ),
         timeline=_Timeline(),
         scheduler=_Scheduler(),
+        mood_engine=mood_engine,
     )
     return cast(PluginContext, ctx)
 
@@ -211,3 +240,117 @@ def test_poke_rate_guard_mutes_fifth_poke_for_same_user() -> None:
     assert results == [True, True, True, True, False, False]
     assert len(ctx.timeline.triggers) == 4
     assert len(ctx.scheduler.calls) == 4
+
+
+def test_dispatch_poke_nudges_tension() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood)
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    dispatch_qq_interaction_signal(ctx, signal, now=100.0)
+
+    assert len(mood.signals) == 1
+    s = mood.signals[0]
+    assert s["tension_d"] > 0
+    assert s["valence_d"] == 0.0
+    assert mood.sessions[0] == "group_123456"
+
+
+def test_dispatch_positive_reaction_nudges_valence() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood)
+    signal = QQInteractionSignal(
+        kind="message_reaction",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        raw_message_id=9988,
+        emoji_code="171",  # 点赞 → positive
+        is_tome=True,
+    )
+
+    dispatch_qq_interaction_signal(ctx, signal, now=100.0)
+
+    assert len(mood.signals) == 1
+    s = mood.signals[0]
+    assert s["valence_d"] > 0
+    assert s["tension_d"] == 0.0
+
+
+def test_dispatch_negative_reaction_lowers_valence_raises_tension() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood)
+    signal = QQInteractionSignal(
+        kind="message_reaction",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        raw_message_id=9988,
+        emoji_code="322",  # 翻白眼 → negative
+        is_tome=True,
+    )
+
+    dispatch_qq_interaction_signal(ctx, signal, now=100.0)
+
+    assert len(mood.signals) == 1
+    s = mood.signals[0]
+    assert s["valence_d"] < 0
+    assert s["tension_d"] > 0
+
+
+def test_dispatch_neutral_reaction_no_nudge() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood)
+    signal = QQInteractionSignal(
+        kind="message_reaction",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        raw_message_id=9988,
+        emoji_code="32",  # 疑问 → neutral
+        is_tome=True,
+    )
+
+    dispatch_qq_interaction_signal(ctx, signal, now=100.0)
+
+    assert mood.signals == []
+
+
+def test_dispatch_without_mood_engine_is_safe() -> None:
+    ctx = _ctx(mood_engine=None)
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    # Must not raise; dispatch still succeeds.
+    assert dispatch_qq_interaction_signal(ctx, signal, now=100.0) is True
+
+
+def test_rate_muted_poke_still_nudges_tension() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood)
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    # 6 pokes: 5th+ are reply-muted, but tension should still accrue each time.
+    for offset in range(6):
+        dispatch_qq_interaction_signal(ctx, signal, now=100.0 + offset)
+
+    assert len(mood.signals) == 6
+    assert len(ctx.scheduler.calls) == 4
+

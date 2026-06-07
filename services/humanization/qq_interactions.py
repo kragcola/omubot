@@ -8,6 +8,7 @@ from loguru import logger
 from nonebot.adapters.onebot.v11 import NoticeEvent, PokeNotifyEvent
 
 from kernel.types import PluginContext, TriggerContext
+from services.humanization.emoji_sentiment import classify_reaction_sentiment
 
 _POKE_INBOUND_WINDOW_S = 60.0
 _POKE_INBOUND_THRESHOLD = 5
@@ -138,6 +139,54 @@ def _qq_interaction_reason(signal: QQInteractionSignal) -> str:
     return "QQ 表情回应"
 
 
+# Issue 17 Part 0: mood nudge magnitudes. Positive reaction → valence+,
+# negative → valence-/tension+, poke → tension+. All ride the MoodEngine
+# 30-min decay + 0.2 per-dimension cap, so they nudge rather than dominate.
+_REACTION_POSITIVE_VALENCE = 0.10
+_REACTION_NEGATIVE_VALENCE = 0.12
+_REACTION_NEGATIVE_TENSION = 0.06
+_POKE_TENSION = 0.04
+
+
+def _apply_mood_nudge(ctx: PluginContext, signal: QQInteractionSignal) -> None:
+    """Feed an inbound to-me interaction into the mood engine as a transient nudge.
+
+    Reactions map through ``classify_reaction_sentiment``; pokes raise tension.
+    Best-effort: a missing/erroring mood engine never blocks dispatch. Uses the
+    same cache key as the group mood read (``group_{gid}``) so the nudge lands
+    on the profile the reply path will evaluate.
+    """
+    mood_engine = getattr(ctx, "mood_engine", None)
+    if mood_engine is None:
+        return
+    valence_d = 0.0
+    tension_d = 0.0
+    if signal.kind == "message_reaction":
+        polarity, intensity = classify_reaction_sentiment(signal.emoji_code)
+        if polarity == "positive":
+            valence_d = intensity * _REACTION_POSITIVE_VALENCE
+        elif polarity == "negative":
+            valence_d = -intensity * _REACTION_NEGATIVE_VALENCE
+            tension_d = intensity * _REACTION_NEGATIVE_TENSION
+        else:  # neutral
+            return
+    elif signal.kind == "poke":
+        tension_d = _POKE_TENSION
+    else:
+        return
+    if not (valence_d or tension_d):
+        return
+    try:
+        mood_engine.register_interaction_signal(
+            valence_d=valence_d,
+            tension_d=tension_d,
+            group_id=signal.group_id,
+            session_id=f"group_{signal.group_id}",
+        )
+    except Exception as exc:
+        logger.debug("qq interaction mood nudge skipped | err={}", exc)
+
+
 def dispatch_qq_interaction_signal(
     ctx: PluginContext,
     signal: QQInteractionSignal,
@@ -164,6 +213,11 @@ def dispatch_qq_interaction_signal(
     scheduler = getattr(ctx, "scheduler", None)
     if scheduler is None or scheduler.is_muted(signal.group_id):
         return False
+
+    # Mood nudge fires for any authorized to-me interaction, including pokes
+    # that get rate-muted below: being poke-spammed is exactly when tension
+    # should rise even though we suppress the reply. The 0.2 cap bounds it.
+    _apply_mood_nudge(ctx, signal)
 
     current_time = time.time() if now is None else now
     if _poke_inbound_muted(signal, now=current_time):

@@ -121,13 +121,17 @@ class MoodEngine:
         self._refresh_s = refresh_minutes * 60
         self._cache: dict[tuple[str, str], tuple[MoodProfile, float]] = {}
         self._history: dict[tuple[str, str], list[tuple[MoodProfile, float]]] = {}
-        # Transient recognition nudges: seeing self/friend stickers warms the
-        # mood slightly. Each entry decays linearly over _nudge_decay_s. Stored
-        # per cache_key so it composes with the 15-min mood cache without
-        # rewriting the base computation.
-        self._recognition_nudges: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
+        # Transient interaction nudges: seeing self/friend stickers warms the
+        # mood, and inbound QQ reactions/pokes shift it (positive→valence+,
+        # negative→valence-/tension+, poke→tension+). Each entry is
+        # (timestamp, valence_d, openness_d, tension_d) and decays linearly over
+        # _nudge_decay_s. Stored per cache_key so it composes with the 15-min
+        # mood cache without rewriting the base computation.
+        self._recognition_nudges: dict[
+            tuple[str, str], list[tuple[float, float, float, float]]
+        ] = {}
         self._nudge_decay_s = 1800.0  # 30 min
-        self._nudge_cap = 0.2  # max total valence/openness added
+        self._nudge_cap = 0.2  # max total per-dimension delta added
 
     def evaluate(
         self,
@@ -151,10 +155,11 @@ class MoodEngine:
                 return cached_profile
 
         profile = self._compute(schedule, recent_interaction_count)
-        nudge_v, nudge_o = self._active_nudge(cache_key)
-        if nudge_v or nudge_o:
+        nudge_v, nudge_o, nudge_t = self._active_nudge(cache_key)
+        if nudge_v or nudge_o or nudge_t:
             profile.valence += nudge_v
             profile.openness += nudge_o
+            profile.tension += nudge_t
             profile.clamp()
         self._cache[cache_key] = (profile, now)
         history = self._history.setdefault(cache_key, [])
@@ -199,38 +204,67 @@ class MoodEngine:
             openness_d = 0.08
         else:
             return  # known / unknown: no signal
+        self.register_interaction_signal(
+            valence_d=valence_d,
+            openness_d=openness_d,
+            group_id=group_id,
+            session_id=session_id,
+        )
+
+    def register_interaction_signal(
+        self,
+        *,
+        valence_d: float = 0.0,
+        openness_d: float = 0.0,
+        tension_d: float = 0.0,
+        group_id: str | int | None = None,
+        session_id: str = "",
+    ) -> None:
+        """Record an inbound QQ interaction (reaction/poke) as a transient nudge.
+
+        Issue 17 Part 0: positive reactions → valence+, negative reactions →
+        valence-/tension+, pokes → tension+. Shares the same decay (30 min) and
+        per-dimension cap (0.2) as recognition nudges, so social signals nudge
+        rather than dominate the base mood. No-op when all deltas are zero.
+        """
+        if not (valence_d or openness_d or tension_d):
+            return
         key = self._cache_key(group_id=group_id, session_id=session_id)
         entries = self._recognition_nudges.setdefault(key, [])
-        entries.append((time.monotonic(), valence_d, openness_d))
+        entries.append((time.monotonic(), valence_d, openness_d, tension_d))
         # Bound list growth; decay/prune happens on read.
         if len(entries) > 64:
             del entries[: len(entries) - 64]
         self._cache.pop(key, None)
 
-    def _active_nudge(self, key: tuple[str, str]) -> tuple[float, float]:
-        """Sum un-expired, linearly-decayed nudges for (valence, openness), capped."""
+    def _active_nudge(self, key: tuple[str, str]) -> tuple[float, float, float]:
+        """Sum un-expired, linearly-decayed nudges per dimension, each capped."""
         entries = self._recognition_nudges.get(key)
         if not entries:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         now = time.monotonic()
         valence = 0.0
         openness = 0.0
-        kept: list[tuple[float, float, float]] = []
-        for ts, v_d, o_d in entries:
+        tension = 0.0
+        kept: list[tuple[float, float, float, float]] = []
+        for ts, v_d, o_d, t_d in entries:
             age = now - ts
             if age >= self._nudge_decay_s:
                 continue
             factor = 1.0 - (age / self._nudge_decay_s)
             valence += v_d * factor
             openness += o_d * factor
-            kept.append((ts, v_d, o_d))
+            tension += t_d * factor
+            kept.append((ts, v_d, o_d, t_d))
         if kept:
             self._recognition_nudges[key] = kept
         else:
             self._recognition_nudges.pop(key, None)
+        cap = self._nudge_cap
         return (
-            max(-self._nudge_cap, min(self._nudge_cap, valence)),
-            max(-self._nudge_cap, min(self._nudge_cap, openness)),
+            max(-cap, min(cap, valence)),
+            max(-cap, min(cap, openness)),
+            max(-cap, min(cap, tension)),
         )
 
     def recent_profiles(

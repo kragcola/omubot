@@ -196,3 +196,89 @@ class TestClamp:
         assert p.valence == -1.0
         assert p.openness == 1.0
         assert p.tension == 0.0
+
+
+class TestInteractionNudge:
+    """Issue 17 Part 0: reaction/poke nudges share the recognition-nudge path."""
+
+    def test_recognition_self_still_nudges_valence(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        schedule = _make_schedule()
+        random.seed(7)
+        base = engine.evaluate(schedule, session_id="g1").valence
+        engine.register_recognition_signal("self", session_id="g1")
+        random.seed(7)
+        after = engine.evaluate(schedule, session_id="g1").valence
+        assert after > base
+
+    def test_recognition_friend_still_nudges_openness(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        schedule = _make_schedule()
+        random.seed(7)
+        base = engine.evaluate(schedule, session_id="g1").openness
+        engine.register_recognition_signal("friend", session_id="g1")
+        random.seed(7)
+        after = engine.evaluate(schedule, session_id="g1").openness
+        assert after > base
+
+    def test_recognition_known_is_noop(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        schedule = _make_schedule()
+        random.seed(7)
+        before = engine.evaluate(schedule, session_id="g1")
+        engine.register_recognition_signal("known", session_id="g1")
+        random.seed(7)
+        after = engine.evaluate(schedule, session_id="g1")
+        assert after.valence == before.valence
+        assert after.openness == before.openness
+
+    def test_positive_reaction_raises_valence(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        schedule = _make_schedule()
+        random.seed(7)
+        base = engine.evaluate(schedule, session_id="g1").valence
+        engine.register_interaction_signal(valence_d=0.1, session_id="g1")
+        random.seed(7)
+        after = engine.evaluate(schedule, session_id="g1").valence
+        assert after > base
+
+    def test_negative_reaction_raises_tension_lowers_valence(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        schedule = _make_schedule()
+        random.seed(7)
+        base = engine.evaluate(schedule, session_id="g1")
+        engine.register_interaction_signal(valence_d=-0.1, tension_d=0.06, session_id="g1")
+        random.seed(7)
+        after = engine.evaluate(schedule, session_id="g1")
+        assert after.valence < base.valence
+        assert after.tension > base.tension
+
+    def test_poke_raises_tension_only(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        engine.register_interaction_signal(tension_d=0.04, session_id="g1")
+        v_nudge, o_nudge, t_nudge = engine._active_nudge(
+            engine._cache_key(session_id="g1")
+        )
+        assert t_nudge > 0
+        assert v_nudge == 0.0
+        assert o_nudge == 0.0
+
+    def test_zero_signal_is_noop(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        schedule = _make_schedule()
+        before = engine.evaluate(schedule, session_id="g1")
+        engine.register_interaction_signal(session_id="g1")
+        after = engine.evaluate(schedule, session_id="g1")
+        assert after.tension == before.tension
+        assert after.valence == before.valence
+
+    def test_tension_nudge_is_capped(self):
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        for _ in range(20):
+            engine.register_interaction_signal(tension_d=0.1, session_id="g1")
+        v_nudge, o_nudge, t_nudge = engine._active_nudge(
+            engine._cache_key(session_id="g1")
+        )
+        assert t_nudge <= 0.2 + 1e-9
+        assert v_nudge == 0.0
+        assert o_nudge == 0.0
