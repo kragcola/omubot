@@ -95,6 +95,9 @@ def _action_failed_payload(error: Exception) -> dict[str, Any]:
 def _should_force_reply(trigger: TriggerContext | None) -> bool:
     if trigger is None:
         return False
+    obligation = getattr(trigger, "obligation", None)
+    if obligation is not None and getattr(obligation, "level", "") == "must":
+        return True
     if trigger.mode in {"video_always", "directed_followup", "qq_interaction", "correction"}:
         return True
     # A deferred addressed-wait re-fire must reply (its quiet window elapsed).
@@ -1533,7 +1536,11 @@ class GroupChatScheduler:
         # Force a reply this time (the quiet window elapsed → user finished).
         extra = dict(trigger.extra)
         extra["force_after_wait"] = True
-        fire_trigger = replace(trigger, extra=extra)
+        fire_trigger = replace(
+            trigger,
+            extra=extra,
+            obligation=replace(trigger.obligation, level="must") if trigger.obligation is not None else None,
+        )
         _L.info("scheduler | group={} deferred @ -> fire (force)", group_id)
         slot.last_response_class = ResponseClass.FULL_REPLY.value
         slot.running_task = asyncio.create_task(self._do_chat(group_id, trigger=fire_trigger))
@@ -1771,7 +1778,8 @@ class GroupChatScheduler:
         try:
             if slot is None:
                 return
-            async with slot.chat_lock:
+            slot_ref = slot
+            async with slot_ref.chat_lock:
                 monitor_task: asyncio.Task[None] | None = None
                 for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
                     monitor_task = None
@@ -1804,6 +1812,10 @@ class GroupChatScheduler:
                             )
 
                         force_reply = _should_force_reply(trigger)
+                        must_emit = bool(
+                            trigger is not None
+                            and getattr(getattr(trigger, "obligation", None), "level", "") == "must"
+                        )
 
                         # @mention: prepend [CQ:reply] to the first streamed segment only.
                         # Quote-reply already identifies the target — no need for [CQ:at].
@@ -1861,13 +1873,13 @@ class GroupChatScheduler:
                                     new_pending = self._pending_messages_since(group_id, _baseline)
                                     existing_keys = {
                                         (item.content, item.user_id)
-                                        for item in slot.pending_during_generation
+                                        for item in slot_ref.pending_during_generation
                                     }
                                     for item in new_pending:
                                         key = (item.content, item.user_id)
                                         if key in existing_keys:
                                             continue
-                                        slot.pending_during_generation.append(item)
+                                        slot_ref.pending_during_generation.append(item)
                                         existing_keys.add(key)
                                 _L.info(
                                     "on_segment_aborted | group={} action={}",
@@ -1903,6 +1915,7 @@ class GroupChatScheduler:
                                 on_segment=on_segment if self._bot else None,
                                 privacy_mask=resolved.privacy_mask,
                                 force_reply=force_reply,
+                                must_emit=must_emit,
                                 trigger=trigger,
                             ),
                             timeout=_CHAT_LOCK_LLM_TIMEOUT_S,
@@ -1927,8 +1940,8 @@ class GroupChatScheduler:
                                 group_id, sent_segments, send_total_elapsed,
                             )
                         if latest_reply:
-                            slot.last_reply_time = time.time()
-                            slot.last_reply_content = latest_reply
+                            slot_ref.last_reply_time = time.time()
+                            slot_ref.last_reply_content = latest_reply
                         # B2 fix: mark the active topic block as bot-involved so a
                         # user's follow-up in the same block is judged "ratified"
                         # (a continuation of our exchange) rather than suppressed
@@ -1940,7 +1953,7 @@ class GroupChatScheduler:
                             except Exception as exc:
                                 _L.debug("mark_bot_involved failed | group={} err={}", group_id, exc)
                         if sent_segments > 0:
-                            slot.wait_deferrals = 0  # honored → reset deferral budget
+                            slot_ref.wait_deferrals = 0  # honored → reset deferral budget
                         # Addressed-wait deferral: an @ turn produced no reply
                         # because the thinker chose to wait (user may not be
                         # finished). Don't drop the @ obligation — re-fire after a

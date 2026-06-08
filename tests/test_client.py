@@ -856,6 +856,99 @@ class TestPassTurn:
 
             assert result is not None and result.strip() != ""
 
+    async def test_must_emit_skips_thinker_wait_and_emits_reply(
+        self, identity_snapshot, prompt, short_term, tools, timeline, card_store,
+    ) -> None:
+        async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
+            client._thinker_enabled = True
+            gid = "12345"
+            timeline.add(gid, role="user", content="。", speaker="user(111)")
+
+            with (
+                patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+                patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=MOCK_RESULT_FULL),
+            ):
+                result = await client.chat(
+                    session_id=f"group_{gid}",
+                    user_id="111",
+                    user_content="",
+                    identity=identity_snapshot,
+                    group_id=gid,
+                    ctx=None,
+                    must_emit=True,
+                )
+
+            assert result == "reply text"
+            mock_think.assert_not_called()
+
+    async def test_nickname_only_call_routes_to_companion_llm(
+        self, identity_snapshot, prompt, short_term, tools, timeline, card_store,
+    ) -> None:
+        """Nickname-only call ("emu。") flows into the main LLM as a companion
+        weak-reply (B): the name-called hint is injected, RAG is skipped, and the
+        reply text is LLM-generated (not a hardcoded ack)."""
+        async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
+            client._thinker_enabled = True
+            gid = "12345"
+            timeline.add(gid, role="user", content="emu。", speaker="user(111)")
+            trigger = SimpleNamespace(
+                mode="at_mention",
+                extra={"nickname_only_call": True, "semantic_text": "emu。"},
+            )
+            captured: dict[str, Any] = {}
+
+            async def fake_call(*args: Any, _cap: dict[str, Any] = captured, **kwargs: Any) -> dict[str, Any]:
+                # system_blocks is positional arg index 4 (session, base_url, key, model, system_blocks)
+                _cap["system_blocks"] = args[4] if len(args) > 4 else kwargs.get("system_blocks")
+                return {
+                    "text": "在呢~怎么啦",
+                    "tool_uses": [],
+                    "input_tokens": 10, "output_tokens": 3,
+                    "cache_read": 0, "cache_create": 0,
+                }
+
+            with (
+                patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+                patch("services.llm.client.call_api", side_effect=fake_call) as mock_call_api,
+            ):
+                result = await client.chat(
+                    session_id=f"group_{gid}",
+                    user_id="111",
+                    user_content="",
+                    identity=identity_snapshot,
+                    group_id=gid,
+                    ctx=None,
+                    force_reply=True,
+                    trigger=trigger,
+                )
+
+            # Reply comes from the main LLM, not a hardcoded token pool.
+            assert _normalize_reply(result) == _normalize_reply("在呢~怎么啦")
+            # force_reply skips the thinker entirely.
+            mock_think.assert_not_called()
+            # B: the turn went through the main LLM (not the old short-circuit).
+            mock_call_api.assert_called()
+            # The name-called direction hint is injected into the prompt.
+            blocks_text = "".join(
+                str(b.get("text", "")) for b in (captured.get("system_blocks") or [])
+                if isinstance(b, dict)
+            )
+            assert "点名提示" in blocks_text
+            # The bot's reply is recorded on the timeline.
+            assert _normalize_reply(timeline.get_turns(gid)[-1]["content"]) == _normalize_reply("在呢~怎么啦")
+
+    def test_companion_hint_does_not_forbid_stickers(self) -> None:
+        """The companion / nickname weak-reply hints constrain length/register but
+        must NOT forbid stickers — the by-intent sticker prerequisite has landed,
+        so sticker attachment is left to the thinker decision (design §2.2)."""
+        from services.llm.client import _COMPANION_REPLY_HINT, _NICKNAME_ONLY_REPLY_HINT
+
+        assert "不要用表情包" not in _COMPANION_REPLY_HINT
+        assert "不要用表情包" not in _NICKNAME_ONLY_REPLY_HINT
+        # Still constrains the register (short, in-presence, no topic expansion).
+        assert "不要展开话题" in _COMPANION_REPLY_HINT
+        assert "不要展开话题" in _NICKNAME_ONLY_REPLY_HINT
+
     async def test_low_confidence_pass_turn_light_ack_when_gate_enabled(
         self, identity_snapshot, prompt, short_term, tools, timeline, card_store,
     ) -> None:
@@ -887,7 +980,7 @@ class TestPassTurn:
                     ctx=None,
                 )
 
-            assert _normalize_reply(result) == _normalize_reply("嗯，我在。")
+            assert _normalize_reply(result) == _normalize_reply("嗯~")
 
     async def test_tool_calls_are_exposed_to_post_reply(self, identity_snapshot, prompt, short_term, tools) -> None:
         async for client in _client(prompt, short_term, tools):

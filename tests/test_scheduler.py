@@ -4,7 +4,7 @@ import asyncio
 import time
 
 from kernel.config import GroupConfig, GroupOverride
-from kernel.types import TriggerContext
+from kernel.types import AddressingContext, ReplyObligation, TriggerContext
 from services.memory.timeline import GroupTimeline
 from services.persona import IdentitySnapshot
 from services.scheduler import GroupChatScheduler, _GroupSlot, _should_force_reply
@@ -36,6 +36,33 @@ def test_qq_interaction_mode_force_reply() -> None:
             extra={"addressee_self": False},
         )
     ) is False
+
+
+def test_must_obligation_overrides_legacy_addressee_flag() -> None:
+    addressing = AddressingContext(
+        addressed=True,
+        target="self",
+        confidence=1.0,
+        evidence="nickname_original",
+        original_text="emu。",
+        stripped_text="。",
+        matched_nickname="emu",
+    )
+    obligation = ReplyObligation(
+        level="must",
+        reason="self_addressed",
+        source="nickname_original",
+        priority=100,
+        addressing=addressing,
+    )
+    assert _should_force_reply(
+        TriggerContext(
+            reason="有人叫你「emu」",
+            mode="at_mention",
+            obligation=obligation,
+            extra={"addressee_self": False},
+        )
+    ) is True
 
 
 class _FakeRuntime:
@@ -1347,6 +1374,35 @@ class TestP7RuleLayerBoundary:
         assert len(llm.calls) == 1  # rule layer fired the @
         assert calls == []  # gray-zone scoring never ran
         await scheduler.close()
+
+    async def test_must_obligation_passes_must_emit_to_chat(self) -> None:
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        obligation = ReplyObligation(
+            level="must",
+            reason="self_addressed",
+            source="nickname_original",
+            priority=100,
+        )
+        scheduler.notify(
+            "111",
+            trigger=TriggerContext(
+                reason="有人叫你「emu」",
+                mode="at_mention",
+                obligation=obligation,
+                extra={"addressee_self": False},
+            ),
+            is_addressed=True,
+        )
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 1
+        assert llm.calls[0]["force_reply"] is True
+        assert llm.calls[0]["must_emit"] is True
+        await scheduler.close()
+
 
     async def test_non_addressed_message_reaches_gray_zone(self) -> None:
         """A plain non-@ message (no rule-layer hit) is the only path that may

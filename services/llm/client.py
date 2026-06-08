@@ -146,7 +146,29 @@ def _build_sticker_cq(store: StickerStore, sticker_id: str) -> str | None:
     return f"[CQ:image,file=base64://{b64},sub_type=1,summary=[动画表情]]"
 
 
-_PASS_TURN_LIGHT_ACK = "嗯，我在。"
+# Light-reply fallback tokens when LLM generation fails. Split by scenario to
+# avoid semantic mismatch (closing needs farewell, companion needs ack).
+_LIGHT_REPLY_CLOSING_FALLBACK = "好~"
+_LIGHT_REPLY_COMPANION_FALLBACK = "嗯~"
+_LIGHT_REPLY_GENERIC_FALLBACK = "嗯~"  # legacy compat
+# Companion weak-reply direction injected into plugin_dynamic for the main LLM.
+# It constrains length/register only — it does NOT hardcode the reply text, and
+# it no longer forbids stickers: the sticker prerequisite (send_sticker by-intent
+# retrieval) has landed, so whether to attach one is left to the thinker's
+# `sticker` decision + the existing send_sticker nudge (design §2.2: 弱回复必须带温度).
+_COMPANION_REPLY_HINT = (
+    "【弱回复提示】对方不需要有信息量的回复，只需简短应一声（嗯/哈哈/是吧）"
+    "表示在听，不要展开话题。"
+)
+# Nickname-only direction: someone called the bot's name with no payload
+# ("emu。" / "姆。"). NoneBot stripped the nickname, so there is nothing to
+# answer — respond as if your name was called: a short, warm in-presence ack
+# or a reverse-question, never a topic. Reply text is LLM-generated; a sticker
+# may be attached per the thinker `sticker` decision.
+_NICKNAME_ONLY_REPLY_HINT = (
+    "【点名提示】对方刚喊了你的名字，但没说别的事。像被叫到一样简短回应一下"
+    "（在呢～/怎么啦/嗯？叫我有事呀），可以反问一句，不要展开话题、不要硬找话说。"
+)
 _PAUSE_EXTEND_MAX_COUNT = 2
 _CONTROL_TOKEN_RE = re.compile(
     r"(?is)\s*(?:\[\s*pass[_\s-]*turn\s*\]|pass[_\s-]*turn|passturn)\s*(?:[:：\-]\s*.*)?\s*"
@@ -2601,6 +2623,94 @@ class LLMClient:
         cleaned, _ = _strip_control_tokens(_clean_reply(text))
         return cleaned.strip().strip('"').strip("'").strip()[:32]
 
+    async def _handle_light_reply(
+        self,
+        *,
+        light_kind: str,
+        thinker_action: str,
+        conversation_text: str,
+        mood_text: str,
+        user_id: str,
+        group_id: str | None,
+        identity_name: str,
+        trigger: object | None,
+        on_segment: Callable[[str], Awaitable[bool]] | None,
+        timeline: object | None,
+        thinker_usage: dict[str, int],
+        session_id: str,
+        t0: float,
+    ) -> dict[str, Any] | None:
+        """Handle light_reply (closing/companion) as a unified short-circuit.
+
+        Returns a result dict if the turn was handled (caller should return None
+        to skip main LLM), or None if the turn should continue to main LLM.
+
+        Closing: generates a symmetric farewell token synchronously (not speculative,
+        because the thinker decides light_kind after speculative window closes).
+        Companion: injects a hint and continues to main LLM for a short ack.
+        """
+        if thinker_action != "light_reply":
+            return None
+
+        if light_kind == "closing":
+            # Generate farewell token synchronously. This adds ~200-500ms latency
+            # but closing is low-frequency and semantic correctness > latency.
+            token = await self._gen_closing_token(
+                conversation_text=conversation_text,
+                mood_text=mood_text,
+                user_id=user_id,
+                group_id=group_id,
+                identity_name=identity_name,
+            )
+            token = (token or "").strip() or _LIGHT_REPLY_CLOSING_FALLBACK
+            emitted = False
+            if on_segment is not None:
+                quote_id = getattr(trigger, "target_message_id", None) if trigger is not None else None
+                seg = f"[CQ:reply,id={quote_id}]{token}" if quote_id else token
+                try:
+                    await on_segment(seg)
+                    emitted = True
+                except Exception as exc:
+                    _log_msg_out.warning("light_reply closing emit failed | err={}", exc)
+            if emitted and group_id is not None and timeline is not None:
+                try:
+                    cast(Any, timeline).add(group_id, role="assistant", content=token)
+                except Exception as exc:
+                    _log_msg_out.debug("light_reply closing timeline write skipped | err={}", exc)
+            self._record_usage(
+                call_type="proactive",
+                user_id=user_id, group_id=group_id,
+                model=self._profile_for_task("thinker")[3],
+                provider_kind=self._profile_for_task("thinker")[4],
+                input_tokens=thinker_usage.get("input_tokens", 0),
+                cache_read_tokens=thinker_usage.get("cache_read", 0),
+                cache_create_tokens=thinker_usage.get("cache_create", 0),
+                output_tokens=thinker_usage.get("output_tokens", 0),
+                tool_rounds=0, elapsed_s=time.monotonic() - t0,
+            )
+            _log_msg_out.info(
+                "light_reply | session={} kind=closing token={!r} emitted={}",
+                session_id, token, emitted,
+            )
+            return {"text": token, "light_reply": True, "light_kind": "closing"}
+
+        if light_kind == "companion":
+            # Companion: return a hint to inject into plugin_dynamic, then let
+            # main LLM generate a short ack. This is design §2.5 复用点 A.
+            _log_msg_out.info(
+                "light_reply | session={} kind=companion -> main LLM with hint",
+                session_id,
+            )
+            # Return a sentinel that tells caller to inject hint and continue.
+            return {"inject_companion_hint": True, "light_kind": "companion"}
+
+        # Unknown light_kind: log and fall through to main LLM.
+        _log_msg_out.debug(
+            "light_reply | session={} unknown kind={!r} -> main LLM",
+            session_id, light_kind,
+        )
+        return None
+
     async def _fire_post_reply(
         self,
         *,
@@ -3960,7 +4070,9 @@ class LLMClient:
         trigger: object | None = None,
         *,
         privacy_mask: bool = True,
+        must_emit: bool = False,
     ) -> str | None:
+        force_reply = bool(force_reply or must_emit)
         content_preview = user_content[:80] if isinstance(user_content, str) else str(user_content)[:80]
         _log_msg_in.info(
             "chat | session={} user={} identity={} text={!r}",
@@ -4032,7 +4144,18 @@ class LLMClient:
         else:
             conversation_text = content_text(user_content) if user_content else ""
 
-        if self._text_preflight_enabled(group_id):
+        trigger_extra = getattr(trigger, "extra", {}) if trigger is not None else {}
+        # Nickname-only call ("emu。" / "姆。"): NoneBot stripped the nickname, so
+        # there is no semantic payload. Route through the main LLM as a companion
+        # weak-reply (B): inject a name-called hint + skip RAG (no query to
+        # retrieve on), letting the LLM produce a short ack and optionally a
+        # by-intent sticker. The flag is consumed in the no-thinker branch below
+        # (nickname-only is @-addressed → force_reply → thinker is skipped).
+        nickname_only_call = bool(trigger_extra.get("nickname_only_call", False))
+        if nickname_only_call:
+            conversation_text = str(trigger_extra.get("semantic_text") or conversation_text or "").strip()
+
+        if self._text_preflight_enabled(group_id) and not must_emit:
             trigger_extra = getattr(trigger, "extra", {}) if trigger is not None else {}
             preflight_result = preflight(
                 conversation_text,
@@ -4061,7 +4184,7 @@ class LLMClient:
         slang_context_block = ""
         slang_ask_user_fallback: str | None = None
         speculative_slang_task: asyncio.Task[Any] | None = None
-        closing_token: str | None = None
+        companion_hint: str | None = None
         instruction_hint = ""
         if self._thinker_enabled and not force_reply:
             from services.llm.thinker import (
@@ -4099,20 +4222,6 @@ class LLMClient:
                             group_id=group_id,
                             timeout=max(0.05, float(getattr(self._slang_lookup_config, "timeout_ms", 500)) / 1000.0),
                         )
-                # Weak-reply P0: when the router flagged this turn as a closing,
-                # pre-generate the terminal token in parallel with the thinker so
-                # the short-circuit below pays no extra serial latency.
-                closing_token_task: asyncio.Task[Any] | None = None
-                if str(getattr(trigger, "mode", "") or "") == "closing":
-                    closing_token_task = speculative.submit(
-                        self._gen_closing_token,
-                        conversation_text=conversation_text,
-                        mood_text=mood_text,
-                        user_id=user_id,
-                        group_id=group_id,
-                        identity_name=identity.name,
-                        timeout=2.0,
-                    )
                 thinker_decision = await think(
                     api_call=lambda req: self._call(req),
                     recent_messages=recent_for_thinker,
@@ -4135,15 +4244,6 @@ class LLMClient:
                 slang_context_block = self._build_slang_context_block(resolved_terms)
                 if unresolved_terms:
                     slang_ask_user_fallback = self._slang_ask_user_fallback(unresolved_terms)
-                if closing_token_task is not None:
-                    try:
-                        closing_token = await closing_token_task
-                    except Exception:
-                        # Speculative gen failed/timed out → fall back to a static
-                        # token at the short-circuit. (Outer cancellation propagates:
-                        # if the chat task itself is cancelled, the SpeculativeExecutor
-                        # __aexit__ cancels this task and CancelledError is re-raised.)
-                        closing_token = None
             # Persist decision in prompt context so plugins can see it
             thinker_action = thinker_decision.action
             thinker_thought = thinker_decision.thought
@@ -4275,52 +4375,49 @@ class LLMClient:
             if instruction_hint is None:
                 return None  # DENY (legacy direct mode): refusal already emitted
 
-            # Weak-reply P0: closing short-circuit. When the thinker (or the
-            # router-set trigger) classifies this turn as a farewell, emit a
-            # symmetric terminal token directly — no main LLM call. Structurally
-            # mirrors the instruction_gate DENY path (on_segment + return None).
+            # Unified light_reply handling (closing/companion). Replaces the old
+            # speculative + short-circuit approach that missed thinker-originated
+            # closing decisions. See weak-reply-audit-2026-06-07.md for rationale.
             light_kind = str(getattr(thinker_decision, "light_kind", "") or "")
-            is_closing_turn = light_kind == "closing" or (
-                str(getattr(trigger, "mode", "") or "") == "closing"
-                and thinker_action != "wait"
+            light_result = await self._handle_light_reply(
+                light_kind=light_kind,
+                thinker_action=thinker_action,
+                conversation_text=conversation_text,
+                mood_text=mood_text,
+                user_id=user_id,
+                group_id=group_id,
+                identity_name=identity.name,
+                trigger=trigger,
+                on_segment=on_segment,
+                timeline=self._timeline,
+                thinker_usage=thinker_decision.usage,
+                session_id=session_id,
+                t0=t0,
             )
-            if is_closing_turn:
-                token = (closing_token or "").strip() or _PASS_TURN_LIGHT_ACK
-                emitted = False
-                if on_segment is not None:
-                    quote_id = getattr(trigger, "target_message_id", None) if trigger is not None else None
-                    seg = f"[CQ:reply,id={quote_id}]{token}" if quote_id else token
-                    try:
-                        await on_segment(seg)
-                        emitted = True
-                    except Exception as exc:
-                        _log_msg_out.warning("closing emit failed | err={}", exc)
-                if emitted and group_id is not None and self._timeline is not None:
-                    try:
-                        self._timeline.add(group_id, role="assistant", content=token)
-                    except Exception as exc:
-                        _log_msg_out.debug("closing timeline write skipped | err={}", exc)
-                self._record_usage(
-                    call_type="proactive",
-                    user_id=user_id, group_id=group_id,
-                    model=self._profile_for_task("thinker")[3],
-                    provider_kind=self._profile_for_task("thinker")[4],
-                    input_tokens=thinker_decision.usage.get("input_tokens", 0),
-                    cache_read_tokens=thinker_decision.usage.get("cache_read", 0),
-                    cache_create_tokens=thinker_decision.usage.get("cache_create", 0),
-                    output_tokens=thinker_decision.usage.get("output_tokens", 0),
-                    tool_rounds=0, elapsed_s=time.monotonic() - t0,
-                )
-                _log_msg_out.info(
-                    "closing_light_reply | session={} token={!r} speculative={}",
-                    session_id, token, closing_token is not None,
-                )
-                return None
+            if light_result is not None:
+                if light_result.get("light_kind") == "closing":
+                    # Closing was handled; skip main LLM.
+                    return None
+                if light_result.get("inject_companion_hint"):
+                    # Companion: inject hint and continue to main LLM. The hint
+                    # constrains length/register; sticker attachment is left to
+                    # the thinker `sticker` decision + send_sticker nudge below.
+                    companion_hint = _COMPANION_REPLY_HINT
         else:
             self._last_thinker_action = ""
             thinker_thought = ""
             thinker_topic_intent_label = "闲聊"
             self._last_thinker_thought = ""
+            # Nickname-only call reaches here (force_reply skips the thinker).
+            # Inject the name-called direction and skip RAG: there is no semantic
+            # query to retrieve on, and the reply is a short in-presence ack. The
+            # main LLM still owns the wording (no hardcoded token) and may attach
+            # a by-intent sticker via send_sticker.
+            if nickname_only_call:
+                companion_hint = _NICKNAME_ONLY_REPLY_HINT
+                thinker_retrieve_mode = "skip"
+                self._last_thinker_action = "light_reply"
+                self._last_thinker_thought = "nickname_only_companion"
 
         group_profile = self._resolve_group_profile(group_id)
         humanization = self._resolve_humanization(
@@ -4416,6 +4513,8 @@ class LLMClient:
                     plugin_dynamic.append({"type": "text", "text": addressee_hint})
                 if instruction_hint:
                     plugin_dynamic.append({"type": "text", "text": instruction_hint})
+                if companion_hint:
+                    plugin_dynamic.append({"type": "text", "text": companion_hint})
 
                 if deepseek_native_main:
                     state_board_block = await self._prompt.build_state_board_block(
@@ -4610,7 +4709,7 @@ class LLMClient:
                         confidence,
                         self._pass_turn_confidence_threshold,
                     )
-                    text = text or _PASS_TURN_LIGHT_ACK
+                    text = text or _LIGHT_REPLY_GENERIC_FALLBACK
                     tool_uses = [tu for tu in tool_uses if tu.name != "pass_turn"]
                     pass_turn = None
                 else:
