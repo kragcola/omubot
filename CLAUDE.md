@@ -76,6 +76,15 @@ Fix any errors discovered during testing, even if they were pre-existing and not
 - **只读检查运行中服务锁着的 SQLite**：服务在跑时 DB 被锁，直接 `sqlite3` 可能阻塞或抢锁（D5 同源）。只读检查用 `sqlite3 'file:storage/<db>.db?mode=ro&immutable=1' '<query>'`，先 `.schema` / `PRAGMA table_info` 再 SELECT，不要在跑服务时写。
 - **macOS 沙盒下进程探测**：`pgrep` / 部分 `ps` 会报 `sysmond service not found` 或权限错误。查进程/端口改用 `docker compose ps`、容器日志、pidfile，或 `lsof -nP -iTCP:<port>`。
 
+### 工具调用：有依赖的写操作合并原子执行 + 自验证
+
+分步执行多个独立写操作时，中间步骤（如 `git add`）偶发不真正落实，agent 易凭工具回执字面误判成功（实测：`git add` 没生效 → `git commit` 报 `no changes added` → HEAD 不动，却被误读成「commit 被吞」）。规则：
+
+- **有依赖关系的 git/写操作合并成一条 bash 原子执行**：`git add X Y && git commit -m '…' && git log --oneline -1`，不要拆成多个独立工具调用。
+- **同条命令内打印自验证证据**：commit 后 `git log --oneline -1`、写文件后 `ls -l`/`wc -l`。从同一份输出读真实结果，不读「成功」字面。
+- **声明「已提交/已写入」前必须有外部状态证据**（HEAD hash 真变、文件真在盘、暂存区符合预期），与 D4 一致。
+- **同一动作失败两次即停**，换执行方式（合并原子 bash）或上报，不盯着回执反复试。
+
 ## Release
 
 发布新版本时，Docker 镜像版本必须和 git tag 对齐。无正式 tag 时使用 `vYYYYMMDD-<short hash>` 格式（如 `v20260404-cd328d2`）。

@@ -98,6 +98,25 @@ trigger Tencent anti-fraud and force re-login.
   with `sysmond service not found` or permission errors. Prefer
   `docker compose ps`, container logs, pidfiles, or `lsof -nP -iTCP:<port>`.
 
+## Atomic Writes + Self-Verification
+
+Dependent git/write operations occasionally lose an intermediate step when split
+across separate tool calls (e.g. a `git add` that does not take effect, leaving
+the index empty so the following `git commit` exits with `no changes added` and
+HEAD never moves). Do not trust a tool's "success" wording — verify external
+state.
+
+- **Chain dependent git/write ops into one bash call**:
+  `git add X Y && git commit -m '…' && git log --oneline -1`. Do not split them
+  into separate tool calls.
+- **Print verification evidence in the same command**: `git log --oneline -1`
+  after commit, `ls -l` / `wc -l` after writing a file, `git diff --stat`. Read
+  the real result from that output, not from "tool succeeded".
+- **Before claiming "committed" / "written", require external evidence**: HEAD
+  hash actually changed, file actually on disk, index matches expectation (D4).
+- **Stop after two failures of the same action** — switch approach (atomic bash)
+  or report; do not keep retrying against the response wording.
+
 ## Skill Trigger
 
 For Omubot-specific work involving admin/frontend, admin routes, docs/wiki,
