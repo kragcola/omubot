@@ -86,6 +86,18 @@ trigger Tencent anti-fraud and force re-login.
 - **D7 Git hygiene**: before deploy/build/merge, check `git stash list` and
   `git status -uno`; never rely on `stash apply` exit code alone.
 
+## Local Environment Notes
+
+- **Read-only inspection of SQLite DBs held by a running service**: while a
+  service is up the DB is locked, so a plain `sqlite3` open can block or
+  contend for the lock (same root as D5). For read-only checks use
+  `sqlite3 'file:storage/<db>.db?mode=ro&immutable=1' '<query>'`, and run
+  `.schema` / `PRAGMA table_info` before ad hoc SELECTs. Do not write while the
+  service is running.
+- **Process probing in the macOS sandbox**: `pgrep` and some `ps` calls fail
+  with `sysmond service not found` or permission errors. Prefer
+  `docker compose ps`, container logs, pidfiles, or `lsof -nP -iTCP:<port>`.
+
 ## Skill Trigger
 
 For Omubot-specific work involving admin/frontend, admin routes, docs/wiki,
@@ -109,8 +121,22 @@ The skill bodies are mirrored in:
 
 - `.agents/skills/omubot-admin-console/`
 - `.agents/skills/omubot-deep-delivery/`
+- `.agents/skills/omubot-continuity/`
 - `.claude/skills/omubot-admin-console/`
 - `.claude/skills/omubot-deep-delivery/`
+- `.claude/skills/omubot-continuity/`
+
+## Continuity Rule
+
+For long-running, resumed, or compaction-sensitive work, use the
+`omubot-continuity` skill. First read `.workspace/agent-session-state.md` if it
+exists, then `docs/tracking/ACTIVE.md`, then the active tracker named there, then
+`git status --short`. Continue from the tracker `next_step` instead of
+rediscovering the repository from scratch.
+
+Create or update an active tracker for work that spans sessions, touches 3+
+files, involves production/runtime/skills/hooks/prompts, or requires a bug test
+ledger. Keep `maintenance-log.md` for durable completed changes, not live todo.
 
 ## Maintenance Log
 

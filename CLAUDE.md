@@ -71,6 +71,11 @@ Fix any errors discovered during testing, even if they were pre-existing and not
 - **D6 admin SPA 同步路径**：`admin/static` 是 bind mount——只改前端 `npm run build` 即生效，无需 docker rebuild；改了 .py 才需要 rebuild bot。
 - **D7 部署前 git hygiene**：deploy / build / merge 前必跑 `git stash list && git status -uno`；`stash apply` exit 0 不等于成功，必抽查 `git diff` 确认 hunks 真落地；`storage/*.db*` / `*.bak*` 走 .gitignore 物理护栏，不用 `git add -A`。
 
+### 本机环境提示
+
+- **只读检查运行中服务锁着的 SQLite**：服务在跑时 DB 被锁，直接 `sqlite3` 可能阻塞或抢锁（D5 同源）。只读检查用 `sqlite3 'file:storage/<db>.db?mode=ro&immutable=1' '<query>'`，先 `.schema` / `PRAGMA table_info` 再 SELECT，不要在跑服务时写。
+- **macOS 沙盒下进程探测**：`pgrep` / 部分 `ps` 会报 `sysmond service not found` 或权限错误。查进程/端口改用 `docker compose ps`、容器日志、pidfile，或 `lsof -nP -iTCP:<port>`。
+
 ## Release
 
 发布新版本时，Docker 镜像版本必须和 git tag 对齐。无正式 tag 时使用 `vYYYYMMDD-<short hash>` 格式（如 `v20260404-cd328d2`）。
@@ -99,10 +104,9 @@ Chinese: user-facing strings, identity configs. English: code, comments, docstri
 
 ## Maintenance Discipline
 
-This project has automated hooks in `.claude/settings.json`:
+Unlike Codex (which relies on `.codex/hooks.json` + `scripts/dev/codex-session-start.py` + `docs/tracking/ACTIVE.md` to recover state, because it lacks a todo list and forgets after context compaction), Claude Code does **not** depend on injected SessionStart state. Claude retains task context through automatic compaction and tracks work with TodoWrite + file memory. So at the start of a session you are **not** automatically handed the latest maintenance-log entry or bot logs — read them yourself when a task needs current runtime state. The continuity hooks/tracker are Codex-specific scaffolding; do not assume they have run for you.
 
-- **SessionStart**: injects latest maintenance-log entry + bot logs into context — you'll see current state at the start of every session
-- **PostToolUse on Write/Edit**: when you edit `docs/` or `config/`, you'll get a reminder to update the maintenance log
+Cross-agent handoff is the exception: when you do work that Codex may resume, still update `docs/tracking/ACTIVE.md` and the active tracker, because Codex genuinely depends on them to recover.
 
 Rules for maintenance-log.md:
 - Append a dated entry for every deploy, config change, incident, or significant code change
