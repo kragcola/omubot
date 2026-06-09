@@ -224,17 +224,24 @@ def sticker_store(tmp_path) -> StickerStore:
 
 
 async def test_dream_list_stickers(store: CardStore, sticker_store: StickerStore) -> None:
-    """list_stickers tool returns sticker data as JSON."""
-    stk_id, _ = sticker_store.add(_JPEG_DATA, "测试表情", "开心时用", source="auto")
+    """list_stickers returns the never-sent auto-captured eviction candidates."""
+    # Auto-captured + never sent -> a candidate.
+    cand_id, _ = sticker_store.add(
+        _JPEG_DATA, "候选表情", "群友常用", source="stolen_silent_learn"
+    )
+    # Protected source -> never a candidate.
+    prot_data = b"\xff\xd8\xff\xe0" + b"\x11" * 64 + b"dream-protected"
+    prot_id, _ = sticker_store.add(prot_data, "受保护", "保留", source="admin")
     agent = DreamAgent(store=store, sticker_store=sticker_store)
 
     result = await agent._execute_tool("list_stickers", {})
 
     parsed = json.loads(result)
-    assert stk_id in parsed
-    entry = parsed[stk_id]
-    assert entry["description"] == "测试表情"
-    assert entry["usage_hint"] == "开心时用"
+    assert parsed["total_in_library"] == 2
+    assert "delete_floor" in parsed
+    cand_ids = [c["id"] for c in parsed["candidates"]]
+    assert cand_id in cand_ids, "never-sent silent sticker is a candidate"
+    assert prot_id not in cand_ids, "protected source is excluded"
 
 
 async def test_dream_delete_sticker(store: CardStore, sticker_store: StickerStore) -> None:
@@ -242,7 +249,8 @@ async def test_dream_delete_sticker(store: CardStore, sticker_store: StickerStor
     stk_id, _ = sticker_store.add(_JPEG_DATA, "要删除的表情", "临时用", source="auto")
     assert sticker_store.get(stk_id) is not None
 
-    agent = DreamAgent(store=store, sticker_store=sticker_store)
+    # floor=0 so a single sticker is above the floor and may be removed.
+    agent = DreamAgent(store=store, sticker_store=sticker_store, sticker_delete_floor=0)
     result = await agent._execute_tool("delete_sticker", {"id": stk_id})
 
     assert "已删除" in result
@@ -252,10 +260,25 @@ async def test_dream_delete_sticker(store: CardStore, sticker_store: StickerStor
 
 async def test_dream_delete_sticker_not_found(store: CardStore, sticker_store: StickerStore) -> None:
     """delete_sticker returns 未找到 for nonexistent sticker."""
-    agent = DreamAgent(store=store, sticker_store=sticker_store)
+    agent = DreamAgent(store=store, sticker_store=sticker_store, sticker_delete_floor=0)
     result = await agent._execute_tool("delete_sticker", {"id": "stk_nonexistent"})
 
     assert "未找到" in result
+
+
+async def test_dream_delete_sticker_blocked_below_floor(
+    store: CardStore, sticker_store: StickerStore
+) -> None:
+    """delete_sticker is refused while the library is at/below the delete floor."""
+    stk_id, _ = sticker_store.add(_JPEG_DATA, "受保护的表情", "不该被删", source="auto")
+    assert sticker_store.get(stk_id) is not None
+
+    # 1 sticker, floor=500 -> count (1) <= floor -> refuse.
+    agent = DreamAgent(store=store, sticker_store=sticker_store, sticker_delete_floor=500)
+    result = await agent._execute_tool("delete_sticker", {"id": stk_id})
+
+    assert "下限" in result
+    assert sticker_store.get(stk_id) is not None  # untouched
 
 
 # ---------------------------------------------------------------------------

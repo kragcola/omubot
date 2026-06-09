@@ -4,7 +4,11 @@
   "values": {
     "enabled": true,
     "storage_dir": "storage/stickers",
-    "max_count": 200,
-    "frequency": "frequently"
+    "max_count": 300,
+    "frequency": "frequently",
+    "learn_min_occurrences": 3,
+    "learn_window_hours": 24,
+    "prompt_view_max": 100,
+    "prompt_view_recent_slice": 20
   }
 }

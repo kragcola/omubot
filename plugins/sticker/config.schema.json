@@ -16,6 +16,30 @@
       "title": "最大收藏数量",
       "minimum": 1
     },
+    "learn_min_occurrences": {
+      "type": "integer",
+      "title": "静默收录复发门槛",
+      "description": "同一表情在时间窗内被看到达到该次数才下载入库，过滤一次性图、从源头控量。设 1 等于见到即收。",
+      "minimum": 1
+    },
+    "learn_window_hours": {
+      "type": "number",
+      "title": "复发统计时间窗（小时）",
+      "description": "复发计数的滑动窗口长度，窗口外的旧记录不累计。",
+      "minimum": 0.1
+    },
+    "prompt_view_max": {
+      "type": "integer",
+      "title": "Prompt 表情视图上限",
+      "description": "注入 system prompt 的表情条数上限（只展示常用/最新），防止表情库膨胀击穿缓存。",
+      "minimum": 1
+    },
+    "prompt_view_recent_slice": {
+      "type": "integer",
+      "title": "Prompt 视图新表情曝光位",
+      "description": "在 prompt 视图里为最近新增表情保留的展示位，给未被发过的新表情曝光机会。",
+      "minimum": 0
+    },
     "frequency": {
       "type": "string",
       "title": "默认发送频率",

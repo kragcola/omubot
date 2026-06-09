@@ -22,6 +22,13 @@
       "title": "最大工具轮数",
       "minimum": 1,
       "maximum": 50
+    },
+    "sticker_delete_floor": {
+      "type": "integer",
+      "title": "表情库删除下限",
+      "description": "库存 ≤ 该值时 Dream 不再淘汰表情包，防止单向缩水。",
+      "minimum": 0,
+      "maximum": 5000
     }
   }
 }

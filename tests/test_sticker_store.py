@@ -43,7 +43,11 @@ def test_sticker_config_defaults() -> None:
     cfg = StickerConfig()
     assert cfg.enabled is True
     assert cfg.storage_dir == "storage/stickers"
-    assert cfg.max_count == 200
+    assert cfg.max_count == 300
+    assert cfg.learn_min_occurrences == 3
+    assert cfg.learn_window_hours == 24.0
+    assert cfg.prompt_view_max == 100
+    assert cfg.prompt_view_recent_slice == 20
 
 
 def test_sticker_config_custom() -> None:
@@ -642,3 +646,152 @@ async def test_add_works_from_worker_thread(tmp_path: Path) -> None:
     # Reads from the loop thread still see the worker-thread write.
     assert sid in store.list_all()
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# Part B1: max_count capacity eviction
+# ---------------------------------------------------------------------------
+
+
+def _distinct_jpeg(n: int) -> bytes:
+    """A valid-magic JPEG whose payload makes its SHA unique per n."""
+    return b"\xff\xd8\xff\xe0" + (f"payload-{n:06d}".encode()) + b"\x00" * 16
+
+
+def test_add_evicts_lowest_send_count_silent_when_full(tmp_path: Path) -> None:
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"), max_count=3)
+    a, _ = store.add(_distinct_jpeg(1), "a", "h", source="stolen_silent_learn")
+    b, _ = store.add(_distinct_jpeg(2), "b", "h", source="stolen_silent_learn")
+    c, _ = store.add(_distinct_jpeg(3), "c", "h", source="stolen_silent_learn")
+    # b has been used; a and c never sent -> a (oldest, send_count 0) evicted first.
+    store.record_send(b)
+    store.record_send(c)
+    d, is_new = store.add(_distinct_jpeg(4), "d", "h", source="stolen_silent_learn")
+    assert is_new
+    assert store.count == 3
+    assert a not in store.list_all(), "lowest send_count + oldest must be evicted"
+    assert {b, c, d} <= set(store.list_all())
+    store.close()
+
+
+def test_add_does_not_evict_protected_sources(tmp_path: Path) -> None:
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"), max_count=2)
+    m, _ = store.add(_distinct_jpeg(1), "m", "h", source="migrated:v1:usage_1")
+    adm, _ = store.add(_distinct_jpeg(2), "adm", "h", source="admin")
+    # Library full of protected stickers: adding a silent one must not delete them.
+    _, is_new = store.add(_distinct_jpeg(3), "s", "h", source="stolen_silent_learn")
+    assert is_new
+    assert m in store.list_all() and adm in store.list_all()
+    # Soft cap does not force-delete protected content, so it may exceed max_count.
+    assert store.count == 3
+    store.close()
+
+
+def test_eviction_prefers_silent_over_protected(tmp_path: Path) -> None:
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"), max_count=2)
+    prot, _ = store.add(_distinct_jpeg(1), "p", "h", source="admin")
+    sil, _ = store.add(_distinct_jpeg(2), "s", "h", source="stolen_silent_learn")
+    new, _ = store.add(_distinct_jpeg(3), "n", "h", source="stolen_silent_learn")
+    assert prot in store.list_all(), "protected sticker survives"
+    assert sil not in store.list_all(), "silent sticker evicted instead"
+    assert new in store.list_all()
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# Part B3: eviction_candidates (Dream cleanup feed)
+# ---------------------------------------------------------------------------
+
+
+def test_eviction_candidates_only_never_sent_silent(tmp_path: Path) -> None:
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"), max_count=100)
+    sent, _ = store.add(_distinct_jpeg(1), "sent", "h", source="stolen_silent_learn")
+    never, _ = store.add(_distinct_jpeg(2), "never", "h", source="stolen_silent_learn")
+    protected, _ = store.add(_distinct_jpeg(3), "prot", "h", source="migrated:v1:usage_1")
+    store.record_send(sent)
+    ids = [c["id"] for c in store.eviction_candidates(limit=50)]
+    assert never in ids
+    assert sent not in ids, "sent stickers are not eviction candidates"
+    assert protected not in ids, "protected sources are never candidates"
+    store.close()
+
+
+def test_eviction_candidates_oldest_first_and_limit(tmp_path: Path) -> None:
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"), max_count=100)
+    ids = []
+    for i in range(5):
+        sid, _ = store.add(_distinct_jpeg(i), f"s{i}", "h", source="stolen_silent_learn")
+        ids.append(sid)
+    cands = store.eviction_candidates(limit=3)
+    assert len(cands) == 3
+    # Oldest created_at first; insertion order here is ascending created_at.
+    assert [c["id"] for c in cands] == ids[:3]
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# Part B2: format_prompt_view truncation + cache stability
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_view_truncates_to_max(tmp_path: Path) -> None:
+    store = StickerStore(
+        storage_dir=str(tmp_path / "stickers"),
+        max_count=1000,
+        prompt_view_max=10,
+        prompt_view_recent_slice=5,
+    )
+    for i in range(40):
+        store.add(_distinct_jpeg(i), f"s{i}", "h", source="stolen_silent_learn")
+    view = store.format_prompt_view()
+    body_lines = [ln for ln in view.splitlines() if ln.startswith("«表情包:")]
+    assert len(body_lines) == 10, "view must cap at prompt_view_max"
+    assert "共 40 张" in view.splitlines()[0]
+    store.close()
+
+
+def test_prompt_view_includes_used_and_recent(tmp_path: Path) -> None:
+    store = StickerStore(
+        storage_dir=str(tmp_path / "stickers"),
+        max_count=1000,
+        prompt_view_max=6,
+        prompt_view_recent_slice=2,
+    )
+    ids = []
+    for i in range(20):
+        sid, _ = store.add(_distinct_jpeg(i), f"s{i}", "h", source="stolen_silent_learn")
+        ids.append(sid)
+    # An old sticker that got sent must stay visible despite not being recent.
+    store.record_send(ids[0])
+    view = store.format_prompt_view()
+    assert ids[0] in view, "used sticker stays in view"
+    assert ids[-1] in view, "most recent sticker is in view"
+    store.close()
+
+
+def test_prompt_view_member_cache_stable_across_sends(tmp_path: Path) -> None:
+    store = StickerStore(
+        storage_dir=str(tmp_path / "stickers"),
+        max_count=1000,
+        prompt_view_max=5,
+        prompt_view_recent_slice=5,
+    )
+    ids = [store.add(_distinct_jpeg(i), f"s{i}", "h", source="stolen_silent_learn")[0] for i in range(5)]
+    first = store.format_prompt_view()
+    # Recording a send must NOT churn the member set (prompt cache stability).
+    store.record_send(ids[0])
+    second = store.format_prompt_view()
+    assert {ln for ln in first.splitlines() if ln.startswith("«表情包:")} == {
+        ln for ln in second.splitlines() if ln.startswith("«表情包:")
+    }
+    # Adding a sticker DOES invalidate the member set.
+    store.add(_distinct_jpeg(999), "new", "h", source="stolen_silent_learn")
+    assert store._view_members is None
+    store.close()
+
+
+def test_prompt_view_empty_library(tmp_path: Path) -> None:
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"))
+    assert store.format_prompt_view() == "当前表情包库为空"
+    store.close()
+

@@ -36,6 +36,10 @@ _MAGIC_GIF89 = b"GIF89a"
 _INDEX_FILE = "index.json"  # legacy JSON index (migration source / rollback snapshot)
 _DB_FILE = "stickers.db"
 
+# Only auto-captured stickers are eligible for capacity/quality eviction.
+# Migrated library, admin-curated, and tool-saved stickers are protected.
+_EVICTABLE_SOURCE_PREFIXES = ("stolen_silent",)
+
 _CREATE_STICKERS = """\
 CREATE TABLE IF NOT EXISTS stickers (
     sticker_id   TEXT PRIMARY KEY,
@@ -97,9 +101,18 @@ def _row_to_entry(row: sqlite3.Row) -> dict[str, Any]:
 class StickerStore:
     """Persistent sticker library backed by a directory and a SQLite index."""
 
-    def __init__(self, storage_dir: str, max_count: int = 200) -> None:
+    def __init__(
+        self,
+        storage_dir: str,
+        max_count: int = 300,
+        *,
+        prompt_view_max: int = 100,
+        prompt_view_recent_slice: int = 20,
+    ) -> None:
         self._storage_dir = Path(storage_dir)
         self._max_count = max_count
+        self._prompt_view_max = max(1, int(prompt_view_max))
+        self._prompt_view_recent_slice = max(0, int(prompt_view_recent_slice))
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         # add() runs inside asyncio.to_thread workers (silent sticker learning),
         # while reads/updates run on the event loop thread. Allow cross-thread
@@ -117,6 +130,10 @@ class StickerStore:
         # Lazy BM25 index over rich descriptions; rebuilt on demand when dirty.
         self._retriever = KeywordBM25Retriever()
         self._search_dirty = True
+        # Cached prompt-view member set (sticker_ids). Recomputed only when the
+        # library changes (add/remove/evict), NOT on every send — so send_count
+        # bursts don't churn the system-prompt cache breakpoint.
+        self._view_members: list[str] | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -131,6 +148,12 @@ class StickerStore:
     def max_count(self) -> int:
         """Return the configured maximum sticker count."""
         return self._max_count
+
+    @property
+    def count(self) -> int:
+        """Return the current number of stickers in the library."""
+        with self._lock:
+            return len(self._index)
 
     def close(self) -> None:
         """Checkpoint the WAL and close the SQLite connection."""
@@ -263,6 +286,12 @@ class StickerStore:
             if sticker_id in self._index:
                 return (sticker_id, False)
 
+            # Capacity guard: enforce max_count by evicting the least-valuable
+            # auto-captured stickers (lowest send_count, then oldest).  Protected
+            # sources (migrated/admin/manual) are never auto-evicted.
+            if self._max_count > 0 and len(self._index) >= self._max_count:
+                self._evict_for_capacity_locked(len(self._index) - self._max_count + 1)
+
             filename = f"{sticker_id}.{ext}"
             file_path = self._storage_dir / filename
             file_path.write_bytes(image_data)
@@ -287,6 +316,7 @@ class StickerStore:
                 )
             self._index[sticker_id] = entry
             self._search_dirty = True
+            self._view_members = None
         return (sticker_id, True)
 
     def remove(self, sticker_id: str) -> bool:
@@ -301,11 +331,85 @@ class StickerStore:
             with self._db:
                 self._db.execute("DELETE FROM stickers WHERE sticker_id = ?", (sticker_id,))
             self._search_dirty = True
+            self._view_members = None
 
         file_path = self._storage_dir / entry["file"]
         if file_path.exists():
             file_path.unlink()
         return True
+
+    @staticmethod
+    def _is_evictable(source: str) -> bool:
+        return any(str(source or "").startswith(p) for p in _EVICTABLE_SOURCE_PREFIXES)
+
+    def _eviction_order_locked(self) -> list[str]:
+        """Return evictable sticker_ids worst-first (lowest send_count, oldest).
+
+        Caller must hold ``self._lock``.  Only auto-captured (``stolen_silent*``)
+        stickers are returned; protected sources are excluded.
+        """
+        candidates = [
+            (sid, entry)
+            for sid, entry in self._index.items()
+            if self._is_evictable(entry.get("source", ""))
+        ]
+        candidates.sort(
+            key=lambda kv: (
+                int(kv[1].get("send_count", 0) or 0),
+                str(kv[1].get("created_at", "") or ""),
+            )
+        )
+        return [sid for sid, _ in candidates]
+
+    def _evict_for_capacity_locked(self, n: int) -> int:
+        """Evict up to *n* least-valuable auto-captured stickers. Returns count removed.
+
+        Caller must hold ``self._lock``.  Removes from DB + mirror + disk inline.
+        If no evictable candidates exist (library full of protected stickers),
+        removes nothing — the soft cap does not force-delete protected content.
+        """
+        if n <= 0:
+            return 0
+        victims = self._eviction_order_locked()[:n]
+        removed = 0
+        for sid in victims:
+            entry = self._index.pop(sid, None)
+            if entry is None:
+                continue
+            with self._db:
+                self._db.execute("DELETE FROM stickers WHERE sticker_id = ?", (sid,))
+            file_path = self._storage_dir / entry["file"]
+            if file_path.exists():
+                file_path.unlink()
+            removed += 1
+        if removed:
+            self._search_dirty = True
+            self._view_members = None
+        return removed
+
+    def eviction_candidates(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return up to *limit* auto-captured stickers that never got sent.
+
+        Deterministic quality-driven cleanup feed for the Dream agent: only
+        ``stolen_silent*`` sources with ``send_count == 0``, oldest first.  Each
+        item carries id/description/usage_hint/created_at so Dream can rescue
+        genuinely valuable ones while deleting the rest.
+        """
+        with self._lock:
+            rows = [
+                {
+                    "id": sid,
+                    "description": entry.get("description", ""),
+                    "usage_hint": entry.get("usage_hint", ""),
+                    "created_at": entry.get("created_at", ""),
+                    "source": entry.get("source", ""),
+                }
+                for sid, entry in self._index.items()
+                if self._is_evictable(entry.get("source", ""))
+                and int(entry.get("send_count", 0) or 0) == 0
+            ]
+        rows.sort(key=lambda r: str(r.get("created_at", "") or ""))
+        return rows[: max(0, limit)]
 
     def update(
         self,
@@ -411,19 +515,70 @@ class StickerStore:
     # Prompt injection
     # ------------------------------------------------------------------
 
+    def _compute_view_members_locked(self) -> list[str]:
+        """Pick which sticker_ids the prompt view exposes. Caller holds the lock.
+
+        Fills up to ``prompt_view_max`` slots, ranked by send_count desc then
+        newest first (most useful + freshest win when the cap bites), while
+        guaranteeing the newest ``prompt_view_recent_slice`` stickers are always
+        included — a fresh-exposure window so brand-new (send_count==0) stickers
+        can earn sends instead of being buried under the proven core.
+        """
+        items = list(self._index.items())
+        if len(items) <= self._prompt_view_max:
+            ordered = self._rank_locked(items)
+            return [sid for sid, _ in ordered]
+
+        def created(entry: dict[str, Any]) -> str:
+            return str(entry.get("created_at", "") or "")
+
+        # Guarantee the newest N stickers a slot.
+        by_recent = sorted(items, key=lambda kv: created(kv[1]), reverse=True)
+        guaranteed = [sid for sid, _ in by_recent[: self._prompt_view_recent_slice]]
+        guaranteed_set = set(guaranteed)
+        # Fill the remaining budget with the highest-ranked non-guaranteed stickers.
+        budget = max(0, self._prompt_view_max - len(guaranteed))
+        ranked = self._rank_locked([kv for kv in items if kv[0] not in guaranteed_set])
+        fill = [sid for sid, _ in ranked[:budget]]
+        # Keep overall order ranked (guaranteed ids re-sorted into the ranking).
+        members = set(guaranteed) | set(fill)
+        final = self._rank_locked([kv for kv in items if kv[0] in members])
+        return [sid for sid, _ in final[: self._prompt_view_max]]
+
+    def _rank_locked(self, items: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:
+        """Rank items by send_count desc, then created_at desc, then id. Lock held."""
+        return sorted(
+            items,
+            key=lambda kv: (
+                int(kv[1].get("send_count", 0) or 0),
+                str(kv[1].get("created_at", "") or ""),
+                kv[0],
+            ),
+            reverse=True,
+        )
+
     def format_prompt_view(self) -> str:
         """Return a compact view of the sticker library for system prompt injection.
 
-        Only includes id, format, description, usage_hint, and ocr_text — volatile
-        fields (send_count, last_sent, created_at) are excluded for prompt cache
-        stability. ocr_text is stable (does not change on send) and safe to include.
+        Only exposes a bounded top-N slice (proven-useful + recently added), not
+        the whole library, so the system-prompt block stays small and its cache
+        breakpoint stable.  Per line: id, format, description, usage_hint,
+        ocr_text — volatile fields (send_count/last_sent/created_at) are excluded
+        for cache stability; the member set is cached and only recomputed when
+        the library changes, so send bursts don't churn the prompt cache.
         """
-        if not self._index:
-            return "当前表情包库为空"
+        with self._lock:
+            if not self._index:
+                return "当前表情包库为空"
+            if self._view_members is None:
+                self._view_members = self._compute_view_members_locked()
+            member_ids = [sid for sid in self._view_members if sid in self._index]
+            entries = [(sid, self._index[sid]) for sid in member_ids]
+            total = len(self._index)
 
         lines = ["当前表情包库："]
-        with self._lock:
-            entries = list(self._index.items())
+        if len(entries) < total:
+            lines[0] = f"当前表情包库（共 {total} 张，下列为常用/最新 {len(entries)} 张）："
         for sticker_id, entry in entries:
             description = entry.get("description", "")
             usage_hint = entry.get("usage_hint", "")

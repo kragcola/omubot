@@ -1110,6 +1110,8 @@ class ChatPlugin(AmadeusPlugin):
             ctx.sticker_store = StickerStore(
                 storage_dir=sticker_cfg.storage_dir,
                 max_count=sticker_cfg.max_count,
+                prompt_view_max=sticker_cfg.prompt_view_max,
+                prompt_view_recent_slice=sticker_cfg.prompt_view_recent_slice,
             )
         else:
             ctx.sticker_store = None

@@ -5,6 +5,7 @@
     "enabled": true,
     "life_reflection_enabled": false,
     "interval_hours": 24,
-    "max_rounds": 15
+    "max_rounds": 15,
+    "sticker_delete_floor": 150
   }
 }

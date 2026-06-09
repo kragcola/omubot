@@ -369,3 +369,85 @@ async def test_ensure_cached_prefers_llm_client_session(
     used_session = plugin._image_cache.save.call_args.args[0]
     assert used_session is real_session, "must prefer llm_client._session over adapter.session"
 
+
+# ---------------------------------------------------------------------------
+# Part A: recurrence quality gate
+# ---------------------------------------------------------------------------
+
+
+def test_recurrence_gate_requires_min_occurrences() -> None:
+    from plugins.sticker.plugin import _RecurrenceGate
+
+    gate = _RecurrenceGate(min_occurrences=3, window_seconds=1000.0)
+    assert gate.should_learn("f1", now=0.0) is False  # 1st sighting
+    assert gate.should_learn("f1", now=1.0) is False  # 2nd
+    assert gate.should_learn("f1", now=2.0) is True   # 3rd -> crosses gate
+
+
+def test_recurrence_gate_window_prunes_stale_sightings() -> None:
+    from plugins.sticker.plugin import _RecurrenceGate
+
+    gate = _RecurrenceGate(min_occurrences=3, window_seconds=100.0)
+    assert gate.should_learn("f1", now=0.0) is False
+    assert gate.should_learn("f1", now=50.0) is False
+    # 3rd sighting at 200 is outside the 100s window of the first two ->
+    # both pruned, only this one remains, so the gate stays closed.
+    assert gate.should_learn("f1", now=200.0) is False
+    assert gate.should_learn("f1", now=250.0) is False  # 2 within window
+    assert gate.should_learn("f1", now=290.0) is True   # 3 within [190, 290]
+
+
+def test_recurrence_gate_resolved_stops_counting() -> None:
+    from plugins.sticker.plugin import _RecurrenceGate
+
+    gate = _RecurrenceGate(min_occurrences=2, window_seconds=1000.0)
+    assert gate.should_learn("f1", now=0.0) is False
+    assert gate.should_learn("f1", now=1.0) is True
+    gate.mark_resolved("f1")
+    # Resolved within window: further sightings do not re-trigger.
+    assert gate.should_learn("f1", now=2.0) is False
+    assert gate.should_learn("f1", now=3.0) is False
+
+
+def test_recurrence_gate_min_one_passes_immediately() -> None:
+    from plugins.sticker.plugin import _RecurrenceGate
+
+    gate = _RecurrenceGate(min_occurrences=1, window_seconds=1000.0)
+    assert gate.should_learn("f1", now=0.0) is True
+
+
+def test_recurrence_gate_seen_lru_eviction_bounded() -> None:
+    from plugins.sticker.plugin import _MAX_TRACKED_FILE_IDS, _RecurrenceGate
+
+    gate = _RecurrenceGate(min_occurrences=5, window_seconds=10_000.0)
+    for i in range(_MAX_TRACKED_FILE_IDS + 200):
+        gate.should_learn(f"f{i}", now=float(i))
+    assert len(gate._seen) <= _MAX_TRACKED_FILE_IDS
+
+
+async def test_on_message_gate_blocks_one_off_sticker(
+    sticker_store: StickerStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sticker seen fewer than min_occurrences times is never downloaded/added."""
+    plugin = _make_plugin(sticker_store, _silent_learn_group_config(12345))
+    from plugins.sticker.plugin import _RecurrenceGate
+    plugin._recurrence_gate = _RecurrenceGate(min_occurrences=3, window_seconds=1000.0)
+
+    calls = {"n": 0}
+
+    async def fake_cache(self, bot, seg, *, file_id):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(StickerPlugin, "_ensure_segment_cached", fake_cache)
+
+    seg = {"type": "image", "data": {"file": "oneoff.jpg", "sub_type": "1", "url": "x"}}
+    before = len(sticker_store._index)
+    # Two sightings: below the gate, must NOT even attempt download.
+    await plugin.on_message(_msg_ctx(segments=[seg]))
+    await plugin.on_message(_msg_ctx(segments=[seg]))
+    assert calls["n"] == 0, "below threshold must not download"
+    assert len(sticker_store._index) == before
+
+

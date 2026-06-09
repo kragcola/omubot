@@ -36,6 +36,8 @@ class DreamConfig(BaseModel):
     life_reflection_enabled: bool = False
     interval_hours: int = 24
     max_rounds: int = 15
+    sticker_delete_floor: int = 150
+    """表情库删除下限：库存 ≤ 该值时 Dream 不再淘汰表情包，防止单向缩水。"""
 
 # Type alias for the LLM API caller (matches LLMClient._call signature)
 ApiCaller = Callable[..., Awaitable[dict[str, Any]]]
@@ -391,7 +393,7 @@ _LIST_ENTITIES_TOOL: dict[str, Any] = {
 
 _LIST_STICKERS_TOOL: dict[str, Any] = {
     "name": "list_stickers",
-    "description": "查看当前表情包库的完整索引（含使用统计）。",
+    "description": "查看「从未被发送过的自动收录表情」淘汰候选清单（按最旧优先排序，已被发送过的不在内）。",
     "input_schema": {
         "type": "object",
         "properties": {},
@@ -434,6 +436,7 @@ class DreamAgent:
         runtime_state: RuntimeStateBus | None = None,
         vision_client: Any | None = None,
         ocr_backfill_per_run: int = 10,
+        sticker_delete_floor: int = 500,
         life_reflection_enabled: bool = False,
         schedule_store: Any | None = None,
         story_arc_store: Any | None = None,
@@ -448,6 +451,7 @@ class DreamAgent:
         self._runtime_state = runtime_state
         self._vision_client = vision_client
         self._ocr_backfill_per_run = max(0, int(ocr_backfill_per_run))
+        self._sticker_delete_floor = max(0, int(sticker_delete_floor))
         self._life_reflection_enabled = bool(life_reflection_enabled)
         self._schedule_store = schedule_store
         self._story_arc_store = story_arc_store
@@ -551,13 +555,31 @@ class DreamAgent:
 
             sticker_section = ""
             if self._sticker_store:
-                sticker_section = (
-                    "\n\n5. 表情包库整理：用 list_stickers 查看完整索引，"
-                    "审查 send_count 低且 created_at 久远的表情包（LRU 候选），"
-                    "综合判断是否淘汰（独特/有价值的可以保留），"
-                    f"用 delete_sticker 删除不需要的。库存上限 {self._sticker_store.max_count} 张。"
-                    "如果发现 description 或 usage_hint 明显不准确，可以删除该表情包。"
-                )
+                count = self._sticker_store.count
+                floor = self._sticker_delete_floor
+                if floor > 0 and count <= floor:
+                    sticker_section = (
+                        f"\n\n5. 表情包库：当前 {count} 张，未达删除下限 "
+                        f"{floor} 张，本轮不要淘汰任何表情包"
+                        "（delete_sticker 会被拒绝）。库存偏少，正常即可。"
+                    )
+                else:
+                    floor_note = (
+                        f"（删除下限 {floor} 张，库存高于下限才可淘汰）"
+                        if floor > 0
+                        else ""
+                    )
+                    floor_warn = (
+                        f"，但不要删到 {floor} 张以下" if floor > 0 else ""
+                    )
+                    sticker_section = (
+                        f"\n\n5. 表情包库整理：当前 {count} 张{floor_note}。"
+                        "用 list_stickers 查看「从未被发送过的自动收录表情」候选清单"
+                        "（已按最旧优先排序）。逐个判断：明显重复、低质、description/"
+                        "usage_hint 不准确、或就是没用的，用 delete_sticker 删除；"
+                        f"独特/有价值/有潜力的保留{floor_warn}。"
+                        "已经被发送过的表情包不在候选里，不要删。"
+                    )
 
             system = [{"type": "text", "text": (
                 "你是记忆整理助手。当前记忆卡片索引：\n"
@@ -861,7 +883,18 @@ class DreamAgent:
         if name == "list_stickers":
             if self._sticker_store is None:
                 return "表情包系统未启用"
-            return json.dumps(self._sticker_store.list_all(), ensure_ascii=False, indent=2)
+            # Deterministic quality-driven feed: only never-sent auto-captured
+            # stickers (send_count==0), oldest first.  Dream rescues the
+            # genuinely valuable ones and deletes the rest, instead of scanning
+            # the whole library by hand.
+            candidates = self._sticker_store.eviction_candidates(limit=60)
+            payload = {
+                "total_in_library": self._sticker_store.count,
+                "delete_floor": self._sticker_delete_floor,
+                "never_sent_auto_captured": len(candidates),
+                "candidates": candidates,
+            }
+            return json.dumps(payload, ensure_ascii=False, indent=2)
 
         if name == "delete_sticker":
             if self._sticker_store is None:
@@ -869,6 +902,11 @@ class DreamAgent:
             sticker_id = inp.get("id", "")
             if not sticker_id:
                 return "缺少 id 参数"
+            if self._sticker_delete_floor > 0 and self._sticker_store.count <= self._sticker_delete_floor:
+                return (
+                    f"表情库当前 {self._sticker_store.count} 张，未超过删除下限 "
+                    f"{self._sticker_delete_floor} 张，本轮不淘汰表情包。"
+                )
             if self._sticker_store.remove(sticker_id):
                 return f"已删除: {sticker_id}"
             return f"未找到: {sticker_id}"
@@ -907,6 +945,7 @@ class DreamPlugin(AmadeusPlugin):
             on_memo_change=lambda: ctx.prompt_builder.invalidate(),
             runtime_state=ctx.runtime_state,
             vision_client=getattr(ctx, "vision_client", None),
+            sticker_delete_floor=dream_cfg.sticker_delete_floor,
             life_reflection_enabled=dream_cfg.life_reflection_enabled,
             schedule_store=getattr(ctx, "schedule_store", None),
             story_arc_store=getattr(ctx, "story_arc_store", None),

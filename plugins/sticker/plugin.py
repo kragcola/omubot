@@ -7,6 +7,8 @@ silent_learn 模式下通过 on_message 静默吸纳群友常用表情。
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -27,6 +29,86 @@ from services.media.sticker_capture import (
 _L = logger.bind(channel="system")
 _SILENT_STEAL_MAX_IMAGES = 2
 _MAX_PENDING_RETRIES = 100
+# Frequency-gate memory caps so the in-memory counters never grow unbounded.
+_MAX_TRACKED_FILE_IDS = 5000
+_MAX_RESOLVED_FILE_IDS = 5000
+
+
+class _RecurrenceGate:
+    """In-memory recurrence counter for the silent-steal quality gate.
+
+    A sticker is only worth learning if the group actually re-sends it.  Each
+    distinct ``file_id`` accumulates timestamped sightings in a sliding window;
+    once it is seen ``min_occurrences`` times it passes the gate exactly once,
+    after which it is marked resolved and stops counting.  This is the input
+    quality criterion (group re-use as a vote) and the primary volume control —
+    one-off images never reach the threshold, so they are never downloaded.
+    """
+
+    def __init__(self, *, min_occurrences: int, window_seconds: float) -> None:
+        self._min = max(1, int(min_occurrences))
+        self._window = max(1.0, float(window_seconds))
+        self._seen: dict[str, deque[float]] = {}
+        self._resolved: dict[str, float] = {}
+
+    def mark_resolved(self, file_id: str) -> None:
+        """Record that *file_id* was handled (learned or attempted); stop counting."""
+        if not file_id:
+            return
+        self._resolved[file_id] = time.monotonic()
+        self._seen.pop(file_id, None)
+        self._evict_resolved()
+
+    def should_learn(self, file_id: str, *, now: float | None = None) -> bool:
+        """Register one sighting of *file_id*; return True when it crosses the gate.
+
+        Returns False (and keeps counting) until the threshold is reached, and
+        False for already-resolved ids.  When True, the caller should download +
+        add the sticker and then call :meth:`mark_resolved`.
+        """
+        if not file_id:
+            return False
+        ts = time.monotonic() if now is None else now
+        # Expire stale resolved markers so a long-dormant sticker may re-qualify.
+        resolved_at = self._resolved.get(file_id)
+        if resolved_at is not None:
+            if ts - resolved_at <= self._window:
+                return False
+            self._resolved.pop(file_id, None)
+
+        bucket = self._seen.get(file_id)
+        if bucket is None:
+            bucket = deque()
+            self._seen[file_id] = bucket
+            self._evict_seen()
+        bucket.append(ts)
+        # Prune sightings outside the sliding window.
+        cutoff = ts - self._window
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if self._min <= 1:
+            return True
+        return len(bucket) >= self._min
+
+    def _evict_seen(self) -> None:
+        if len(self._seen) <= _MAX_TRACKED_FILE_IDS:
+            return
+        # Drop the least-recently-touched file_ids (smallest latest timestamp).
+        overflow = len(self._seen) - _MAX_TRACKED_FILE_IDS
+        victims = sorted(
+            self._seen.items(),
+            key=lambda kv: kv[1][-1] if kv[1] else 0.0,
+        )[:overflow]
+        for fid, _ in victims:
+            self._seen.pop(fid, None)
+
+    def _evict_resolved(self) -> None:
+        if len(self._resolved) <= _MAX_RESOLVED_FILE_IDS:
+            return
+        overflow = len(self._resolved) - _MAX_RESOLVED_FILE_IDS
+        victims = sorted(self._resolved.items(), key=lambda kv: kv[1])[:overflow]
+        for fid, _ in victims:
+            self._resolved.pop(fid, None)
 
 
 @dataclass(frozen=True)
@@ -43,8 +125,15 @@ class StickerConfig(BaseModel):
 
     enabled: bool = True
     storage_dir: str = "storage/stickers"
-    max_count: int = 200
+    max_count: int = 300
     frequency: str = "frequently"
+    # 静默偷取的复发频率闸：同一表情在窗口内被看到 >= learn_min_occurrences 次
+    # 才下载入库。绝大多数一次性图达不到门槛，从源头控量并以"群复发"为质量依据。
+    learn_min_occurrences: int = 3
+    learn_window_hours: float = 24.0
+    # prompt 视图只暴露 top-N 张给 LLM，而非全库，止住 system prompt token 膨胀。
+    prompt_view_max: int = 100
+    prompt_view_recent_slice: int = 20
 
 _STICKER_FREQUENCY_PROMPTS: dict[str, str] = {
     "rarely": (
@@ -93,7 +182,7 @@ _STICKER_FREQUENCY_PROMPTS: dict[str, str] = {
 class StickerPlugin(AmadeusPlugin):
     name = "sticker"
     description = "表情包工具：保存、发送、管理表情包及图片描述"
-    version = "1.1.7"
+    version = "1.2.0"
     priority = 40
     silent_safe = True
     """on_message 只读取消息 + 写表情库，不发消息也不改 trigger，可在 silent_learn 群运行。"""
@@ -109,6 +198,10 @@ class StickerPlugin(AmadeusPlugin):
         self._ctx: PluginContext | None = None
         self._pending_retries: list[_PendingStickerRetry] = []
         self._pending_retry_keys: set[tuple[str, str, str]] = set()
+        # Recurrence gate is configured in on_startup; default lets every sticker
+        # through (min_occurrences=1) so tests constructing the plugin directly
+        # keep working until on_startup tightens it.
+        self._recurrence_gate = _RecurrenceGate(min_occurrences=1, window_seconds=86400.0)
 
     async def on_startup(self, ctx: PluginContext) -> None:
         import nonebot
@@ -123,6 +216,10 @@ class StickerPlugin(AmadeusPlugin):
         self._superusers = set(ctx.config.admins.keys()) | nonebot.get_driver().config.superusers
         self._sticker_frequency = sticker_cfg.frequency
         self._group_config = getattr(ctx.config, "group", None)
+        self._recurrence_gate = _RecurrenceGate(
+            min_occurrences=sticker_cfg.learn_min_occurrences,
+            window_seconds=sticker_cfg.learn_window_hours * 3600.0,
+        )
 
     def register_tools(self) -> list[Tool]:
         if self._sticker_store is None:
@@ -181,6 +278,12 @@ class StickerPlugin(AmadeusPlugin):
             if not is_sticker_like_segment(seg):
                 continue
             file_id = segment_value(seg, "file")
+            # Recurrence quality gate: only learn stickers the group actually
+            # re-sends.  Count sightings before downloading — one-off images
+            # never reach the threshold, so they cost no bandwidth or vision.
+            gate_key = (file_id.split(".", 1)[0] if file_id else "").strip()
+            if gate_key and not self._recurrence_gate.should_learn(gate_key):
+                continue
             path = await self._ensure_segment_cached(bot, seg, file_id=file_id)
             if path is None or not path.exists():
                 self._queue_retry(ctx, seg, file_id=file_id)
@@ -196,6 +299,8 @@ class StickerPlugin(AmadeusPlugin):
                     "stolen_silent_learn",
                 )
             except ValueError as exc:
+                # Format rejected etc. — mark resolved so we stop recounting it.
+                self._recurrence_gate.mark_resolved(gate_key)
                 _L.debug("silent sticker learn skipped | group={} reason={}", ctx.group_id, exc)
                 continue
             except Exception:
@@ -204,6 +309,8 @@ class StickerPlugin(AmadeusPlugin):
                     ctx.group_id, file_id, exc_info=True,
                 )
                 continue
+            # Crossed the gate and add() ran (new or dup): stop counting it.
+            self._recurrence_gate.mark_resolved(gate_key)
             if is_new:
                 await emit_emotion_tag(
                     self._sticker_store,
