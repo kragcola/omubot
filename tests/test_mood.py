@@ -453,6 +453,70 @@ class TestDialogueClimateM1DormantHelpers:
             m1_enabled=False,
         ) == ""
 
+    def test_m1_recorder_captures_inject_and_trigger(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        captured: list[tuple[str, dict[str, Any]]] = []
+
+        class _StubRecorder:
+            def record_inject(self, **kw: Any) -> None:
+                captured.append(("inject", kw))
+
+            def record_trigger(self, **kw: Any) -> None:
+                captured.append(("trigger", kw))
+
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        engine.set_m1_recorder(_StubRecorder())
+        now = 1000.0
+        monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: now)
+
+        engine.register_interaction_signal(
+            tension_d=0.14,
+            group_id="g1",
+            session_id="group_g1",
+            m1_tension_enabled=True,
+        )
+        engine.build_m1_tension_guidance(
+            group_id="g1", session_id="group_g1", m1_enabled=True
+        )
+
+        kinds = [k for k, _ in captured]
+        assert kinds == ["inject", "trigger"]
+        inject_kw = captured[0][1]
+        assert inject_kw["tension_after"] > inject_kw["tension_before"]
+        assert inject_kw["delta"] == 0.14
+        trigger_kw = captured[1][1]
+        assert trigger_kw["tension_after"] >= trigger_kw["threshold"]
+
+    def test_m1_recorder_failure_never_breaks_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        class _BoomRecorder:
+            def record_inject(self, **kw: Any) -> None:
+                raise RuntimeError("boom")
+
+            def record_trigger(self, **kw: Any) -> None:
+                raise RuntimeError("boom")
+
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        engine.set_m1_recorder(_BoomRecorder())
+        now = 1000.0
+        monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: now)
+
+        # A throwing recorder must not propagate into the live path.
+        engine.register_interaction_signal(
+            tension_d=0.14,
+            group_id="g1",
+            session_id="group_g1",
+            m1_tension_enabled=True,
+        )
+        guidance = engine.build_m1_tension_guidance(
+            group_id="g1", session_id="group_g1", m1_enabled=True
+        )
+        assert "更短更冷淡" in guidance
+
 
 class TestDialogueClimateM1PromptGuidance:
     @staticmethod

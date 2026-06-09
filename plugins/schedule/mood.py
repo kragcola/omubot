@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
 import random
 import time
@@ -221,6 +222,15 @@ class MoodEngine:
         self._m1_tension_metrics: dict[tuple[str, str], tuple[int, int]] = {}
         self._m1_tension_tau_s = _M1_DEFAULT_TENSION_TAU_S
         self._m1_tension_threshold = _M1_TENSION_PROMPT_THRESHOLD
+        # Optional durable gray-run recorder (Part A R7/R8 calibration). None by
+        # default so the standard path and all unit tests are unaffected; wired
+        # only when dialogue_climate M1 is enabled. Hooks are best-effort and
+        # must never raise into the reply path.
+        self._m1_recorder: Any = None
+
+    def set_m1_recorder(self, recorder: Any) -> None:
+        """Attach a durable M1 metrics recorder (see services.dialogue_climate)."""
+        self._m1_recorder = recorder
 
     def evaluate(
         self,
@@ -356,6 +366,18 @@ class MoodEngine:
         self._m1_tension_state[key] = (updated, baseline, now_ts)
         injected, triggered = self._m1_tension_metrics.get(key, (0, 0))
         self._m1_tension_metrics[key] = (injected + 1, triggered)
+        if self._m1_recorder is not None:
+            with contextlib.suppress(Exception):  # never break reply path
+                self._m1_recorder.record_inject(
+                    group_id=key[0],
+                    session_id=key[1],
+                    tension_before=resolved,
+                    tension_after=updated,
+                    delta=tension_d,
+                    tau_s=self._m1_tension_tau_s,
+                    threshold=self._m1_tension_threshold,
+                    monotonic_ts=now_ts,
+                )
 
     def resolve_m1_tension(
         self,
@@ -400,6 +422,15 @@ class MoodEngine:
         key = self._cache_key(group_id=group_id, session_id=session_id)
         injected, triggered = self._m1_tension_metrics.get(key, (0, 0))
         self._m1_tension_metrics[key] = (injected, triggered + 1)
+        if self._m1_recorder is not None:
+            with contextlib.suppress(Exception):  # never break reply path
+                self._m1_recorder.record_trigger(
+                    group_id=key[0],
+                    session_id=key[1],
+                    tension_after=tension,
+                    threshold=self._m1_tension_threshold,
+                    tau_s=self._m1_tension_tau_s,
+                )
         return _M1_TENSION_GUIDANCE
 
     def m1_tension_metrics(

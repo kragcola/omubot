@@ -1225,6 +1225,13 @@ class ChatPlugin(AmadeusPlugin):
                 anomaly_chance=schedule_cfg.mood_anomaly_chance,
                 refresh_minutes=schedule_cfg.mood_refresh_minutes,
             )
+            if schedule_cfg.dialogue_climate.m1_enabled:
+                try:
+                    from services.dialogue_climate import M1MetricsRecorder
+
+                    ctx.mood_engine.set_m1_recorder(M1MetricsRecorder())
+                except Exception as exc:
+                    _L.warning("m1 metrics recorder wiring failed | err={}", exc)
             ctx.schedule_gen = ScheduleGenerator(
                 store=ctx.schedule_store,
                 generate_at_hour=schedule_cfg.generate_at_hour,
