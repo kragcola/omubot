@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import random
 import time
+from typing import Any
 
 from plugins.schedule.calendar import get_day_context
 from plugins.schedule.calendar import get_self_name as _get_self_name
@@ -105,6 +107,86 @@ _ANOMALY_REASONS: dict[str, list[str]] = {
 }
 
 # ------------------------------------------------------------------
+# Dialogue Climate M1 dormant helpers
+# ------------------------------------------------------------------
+
+_M1_DEFAULT_TENSION_TAU_S = 600.0
+_M1_IRRITATION_MENTION_TENSION = 0.03
+_M1_IRRITATION_POKE_TENSION = 0.04
+_M1_IRRITATION_BURST_BONUS = 0.01
+_M1_IRRITATION_TENSION_CAP = 0.2
+_M1_TENSION_BASELINE = 0.0
+_M1_TENSION_PROMPT_THRESHOLD = 0.12
+_M1_TENSION_PRUNE_EPSILON = 0.001
+_M1_TENSION_GUIDANCE = (
+    "【对话气氛】刚刚被连续 @ 或戳一戳打扰，回复更短更冷淡一点；"
+    "可以少展开、先把节奏收住，但不要解释原因，也不要把这当成标签说给对方听。"
+)
+
+
+def resolve_m1_tension_on_read(
+    tension: float,
+    baseline: float,
+    last_ts: float,
+    now_ts: float,
+    *,
+    tau_s: float = _M1_DEFAULT_TENSION_TAU_S,
+) -> float:
+    """Resolve dormant M1 tension with closed-form decay toward baseline."""
+    elapsed_s = max(0.0, float(now_ts) - float(last_ts))
+    tau = max(1e-6, float(tau_s))
+    resolved = float(baseline) + (float(tension) - float(baseline)) * math.exp(-elapsed_s / tau)
+    return max(0.0, min(1.0, resolved))
+
+
+def compute_m1_irritation_tension_delta(
+    *,
+    mention_count: int = 0,
+    poke_count: int = 0,
+    m1_enabled: bool = False,
+) -> float:
+    """Convert @/poke burst counts into a bounded dormant M1 tension delta."""
+    if not m1_enabled:
+        return 0.0
+    mentions = max(0, int(mention_count or 0))
+    pokes = max(0, int(poke_count or 0))
+    total = mentions + pokes
+    if total <= 0:
+        return 0.0
+    delta = (
+        mentions * _M1_IRRITATION_MENTION_TENSION
+        + pokes * _M1_IRRITATION_POKE_TENSION
+        + max(0, total - 1) * _M1_IRRITATION_BURST_BONUS
+    )
+    return max(0.0, min(_M1_IRRITATION_TENSION_CAP, delta))
+
+
+def register_m1_irritation_signal(
+    mood_engine: Any,
+    *,
+    mention_count: int = 0,
+    poke_count: int = 0,
+    group_id: str | int | None = None,
+    session_id: str = "",
+    m1_enabled: bool = False,
+) -> bool:
+    """Register dormant M1 irritation through the existing interaction channel."""
+    delta = compute_m1_irritation_tension_delta(
+        mention_count=mention_count,
+        poke_count=poke_count,
+        m1_enabled=m1_enabled,
+    )
+    if delta <= 0.0 or mood_engine is None:
+        return False
+    mood_engine.register_interaction_signal(
+        tension_d=delta,
+        group_id=group_id,
+        session_id=session_id,
+        m1_tension_enabled=True,
+    )
+    return True
+
+# ------------------------------------------------------------------
 # MoodEngine
 # ------------------------------------------------------------------
 
@@ -132,6 +214,13 @@ class MoodEngine:
         ] = {}
         self._nudge_decay_s = 1800.0  # 30 min
         self._nudge_cap = 0.2  # max total per-dimension delta added
+        # M1 stores only the single irritation/tension dimension as a transient
+        # per-group analytic state: (tension, baseline, last_ts). It is updated
+        # only by the M1 opt-in path and is read with closed-form decay.
+        self._m1_tension_state: dict[tuple[str, str], tuple[float, float, float]] = {}
+        self._m1_tension_metrics: dict[tuple[str, str], tuple[int, int]] = {}
+        self._m1_tension_tau_s = _M1_DEFAULT_TENSION_TAU_S
+        self._m1_tension_threshold = _M1_TENSION_PROMPT_THRESHOLD
 
     def evaluate(
         self,
@@ -219,6 +308,7 @@ class MoodEngine:
         tension_d: float = 0.0,
         group_id: str | int | None = None,
         session_id: str = "",
+        m1_tension_enabled: bool = False,
     ) -> None:
         """Record an inbound QQ interaction (reaction/poke) as a transient nudge.
 
@@ -231,11 +321,105 @@ class MoodEngine:
             return
         key = self._cache_key(group_id=group_id, session_id=session_id)
         entries = self._recognition_nudges.setdefault(key, [])
-        entries.append((time.monotonic(), valence_d, openness_d, tension_d))
+        now = time.monotonic()
+        entries.append((now, valence_d, openness_d, tension_d))
         # Bound list growth; decay/prune happens on read.
         if len(entries) > 64:
             del entries[: len(entries) - 64]
+        if m1_tension_enabled and tension_d > 0.0:
+            self._register_m1_tension_delta(key, tension_d, now_ts=now)
         self._cache.pop(key, None)
+
+    def _register_m1_tension_delta(
+        self,
+        key: tuple[str, str],
+        tension_d: float,
+        *,
+        now_ts: float,
+    ) -> None:
+        """Accumulate M1 tension into the per-key closed-form state."""
+        tension_d = max(0.0, float(tension_d or 0.0))
+        if tension_d <= 0.0:
+            return
+        tension, baseline, last_ts = self._m1_tension_state.get(
+            key,
+            (_M1_TENSION_BASELINE, _M1_TENSION_BASELINE, now_ts),
+        )
+        resolved = resolve_m1_tension_on_read(
+            tension,
+            baseline,
+            last_ts,
+            now_ts,
+            tau_s=self._m1_tension_tau_s,
+        )
+        updated = min(self._nudge_cap, resolved + tension_d)
+        self._m1_tension_state[key] = (updated, baseline, now_ts)
+        injected, triggered = self._m1_tension_metrics.get(key, (0, 0))
+        self._m1_tension_metrics[key] = (injected + 1, triggered)
+
+    def resolve_m1_tension(
+        self,
+        *,
+        group_id: str | int | None = None,
+        session_id: str = "",
+        now_ts: float | None = None,
+    ) -> float:
+        """Read M1 tension with closed-form decay and update the stored timestamp."""
+        key = self._cache_key(group_id=group_id, session_id=session_id)
+        state = self._m1_tension_state.get(key)
+        if state is None:
+            return 0.0
+        now = time.monotonic() if now_ts is None else float(now_ts)
+        tension, baseline, last_ts = state
+        resolved = resolve_m1_tension_on_read(
+            tension,
+            baseline,
+            last_ts,
+            now,
+            tau_s=self._m1_tension_tau_s,
+        )
+        if resolved <= baseline + _M1_TENSION_PRUNE_EPSILON:
+            self._m1_tension_state.pop(key, None)
+            return 0.0
+        self._m1_tension_state[key] = (resolved, baseline, now)
+        return resolved
+
+    def build_m1_tension_guidance(
+        self,
+        *,
+        group_id: str | int | None = None,
+        session_id: str = "",
+        m1_enabled: bool = False,
+    ) -> str:
+        """Return behavior guidance when on-read M1 tension is above threshold."""
+        if not m1_enabled:
+            return ""
+        tension = self.resolve_m1_tension(group_id=group_id, session_id=session_id)
+        if tension < self._m1_tension_threshold:
+            return ""
+        key = self._cache_key(group_id=group_id, session_id=session_id)
+        injected, triggered = self._m1_tension_metrics.get(key, (0, 0))
+        self._m1_tension_metrics[key] = (injected, triggered + 1)
+        return _M1_TENSION_GUIDANCE
+
+    def m1_tension_metrics(
+        self,
+        *,
+        group_id: str | int | None = None,
+        session_id: str = "",
+    ) -> dict[str, float]:
+        """Return observable M1 counters for gray-run calibration."""
+        key = self._cache_key(group_id=group_id, session_id=session_id)
+        injected, triggered = self._m1_tension_metrics.get(key, (0, 0))
+        trigger_rate = (triggered / injected) if injected else 0.0
+        return {
+            "injection_count": float(injected),
+            "prompt_trigger_count": float(triggered),
+            "prompt_trigger_rate": trigger_rate,
+            "tau_s": float(self._m1_tension_tau_s),
+            "half_life_s": math.log(2.0) * float(self._m1_tension_tau_s),
+            "current_tension": self.resolve_m1_tension(group_id=group_id, session_id=session_id),
+        }
 
     def _active_nudge(self, key: tuple[str, str]) -> tuple[float, float, float]:
         """Sum un-expired, linearly-decayed nudges per dimension, each capped."""

@@ -231,10 +231,14 @@ class PluginContext:
     runtime_errors: Any = None
     backup_scheduler: Any = None
     mood_engine: Any = None
+    dialogue_climate_m1_enabled: bool = False
+    schedule_event_replan_enabled: bool = False
     affection_engine: Any = None
     schedule_store: Any = None
     schedule_gen: Any = None
     schedule_enabled: bool = False
+    story_arc_store: Any = None
+    partner_state_store: Any = None
     affection_store: Any = None
     affection_enabled: bool = False
     catchphrase_normalizer: Any = None

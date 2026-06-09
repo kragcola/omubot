@@ -17,6 +17,29 @@
       "minimum": 0,
       "maximum": 23
     },
+    "persona_driven_enabled": {
+      "type": "boolean",
+      "title": "角色驱动日程生成"
+    },
+    "story_arc_enabled": {
+      "type": "boolean",
+      "title": "启用 StoryArc 剧情弧账本"
+    },
+    "event_replan_enabled": {
+      "type": "boolean",
+      "title": "启用 L3 事件重规划闭环"
+    },
+    "dialogue_climate": {
+      "type": "object",
+      "title": "对话气候",
+      "additionalProperties": true,
+      "properties": {
+        "m1_enabled": {
+          "type": "boolean",
+          "title": "启用 A-M1 tension 单维闭环"
+        }
+      }
+    },
     "mood_anomaly_chance": {
       "type": "number",
       "title": "心情异常概率",

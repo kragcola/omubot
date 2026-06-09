@@ -40,6 +40,7 @@ from services.humanization.qq_interactions import (
     QQInteractionSignal,
     dispatch_qq_interaction_signal,
     parse_qq_interaction_signal,
+    register_m1_mention_irritation,
 )
 from services.name_registry import NameVariationRegistry
 from services.private_conversation import (
@@ -1320,6 +1321,13 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     message_id=event.message_id,
                 )
             return
+
+        if _message_ats_self(msg, bot.self_id):
+            register_m1_mention_irritation(
+                ctx,
+                group_id=group_id,
+                actor_user_id=str(event.user_id),
+            )
 
         if await bus.fire_on_message(msg_ctx):
             return  # consumed by an interceptor plugin

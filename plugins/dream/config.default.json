@@ -3,6 +3,7 @@
   "plugin": "dream",
   "values": {
     "enabled": true,
+    "life_reflection_enabled": false,
     "interval_hours": 24,
     "max_rounds": 15
   }

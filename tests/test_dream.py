@@ -1,8 +1,11 @@
+import asyncio
 import json
 
 import pytest
 
-from plugins.dream import DreamAgent, dream_pre_check
+from plugins.dream import DreamAgent, DreamConfig, dream_pre_check
+from plugins.schedule.story_arc import StoryArc
+from plugins.schedule.types import Schedule, TimeSlot
 from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
 
@@ -301,3 +304,280 @@ async def test_dream_backfill_ocr_noop_without_vision(store: CardStore, sticker_
     agent = DreamAgent(store=store, sticker_store=sticker_store, vision_client=None)
 
     assert await agent._backfill_sticker_ocr() == 0
+
+
+class _FakeScheduleStore:
+    def __init__(self, schedule: Schedule | None) -> None:
+        self.schedule = schedule
+        self.load_calls: list[tuple[str, bool]] = []
+
+    def load(self, date_str: str, *, update_current: bool = True) -> Schedule | None:
+        self.load_calls.append((date_str, update_current))
+        return self.schedule
+
+
+class _FakeStoryArcStore:
+    def __init__(self, arc: StoryArc | None) -> None:
+        self.arc = arc
+        self.load_active_calls = 0
+        self.saved: list[StoryArc] = []
+
+    def load_active(self) -> StoryArc | None:
+        self.load_active_calls += 1
+        return self.arc
+
+    def save(self, arc: StoryArc) -> None:
+        self.saved.append(arc)
+        self.arc = arc
+
+
+class _FakeMessageLog:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.query_calls: list[tuple[str, int]] = []
+
+    async def query_recent(self, group_id: str, limit: int = 20) -> list[dict]:
+        self.query_calls.append((group_id, limit))
+        return self.rows[-limit:]
+
+
+class _FakeMoodEngine:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def m1_tension_metrics(self, *, group_id: str, session_id: str = "") -> dict[str, float]:
+        self.calls.append((group_id, session_id))
+        return {
+            "injection_count": 4.0,
+            "prompt_trigger_rate": 0.25,
+            "current_tension": 0.18,
+        }
+
+
+def _reflection_schedule() -> Schedule:
+    return Schedule(
+        date="2026-06-09",
+        theme="排练后的整理日",
+        day_narrative="白天在复盘昨天排练的失误，晚上把压力拆成可处理的小块。",
+        slots=[
+            TimeSlot(
+                time="09:00",
+                activity="study",
+                description="整理台词和期末复习计划",
+                mood_hint="有压力但能推进",
+            ),
+            TimeSlot(
+                time="20:30",
+                activity="practice",
+                description="和虚构伙伴复盘舞台节奏",
+                mood_hint="疲惫，仍然认真",
+            ),
+        ],
+    )
+
+
+def _reflection_arc() -> StoryArc:
+    return StoryArc(
+        arc_id="stage_play_competition_week",
+        title="舞台剧比赛准备周",
+        stage="rehearsal",
+        goals=["完成舞台剧比赛准备", "兼顾期末复习"],
+        variables={"reflection_group_id": "200"},
+        open_threads=["是否周六追加排练"],
+        last_events=[{"date": "2026-06-08", "summary": "第一次整排进度慢"}],
+        next_day_seed="在复习和排练之间做取舍",
+    )
+
+
+def test_life_reflection_config_defaults_off() -> None:
+    cfg = DreamConfig.model_validate({})
+
+    assert cfg.life_reflection_enabled is False
+
+
+async def test_dream_life_reflection_flag_off_preserves_existing_loop(store: CardStore) -> None:
+    schedule_store = _FakeScheduleStore(_reflection_schedule())
+    story_store = _FakeStoryArcStore(_reflection_arc())
+    message_log = _FakeMessageLog([{"role": "user", "speaker": "100", "content_text": "今天排练有点累"}])
+    agent = DreamAgent(
+        store=store,
+        max_rounds=1,
+        life_reflection_enabled=False,
+        schedule_store=schedule_store,
+        story_arc_store=story_store,
+        message_log=message_log,
+    )
+    calls = 0
+
+    async def mock_api_call(
+        system: list, messages: list, tools: list | None = None, max_tokens: int = 1024,
+    ) -> dict:
+        nonlocal calls
+        calls += 1
+        assert tools is not None
+        return {"text": "无需处理", "tool_uses": []}
+
+    await agent._run(mock_api_call)
+
+    assert calls == 1
+    assert schedule_store.load_calls == []
+    assert story_store.load_active_calls == 0
+    assert story_store.saved == []
+    assert message_log.query_calls == []
+    assert await store.search_cards("洞察", limit=5) == []
+
+
+async def test_dream_life_reflection_writes_cards_and_updates_arc(store: CardStore) -> None:
+    schedule_store = _FakeScheduleStore(_reflection_schedule())
+    arc = _reflection_arc()
+    story_store = _FakeStoryArcStore(arc)
+    message_log = _FakeMessageLog([
+        {"role": "user", "speaker": "100", "content_text": "今天排练有点累，但至少知道哪里要改。"},
+        {"role": "assistant", "speaker": "bot", "content_text": "那就把动作难度先拆小。"},
+    ])
+    mood_engine = _FakeMoodEngine()
+    invalidated = 0
+    agent = DreamAgent(
+        store=store,
+        max_rounds=1,
+        life_reflection_enabled=True,
+        schedule_store=schedule_store,
+        story_arc_store=story_store,
+        message_log=message_log,
+        mood_engine=mood_engine,
+        on_memo_change=lambda: nonlocal_increment("invalidated"),
+    )
+
+    def nonlocal_increment(_name: str) -> None:
+        nonlocal invalidated
+        invalidated += 1
+
+    api_calls: list[tuple[list | None, int]] = []
+
+    async def mock_api_call(
+        system: list, messages: list, tools: list | None = None, max_tokens: int = 1024,
+    ) -> dict:
+        api_calls.append((tools, max_tokens))
+        if tools is not None:
+            return {"text": "无需处理", "tool_uses": []}
+        assert "今天过得怎样" in messages[0]["content"]
+        assert "今日群聊片段" in messages[0]["content"]
+        return {
+            "text": json.dumps({
+                "cards": [
+                    {
+                        "scope": "group",
+                        "scope_id": "200",
+                        "category": "event",
+                        "content": "经历洞察：今天把排练压力拆成了动作难度和复习时间两条线。",
+                        "confidence": 0.82,
+                    },
+                    {
+                        "scope": "global",
+                        "scope_id": "",
+                        "category": "status",
+                        "content": "经历洞察：疲惫时更适合用短任务维持连续性。",
+                        "confidence": 0.76,
+                    },
+                ],
+                "last_event_summary": "夜间反思确认了排练疲惫和复习压力的取舍。",
+                "open_threads": ["动作难度是否继续下调", "复习块是否提前到午后"],
+                "next_day_seed": "明天先复习再排练，减少临场焦虑。",
+            }, ensure_ascii=False),
+            "tool_uses": [],
+        }
+
+    await agent._run(mock_api_call)
+
+    cards = await store.search_cards("经历洞察", limit=5)
+    assert len(cards) == 2
+    assert {card.source for card in cards} == {"dream_reflection"}
+    assert {card.captured_by for card in cards} == {"dream_reflection"}
+    assert {card.scope for card in cards} == {"group", "global"}
+    assert story_store.saved == [arc]
+    assert arc.last_events[-1]["source"] == "dream_reflection"
+    assert "动作难度是否继续下调" in arc.open_threads
+    assert arc.next_day_seed == "明天先复习再排练，减少临场焦虑。"
+    assert schedule_store.load_calls and schedule_store.load_calls[-1][1] is False
+    assert message_log.query_calls == [("200", 12)]
+    assert mood_engine.calls == [("200", "group_200")]
+    assert len(api_calls) == 2
+    assert api_calls[0][0] is not None
+    assert api_calls[0][1] == 2048
+    assert api_calls[1] == (None, 1024)
+    assert invalidated == 1
+
+
+async def test_dream_life_reflection_invalid_json_does_not_write(store: CardStore) -> None:
+    arc = _reflection_arc()
+    story_store = _FakeStoryArcStore(arc)
+    agent = DreamAgent(
+        store=store,
+        max_rounds=1,
+        life_reflection_enabled=True,
+        schedule_store=_FakeScheduleStore(_reflection_schedule()),
+        story_arc_store=story_store,
+    )
+
+    async def mock_api_call(
+        system: list, messages: list, tools: list | None = None, max_tokens: int = 1024,
+    ) -> dict:
+        if tools is not None:
+            return {"text": "无需处理", "tool_uses": []}
+        return {"text": "not-json", "tool_uses": []}
+
+    await agent._run(mock_api_call)
+
+    assert await store.search_cards("经历洞察", limit=5) == []
+    assert story_store.saved == []
+    assert arc.open_threads == ["是否周六追加排练"]
+    assert arc.next_day_seed == "在复习和排练之间做取舍"
+
+
+async def test_dream_life_reflection_cancel_path_leaves_external_state_clean(store: CardStore) -> None:
+    arc = _reflection_arc()
+    story_store = _FakeStoryArcStore(arc)
+    entered_reflection = asyncio.Event()
+    release_reflection = asyncio.Event()
+    agent = DreamAgent(
+        store=store,
+        max_rounds=1,
+        life_reflection_enabled=True,
+        schedule_store=_FakeScheduleStore(_reflection_schedule()),
+        story_arc_store=story_store,
+    )
+
+    async def mock_api_call(
+        system: list, messages: list, tools: list | None = None, max_tokens: int = 1024,
+    ) -> dict:
+        if tools is not None:
+            return {"text": "无需处理", "tool_uses": []}
+        entered_reflection.set()
+        await release_reflection.wait()
+        return {
+            "text": json.dumps({
+                "cards": [{
+                    "scope": "global",
+                    "scope_id": "global",
+                    "category": "event",
+                    "content": "经历洞察：这条不应写入。",
+                    "confidence": 0.8,
+                }],
+                "last_event_summary": "不应写入",
+                "open_threads": ["不应写入"],
+                "next_day_seed": "不应写入",
+            }, ensure_ascii=False),
+            "tool_uses": [],
+        }
+
+    task = asyncio.create_task(agent._run(mock_api_call))
+    await asyncio.wait_for(entered_reflection.wait(), timeout=1)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(task, timeout=0.01)
+
+    assert await store.search_cards("不应写入", limit=5) == []
+    assert story_store.saved == []
+    assert arc.last_events == [{"date": "2026-06-08", "summary": "第一次整排进度慢"}]
+    assert arc.open_threads == ["是否周六追加排练"]
+    assert arc.next_day_seed == "在复习和排练之间做取舍"
+    assert agent._running is False

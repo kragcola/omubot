@@ -11,6 +11,7 @@ import os
 import re
 import time
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import nonebot
@@ -67,6 +68,116 @@ def _message_content_text(content: Any) -> str:
             if isinstance(block, dict) and block.get("type") == "text"
         ).strip()
     return str(content or "").strip()
+
+
+def _read_yaml_mapping(path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _as_short_text_tuple(value: Any, *, limit: int) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    items: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return tuple(items)
+
+
+def _first_nonempty_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _build_schedule_persona_brief(persona_runtime: Any, identity: Any) -> Any:
+    from plugins.schedule import PersonaScheduleBrief
+
+    role = str(getattr(identity, "description", "") or "").strip()
+    traits: tuple[str, ...] = ()
+    known_facts: tuple[str, ...] = ()
+    bundle = getattr(persona_runtime, "bundle", None)
+    pending_dir = getattr(bundle, "pending_freeze_dir", None)
+    if isinstance(pending_dir, Path):
+        persona_yaml = _read_yaml_mapping(pending_dir / "persona.yaml")
+        raw_identity_data = persona_yaml.get("identity")
+        identity_data = raw_identity_data if isinstance(raw_identity_data, dict) else {}
+        if not role:
+            role = str(identity_data.get("role") or "").strip()
+        traits = _as_short_text_tuple(identity_data.get("essence"), limit=5)
+
+        knowledge_yaml = _read_yaml_mapping(pending_dir / "knowledge.yaml")
+        known_facts = _as_short_text_tuple(knowledge_yaml.get("known_facts"), limit=3)
+
+    if not role:
+        role = _first_nonempty_line(str(getattr(identity, "personality", "") or ""))
+
+    return PersonaScheduleBrief(
+        identity=role,
+        traits=traits,
+        known_facts=known_facts,
+        partner_context="天马司、草薙宁宁、神代类、朝比奈真冬是可用于日常安排的虚构伙伴关系；无伙伴状态卡前按稳定的同伴/排练关系处理。",
+    )
+
+
+def _build_fiction_partner_profiles(persona_runtime: Any) -> tuple[Any, ...]:
+    from plugins.schedule import FictionPartnerProfile
+
+    partner_names = ("天马司", "草薙宁宁", "神代类", "朝比奈真冬")
+    known_facts: list[str] = []
+    bundle = getattr(persona_runtime, "bundle", None)
+    pending_dir = getattr(bundle, "pending_freeze_dir", None)
+    if isinstance(pending_dir, Path):
+        knowledge_yaml = _read_yaml_mapping(pending_dir / "knowledge.yaml")
+        raw_facts = knowledge_yaml.get("known_facts")
+        if isinstance(raw_facts, list):
+            known_facts = [str(item or "") for item in raw_facts]
+    joined_facts = "；".join(known_facts)
+    if joined_facts:
+        detected = tuple(name for name in partner_names if name in joined_facts)
+        if detected:
+            partner_names = detected
+    constraints = (
+        "kind=fiction，仅作为虚构伙伴状态演绎",
+        "不得写入真人 factual 或群友线下行为",
+        "私聊内容不得进入群叙事",
+    )
+    profile_by_name = {
+        "天马司": "W×S 成员，外向、自信、舞台中心感强。",
+        "草薙宁宁": "W×S 成员，冷静细致，重视表演完成度。",
+        "神代类": "W×S 成员，擅长舞台机关与演出设计，点子很多。",
+        "朝比奈真冬": "宫益坂相关的虚构伙伴关系，情绪表达更克制，需要尊重边界。",
+    }
+    return tuple(
+        FictionPartnerProfile(
+            entity_id=_fiction_partner_entity_id(name),
+            display_name=name,
+            pinned_profile=profile_by_name.get(name, "凤笑梦的虚构伙伴关系。"),
+            constraints=constraints,
+        )
+        for name in partner_names
+    )
+
+
+def _fiction_partner_entity_id(name: str) -> str:
+    mapping = {
+        "天马司": "tenma_tsukasa",
+        "草薙宁宁": "kusanagi_nene",
+        "神代类": "kamishiro_rui",
+        "朝比奈真冬": "asahina_mafuyu",
+    }
+    return mapping.get(name, re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "fiction_partner")
 
 
 def _register_classifier_window(ctx: PluginContext, msg_ctx: MessageContext, current_text: str) -> list[dict[str, Any]]:
@@ -1086,11 +1197,30 @@ class ChatPlugin(AmadeusPlugin):
         from plugins.schedule.plugin import ScheduleConfig
 
         schedule_cfg = load_plugin_config("plugins/schedule/config.default.json", ScheduleConfig)
+        ctx.dialogue_climate_m1_enabled = bool(schedule_cfg.dialogue_climate.m1_enabled)
+        ctx.schedule_event_replan_enabled = bool(schedule_cfg.enabled and schedule_cfg.event_replan_enabled)
         if schedule_cfg.enabled:
-            from plugins.schedule import MoodEngine, ScheduleGenerator, ScheduleStore
+            from plugins.schedule import (
+                FictionPartnerStateStore,
+                MoodEngine,
+                ScheduleGenerator,
+                ScheduleStore,
+                StoryArcStore,
+            )
 
+            schedule_persona_brief = _build_schedule_persona_brief(persona_runtime, ctx.identity)
+            fiction_partner_profiles = _build_fiction_partner_profiles(persona_runtime)
             ctx.schedule_store = ScheduleStore(storage_dir=schedule_cfg.storage_dir)
             await ctx.schedule_store.startup()
+            story_arc_store = None
+            partner_state_store = None
+            if schedule_cfg.story_arc_enabled:
+                story_arc_store = StoryArcStore()
+                await story_arc_store.startup()
+                partner_state_store = FictionPartnerStateStore()
+                await partner_state_store.startup()
+            ctx.story_arc_store = story_arc_store
+            ctx.partner_state_store = partner_state_store
             ctx.mood_engine = MoodEngine(
                 anomaly_chance=schedule_cfg.mood_anomaly_chance,
                 refresh_minutes=schedule_cfg.mood_refresh_minutes,
@@ -1099,6 +1229,14 @@ class ChatPlugin(AmadeusPlugin):
                 store=ctx.schedule_store,
                 generate_at_hour=schedule_cfg.generate_at_hour,
                 identity_name=ctx.identity.name,
+                persona_driven_enabled=schedule_cfg.persona_driven_enabled,
+                persona_brief=schedule_persona_brief,
+                memory_card_store=ctx.card_store,
+                story_arc_enabled=schedule_cfg.story_arc_enabled,
+                story_arc_store=story_arc_store,
+                partner_state_store=partner_state_store,
+                fiction_partner_profiles=fiction_partner_profiles,
+                event_replan_enabled=schedule_cfg.event_replan_enabled,
             )
             from plugins.schedule.calendar import set_self_name
             set_self_name(ctx.identity.name)
@@ -1107,6 +1245,9 @@ class ChatPlugin(AmadeusPlugin):
             ctx.schedule_store = None
             ctx.mood_engine = None
             ctx.schedule_gen = None
+            ctx.story_arc_store = None
+            ctx.partner_state_store = None
+            ctx.schedule_event_replan_enabled = False
         ctx.schedule_enabled = schedule_cfg.enabled
 
         # ---- affection system ----

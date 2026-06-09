@@ -74,6 +74,21 @@ class TestScheduleStore:
             assert store2.current is not None
             assert store2.current.date == "2026-04-29"
 
+    def test_load_without_update_current_preserves_current(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ScheduleStore(storage_dir=tmp)
+            today = _make_schedule("2026-04-29")
+            yesterday = _make_schedule("2026-04-28")
+            store.save(yesterday)
+            store.save(today)
+
+            loaded = store.load("2026-04-28", update_current=False)
+
+            assert loaded is not None
+            assert loaded.date == "2026-04-28"
+            assert store.current is not None
+            assert store.current.date == "2026-04-29"
+
     def test_list_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ScheduleStore(storage_dir=tmp)

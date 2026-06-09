@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import cast
 
+import pytest
 from nonebot.adapters.onebot.v11 import NoticeEvent, PokeNotifyEvent
 
 from kernel.types import PluginContext, TriggerContext
@@ -10,6 +11,7 @@ from services.humanization.qq_interactions import (
     QQInteractionSignal,
     dispatch_qq_interaction_signal,
     parse_qq_interaction_signal,
+    register_m1_mention_irritation,
     reset_qq_interaction_rate_guard,
 )
 
@@ -79,8 +81,10 @@ class _MoodEngine:
         tension_d: float = 0.0,
         group_id: str | int | None = None,
         session_id: str = "",
+        m1_tension_enabled: bool = False,
     ) -> None:
         del group_id
+        del m1_tension_enabled
         self.signals.append({
             "valence_d": valence_d,
             "openness_d": openness_d,
@@ -94,6 +98,7 @@ def _ctx(
     poke_enabled: bool = True,
     reaction_enabled: bool = True,
     mood_engine: object | None = None,
+    m1_enabled: bool = False,
 ) -> PluginContext:
     ctx = SimpleNamespace(
         config=SimpleNamespace(
@@ -108,6 +113,7 @@ def _ctx(
         timeline=_Timeline(),
         scheduler=_Scheduler(),
         mood_engine=mood_engine,
+        dialogue_climate_m1_enabled=m1_enabled,
     )
     return cast(PluginContext, ctx)
 
@@ -262,6 +268,125 @@ def test_dispatch_poke_nudges_tension() -> None:
     assert mood.sessions[0] == "group_123456"
 
 
+def test_m1_disabled_keeps_poke_on_part0_static_nudge() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood, m1_enabled=False)
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    for offset in range(3):
+        dispatch_qq_interaction_signal(ctx, signal, now=100.0 + offset)
+
+    assert [s["tension_d"] for s in mood.signals] == pytest.approx([0.04, 0.04, 0.04])
+    assert all(s["valence_d"] == 0.0 for s in mood.signals)
+
+
+def test_m1_enabled_poke_frequency_aggregates_before_nudge() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood, m1_enabled=True)
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    for offset in range(3):
+        dispatch_qq_interaction_signal(ctx, signal, now=100.0 + offset)
+
+    assert [s["tension_d"] for s in mood.signals] == pytest.approx([0.04, 0.09, 0.14])
+    assert all(s["valence_d"] == 0.0 for s in mood.signals)
+    assert mood.sessions == ["group_123456", "group_123456", "group_123456"]
+
+
+def test_m1_enabled_rate_muted_poke_still_aggregates_frequency() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood, m1_enabled=True)
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    for offset in range(6):
+        dispatch_qq_interaction_signal(ctx, signal, now=100.0 + offset)
+
+    assert [s["tension_d"] for s in mood.signals] == pytest.approx([0.04, 0.09, 0.14, 0.19, 0.2, 0.2])
+    assert len(ctx.scheduler.calls) == 4
+
+
+def test_m1_disabled_mention_frequency_does_not_touch_mood() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood, m1_enabled=False)
+
+    changed = register_m1_mention_irritation(
+        ctx,
+        group_id="123456",
+        actor_user_id="10001",
+        now=100.0,
+    )
+
+    assert changed is False
+    assert mood.signals == []
+
+
+def test_m1_enabled_mention_frequency_aggregates_before_nudge() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood, m1_enabled=True)
+
+    changed = [
+        register_m1_mention_irritation(
+            ctx,
+            group_id="123456",
+            actor_user_id="10001",
+            now=100.0 + offset,
+        )
+        for offset in range(3)
+    ]
+
+    assert changed == [True, True, True]
+    assert [s["tension_d"] for s in mood.signals] == pytest.approx([0.03, 0.07, 0.11])
+    assert all(s["valence_d"] == 0.0 for s in mood.signals)
+
+
+def test_m1_enabled_mention_and_poke_share_frequency_context() -> None:
+    mood = _MoodEngine()
+    ctx = _ctx(mood_engine=mood, m1_enabled=True)
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    assert register_m1_mention_irritation(
+        ctx,
+        group_id="123456",
+        actor_user_id="10001",
+        now=100.0,
+    ) is True
+    dispatch_qq_interaction_signal(ctx, signal, now=101.0)
+    dispatch_qq_interaction_signal(ctx, signal, now=102.0)
+    assert register_m1_mention_irritation(
+        ctx,
+        group_id="123456",
+        actor_user_id="10001",
+        now=103.0,
+    ) is True
+
+    assert [s["tension_d"] for s in mood.signals] == pytest.approx([0.03, 0.08, 0.13, 0.17])
+    assert all(s["valence_d"] == 0.0 for s in mood.signals)
+
+
 def test_dispatch_positive_reaction_nudges_valence() -> None:
     mood = _MoodEngine()
     ctx = _ctx(mood_engine=mood)
@@ -353,4 +478,3 @@ def test_rate_muted_poke_still_nudges_tension() -> None:
 
     assert len(mood.signals) == 6
     assert len(ctx.scheduler.calls) == 4
-

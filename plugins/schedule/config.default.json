@@ -5,6 +5,12 @@
     "enabled": true,
     "storage_dir": "storage/schedule",
     "generate_at_hour": 2,
+    "persona_driven_enabled": false,
+    "story_arc_enabled": false,
+    "event_replan_enabled": false,
+    "dialogue_climate": {
+      "m1_enabled": false
+    },
     "mood_anomaly_chance": 0.05,
     "mood_refresh_minutes": 30
   }

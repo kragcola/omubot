@@ -30,6 +30,10 @@
       "enabled",
       "storage_dir",
       "generate_at_hour",
+      "persona_driven_enabled",
+      "story_arc_enabled",
+      "event_replan_enabled",
+      "dialogue_climate.m1_enabled",
       "mood_anomaly_chance",
       "mood_refresh_minutes"
     ]

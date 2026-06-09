@@ -7,6 +7,11 @@
       "type": "boolean",
       "title": "启用梦境整理"
     },
+    "life_reflection_enabled": {
+      "type": "boolean",
+      "title": "启用夜间生命反思",
+      "description": "默认关闭。开启后 Dream 会复用夜间整理循环，将当天日程、active story arc 和群聊片段反思为经历洞察卡。"
+    },
     "interval_hours": {
       "type": "integer",
       "title": "整理间隔小时",

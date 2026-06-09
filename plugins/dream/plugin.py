@@ -12,9 +12,11 @@ import json
 import os
 import time
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 from pydantic import BaseModel
@@ -31,6 +33,7 @@ class DreamConfig(BaseModel):
     """Dream 整理配置。"""
 
     enabled: bool = False
+    life_reflection_enabled: bool = False
     interval_hours: int = 24
     max_rounds: int = 15
 
@@ -39,6 +42,207 @@ ApiCaller = Callable[..., Awaitable[dict[str, Any]]]
 
 # Dedicated dream logger — writes only to dream log files, not the main bot log.
 dream_logger = logger.bind(dream=True, channel="dream")
+_CST = ZoneInfo("Asia/Shanghai")
+_REFLECTION_CARD_LIMIT = 3
+_REFLECTION_MESSAGE_LIMIT = 12
+_REFLECTION_CONTEXT_MAX_CHARS = 2400
+
+
+@dataclass(frozen=True, slots=True)
+class LifeReflectionCardDraft:
+    category: str
+    scope: str
+    scope_id: str
+    content: str
+    confidence: float = 0.74
+
+
+@dataclass(slots=True)
+class LifeReflectionDraft:
+    cards: list[LifeReflectionCardDraft] = field(default_factory=list)
+    last_event_summary: str = ""
+    open_threads: list[str] = field(default_factory=list)
+    next_day_seed: str = ""
+
+
+def _truncate_reflection_text(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _build_life_reflection_context(
+    *,
+    schedule: Any | None,
+    arc: Any | None,
+    group_id: str,
+    recent_messages: list[dict[str, Any]],
+    tension_metrics: dict[str, float],
+) -> str:
+    lines = ["【今天过得怎样：reflection 输入】"]
+    if schedule is not None:
+        lines.append(f"- 日期：{getattr(schedule, 'date', '')}")
+        theme = str(getattr(schedule, "theme", "") or "").strip()
+        if theme:
+            lines.append(f"- 今日主题：{theme}")
+        narrative = str(getattr(schedule, "day_narrative", "") or "").strip()
+        if narrative:
+            lines.append(f"- 今日基调：{_truncate_reflection_text(narrative, 160)}")
+        slots = list(getattr(schedule, "slots", []) or [])
+        if slots:
+            lines.append("- 今日 slots：")
+            for slot in slots[:6]:
+                slot_time = str(getattr(slot, "time", "") or "").strip()
+                activity = str(getattr(slot, "activity", "") or "").strip()
+                description = str(getattr(slot, "description", "") or "").strip()
+                mood_hint = str(getattr(slot, "mood_hint", "") or "").strip()
+                lines.append(
+                    "  - "
+                    f"{slot_time} [{activity}] "
+                    f"{_truncate_reflection_text(description, 90)} / "
+                    f"{_truncate_reflection_text(mood_hint, 50)}"
+                )
+
+    if arc is not None:
+        title = str(getattr(arc, "title", "") or getattr(arc, "arc_id", "") or "").strip()
+        stage = str(getattr(arc, "stage", "") or "").strip()
+        if title or stage:
+            lines.append(f"- active arc：{title} stage={stage}")
+        goals = [str(item).strip() for item in list(getattr(arc, "goals", []) or []) if str(item).strip()]
+        if goals:
+            lines.append("- goals：" + "；".join(goals[:3]))
+        threads = [
+            str(item).strip()
+            for item in list(getattr(arc, "open_threads", []) or [])
+            if str(item).strip()
+        ]
+        if threads:
+            lines.append("- open_threads：" + "；".join(threads[:3]))
+        seed = str(getattr(arc, "next_day_seed", "") or "").strip()
+        if seed:
+            lines.append(f"- next_day_seed：{_truncate_reflection_text(seed, 160)}")
+
+    if group_id and group_id != "global":
+        lines.append(f"- group_id：{group_id}")
+    if recent_messages:
+        lines.append("- 今日群聊片段：")
+        for row in recent_messages[-_REFLECTION_MESSAGE_LIMIT:]:
+            speaker = str(row.get("speaker") or row.get("role") or "").strip()
+            text = str(row.get("content_text") or "").strip()
+            if text:
+                lines.append(f"  - {speaker}: {_truncate_reflection_text(text, 80)}")
+
+    numeric_metrics = [
+        f"{key}={value:.3g}"
+        for key, value in sorted(tension_metrics.items())
+        if isinstance(value, (int, float))
+    ]
+    if numeric_metrics:
+        lines.append("- 互动张力指标：" + "；".join(numeric_metrics))
+    lines.append("- 输出 1-3 条经历洞察卡；不要把私聊内容写进群叙事；不要虚构真人线下行为。")
+    context = "\n".join(line for line in lines if line.strip())
+    return _truncate_reflection_text(context, _REFLECTION_CONTEXT_MAX_CHARS)
+
+
+def _strip_json_fence(text: str) -> str:
+    text = str(text or "").strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _parse_life_reflection_result(text: str) -> LifeReflectionDraft | None:
+    try:
+        payload = json.loads(_strip_json_fence(text))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    cards: list[LifeReflectionCardDraft] = []
+    raw_cards = payload.get("cards")
+    if isinstance(raw_cards, list):
+        for item in raw_cards:
+            if not isinstance(item, dict):
+                continue
+            scope = str(item.get("scope", "global") or "global").strip()
+            if scope not in {"global", "group"}:
+                continue
+            scope_id = str(item.get("scope_id", "") or "").strip()
+            if scope == "global":
+                scope_id = scope_id or "global"
+            if scope == "group" and not scope_id:
+                continue
+            category = str(item.get("category", "event") or "event").strip()
+            if category not in {"event", "status", "relationship"}:
+                continue
+            content = _truncate_reflection_text(str(item.get("content", "") or ""), 240)
+            if not content:
+                continue
+            raw_confidence = item.get("confidence", 0.74)
+            try:
+                confidence = float(raw_confidence)
+            except (TypeError, ValueError):
+                confidence = 0.74
+            confidence = max(0.1, min(1.0, confidence))
+            cards.append(LifeReflectionCardDraft(
+                category=category,
+                scope=scope,
+                scope_id=scope_id,
+                content=content,
+                confidence=confidence,
+            ))
+            if len(cards) >= _REFLECTION_CARD_LIMIT:
+                break
+
+    threads: list[str] = []
+    raw_threads = payload.get("open_threads")
+    if isinstance(raw_threads, list):
+        for item in raw_threads:
+            thread = _truncate_reflection_text(str(item or ""), 120)
+            if thread and thread not in threads:
+                threads.append(thread)
+            if len(threads) >= 3:
+                break
+
+    return LifeReflectionDraft(
+        cards=cards,
+        last_event_summary=_truncate_reflection_text(str(payload.get("last_event_summary", "") or ""), 180),
+        open_threads=threads,
+        next_day_seed=_truncate_reflection_text(str(payload.get("next_day_seed", "") or ""), 180),
+    ) if cards else None
+
+
+def _apply_life_reflection_to_arc(arc: Any, draft: LifeReflectionDraft) -> None:
+    today = datetime.now(_CST).strftime("%Y-%m-%d")
+    if draft.last_event_summary:
+        last_events = [dict(item) for item in list(getattr(arc, "last_events", []) or []) if isinstance(item, dict)]
+        last_events.append({
+            "date": today,
+            "source": "dream_reflection",
+            "summary": draft.last_event_summary,
+        })
+        arc.last_events = last_events[-6:]
+
+    if draft.open_threads:
+        existing = [
+            str(item).strip()
+            for item in list(getattr(arc, "open_threads", []) or [])
+            if str(item).strip()
+        ]
+        for thread in draft.open_threads:
+            if thread and thread not in existing:
+                existing.append(thread)
+        arc.open_threads = existing[-6:]
+
+    if draft.next_day_seed:
+        arc.next_day_seed = draft.next_day_seed
 
 
 def setup_dream_logger(log_dir: str) -> None:
@@ -230,6 +434,11 @@ class DreamAgent:
         runtime_state: RuntimeStateBus | None = None,
         vision_client: Any | None = None,
         ocr_backfill_per_run: int = 10,
+        life_reflection_enabled: bool = False,
+        schedule_store: Any | None = None,
+        story_arc_store: Any | None = None,
+        message_log: Any | None = None,
+        mood_engine: Any | None = None,
     ) -> None:
         self._store = store
         self._interval_hours = interval_hours
@@ -239,6 +448,11 @@ class DreamAgent:
         self._runtime_state = runtime_state
         self._vision_client = vision_client
         self._ocr_backfill_per_run = max(0, int(ocr_backfill_per_run))
+        self._life_reflection_enabled = bool(life_reflection_enabled)
+        self._schedule_store = schedule_store
+        self._story_arc_store = story_arc_store
+        self._message_log = message_log
+        self._mood_engine = mood_engine
         self._running: bool = False
         self._loop_task: asyncio.Task[None] | None = None
 
@@ -432,12 +646,140 @@ class DreamAgent:
                 )
 
             dream_logger.info("dream completed")
+            reflection_writes = await self._run_life_reflection(api_call)
             if (card_writes > 0 or sticker_deletes > 0) and self._on_memo_change:
+                self._on_memo_change()
+            if reflection_writes > 0 and self._on_memo_change:
                 self._on_memo_change()
         except Exception:
             dream_logger.exception("dream failed")
         finally:
             self._running = False
+
+    async def _run_life_reflection(self, api_call: ApiCaller) -> int:
+        if not self._life_reflection_enabled:
+            return 0
+        schedule = self._load_today_schedule()
+        arc = self._load_active_story_arc()
+        if schedule is None and arc is None:
+            return 0
+        group_id = self._select_reflection_group_id(arc)
+        recent_messages = await self._load_reflection_messages(group_id)
+        context = _build_life_reflection_context(
+            schedule=schedule,
+            arc=arc,
+            group_id=group_id,
+            recent_messages=recent_messages,
+            tension_metrics=self._reflection_tension_metrics(group_id),
+        )
+        if not context:
+            return 0
+
+        system = [{
+            "type": "text",
+            "text": (
+                "你是 Dream 夜间反思层。根据今天的日程、剧情弧和群聊片段，"
+                "生成 1-3 条经历洞察卡，并给 active story arc 一个轻量更新。"
+                "只输出 JSON，不要输出解释。JSON 结构："
+                "{\"cards\":[{\"scope\":\"global|group\",\"scope_id\":\"...\","
+                "\"category\":\"event|status|relationship\",\"content\":\"一句经历洞察\","
+                "\"confidence\":0.74}],\"last_event_summary\":\"...\","
+                "\"open_threads\":[\"...\"],\"next_day_seed\":\"...\"}。"
+                "红线：不要虚构真人线下行为；私聊内容不得进入群叙事；"
+                "fiction 伙伴可作为虚构角色关系反思。"
+            ),
+        }]
+        messages = [{"role": "user", "content": context}]
+        result = await api_call(system, messages, tools=None, max_tokens=1024)
+        draft = _parse_life_reflection_result(result.get("text", ""))
+        if draft is None:
+            dream_logger.warning("life reflection skipped | invalid JSON")
+            return 0
+        return await self._commit_life_reflection(draft, arc)
+
+    def _load_today_schedule(self) -> Any | None:
+        store = self._schedule_store
+        if store is None:
+            return None
+        today = datetime.now(_CST).strftime("%Y-%m-%d")
+        try:
+            return store.load(today, update_current=False)
+        except TypeError:
+            try:
+                return store.load(today)
+            except Exception as exc:
+                dream_logger.warning("life reflection schedule load failed | err={}", exc)
+                return None
+        except Exception as exc:
+            dream_logger.warning("life reflection schedule load failed | err={}", exc)
+            return None
+
+    def _load_active_story_arc(self) -> Any | None:
+        store = self._story_arc_store
+        if store is None:
+            return None
+        try:
+            return store.load_active()
+        except Exception as exc:
+            dream_logger.warning("life reflection story arc load failed | err={}", exc)
+            return None
+
+    def _select_reflection_group_id(self, arc: Any | None) -> str:
+        if arc is not None:
+            value = getattr(arc, "variables", {}).get("reflection_group_id")
+            if value:
+                return str(value)
+        return "global"
+
+    async def _load_reflection_messages(self, group_id: str) -> list[dict[str, Any]]:
+        msg_log = self._message_log
+        if msg_log is None or not group_id or group_id == "global":
+            return []
+        query_recent = getattr(msg_log, "query_recent", None)
+        if query_recent is None:
+            return []
+        try:
+            rows = await query_recent(group_id, limit=_REFLECTION_MESSAGE_LIMIT)
+        except Exception as exc:
+            dream_logger.warning("life reflection message lookup failed | group={} err={}", group_id, exc)
+            return []
+        return [dict(row) for row in rows if isinstance(row, dict)]
+
+    def _reflection_tension_metrics(self, group_id: str) -> dict[str, float]:
+        if self._mood_engine is None or not group_id or group_id == "global":
+            return {}
+        metrics = getattr(self._mood_engine, "m1_tension_metrics", None)
+        if metrics is None:
+            return {}
+        try:
+            return dict(metrics(group_id=group_id, session_id=f"group_{group_id}"))
+        except Exception:
+            return {}
+
+    async def _commit_life_reflection(self, draft: LifeReflectionDraft, arc: Any | None) -> int:
+        writes = 0
+        for card in draft.cards[:_REFLECTION_CARD_LIMIT]:
+            await self._store.add_card(
+                NewCard(
+                    category=card.category,
+                    scope=card.scope,
+                    scope_id=card.scope_id,
+                    content=card.content,
+                    confidence=card.confidence,
+                    source="dream_reflection",
+                    priority=6,
+                ),
+                captured_by="dream_reflection",
+            )
+            writes += 1
+        if arc is not None:
+            _apply_life_reflection_to_arc(arc, draft)
+            store = self._story_arc_store
+            if store is not None:
+                store.save(arc)
+        if writes:
+            dream_logger.info("life reflection completed | cards={}", writes)
+        return writes
 
     async def _execute_tool(self, name: str, inp: dict[str, Any]) -> str:
         """Execute a dream tool call and return the result string."""
@@ -565,6 +907,11 @@ class DreamPlugin(AmadeusPlugin):
             on_memo_change=lambda: ctx.prompt_builder.invalidate(),
             runtime_state=ctx.runtime_state,
             vision_client=getattr(ctx, "vision_client", None),
+            life_reflection_enabled=dream_cfg.life_reflection_enabled,
+            schedule_store=getattr(ctx, "schedule_store", None),
+            story_arc_store=getattr(ctx, "story_arc_store", None),
+            message_log=getattr(ctx, "msg_log", None),
+            mood_engine=getattr(ctx, "mood_engine", None),
         )
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:

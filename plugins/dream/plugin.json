@@ -26,6 +26,7 @@
     "apply_mode": "restart_required",
     "restart_required_fields": [
       "enabled",
+      "life_reflection_enabled",
       "interval_hours",
       "max_rounds"
     ]

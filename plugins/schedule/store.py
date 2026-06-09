@@ -32,7 +32,7 @@ class ScheduleStore:
         """Ensure storage dir exists and load today's schedule if present."""
         self._dir.mkdir(parents=True, exist_ok=True)
 
-    def load(self, date_str: str) -> Schedule | None:
+    def load(self, date_str: str, *, update_current: bool = True) -> Schedule | None:
         """Load a schedule file from disk. Returns None if missing or malformed."""
         path = self._path(date_str)
         if not path.exists():
@@ -73,7 +73,8 @@ class ScheduleStore:
                 generated_at=data.get("generated_at", ""),
                 theme=data.get("theme", ""),
             )
-            self._current = schedule
+            if update_current:
+                self._current = schedule
             _L.info("schedule loaded | date={} theme={}", schedule.date, schedule.theme)
             return schedule
         except (json.JSONDecodeError, KeyError, TypeError) as e:
