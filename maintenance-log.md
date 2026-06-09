@@ -4,6 +4,836 @@
 
 ---
 
+## 2026-06-09 角色包日V MAYU AtPress / EXIT TUNES press release chibi 裁剪小批
+
+**变更类型**：角色识别训练包补源 / 运行态包替换（`ja_virtual_singers.charpack`；仅重启 `ccip-sidecar`，NapCat 未动）。
+
+**内容**：在 [tools/enroll_virtual_singers_pack.py](tools/enroll_virtual_singers_pack.py) 为 `mayu` 增加 `press_release_chibi_crop_atpress_exit_tunes_mayu_strap_sitting_20121205`。来源为 AtPress / EXIT TUNES press release 图片 `https://www.atpress.ne.jp/releases/32052/3_3.jpg`，使用确定性裁剪框 `(762, 359, 872, 524)` 只取 MAYU 单个 strap / chibi-like 坐姿特典图。该源按 `chibi` 计入，MAYU 缺口清零；当前日V活动包为 34 人 / 301 图，剩余 `lily:expression`、`nekomura_iroha:chibi`、`haru:chibi`。
+
+**验证**：`ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`pyright ...` 0 errors；本机 readline stub 基线下 `tests/test_enroll_virtual_singers_pack.py -q` 为 54 passed。临时构建 `.workspace/character-pack-builds/ja-mayu-atpress-chibi-20260609-v1/ja_virtual_singers.charpack` 结构检查通过：34 IDs unique、301 images、npz keys match、dims `(768,)`、sample dirs present、under5=[]；全活动 4 包 136 IDs unique。运行态替换后 `/health` 为 4 packs / 136 characters；新增 crop SHA256 `06fd118c3f1c79ab3b9cfac09fe782f9bd71b1578ef0545de9d2864c41cbd615`，`/identify` 命中 `mayu` diff `0.035269200801849365`，`/identify-multi` 单命中 `mayu`，全 136 top8 collision top1 `mayu`、top2 `kizuna_akari`，margin `0.18396615982055664`。NapCat inspect 仍为 `2026-05-28T10:56:06.736616338Z running 0`。
+
+**影响与回滚**：影响范围仅日V角色识别训练包；不涉及 bot、NapCat、Living Persona。回滚：将 `config/character_packs/backups/ja_virtual_singers.charpack.bak-20260609-224212-pre-mayu-atpress-chibi-active` 恢复到 `config/character_packs/ja_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`。后续人物识别任务应继续补 BangDream 10 个 `chibi` 或日V `lily:expression`、`nekomura_iroha:chibi`、`haru:chibi`；不要重试 MAYU AtPress 中多头或商品展示 crop。
+
+---
+
+## 2026-06-09 角色包日V猫村いろは AHS 官方页 expression 裁剪小批
+
+**变更类型**：角色识别训练包补源 / 运行态包替换（`ja_virtual_singers.charpack`；仅重启 `ccip-sidecar`，NapCat 未动）。
+
+**内容**：在 [tools/enroll_virtual_singers_pack.py](tools/enroll_virtual_singers_pack.py) 为 `nekomura_iroha` 增加 `official_expression_crop_ahs_iroha_v2_official_face`。来源为 AHS 官方页图片 `https://www.ah-soft.com/images/products/vocaloid/iroha/iroha_official.jpg`，referer `https://www.ah-soft.com/vocaloid/iroha_v2/`，使用确定性裁剪框 `(0, 0, 120, 104)` 只取猫村いろは脸部/上半身表情区域。该源按 `expression` 计入，猫村从 `chibi,expression` 变为只缺 `chibi`；当前日V活动包为 34 人 / 300 图。
+
+**验证**：`ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`pyright ...` 0 errors；本机 readline stub 基线下 `tests/test_enroll_virtual_singers_pack.py -q` 为 53 passed。临时构建 `.workspace/character-pack-builds/ja-iroha-expression-20260609-v1/ja_virtual_singers.charpack` 结构检查通过：34 IDs unique、300 images、npz keys match、dims `(768,)`、sample dirs present、under5=[]；全活动 4 包 136 IDs unique。运行态替换后 `/health` 为 4 packs / 136 characters；新增 crop SHA256 `1bf6a7188f5b0b95f1389e2433be5e9c4ac260ca529f3e45c5492190ed00e2cf`，`/identify` 命中 `nekomura_iroha` diff `0.07174767553806305`，`/identify-multi` detection_count=1，全 136 top8 collision top1 `nekomura_iroha`、top2 `dongfang_zhizi`，margin `0.087007954717`。NapCat inspect 仍为 `2026-05-28T10:56:06.736616338Z running 0`。
+
+**影响与回滚**：影响范围仅日V角色识别训练包；不涉及 bot、NapCat、Living Persona。回滚：将 `config/character_packs/backups/ja_virtual_singers.charpack.bak-20260609-211700-pre-iroha-expression-active` 恢复到 `config/character_packs/ja_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`。后续人物识别任务应继续补 BangDream 10 个 `chibi` 或日V `lily:expression`、`nekomura_iroha:chibi`、`haru:chibi`、`mayu:chibi`；不要用猫村 AHS 正比/包装/横幅图清 chibi。
+
+---
+
+## 2026-06-09 表情包静默偷取彻底修复：manifest 缺权限 + session 选错（两层根因）
+
+**变更类型**：故障修复（表情库一个月零增长根因），已部署 2026-06-09 21:06（rebuild bot，NapCat 未动）。涉及 [plugins/sticker/plugin.json](plugins/sticker/plugin.json)、[plugins/sticker/plugin.py](plugins/sticker/plugin.py)、[tests/test_sticker_plugin_silent_learn.py](tests/test_sticker_plugin_silent_learn.py)。
+
+**背景**：06-08「表情包子系统三项放开」部署后继续观察，表情库仍零增长——`storage/stickers/stickers.db` 停在 61 张（migrated 49 + stolen 11 + stolen_silent_learn 1），运行态日志 0 条 `silent sticker learn`、0 retry 入队、0 报错（代码像没跑）。逐层探针定位到两层独立根因，06-08 那刀（放宽 `on_message` 内部门控）改在了够不着的地方：
+
+**根因一（致命，使整条静默路径死亡）**：[plugin.json](plugins/sticker/plugin.json) 的 `permissions` 是 `["prompt","tool","storage"]`，**漏了 `"message"` 与 `"tick"`**。而 [kernel/bus.py](kernel/bus.py) 的 `fire_on_message`/`fire_on_tick` 首行就是 `if not self._has_permission(p, "message"|"tick"): continue`。自 manifest v2 权限门控上线以来，StickerPlugin 的 `on_message`（静默偷取入口）与 `on_tick`（retry 兜底）从未被 bus 调用。这解释了 0 学习 / 0 retry / 0 报错——方法被权限层挡在外面，内部门控改了等于没改。D1 同模式扫描：全仓 7 个定义 `on_message` 的插件，只有 sticker 漏声明 `"message"`，其余 6 个（echo/slang/chat/bilibili/element_detector/food）齐全，非系统性遗漏。
+
+**根因二（补权限后暴露）**：`_ensure_segment_cached` 的 session 选择**优先取 `bot.adapter.session`**，但它是 NoneBot 的 `functools.partial` 包装（PROBE 实测 `session=partial`），不是真 `aiohttp.ClientSession`，导致 `image_cache.save()` 静默返回 None（无 warning），每次偷取拿不到文件。改为优先 `ctx.llm_client._session`（与 [chat/plugin.py](plugins/chat/plugin.py) 已验证可用的下载路径同源）后，`session=ClientSession`、`save()` 返回真实 ref、`add()` 返回 `is_new=True`。
+
+**修复**：① manifest permissions 补 `"message"` + `"tick"`，version 1.1.6→1.1.7；② `_ensure_segment_cached` session 优先级改为 `llm_client._session` → `adapter.session` → `bot._session`；③ 新增两条回归测试——`test_manifest_grants_message_and_tick_permissions`（manifest 权限必须覆盖所有 hook，防再退化；既有单测全部直接调 `on_message`/`on_tick` 绕过 bus 权限闸，所以生产挂了测试还绿，这正是补的盲点）、`test_ensure_cached_prefers_llm_client_session`（断言下载用 llm_client session 而非 adapter partial）。
+
+**验证与影响（D4 证据）**：① `uv run ruff check` 全过，PROBE 探针全部移除（`grep -c PROBE plugin.py`=0）；② 全量 `uv run pytest` = **2560 passed, 17 skipped**（含 2 条新回归；此前 `test_admin_api.py` 的环境基线 fail 本轮也已转绿）；③ 运行态实测：部署后容器内 `stickers.db` 由 61 → 112，`stolen_silent_learn` 由 1 → 55，几分钟内增 ~54 张，`silent sticker learned` 日志持续输出，`is_new=False` 去重正常工作；④ 注意 `storage/stickers/` 是 docker named volume，宿主机 `index.json`（停在 May 21、total 64）与容器内 `stickers.db` 不是同一份，库存以容器内 DB 为准（index.json 为 legacy）。⑤ NapCat 红线：`docker inspect napcat` 全程 `2026-05-28T10:56:06 running`，仅 rebuild/recreate `qq-bot`。⑥ 回滚：`git` 回退上述 3 文件后 `dot_clean . && docker compose up -d --build --no-deps bot`；无 DB/配置迁移，无需动 NapCat。
+
+---
+
+## 2026-06-09 人物角色识别中V缺口清零：东方栀子 Bilibili 管理团队头像 expression 小批
+
+**变更类型**：角色识别训练包补源 / 运行态包替换（`zh_virtual_singers.charpack`；仅重启 `ccip-sidecar`，NapCat 未动）。
+
+**内容**：在 [tools/enroll_virtual_singers_pack.py](tools/enroll_virtual_singers_pack.py) 为 `dongfang_zhizi` 增加 `official_expression_bilibili_space_62351857_era_shine_face`，来源为 Bilibili UID `62351857` 管理团队头像 `https://i1.hdslb.com/bfs/face/d64b28af735d4cd0c872cdb12cc34edc97186561.jpg`。来源绑定证据保存在 `.workspace/character-pack-candidates/zh-dongfang-zhizi-bilibili-review-20260608-v1/`：Bilibili API `view-BV1JzLF66E6L.json` 的 `owner_mid/name/face` 与视频描述中的 Era_Diffsinger/音源管理一致，官方站 `rules.html` 绑定 Era/Shine 由该 Bilibili UID 管理。新增图按 `expression` 计入，`zh_virtual_singers` 活动包当前 16 人 / 155 图 / `missing_forms=[]`，中V缺口清零。
+
+**验证**：`ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`pyright ...` 0 errors；本机 readline stub 基线下 `tests/test_enroll_virtual_singers_pack.py -q` 为 52 passed。临时构建 `.workspace/character-pack-builds/zh-dongfangzhizi-bilibili-expression-20260609-v1/zh_virtual_singers.charpack` 结构检查通过：16 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]；东方栀子 forms 为 `profile_art=6/full_body=1/normal_proportion=1/chibi=1/expression=1`，`missing_forms=[]`。运行态替换后 `/health` 为 4 packs / 136 characters；新增图 `/identify` 命中 `dongfang_zhizi` diff `0.12306507676839828`，`/identify-multi` detection_count=1，全 136 top8 collision top1 `dongfang_zhizi`、top2 `kasane_teto`，margin `0.07728927582502365`。NapCat inspect 仍为 `2026-05-28T10:56:06.736616338Z running 0`。
+
+**影响与回滚**：影响范围仅中V角色识别训练包；不涉及 bot、NapCat、Living Persona。回滚：将 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260609-200302-pre-dongfang-bilibili-expression-active` 恢复到 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`。后续人物识别任务应转向 BangDream 10 个 `chibi` 缺口或日V `lily/nekomura_iroha/haru/mayu` 剩余缺口，勿再重跑已收口的东方栀子官方站/官方下载/Bilibili 管理头像路线。
+
+---
+
+## 2026-06-09 Dialogue Climate M1 烤群指标 durable 采集器
+
+**变更类型**：新增观测基建（M2 立项前置数据通道）；纯增量、默认旁路、不改 M1 行为。
+
+**背景**：Part A 设计（[living-persona-partA-dialogue-climate.md](docs/tracking/living-persona-partA-dialogue-climate.md) R7/R8）把「M1 烤群实测数据」列为 M2（ClimateState 全维引擎）立项的硬前置——情绪系统主成本在「调到感觉对」，无自动化测试可覆盖，必须用真实 @/poke 数据校准 τ_tension 与阈值。但现有 `MoodEngine.m1_tension_metrics()` 是**纯内存计数器**，重启即清零（今天就 rebuild 两次），且 `half_life_s` 回报的是**配置 tau** 而非**实测衰减**，无法校准。
+
+**内容**：
+- 新增 [services/dialogue_climate/](services/dialogue_climate/)（同时占位 partA M2 预留目录）：
+  - `m1_metrics.py` — `M1MetricsRecorder`，同步 best-effort 写入 `storage/living_persona/m1_metrics.db`（WAL）。逐条记录每次 inject / trigger 事件（ts、group、tension before/after、delta、tau、threshold）。重启不丢。
+  - `summarize_events()` 纯函数：注入数 / 触发率 / **实测半衰期**——对同 key 相邻注入反解 `tau = dt / ln(prev_after / before_next)`，取中位数，robust 抗 burst；另出 inter-arrival 中位数、峰值 tension。
+  - `m1_cli.py` — `uv run python -m services.dialogue_climate.m1_cli [--group GID]` 打印烤群校准报告。
+- [mood.py](plugins/schedule/mood.py)：MoodEngine 加可选 `set_m1_recorder()` + 两个采集 hook（`_register_m1_tension_delta` 注入点、`build_m1_tension_guidance` 超阈点）。**默认 None，内存路径与全部单测字节不变**；hook 全程 `contextlib.suppress(Exception)`，绝不向回复链路抛错。
+- [chat/plugin.py](plugins/chat/plugin.py)：仅当 `dialogue_climate.m1_enabled=true` 时创建 recorder 并 attach；关态完全旁路。
+- [.gitignore](.gitignore)：补 `storage/living_persona/`（含 m1_metrics.db、story_arcs、partner_states 全部运行态数据）物理护栏。
+
+**验证**：ruff `All checks passed`；pyright `0 errors`；新测试 `tests/test_m1_metrics_recorder.py`（聚合空集 / 计数触发率 / 已知 tau 反解 / 跳过非衰减对 / per-key 隔离 / durable roundtrip 跨「重启」 / 坏路径不抛错）+ mood 新增 2 例（hook 捕获 inject+trigger、recorder 抛错不破坏 guidance）共 58 passed；回归 `tests/ -k "schedule or dream or mood or chat_plugin"` **332 passed**；CLI 空库 smoke 正常。
+
+**影响与回滚**：M1 关态零影响（recorder 不创建）；开态新增一张 SQLite 表的 best-effort 写入，失败静默不影响回复。回滚：还原 5 文件（recorder 关联点全是可选 hook，移除即恢复纯内存路径），删 `storage/living_persona/m1_metrics.db`。
+
+**上线（2026-06-09 19:45）**：D7 git hygiene 通过（无 stash）；`dot_clean .` + `docker compose build --build-arg HTTP_PROXY= ... bot` + `up bot -d --no-build`，NapCat 未动（D6，保持 `Up 40 hours`）。bot 19:45:38 connected。容器内 `/app/.venv/bin/python` 验证：`M1MetricsRecorder()` 初始化 `storage/living_persona/m1_metrics.db` 成功，表 `m1_tension_events` 就位，summary 可读（当前 0 事件，待真实 @/poke burst 累积）。运行态 override `values.dialogue_climate.m1_enabled=true` 已开（chat/plugin 据此 attach recorder，无 wiring failed 日志）。观测期开始：随时 `uv run python -m services.dialogue_climate.m1_cli` 看烤群进度。
+
+---
+
+## 2026-06-09 仪表盘日程补全 slot 叙事（description）
+
+**变更类型**：admin API 字段补全 + 前端展示修复（dashboard 链 + schedule 链共 4 文件；**需 rebuild bot 镜像生效**）。
+
+**内容**：用户反馈「今日节奏 / RHYTHM」面板只显示 `时间 / activity / location · mood_hint` 的简写，看不到完整叙事。根因是 slot 序列化从未带 `description` 字段（Schedule 数据里有，但 API 没发出来），并非前端截断。
+
+**找错组件的教训（关键）**：第一刀改错了链路——用户看的「今日节奏 / RHYTHM」其实在 **`DashboardView.vue`**（数据源 `GET /api/admin/dashboard`），而我先改的是同名但无人访问的 **`ScheduleView.vue`**（标题「日程心情 / Mood Schedule」，数据源 `/api/admin/schedule`）。用户截图标题「今日节奏 / RHYTHM」+ `location · mood_hint` 合并行，与 ScheduleView 结构不符——这是一开始就该读出的判据。无痕窗口仍看不到，才排除浏览器缓存、定位到改错文件。
+
+**修复（两条链都补）**：① 后端 [dashboard.py](admin/routes/api/dashboard.py) slot 序列化补 `"description"`（line 120，真正生效的一条）；② 前端 [DashboardView.vue](admin/frontend/src/views/dashboard/DashboardView.vue) `DashboardSlot` interface 加 `description?`，timeline 在 activity 下方渲染（`.dash-timeline__desc`，text-2 正文色、past slot 降 text-3）；③④ 同步补 [schedule.py](admin/routes/api/schedule.py) + [ScheduleView.vue](admin/frontend/src/views/schedule/ScheduleView.vue)（独立的「日程心情」页，一并补齐保持一致）。业务逻辑、布局、Calm Ops 风格不变。
+
+**生效坑（重要教训）**：bot 镜像**不 bind 源码**（只 bind `config`、`admin/static`、`storage` volume），Python 源码烤进镜像。改后端 `.py` 后 `restart bot` 不换代码，必须 rebuild。曾误用「容器内复跑 `ScheduleStore.load` 序列化」自验证，但那没经过 admin API 那层（Store 本来就有 description），属假阳性。正确验证必须走真实 HTTP（login 拿 cookie → 打**用户实际访问的端点** → 检字段）。
+
+**验证（真实端到端）**：`vue-tsc --noEmit` exit 0；`npm run build` ✓ built（新 chunk `DashboardView-shA56LwI`）。后端经 `dot_clean . && docker compose build --build-arg HTTP_PROXY= ... bot && docker compose up bot -d --no-build`（D6：未 down、NapCat 未动）；recreate 后容器内 `grep description admin/routes/api/dashboard.py` 命中 line 120；实际 HTTP 打 **`/api/admin/dashboard`**（用户实际看的端点）确认 `schedule.slots[0]` 字段为 `[time, activity, mood_hint, location, description]`，`description="闹钟响了三遍…"`。
+
+**影响与回滚**：仅影响仪表盘/日程页展示，无运行时行为变更。回滚：还原 4 文件 + rebuild bot。前端需硬刷新（Dashboard/ScheduleView 均无自动轮询）。本次 rebuild 仍把工作区全部未提交改动一并烤进镜像（与上次「全量启用」一致）。
+
+## 2026-06-09 Living Persona 全量运行态启用
+
+**变更类型**：运行态配置启用 / bot rebuild / 构建上下文治理（Docker volume runtime override、`qq-bot` 重建；NapCat 未动）。
+
+**内容**：用户确认“验收通过，启用”后，已在 bot 容器使用的 Docker volume 内写入 runtime override，而不是写 host `./storage`：`/app/storage/plugins/config/schedule.json` 开启 `enabled=true`、`persona_driven_enabled=true`、`story_arc_enabled=true`、`event_replan_enabled=true`、`dialogue_climate.m1_enabled=true`；`/app/storage/plugins/config/dream.json` 开启 `enabled=true`、`life_reflection_enabled=true`，其余既有默认项保持。同步种子化 fiction-only active arc `/app/storage/living_persona/story_arcs/stage_play_competition_week.json`（舞台剧比赛准备周，`scope=fiction`、`stage=preparation`），并预热 4 张 fiction partner state cards：`tenma_tsukasa`、`kusanagi_nene`、`kamishiro_rui`、`asahina_mafuyu`，卡片约束保留“不得泄漏真人 factual / 私聊叙事”的防护。
+
+**部署过程与构建治理**：因 bot 镜像不 bind 源码，执行了 bot 镜像 rebuild 并 recreate `qq-bot`。第一次 build 遇到 Docker build cache lease 错误，已 `docker builder prune -f` 并重新 `docker pull python:3.12-slim`；第二次 build 受 Docker 默认代理 `host.docker.internal:8890` 不可达影响导致 apt 失败，最终使用无代理 build 参数完成：`docker compose build --build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy= bot`，随后 `docker compose up bot -d --no-build`。为避免后续 build context 把本机缓存和临时目录卷入镜像上下文，`.dockerignore` 新增 `.cache/`、`.workspace/`、`tmp/`、`pytest-of-kragcola/`。本轮只重建/recreate `qq-bot`，未对 NapCat 执行 `down`、recreate、rebuild 或 restart。
+
+**运行态验证**：`docker compose ps bot napcat` 显示 `qq-bot` 与 `napcat` running；`docker inspect napcat --format '{{.Created}} {{.State.Status}} {{.RestartCount}}'` 为 `2026-05-28T10:56:06.736616338Z running 0`，`docker inspect qq-bot ...` 为 `2026-06-09T08:48:00.321294125Z running 0`，确认 NapCat 登录态容器未被触碰。容器内 `scripts/check_plugin_layout.py --strict` 通过。有效配置探针输出 `schedule_flags True True True True`、`dream_flags True True`，active arc 为 `('stage_play_competition_week', 'fiction', 'preparation', ['asahina_mafuyu', 'kamishiro_rui', 'kusanagi_nene', 'tenma_tsukasa'])`。bot 日志显示 `OneBot V11 | Bot 384801062 connected`、`schedule generator started | generate_at=2:00 CST`、正常收消息；Dream 日志显示启用后 `life reflection completed | cards=2`，active arc 已写入 `source=dream_reflection` 的 `last_events`。
+
+**影响与回滚**：Living Persona 已进入运行态：日程 persona/StoryArc/replan、A-M1 dialogue climate、Dream reflection 全部开关打开。回滚优先改 runtime override：将 `schedule.persona_driven_enabled=false`、`schedule.story_arc_enabled=false`、`schedule.event_replan_enabled=false`、`schedule.dialogue_climate.m1_enabled=false`、`dream.life_reflection_enabled=false` 后 `docker compose restart bot`；如需移除本轮种子叙事数据，删除 `/app/storage/living_persona/story_arcs/stage_play_competition_week.json` 与 `/app/storage/living_persona/partner_states/*.json`。代码级回滚仍按各 Wave 维护日志移除对应实现。当前 bot 镜像包含工作区未提交代码；工作区仍有角色包主线既有脏改和 `tmp/`、`pytest-of-kragcola/` 未追踪目录，后续提交务必精确 `git add`，严禁 `git add -A`。
+
+## 2026-06-09 Living Persona 系列全量验收通过（Wave 1N/1E/2/3/4/5，D4 外部证据独立复核）
+
+**变更类型**：项目治理 / 验收（仅 docs 回填，无代码、无配置、无部署）。
+
+**背景**：Wave 5 实现侧已停在 Living Persona 全量总验收点等待验收。本轮作为验收人，按派单 [living-persona-dispatch-execution-2026-06-08.md](docs/tracking/living-persona-dispatch-execution-2026-06-08.md) §8「落地后按 D4 逐条用外部证据复核，非照单全收回执」，对六个 Wave 独立跑证据，不照搬执行者回执。
+
+**复核证据（亲自跑，非口述）**：
+
+1. **零行为变更基线**：`schedule/config.default.json` 四 flag（`persona_driven_enabled` / `story_arc_enabled` / `event_replan_enabled` / `dialogue_climate.m1_enabled`）+ `dream/config.default.json` 的 `life_reflection_enabled` 全部实测为 `false`；flag 关基线一致测试 `test_persona_driven_disabled_matches_baseline_bytes` / `test_reflection_insight_disabled_matches_baseline_bytes` / `test_story_arc_flag_off_does_not_read_arc_store` 真实存在并断言 `off_call == default_call`、store 零调用。
+2. **测试全绿**：`pkill -9 -f pytest`（D5）后，确定性组合 `141 passed`；宽测 `tests/ -k schedule` `173 passed`；宽测 `tests/ -k "dream or schedule"` `207 passed`（执行者回执提及的 `test_bad_mood_suppresses_reply` 概率边界 flaky 本轮未复现，反证其为 scheduler 随机边界、非 Living Persona 路径）。`ruff check` 改动文件全集 `All checks passed!`；`pyright` 改动文件全集 `0 errors`。
+3. **断言强度抽查（非空壳）**：7 天舞台剧链路 `test_story_arc_seven_day_chain_updates_two_fiction_partners` 断言连续 7 天后 `deadline_days_left` 7→0、`rehearsal_progress >0.7`、两名 fiction 伙伴 `current_state` 均变化且 `recent_events` 非空、partner_store 落两人；`test_story_arc_update_after_schedule_advances_variables` 断言变量跨天演化（exam_pressure 0.7→0.73 等）；事件预算 `test_event_replan_budget_blocks_second_setback_but_keeps_active_guidance` 断言第二次 setback 被挡（`setback_count==1`、`last_events`/`schedule.saved` 不增长）但 active guidance 保留。
+4. **红线外部证据（F6/Part C §5）**：生产代码 factual 写入路径 grep 0 命中；`FictionPartnerState` 读写双重 `raise ValueError`（kind!=fiction 硬拒，`story_arc.py:156-157/173-174`）；私聊入群叙事仅命中 Dream prompt 的防护文案（`不要把私聊内容写进群叙事`/`不要虚构真人线下行为`）。
+5. **D2 cancel-path**：Wave 4 `test_dream.py` 有 `pytest.raises(TimeoutError)` 模拟 Dream `_run` 取消，断言半写的 memo/arc（`不应写入`）未污染（`search_cards(...) == []`）。
+
+**结论与影响**：Living Persona 全量（A-M1 + B-L1/L1.5/L2/L3 + C-MVP）实现侧验收通过。派单 §7 自审表 Wave 5 验收人确认列已勾选，§7 追加验收说明行；[ACTIVE.md](docs/tracking/ACTIVE.md) status 改为 `accepted`，Phase 表 Wave 5 改为 `done_accepted`。**全部 flag 默认关，运行态零行为变更，未上线**——HEAD 仍为 `74b0bc6`，本轮无 commit、无 rebuild、无 NapCat 操作。后续若要开灰度需单独立项 + 烤群实测调 τ/阈值。搁置区（A-M2/M3/M4、C 真人主体、SQLite 迁移、narrative mediation 完整三档）保留不动。
+
+**交接与回滚**：纯 docs 回填，`git checkout -- docs/tracking/ maintenance-log.md` 即可回滚验收记录（不影响已实现的 Living Persona 代码，那些仍未 commit、躺在工作区且 flag 默认关）。当前工作区仍有角色包主线既有脏改与 `tmp/`、`pytest-of-kragcola/` 未追踪目录；任何后续提交严禁 `git add -A`。
+
+## 2026-06-09 Living Persona Wave 5：B-L3 事件重规划闭环 + A-M1 tension 接入（默认关）
+
+**变更类型**：功能灰度实现 / L3 经历洞察回灌、运行时事件重规划、近端剧情约束与测试（`plugins/schedule/plugin.py`、`plugins/schedule/generator.py`、schedule config JSON、`kernel/types.py`、`plugins/chat/plugin.py`、`tests/test_schedule_generator.py`、`tests/test_mood.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 5.1–5.5 新增 `schedule.event_replan_enabled`，默认 `false`。开态下 generator 读取 Dream Wave 4 产出的 `dream_reflection` 经历洞察卡，注入 `【昨日经历洞察】`，让“经历→反思→次日规划”形成闭环。SchedulePlugin 运行时开态读取 current schedule 与 active arc，只有 `dialogue_climate.m1_enabled=true` 时才读取 A-M1 `resolve_m1_tension`；高 M1 tension 或高 deadline/exam pressure 可触发一次 fiction 伙伴轻微 setback，覆盖当前/后续最多 3 个 slot 的 `description/mood_hint`，同步更新 `arc.stage=setback_replan`、`last_events/open_threads/next_day_seed/variables/event_budget.active_replan_constraints`，并注入可自然回答“这周怎么了”的近端 `剧情约束` block。事件预算复用 Wave 2 的 `record_event_trigger()`，守住 once-only、cooldown、每 arc ≤1 setback。
+
+**验证与影响**：D1 grep 已回填派单 §5：config/ctx/chat/generator/plugin 全链路均命中 `event_replan_enabled`；`generator.py` 命中 `search_cards("经历洞察", limit=3)`、`source="dream_reflection"` 过滤与 active constraint 衰减；`plugin.py` 命中 `record_event_trigger`、`setback_replan`、`active_replan_constraints`、`resolve_m1_tension` 与“这周怎么了” block。`ruff check plugins/schedule/plugin.py plugins/schedule/generator.py kernel/types.py plugins/chat/plugin.py tests/test_schedule_generator.py tests/test_mood.py` 通过；`pyright ...` 0 errors；schedule JSON 校验通过；使用既有 no-op readline stub 后 `tests/test_schedule_generator.py tests/test_mood.py tests/test_story_arc.py tests/test_schedule_store.py tests/test_dream.py -q` 为 `124 passed`，`tests/ -k schedule -q` 为 `173 passed, 2391 deselected, 2 warnings`，`tests/ -k "dream or schedule" -q` 为 `207 passed, 2357 deselected, 4 warnings`。负向 grep `CREATE TABLE.*replan|services/event_replan|ReplanEngine|dream_reflection.*factual|kind.*factual|真人线下行为|私聊内容` 仅命中防护文案/测试断言；未新增 replan 服务、新表、真人 factual 线下行为或私聊入群叙事路径。
+
+**交接与回滚**：Wave 5 实现侧已到 Living Persona 全量总验收点，当前必须等待验收人 D4 复核确认，验收前不得进入搁置区（A-M2/M3/M4、C 真人主体、SQLite 迁移、narrative mediation 完整三档）或任何新 Wave。运行态回滚为保持 `schedule.event_replan_enabled=false`，此时不读 reflection cards、不读 active arc 重规划、不写 schedule/arc、不注入 `剧情约束`。若仅关闭 `dialogue_climate.m1_enabled=false`，则 Wave 5 不读 M1 tension，但仍可按 arc pressure 降级触发。代码级回滚可移除 `event_replan_enabled` config/ctx/generator 透传、generator reflection insight helpers、runtime replan helpers、近端约束渲染/衰减与新增测试；数据级回滚可删除或清空独立 StoryArc JSON 中 `event_budget.active_replan_constraints` / `setback_count` / `triggered_once`。当前工作区仍有角色包主线既有脏改和 `tmp/`、`pytest-of-kragcola/` 未追踪目录；提交时严禁 `git add -A`，只按本轮文件精确 add。
+
+## 2026-06-09 Living Persona Wave 4：Dream 夜间 reflection 经历洞察 + Arc 更新（默认关）
+
+**变更类型**：功能灰度实现 / B-L2 Dream reflection、经历洞察 memo 卡、StoryArc 反思回写与 D2 cancel-path 测试（`plugins/dream/plugin.py`、dream config JSON、`tests/test_dream.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 4.1–4.3 新增 `dream.life_reflection_enabled`，默认 `false`。DreamAgent 不新建反思引擎，复用既有 `_run()`，在原记忆卡/表情整理完成后追加开态 reflection tail stage：读取当天 schedule（`update_current=False`）、active story arc、群聊片段与 M1 metrics，构造 `【今天过得怎样：reflection 输入】`，调用 LLM 无工具 JSON 输出 1–3 条经历洞察。解析成功后才写 `source/captured_by=dream_reflection` memo 卡，并有界更新 active arc 的 `last_events/open_threads/next_day_seed`；invalid JSON 或取消时不写外部状态。
+
+**验证与影响**：D1 grep 已回填到派单 §5：`plugin.py:36/440/455/938` 为 flag 与 startup 透传，`:77/85` 为 reflection context，`:681-720` 为 `_run_life_reflection`，`:162-221` 为 JSON 防御解析，`:224-247` 为 arc 有界回写，`:781-803` 为 memo/arc commit。`ruff check plugins/dream/plugin.py kernel/types.py plugins/chat/plugin.py tests/test_dream.py` 通过；`pyright ...` 0 errors；dream JSON `python -m json.tool` 通过；使用既有 no-op readline stub 后 `tests/test_dream.py -q` 为 `18 passed`，`tests/test_dream.py tests/test_story_arc.py tests/test_schedule_generator.py -q` 为 `55 passed`，确定性组合 `tests/test_dream.py tests/test_story_arc.py tests/test_schedule_generator.py tests/test_schedule_store.py tests/test_mood.py -q` 为 `113 passed`，`tests/ -k dream -q` 为 `34 passed, 2519 deselected`。D2 新增 `pytest.raises(TimeoutError)` cancel-path，断言 memo/arc 无“不得写入”半写污染。负证据：`rg -n 'services/life_reflection|ReflectionEngine|CREATE TABLE.*reflection|dream_reflection.*factual|kind.*factual' ...` 无生产路径命中，仅 factual 拒绝测试命中。补充宽测 `tests/ -k "dream or schedule"` 有一个既有 scheduler 概率边界失败（期望 `<15`，本次刚好 `15`），非 Dream/StoryArc 路径，已在派单回执记录。
+
+**交接与回滚**：Wave 4 实现侧已到验收点，当前必须等待验收人 D4 复核确认，验收前不得进入 Wave 5 / B-L3 重规划闭环。运行态回滚为保持 `dream.life_reflection_enabled=false`，此时 Dream 只跑原记忆/表情整理，不读 schedule/arc/message/mood，不写 `dream_reflection` 卡、不保存 arc。代码级回滚可移除 `LifeReflection*` draft/helpers、DreamAgent life_reflection 参数/字段、`_run_life_reflection` / commit 逻辑、DreamPlugin startup 透传、config JSON 字段和新增测试。当前工作区仍有角色包主线既有脏改和 `tmp/`、`pytest-of-kragcola/` 未追踪目录；提交时严禁 `git add -A`，只按本轮文件精确 add。
+
+## 2026-06-09 Living Persona Wave 3：C-MVP fiction 伙伴卡 + StoryArc 接生成（默认关）
+
+**变更类型**：功能灰度实现 / C-MVP fiction partner cards、StoryArc prompt 注入与生成后回写（`plugins/schedule/story_arc.py`、`plugins/schedule/generator.py`、`plugins/schedule/__init__.py`、`plugins/chat/plugin.py`、`tests/test_story_arc.py`、`tests/test_schedule_generator.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 3.1–3.3 新增只支持 `kind=fiction` 的伙伴状态卡：`FictionPartnerProfile`、`FictionPartnerState`、`FictionPartnerStateStore(storage/living_persona/partner_states)`。`FictionPartnerState.from_dict()` / `to_dict()` 均拒绝非 fiction，守住 C-MVP 不写真人 `factual` 的红线。`ChatPlugin` 在 `schedule.story_arc_enabled=true` 时才启动 `StoryArcStore` 与 partner store，并把从 persona known facts 推导出的 fiction partner profiles 透传给 `ScheduleGenerator`。generator 在开态载入 active arc、同步 fiction partner states、注入 `【当前剧情弧】` prompt 段，并在日程保存后回写 `last_events` / `next_day_seed` / variables / `partner_states`。
+
+**验证与影响**：D1 grep 已回填到派单 §5：`story_arc.py:131/144/156-173/261/297` 为 fiction partner 卡与拒绝逻辑；`chat/plugin.py:134/1216-1219/1232` 为 profiles 与开态 store 接线；`generator.py:222-226/270/283-306/377-424/430-441/493-500` 为 active arc 注入、回写和只处理 `kind=fiction`。`ruff check plugins/schedule/story_arc.py plugins/schedule/generator.py plugins/schedule/__init__.py plugins/chat/plugin.py tests/test_story_arc.py tests/test_schedule_generator.py` 通过；`pyright ...` 0 errors；schedule JSON 校验通过；使用既有 no-op readline stub 后 `tests/test_story_arc.py tests/test_schedule_generator.py -q` 为 `37 passed`，`tests/test_story_arc.py tests/test_schedule_generator.py tests/test_schedule_store.py -q` 为 `50 passed`，`tests/ -k schedule -q` 为 `166 passed, 2382 deselected, 2 warnings`。负向 grep `kind\s*[:=].*factual|FictionPartnerState\([^\n]*kind=.*factual|kind\s*=\s*"factual"` 在生产路径 0 命中，仅拒绝测试命中；七天 `stage_play_competition_week` 测试覆盖主线承接、考试压力/排练进度演化、≥2 名 fiction 伙伴状态变化。
+
+**交接与回滚**：Wave 3 实现侧已到验收点，当前必须等待验收人 D4 复核确认，验收前不得进入 Wave 4 / Dream reflection。运行态回滚为保持 `schedule.story_arc_enabled=false`，此时不启动 story/partner stores、不读 active arc、不注入 `【当前剧情弧】`、不回写 arc/partner states。代码级回滚可移除 fiction partner classes、ChatPlugin profile/store 接线、generator StoryArc 注入/回写 helpers 与新增测试；数据级回滚可删除独立目录 `storage/living_persona/partner_states/` 与 `storage/living_persona/story_arcs/`，不影响既有 `storage/schedule`。当前工作区仍有角色包主线既有脏改和 `tmp/`、`pytest-of-kragcola/` 未追踪目录；提交时严禁 `git add -A`，只按本轮文件精确 add。
+
+## 2026-06-09 Living Persona Wave 2：StoryArc 外置账本与事件预算原语（默认关）
+
+**变更类型**：功能灰度实现 / B-L1.5 StoryArc 存储骨架、配置开关与测试（`plugins/schedule/story_arc.py`、`plugins/schedule/plugin.py`、`plugins/schedule/__init__.py`、schedule config JSON、`tests/test_story_arc.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 2.1–2.3 新增 `StoryArc` 外置 JSON ledger，默认读写目录为 `storage/living_persona/story_arcs/*.json`，字段覆盖 `arc_id/title/scope/stage/goals/active_conflicts/variables/partner_states/open_threads/last_events/next_day_seed/event_budget`。`partner_states` 先作为 C-MVP 占位字段允许为空，不强耦合伙伴卡。新增 `StoryArcStore`、`StoryArcEventCandidate`，并实现 once-only、每 arc 至多 1 个 setback、cooldown、Best-Least-Recently-Viewed 事件选择原语。`schedule.story_arc_enabled` 已接入 `ScheduleConfig`、默认配置、schema 与 restart_required 字段，默认 `false`。
+
+**验证与影响**：D1 grep 已回填到派单 §5：`story_arc.py:46` `StoryArc`，`:129-132` store 与独立目录，`:189/:207/:232` 事件预算原语；`plugin.py:32`、`config.default.json:9`、`config.schema.json:24`、`plugin.json:34` 为 flag 默认关与配置接线。负向 grep `rg -n 'story_arc|StoryArc|story_arcs' plugins/schedule/generator.py plugins/chat/plugin.py services plugins/dream plugins/memo` 0 输出，证明 Wave 2 没有 generator/chat/dream/memo 消费路径，不注入 prompt、不回写 arc。`ruff check plugins/schedule/story_arc.py plugins/schedule/plugin.py plugins/schedule/__init__.py tests/test_story_arc.py tests/test_schedule_generator.py` 通过；`pyright ...` 为 0 errors；三个 schedule JSON `python -m json.tool` 通过；使用既有 no-op readline stub 后 `tests/test_story_arc.py -q` 为 `10 passed`，`tests/test_story_arc.py tests/test_schedule_generator.py tests/test_schedule_store.py -q` 为 `43 passed`，`tests/ -k schedule -q` 为 `161 passed, 2380 deselected, 2 warnings`。
+
+**交接与回滚**：Wave 2 实现侧已到验收点，当前必须等待验收人 D4 复核确认，验收前不得进入 Wave 3、不得把 StoryArc 接入生成。运行态回滚为保持 `schedule.story_arc_enabled=false`；代码回滚可移除 `plugins/schedule/story_arc.py`、`StoryArc` export、`story_arc_enabled` 配置字段与 `tests/test_story_arc.py`；数据级回滚可删除独立目录 `storage/living_persona/story_arcs/`，不影响既有 `storage/schedule`。当前工作区仍有角色包主线既有脏改和 `tmp/`、`pytest-of-kragcola/` 未追踪目录；提交时严禁 `git add -A`，只按本轮文件精确 add。
+
+## 2026-06-09 弱回复 closing/companion 统一重构上线（commit + flag + rebuild）
+
+**变更类型**：功能上线 / 生产部署（commit `5aedc01`、`config/config.json` flag 翻转、`docker compose up bot -d --build`）。
+
+**内容**：按 [weak-reply-audit-2026-06-07.md](docs/tracking/weak-reply-audit-2026-06-07.md) 方案 A 把弱回复 closing/companion 统一重构上线。修复生产 bug：closing 场景曾输出错误的陪伴 token `嗯，我在。`（语义应为告别）。核心改动 `services/llm/client.py` 新增 `_handle_light_reply()` 统一短路（删除旧 speculative `closing_token_task` 与 `is_closing_turn` 分支），closing 同步生成对称告别 token（fallback `好~`）、companion 注入 hint 后继续走主 LLM 出简短 ack（fallback `嗯~`）；`services/scheduler.py` 新增 `obligation.level="must"` → `must_emit`，保证必答场景不被 text_preflight skip 吞掉。
+
+**验证与影响**：本轮提交文件经 D7 精确 add（绝无 `git add -A`）：`services/llm/client.py`、`services/scheduler.py`、`tests/test_client.py`、`tests/test_closing_light_reply_client.py`、`tests/test_scheduler.py`，commit `5aedc01`（453+/75-）。D4 外部可观察证据：① 弱回复总闸 `text_preflight.enabled` 在 `config/config.json` 由 `false` 翻为 `true`，容器内运行配置 grep 确认 `"enabled": true`；② `docker compose up bot -d --build` 退出码 0，plugin-layout `--strict` 校验通过，bot 容器 Recreated + Started，napcat 仅 Running 未 recreate（D6 守住）；③ 启动日志 `Bot 就绪 ✓`、22 插件加载、OneBot V11 384801062 connected、正常收消息；④ `pkill -9 -f pytest` 后 `tests/test_closing_light_reply_client.py tests/test_scheduler.py tests/test_client.py` 等 `85 passed`。
+
+**注意（部署态 vs git）**：`config/config.json` 受 .gitignore 物理护栏不进版本库，故 flag 翻转是**部署态操作，未进 commit**——回滚 flag 需手动改回 `config/config.json` 的 `text_preflight.enabled=false`。本次 `--build` 把**整个工作区**（含未提交的 Living Persona 1E.3/1E.4、dream 删除下限、image_cache、sidecar 配套等）一并烤进运行镜像；其中 Living Persona M1 全程 `dialogue_climate.m1_enabled=false` 休眠，运行态零影响，但这些代码仍未 commit，git 与镜像不一致部分待后续分立项收口。
+
+**回滚路径**：代码回滚 `git revert 5aedc01`；运行态回滚翻回 `config/config.json` 的 `text_preflight.enabled=false`（无需 rebuild，config 为 bind-mount rw，改后 `docker compose restart bot` 即可）。
+
+## 2026-06-09 Living Persona Wave 1E.3/1E.4：on-read tension 动力学 + 超阈 prompt 行为指导
+
+**变更类型**：功能灰度实现 / MoodEngine M1 瞬态动力学、prompt 行为指导与测试（`plugins/schedule/mood.py`、`plugins/schedule/plugin.py`、`tests/test_mood.py`、`tests/test_router_qq_interactions.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 1E.3/1E.4 完成 A-M1 tension 闭环实现侧收口。`MoodEngine` 内新增瞬态 per-key `_m1_tension_state`，存 `(tension, baseline, last_ts)`；1E.2 的 @/poke 频率路径通过 `register_m1_irritation_signal()` 显式传入 `m1_tension_enabled=True` 才写入，旧 part0 reaction/poke 默认不写 M1 三元组。`resolve_m1_tension()` 读时按 `baseline + (last-baseline)*exp(-Δt/τ)` 解析并回写 `last_ts`，低 tension 自动 prune；`m1_tension_metrics()` 暴露 injection_count / prompt_trigger_count / trigger_rate / tau_s / half_life_s / current_tension。`SchedulePlugin.on_pre_prompt()` 只在 `dialogue_climate.m1_enabled=true` 且 tension 超阈时注入 `对话气氛` block，文本是“回复更短更冷淡”的行为指导，并明确不要解释原因、不要当标签说。
+
+**验证与影响**：D1 grep 已回填到派单 §5：`mood.py:127-139` 闭式公式，`:220-223` 三元组与 metrics，`:303-330` `m1_tension_enabled` opt-in，`:333-384` 读写闭式状态，`:387-421` guidance/metrics；`plugin.py:53/60` 捕获开关，`:103-117` 超阈 add_block。`ruff check plugins/schedule/mood.py plugins/schedule/plugin.py services/humanization/qq_interactions.py tests/test_mood.py tests/test_router_qq_interactions.py` 通过；`pyright plugins/schedule/mood.py plugins/schedule/plugin.py services/humanization/qq_interactions.py kernel/router.py kernel/types.py plugins/chat/plugin.py tests/test_mood.py tests/test_router_qq_interactions.py` 为 0 errors；使用既有 no-op readline stub 后 `tests/test_mood.py tests/test_router_qq_interactions.py -q` 为 `62 passed`，组合测试分别为 `95 passed` / `89 passed` / `82 passed`，`tests/ -k schedule -q` 为 `161 passed, 2370 deselected, 2 warnings`。负证据：`grep -rnE 'ClimateState|services/dialogue_climate|dialogue_climate/state|CREATE TABLE.*climate|living_persona.*tension' services plugins kernel tests` 0 输出；`git diff --check -- ...` 通过。
+
+**交接与回滚**：Wave 1E.1–1E.4 实现侧已回填并自审全绿，但验收人尚未 D4 复核确认；当前必须停在 Wave 1E 验收点，不能进入 Wave 2。运行态回滚为保持 `dialogue_climate.m1_enabled=false`，此时 @ sensor 不写入、poke 保留旧 `_POKE_TENSION` part0 nudge，不写 M1 三元组、不注入 `对话气氛` block。代码回滚可移除 `_m1_tension_state` / `m1_tension_enabled` opt-in / `resolve_m1_tension` / `build_m1_tension_guidance` / metrics、SchedulePlugin guidance block 与新增测试。当前工作区仍有角色包主线既有脏改和 `tmp/`、`pytest-of-kragcola/` 未追踪目录；提交时严禁 `git add -A`，只按本轮文件精确 add。
+
+## 2026-06-09 Living Persona Wave 1E.2：IrritationSensor @/poke 频率聚合接入
+
+**变更类型**：功能灰度实现 / QQ interaction 频率聚合、运行时开关透传与测试（`services/humanization/qq_interactions.py`、`kernel/router.py`、`kernel/types.py`、`plugins/chat/plugin.py`、`tests/test_router_qq_interactions.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 1E.2 接入 IrritationSensor。poke 继续复用 `qq_interactions.py` 既有 `is_tome()` 解析和 `_POKE_INBOUND_HISTORY` 速率 guard；真实 `@bot` 在 `kernel/router.py` 的 `_message_ats_self(...)` 确认后调用 `register_m1_mention_irritation()`，只新增短窗口 `_MENTION_INBOUND_HISTORY` 用于 @ 频率。开态把 `mention_count/poke_count` 喂给 1E.1 的 `register_m1_irritation_signal()`，最终仍走既有 `MoodEngine.register_interaction_signal(tension_d=...)`；没有新增 ClimateState、新表或持久 tension 容器。`plugins/chat/plugin.py` 将 `schedule.dialogue_climate.m1_enabled` 透传为 `ctx.dialogue_climate_m1_enabled`。
+
+**验证与影响**：D1 grep 已回填到派单 §5：`qq_interactions.py:13-17` 既有 poke rate guard，`:18-19` mention 短窗口，`:183-205` 统一调用 `register_m1_irritation_signal`，`:211-237` mention sensor，`:240-262/383-385` poke rate 记录与传入，`:321-335` 开态 M1 分支，`:341-345` 旧 part0 nudge 保留；`kernel/router.py:45/1462-1468/1530-1535` 接真实 @self；`kernel/types.py:235` 与 `plugins/chat/plugin.py:1151` 透传开关。`ruff check services/humanization/qq_interactions.py kernel/router.py kernel/types.py plugins/chat/plugin.py tests/test_router_qq_interactions.py` 通过；`pyright ...` 0 errors；使用既有 no-op readline stub 后 `tests/test_router_qq_interactions.py -q` 为 `17 passed`，组合测试 `tests/test_router_qq_interactions.py tests/test_mood.py tests/test_chat_plugin_humanization_wire.py tests/test_ingest_ordering_and_at_detection.py -q` 为 `82 passed`，`tests/test_schedule_generator.py tests/test_router_qq_interactions.py tests/test_mood.py -q` 为 `75 passed`。负证据：`grep -rnE 'ClimateState|services/dialogue_climate|dialogue_climate/state|CREATE TABLE.*climate|living_persona.*tension' services plugins kernel tests` 0 输出；`git diff --check -- ...` 通过。
+
+**交接与回滚**：Wave 1E.2 子步已完成但 Wave 1E 尚未收口；下一步只能进入 1E.3（on-read tension 动力学），不得越级 Wave 2。运行态回滚为保持 `dialogue_climate.m1_enabled=false`，此时 @ sensor 不写入、poke 保留旧 `_POKE_TENSION` part0 nudge。代码回滚可移除 `ctx.dialogue_climate_m1_enabled`、`register_m1_mention_irritation`、mention 短窗口、M1 poke 分支与新增测试。当前工作区还有角色包主线既有脏改和 `tmp/`、`pytest-of-kragcola/` 未追踪目录；提交时严禁 `git add -A`，只按本轮文件精确 add。
+
+## 2026-06-09 Living Persona Wave 1E.1：dialogue_climate.m1_enabled 默认关 + dormant tension 骨架
+
+**变更类型**：功能灰度实现 / 配置、MoodEngine 前置骨架与测试（`plugins/schedule/plugin.py`、`plugins/schedule/config.default.json`、`plugins/schedule/config.schema.json`、`plugins/schedule/plugin.json`、`plugins/schedule/mood.py`、`tests/test_mood.py`、`tests/test_schedule_generator.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 1E.1 新增 `schedule.dialogue_climate.m1_enabled`，默认 `false`，在 `ScheduleConfig`、默认配置、schema 与 `restart_required_fields` 中暴露。`plugins/schedule/mood.py` 增加 dormant M1 helper：`resolve_m1_tension_on_read()` 以 `baseline + (last-baseline)*exp(-Δt/τ)` 做闭式衰减；`compute_m1_irritation_tension_delta()` 将 @/poke burst 预聚合为有界 tension delta；`register_m1_irritation_signal()` 只通过既有 `mood_engine.register_interaction_signal(tension_d=...)` 注入，不另起状态容器。本步不把 helper 接入 runtime 事件流，关态不夺现有 `_active_nudge` / part0 on-read nudge 路径。
+
+**验证与影响**：D1 grep 已回填到派单 §5：`plugin.py:19-22/32`、`config.default.json:9-10`、`config.schema.json:24-31`、`plugin.json:34`、`mood.py:120-179`。`source ./scripts/dev/env.sh && uv run ruff check plugins/schedule/mood.py plugins/schedule/plugin.py tests/test_mood.py tests/test_schedule_generator.py` 通过；`uv run pyright ...` 为 0 errors；`python -m json.tool` 校验三个 schedule JSON 通过；使用既有 no-op readline stub 后 `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_mood.py tests/test_router_qq_interactions.py tests/test_schedule_generator.py tests/test_schedule_store.py -q` 为 `82 passed`，`tests/ -k schedule -q` 为 `158 passed, 2360 deselected, 2 warnings`。新增测试覆盖 config 默认关/显式开、默认关 delta=0、开态 delta 上限 0.2、默认关不触碰 mood engine、开态复用 `register_interaction_signal` 且只传 `tension_d`、固定 Δt 衰减等于 `baseline + diff/e`。
+
+**交接与回滚**：Wave 1N 已经用户 D4 复核确认收口；Wave 1E.1 已完成但 Wave 1E 尚未收口。下一步只能进入 1E.2（IrritationSensor @/poke 频率聚合），继续保持 `dialogue_climate.m1_enabled` 默认关并复用 `register_interaction_signal`，不得越级 Wave 2。运行态回滚为保持 `dialogue_climate.m1_enabled=false`；代码回滚可移除 `DialogueClimateConfig`、config JSON 字段、dormant M1 helpers 与新增测试。无 NapCat、Docker、DB 或新存储目录变更。
+
+## 2026-06-09 Living Persona Wave 1N.3：日程生成接入跨天连续与最近记忆（默认关）
+
+**变更类型**：功能灰度实现 / prompt 构造、存储读取语义与测试（`plugins/schedule/generator.py`、`plugins/schedule/store.py`、`plugins/chat/plugin.py`、`tests/test_schedule_generator.py`、`tests/test_schedule_store.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 1N.3，在 `schedule.persona_driven_enabled=true` 时让 `ScheduleGenerator` 回读昨日日程摘要与最近 5 条记忆卡，渲染 `【跨天连续与最近记忆】`，并把“承接昨日状态/最近记忆形成跨天因果、不要重复昨日主题、自然变奏不逐字复述”作为 prompt 规则注入。`ChatPlugin` 将既有 `ctx.card_store` 透传给 generator；`ScheduleStore.load()` 增加 `update_current` 参数，generator 读昨天时使用 `update_current=False`，避免把当前日程缓存污染成昨天。continuity context 上限 900 字，persona brief 仍保持 700 字上限，token 增量受控。
+
+**验证与影响**：D1 grep 已回填到派单 §5：`generator.py:216` 回读 yesterday，`:220-227` 调 `search_cards("", limit=5)`，`:256/261-262` 渲染跨天连续规则；`plugin.py:1167` 透传 `ctx.card_store`；`store.py:35/76` 条件更新 current。`source ./scripts/dev/env.sh && uv run ruff check plugins/schedule/generator.py plugins/schedule/store.py plugins/schedule/__init__.py plugins/schedule/plugin.py plugins/chat/plugin.py tests/test_schedule_generator.py tests/test_schedule_store.py` 通过；`uv run pyright ...` 为 0 errors；使用既有 no-op readline stub 后 `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_schedule_generator.py tests/test_schedule_store.py -q` 为 `31 passed`，`tests/ -k schedule -q` 为 `156 passed, 2355 deselected, 2 warnings`。新增测试覆盖 flag 关不读记忆卡、flag 开注入昨天摘要/记忆卡、三天 deterministic 链路主题不重复并呈现可读因果、`load(update_current=False)` 不覆盖 current、700/900 字符上限。
+
+**交接与回滚**：Wave 1N 执行侧已收口并等待验收人确认；按派单串行规则，下一步应进入 Wave 1E.1（`dialogue_climate.m1_enabled` 默认关），不要越级启动 Wave 2。运行态回滚为保持 `schedule.persona_driven_enabled=false`；代码回滚可移除 `PersonaScheduleBrief`、`memory_card_store` 透传、`ScheduleStore.load(update_current=...)`、continuity helpers 与相关测试。无 NapCat、Docker、DB 或新存储目录变更。
+
+## 2026-06-08 Living Persona Wave 1N.2：日程生成注入 persona 短要点（默认关）
+
+**变更类型**：功能灰度实现 / prompt 构造与测试（`plugins/schedule/generator.py`、`plugins/schedule/__init__.py`、`plugins/chat/plugin.py`、`tests/test_schedule_generator.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 1N.2 增加 `PersonaScheduleBrief`，仅在 `schedule.persona_driven_enabled=true` 时注入 `【persona 日程短要点】`。短摘要来源为 active persona 冻结产物的结构化短字段：`persona.yaml.identity.role` / `identity.essence` 与 `knowledge.yaml.known_facts`，再补一条伙伴关系近况。schedule 路径不读 `source.md` / `source.frozen.md`，不把 persona 全文塞进 prompt。brief 中预留 `fiction/factual` 分层：伙伴/团体关系按 fiction 处理，真人/群友事实按 factual 处理，本层不虚构真人线下行为。
+
+**验证与影响**：D1 grep 命中 `plugins/schedule/generator.py:65-70`、`:178-181`、`:209-224`，`plugins/chat/plugin.py:104-131`、`:1154`、`:1165-1166`；`grep -nE 'source\.md|source\.frozen' plugins/schedule/generator.py plugins/chat/plugin.py` 0 输出。active persona 探针确认 brief identity 含 `Wonderlands×Showtime`，known_facts 含 `WxS`、`宫益坂女子学园二年级`、伙伴名单，traits 为 5 条短关键词。`ruff check` 通过；`pyright` 0 errors；使用既有 no-op readline stub 后 focused schedule 测试 `26 passed`，`tests/ -k schedule` `151 passed, 2355 deselected, 2 warnings`。新增测试证明：flag 关即使传入 brief，LLM 入参与保存 JSON bytes 仍与默认关完全一致；flag 开 prompt 含身份/伙伴/`fiction/factual`，且不含 `## 1. 是谁` / `禁说事实` 等 source 全文段落；brief 长度 ≤700 字。
+
+**交接与回滚**：下一步按派单进入 1N.3（昨日日程摘要 + 最近记忆卡回读），仍须保持 flag 关基线不变。运行态回滚为保持 `persona_driven_enabled=false`；代码回滚可移除 `PersonaScheduleBrief`、generator 注入分支、ChatPlugin brief 构建/透传与新增测试。无 NapCat、Docker、DB 或新存储目录变更。
+
+## 2026-06-08 Living Persona Wave 1N.1：角色驱动日程灰度开关默认关接线
+
+**变更类型**：功能灰度开关 / 配置与测试（`plugins/schedule/*`、`plugins/chat/plugin.py`、`tests/test_schedule_generator.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/living-persona-dispatch-execution-2026-06-08.md`；无运行态重启/部署）。
+
+**内容**：按 Living Persona 派单 Wave 1N.1 新增 `schedule.persona_driven_enabled`，默认 `false`，在 `ScheduleConfig`、`config.default.json`、`config.schema.json`、`plugin.json restart_required_fields` 中暴露，并从 `ChatPlugin` 初始化路径透传给 `ScheduleGenerator`。本步只接线灰度 flag，不读取 persona，不改 schedule prompt，不新增存储。
+
+**验证与影响**：D1 grep 命中 `plugins/schedule/plugin.py:25`、`plugins/schedule/generator.py:70/75`、`plugins/chat/plugin.py:1102`、`plugins/schedule/config.default.json:8`、`plugins/schedule/config.schema.json:20`、`plugins/schedule/plugin.json:33`。`ruff check` 通过，`pyright` 0 errors。直接 `uv run pytest ...` 在本机 Anaconda Python 3.13 `readline` native crash（exit 139），已在派单偏差表记录；使用既有 no-op readline stub 后 focused schedule 测试 `23 passed`，`tests/ -k schedule` `148 passed, 2355 deselected, 2 warnings`。新增测试捕获 LLM 调用入参和保存 JSON bytes，证明默认关与显式关完全一致。
+
+**交接与回滚**：验收人已确认接受既有 `/tmp/omubot_pytest_stubs` 后的 pytest 结果作为本机验证基线，后续已继续 1N.2。运行态回滚为保持 `persona_driven_enabled=false`；代码回滚可移除新增字段/透传/测试并按 git 回退。无 NapCat、Docker、DB 或存储目录变更。
+
+## 2026-06-08 角色包中V东方栀子官方站 chibi 小批补录：官方站点头像/Q版单图
+
+**变更类型**：角色包训练数据增量补录/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`；仅执行 `docker compose restart ccip-sidecar`；NapCat 未 recreate）。
+
+**内容**：继续按 active tracker 补中V剩余缺口。本轮只写回东方栀子官方声库站点头像/Q版单图 `Image_16002726312696.png`，来源 `https://dongfangzhizi.top/` 的 WordPress media 条目日期为 `2025-12-25T13:54:04`，source 写为 `official_chibi_dongfangzhizi_voicebank_site_avatar_20251225`，仅计入 `chibi`，不计入 `expression`。官方站 `306.png` 公安备案图标、`379.png` 横向 logo、`307/309/310/311/312/313/314/315/316/318/328/330.png` 立绘/声库展示图、以及 `439/442/448/450/452.jpg` 活动 KV/多人/横幅图都继续作为负例；站内本轮未发现干净的 `expression` 差分源。
+
+**验证与影响**：候选材料在 `.workspace/character-pack-candidates/zh-dongfang-zhizi-official-site-review-20260608-v1/`，包含站点页面、WordPress media API、源图、`identify`、`identify-multi` 与 collision 结果。`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `51 passed`。Dry-run/build 生成 `.workspace/character-pack-builds/zh-dongfangzhizi-official-site-chibi-20260608-v1/zh_virtual_singers.charpack`，中V从 153 张图增至 154 张图；结构验证为 16 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]，活动四包全局 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260608-153439-pre-dongfang-official-site-chibi-active`，只执行 `docker compose restart ccip-sidecar`；sidecar health 为 `status=ok pack_count=4 character_count=136`。新增头像图活动态 `/identify` 命中 `dongfang_zhizi`，diff `0.09644080698490143`；`/identify-multi` 只检测到 1 个角色；sidecar 容器内全 136 top8 collision top1 为 `dongfang_zhizi`、top2 为 `nekomura_iroha`，margin `0.09793475270271301`。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}} {{.RestartCount}}'` 仍为 `2026-05-28T10:56:06.736616338Z running 0`。
+
+**交接与回滚**：东方栀子 `chibi` 缺口已清除，中V当前只剩 `dongfang_zhizi:expression`。下一步继续找官方/授权且单角色干净的 `expression` 源；不要把官方站立绘、活动 KV、横向 logo、公安备案图标、VCPedia Pixiv 图或同人梗图用于清 `expression`。回滚可将 `zh_virtual_singers.charpack.bak-20260608-153439-pre-dongfang-official-site-chibi-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-08 Living Persona 系列最终审查 + 全量实施派发文档落地
+
+**变更类型**：项目治理 / 规划文档（仅 docs，无代码、无部署）。
+
+**背景**：用户要求对 Living Persona 系列（Part 0/A/B/C + 故事弧调研）做最终审查，再创建一份"全量实施派发追踪文档"交给他人执行，强调派发文档的引导性，并指定格式参考同目录的 [pmubot-dispatch-execution-2026-05-31.md](docs/tracking/pmubot-dispatch-execution-2026-05-31.md)。
+
+**最终审查发现并修正**：通读四 part + 研究文档 + 重新 grep 全部代码锚点，发现**一处实质不一致**——[Part B](docs/tracking/living-persona-partB-generative-life.md) §6 排期项 4 写"C-MVP 在 B-L1.5/L2 跑通后启动"，与 [Part 0](docs/tracking/living-persona-part0-overview.md) §4 和 [Part C](docs/tracking/living-persona-partC-social-narrative.md) §6.5 的"C-MVP 与 B-L1.5 并行（L1.5 的 `partner_states` 依赖伙伴卡供数，co-dependent 同批交付）"矛盾。已将 Part B §6.4 改为"C-MVP 随 L1.5 并行、同批交付，真人入叙事仍后置"，消除张力。
+
+**代码锚点复验（全部对上，2026-06-08）**：`identity_name` 只传名字（[generator.py:134](plugins/schedule/generator.py#L134)、[chat/plugin.py:1101](plugins/chat/plugin.py#L1101)）；跨天因果缺失（[generator.py:54-55](plugins/schedule/generator.py#L54)）；日程在 dream/memo 零引用（孤岛成立）；生成入口 `_generate:121`、存盘 `store.save:174`；`store.load:35/save:83`；Schedule 字段 `slots:38 day_narrative:37 theme:41`；`ScheduleConfig:19 enabled:22`；Dream `_run:330`（max_rounds=15）；mood `register_interaction_signal:214`、`_active_nudge:240`；`add_block:365`（带 position/priority）；poke/tome 解析 `qq_interactions.py:28/66`；`storage/living_persona/` 与 `services/dialogue_climate/` 均 **No such file**（全新无污染）。
+
+**派发文档**：新增 [docs/tracking/living-persona-dispatch-execution-2026-06-08.md](docs/tracking/living-persona-dispatch-execution-2026-06-08.md)，严格对齐 pmubot dispatch 格式——① §0 决策冻结表（F1–F8，冲突时以本表为准）；② §1 主线锚点订正表（16 条 grep 实证）；③ §2 Wave 0 零代码复验；④ §3 串行 Wave 表（**Wave 1N B-L1 ∥ 1E A-M1** 可并行 → Wave 2 L1.5 存储+开关 → Wave 3 C-MVP+接生成 → Wave 4 L2 反思 → Wave 5 L3 重规划闭环），每个 Wave 子项带「编号/一句话/关键文件/D1 grep 锁/验证/回滚」六列 + 收口判据；⑤ §4 总收口；⑥ §5 偏差表+回执模板；⑦ §6 搁置区（A 全维/C 真人主体/SQLite 明确不在本批，保留不砍）；⑧ §7 自审表；⑨ §8 验收人 D4 外部证据复核要点。
+
+**引导性设计要点**：全程 flag 默认关=零行为变更回归基线；每 Wave 自带 D1 grep + 验证 + 回滚三件套；红线（Part C §5 真人不可虚构线下行为/私聊不入群叙事）作为冻结决策 F6 贯穿，涉及叙事写入的 Wave 3/4/5 要求 grep+单测双证据断言无真人 `factual` 写入；D2 cancel-path（Wave 4 Dream）、D5 pkill pytest 写入执行原则。
+
+**验证与影响**：仅 docs。新派发文档 + 系列四 part 交叉引用 **0 死链**（sibling + `../../` 代码链接全部存在）；表格列数修正（1E.3 单元格内 grep 的裸 `|` 转义为 `\|`）；残留 MD032/MD012 警告与参考文档 blockquote-list 写法一致，保留不动。无 NapCat 操作。
+
+**交接与回滚**：派发文档即落地依据，执行者从 Wave 0 锚点复验起步。本系列**低优先级，不抢角色包补齐 + pmubot 主线**，故 ACTIVE.md 仍指向角色包 tracker，未改。文档回滚按 git 即可。
+
+## 2026-06-08 Living Persona 系列补充故事弧调研 + Part B 新增 L1.5 / Part C 新增 C-MVP
+
+**变更类型**：项目治理 / 规划文档补充（仅 docs，无代码、无部署）。
+
+**背景**：用户审查“当前/未来能否产生连贯而波折的故事结构”，举例“连续一周准备舞台剧比赛 + 期末考试冲突 + 伙伴路上被车撞需更换舞台动作”。结论——当前日程系统只有单日 `theme/day_narrative/slots`（[plugins/schedule/types.py](plugins/schedule/types.py)），生成器只喂 name+日期+日历（[plugins/schedule/generator.py:131-166](plugins/schedule/generator.py#L131)），运行时只注入当前 slot（[plugins/schedule/plugin.py:72-93](plugins/schedule/plugin.py#L72)），无法表达跨天主线/冲突/伙伴动态/重规划。随后用户要求“考察酒馆、故事树等成熟项目 + 前沿论文，有理有据补充项目”。
+
+**内容**：
+
+1. 新增 [docs/tracking/living-persona-research-story-arc-2026-06-08.md](docs/tracking/living-persona-research-story-arc-2026-06-08.md)：考察成熟工程实践（SillyTavern 角色卡/World Info/Author's Note/Group Chats、AI Dungeon Memory/Story Cards、NovelAI Lorebook、Twine/Ink/Yarn Spinner storylets+saliency/ChoiceScript 变量与分支）与研究（Generative Agents、Drama/Experience Management 与 PaSSAGE、Riedl & Young 叙事规划、Mimesis narrative mediation、长故事一致性 Lost in Stories/ConStory-Bench），每条均带官方文档/论文链接；提炼“长故事需显式剧情弧状态 + 触发式背景 + 近端作者注 + 一致性账本”。
+2. 回写 [Part 0](docs/tracking/living-persona-part0-overview.md)：索引新增 Research 行，落地顺序加入 L1.5。
+3. 回写 [Part B](docs/tracking/living-persona-partB-generative-life.md)：在 L1 与 L2 之间新增 **L1.5 Story Arc（剧情弧账本）**（`arc_id/stage/goals/conflicts/variables/partner_states/open_threads/next_day_seed`，先用 `storage/living_persona/story_arcs/*.json`）；L2/L3 升级为同步更新 arc；风险加 B5（LLM 长故事自相矛盾→外部账本兜底）/B6（过度戏剧化→每 arc 最多 1 个重大 setback、优先低烈度事件）；排期与决策模板同步。
+4. 回写 [Part C](docs/tracking/living-persona-partC-social-narrative.md)：新增 **§6.5 C-MVP 伙伴状态卡**（只覆盖虚构伙伴 `kind=fiction`，惰性生成+存档，供 Part B-L1.5 的 `partner_states` 读取），真人入叙事仍按红线后置。
+
+**调研方法留痕**：先跑后台 deep-research workflow（29 agents），但其抓的 23 个 URL 未抽出可靠 claim（全标 unreliable），**未采用**；改用人工 WebSearch 核查官方文档/论文入口取证。第一轮误以为 `mcp__anysearch` 仍是上个会话的 "MCP server not connected" 状态而跳过它（教训：MCP 连接状态每会话应实测，不沿用旧记忆），经用户指出后实测 anysearch 已连通，遂用其 `extract` 抓取 **SillyTavern 四页（World Info / Character Design / Author's Note / Group Chats）+ Ink Writing-with-ink + Yarn Storylets-and-Saliency 官方全文**逐页核实，并用 `academic.search` 交叉核对论文。全文核实新得若干可直接复用的机制（WI Insertion Order/Timed Effects、Ink read-count/once-only/sticky/fallback、Yarn directed-saliency=drama-management / Best-Least-Recently-Viewed、Author's Note 的“受伤→行为受限”用例），已补进研究文档 §1.1/§2.2/§2.3/§3.4，§9 来源核实状态同步更新为“已 extract 全文”。
+
+**验证与影响**：新研究文档内部 3 条相对 md 链接全部解析为存在文件（脚本核验）。仅文档变更，不影响运行时；舞台剧样例被定为 Part B-L1.5/L3 + Part C C-MVP 的验收用例。Part C 第 28/111 行 MD060 紧凑表格风格为既存样式，未在本轮改动范围内，按 skill 原则未动。
+
+**自审回填（落地前）**：通读四 part + 研究文档一致性自审，发现全文核实新得的工程范式只停在研究文档、未下沉到 Part B 实现层，遂回填：① L1.5 实现建议补「近端高优先注入（WI Insertion Order）+ 变量即状态（Ink read-count/ChoiceScript stats）」；② L3 重规划补「Author's Note 式近端约束注入 + once-only/cooldown/fallback 事件触发」；③ B5/B6 护栏落为「once-only+cooldown+Best-LRV」现成算法并指向研究 §1.1/§2.2/§2.3/§3.5；④ 消除 Part 0 §4 与 Part C §6「C 依赖 B」同 C-MVP 提前的字面张力（明确 C 主体依赖 B、C-MVP 例外随 B-L1.5 并行）。落地前复核 Part B 代码证据仍准确：`identity_name` 只传名字（generator.py:134 / chat:1101）、日程在 dream/memo 零引用（孤岛成立）、Dream tool loop 在 dream/plugin.py:331。研究文档新增 §10 L1.5 落地清单（D3 旧→新六行 + 落地顺序 + 回滚 + 范围边界）。全系列交叉引用脚本复验 0 死链。
+
+**交接与回滚**：纯文档新增/编辑，`git checkout -- docs/tracking/ maintenance-log.md` 即可回滚。决策模板（Part A R5/M1、Part B L1–L3+L1.5、Part C 形态/红线/C-MVP）仍待用户签字。落地起点为研究文档 §10 清单第 1 步（新增 story_arc 存储+单测，不接生成），开关 `schedule.story_arc_enabled` 默认关。
+
+## 2026-06-08 Issue 17 Part 0 上线：戳一戳/reaction 接入 MoodEngine 三维 nudge
+
+**变更类型**：功能上线（代码 + 测试 + bot rebuild）。提交 `1b82fa2`。
+
+**背景**：用户问"今日节奏 + 心情统一规划管理方案是否落地"。排查结论——统一编排层 **Dialogue Climate** 设计文档齐全（`docs/tracking/omubot-grayscale-issue17-research-dialogue-climate.md` 等），但 2026-06-06 范围决策（[issue17-part0-landing-2026-06-06.md](docs/tracking/issue17-part0-landing-2026-06-06.md)）明确**不新建 Climate 统一层**，改为把信号接进**已有的 MoodEngine** 三维 nudge（valence/openness/tension）。这批 Part 0 接线代码此前已写但**一直躺在未提交工作区**，本次测试 + 提交 + 上线。
+
+**改动（D3 旧→新四列见 landing 文档 §1）**：
+
+1. **P0-1** 新增 [services/humanization/emoji_sentiment.py](services/humanization/emoji_sentiment.py)：QQ face ID（str）→ `(polarity, intensity, label)` 情感表 + `classify_reaction_sentiment()`。ID 全部对齐权威表 [kernel/qq_face.py](kernel/qq_face.py)（已抽查 171=点赞/322=翻白眼/85=差劲/11=发怒；规避旧文档 76=👍 的错误，76 实为彩虹未收录）；未知码→弱正面默认 `(positive, 0.2)`。
+2. **E-ext** [plugins/schedule/mood.py](plugins/schedule/mood.py)：`_recognition_nudges` 三元组扩为四元组 `(ts, valence_d, openness_d, tension_d)`；`_active_nudge` 返回三维并各自 cap 0.2；`evaluate()` 应用 tension。`register_recognition_signal()` 内部转调新方法（向后兼容旧三元组路径）。
+3. **reg-ext** 新增通用入口 `register_interaction_signal(*, valence_d, openness_d, tension_d, group_id, session_id)`。
+4. **P0-3/P0-4** [services/humanization/qq_interactions.py](services/humanization/qq_interactions.py:151)：新增 `_apply_mood_nudge()`，正面 reaction→valence+、负面→valence-/tension+、poke→tension+。关键——nudge 在 [dispatch:220](services/humanization/qq_interactions.py#L220) **的 mute 检查之前**触发，所以被速率静默的 poke-spam 仍抬升 tension（设计意图）。`mood_engine=None` 时 try/except no-op。所有 nudge 复用 30min 线性衰减 + 0.2/维 cap，不主导 base mood。
+
+**信号映射**：reaction 正面 valence+`intensity*0.10`；负面 valence−`*0.12`/tension+`*0.06`；未知 valence+`0.2*0.05`；poke tension+`0.04`。
+
+**验证（D4）**：① ruff 全过、pyright 改动文件 0 error；② 相关 51 测试通过（test_emoji_sentiment / test_mood / test_router_qq_interactions），全量 **2483 passed, 17 skipped** 零失败（`Event loop is closed` 为 aiosqlite teardown 既有无害 ResourceWarning）；③ host network build（绕 buildkit 代理坑）→ `docker compose up -d --no-deps bot` recreate；④ 镜像内 `emoji_sentiment.py` PRESENT、`mood.py` 含 `register_interaction_signal`；⑤ `Bot 384801062 connected`、connection open、日程生成器启动、启动零 ERROR；⑥ **napcat 红线 `Created=2026-05-28`、`RestartCount=0` 未动**（D6）。
+
+**交接与回滚**：纯附加接线，不改 reaction/poke 既有 trigger 投递。回滚 = `git revert 1b82fa2` + rebuild。统一编排层（ClimateState/ClimateDynamics/CouplingPolicy）仍**未实现**，今日节奏与心情当前仍靠 [plugins/schedule/plugin.py](plugins/schedule/plugin.py) 单插件内聚（`build_mood_block` 把日程 slot 的 mood_hint 合进 prompt）；本次只落地 Part 0 信号源前置。P0-2（语音 ptt2text）因 NapCat 版本红线仍挂起。
+
+## 2026-06-08 slang 子系统 warning 排查结论：损坏已自愈，无需改动
+
+**变更类型**：故障排查（无代码改动 / 结论性留痕）。
+
+**起因**：后台「系统」页历史残留 slang 相关 warning（`slang tick job failed | ...database disk image is malformed`、`hook error | plugin=slang hook=on_message` 软隔离熔断），上一条目（Docker 迁移）末尾标记为"待单独排查"。
+
+**排查过程**：
+
+1. **运行库实测健康**：先确认 `storage` 是 named volume `omubot-storage`（Linux ext4），**不是** bind-mount——host 上 `storage/slang.db`（31MB/5-21）是陈旧本地副本，与运行无关。容器卷内活跃 `storage/slang.db` 为 94MB / 6-08 写入、`PRAGMA integrity_check=ok`、`journal_mode=delete`、5449 条 term。
+2. **settings 字段无缺失**：用运行时 venv（`/app/.venv/bin/python`）读 `slang_settings` 行做 `SlangSettings.model_validate`，**VALIDATE OK**，`daily_ai_review_times=['04:00','16:00']`、`learning_enabled=True`。上轮 summary 记的"`daily_ai_review_time`（单数）缺字段"全仓无任何引用（`grep` 确认），系 malformed 异常文本记串，**该 warning 实际不存在**。
+3. **根因定位**：[services/slang/store.py:558-562](services/slang/store.py#L558-L562) 注释明确——slang.db 在 **macOS Docker bind-mount + WAL** 时代每 5–10 天损坏一次；corrupt 备份集中在 5/11–5/20（带 `.shm`/`.wal`），5/20-21 切 `journal_mode=DELETE`+`synchronous=FULL` 消除 WAL 损坏面后**再无新 corrupt**。三条 warning 均为损坏期历史记录，RuntimeErrorStore 是内存滚动窗口，迁移重启已清空。重启 18min 零 slang/hook 报错。
+4. **D1 同模式扫描**：全仓 sqlite store 体检——DELETE+FULL 已扩散到 slang/style/conversation_archive/learning_normalizer/memory_consolidator；仍用 WAL 的 8 个活跃库（block_trace/character_recognition/episodic/knowledge_graph/knowledge_index/memory_cards/messages/stickers）`PRAGMA quick_check` **全部 ok**。唯一 BAD 是 `storage/backups/slang-corrupt-20260520-213228/` 留档坏副本。结论：WAL 损坏机制只在已废弃的 bind-mount 场景成立，named volume（ext4）上 WAL 安全，**sticker/knowledge 等无需改 DELETE**。
+
+**结论与影响**：slang 三条 warning 单一根因（历史 db 损坏）已于 5/20-21 切 DELETE 模式时根治，运行库现完全健康，**本次无代码改动**。后台残留 warning 计数随重启已归零。
+
+**交接与回滚**：无改动无需回滚。若后台再现 slang `malformed`，按 [services/slang/store.py](services/slang/store.py) 的 DELETE 模式排查（不应再发生）；新损坏优先怀疑卷损坏而非 WAL。
+
+## 2026-06-08 Docker 存储迁移到外置盘 + napcat 重登 + sticker manifest 误报修复
+
+**变更类型**：运维事件（主盘满故障处理 / Docker disk image 迁移 / napcat 重新扫码登录 / 代码修复部署）。
+
+**起因**：rebuild bot 时构建失败报 `read-only file system`。排查发现主盘（内置 228Gi）被写满到只剩 1.3Gi，根因是 Docker Desktop 的 `Docker.raw`（逻辑 1TB 稀疏文件、真实 ~55G）一直在主盘 `~/Library/Containers/com.docker.docker/Data/vms/0/data/`，之前"迁移 docker"只迁了项目目录/bind-mount 到外置盘，没迁这个底层镜像存储。详见记忆 [[project_docker_raw_migration]]。
+
+**处理**：
+
+1. **迁 Docker.raw 到外置盘**：用户在 Docker Desktop → Settings → Resources → Advanced → Disk image location 改到 `/Volumes/OmubotDisk/DockerData/DockerDesktop`，Apply & restart。Docker 用 `cp -Rp` 搬 raw，耗时约 **70+ 分钟**（cp 对 1TB 稀疏文件要线性扫完整个逻辑地址空间，极慢；中段 du 卡住是假象，CPU 时间在涨即正常）。迁完主盘从 1.3Gi 恢复到 64Gi 可用。settings-store.json 写入 `DataFolder=/Volumes/OmubotDisk/DockerData/DockerDesktop`。
+2. **napcat 重登**：迁移完成后 Docker Desktop 停/启了所有容器（napcat StartedAt 变化，但 `Created=2026-05-28`、`RestartCount=0`，**未 recreate，D6 红线完好**，设备指纹文件 `napcat/data/nt_qq_472663...` 完整）。但 1 小时+ 的 daemon 停机导致 QQ 登录会话失效，napcat 重启后打印二维码要求重新扫码。用户经 WebUI（`http://localhost:6099`，token 在 `napcat/config/webui.json`）扫码重登成功，emu不吃小杯面(384801062) 恢复在线。
+3. **sticker manifest 误报修复**：删除 `plugins/sticker/plugin.json` 里的 `"dependencies": {"vision": ">=1.0.0"}`——vision 是 service（`ctx.vision_client`）不是注册到插件总线的 plugin（`plugins/vision/` 只有 plugin.json 无 plugin.py），导致每次依赖解析刷 `dependency not found | plugin=sticker dependency=vision` warning（历史累计 868 次，污染后台「系统」页 runtime_errors warning 计数）。功能从未受影响。
+
+**构建坑**：迁移+prune 后 buildkit 通过 host proxy（`host.docker.internal:8890`）下载 apt 大包反复中断，但容器直连 Debian 正常。最终用 `docker build --network=host --build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= --build-arg http_proxy= --build-arg https_proxy= --build-arg GIT_COMMIT=unknown -t omubot-bot:latest .` 绕过 buildkit 代理构建成功，再 `docker compose up -d --no-deps bot` 用新镜像 recreate bot（不动 napcat）。
+
+**验证与影响**：① 主盘 64Gi 可用、外置盘 595Gi 可用；② 容器全 up，NapCat `Created=2026-05-28` 红线通过；③ bot `Bot 384801062 connected`、connection open、正常收群消息（含 sub_type=1 动画表情）；④ `docker logs qq-bot | grep -c "dependency not found.*sticker"` = **0**，误报已消除，启动期 WARNING 仅剩 1 条无害 nonebot legacy format 提示。清理了 21.47GB build cache。
+
+**交接与回滚**：Docker disk image 现在外置盘，主盘空间问题根治。后续 `docker compose up -d --build` 若再遇 buildkit 代理下载失败，用上面的 `docker build --network=host` + 空 proxy build-arg 方案。napcat 已重登，**不要 down/recreate napcat**（D6）。剩余 slang 子系统的 warning（hook error 熔断 / slang.db 损坏 / daily_ai_review_time 缺字段）是另一独立问题，本次未处理，待单独排查。
+
+## 2026-06-08 角色包中V VCPedia normal 小批补录：苍穹/诗岸
+
+**变更类型**：角色包训练数据增量补录/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`；已恢复 Docker Desktop 控制面并 `docker compose restart ccip-sidecar`；NapCat 未 recreate）。
+
+**内容**：继续按 active tracker 补中V剩余 `normal_proportion` 缺口。本轮只写回 VCPedia 两张单角色正比透明立绘：苍穹页面 `https://vcpedia.cn/苍穹` 的 `File:苍穹.png`（caption `苍穹人设图`）作为 `vcpedia_sheet_cangqiong_character_art`；诗岸页面 `https://vcpedia.cn/诗岸` 的 `File:诗岸立绘.png`（caption `诗岸人设图`）作为 `vcpedia_sheet_shian_character_art`。脚本新增 `RefererImageUrl` 与 referer-aware 下载/cache 支持，`vcpedia_sheet_*` 统一计入 `normal_proportion`。旧 SynthV Wiki 苍穹 Genesis Crystal / 诗岸 game concept 误撞候选、以及多角色 concept sheet 仍保持拒绝，不用来清 normal。
+
+**验证与影响**：候选材料在 `.workspace/character-pack-candidates/zh-vcpedia-normal-review-20260608-v1/`，包含 VCPedia 页面/API/fileinfo、源图、`identify` 与 collision 结果。`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `50 passed`。Dry-run 显示中V 16 人 / 153 图，苍穹/诗岸 `normal_proportion` 缺口清除，只剩 `dongfang_zhizi:chibi,expression`。Docker Desktop 当时因主机 Data 卷满盘触发 VM `input/output error` / `read-only file system`，sidecar `/build-series-pack` reset；先将可再生成的 `~/.cache/huggingface` 与 `~/.cache/uv` 移到 `.workspace/host-cache-offload-20260608/` 释放空间，再用 sidecar 同源 builder 在隔离 `uv --with` 环境生成 `.workspace/character-pack-builds/zh-vcpedia-normal-20260608-v1/zh_virtual_singers.charpack`。结构验证：活动 4 包 136 IDs 无重复、under5=[]、npz keys match、dims `(768,)`、sample dirs present；活动中V 16 人 / 153 图。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260608-023350-pre-vcpedia-normal-active`，恢复 Docker Desktop 控制面后执行 `docker compose restart ccip-sidecar`；sidecar health 为 `status=ok pack_count=4 character_count=136`。两张新增图活动态 `/identify` 均命中目标：苍穹 diff `0.013557199388742447`，诗岸 diff `0.013620720244944096`；sidecar 容器内全 136 top8 collision 均 top1 目标，margin 分别 `0.12224921211600304` / `0.05180262681096792`。NapCat 红线复核：`docker inspect napcat` 的 Created 仍为 `2026-05-28T10:56:06.736616338Z`，未 recreate。
+
+**交接与回滚**：中V现在只剩 `dongfang_zhizi:chibi,expression`；苍穹/诗岸的 normal 缺口已清除。下一步继续找东方栀子官方/授权 chibi/expression，或转向 BangDream 10 个 chibi、日V `lily/nekomura_iroha/haru/mayu` 剩余缺口；不要重试本轮已拒绝的苍穹/诗岸旧设定板、整张多角色 concept sheet 或表情图清 normal。回滚可将 `zh_virtual_singers.charpack.bak-20260608-023350-pre-vcpedia-normal-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。主机用户级 cache 已临时 offload 到 `.workspace/host-cache-offload-20260608/`，如需要可手动恢复或保留为外置盘缓存。
+
+## 2026-06-08 表情包子系统三项放开：active 群偷取 + bot 主动收录 + Dream 删除下限（默认 500，后台可配）
+
+**变更类型**：代码行为变更（表情偷取/收录门控放宽 + Dream 删除护栏 + 新增可视化配置项），未部署（待用户确认上线）。涉及 `plugins/sticker/plugin.py`、`services/tools/sticker_tools.py`、`services/media/sticker_store.py`、`plugins/dream/plugin.py`、`plugins/dream/config.default.json`、`plugins/dream/config.schema.json`、`admin/routes/api/dream.py` 及对应测试。
+
+**背景**：观察到 bot 上线一个月，静默群只在头一两天偷过表情，之后库存停滞甚至缩水，发送也稀疏。量化实测（usage.json/index.json）：库存 64 张（migrated 52、stolen 11、stolen_silent_learn 1），偷取 created_at 停在 05-14，05-19 一次 `sticker_del=5` 净减少，发送事件仅 3 条（5-13/14）。根因是三道门叠加：① 静默偷取 `on_message` 第一道闸 `presence_mode != "silent_learn"` 把 active 群（如烤群 993065015，config.json 实为 active）全部挡掉，静默偷取在 active 群从未运行；② active 群唯一的偷取入口 `SaveStickerTool` 被硬门控成「只有管理员要求才能收录」，bot 主动看到好表情无法收；③ Dream 整理 prompt 鼓励 `delete_sticker` 但只删不进，单向缩水。
+
+**内容**：
+
+1. 放开静默偷取门控：`StickerPlugin.on_message` 闸门改为 `presence_mode not in ("silent_learn", "active")`，保留 `not allow_speaking` 短路——即 active 群只在「bot 不开口的安静时段」静默吸表情，不与主动回复路径抢；`off` 群、per-group `sticker_mode=off`、`tools_enabled=False` 仍排除。
+2. 放开 bot 主动收录：`SaveStickerTool` 的 `requested_by` 由必填改为可选，新增「无具名要求 = bot 自己判断好用 → source=stolen」分支；管理员要求仍 source=admin；**具名非管理员要求仍拒绝**（防群友诱导收录乱图）。工具描述同步改写为「管理员要求 或 你自己觉得有趣/好用」。
+3. Dream 删除下限：`DreamConfig` 新增 `sticker_delete_floor: int = 500`，经 `DreamAgent` 构造透传；`delete_sticker` 工具在「库存 ≤ 下限且下限 > 0」时拒绝删除并返回提示；整理 prompt 按库存与下限关系分两种措辞（达下限则明示本轮禁删）。`StickerStore` 新增 `count` 属性。管理员经 `ManageStickerTool` 的显式删除不受此下限限制（人在控制）。`sticker_delete_floor=0` 表示不设保护（用于测试/特殊场景）。
+4. 后台可配：`plugins/dream/config.schema.json` 新增 `sticker_delete_floor` 字段（integer，0–5000，含中文 title/description），通过既有 schema 驱动的插件配置编辑器（后台「插件」页）即可改值，写入 `storage/plugins/config/dream.json` 经 `load_plugin_config` 合并生效。`admin/routes/api/dream.py` 的 `/dream` 状态接口额外暴露 `sticker_delete_floor` 与 `sticker_count`。
+
+**验证与影响**：D1 同模式扫描——偷取触发点全仓仅 `plugins/sticker/plugin.py`（on_message 静默 + on_tick retry）与 `SaveStickerTool` 两处，均已覆盖；删除点仅 Dream `delete_sticker` 与管理员 `ManageStickerTool`，仅前者加下限。新增/改动测试：`tests/test_sticker_plugin_silent_learn.py`（active 安静态会偷、off 不偷、active 开口态不偷）、`tests/test_sticker_tools.py`（无 requested_by 主动收录=stolen、具名非管理员仍拒、schema required 去掉 requested_by）、`tests/test_dream.py`（floor=0 可删、floor=500 单张被拒、not_found 仍正常）。`uv run ruff check` 全过；`uv run pyright`（改动文件）0 errors；全量 `pytest` 为 `1 failed, 2480 passed, 17 skipped`，唯一 failed 为既存基线 `test_admin_api.py::test_system_services_health_endpoint`（admin `error_alerts` 告警，已 git stash 验证 clean tree 同样失败，与本次改动无关）。影响面：active 群安静时段开始静默吸表情、bot 可主动收录、Dream 不再把库删到 500 以下；不改发送决策逻辑（thinker `sticker` 判定未动）。
+
+**交接与回滚**：已部署 2026-06-08 01:31（`dot_clean . && docker compose up -d --build --no-deps bot`，bot 容器 recreate；NapCat 未动，部署前后 `Created=2026-05-28T10:56:06` running 一致）。bot `384801062 connected`，WebSocket 正常收群消息无报错。下限默认 500 > 当前库存 64，部署后 Dream 短期内不会再删任何表情，库存将随 active 群静默偷取回升。回滚：按 git 回退上述文件后 rebuild bot 即可；若只想临时关下限，后台插件页把 `sticker_delete_floor` 设 0。
+
+## 2026-06-08 角色包中V五维介质 Bilibili 表情小批补录：启程之音/旧五维包
+
+**变更类型**：角色包训练数据增量补录/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：继续按 active tracker 补中V剩余缺口。本轮复核 Bilibili 活动 `五维介质-启程之音`（`act_id=107174`、`lottery_id=107180`），活动说明强绑定「平行四界」与星尘/海伊/苍穹/赤羽/诗岸/永夜/牧心；活动奖励反查到 package `7995`（动态表情包，item_id `1745465728001`）与 `7996`（静态表情包，item_id `1745238293001`），并用旧五维包 `3863` / `3911` 作为候选参考。下载 90 张静态 PNG 后，只写回 8 张运行态稳定单图：苍穹 `7996_109372` expression；赤羽 `7995_109347` chibi、`7995_109362` expression；诗岸 `7996_109374` expression；牧心 `3863_53979` chibi、`7996_109384` expression；永夜 Minus `3863_53963` chibi、`7996_109370` expression。东方栀子在本轮 90 张图里没有 top1 命中；苍穹/诗岸的表情包图只用于 `expression`，不用于 `normal_proportion`。
+
+**验证与影响**：候选材料写入 `.workspace/character-pack-candidates/zh-medium5-qichengzhiyin-bilibili-review-20260608-v1/`，包含 `candidates.json`、`contact-sheet.jpg`、`identify-results.json`、`collision-results.json`、`active-identify-results.json`、`active-collision-results.json`。`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `48 passed`。Dry-run/build 生成 `.workspace/character-pack-builds/zh-medium5-qicheng-bilibili-emote-20260608-v1/zh_virtual_singers.charpack`，中V从 143 张图增至 151 张图；结构验证为 16 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]，活动四包全局 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260608-011343-pre-qicheng-bilibili-emote-active`，只执行 `docker compose restart ccip-sidecar`；sidecar health 为 `status=ok pack_count=4 character_count=136`。8 张新增图活动态 `/identify` 均命中目标，diff 范围 `0.044722285` 到 `0.100470096`；sidecar 容器内全 136 top8 collision 第一名均为目标，最窄 margin `0.041792527`。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：赤羽、牧心、永夜 Minus 的 `chibi/expression` 缺口已清除；苍穹/诗岸只剩 `normal_proportion`；东方栀子仍缺 `chibi,expression`。不要批量接入 package `3863/3911/7995/7996` 的其它表情：本轮只白名单上述 8 张，`7996_109383` 超阈值且不稳定，东方栀子无命中，苍穹/诗岸表情图不得当作 normal。回滚可将 `zh_virtual_singers.charpack.bak-20260608-011343-pre-qicheng-bilibili-emote-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-07 角色包中V心华 LINE STORE 小批补录：LINE creator 贴图源
+
+**变更类型**：角色包训练数据增量补录/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`、`docs/character-packs/training-data-audit-2026-06-02.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：继续按 active tracker 补中V缺口。本轮先排除 LINE product `8632068`：页面标题 `暖男 冠華`、作者 `CuckCuck`，不是心华。随后复核 LINE product `1245282`，页面标题 `台灣V家虛擬歌姬-心華`、描述强绑定心华出道一周年纪念贴图，作者 `FACIO YUMEI`。因作者不能核成官方权利方 endpoint，source 命名为 `line_creator_*` 而不是 `official_*`。只写回 2 张运行态稳定单图：`9950512` 作为 `line_creator_chibi_facio_yumei_xin_hua_1245282_9950512`，`9950513` 作为 `line_creator_expression_facio_yumei_xin_hua_1245282_9950513`；同产品其它贴图和 product main 图继续拒绝，不批量接入。
+
+**验证与影响**：`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `46 passed`。Dry-run/build 生成 `.workspace/character-pack-builds/zh-xin-hua-line-sticker-20260607-v1/zh_virtual_singers.charpack`，中V从 141 张图增至 143 张图；结构验证为 16 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]，活动四包全局 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260607-223821-pre-xin-hua-line-sticker-active`，只执行 `docker compose restart ccip-sidecar`；sidecar health 为 `status=ok pack_count=4 character_count=136`。两张新增图 `/identify` 均命中 `xin_hua`，diff `0.145203948` / `0.140470535`；sidecar 容器内全 136 top8 collision 第一名均为目标，margin `0.069639474` / `0.077715009`。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：心华 chibi/expression 缺口已清除；中V当前剩余缺口为 `chi_yu/mu_xin/yongye_minus/dongfang_zhizi:chibi,expression` 与 `cang_qiong/shi_an:normal_proportion,expression`。不要重试 LINE product `8632068`，不要批量接入 LINE product `1245282` 中除 `9950512/9950513` 外的贴图或 product main 图。回滚可将 `zh_virtual_singers.charpack.bak-20260607-223821-pre-xin-hua-line-sticker-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-07 角色包中V Bilibili 表情小批补录：星尘/海伊
+
+**变更类型**：角色包训练数据增量补录/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`、`docs/character-packs/training-data-audit-2026-06-02.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：继续按 active tracker 补中V缺口。本轮复核 Bilibili 表情包 package `264`（星尘，item_id `6077`）与 package `441`（海伊，item_id `36777`），只写回 4 张运行态稳定单图：星尘 `4391` 作为 `official_chibi_bilibili_emote_pkg264_4391`，星尘 `4401` 作为 `official_expression_bilibili_emote_pkg264_4401`，海伊 `7648` 作为 `official_chibi_bilibili_emote_pkg441_7648`，海伊 `7659` 作为 `official_expression_bilibili_emote_pkg441_7659`。同包其它图继续作为负例或弱候选：星尘 `4393` 当前误撞 `yan_he`，`4396` 当前误撞 `vocaloid_kagamine_len`；海伊 `7657` 未命中/超阈值，`7656` 不够稳定；星尘新年 package `755` 未写回。
+
+**验证与影响**：`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `44 passed`。Dry-run/build 生成 `.workspace/character-pack-builds/zh-medium5-bilibili-emote-20260607-v1/zh_virtual_singers.charpack`，中V从 137 张图增至 141 张图；结构验证为 16 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]，活动四包全局 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260607-215202-pre-bilibili-emote-active`，只执行 `docker compose restart ccip-sidecar`；sidecar health 为 `status=ok pack_count=4 character_count=136`。4 张新增图 `/identify` 均命中目标：星尘 diff `0.069077484` / `0.049320612`，海伊 diff `0.088419318` / `0.111666501`；sidecar 容器内全 136 top8 collision 第一名均为目标，最窄 margin `0.088582411`。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：星尘/海伊 chibi/expression 缺口已清除；中V当前剩余缺口为 `chi_yu/mu_xin/yongye_minus/xin_hua/dongfang_zhizi:chibi,expression` 与 `cang_qiong/shi_an:normal_proportion,expression`。不要重试 Bilibili 星尘/海伊包中已误撞或不稳的非白名单表情，不要批量接入 package `755`。回滚可将 `zh_virtual_singers.charpack.bak-20260607-215202-pre-bilibili-emote-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-07 角色包中V夏语遥 LINE STORE 小批补录：VOICEMITH/E-CAPSULE 贴图源
+
+**变更类型**：角色包训练数据增量补录/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`、`docs/character-packs/training-data-audit-2026-06-02.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：继续按 active tracker 补中V缺口。本轮复核 LINE STORE product `5077007`，页面标题为 `夏語遙(3)`，作者 `飛天膠囊數位科技有限公司`，版权 `©VOICEMITH.All Rights Reserved`，来源强绑定夏语遥。40 张贴图只写回 2 张运行态稳定单图：`98039968` 作为 `official_chibi_line_voicemith_ecapsule_xia_yuyao3_5077007_98039968`，`98039985` 作为 `official_expression_line_voicemith_ecapsule_xia_yuyao3_5077007_98039985`。同产品其它贴图虽然来源绑定，但当前 centroid 下多为 top1 误撞、超阈值或 top1-top2 margin 太窄，明确不批量接入。
+
+**验证与影响**：`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `42 passed`。Dry-run/build 生成 `.workspace/character-pack-builds/zh-xia-yuyao-line-sticker-20260607-v1/zh_virtual_singers.charpack`，中V从 135 张图增至 137 张图；结构验证为 16 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]，活动四包全局 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260607-211439-pre-xia-yuyao-line-sticker-active`，只执行 `docker compose restart ccip-sidecar`；sidecar health 为 `status=ok pack_count=4 character_count=136`。两张新增图 `/identify` 均命中 `xia_yuyao`，diff `0.107345752` / `0.098708108`；sidecar 容器内全 136 top8 collision 第一名均为目标，margin 约 `0.1409` / `0.1553`。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：夏语遥 chibi/expression 缺口已清除；该阶段在 Bilibili 表情小批前的中V剩余缺口为星尘、海伊、赤羽、牧心、永夜 Minus、心华、东方栀子缺 `chibi,expression`，以及 `cang_qiong/shi_an:normal_proportion,expression`。不要重试 LINE product `5077007` 中除 `98039968/98039985` 外已误撞或不稳的贴图。回滚可将 `zh_virtual_singers.charpack.bak-20260607-211439-pre-xia-yuyao-line-sticker-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-07 角色包中V VSinger archived sticker 小批补录：洛天依/言和/乐正绫/乐正龙牙/徵羽摩柯/墨清弦
+
+**变更类型**：角色包训练数据增量补录/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`、`docs/character-packs/training-data-audit-2026-06-02.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：继续按 active tracker 补中V缺口。本轮只写回 11 张 Luminous/img.lty.fun VSINGER 单角色归档表情源：洛天依 1 张 expression，言和/乐正绫/乐正龙牙/徵羽摩柯/墨清弦各 1 张 expression + 1 张 chibi；新增 `archived_expression_* -> expression`、`archived_chibi_* -> chibi` 分桶。来源命名刻意使用 `archived_*`，不是 `official_*`：Luminous 页面声称这些图提取自 VSINGER 官方 QQ/微信表情且版权归上海禾念，但它仍是归档镜像而不是 VSinger 一手官网 endpoint。已拒绝徵羽摩柯七周年表情候选组，多张 top1 误撞 `kaito`；本轮摩柯只使用 bilibili 徵羽摩柯六周年 LQ18/LQ15。
+
+**验证与影响**：`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `40 passed`。Dry-run/build 生成 `.workspace/character-pack-builds/zh-vsinger-stickers-20260607-v1/zh_virtual_singers.charpack`，中V从 124 图增至 135 图；结构验证为 16 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]，活动四包全局 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260607-203504-pre-vsinger-stickers-active`，只执行 `docker compose restart ccip-sidecar`；`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136`。11 张新增图 `/identify` 全部命中目标，sidecar 容器内全 136 top8 collision 第一名均为目标，最低 top1-top2 margin 约 `0.0713`。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：VSinger 六人缺口已清除；该阶段在夏语遥 LINE 与 Bilibili 表情小批前仍有星尘、海伊、赤羽、牧心、永夜 Minus、夏语遥、心华、东方栀子缺 `chibi,expression`，以及 `cang_qiong/shi_an:normal_proportion,expression`。不要把 Luminous/img.lty.fun 归档镜像误标为官方 endpoint，不要重试 VSinger API cover/album 封面或徵羽摩柯七周年误撞候选。回滚可将 `zh_virtual_singers.charpack.bak-20260607-203504-pre-vsinger-stickers-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-07 复读机制昵称点名修复：echo 用原文（strip 前）算 key 并复读
+
+**变更类型**：群复读机制 bug 修复 + 日志可观测性补全 + 回归测试（`kernel/router.py`、`plugins/echo/plugin.py`、`kernel/config.py`、`bot.py`、`tests/test_ingest_ordering_and_at_detection.py`、`tests/test_echo_humanizer_input.py`；纯代码 + 配置默认值，无 DB 迁移；2026-06-07 20:23 已重建并重启 `qq-bot` 上线，NapCat 未动）。
+
+**背景与根因**：群 `993065015` 18:57:24 用户发 `姆。`，bot 在 18:57:26（napcat 日志铁证）回了裸 `。`，且应用层**零日志**、未走 LLM。排查链路：① 真凶是 **EchoPlugin（群复读检测，priority 200 拦截器）**，不是弱回复链路。`姆。`/`emu。` 被 NoneBot strip 掉昵称后 segments 只剩 `。`；EchoPlugin 用 strip 后 segments 算 `echo_key=。`，群里反复点名（不同昵称 strip 后都是 `。`）在 300s 窗口累计达阈值 3 → 判定复读 → 把 strip 后的 `。` 原样 `send_group_msg` 发出，并 `return True` 消费事件（故不进 addressing/chat，即“没看到回复调用”）。② **零日志假象**根因：EchoPlugin 用 `logger.bind(channel="echo")`，但 `LogChannelConfig`（kernel/config.py）**没有 `echo` 字段**，[bot.py](bot.py) 的 channel filter `getattr(channels, "echo", False)` 永远返回 False → echo 所有日志被静默过滤。这是与 2026-06-07 早先两刀（addressing 层、弱回复语义链路）**同源问题的第三个面**：echo 也在消费 NoneBot strip 后的内容。
+
+**内容**（按用户决策：echo 一律用原文 + 用原文算 key）：① router 新增 `_original_segments(event, fallback)`：返回 `event.original_message`（strip 前深拷贝），缺失时回退 stripped。② `echo_key` 改为 `build_echo_key(_original_segments(...))`，使 `姆。`/`emu。`/`。` 算出不同 key、互不并入同一复读计数。③ `raw_message` 新增 `echo_segments` 字段携带原文 segments；`segments` 仍保留 strip 后版本（bilibili/sticker 插件依赖它，不动）。④ EchoPlugin 复读发送改为优先用 `echo_segments`（原文 `姆。`），回退 `segments`，使复读输出完整原文而非残缺 `。`。⑤ `LogChannelConfig` 补 `echo: bool = True`，[bot.py](bot.py) `_CHANNEL_LABELS` 补「复读」标签，解除 echo 永久日志盲区。无昵称 strip 时 original==stripped，普通复读行为不变。
+
+**验证与影响（D4 证据）**：① 同模式扫描（D1）：`grep build_echo_key` 全仓唯一调用点 router.py:1439（已改）；echo 无其他 `get_plaintext` 依赖；确认 `echo_key` 仅 echo 消费、`segments` 另被 bilibili/sticker 消费（故不改 segments，另加 echo_segments）。② 外部可观察：`uv run ruff check kernel/router.py plugins/echo/plugin.py kernel/config.py bot.py tests/test_ingest_ordering_and_at_detection.py tests/test_echo_humanizer_input.py` 通过；`uv run pyright kernel/router.py plugins/echo/plugin.py kernel/config.py` 0 errors；echo+router 聚焦 `tests/test_echo.py tests/test_echo_humanizer_input.py tests/test_plugin_mute_gate.py tests/test_ingest_ordering_and_at_detection.py` **51 passed**（含 5 个新增：`_original_segments` 取原文/回退、`echo_key` 区分昵称、echo 发 echo_segments、缺失回退 segments）；全量 `pytest -q` **2465 passed, 17 skipped, 1 failed**——唯一 failed `test_admin_api::test_system_services_health_endpoint` 为预存基线（`backup_disk` 磁盘 95% 告警，环境状态，与本次无关，已多次复测确认）。③ 运行态：部署前 `git stash list`（空）+ `git diff` 抽查确认 `_original_segments`/`echo_segments`/`echo_key=build_echo_key(echo_segments)` hunks 落地；`dot_clean && docker compose up -d --build --no-deps bot` 只重建/recreate `qq-bot`；`docker compose ps` 显示 `qq-bot Up`、`ccip-sidecar healthy`、`napcat Up 7 days`；bot 20:23 启动后正常收消息无 error/traceback。NapCat 红线：`docker inspect napcat` 为 `2026-05-31T12:30:30 running`，未 recreate。④ D2 不适用：未新增 `wait_for`/shutdown cancel 协程。⑤ 回滚：恢复上述 4 个源文件后 `docker compose up -d --build --no-deps bot`；config 默认值变更随代码回退，无需重启 NapCat。
+
+**观察点**：下次群里反复刷 `姆。` 达复读阈值时，bot 应复读出完整 `姆。`（而非裸 `。`），且 `复读 | group=... key=...` 日志现在可见；不同昵称点名不再被并成同一句复读。
+
+---
+
+## 2026-06-07 角色包中V Medium5 concept chibi 裁剪小批补录：苍穹/诗岸
+
+**变更类型**：角色包训练数据增量补录/确定性裁剪源能力/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`、`docs/character-packs/training-data-audit-2026-06-02.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：按 active tracker 继续补中V缺口。本轮复核 Medium5 / SynthV Wiki concept sheet 后，没有把整张图直接入库：苍穹 sheet 含苍穹+赤羽，诗岸 sheet 含诗岸+ZERO，且整图均不是 clean `normal_proportion`；诗岸整图此前还曾 `/identify` 到 BangDream `nakamachi_arale`。脚本新增 `CroppedImageUrl` / `CROPPED_IMAGE_URLS` / `download_cropped_image`，只写回两张确定性目标角色裁剪源：`synthvwiki_chibi_crop_cangqiong_concept_front` 与 `synthvwiki_chibi_crop_shian_concept_front`，并按 `chibi` 计入。`cang_qiong` / `shi_an` 的 chibi 缺口因此清除，但二者仍缺 `normal_proportion,expression`。
+
+**验证与影响**：`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `38 passed`。Dry-run/build 生成 `.workspace/character-pack-builds/zh-medium5-chibi-crop-20260607-v1/zh_virtual_singers.charpack`，中V为 16 人 / 124 图；结构验证为 16 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]，活动四包全局 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260607-194441-pre-medium5-chibi-crop-active`，只执行 `docker compose restart ccip-sidecar`；`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136`。新增裁剪源 `/identify` 均命中目标：苍穹 `0.0737996176`、诗岸 `0.0572203174`；sidecar 容器内全 136 top8 collision 第一名均为目标，top2 分别为 `hinomori_shizuku 0.159621`、`nakamachi_arale 0.097765528`。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：下一步继续找中V chibi/expression 源，以及 `cang_qiong` / `shi_an` 更干净的单角色 `normal_proportion` / `expression` 源；不要用整张 Medium5 concept sheet 或已误撞的旧设定板清表。回滚可将 `zh_virtual_singers.charpack.bak-20260607-194441-pre-medium5-chibi-crop-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-07 角色包日V FINDME chibi 小批补录：KAFU/SEKAI/RIME/COKO
+
+**变更类型**：角色包训练数据增量补录/活动日V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/ja_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`、`docs/character-packs/training-data-audit-2026-06-02.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：按 active tracker 继续补日V chibi 缺口。复核 FINDME STORE / KAMITSUBAKI 音楽的同位体授权商品候选后，只写回 4 张视觉干净、单角色、运行态 top1 稳定的 chibi 源：KAFU `official_chibi_findme_kafu_1st_anniv_plush_mascot`、SEKAI `official_chibi_findme_sekai_1st_anniv_plush_mascot`、RIME `official_chibi_findme_rime_niconico2023_plush_front`、COKO `official_chibi_findme_coko_niconico2023_plush_front`。拒绝 HARU 正面图（当前 `/identify` 与 collision top1 为 KAFU）、全部背面图，以及包装/专辑/展示图。
+
+**验证与影响**：`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `35 passed`。Dry-run/build 生成 `.workspace/character-pack-builds/ja-kamitsubaki-chibi-20260607-v1/ja_virtual_singers.charpack`，日V为 34 人 / 299 图；结构验证为 34 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]，活动四包全局 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/ja_virtual_singers.charpack.bak-20260607-181934-pre-kamitsubaki-chibi-active`，只执行 `docker compose restart ccip-sidecar`；`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136 registry_version=7a60b4f27c86 cache_entries=0`。4 张新增源图 `/identify` 均命中目标：KAFU `0.060864493`、SEKAI `0.081995755`、RIME `0.107475802`、COKO `0.133097947`；sidecar 容器内全 136 top8 collision 第一名均为目标。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：日V当前剩余缺口为 `lily:expression`、`nekomura_iroha:chibi,expression`、`haru:chibi`、`mayu:chibi`；不要用 FINDME/KAMITSUBAKI 包装、专辑、背面图或当前误撞的 HARU plush 清表。回滚可将 `ja_virtual_singers.charpack.bak-20260607-181934-pre-kamitsubaki-chibi-active` 移回 `config/character_packs/ja_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-07 昵称点名弱回复改走主 LLM（B 方案）+ companion 启用表情包
+
+**变更类型**：弱回复机制行为修正/去硬编码/回归测试（`services/llm/client.py`、`tests/test_client.py`；纯代码，无配置/DB 迁移；已重建并重启 `qq-bot` 上线，NapCat 未动）。
+
+**背景与根因**：上线后日志（群 `993065015`）观察到两个体验问题。① `姆。` 这类昵称点名回了裸 `？`——根因是上一刀（见下方「昵称点名空内容语义链路修复」条目）的短路实现 `_handle_nickname_only_companion` 从硬编码 5 元池 `_EMPTY_VISIBLE_REPLY_FALLBACKS` 随机抽，`？` 是池成员之一，属随机命中冷选项，且整条回复内容是硬编码、不经 LLM。② thinker 判 `light_reply thought='回个表情包表示看到了'` 却发了文字 `姆~`、`sticker=none`——根因是 companion hint 硬编码「不要用表情包」，是 design §2.6「表情包语义检索前置项未落地」时期的临时保守约束；而 `send_sticker` 的 `intent`（by-intent 检索）入口现已落地，该约束已过时。
+
+**内容**：① 昵称点名不再短路（B 方案）：删除死代码 `_handle_nickname_only_companion`，改为在 chat() 早段设 `nickname_only_call` 标志，流入主 LLM 路径——因 `@bot` → `force_reply=True` 本就跳过 thinker，故在 no-thinker 分支注入 `_NICKNAME_ONLY_REPLY_HINT`（点名提示：像被叫到一样简短回应/可反问、不展开）并设 `thinker_retrieve_mode="skip"`（无语义 query，跳过 RAG）。回复文字改由主 LLM 生成，不再硬编码；可按 thinker `sticker` 决策 + 既有 send_sticker 注入自主发表情包。② companion hint 去硬编码并解禁表情：提取 `_COMPANION_REPLY_HINT` 常量，删除「不要用表情包」整句，仅保留「简短/在场/不展开」的语域约束；是否配表情交回 thinker.sticker 字段与既有 [client.py:4586](services/llm/client.py#L4586) 的 send_sticker 注入。③ 保留 `_pick_empty_visible_reply_fallback` / `_EMPTY_VISIBLE_REPLY_FALLBACKS`，因 `_fallback_ack`（addressed 但 LLM 空回复）仍以它为最终文字兜底。
+
+**注意（认知修正）**：本次「启用表情包」复用的 `search_by_intent` 底层是 `KeywordBM25Retriever`（关键词 BM25），**不是向量语义检索**。对点名/companion 应一声的意图够用，但同义不同词召回弱于向量；向量升级是独立前置项，本次未做。
+
+**验证与影响（D4 证据）**：① 同模式扫描（D1）：`grep -rn "不要用表情包"` 全仓仅 client.py 那一处（已改），其余两处是 `_fallback_ack` docstring（该函数本就优先发表情、文字仅兜底）。② 外部可观察：`uv run ruff check services/llm/client.py tests/test_client.py` 通过；`uv run pyright services/llm/client.py` 0 errors；`tests/test_client.py` **56 passed**（含新增 `test_nickname_only_call_routes_to_companion_llm`、`test_companion_hint_does_not_forbid_stickers`）；相关回归 `tests/test_ingest_ordering_and_at_detection.py tests/test_context_plugin.py tests/test_closing_light_reply_client.py tests/test_scheduler.py tests/test_router_qq_interactions.py` **115 passed**；全量 `pytest -q` 为 **2456 passed, 17 skipped, 1 failed**——唯一 failed 为 `tests/test_admin_api.py::test_system_services_health_endpoint`，已 stash 本次改动复测确认其在改动前同样 fail（`backup_disk` 磁盘占用 95% 触发 error alert，属环境状态/admin 子系统预存基线，与本次无关）。③ 运行态：部署前 `git stash list`（空）`&& git status -uno --short`；`git diff` 抽查确认 `_NICKNAME_ONLY_REPLY_HINT`/`nickname_only_call`/`thinker_retrieve_mode="skip"` hunks 真实落地；`dot_clean && docker compose up -d --build --no-deps bot` 只重建/recreate `qq-bot`；`docker compose ps` 显示 `qq-bot Up`、`ccip-sidecar healthy`、`napcat Up 6 days`；bot 日志 17:59 启动、`Bot 就绪，开始接收消息 ✓`、正常收消息无 error/traceback。NapCat 红线复核：`docker inspect napcat` 为 `2026-05-31T12:30:30 running`，未 recreate。④ D2 不适用：未新增 `wait_for`/shutdown cancel 协程；昵称点名现复用主 LLM 既有路径。⑤ 回滚：恢复 `services/llm/client.py`、`tests/test_client.py` 后 `docker compose up -d --build --no-deps bot`；无 DB/配置迁移，无需重启 NapCat。
+
+**观察点**：下一次 `姆。`/`emu。` 点名应见日志走主 LLM（非 `nickname_only_light_ack` 短路），回复为 LLM 生成的短在场 ack（可能带 by-intent 表情包），且 ContextPlugin 因 `retrieve_mode=skip` 不检索；companion 弱回复在 thinker.sticker=true 时可出现 send_sticker。
+
+## 2026-06-07 VSinger 官方 API cover/album 筛查：只作溯源与负例记录
+
+**变更类型**：角色包候选负例追踪/交接文档更新（`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`、`maintenance-log.md`；未改 enrollment 脚本，未重建/替换任何活动 charpack，未重启 sidecar/NapCat）。
+
+**内容**：继续按 active tracker 补齐中V缺口时，复核 VSinger 官方 API `https://vsinger.com/api/vsinger` 并保存响应到 `.workspace/character-pack-candidates/zh-vsinger-api-review-20260607/vsinger-api.json`。本轮确认既有洛天依 Q 版白名单源 `https://res.vsinger.com/images/cffa18b20ce29010364f33ae94c6a8b0.jpg` 来自官方 JSON 的 `洛天依 models[1].cover_img`，标题为 `洛天依Q版公式服`；只有洛天依有 `models`，言和、乐正绫、乐正龙牙、徵羽摩柯、墨清弦均无 model 条目。额外下载 6 角色共 24 张 `cover_imgs` 与 129 张 `album_imgs`，并生成 `cover-contact-sheet.jpg` 与各角色 album contact sheet。视觉复核显示 cover 多为正比/半身展示图，album 多为歌曲/专辑封面，语义上不是干净的 chibi/expression 训练源。
+
+**验证与影响**：本地 JSON 计数为 cover 24 张（每角色 4 张）与 album 129 张（洛天依 41、言和 21、乐正绫 23、乐正龙牙 17、徵羽摩柯 14、墨清弦 13）。代表 `/identify` 结果虽有本人命中，但不足以批准入库：`yan_he_album_11.jpg -> yan_he 0.077911049`、`yuezheng_ling_album_01.jpg -> yuezheng_ling 0.098497488`、`yuezheng_ling_album_15.jpeg -> yuezheng_ling 0.140568078`、`yuezheng_ling_album_19.jpeg -> yuezheng_ling 0.100723065`、`yuezheng_longya_album_06.jpeg -> yuezheng_longya 0.093474418`、`zhiyu_moke_album_06.jpg -> zhiyu_moke 0.063973740`、`mo_qingxian_album_08.jpg -> mo_qingxian 0.084646240`；另有 `yuezheng_longya_album_13.jpeg -> yashio_rui 0.161054522` 误撞。结论为 approved=0；本轮只补记录，活动角色包与 sidecar registry 不变，NapCat 未触碰。
+
+**交接与回滚**：下一步继续找中V chibi/expression 与 `cang_qiong` / `shi_an` normal_proportion 更干净的一手源。不要用 VSinger API cover/album 封面清表，除非后续明确建立可复跑的干净裁剪/来源策略并重新做 `/identify` 与全包 collision。回滚只需撤回本条文档/追踪改动；无 charpack 或容器回滚。
+
+## 2026-06-07 BangDream chibi 追加审核包负例补记：不写回 trusted 来源
+
+**变更类型**：角色包候选负例追踪/交接文档更新（`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`、`maintenance-log.md`；未改 enrollment 脚本，未重建/替换任何活动 charpack，未重启 sidecar/NapCat）。
+
+**内容**：按 active tracker 继续时，补记两个 2026-06-07 BangDream chibi 追加审核包的筛查结论，避免后续把结构通过图误当 trusted 来源。`bangdream-chibi-correct-band-review-20260607-v1` 为 102 candidates / 63 `accepted_for_review`，`bangdream-chibi-nonchibi-filter-review-20260607-v1` 为 86 candidates / 41 `accepted_for_review`；两包均不批准入库。代表负例 `/identify`：`izumi_houka` 候选分别误撞 `toyama_kasumi 0.053820323`、`maruyama_aya 0.038712356`；`shinomiya_shizuku` 误撞 `chihaya_anon 0.055514667`；`umezato_chieri` 误撞 `ushigome_rimi 0.082805283`；`kotohira_nagi` 误撞 `nagasaki_soyo 0.090454862`。页面标题/商品名核对同样指向错误桶：Goodsmile 候选页明确是 MyGO plush，Bushiroad Creative `88975` 是 Pastel＊Palettes acrylic stand，`3773` 是 generic `森チャック×BanG Dream! ぬいぐるみ`；1999/AmiAmi 页面虽受 Cloudflare/403 影响，但视觉与识别证据已足够判为旧角色误桶。
+
+**验证与影响**：执行当前 manifest 缺口扫描确认活动包仍为 BangDream 10 个 `chibi` 缺口、日V 8 个缺口、中V 16 个缺口，未因本轮记录改变运行态。候选包计数来自 `candidates.json` 本地结构扫描；本轮只改追踪与维护记录，不触碰 `tools/enroll_bangdream_pack.py`，不生成临时 build，不执行 `docker compose restart ccip-sidecar`，也不触碰 NapCat。
+
+**交接与回滚**：下一步 BangDream 10 个 chibi 必须换强绑定来源策略，不能重收 2026-06-06 商品向、2026-06-07 correct-band/nonchibi-filter 误桶图；除非后续有同页角色名/商品名/图片一致的新证据并重新做 `/identify` 与全包 collision。回滚只需撤回本条文档/追踪改动；无 charpack 或容器回滚。
+
+## 2026-06-07 角色包日V expression 分桶修正：官方 portrait/profile 源计入表情桶
+
+**变更类型**：角色包训练数据元数据修正/活动日V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/ja_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`、`docs/character-packs/training-data-audit-2026-06-02.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：按 active tracker 继续角色包缺口补齐。没有新增图片，只将 5 张已在活动包中的强绑定官方 portrait/profile 源改按 `expression` 计入：`official_profile_kafu_about`、`official_profile_sekai_about`、`official_profile_coko_about1`、`official_profile_haru_about`、`official_profile_mayu_loves`。本次修正的是 manifest form truth：HARU/MAYU 的 `expression` 缺口清除，KAFU/SEKAI/COKO expression 计数增加，但仍缺 `chibi`；日V活动包保持 34 人 / 295 图。
+
+**验证与影响**：`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `33 passed`。Dry-run/build 生成 `.workspace/character-pack-builds/ja-expression-rebucket-20260607-v2/ja_virtual_singers.charpack`，结构验证为 34 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]；活动四包全局 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/ja_virtual_singers.charpack.bak-20260607-154324-pre-expression-rebucket-active`，只执行 `docker compose restart ccip-sidecar`；`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136 registry_version=7a60b4f27c86`。5 张重分桶源图 `/identify` 均命中本人：KAFU `0.036910903`、SEKAI `0.151321471`、COKO `0.023361873`、HARU `0.027580544`、MAYU `0.027234023`；sidecar 容器内全 136 top8 collision 第一名均为目标。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：本轮不是全部缺口完成；日V仍剩 `lily:expression`、`nekomura_iroha:chibi,expression`、`kafu/sekai/rime/coko/haru/mayu:chibi`。下一步继续找官方/授权单角色 chibi/expression 源，不要把 KAMITSUBAKI KV/package 或 Lily 横幅/按钮当作缺口来源。回滚可将上述备份移回 `config/character_packs/ja_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-07 昵称点名空内容语义链路修复：保留原文并转轻量陪伴回复
+
+> **后续更新（2026-06-07 晚）**：本条③的「短路发硬编码 companion ack」实现已被上方「昵称点名弱回复改走主 LLM（B 方案）」取代——`_handle_nickname_only_companion` 短路删除，改走主 LLM + 表情包。本条①②④⑤（router 原文保留、`nickname_only_call` 标志、ContextPlugin 纯标点 guard、`context_prompt_owner` 字段）仍然有效。
+
+**变更类型**：群聊寻址/回复语义链路修复与回归测试/运行态上线（`kernel/router.py`、`services/llm/client.py`、`plugins/context/plugin.py`、`kernel/types.py`、`tests/test_ingest_ordering_and_at_detection.py`、`tests/test_context_plugin.py`、`tests/test_client.py`；纯代码，无配置/DB 迁移；2026-06-07 14:50 已重建并重启 `qq-bot` 上线，NapCat/sidecar 未动）。
+
+**背景与根因**：排查 2026-06-07 凌晨群 `993065015` 中 `姆。` / `emu。` 回复语义不连贯。上一轮“昵称提及必回复链路体系化修复”已解决“是否知道用户在叫自己”的寻址义务：`AddressingContext.original_text` 能从 `event.original_message` 恢复 `emu。`，并通过 `ReplyObligation(level=must)` 保证不被 thinker wait 吞掉。但语义正文仍沿用 NoneBot 剥昵称后的 `event.get_plaintext()` / `_render_message()` 结果，导致 reply_workflow 和 ContextPlugin 看到的 query 只剩 `。`，于是强制回复成立、但语义 payload 丢失，context 检索也会用纯标点乱捞记忆。
+
+**内容**：① router 新增语义文本辅助：识别 `nickname_original` 且 stripped 只剩空白/标点时，将 `semantic_plain_text` 恢复为 `original_text`；`MessageContext.content/raw_message.plain_text` 使用语义文本，同时保留 `stripped_plain_text` / `original_plain_text` 供审计。② 渲染后再次判断 `nickname_only_call`：若原始是昵称+标点/空白且无图片等非文本 payload，则 timeline 写入原文 `emu。`，TriggerContext.extra 写入 `addressing_original_text`、`addressing_stripped_text`、`semantic_text`、`nickname_only_call`。有实际正文（如 `emu现在几点`）或图片 payload 时不降级。③ LLMClient 在 `nickname_only_call` 时跳过 thinker/context/main LLM，直接发一条短 companion ack（沿用现有 addressed 空回复 fallback 池），避免完整主回复围绕“。”发挥；同时记录 assistant turn 与 post_reply。④ ContextPlugin 新增纯标点 query guard：`。` / `？` / 空白不调用 `build_prompt_context`，避免无意义 memory/doc 检索污染 prompt。⑤ `PluginContext` 补 `context_prompt_owner` 类型字段，消除 ContextPlugin startup 的类型盲点。
+
+**验证与影响（D4 证据）**：① 同模式扫描（D1）：扫描 `nickname_original` / `AddressingContext` / `event.get_plaintext` / `conversation_text` / `context prompt pack` 路径，确认本次覆盖 router → timeline/TriggerContext.extra → LLMClient → ContextPlugin 关键消费点；`@self`、reply-to-self、有正文昵称点名、带图片昵称点名仍走原 full reply/视觉路径。② 外部可观察：`source ./scripts/dev/env.sh && uv run ruff check kernel/types.py kernel/router.py services/llm/client.py plugins/context/plugin.py tests/test_ingest_ordering_and_at_detection.py tests/test_context_plugin.py tests/test_client.py` 通过；`uv run pyright kernel/types.py kernel/router.py services/llm/client.py plugins/context/plugin.py tests/test_ingest_ordering_and_at_detection.py tests/test_context_plugin.py` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_ingest_ordering_and_at_detection.py tests/test_context_plugin.py tests/test_client.py::TestPassTurn::test_nickname_only_call_short_circuits_to_light_ack -q` 为 **20 passed, 1 warning**；扩展回复链路回归 `tests/test_ingest_ordering_and_at_detection.py tests/test_context_plugin.py tests/test_client.py::TestPassTurn tests/test_closing_light_reply_client.py -q` 为 **37 passed, 18 warnings**（均为 aiohttp Python 3.13 deprecation warning，非失败）。整文件 `tests/test_client.py` pyright 仍有既有测试类型债，未在本刀扩展清理；新增行为由定向 pytest 覆盖。③ 运行态：部署前执行 `git stash list && git status -uno --short`；执行 `dot_clean /Volumes/OmubotDisk/omubot && docker compose up -d --build --no-deps bot`，只重建/recreate `qq-bot`；`docker compose ps` 显示 `qq-bot Up`、`ccip-sidecar healthy`、`napcat Up 6 days`；bot 日志显示 14:50 启动、14:51 OneBot 连接、`Bot 就绪，开始接收消息 ✓`。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。④ D2 不适用：本次未新增 `wait_for` 包裹协程或 shutdown cancel 路径；新增短路仅同步 await `on_segment` 并沿用既有发送/记录链路。⑤ 回滚：恢复上述 7 个文件并 `docker compose up -d --build --no-deps bot` 即可；无 DB/配置迁移，无需重启 NapCat。
+
+**交接与后续**：1500ms warning 的根因仍是 arbiter 小模型超时 fallback，不是主回复失败，本次不改 arbiter 超时策略。本次已通过常规 bot rebuild 上线；建议继续观察 `reply_workflow text_preview` 不再出现 nickname-only 的 `。`，ContextPlugin 日志不再对纯标点 query 打包上下文。
+
+## 2026-06-07 弱回复机制系统性修复：closing/companion 统一入口
+
+**变更类型**：弱回复机制修复/审计文档/回归测试（`services/llm/client.py`、`tests/test_client.py`、`tests/test_closing_light_reply_client.py`、`docs/tracking/weak-reply-audit-2026-06-07.md`；纯代码，无配置/DB/运行态变更，未重启容器）。
+
+**背景与根因**：排查 2026-06-05 `group_993065015` 出现 `closing_light_reply token='嗯，我在。'`。日志链路显示 thinker 已判 `action=light_reply thought='非凡说睡了，给个晚安收尾'`，但输出的是陪伴型 ack。全链路审计确认两个 Critical 偏差：① speculative closing token 只在 `trigger.mode == "closing"` 时启动，但实际进入 closing 短路的条件还包括 thinker 自主返回 `light_kind == "closing"`，导致 thinker-origin closing 从未生成告别 token，只能 fallback 到 `_PASS_TURN_LIGHT_ACK`；② companion 弱回复没有消费者，生产 2026-06-01 "雪糕口味" 场景 thinker 想“应一声表示在听”，实际掉进主 LLM 输出完整内容回复。
+
+**内容**：新增统一 `_handle_light_reply()`：只消费 `thinker_action == "light_reply"`；`light_kind=closing` 时同步调用 `_gen_closing_token` 生成对称告别 token 并直接 emit，失败 fallback 改为语义正确的 `"好~"`，不再使用 `"嗯，我在。"`；`light_kind=companion` 时返回 `inject_companion_hint`，在主 LLM 的 `plugin_dynamic` 注入“只需简短应一声、不要展开话题、不要用表情包”的弱回复提示，避免掉成完整内容回复。删除旧的 `closing_token_task` speculative 预生成和分散的 `closing_light_reply` 短路分支；低置信 `pass_turn` fallback 改为通用 `"嗯~"`。审计文档记录 C1/C2/M1/M2/M3/M4/L1/L2 全部问题及后续建议。
+
+**验证与影响（D4 证据）**：① 同模式扫描：对照 [weak-reply-mechanism-design.md](docs/tracking/weak-reply-mechanism-design.md) 与 [weak-reply-p0-closing-2026-05-30.md](docs/migrations/weak-reply-p0-closing-2026-05-30.md)，核对 client/scheduler/thinker 全部 `light_reply` 接缝；生产日志复核 06-01 companion、06-03/06-05 closing 三个样本。② 外部可观察：`uv run ruff check services/llm/client.py tests/test_client.py tests/test_closing_light_reply_client.py docs/tracking/weak-reply-audit-2026-06-07.md` 通过；`uv run pyright services/llm/client.py` 0 errors；弱回复聚焦测试 `tests/test_closing_light_reply_client.py tests/test_client.py tests/test_thinker.py tests/test_scheduler.py` 为 **172 passed**；除环境依赖 admin 磁盘 health 测试外的全量 `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest -q --ignore=tests/test_admin_api.py` 为 **2397 passed, 17 skipped**。全量未忽略时仅 `tests/test_admin_api.py::test_system_services_health_endpoint` 因当前磁盘占用 91% 触发 `backup_disk` error alert，属环境状态，不是本次代码失败；aiohttp/aiosqlite teardown warning 仍为既有 warning。③ D2：`_gen_closing_token` cancellation 旧测试继续通过；新增 `_handle_light_reply` closing/companion/fallback/non-light-action 单测，防止再次回退硬编码。④ 回滚：恢复 `services/llm/client.py` 与两测试文件，删除审计文档；无 DB/配置/容器资源。
+
+**交接与后续**：本次修复 Critical C1/C2 与 fallback 语义。Medium 项 `closing_done` 新话题复位、emit 成功后再提交状态、cancel 后 scheduler 状态污染 D2 测试仍建议后续单独做（涉及 scheduler 状态机，需独立回归）。上线需常规 bot rebuild；NapCat/sidecar 不涉及。
+
+## 2026-06-07 BangDream chibi 商品向候选二轮筛选：全拒绝并修正审核报告口径
+
+**变更类型**：角色包候选采集流程/负例筛选记录（`tools/collect_character_pack_candidates.py`、`tests/test_collect_character_pack_candidates.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`；未改 `tools/enroll_bangdream_pack.py` 白名单，未重建/替换任何活动 charpack，未重启 sidecar/NapCat）。
+
+**内容**：按用户要求继续 BangDream 的“批量拉取之后筛选”。先把 BangDream `chibi` 搜索词从泛 `SD/Q版/ちび` 扩展为更偏商品的 `ぬいぐるみ/デフォルメ/SD/アクリルスタンド/缶バッジ/Q版/ちび`，并保证 BangDream chibi 至少生成 8 条搜索 query；同时修正纯 seed replay 报告的 `targets` 口径，只列出当前 specs 实际涉及的目标，避免 BangDream 审核包混入中V/日V缺口目标。
+
+**筛选结论**：第二轮 dry-run `.workspace/character-pack-candidates/bangdream-chibi-product-dry-run-20260606-v1/` 产出 10 targets / 108 specs；seed replay 审核包 `.workspace/character-pack-candidates/bangdream-chibi-product-review-20260606-v1/` 产出 9 targets / 108 specs / 69 `accepted_for_review`，`izawa_natsume` 本轮无结构通过候选。视觉接触表和 `screening-report.md/json` 复核后，approved_for_enrollment=0：官方 OGP/list/full/thumb 仍非 chibi，多人阵列商品图不可直接录入，最像 chibi 的 14 张单人商品图经 `/identify` 全部误撞其它 BangDream 角色（如 `toyama_kasumi`、`nakamachi_arale`、`miyanaga_nonoka`、`minetsuki_ritsu`、`fuji_miyako`），说明搜索桶把旧乐队/旧商品串到后期 10 人，不适合补 trusted chibi。
+
+**验证与影响**：`source ./scripts/dev/env.sh && uv run ruff check tools/collect_character_pack_candidates.py tests/test_collect_character_pack_candidates.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_collect_character_pack_candidates.py -q` 为 `11 passed`。本轮只改候选工具、测试与追踪/维护记录；活动角色包未变，sidecar 健康状态未被扰动，NapCat 未动。
+
+**交接与回滚**：下一步继续 BangDream 10 个 chibi 缺口，但不要重收本轮商品搜索误桶图；需要换成更强绑定的来源策略，例如页面标题/商品名/角色名一致校验、官方公布页、或可核验的单人 SD 来源。回滚只需撤回 collector/test/tracker/维护日志改动；无需恢复 charpack 或重启服务。
+
+## 2026-06-06 Issue 17 Part 0：QQ 互动信号接入 MoodEngine（emoji 情感/reaction/poke）
+
+**变更类型**：人格化信号源落地（`services/humanization/emoji_sentiment.py` 新增、`services/humanization/qq_interactions.py`、`plugins/schedule/mood.py`、`tests/test_emoji_sentiment.py` 新增、`tests/test_mood.py`、`tests/test_router_qq_interactions.py`；纯代码，无配置/DB/运行态变更，未重启容器，NapCat/sidecar 未动）。
+
+**背景与订正**：执行 Issue 17 Part 0（Climate 前置信号源）。立项文档 [omubot-grayscale-issue17-part0-prerequisites.md](docs/tracking/omubot-grayscale-issue17-part0-prerequisites.md)（2026-05-27）把所有信号映射到 `services/dialogue_climate/` + `ClimateSignal`/`IrritationSensor`/`MessageSensor`。落地前 grep 核实：**该 Climate 系统全仓 0 命中、不存在**，文档所有代码片段作废。真实信号汇是已落地的 `MoodEngine`（valence/openness/tension 三维），且已有 `_recognition_nudges`+`_active_nudge`（30min 线性衰减 + 0.2 per-dim cap，issue17 角色识别 E1 落地）。范围按用户 2026-06-06 决策定为 **P0-1/P0-3/P0-4，不含语音 P0-2**。
+
+**内容**：① P0-1：新增 `emoji_sentiment.py`，`EMOJI_SENTIMENT` 表 + `classify_reaction_sentiment()`，ID/语义以仓库权威表 `kernel/qq_face.py` 为准（订正立项文档错误 ID：文档称 76=👍，实际 76=彩虹；正面用 171=点赞/228=比心 等），未知码默认弱正面 0.2。② nudge 扩展：`_recognition_nudges` 三元组 `(ts,v,o)` 扩为四元组带 tension `(ts,v,o,t)`，`_active_nudge` 返回三维并各自 cap，`evaluate()` 应用 tension nudge；新增通用入口 `register_interaction_signal(valence_d/openness_d/tension_d,...)`，旧 `register_recognition_signal` 内部转调（签名不变，向后兼容）。③ P0-3/P0-4：`dispatch_qq_interaction_signal` 在群未静默后、poke 限速判定前调用 `_apply_mood_nudge`——reaction 正面→valence+（intensity×0.10）、负面→valence−（×0.12）/tension+（×0.06）、中性→不注入；poke→tension+（0.04）。被限速静默的 poke 仍累加 tension（被狂戳正是该升 tension 的场景，cap 0.2 兜底）。`ctx.mood_engine is None` 时全 no-op，try/except 包裹不阻塞 dispatch。session_id 用 `group_{gid}`，对齐群 mood 读取路径的 cache key。
+
+**验证与影响（D4 证据）**：① 同模式扫描（D1）：emoji 表照搬 `kernel/qq_face.py` ID→名 dict 模式；nudge 注入复用 issue17 E1 已落地的 `_recognition_nudges` 基础设施。② 外部可观察：`source ./scripts/dev/env.sh && uv run ruff check`（6 文件）All passed；`uv run pyright`（源 3 + 测试 3）0 errors；`pkill -9 -f pytest` 后 `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest -q` 全量 **2442 passed, 17 skipped**（"Event loop is closed" 为 aiosqlite teardown 既有 warning，非失败）；定向 `test_emoji_sentiment/test_mood/test_router_qq_interactions` 51 passed。新增/改动测试覆盖：emoji 极性映射+未知默认、nudge 三维衰减/cap、reaction 正负中/poke 注入方向、mood_engine=None 安全、限速静默 poke 仍 nudge。③ D2 不适用：nudge 为纯内存同步操作，无 await/wait_for，无新协程。④ 回滚：`git restore` 三改动文件 + 删 `emoji_sentiment.py`+两测试；无 DB/运行态资源，不碰 NapCat/sidecar；上线随常规 bot rebuild。
+
+**交接与回滚**：P0-2（语音 `ptt2text`）**未做且有硬阻塞**——需 NapCat ≥ V4.18.2，生产实跑 v4.15.0，升级镜像 = recreate = 撞 D6 红线（设备指纹），留待单独授权决策。执行方案见 [docs/tracking/issue17-part0-landing-2026-06-06.md](docs/tracking/issue17-part0-landing-2026-06-06.md)。回滚同上。
+
+## 2026-06-06 角色包第三批微推进：赤羽/牧心 normal_proportion 补录
+
+**变更类型**：角色包训练数据增量补录/脚本白名单/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：按 active tracker 继续形态缺口补录，优先处理中V剩余 `normal_proportion` 缺口。复核 SynthV Wiki gallery 的五维介质设定图候选后，只写回通过视觉与运行态碰撞验证的两张单角色正比设定图：赤羽 `Medium_2050_chiyu.jpg` 作为 `synthvwiki_sheet_chiyu_medium2050_concept`，牧心 `Muxin_game_concept.jpg` 作为 `synthvwiki_sheet_muxin_game_concept`；新增 `synthvwiki_sheet_* -> normal_proportion` 分桶。苍穹 Genesis Crystal reference 虽然是单角色设定板，但 `/identify` 误撞 BangDream `minetsuki_ritsu`；诗岸 game concept nearest 为 `yuezheng_longya` 且未过阈值，均未录入。
+
+**验证与影响**：`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `32 passed`。Dry-run/build：中V从 120 张到 122 张，赤羽/牧心 `missing_forms` 均降为 `chibi,expression`；临时包 `.workspace/character-pack-builds/batch-fill-20260606-v3/zh_virtual_singers.charpack` 结构验证为 16 IDs unique、npz keys match、dims `(768,)`、sample dirs present、under5=[]，全活动 4 包 / 136 IDs 无重复。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260606-192114-pre-chiyu-muxin-normal-active`，只执行 `docker compose restart ccip-sidecar`；`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136 api_version=2026-06-01.v1 cache_entries=0`。新增源图 `/identify` 命中：赤羽 `chi_yu diff=0.054631881`、牧心 `mu_xin diff=0.105248034`；sidecar 容器内全 136 top8 collision top1 均为目标，top2 分别为 `dongfang_zhizi 0.149960324`、`zhiyu_moke 0.162928686`。负例复测：苍穹候选误撞 `minetsuki_ritsu 0.155289233`，诗岸候选 nearest `yuezheng_longya 0.196532845` 且 unmatched。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：本轮不是全部缺口完成；中V `normal_proportion` 只从 4 个缺口降到 2 个（仍剩 `cang_qiong`、`shi_an`），所有中V角色仍至少缺 chibi 或 expression。下一步继续找 BangDream 10 个 chibi、日V chibi/expression、中V chibi/expression，以及苍穹/诗岸更干净的 normal 来源；不要重试本轮已误撞的苍穹/诗岸设定板，除非先做新的裁剪/来源策略并重新验证。回滚可将 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260606-192114-pre-chiyu-muxin-normal-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-06 角色包第二批微推进：永夜Minus full_body 分桶修正
+
+**变更类型**：角色包训练数据元数据修正/候选二批审核/活动中V包重建与 sidecar 重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`config/character_packs/zh_virtual_singers.charpack`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`.workspace/agent-session-state.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：按 active tracker 继续第二批补源，不重新审计架构。先从当前活动 manifest 的剩余缺口出发，对中V包跑扩大版 trusted image-search dry-run，生成 `.workspace/character-pack-candidates/zh-second-batch-search-dry-run-20260606/candidate-specs.json`（16 targets / 32 specs），再下载成 `.workspace/character-pack-candidates/zh-second-batch-review-20260606/`（25 张结构通过候选）。人工视觉复核后确认，大多数所谓 `accepted_for_review` 只是结构过关：Vsinger 商品总览/演唱会海报/多人图、B 站封面、Moegirl 正比图被错桶成 chibi/expression，均未写入训练。唯一可落地的高置信修正是永夜Minus 既有 `File:Minus公式服.png`：此前 `moegirl_gallery_source()` 未识别“官方服/公式服”，导致该单角色全身官方服图被归为 profile_art，活动 manifest 仍报 `full_body` 缺口；本轮将“官方服/公式服”归入 `moegirl_full_*`，不新增图片集合，只修正真实分桶。
+
+**验证与影响**：静态与测试：`source ./scripts/dev/env.sh && uv run ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`uv run pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `30 passed`。Dry-run：`uv run python tools/enroll_virtual_singers_pack.py --pack zh --dry-run` 显示永夜Minus `missing_forms=chibi,expression`，`full_body` 缺口消失，仍为 16 人 / 120 张。临时构建 `.workspace/character-pack-builds/batch-fill-20260606-v2/zh_virtual_singers.charpack` 成功；manifest/npz 结构验证为 16 IDs unique、npz keys match、dims `(768,)`、under5=[]。替换活动包前创建备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260606-183659-pre-yongye-fullbody-active`，只执行 `docker compose restart ccip-sidecar`；`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136 api_version=2026-06-01.v1 cache_entries=0`。全活动包复扫：4 包 / 136 全局唯一 ID、无 duplicate IDs、under5=0，缺口角色计数为 BangDream 10、日V 8、中V 16。永夜Minus 官方服源图 `/identify` 命中 `yongye_minus diff=0.081483044`；sidecar 容器内全 136 top8 collision 第一名 `yongye_minus 0.081483044`，第二名 `kafu 0.156771809`，top1-top2 间隔约 `0.07529`。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：本轮不是剩余缺口完成，只是把一个已有可信源的 metadata truth 修正并运行态生效。下一步继续找 BangDream 10 个 chibi、日V chibi/expression、中V chibi/expression/normal 的可信单角色来源；不要重收本轮已拒绝的 Vsinger 商品总览/海报/多人图/B 站封面、Moegirl 正比图错桶 chibi、KAMITSUBAKI KV/包装图、BangDream OGP/list/full art。回滚可将 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260606-183659-pre-yongye-fullbody-active` 移回 `config/character_packs/zh_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；代码/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-06 昵称提及必回复链路体系化修复
+
+**变更类型**：群聊回复控制链路修复/回复义务契约/回归测试（`kernel/types.py`、`kernel/router.py`、`services/scheduler.py`、`services/llm/client.py`、`tests/test_ingest_ordering_and_at_detection.py`、`tests/test_scheduler.py`、`tests/test_client.py`；无配置变更、未重启容器、NapCat 未动）。
+
+**背景与根因**：排查 15:10 群 `993065015` 用户 `2459515872` 发送 `emu。` 未触发回复。Docker 日志确认 NapCat 与 NoneBot 均收到消息，router/reply_workflow 已判 `current_trigger:at_mention`，scheduler 经 arbiter A 阶段 `arbiter_a_fire` 后进入 chat，但 LLMClient 出现 `thinker_wait`：`大家聊得挺热闹，我在旁边看着就好，没必要每条都插话`。根因是 NoneBot 文本昵称命中后会把原始 `emu。` 剥成 `。`，后续 addressee detector 看不到原始昵称，`TriggerContext.extra.addressee_self` 可能退化为非 self；scheduler 虽然按 `at_mention` 触发，但 `_should_force_reply()` 被二次 gate 降级，导致 thinker 仍按普通主动插话决策并可 wait，破坏“昵称/明确点名必须回复”契约。
+
+**修复内容**：新增内核级 `AddressingContext` 与 `ReplyObligation`，将“是否被寻址”和“是否必须回复”从临时 `extra.addressee_self` 升级为随 `TriggerContext` 传递的显式契约。router 在构造 at/nickname trigger 前保留 `original_message` 与 stripped 文本，识别 `nickname_original`、`at_self`、`reply_to_self` 等硬证据；`emu。` / `姆姆？` 这类前缀昵称+标点按 self-addressed 处理，同时把普通正文中间包含昵称与 vocative 前缀区分开，减少误触发。scheduler 的 `_should_force_reply()` 优先读取 `obligation.level == must`，并向 LLMClient 传递 `must_emit=True`；LLMClient 将 `must_emit` 合并进 `force_reply`，跳过 text preflight 与 thinker wait 路径，继续复用既有 force_reply 的 pass_turn override/空回复 fallback，从而保证 MUST_REPLY 只能被 arbiter 等完整性短暂延迟，不能被概率、RWS 或 thinker 静默吞掉。deferred @ 兜底也会把 obligation 提升为 must。
+
+**同模式扫描**：扫描 `TriggerContext`/`ctx.trigger`/`addressee_self`/`must_emit` 位点，确认强触发来源包括 router at/nickname、Bilibili plugin、QQ interaction、directed_followup/correction/closing 等；只有 `at_mention` 历史上依赖 `addressee_self` 决定 force_reply，本轮已为 router 自产 at/nickname trigger 加上 `ReplyObligation`，并让 scheduler 对 legacy trigger 保持兼容。Bilibili `video_autonomous` 仍属于概率/SHOULD/MAY 路径，未被错误提升为 MUST；`video_always`、`directed_followup`、`qq_interaction`、`correction` 保持原有无条件 force 行为。
+
+**验证与影响**：针对 15:10 事故新增/补强回归：`emu。` 被 NoneBot 剥成 `。` 后仍保留 `nickname_original` evidence；`ReplyObligation(level=must)` 可覆盖 legacy `addressee_self=False`；scheduler 把 must obligation 传入 chat 的 `force_reply=True` 与 `must_emit=True`；LLMClient 在 `must_emit=True` 时不调用 thinker，因此不会出现 `thinker_wait` 吞必回。验证命令：`uv run pytest tests/test_ingest_ordering_and_at_detection.py tests/test_scheduler.py::test_must_obligation_overrides_legacy_addressee_flag tests/test_scheduler.py::TestP7RuleLayerBoundary::test_must_obligation_passes_must_emit_to_chat tests/test_client.py::TestPassTurn::test_must_emit_skips_thinker_wait_and_emits_reply -q` 为 `13 passed`；扩大回归 `uv run pytest tests/test_force_reply.py tests/test_arbiter_scheduler.py tests/test_scheduler.py tests/test_ingest_ordering_and_at_detection.py tests/test_client.py::TestPassTurn -q` 为 `106 passed`；`uv run ruff check ...` 通过；`uv run pyright kernel/types.py kernel/router.py services/scheduler.py services/llm/client.py tests/test_ingest_ordering_and_at_detection.py` 为 0 errors；`git diff --check` 通过。对 `tests/test_scheduler.py` / `tests/test_client.py` 整文件 pyright 仍有既有测试类型债，非本轮新增，已记录为未清项。
+
+**回滚**：如线上发现过度响应，可回退本轮 7 个文件改动，恢复 `TriggerContext` 仅携带 legacy `extra`、router 旧 `addressee_self` detector 路径、scheduler 旧 `_should_force_reply()` 与 LLMClient 无 `must_emit` 参数；无需迁移数据库或改配置。运行态若已部署则重启 bot 即可回滚行为；NapCat 不需要也不允许 recreate。
+
+## 2026-06-06 角色包缺口第一批高置信源写回与重建
+
+**变更类型**：角色包训练数据增量补录/脚本白名单/活动包重建与 sidecar 重载（`tools/enroll_bangdream_pack.py`、`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_bangdream_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：在批量候选池 `.workspace/character-pack-candidates/all-gaps-review-20260606-v2/` 上做第一批人工视觉审核，只收高置信、单角色、形态匹配来源。BangDream 只接入藤都子与千石ユノ两张 AmiAmi 单角色 SD 商品图，新增 `trusted_chibi_*` 白名单；明确拒绝峰月律五人商品组图，以及后期乐队 OGP/list/full art 被错标成 chibi 的候选。日V只接入 KAFU KAMITSUBAKI 站立图与 RIME 官方包装图作为 `normal_proportion`；明确拒绝 KAMITSUBAKI KV/包装图继续当 chibi。中V只接入夏语遥、东方栀子 Moegirl 单角色正比/设定图作为 `normal_proportion`；未把 VSinger 海报、Moegirl 海报或表情错桶图写入。为支持测试 fake session，enrollment 下载 helper 改为 `HttpGetSession` Protocol；fallback embed 路径仍动态导入 numpy，不把 bot runtime 依赖扩大。
+
+**验证与影响**：静态与测试：`ruff check tools/enroll_bangdream_pack.py tests/test_enroll_bangdream_pack.py tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`pyright ...` 为 0 errors；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_bangdream_pack.py tests/test_enroll_virtual_singers_pack.py -q` 为 `37 passed`。Dry-run：BangDream 357 张，藤都子/千石ユノ从缺 `chibi` 变为四桶齐，BangDream 缺口从 15 个 `chibi` 降到 13；中V 120 张，夏语遥/东方栀子补入 `normal_proportion`，仍如实缺 `chibi/expression`；日V 295 张，KAFU/RIME 补入 `normal_proportion`，仍如实缺 `chibi`。临时构建到 `.workspace/character-pack-builds/batch-fill-20260606-v1/` 后结构验证通过：三包 manifest 与 npz keys 对齐，向量维度均 `(768,)`，sample dirs 分别为 60/16/34。
+
+**运行态验证**：替换活动 `bangdream`、`zh_virtual_singers`、`ja_virtual_singers` 前创建备份：`config/character_packs/backups/bangdream.charpack.bak-20260606-173323-pre-batch-fill-active`、`zh_virtual_singers.charpack.bak-20260606-173323-pre-batch-fill-active`、`ja_virtual_singers.charpack.bak-20260606-173323-pre-batch-fill-active`。只执行 `docker compose restart ccip-sidecar`；`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136 api_version=2026-06-01.v1`。活动包结构复扫：4 包共 136 个唯一 ID，无 duplicate IDs，under5=0；`project_sekai` 无缺口，BangDream 13 个 chibi 缺口，中V仍 16 人有混合缺口，日V仍 8 人有混合缺口。新增 6 张源图 `/identify` 均命中目标：`fuji_miyako 0.048900146`、`sengoku_yuno 0.060533199`、`kafu 0.021852177`、`rime 0.028172817`、`xia_yuyao 0.107589744`、`dongfang_zhizi 0.076334700`；sidecar 容器内全 136 角色 top5 碰撞检查 top1 均为目标，最低 top1-top2 margin 约 `0.043033`（RIME vs KAFU）。NapCat 红线复核：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**交接与回滚**：这不是全部缺口完成，只是第一批高置信补源已运行态生效。下一步继续第二批补源，优先找官方/授权/可信单角色 chibi/expression；不要重收本轮已拒绝的 KV、横幅、多人商品组图和错桶候选。回滚可将上述 `*pre-batch-fill-active` 备份移回对应活动目录后执行 `docker compose restart ccip-sidecar`；脚本/测试/tracker/维护日志按 git 回退即可；NapCat 不需要也不允许 recreate。
+
+## 2026-06-06 角色包缺口批量候选池落地
+
+**变更类型**：角色包补源流程/候选采集工具/测试与交接文档（`tools/collect_character_pack_candidates.py`、`tests/test_collect_character_pack_candidates.py`、`docs/tracking/ACTIVE.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`；生成 `.workspace/character-pack-candidates/*` 审核材料；无 bot/admin/sidecar/NapCat 运行态变更）。
+
+**内容**：为避免继续“一天只手工补一个角色”，新增 manifest 驱动的批量候选池工具。工具从当前活动 `config/character_packs/*.charpack/manifest.json` 的 `training_stats.missing_forms` 自动抽取缺口角色，支持 catalog replay、BangDream 官方路径 probe、官方页宽松扫描、可信域名图片搜索、seed replay、并行下载、缓存复用、重复 hash 标记、JSON/HTML/缩略图审核包输出。所有搜索/宽松页面结果只标为 `accepted_for_review`，并附 `manual_visual_review_required`，不直接写回活动角色包，不重建 pack。为防止候选池污染，新增域名白名单、噪声素材过滤、通用素材过滤和 seed provenance 保留，避免用 `seed_file` 抹掉原 provider。
+
+**验证与影响**：当前缺口基线仍为 4 个活动包、136 角色：BangDream 15 个 `chibi` 缺口，中V 16 个混合缺口，日V 8 个混合缺口。最终审核包位于 `.workspace/character-pack-candidates/all-gaps-review-20260606-v2/`，其中 `index.html` 可人工审图，`candidates.json` 记录结构化结果；本轮覆盖 39 个缺口目标、140 条候选规格、70 张通过结构筛选的 `accepted_for_review` 图片，分布为 BangDream 14 张 `chibi`、日V 45 张、中V 11 张。`source ./scripts/dev/env.sh && uv run ruff check tools/collect_character_pack_candidates.py tests/test_collect_character_pack_candidates.py` 通过；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_collect_character_pack_candidates.py -q` 为 `10 passed`（直接 pytest 仍会触发本机已知 readline 139，沿用既有 stub workaround）；`uv run pyright tools/collect_character_pack_candidates.py tests/test_collect_character_pack_candidates.py` 为 0 errors；`py_compile` 与 `git diff --check` 通过。`curl http://localhost:8620/health` 仍返回 `status=ok pack_count=4 character_count=136 api_version=2026-06-01.v1`，未修改活动 charpack，未重启 sidecar，未触碰 NapCat。
+
+**交接与回滚**：下一步先人工审核 `all-gaps-review-20260606-v2/index.html`，只把可信、单角色、授权链清晰的候选写回 `tools/enroll_bangdream_pack.py` 或 `tools/enroll_virtual_singers_pack.py`，再做 dry-run/build、sidecar `/identify` 与全包碰撞检查；不要把 `accepted_for_review` 当成可训练白名单。回滚可删除新增候选工具、测试与 `.workspace/character-pack-candidates/*` 审核材料，并恢复 ACTIVE/tracker/本条维护日志；活动角色包未在本阶段改动。
+
+## 2026-06-06 修正 CLAUDE.md 失效的 SessionStart hook 声明
+
+**变更类型**：协作流程文档诚实性修正（`CLAUDE.md`；无 bot/admin/sidecar/NapCat 运行态变更）。
+
+**背景**：复核 Codex 与 Claude Code 两侧 agent 配置时确认，CLAUDE.md「Maintenance Discipline」段声称 `.claude/settings.json` 有 SessionStart hook 在每次开场注入维护日志最新条目与 bot 日志、并有 PostToolUse 提醒。但该文件在版本控制中不存在（`.gitignore` 第 63 行 `.claude/*` 将其排除，仅白名单放行 `skills/`、`handoff/`），本次 Claude 会话开场也确认未收到任何注入。该声明是空头承诺，可能误导未来 Claude 会话以为「已自动获知当前状态」而不主动去读。
+
+**定位修正（关键）**：用户澄清，`.codex/hooks.json` + `scripts/dev/codex-session-start.py` + `docs/tracking/ACTIVE.md` + Resume Capsule + `omubot-continuity` skill 这整套 continuity 机制是**专门为 Codex 补两个先天缺陷**而造的脚手架/义肢——Codex 没有 todo list、且上下文压缩后会失忆。Claude Code 原生具备 Codex 缺的两样（自动压缩续接 + TodoWrite + 文件记忆），不依赖注入状态。因此结论是 Claude Code **不应**复刻这套 hook（创建 `.claude/settings.json` 注入 SessionStart 是负优化，且可能与原生压缩冲突），`.claude/settings.json` 保持 gitignored 机器本地、不提交，也不在 Claude 侧造 Codex 专属的 `openai.yaml`。
+
+**修复内容**：将 CLAUDE.md「Maintenance Discipline」开头从「本项目有自动 hook 在 SessionStart 注入维护日志/bot 日志」改为如实表述——说明该 continuity 体系为 Codex 专属、Claude 不依赖注入、需运行态信息须自行读取；并保留唯一真正需要互通的纪律：当 Claude 所做工作可能由 Codex 接手时，仍须更新 `docs/tracking/ACTIVE.md` 与 active tracker，因为 Codex 真实依赖它做交接。下方 maintenance-log / project-info 纪律为真实有效条款，未改动。
+
+**验证与影响**：仅文档表述变更，无代码/配置/运行态改动，无需 rebuild、不触碰 NapCat。`git diff --check CLAUDE.md` 无尾随空白告警；改动定位在 CLAUDE.md「Maintenance Discipline」段首。同步在 Claude 文件记忆新增 `project_continuity_codex_only` 一条，防止后续会话再把该机制误判为 Claude 也应对齐的标准。回滚可恢复 CLAUDE.md 该段原文与本条维护日志。
+
+## 2026-06-06 Agent Continuity 快照瘦身
+
+**变更类型**：协作流程/hook 上下文压缩（`scripts/dev/codex-session-start.py`、`.codex/hooks.json`、`docs/tracking/agent-continuity-template.md`、`docs/tracking/character-pack-batch-fill-2026-06-06.md`、`docs/tracking/agent-continuity-implementation-2026-06-06.md`；无 bot/admin/sidecar/NapCat 运行态变更）。
+
+**内容**：针对 `/v1/responses` 前置 nginx `client_max_body_size 1m` 导致长会话 413 的风险，将 SessionStart 从“默认注入 live state、ACTIVE、active tracker 顶部、维护日志最新条目和 bot 日志尾部”改为紧凑恢复索引。脚本优先读取 active tracker 的 `## Resume Capsule`，只保留 objective/next_step/current_files/last_verified/do_not_redo/rollback 等热信息；维护日志、测试 ledger、详细 tracker 与日志改为按需读取。新增 4KB 级别 byte budget 截断保护。PostToolUse 高影响路径提醒合并为短文案，避免代码/continuity 两条 additionalContext 在长任务中重复堆积。当前角色包批量补源 tracker 与 tracker 模板已补 `Resume Capsule`。
+
+**验证与影响**：`python3 -m py_compile scripts/dev/codex-session-start.py` 通过；`.codex/hooks.json` 可由 `python3 -m json.tool` 解析；SessionStart 在 repo 根目录和父目录 cwd 两种路径下均输出可解析 JSON。当前 workspace 快照下 `python3 scripts/dev/codex-session-start.py` 输出从约 `15323` bytes 降至 `2803` bytes；合成超长状态会被截断到 `4095/4096` bytes。影响范围仅为本地 agent 协作上下文，不改变 Omubot 运行态；如果紧凑恢复信息不足，回滚可恢复旧版 SessionStart 读取 tracker 顶部/维护日志/日志尾部与旧 hook 文案。
+
+## 2026-06-06 Agent Continuity MVP 落地
+
+**变更类型**：协作流程/skill/hook 文档化落地（`AGENTS.md`、`.codex/hooks.json`、`scripts/dev/codex-session-start.py`、`.agents/skills/omubot-continuity/SKILL.md`、`.claude/skills/omubot-continuity/SKILL.md`、`.gitignore`、`docs/tracking/ACTIVE.md`、`docs/tracking/agent-continuity-template.md`、`docs/tracking/agent-continuity-implementation-2026-06-06.md`；无 bot/admin/sidecar/NapCat 运行态变更）。
+
+**内容**：按 `docs/tracking/agent-continuity-omubot-plan-2026-06-06.md` 执行 Phase 1-4。新增 `docs/tracking/ACTIVE.md` 作为压缩/新会话恢复入口，新增 tracker 模板和本次 implementation tracker，tracker 内按方案原文 section 与 rollout phase 分别标注进度，避免上下文压缩后无法对齐。`AGENTS.md` 新增 Continuity Rule；`scripts/dev/codex-session-start.py` 扩展为读取 `.workspace/agent-session-state.md`、ACTIVE 与 active tracker 顶部，并提示从 `next_step` 继续；新增 `omubot-continuity` skill 并镜像到 `.claude/skills/`，同时调整 `.gitignore` 使 Claude 镜像可被版本控制；`.codex/hooks.json` 增加低噪声 PostToolUse 提醒，只在 active tracker 存在且改动高影响路径时提醒同步 tracker，不自动写文件。Phase 5 Claude Code PreCompact/Stop 强 hook 按方案保持 deferred，需用户明确确认后再做。
+
+**验证与影响**：Phase 1 结构验收 `test -f docs/tracking/ACTIVE.md`、`test -f docs/tracking/agent-continuity-template.md` 与 `rg -n "Continuity Rule|omubot-continuity|ACTIVE.md|agent-continuity-template" ...` 通过；SessionStart `python3 scripts/dev/codex-session-start.py | python3 -m json.tool` 与父目录 cwd 变体均可解析，并能检出 `Agent Continuity Snapshot`、ACTIVE、active tracker 与 continuity instruction；skill 镜像 `test -f`、`cmp -s` 与关键词扫描通过；hooks `python3 -m json.tool .codex/hooks.json` 通过，模拟 PostToolUse 对 `scripts/dev/codex-session-start.py` 会输出 tracker 提醒，对 `README.md` 不输出。最终 `py_compile`、JSON、`git diff --check` 与尾随空白扫描均通过。影响范围仅为 agent 协作流程和本地会话启动上下文；不重启容器，不触碰 NapCat。
+
+**交接与回滚**：ACTIVE 已在最终验证后设为 `mode: none`，本次 implementation tracker 作为审计记录保留；后续如要启用 Phase 5 Claude Code PreCompact/Stop 强 hook，需要用户明确确认。回滚可删除新增 `docs/tracking/ACTIVE.md`、`agent-continuity-template.md`、implementation tracker、`omubot-continuity` 两份 skill，恢复 `AGENTS.md`、`.gitignore`、`.codex/hooks.json`、`scripts/dev/codex-session-start.py` 和本条维护日志；`.workspace/agent-session-state.md` 为 gitignored live state，可直接删除。
+
+## 2026-06-06 Agent Continuity 防失忆方案建档
+
+**变更类型**：协作流程方案文档（`docs/tracking/agent-continuity-omubot-plan-2026-06-06.md`；无 bot/admin/sidecar 运行态变更）。
+
+**内容**：基于外部成熟样本重新整理 Omubot 防上下文压缩失忆方案。已拉取并分析 Anthropic 官方 `anthropics/skills`、`anthropics/claude-code`、社区 `Sonovore/claude-code-handoff` 与 `claude-office-skills/skills`，结论是 Omubot 不应只做一个“todo skill”，而应采用 `docs/tracking/ACTIVE.md` + active tracker + `omubot-continuity` skill + SessionStart/PostToolUse hook 的组合。方案文档记录了状态分层、恢复读序、tracker 模板、skill 草案、hook 接线、分阶段落地、验收基准和回滚路径。
+
+**影响与交接**：本次只新增方案文档，不改变 Codex/Claude 实际行为，不安装新 hooks，不创建 active tracker。后续若继续落地，应从方案 Phase 1 开始：新增 `docs/tracking/ACTIVE.md`、tracker 模板和 AGENTS Continuity Rule；再扩展 `scripts/dev/codex-session-start.py` 注入 active tracker。回滚为删除该方案文档和本条维护日志；NapCat 不涉及。
+
+## 2026-06-05 日V Lily 官方 SD 源补录与依赖可复跑修复
+
+**变更类型**：角色包训练数据增量补录/运行态重载/脚本依赖修复（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`pyproject.toml`、`uv.lock`、`docs/character-packs/training-data-audit-2026-06-02.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：继续执行 `ja_virtual_singers` 缺口补录。复核 KAMITSUBAKI 官方 MediaFire、comics、Piapro KAFU/RIME/Lily/Iroha、AHS SD zip、MAYU 官网等来源后，只接入 Animove / Lily 官方 goods 页的单角色 SD/Q版图 `https://animove.jp/lily/goods/2013/04/01/130401_sd.jpg`，新增白名单 `official_chibi_animove_lily_goods_sd_20130401` 并补定向测试。`python tools/enroll_virtual_singers_pack.py --pack ja --dry-run` 结果为 34 人、294 张，Lily 从 `missing_forms=chibi,expression` 收敛为 `missing_forms=expression`。正式重建 `ja_virtual_singers.charpack` 为 34 人、294 张；新增活动包备份 `config/character_packs/backups/ja_virtual_singers.charpack.bak-20260605-030431-pre293-active`。同时发现角色包脚本依赖 `requests` 但项目未声明，标准 `uv run` 会 `ModuleNotFoundError`，已通过 `uv add requests>=2.32.0` 固化到 `pyproject.toml` / `uv.lock`，后续无需临时 `--with requests`。
+
+**验证与影响**：`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_enroll_virtual_singers_pack.py -q` 为 `27 passed`；结构验证为 `chars=34 total_images=294 stats=34/34 under5=0 gaps=8`，Lily `forms` 含 `chibi:1`、`missing_forms=["expression"]`，`npz_keys=34` 与 manifest IDs 对齐，向量维度均 `(768,)`，`sample_dirs=34`。运行态只重启 `ccip-sidecar`；`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136 registry_version=7a60b4f27c86 api_version=2026-06-01.v1`，其中 `registry_version` 当前只按 pack 名与角色数计算，图片数变化不会改变版本号。新增 Lily SD 图 `/identify` 与 `/identify-multi` 均命中 `lily diff=0.070962653`；容器内全 136 角色 top10 碰撞检查第一名 `lily 0.070962653`，第二名 `vocaloid_kagamine_rin 0.125846729`，top1-top2 间隔约 `0.054884`。日V仍不是全部完成：剩余 8 个有分桶缺口的角色为 `lily`（仅 `expression`）、`nekomura_iroha/haru/mayu`（`chibi/expression`）、`kafu/rime`（`normal_proportion/chibi`）、`sekai/coko`（`chibi`）。回滚可把上述 `pre293-active` 备份移回 `config/character_packs/ja_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`；NapCat 不需要也不允许 recreate。
+
+## 2026-06-04 中V洛天依 Q版官方源补录
+
+**变更类型**：角色包训练数据增量补录/运行态重载（`tools/enroll_virtual_singers_pack.py`、`tests/test_enroll_virtual_singers_pack.py`、`docs/character-packs/training-data-audit-2026-06-02.md`；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**内容**：继续按“少于 5 张或四桶不足”目标深挖可信源。复核 VSinger 官方 `https://vsinger.com/api/vsinger` 后发现洛天依 `models` 条目公开“洛天依Q版公式服”，其中 `cover_img=https://res.vsinger.com/images/cffa18b20ce29010364f33ae94c6a8b0.jpg` 为干净单角色 Q版洛天依；对应 7MB 官方 zip 仅含 MMD 材质贴图，不作为训练图。脚本新增 `official_chibi_vsinger_api_luo_tianyi_q_model_cover` 精确白名单并补测试。重建 `zh_virtual_singers.charpack` 为 16 人、118 张；洛天依 `missing_forms` 从 `chibi,expression` 缩为 `expression`。新增备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260604-165510-pre118-active`。
+
+**验证与影响**：`python tools/enroll_virtual_singers_pack.py --pack zh --dry-run` 与正式构建通过；结构验证为 `chars=16 images=118 under5=0 gaps=16 npz_keys_match=True`，洛天依 forms 含 `chibi:1`。运行态 `/identify` 对新增封面命中 `luo_tianyi diff=0.163453937`，全 136 角色 top10 碰撞检查 top1 `luo_tianyi 0.163453937`、top2 `ia 0.214880824`。`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136`；`docker inspect napcat` 仍为 `2026-05-28T10:56:06.736616338Z running`。原目标未完成：中V仍有 16 人存在至少一个分桶缺口，只是洛天依不再缺 Q版。
+
+## 2026-06-03 角色包训练数据审计与可信源重建
+
+**变更类型**：角色包训练审计/录入脚本/运行态角色包重建（`ccip-sidecar/server.py`、`tools/enroll_bangdream_pack.py`、`tools/enroll_virtual_singers_pack.py`、`tools/enroll_pjsk_pack.py`、`docs/character-packs/training-data-audit-2026-06-02.md`、定向测试；已 `docker compose restart ccip-sidecar`；NapCat 未动）。
+
+**背景**：用户要求检查当前各角色包训练数据量，把少于 5 张或 `全身/正比/Q版/表情` 任一桶不足的角色列出来，并对可用可信源补齐的角色重新训练录入。复查最新 wiki/维护日志后确认，上一轮 tight crop 与视觉证据链已修正运行态识别问题，但虚拟歌手和后期 BangDream 角色仍存在训练样本薄弱、manifest 不记录训练统计、下载源不稳定等治本缺口。
+
+**修复与重建**：
+- `ccip-sidecar` 系列包构建器透传 `training_stats`，并填默认 `image_count/embedded_count/sample_count`，让每角色训练图数量、来源和缺失桶进入 manifest。
+- `tools/enroll_bangdream_pack.py --stamps 2` 接入官方 BanG Dream! Our Notes `index/img_*.webp` 与 `character/img_*_2.webp`，并增加 repo-local 下载缓存/retry；随后追加官方迷你动画「元祖！バンドリちゃん」Ave Mujica `img_chara-*.webp` 单角色 Q版图，重建 `bangdream.charpack` 为 60 人、400 张、60/60 带 `training_stats`。当前无少于 5 张角色，Ave Mujica 5 人四桶齐，剩余 15 个晚近角色仍只缺可信 Q版。
+- BangDream 脚本追加 Bestdori trim 候选过滤：跳过当前明确无 `trim_normal.png` 的 `res900*`、`bili_*`、`res*900/901/500/501/s01` 资源族，dry-run 从约 8 分钟空撞慢源降至 23 秒，且输出仍保持 400 张。
+- `tools/enroll_virtual_singers_pack.py` 增加 `--pack zh|ja|all`、精确萌娘页 allowlist、图库分页、`imageinfo` 直链优先 + redirect 备用、repo-local 下载缓存 `.cache/character-pack-images/virtual_singers`，避免 dry-run 成功而实际构建随机掉图。
+- 日V脚本新增 AHS/SSW/TOKYO6/KAMITSUBAKI/Piapro/Internet/VOCALOID/v-flower 官方补源；对 A.I.VOICE 琴叶茜/葵单人表情图新增 `official_expression_* -> expression` 分桶；新增 Sonicwire/Crypton 官方图片包 zip member 下载/缓存，接入本家 Crypton 单人 `sd`/`settei`/全身成员；新增 A.I.VOICE 官方素材 zip 序号选择器，补齐琴葉茜/葵 `normal_proportion/chibi`；拒绝使用镜音铃/连双人产品图凑单人数量。
+- 日V脚本追加 AHS 官方 SD zip 与 TOKYO6 官方差分 zip 精确白名单：`ahs_sdcharactor.zip` 的 `kaaiyuki.png` / `tsurumakimaki.png` 补 `kaai_yuki`、`tsurumaki_maki` 的 `chibi`；`koharu_rikka_sabun_files.zip` / `natsuki_karin_sabun_files.zip` / `hanakuma_chifuyu_sabun_files.zip` 的单人差分补三名 TOKYO6 角色 `expression`。新增 zip blob 缓存，避免同一官方包多个 member 重复下载。
+- 日V脚本追加 LINE STORE 官方贴图包 `TOKYO6 Characters Sticker`（作者 `TOKYO6 ENTERTAINMENT`）精确白名单：通过 `productInfo.meta` 枚举并人工核对单角色贴图，接入 `648064406/648064412/648064408`，补 `koharu_rikka` / `natsuki_karin` / `hanakuma_chifuyu` 的 `chibi`，使三名 TOKYO6 角色四桶齐。
+- 日V脚本追加 IA 官方站单人视觉图：`mob_main_202010_-1.jpg` 作为 `ia` 的 `full_body`；初次重建后该图 `/identify` 只返回候选 IA、diff 约 `0.17960`，高于阈值 `0.17848`，因此未把它当作完成证据。随后用 sidecar 容器内 `ccip_difference` 离线模拟，确认追加官方 `IA/05` 封面 `IA05_jk-scaled.jpg` 作为 `profile_art` 可把全身图 diff 降到约 `0.17699`；真实重建后 `/identify` 已命中 IA。封面图不计入四桶，只用于稳定 IA centroid。
+- 日V脚本追加 LINE STORE 官方贴图包 `Hatsune Miku: All Together`（作者 `CRYPTON FUTURE MEDIA, INC`）精确白名单：只接入人工核对为单角色的 `24346/24347/24348/24349/24355/24352` 六张贴图，补本家 Crypton 6 人 `expression`；多人贴图和角色难以区分贴图不接入。
+- 日V脚本追加 LINE STORE 官方贴图包 `Tsurumaki Maki`（作者 `AHS Co. Ltd.`）精确白名单：只接入人工核对为单角色的 `375929074`，补 `tsurumaki_maki` 的 `expression`，使其从日V缺口清单移除。
+- 日V脚本追加 LINE STORE 官方贴图包 `Kaai Yuki`（作者 `AHS Co. Ltd.`）精确白名单：只接入人工核对为单角色的 `5105717`，补 `kaai_yuki` 的 `expression`；当时仍缺 `normal_proportion`，后续 AHS press 官方插画已补齐。
+- 日V脚本追加 LINE STORE 官方贴图包 `Yuzuki Yukari` / `Kizuna Akari`（作者 `VOCALOMAKETS`）精确白名单：先接入人工核对为单角色的 `796527` / `153063566`，补 `yuzuki_yukari` / `kizuna_akari` 的 `expression`；后续追加 Q版见下一条，两者仍缺 `normal_proportion`，不标完成。
+- 日V脚本追加 LINE STORE 官方贴图包 `Gumi Animated Stickers`（作者 `INTERNET Co., Ltd.`）与 `Otomachi Una`（作者 `MTK`）精确白名单：先接入人工核对为单角色的 `17915994` / `15392026`，补 `gumi` / `otomachi_una` 的 `expression`；后续追加 Q版见下一条，两者仍缺 `normal_proportion`，不标完成。
+- 日V脚本追加同批官方 LINE 元数据枚举出的单角色 Q版/表情贴图：`Gumi Animated Stickers` 的 `17915992`、`Otomachi Una` 的 `15392046`、`Yuzuki Yukari` 的 `796519`、`Kizuna Akari` 的 `153063560`、`CAMUI GACKPO STICKER` 的 `339791279/339791316`。本次只补 `chibi` / `expression` 桶，`gumi` / `otomachi_una` / `yuzuki_yukari` / `kizuna_akari` / `kamui_gakupo` 仍缺 `normal_proportion`，不标完成。
+- 日V脚本追加 LINE STORE 官方贴图包 `TETO STAMP 1`（作者 `Oyamano`，页面内含 `twindrill` 元信息）精确白名单：只接入人工核对为单人重音テト的 `237904694` / `237904695`，分别补 `kasane_teto` 的 `chibi` / `expression`，使其四桶齐。
+- 日V脚本追加 LINE STORE 官方贴图包 `IA Official Sticker Vol.1` / `ONE Official Sticker Vol.1`（作者 `1st PLACE`）与 `Sticker Hana-chan`（作者 `Gyroid Co., Ltd.`，描述明确为 v flower）精确白名单：补 `ia` / `one` / `v_flower` 的 `chibi` / `expression`；`v_flower` 已四桶齐，`ia` 仍缺 `full_body`，`one` 仍缺 `normal_proportion`，不标完成。
+- 日V脚本追加 LINE STORE 官方贴图包 `Tohoku Zunko` / `Tohoku Kiritan`（页面含 `SSS LLC.` 元信息）精确白名单：补 `tohoku_zunko` / `tohoku_kiritan` 的 `chibi` / `expression`；当时仍缺 `normal_proportion`，后续 AHS press 官方插画已补齐。
+- 日V脚本追加 LINE STORE 官方贴图包 `Seika Kyomachi 70th Anniversary Stickers`（作者 `Seika town`）与 `Onikko Hunter Tsuina-chan vol.01`（作者 `Onikko Hunter Tsuina-chan Project`）精确白名单：补 `kyomachi_seika` / `tsuina_chan` 的 `chibi` / `expression`；`kyomachi_seika` 已由京町セイカ官网角色图四桶齐，`tsuina_chan` 后续由 AHS press 官方插画补齐 `normal_proportion`。
+- 日V脚本追加官方正比/设定图白名单：SSW/A.I.VOICE2 GUMI 立绘、SSW 神威がくぽ V3 插画、SSW Lily V3 front 图、音街ウナ官网下载页 A.I.VOICE2 立ち絵、VOCALOMAKETS 结月缘/绁星灯 A.I.VOICE2 设定资料、京町セイカ官网角色图。真实重建后 `gumi` / `kamui_gakupo` / `otomachi_una` / `yuzuki_yukari` / `kizuna_akari` / `kyomachi_seika` 四桶齐；`lily` 只去掉 `normal_proportion` 缺口，仍缺 `chibi/expression`。AHS 歌愛ユキ带商品标注的产品图与 566MB 追傩酱大素材包未接入，避免为清表污染可复跑路径。
+- 日V脚本追加 AHS press 官方单人插画白名单：`vocaloid4_yuki_illust.jpg`、`synth-v2_iroha_illust.jpg`、`voicepeak_zunko_illust.png`、`voicepeak_kiritan_illust.png`、`synth-v2_tsuina_illust.png`，分别补 `kaai_yuki`、`nekomura_iroha`、`tohoku_zunko`、`tohoku_kiritan`、`tsuina_chan` 的 `normal_proportion`。真实重建后 `kaai_yuki` / `tohoku_zunko` / `tohoku_kiritan` / `tsuina_chan` 四桶齐；`nekomura_iroha` 仍缺 `chibi/expression`。AHS おまけ页姿态图、商品标注产品图和 566MB 追傩酱大素材包仍不接入默认重训路径。
+- 日V脚本追加 KAMITSUBAKI 音楽的同位体官方 GIF 固定帧白名单：官方页面给出 MediaFire 配布文件夹，脚本使用精确 quickkey URL 下载 GIF，并抽取指定中段帧转 PNG，避免 GIF 首帧空白/文字污染 embedding。接入 `kafu` / `sekai` / `rime` / `coko` 的 `expression` 桶；`haru` 未在当前官方 GIF 配布页找到对应源。运行态发现 `COKO` 第二弹 frame36 会误识别为 `yan_he`，已改用第三弹 frame36 并把坏帧拒绝接入。
+- 日V脚本追加 Piapro 官方“投稿可能なキャラクター”页正比站姿白名单：`official_sheet_piapro_sekai_standing`、`official_sheet_piapro_haru_standing`、`official_sheet_piapro_one_standing`、`official_sheet_piapro_mayu_standing`，分别补 `sekai` / `haru` / `one` / `mayu` 的 `normal_proportion`；真实重建后 `one` 四桶齐，日V缺口从 9 人降到 8 人。Piapro `kafu` / `rim` 站姿图虽为官方一手图，但运行态分别误撞 `izumi_houka 0.152659729` / `yakura_yomogi 0.161006689`，离线 centroid 模拟后仍不能 top1 回到本人，拒绝接入；Piapro `lily` / `iroha` 正比站姿不修当前 `chibi/expression` 缺口，也不接入。
+- 中V脚本新增精确萌娘文件 allowlist，补录永夜 Minus 和东方栀子单人文件；新增 SynthV Wiki Official Art 精确静态图片补齐海伊、苍穹、赤羽、诗岸、牧心；仍拒绝盲搜短名。
+- 中V脚本追加 VSinger 官方 API 精确源：`https://vsinger.com/api/vsinger` 的智御墨客 `cover[0]` 对应 `https://res.vsinger.com/images/ec7b130d2e36888de23c91191223c64d.png`，作为 `official_full_vsinger_api_zhiyu_moke_cover_0` 接入并清除 `zhiyu_moke` 的 `full_body` 缺口；同 API `cover[1]` / `cover[2]` 运行态误判为 `kaito`，已拒绝接入，避免用错误图污染 centroid。
+- 新增 `tools/enroll_pjsk_pack.py`，作为 PJSK 26 人 series-pack 构建脚本：覆盖凤笑梦/晓山瑞希，接入 Sekaipedia cutout/chibi/MySEKAI/stamp 精确来源，stamp 只选“只出现在该角色 stamp 页”的图片以排除多人/共用 stamp，并写入 `training_stats`。
+- 重建 `project_sekai.charpack`：26 人、422 张、26/26 带 `training_stats`，全部 `full_body/normal_proportion/chibi/expression` 四桶齐；旧包备份到 `project_sekai.charpack.bak-20260603-053204`。
+- 重建 `zh_virtual_singers.charpack`：16 人、117 张、16/16 带 `training_stats`；少于 5 张者已清零，智御墨客已不缺 `full_body`，但 16 人仍至少存在 `chibi/expression` 等分桶缺口。新增活动包备份 `config/character_packs/backups/zh_virtual_singers.charpack.bak-20260603-215124-pre117-active`。
+- 重建 `ja_virtual_singers.charpack`：34 人、293 张、34/34 带 `training_stats`；少于 5 张者已清零，本家 Crypton 6 人已补齐 `chibi/normal_proportion/expression` 并四桶齐，琴葉茜/葵、`tsurumaki_maki`、`kasane_teto`、`v_flower`、`koharu_rikka`、`natsuki_karin`、`hanakuma_chifuyu`、`ia`、`one`、`gumi`、`kamui_gakupo`、`otomachi_una`、`yuzuki_yukari`、`kizuna_akari`、`kyomachi_seika`、`kaai_yuki`、`tohoku_zunko`、`tohoku_kiritan`、`tsuina_chan` 已四桶齐；`kafu` / `rime` 仍缺 `normal_proportion/chibi`，`lily` / `nekomura_iroha` / `haru` / `mayu` 仍缺 `chibi/expression`，`sekai` / `coko` 仍缺 `chibi`；日V剩余分桶缺口角色数为 8。新增活动包备份 `config/character_packs/backups/bangdream.charpack.bak-20260603-211959-pre400-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-133759-pre218-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-135701-pre235-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-141546-pre241-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-142903-pre242-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-144952-pre243-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-151227-pre245-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-154028-pre247-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-155618-pre249-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-161516-pre255-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-164304-pre259-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-171441-pre263-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-174005-pre269-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-175758-pre272-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-181500-pre273-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-190348-pre274-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-195400-pre280-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-200414-replaced-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-203304-pre285-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-203822-replaced-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-204251-pre289-bad-coko-frame-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260603-204758-replaced-bad-coko-frame-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260604-151006-pre291-active`、`config/character_packs/backups/ja_virtual_singers.charpack.bak-20260604-152925-pre293-active`。
+- 更新审计文档 `docs/character-packs/training-data-audit-2026-06-02.md`，逐包列出当前少于 5 张或形态桶不足角色。PJSK 当前无缺口；BangDream/中V/日V仍有可信源缺口，未用盲搜、合并页双人图或低可信素材凑数。
+- 继续复核但拒绝接入的来源已写入审计文档：Yumemita 动画页 `img_character-list-*` 为正比半身图非 Q版；AHS/INTERNET/1st PLACE LINE 作者页未找到可修 Lily/猫村/ONE 正比缺口的官方源；KAMITSUBAKI product 页无同位体设定/SD下载；VSinger 表情镜像不是一手源。
+
+**验证（D4/D7）**：
+- 结构：`project_sekai 26 stats/422 images under5=0 gaps=0`、`bangdream 60 stats/400 images under5=0 gaps=15`、`zh_virtual_singers 16 stats/117 images under5=0 gaps=16`、`ja_virtual_singers 34 stats/293 images under5=0 gaps=8`；四包 `npz_keys` 与 manifest IDs 对齐，向量维度均 `(768,)`，全包 `duplicate_ids={}`。
+- 运行态：只执行 `docker compose restart ccip-sidecar`；`curl http://localhost:8620/health` 返回 `status=ok pack_count=4 character_count=136 registry_version=7a60b4f27c86 api_version=2026-06-01.v1`。
+- 容器内复核：活动 `config/character_packs/ja_virtual_singers.charpack/manifest.json` 已为 293 张；`gumi` / `kamui_gakupo` / `otomachi_una` / `yuzuki_yukari` / `kizuna_akari` / `kyomachi_seika` / `kaai_yuki` / `tohoku_zunko` / `tohoku_kiritan` / `tsuina_chan` / `one` 均包含 `normal_proportion` form 且 `missing_forms=[]`；`sekai` / `haru` / `mayu` 已包含新增 Piapro `normal_proportion` form；`kafu` / `rime` 的 Piapro 站姿图因误撞拒绝接入；`lily` / `nekomura_iroha` 剩余只缺 `chibi/expression`。
+- `/identify` 样本抽检均命中期望 ID：PJSK `hatsune_miku/kagamine_rin`，本家新增 zip/LINE 图 `vocaloid_hatsune_miku/vocaloid_kagamine_rin/vocaloid_kagamine_len/vocaloid_megurine_luka/vocaloid_meiko/vocaloid_kaito`，A.I.VOICE 新增 zip 图 `kotonoha_akane/kotonoha_aoi`，AHS SD/TOKYO6 差分/AHS/VOCALOMAKETS/Internet/MTK/TWINDRILL/1st PLACE/Gyroid/SSS/Seika Town/Tsuina Project LINE/AHS press/KAMITSUBAKI GIF 新增图 `kaai_yuki/nekomura_iroha/tsurumaki_maki/gumi/otomachi_una/kasane_teto/ia/one/v_flower/tohoku_zunko/tohoku_kiritan/kyomachi_seika/tsuina_chan/yuzuki_yukari/kizuna_akari/koharu_rikka/natsuki_karin/hanakuma_chifuyu/kamui_gakupo/kafu/sekai/rime/coko`，中V `hai_yi/cang_qiong/mu_xin/zhiyu_moke`，BangDream `kotohira_nagi/togawa_sakiko/misumi_uika/wakaba_mutsumi/yahata_umiri/yutenji_nyamu`；PJSK 初音/镜音铃与本家初音/镜音铃未互串。本轮新增正比源 `/identify` 差值均低于阈值 `0.178475114`：`gumi 0.118652903`、`kamui_gakupo 0.030937895`、`otomachi_una 0.080982067`、`yuzuki_yukari 0.053368326`、`kizuna_akari 0.095096774`、`kyomachi_seika 0.028461274`、`kaai_yuki 0.018740641`、`nekomura_iroha 0.127991751`、`tohoku_zunko 0.081979223`、`tohoku_kiritan 0.043052513`、`tsuina_chan 0.039699901`、`zhiyu_moke 0.027428376`；新增 KAMITSUBAKI GIF 固定帧也全部命中：`kafu 0.046182249`、`sekai 0.054937262`、`rime 0.102273606`、`coko 0.029642714`；新增 BangDream 官方迷你动画 Q版图全部命中：`misumi_uika 0.082722224`、`wakaba_mutsumi 0.066523850`、`yahata_umiri 0.053393554`、`yutenji_nyamu 0.044979867`、`togawa_sakiko 0.045270219`。sidecar 容器内对 Ave Mujica 5 图做全 60 角色 top3 碰撞检查，第一名均为期望角色，第二名差距约 `0.083854` 到 `0.194083`；对智御墨客 VSinger API `cover[0]` 做全 136 角色 top8 检查，第一名 `zhiyu_moke 0.027428376`，第二名 `kaito 0.110227354`，top1-top2 间隔约 `0.082799`。对应旧 LINE/SD chibi/expression 回归抽检也均继续命中；`COKO` 第二弹 frame36 曾误撞 `yan_he 0.143620268`，已拒绝接入；VSinger API `zhiyu_moke cover[1]/cover[2]` 曾误撞 `kaito`，也已拒绝接入。
+- 新增 Piapro 正比源运行态抽检全部命中：`sekai 0.035270505`、`haru 0.022259114`、`one 0.040175948`、`mayu 0.011986990`；容器内 top8 碰撞检查第一名均为目标角色，第二名分别为 `shiomi_hotaru 0.125532851`、`kafu 0.167983741`、`mahashi_miku 0.189226270`、`minato_yukina 0.183030874`。拒绝项复测：Piapro `kafu` 仍命中 `izumi_houka 0.152659729`，Piapro `rim` 仍命中 `yakura_yomogi 0.161006689`。
+- PJSK stamp 表情抽检均命中期望 ID：`Stamp0008 -> hoshino_ichika`、`Stamp0025 -> fengxiaomeng`、`Stamp0031 -> xiaoshanruixi`、`Stamp0002 -> kagamine_rin`。
+- 静态/测试：`py_compile`、`uv run ruff check`、`git diff --check` 通过；`PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --with numpy --with requests pytest tests/test_ccip_sidecar_series_builder.py tests/test_enroll_virtual_singers_pack.py tests/test_enroll_pjsk_pack.py tests/test_enroll_bangdream_pack.py` 为 `42 passed`。
+- D7/NapCat 红线：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`，未 down/up/recreate NapCat。
+
+**影响与回滚**：运行态已加载新 PJSK/BangDream/中V/日V角色包，PJSK 四桶齐，BangDream 全员 5+ 且 Ave Mujica 5 人四桶齐，日V从 60 张提升到 293 张，中V从 90 张提升到 117 张；四包 under5 已清零。原目标的分桶部分尚未完成：BangDream 后 15 人仍缺可信 Q版，中V/日V仍需继续补可信 Q版/表情/正比来源；本轮官方正比/设定图、Piapro 正比站姿、VSinger API 全身图、GIF 固定帧和 BangDream mini-anime 图只修复部分桶，不把剩余缺口伪装成完成。回滚可把 `config/character_packs/backups/*pre*` 或对应旧 `bak-*` 移回活动目录后执行 `docker compose restart ccip-sidecar`；下载缓存只影响录入脚本可复跑性，可安全删除；NapCat 不动。
+
+## 2026-06-02 补齐多角色 crop 审计元数据透传
+
+**变更类型**：角色识别审计链路补强（`services/media/character_recognizer.py`、`docs/wiki/Character-Recognition.md` 与定向测试；已 rebuild/recreate `bot`；NapCat 未动）。
+
+**背景**：复审最新 tight head crop 修复时确认：`ccip-sidecar` 已返回 `bbox/crop_padding/crop_bbox`，但 bot 侧 `CharacterRecognition` 只保留 `candidate/detection_count/detection_score`，后续若从 bot 侧复盘仍缺少具体 crop 证据。
+
+**修复**：
+- `CharacterRecognition` 新增 `bbox`、`crop_padding`、`crop_bbox` 字段。
+- 多角色路径解析并透传 sidecar 的 head bbox 与实际评估 crop bbox。
+- wiki 角色识别页补充低置信候选与 crop 审计字段口径。
+
+**验证（D4/D7）**：
+- 静态：`python -m py_compile services/media/character_recognizer.py tests/test_character_recognizer.py` 通过；`source ./scripts/dev/env.sh && uv run ruff check services/media/character_recognizer.py tests/test_character_recognizer.py docs/wiki/Character-Recognition.md` 通过；`uv run pyright services/media/character_recognizer.py tests/test_character_recognizer.py` 为 0 errors；`git diff --check -- services/media/character_recognizer.py tests/test_character_recognizer.py docs/wiki/Character-Recognition.md maintenance-log.md` 通过。
+- 定向 pytest：预置 `/tmp/omubot_pytest_stubs/readline.py` 后 `tests/test_character_recognizer.py` 为 `3 passed`；完整相关集 `tests/test_render_message_character_recognition.py tests/test_character_recognizer.py tests/test_image_cache.py tests/test_ccip_sidecar_series_builder.py` 为 `18 passed, 12 skipped`，跳过项来自当前 bot venv 无 numpy 的 sidecar builder/schema 与本机缺 libvips 的部分 image cache 用例，未把 skipped 当语义证明。
+- 运行态：执行 `dot_clean . && docker compose up -d --build --no-deps bot`，只 rebuild/recreate `qq-bot`；`docker compose ps` 显示 `qq-bot` running、`ccip-sidecar` healthy、`napcat` Up 2 days。
+- 容器代码确认：`qq-bot:/app/services/media/character_recognizer.py` 已包含 `bbox/crop_padding/crop_bbox` 字段与解析逻辑。
+- 原事故图容器内复测：`CharacterRecognizer.identify()` 返回初音 `crop_padding=0.0 crop_bbox=(154,207,276,331)`、重音テト `crop_padding=0.3 crop_bbox=(69,308,270,509)`、弦巻マキ/ONE 低置信候选保留；`_describe_image_data()` 仍输出“可信识别：初音未来、重音テト；其余2个未达到置信阈值（低置信候选：弦巻マキ 0.247、ONE 0.225）”。
+- D7/NapCat 红线：`git stash list` 为空；build 前 `git status -uno --short` 仅视觉链路相关修改；`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**影响与回滚**：仅增加向后兼容的可选字段和 wiki 说明，不改变 prompt 渲染与识别决策。回滚可恢复本条涉及文件后执行 `docker compose up -d --build --no-deps bot`；NapCat 不动。
+
+## 2026-06-02 修复多角色 CCIP tight head crop 漏识重音テト
+
+**变更类型**：生产角色识别 sidecar 修正（`ccip-sidecar/server.py` 与定向测试；已 rebuild/recreate `ccip-sidecar`；NapCat 未动）。
+
+**背景**：用户追问事故图中重音テト“正脸清晰、发型标准”却未达置信。沿链路复查确认：事故原图 `/app/storage/image_cache/5F/5FBEACF2B0BC61E29E9C413ABFDAB9BB.jpg` 被 `detect_heads` 检出 4 个 head，旧 `/identify-multi` 对每个 head 只用 tight bbox 裁剪。重音テト tight crop `(107,346,233,472)` 的最近邻为 `kasane_teto diff=0.230561674`，高于阈值 `0.17847511429108218`；但同一 bbox 加 30% padding 后 diff 降到约 `0.175476`，可过阈值。样本 centroid 自检正常，根因不是 manifest/ID/embedding 损坏，而是 tight head crop 丢掉了双钻发量、侧边发饰和上身轮廓等 CCIP 需要的角色上下文。
+
+**修复**：
+- 多角色路径从单一 tight crop 改为每个 head 批量评估 padding `0.0/0.15/0.30/0.50`。
+- 选择策略保持保守：若 tight crop 已过阈值，直接保留 tight 结果，避免 PJSK 初音/本家初音这类相邻或同形态角色被更大 crop 的低 diff 抢走；只有 tight 未命中时才使用第一个过阈值的 padded crop；全部未命中时仍保留 tight 最近邻作为低置信候选。
+- `/identify-multi` 每个角色结果追加 `crop_padding` 与 `crop_bbox`，用于后续事故审计；既有字段保持兼容。
+- 新增单元覆盖：tight miss 可由第一个 padded hit 救回；tight hit 不被 padded lower diff 覆盖。
+
+**验证（D1/D4/D7）**：
+- D1 同模式扫描：`rg -n "image\\.crop\\(|ccip_batch_extract_features\\(|detect_heads\\(" ccip-sidecar services tests`，确认 sidecar head crop 识别入口只有 `ccip-sidecar/server.py` 这一处。
+- 静态：`python -m py_compile ccip-sidecar/server.py tests/test_ccip_sidecar_series_builder.py` 通过；`source ./scripts/dev/env.sh && uv run ruff check ccip-sidecar/server.py tests/test_ccip_sidecar_series_builder.py` 通过；`git diff --check -- ccip-sidecar/server.py tests/test_ccip_sidecar_series_builder.py` 通过。
+- 本机 pytest：直接跑仍触发已知 macOS `readline` 139；预置 `/tmp/omubot_pytest_stubs/readline.py` 后 `tests/test_ccip_sidecar_series_builder.py` 为 `7 skipped`，原因是当前 bot venv 无 numpy，符合 sidecar 依赖隔离现状；未把该 skipped 视作有效语义证明。
+- 容器语义断言：在 `ccip-sidecar` 容器内 monkeypatch 两个初音候选，构造 padded crop diff 更低的碰撞场景，断言 tight 已命中时仍返回 `project_sekai_miku diff=0.16 crop_padding=0.0`。
+- 部署：执行 `dot_clean . && docker compose up -d --build --no-deps ccip-sidecar`，只 rebuild/recreate `ccip-sidecar`。
+- sidecar health：`status=ok`、`pack_count=4`、`character_count=136`、`threshold=0.17847511429108218`、`registry_version=7a60b4f27c86`。
+- 原事故图复测 `/identify-multi`：`detection_count=4`；初音未来保持 `matched diff=0.162134677 crop_padding=0.0`；重音テト变为 `matched diff=0.175475568 crop_padding=0.3 crop_bbox=[69,308,270,509]`；弦巻マキ与 ONE 仍为低置信候选 `0.246906728/0.224807218`。
+- bot 容器 `.venv/bin/python` 函数级复测 `_describe_image_data()` 输出：`检测到4个角色/头像；可信识别：初音未来（Project SEKAI / Virtual Singer）、重音テト（日V / AHS・TOKYO6）；其余2个未达到置信阈值（低置信候选：弦巻マキ 0.247、ONE 0.225）`。
+- D7/NapCat 红线：`git stash list` 为空；build 前 `git status -uno --short` 仅本任务/上一轮视觉链路相关修改；`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+
+**影响与回滚**：当前运行态已修正多角色 tight crop 漏识重音テト的问题。回滚可恢复 `ccip-sidecar/server.py` 的多尺度裁剪逻辑后执行 `docker compose up -d --build --no-deps ccip-sidecar`；或临时设置 `CCIP_MULTI_CHAR_ENABLED=0` 退回单图全图 CCIP（会牺牲多角色识别）。NapCat 不需要也不允许 recreate。剩余风险：`kasane_teto` 当前样本仍只有 1 张全身图，泛化脆弱；后续应补头像/半身/不同画风样本以降低对 padding rescue 的依赖。
+
+## 2026-06-02 修复引用图片视觉证据被 50 字预览截断
+
+**变更类型**：生产聊天视觉链路修正（`kernel/router.py` 与回归测试；已 rebuild/recreate `bot`；NapCat 未动）。
+
+**背景**：用户复测后指出“当前仍然只会显示一个”。深查 22:01:05 群 `993065015` 消息 `1834182427` 后确认：sidecar、recognizer 和 `_describe_image_data()` 已经能输出多角色证据，但 `_render_message()` 在 quoted preview 层把非 bot 自己的引用内容按 `_REPLY_PREVIEW_MAX=50` 截断。`messages.db.group_messages` 入库内容实际只有：`[图片: 检测到4个角色/头像；可信识别：初音未来（Project SEKAI / Virtual …`，低置信候选在进入 MessageLog/LLM 前已丢失，因此最终回复仍只说初音未来。
+
+**修复**：
+- 新增 `_REPLY_PREVIEW_MAX_VISUAL=500`。
+- 对 `_render_message()` 自行生成的 quoted image preview（包含 `[图片:`）使用视觉证据专用上限，普通文字引用仍保持原 50 字 cap，避免扩大普通上下文噪声。
+- 新增 `test_quoted_reply_visual_evidence_is_not_truncated_to_generic_preview_cap`，覆盖 4-head/1-match/3-candidate 的引用图预览不被截断。
+
+**验证（D4/D7）**：
+- 日志/DB 定位：`docker compose logs --since=30m bot` 显示 22:01 收消息预览被截断；`messages.db.group_messages` 对 `message_id=1834182427` 的 `content_text/content_json` 均只保留到 `Virtual …`，证明丢失点在 quote preview cap，不在 sidecar 或 recognizer。
+- `python -m py_compile kernel/router.py tests/test_render_message_character_recognition.py` 通过。
+- `source ./scripts/dev/env.sh && uv run ruff check ...` 通过；`uv run pyright ...`：0 errors。
+- 定向 pytest：`tests/test_render_message_character_recognition.py` → `8 passed`；相关集 `tests/test_render_message_character_recognition.py tests/test_character_recognizer.py tests/test_image_cache.py` → `18 passed, 5 skipped`。
+- 只 rebuild bot：`dot_clean . && docker compose up -d --build --no-deps bot`；`ccip-sidecar` 未重建，NapCat 未动。
+- NapCat 红线：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 仍为 `2026-05-28T10:56:06.736616338Z running`。
+- 容器代码确认：`qq-bot:/app/kernel/router.py` 包含 `_REPLY_PREVIEW_MAX_VISUAL=500` 与 `[图片:]` cap 提升逻辑。
+- `qq-bot` 容器内用原事故图片模拟 `_render_message(reply=...)`，输出完整 `[QUOTED_MSG]`：`检测到4个角色/头像；可信识别：初音未来（Project SEKAI / Virtual Singer）；其余3个未达到置信阈值（低置信候选：重音テト 0.231、弦巻マキ 0.247、ONE 0.225）：三个二次元少女和一个虚拟歌手同框`，长度 194，未截断。
+
+**影响与回滚**：当前运行态已修正 quoted visual evidence 入 LLM 前被截断的问题。若视觉引用导致 prompt 偏长，可下调 `_REPLY_PREVIEW_MAX_VISUAL` 或仅对包含 `低置信候选` 的图片提升 cap；回滚为恢复 `kernel/router.py` 中 cap 逻辑后 `docker compose up -d --build --no-deps bot`。NapCat 不需要也不允许 recreate。
+
+## 2026-06-02 视觉证据链运行态部署与原图复测
+
+**变更类型**：运行态部署验证（rebuild/recreate `bot` 与 `ccip-sidecar`；NapCat 未动）。
+
+**操作**：在完成 `VisualEvidence`、low-confidence candidate schema、引用图 `ImageCache.save_bytes()` 标准化路径后，执行 `dot_clean . && docker compose up -d --build --no-deps bot ccip-sidecar`，只重建并重启 `qq-bot` 与 `ccip-sidecar`。
+
+**验证（D4/D7）**：
+- D7：`git stash list` 为空；`git status -uno --short` 仅本任务相关修改；build 前后均未使用 `docker compose down/up`。
+- NapCat 红线：`docker inspect napcat --format '{{.Created}} {{.State.Status}}'` 返回 `2026-05-28T10:56:06.736616338Z running`，确认未 recreate。
+- 容器状态：`docker compose ps ccip-sidecar bot napcat` 显示 `ccip-sidecar` healthy、`qq-bot` running、`napcat` Up 2 days。
+- 代码入镜像确认：`qq-bot:/app/kernel/router.py` 含 `VisualEvidence`；`qq-bot:/app/services/media/image_cache.py` 含 `save_bytes`；`ccip-sidecar:/app/server.py` 含 `candidate_character_id`。
+- sidecar health：`status=ok`、`pack_count=4`、`character_count=136`、`threshold=0.17847511429108218`。
+- 原事故图片 `/app/storage/image_cache/5F/5FBEACF2B0BC61E29E9C413ABFDAB9BB.jpg` 复测 `/identify-multi`：`detection_count=4`；matched `hatsune_miku/初音未来 diff=0.162134677`；unmatched candidates `kasane_teto diff=0.230561674`、`tsurumaki_maki diff=0.246906728`、`one diff=0.224807218`。
+- `qq-bot` 容器内函数级复测 `_describe_image_data()` 输出：`检测到4个角色/头像；可信识别：初音未来（Project SEKAI / Virtual Singer）；其余3个未达到置信阈值（低置信候选：重音テト 0.231、弦巻マキ 0.247、ONE 0.225）：三个二次元少女和一个虚拟歌手同框`。
+
+**影响与回滚**：当前运行态已使用新 bot/sidecar 代码。若新视觉证据文本在生产中显得过长或低置信候选干扰回复，可先回滚 `services/media/visual_evidence.py` 与 `kernel/router.py` 的渲染/引用图缓存接线后 `docker compose up -d --build --no-deps bot`；如需回滚 sidecar schema，可恢复 `ccip-sidecar/server.py` 后 `docker compose up -d --build --no-deps ccip-sidecar`。NapCat 不需要也不允许 recreate。
+
+## 2026-06-02 引用图视觉证据入口标准化
+
+**变更类型**：生产聊天视觉链路修正（`services/media/image_cache.py`、`kernel/router.py` 与定向测试；尚未 rebuild/restart 运行容器）。
+
+**背景**：上一轮把 sticker / CCIP / VL 统一为 `VisualEvidence` 后继续复审，发现同一张图片进入证据链前仍有入口差异：直接图片先走 `ImageCache.save()` 下载、缩放、转码并读取标准化缓存文件；引用图片分支则直接读取 URL 原始 bytes 后调用 `_describe_image_data()`。这会让同图在 direct/quoted 两条路径下产生不同 hash、不同 sticker lookup 输入、不同 CCIP/VL 输入，削弱结构化证据链的稳定性。
+
+**修复**：
+- `ImageCache` 新增 `save_bytes(data, file_id)`：用于已经下载到内存的图片 bytes，复用现有 `_process_and_save()`、两级 bucket、格式推断与 media_type 逻辑。
+- `_render_message()` 的 quoted image 分支下载 URL 后，若存在 `image_cache`，优先调用 `save_bytes()` 并读取标准化缓存文件 bytes，再进入 `_describe_image_data()`；若缓存处理或读取失败，保留原始 bytes 回退，避免引用预览直接丢失。
+- 引用图 `file_id` 复用 QQ image segment 的 `file` stem；缺失时用 `quoted_{sha256[:24]}` 作为稳定派生 key。
+
+**验证（D4）**：
+- `python -m py_compile kernel/router.py services/media/image_cache.py tests/test_render_message_character_recognition.py tests/test_image_cache.py` 通过。
+- `source ./scripts/dev/env.sh && uv run ruff check kernel/router.py services/media/image_cache.py tests/test_render_message_character_recognition.py tests/test_image_cache.py` 通过。
+- 定向 pytest（预置 no-op `readline` stub 避免本机 pytest 139）：`tests/test_render_message_character_recognition.py tests/test_character_recognizer.py tests/test_ccip_sidecar_series_builder.py tests/test_image_cache.py` → `17 passed, 10 skipped`。跳过项来自当前 bot venv 无 numpy 的 sidecar builder/schema 测试，以及本机缺 libvips 的图片处理测试。
+- `source ./scripts/dev/env.sh && uv run pyright kernel/router.py services/media/image_cache.py services/media/character_recognizer.py services/media/visual_evidence.py tests/test_render_message_character_recognition.py tests/test_image_cache.py`：0 errors。
+- 新增回归覆盖：`test_quoted_reply_image_uses_normalized_image_cache_bytes` 断言 quoted 分支调用 `save_bytes(raw, "quoted-file")`，并把缓存文件 bytes 与 `image/png` media_type 传给 recognizer；`test_save_bytes_shares_cache_key_with_save` 断言 `save_bytes()` 与 `save()` 共享同一 file_id 缓存。
+
+**影响与回滚**：部署时需 rebuild `bot` 才会进入运行态，NapCat 不动。若引用图缓存处理引发异常，可回滚 `kernel/router.py` 的 quoted `save_bytes()` 接线，保留 `ImageCache.save_bytes()` 作为无害 API；或完全恢复本次两个文件。
+
+## 2026-06-02 视觉证据链治本修正：取消贴纸终止短路 + 保留低置信候选
+
+**变更类型**：生产聊天视觉链路修正（`kernel/router.py`、`services/media/visual_evidence.py`、`services/media/character_recognizer.py`、`ccip-sidecar/server.py` 与定向测试；尚未 rebuild/restart 运行容器）。
+
+**背景**：复审 2026-06-02 16:42 群 `993065015` 多角色图片答错事故后，确认不是单纯“识图没跑”或“阈值太高”：旧迁移表情包描述在 `_describe_image_data()` 中会先命中并阻断角色识别；多角色 sidecar 已检测出多个 head，但未过阈值 crop 的 nearest candidate 被清空，router 又只消费 matched 角色，导致“检测到 4 张脸、仅 1 个可信、其余低置信候选”这个关键事实进入 prompt 前丢失。
+
+**修复**：
+- 新增 `VisualEvidence` / `StickerEvidence` 纯数据渲染层：贴纸、角色识别、低置信候选与 VL 描述统一作为同一图片的证据注解，不再互相短路。
+- `kernel/router.py` 改为 sticker lookup 后仍运行 `character_recognizer.identify()`；`migrated:*` 或 `旧bot迁移` 描述只作为弱证据，不能压过角色身份；弱贴纸命中会触发 VL 补充。
+- `ccip-sidecar` 的 `/identify` 与 `/identify-multi` 返回 additive `candidate_character_id/name`：matched 继续给确定身份；unmatched 保留 nearest candidate 但不作为事实。
+- `CharacterRecognition` 增加 candidate 与 detection 元数据字段；多角色路径把 sidecar 的 `detection_count/detection_score/candidate_*` 传到 router。
+- prompt 文本现在会显式表达不完整识别，例如：“检测到4个角色/头像；可信识别：初音未来…；其余3个未达到置信阈值（低置信候选：…）”，避免模型误以为图里只有一个角色。
+
+**验证（D4）**：
+- D1 同模式扫描：`rg "_describe_image_data\\(|identify\\(|lookup_by_hash\\(" tests kernel services`，确认 `_describe_image_data()` 是当前 sticker/CCIP/VL 合成图片文本的唯一中心入口；本轮集中在该入口修正权重。
+- `source ./scripts/dev/env.sh && uv run ruff check kernel/router.py services/media/character_recognizer.py services/media/visual_evidence.py ccip-sidecar/server.py tests/test_render_message_character_recognition.py tests/test_character_recognizer.py tests/test_ccip_sidecar_series_builder.py` 通过。
+- `source ./scripts/dev/env.sh && uv run pyright kernel/router.py services/media/character_recognizer.py services/media/visual_evidence.py`：0 errors。
+- 定向 pytest 通过：`9 passed, 5 skipped`。本机直接 pytest 仍会因 `readline` 139，需要预置 no-op `readline` stub；5 个 sidecar builder/schema 测试因 bot venv 无 numpy 跳过，符合 sidecar 依赖隔离现状。
+- 函数级语义验收：用 4-face/1-match/3-candidate 样例渲染得到“检测到4个角色/头像；可信识别：初音未来（Project SEKAI / Virtual Singer）；其余3个未达到置信阈值（低置信候选：重音テト 0.231、弦巻マキ 0.247、ONE 0.225）：…”。
+- 非破坏运行态检查：`docker compose ps ccip-sidecar bot napcat` 显示 `ccip-sidecar` healthy、`qq-bot` running、`napcat` Up 2 days；本轮未 touch/recreate/down+up NapCat，未 rebuild/restart 运行容器。
+
+**影响与回滚**：代码回滚可恢复本次改动文件；部署时需 rebuild `bot` 与 `ccip-sidecar` 才会进入运行态，NapCat 不动。若新证据文本过长或模型受低置信候选影响，可先回滚 `visual_evidence.py` / router 渲染逻辑，保留 sidecar candidate 字段作为兼容 schema。
+
 ## 2026-06-02 Wiki 回填到近期运行态（文档收口）
 
 **变更类型**：文档修订（`docs/wiki/Home.md`、`Architecture.md`、`Configuration.md`、`Deployment.md`、`Plugins.md`、`Commands.md`、`Stickers.md`、`Knowledge-System.md`、`Style-Learning.md`、`_Sidebar.md`，新增 `docs/wiki/Character-Recognition.md`，同步 `wiki/README.md`；无 bot/admin/sidecar 运行态变更）。

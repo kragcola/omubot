@@ -93,7 +93,7 @@ _STICKER_FREQUENCY_PROMPTS: dict[str, str] = {
 class StickerPlugin(AmadeusPlugin):
     name = "sticker"
     description = "表情包工具：保存、发送、管理表情包及图片描述"
-    version = "1.1.6"
+    version = "1.1.7"
     priority = 40
     silent_safe = True
     """on_message 只读取消息 + 写表情库，不发消息也不改 trigger，可在 silent_learn 群运行。"""
@@ -139,14 +139,16 @@ class StickerPlugin(AmadeusPlugin):
         ])
 
     async def on_message(self, ctx: MessageContext) -> bool:
-        """silent_learn 模式群里，把群友发的表情静默吸进表情库。
+        """非主动发言态群里，把群友发的表情静默吸进表情库。
 
-        不消费消息（永远 return False）；只在 group_presence_mode == silent_learn
-        且非主动发言态时启用——active 群走 SaveStickerTool 工具调用路径。
+        不消费消息（永远 return False）；在 silent_learn 群、或 active 群的
+        非主动发言态（debounce/batch 未触发、bot 不开口的安静时段）启用——
+        active 群 bot 真正开口时走 SaveStickerTool 工具调用路径，二者不抢。
+        off 群与 per-group sticker_mode=off / tools 关闭仍排除。
         """
         if (
             ctx.allow_speaking
-            or ctx.group_presence_mode != "silent_learn"
+            or ctx.group_presence_mode not in ("silent_learn", "active")
             or not ctx.is_group
             or self._sticker_store is None
         ):
@@ -235,12 +237,15 @@ class StickerPlugin(AmadeusPlugin):
         url = segment_value(seg, "url")
         clean_file_id = (file_id.split(".", 1)[0] if file_id else "").strip()
         if url and clean_file_id and self._image_cache is not None:
-            session = getattr(getattr(bot, "adapter", None), "session", None)
+            # Prefer the LLM client's aiohttp ClientSession — the same session
+            # chat/plugin.py uses successfully for image downloads.  The adapter
+            # session may be a functools.partial wrapper, not a real session.
+            llm_client = getattr(self._ctx, "llm_client", None)
+            session = getattr(llm_client, "_session", None)
+            if session is None:
+                session = getattr(getattr(bot, "adapter", None), "session", None)
             if session is None:
                 session = getattr(bot, "_session", None)
-            if session is None:
-                llm_client = getattr(self._ctx, "llm_client", None)
-                session = getattr(llm_client, "_session", None)
             if session is not None:
                 ref = await self._image_cache.save(session, url=url, file_id=clean_file_id)
                 if ref is not None:
