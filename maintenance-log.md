@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-06-10 表情包发不出真因 · 裸 JPEG 被腾讯拒（image_cache strip 剥掉 JFIF APP0）
+
+**变更类型**：bug 修复 + 存量数据修复，改 [services/media/image_cache.py](services/media/image_cache.py) + [services/media/sticker_store.py](services/media/sticker_store.py) + 新增 [services/media/jpeg_util.py](services/media/jpeg_util.py)、[scripts/dev/sticker_fix_naked_jpeg.py](scripts/dev/sticker_fix_naked_jpeg.py) + 测试。
+
+**真因（主动复现确诊，推翻"NapCat 故障/限流"）**：发图失败 `rich media transfer failed (retcode=1200, result:-1)`。开 NapCat HTTP API 直发对照实验（测试群 984198159）：纯文字 ok、标准 JFIF 图(`ffd8ffe0`) ok、**裸 JPEG(`ffd8ffdb`，SOI 后直接 DQT、无 APPn 段)稳定失败**（多张复现，与尺寸/维度无关）。根因链：群友发的表情在 QQ 上本是合法 JFIF → bot vision 链路 [image_cache.py](services/media/image_cache.py) 用 `jpegsave(strip=True)` 缩放缓存 → **`strip=True` 把 JFIF APP0 段一起剥掉，产出裸 JPEG** → `save_sticker` 从缓存读这个裸图存库 → 发图时腾讯 NTQQ 新富媒体校验拒收。全库 282 张里 **167 张是裸 JPEG**（占 59%，含历史 send_count=52 的——那些是腾讯收紧校验前发出去的）。PNG/GIF 不受影响。
+
+**修复**：
+
+1. **jpeg_util.ensure_jfif_app0**：字节级检测裸 JPEG 并注入 18 字节标准 JFIF APP0 → `ffd8ffe0`（不带 EXIF，最干净，token 不变；实测注入后发送 ok）。
+2. **image_cache（治本）**：`jpegsave` 改 buffer + `ensure_jfif_app0` 后落盘，保留 `strip=True` 省元数据优势但补回 APP0，从源头不再产生裸 JPEG。
+3. **sticker_store.add（二道防线）**：入库前对 JPEG 归一化，且在 hash 之前做——sticker_id 反映可发送字节，dedup 一致。
+4. **存量修复**：`StickerStore.renormalize_naked_jpegs()` + `scripts/dev/sticker_fix_naked_jpeg.py`，重写文件加 APP0 并 re-key 到新 hash（保留全部元数据 description/usage_hint/send_count 等）。storage 是 named volume，**须在容器内跑**：`docker compose exec qq-bot .venv/bin/python -m scripts.dev.sticker_fix_naked_jpeg [--dry-run]`。
+
+**影响与回滚**：纯修文件内容，图像数据不变只补容器段。回滚：`git revert` 代码；存量数据修复不可逆但安全（只是让裸图变标准、内容一致）。建议修复后留 index.json 快照兜底。
+
+**验证（D4）**：① ruff + pyright 0 error；② 全量 `uv run pytest` **2596 passed**（+5 新测试：APP0 检测/注入/入库归一化/存量 re-key 保元数据/幂等）；③ 主动复现已证注入后图能发；④ 存量批量修复结果见下方部署条目（部署后容器内执行）。
+
+---
+
 ## 2026-06-10 事故 · 为复现发图失败 restart NapCat 导致掉登录（D6 实证）
 
 **事件类型**：操作事故 + 恢复，无代码变更（配置已原样回退）。

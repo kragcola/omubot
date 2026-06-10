@@ -21,6 +21,7 @@ from typing import Any
 
 from services.knowledge.retrievers import KeywordBM25Retriever
 from services.knowledge.types import KnowledgeChunk
+from services.media.jpeg_util import ensure_jfif_app0
 from services.storage import close_with_checkpoint_sync
 
 # ---------------------------------------------------------------------------
@@ -278,6 +279,11 @@ class StickerStore:
             (sticker_id, is_new) — is_new=False means it already existed.
         """
         ext = _detect_format(image_data)  # raises ValueError for GIF / unknown
+        if ext == "jpg":
+            # Defense in depth: never store a naked JPEG (no JFIF APP0), which
+            # QQ's rich-media upload rejects. Normalize before hashing so the
+            # sticker_id reflects the actually-sendable bytes.
+            image_data = ensure_jfif_app0(image_data)
         hash_prefix = _compute_hash(image_data)
         sticker_id = f"stk_{hash_prefix}"
 
@@ -337,6 +343,59 @@ class StickerStore:
         if file_path.exists():
             file_path.unlink()
         return True
+
+    def renormalize_naked_jpegs(self, *, dry_run: bool = False) -> list[tuple[str, str]]:
+        """Repair stored "naked" JPEGs (no JFIF APP0) that QQ rejects on send.
+
+        Rewrites each affected file with a standard JFIF APP0 segment and
+        re-keys its row to the new content hash (so a future capture of the same
+        image dedupes correctly via ``add``, which now normalizes before
+        hashing). All metadata (description/usage_hint/ocr_text/source/
+        send_count/last_sent/created_at) is preserved. Returns ``(old_id,
+        new_id)`` pairs that were (or, when ``dry_run``, would be) repaired.
+        """
+        repaired: list[tuple[str, str]] = []
+        with self._lock:
+            for old_id, entry in list(self._index.items()):
+                filename = str(entry.get("file") or "")
+                if not filename.endswith(".jpg"):
+                    continue
+                path = self._storage_dir / filename
+                if not path.exists():
+                    continue
+                data = path.read_bytes()
+                fixed = ensure_jfif_app0(data)
+                if fixed == data:
+                    continue  # already standard / not naked
+                new_id = f"stk_{_compute_hash(fixed)}"
+                repaired.append((old_id, new_id))
+                if dry_run:
+                    continue
+                new_file = f"{new_id}.jpg"
+                (self._storage_dir / new_file).write_bytes(fixed)
+                new_entry = dict(entry)
+                new_entry["file"] = new_file
+                with self._db:
+                    if new_id == old_id:
+                        self._db.execute(
+                            "UPDATE stickers SET file = ? WHERE sticker_id = ?",
+                            (new_file, old_id),
+                        )
+                    else:
+                        self._db.execute(
+                            "UPDATE stickers SET sticker_id = ?, file = ? WHERE sticker_id = ?",
+                            (new_id, new_file, old_id),
+                        )
+                self._index.pop(old_id, None)
+                self._index[new_id] = new_entry
+                if filename != new_file:
+                    old_path = self._storage_dir / filename
+                    if old_path.exists():
+                        old_path.unlink()
+            if not dry_run and repaired:
+                self._search_dirty = True
+                self._view_members = None
+        return repaired
 
     @staticmethod
     def _is_evictable(source: str) -> bool:

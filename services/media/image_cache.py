@@ -18,6 +18,7 @@ from typing import Any
 import aiohttp
 from loguru import logger
 
+from services.media.jpeg_util import ensure_jfif_app0
 from services.memory.types import ImageRefBlock
 
 _L = logger.bind(channel="debug")
@@ -48,6 +49,14 @@ class ImageCache:
                 return f
         return None
 
+    def _cached_ref(self, file_id: str) -> ImageRefBlock | None:
+        cached = self._find_cached(file_id)
+        if cached is None:
+            return None
+        _L.debug("image cache hit | file_id={}", file_id)
+        media_type = self._media_type_for_suffix(cached.suffix)
+        return ImageRefBlock(type="image_ref", path=str(cached), media_type=media_type)
+
     async def save(
         self,
         session: aiohttp.ClientSession,
@@ -65,11 +74,9 @@ class ImageCache:
         path = self._path_for(file_id)
 
         # Cache hit — file already downloaded (check all extensions)
-        cached = self._find_cached(file_id)
+        cached = self._cached_ref(file_id)
         if cached is not None:
-            _L.debug("image cache hit | file_id={}", file_id)
-            media_type = self._media_type_for_suffix(cached.suffix)
-            return ImageRefBlock(type="image_ref", path=str(cached), media_type=media_type)
+            return cached
 
         async with self._sem:
             t0 = time.perf_counter()
@@ -95,6 +102,40 @@ class ImageCache:
             _L.debug(
                 "image save | file_id={} size={}KB download={:.0f}ms process={:.0f}ms",
                 file_id, len(data) // 1024, dl_ms, proc_ms,
+            )
+            return ref
+
+    async def save_bytes(self, data: bytes, file_id: str) -> ImageRefBlock | None:
+        """Resize and cache already-downloaded image bytes.
+
+        This keeps direct images and quoted images on the same normalized
+        bytes/path/media-type path before sticker lookup, CCIP, and VL evidence.
+        """
+        if len(file_id) < 2:
+            _L.warning("image file_id too short | file_id={!r}", file_id)
+            return None
+
+        cached = self._cached_ref(file_id)
+        if cached is not None:
+            return cached
+
+        async with self._sem:
+            # Another concurrent task may have populated the file while we waited.
+            cached = self._cached_ref(file_id)
+            if cached is not None:
+                return cached
+
+            path = self._path_for(file_id)
+            t0 = time.perf_counter()
+            try:
+                ref = await asyncio.to_thread(self._process_and_save, data, path)
+            except Exception:
+                _L.warning("image processing error | file_id={}", file_id, exc_info=True)
+                return None
+            proc_ms = (time.perf_counter() - t0) * 1000
+            _L.debug(
+                "image save_bytes | file_id={} size={}KB process={:.0f}ms",
+                file_id, len(data) // 1024, proc_ms,
             )
             return ref
 
@@ -127,7 +168,12 @@ class ImageCache:
             img.pngsave(str(save_path), strip=True)
             media_type = "image/png"
         else:
-            img.jpegsave(str(save_path), Q=80, strip=True)
+            # strip=True drops the JFIF APP0 segment, producing a "naked" JPEG
+            # that QQ's rich-media upload later rejects (rich media transfer
+            # failed). Re-insert a minimal standard JFIF APP0 so a sticker saved
+            # from this cache stays sendable, while keeping bulky EXIF/ICC out.
+            jpeg = img.jpegsave_buffer(Q=80, strip=True)
+            save_path.write_bytes(ensure_jfif_app0(jpeg))
             media_type = "image/jpeg"
 
         return ImageRefBlock(type="image_ref", path=str(save_path), media_type=media_type)
