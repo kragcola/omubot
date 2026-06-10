@@ -4,6 +4,78 @@
 
 ---
 
+## 2026-06-10 headroom 考察 + Claude Code 省 token 配置 + 工具调用原子 bash 规则
+
+**变更类型**：开发环境调优 + 纪律规则，未动 bot 代码/生产路径。改了用户级 Claude settings、repo 纪律文档（CLAUDE.md / AGENTS.md）、新增两份 tracking 文档，已提交 `5970824` + `74b0bc6`。
+
+**背景（用户驱动）**：用户要「考察 headroom 省 token 途径」。headroom-ai 是 context 优化工具（压缩 + learn from failures），曾在 Codex 社区讨论。我做了三轮调研：① 重审工作负载（确认不是 bot 运行时组件）；② 隔离 venv 实测 `headroom learn` 与压缩工序保真度；③ 系统盘点 Claude Code 真实 token 去向 + 挖出原生省 token 开关。
+
+**内容（三块产出）**：
+
+1. **headroom 审计**：[docs/tracking/headroom-eval-omubot-audit-2026-06-08.md](docs/tracking/headroom-eval-omubot-audit-2026-06-08.md) — 第一档 `learn` dry-run（Claude 侧超时 0 产出 / Codex 侧 12 条建议），挖出两条真增量环境技巧（SQLite 只读 `mode=ro&immutable=1`、macOS 沙盒下 `pgrep` 失效用 `lsof`）。压缩工序实测（5 类真实负载）：结构化 JSON 无损省 70%（SmartCrusher 真本事），但**pytest/日志类有损危险**（会采样删掉 FAILED 行、谎报测试结果）。结论：不值得整套接入；真增量只有两条环境技巧，手动吸收进 CLAUDE.md/AGENTS.md 即可。
+
+2. **Claude Code 省 token**：[docs/tracking/claude-code-token-savings-2026-06-08.md](docs/tracking/claude-code-token-savings-2026-06-08.md) — 从本机 2.1.168 二进制逐函数确认：`ENABLE_TOOL_SEARCH` 未设 + `ANTHROPIC_BASE_URL` 非官方 host → 工具 deferral 关闭，每会话每轮把全部工具定义一次性塞进 context（膨胀几十 K）。**已改 `~/.claude/settings.json`**，加 `ENABLE_TOOL_SEARCH: "true"`。**待重启新会话生效 + 实测中转是否支持 tool_reference**（三步：让 agent 调 Read / Bash / 一个 MCP 工具，都正常=中转支持、留着；有调不出=改回 `false` 秒级回滚）。
+
+3. **工具调用原子 bash 规则**：本会话追查「工具调用偶发失败」时，初版归因成「中转降级」，实测推翻——真根因是**分步工具调用偶发丢失中间步骤**（如 `git add` 没生效，暂存区空，后续 `git commit` 正常退出 `no changes added`、HEAD 不动）+ agent 凭回执字面误判成功。提炼四条规则：① 有依赖的 git/写操作合并成一条 bash 原子执行（`git add X && git commit && git log -1`）；② 同条命令内打印自验证证据；③ 声明「已提交/已写入」前必须有外部状态证据（HEAD hash 真变、文件真在盘）；④ 同一动作失败两次即停，换方式不硬试。已同步进 [CLAUDE.md](CLAUDE.md)「工具调用」段、[AGENTS.md](AGENTS.md)「Atomic Writes + Self-Verification」段，并体现在 token-savings 文档第七、八节。
+
+**影响与回滚**：
+
+- `ENABLE_TOOL_SEARCH` 改了用户级配置（home 目录），只影响本机 Claude Code。当前会话不生效（启动时未加载）；重启新会话后生效。唯一风险：中转若不支持 tool_reference，被 defer 的工具会调不出 → 实测不行时改回 `false` 即秒级恢复。
+- CLAUDE.md / AGENTS.md 纪律规则：纯文档，不影响运行态。回滚 = revert commit `74b0bc6`。
+
+**验证（D4）**：① `~/.claude/settings.json` 真有 `ENABLE_TOOL_SEARCH: "true"`（grep 确认 line 9）；② commit `74b0bc6` 三个文件 diff 确认规则段在（git show 验证）；③ 两份 tracking 文档落盘（headroom-eval / claude-code-token-savings 各 8.4G / 4KB）；④ 本次所有 git 写操作均用原子 bash + git log 验证 HEAD 真变（`5970824` / `74b0bc6`）。
+
+**后续**：① 重启 Claude Code → 开新对话 → 实测 tool-search（见 token-savings 文档 §三）；② 可选：清理 `.workspace/host-cache-offload-20260608`（8.4G 6-08 迁移残留）；③ 可选：设 `MAX_MCP_OUTPUT_TOKENS` 封顶 MCP 返回。
+
+---
+
+## 2026-06-10 表情包发送：解耦「是否发图」与「发哪张」，自动配图路径接语义检索
+
+**变更类型**：行为变更（修复自动配图选错图），仅改 [services/llm/client.py](services/llm/client.py) + [tests/test_sticker_placement.py](tests/test_sticker_placement.py)，未动配置/manifest，未 rebuild（待下次部署随车）。
+
+**背景（通查触发）**：观察到 bot 早上回「早上好」时不配语义合适的表情。原假设是「关键词检索（BM25）不如向量、找不到早安表情」。**实测证伪**：把线上 616 张库导出跑同一套 `KeywordBM25Retriever`，查「早上好」top1=stk_e988764a(OCR「早上好 朋友们」)、top2=stk_7d818198(OCR「早上好,椰汁橙」)、top4/5=真早安图——BM25 命中且排序正确。真根因在**上游门控 + 选图路径**：
+
+1. **send_sticker 24h 触发 0 次**（`grep -c "send_sticker ok"`=0）。库里有早安图、检索也能命中，但发送路径压根没走到。
+2. 发图有三条路径：① 主 LLM 主动调 `send_sticker(intent)` 走 BM25（最理想，但要 thinker `sticker:yes` 鼓励）；② thinker 决策位——「早上好」是中性问候，不命中 thinker 的「表达情绪/欢呼/撒娇/吐槽」条件 → `sticker:false`，LLM 不被提示配图；③ **回复后兜底自动配图 `_send_post_reply_sticker_if_needed`——完全不做语义匹配**：候选池 = recent+frequent+thinker_candidates 经 `fairmatch_rerank`（仅按使用频率公平性排序）后**直接发 `candidate_pool[0]`**。`StickerDecision.rerank_strategy`（intent/emotion/persona）算出来但**无任何代码消费，是死字段**。即这条路即使触发，也只发「当前最该轮到的高频图」，与「早上好」语境无关。
+
+**本次改动（方案 2：解耦「是否」与「哪张」）**：新增 `_select_post_reply_sticker()`。`StickerDecisionProvider` 仍只决定**是否**配图（mood/affection/cooldown 闸 + 频率公平池），**发哪张**改为：用最近用户消息（复用 `_fallback_query`）跑 `search_by_intent` 在**全库**做 BM25，跳过本 scope 近期已用，命中即发该图；无 query / 无命中时回落 `candidate_pool[0]`（保持旧行为，空场景不变）。副带激活了原本死掉的语境匹配语义。
+
+**影响面**：仅路径③的选图逻辑。不改「是否发图」的概率/闸门，不改路径①②。中性问候配图变对题；无上下文场景行为不变。
+
+**验证（D4）**：① 同模式扫描：`grep rerank_strategy/candidate_pool[` 确认全仓仅此一处直接发 `candidate_pool[0]`，无同模式遗漏；`search_by_intent` 另一调用点是 `_fallback_ack`（addressed 但 LLM 空回复的兜底），逻辑独立不受影响。② 测试：新增 3 个回归（contextual_match_over_frequency_top / falls_back_to_pool_when_no_query / skips_recently_used_contextual），`test_sticker_placement.py` 5/5 通过；全量 `pytest` 2580 passed / 17 skipped（较前 +3）；ruff + pyright 0 error。③ 回滚：单文件 revert `_select_post_reply_sticker`，调用点改回 `candidate_pool[0]` 即恢复。
+
+**遗留**：thinker 对中性问候判 `sticker:false` 仍在（路径②未动）——本次只保证「一旦决定发图，发的图对题」。若要让早安这类更主动配图，是另一改动（放宽 thinker 提示词的 sticker=true 场景），待定。
+
+---
+
+**变更类型**：行为变更（表情库质量门 + 容量/曝光/淘汰治理），已部署 2026-06-10（rebuild bot + dream 运行态 override 改 floor，NapCat 未动）。涉及 [plugins/sticker/plugin.py](plugins/sticker/plugin.py)、[plugins/sticker/plugin.json](plugins/sticker/plugin.json)、[plugins/sticker/config.default.json](plugins/sticker/config.default.json) + schema、[services/media/sticker_store.py](services/media/sticker_store.py)、[plugins/chat/plugin.py](plugins/chat/plugin.py)、[plugins/dream/plugin.py](plugins/dream/plugin.py)、[plugins/dream/config.default.json](plugins/dream/config.default.json) + schema、对应测试。
+
+**背景**：06-09 修通静默偷取后，一晚偷取 609 张、库存冲到 616，且 611 张里 563 张（92%）从未被发送过。根问题是入库判定为「见到表情即存」——「被发一次」不构成质量依据，刷屏/一次性梗图/截图全无差别灌入；且入库后无任何容量/曝光护栏：`format_prompt_view` 把全库逐行灌进 system prompt（实测 42,796 字符 ≈ 28,500 token，每偷一张缓存失效一次），`max_count=200` 从未在 add() 执行（形同虚设），Dream 淘汰靠 LLM 读全量 JSON 拍脑袋、floor=500 只防删过头不驱动「删差的」。元数据质量经实证反而不差（98% 偷取表情有真实 Qwen3-VL 情绪标签），故方案不做重内容审查（NSFW/广告），改用「群行为投票 + send_count 信号」治理。
+
+**内容**：
+- **入库前（Part A，核心质量门 + 源头控量）**：新增 `_RecurrenceGate`（[plugins/sticker/plugin.py](plugins/sticker/plugin.py)）——同一 `file_id` 在滑动窗口内被看到 ≥ `learn_min_occurrences`（默认 3）次才下载入库，否则只在内存计数、不下载不调 vision。质量依据=群复发（被反复发=群验证过好用），同时从源头控量（绝大多数一次性图达不到门槛）。计数器带 24h 窗口衰减 + LRU 内存上限（5000 file_id）+ resolved 集（入库后停止重复计数）。闸位于 `is_sticker_like_segment` 通过之后、`_ensure_segment_cached` 之前。
+- **入库后 B1（容量硬护栏）**：`StickerStore.add()` 真正执行 `max_count`（200→300），满库时按 `send_count` 升序→`created_at` 升序淘汰 `stolen_silent*` 来源；`migrated/admin/手动 stolen` 受保护永不自动淘汰；无可淘汰候选时不强删（软上限对受保护内容不强删，库可暂超上限）。
+- **入库后 B2（prompt 止血）**：`format_prompt_view` 只暴露 top-N（默认 100=`prompt_view_max`），成员=用过的（send_count≥1）+ 最新 `prompt_view_recent_slice`（默认 20）张填满预算，按 send_count desc→created_at desc 排序。成员集缓存，仅在库变更（add/remove/evict）时重算，**send 不刷新缓存**（保持 system prompt cache 断点稳定）。
+- **入库后 B3（Dream 量化淘汰）**：新增 `StickerStore.eviction_candidates(limit)` 确定性返回 silent 来源、send_count=0、按 created_at 升序的候选；Dream `list_stickers` 改为返回该候选清单（不再 dump 全量 JSON），prompt 改为「在候选里判断保留/删除」；`sticker_delete_floor` 500→150（default + 运行态 override 同步改）。
+
+**验证与影响（D4 证据）**：① `uv run ruff check` 全过、`uv run pyright`（4 改动文件）0 errors；② 全量 `uv run pytest` = **2577 passed, 17 skipped**（新增频率闸 6 + 容量淘汰/候选/视图 9 共 15 条回归）；③ 部署后运行态实测：`format_prompt_view` 字符数 **42,796 → 7,725（−82%）**、行数 611→101；配置正确加载（max_count=300/learn_min=3/view_max=100）；bot `384801062 connected`、`Bot 就绪 ✓`、无 error/traceback，频率闸无报错；④ dream 运行态 override `storage/plugins/config/dream.json` 的 `sticker_delete_floor` 已在容器内由 500 改 150（仅容器 named volume 内有此文件，宿主机无）；⑤ NapCat 红线：全程 `2026-05-28T10:56:06 running`，仅 rebuild/recreate `qq-bot`。⑥ 注意：max_count 仅在新 add() 时触发淘汰，存量 616>300 会随后续偷取逐步淘汰至 300，不立即生效。
+
+**观察点**：① 频率闸下偷取速率应从「一晚 609」降到「几十」量级（部署后近窗口无动画表情消息进来，需更长观测窗坐实）；② 库存应随 add 触发的 max_count 淘汰回落到 ~300；③ Dream 24h 轮次应开始按候选清单淘汰 send_count=0 的 silent 表情。回滚：git 回退上述文件 + rebuild bot；dream floor 可在后台插件页或容器内 override 改回；无 DB 迁移，NapCat 不动。
+
+---
+
+## 2026-06-09 角色包日V猫村いろは AHS press VOCALOID4 chibi 裁剪小批
+
+**变更类型**：角色识别训练包补源 / 运行态包替换（`ja_virtual_singers.charpack`；仅重启 `ccip-sidecar`，NapCat 未动）。
+
+**内容**：在 [tools/enroll_virtual_singers_pack.py](tools/enroll_virtual_singers_pack.py) 为 `nekomura_iroha` 增加 `official_chibi_crop_ahs_iroha_vocaloid4_press_red_sd`。来源为 AHS press 页面中的 VOCALOID4 猫村いろは角色插图 `https://www.ah-soft.com/images/press/vocaloid/vocaloid4_iroha_illust.jpg`，使用确定性裁剪框 `(1180, 120, 1880, 760)` 只取右侧红衣 SD/小比例猫村。该源按 `chibi` 计入；猫村 expression/chibi 均已清，当前日V活动包为 34 人 / 302 图，剩余 `lily:expression`、`haru:chibi`。
+
+**验证**：`ruff check tools/enroll_virtual_singers_pack.py tests/test_enroll_virtual_singers_pack.py` 通过；`pyright ...` 0 errors；本机 readline stub 基线下 `tests/test_enroll_virtual_singers_pack.py -q` 为 55 passed。临时构建 `.workspace/character-pack-builds/ja-iroha-chibi-20260609-v1/ja_virtual_singers.charpack` 与活动包结构检查通过：34 IDs unique、302 images、npz keys match、dims `(768,)`、sample dirs present、under5=[]；全活动 4 包 136 IDs unique。运行态替换后 `/health` 为 4 packs / 136 characters；新增 PNG crop SHA256 `0837299bfc3a30f9f13d27e5a47c7c29f8e34f289c6b03da67cba334d345c011`，`/identify` 命中 `nekomura_iroha` diff `0.04974418133497238`，`/identify-multi` 单命中 `nekomura_iroha`，全 136 top8 collision top1 `nekomura_iroha`、top2 `dongfang_zhizi`，margin `0.1687510535120964`。NapCat inspect 仍为 `2026-05-28T10:56:06.736616338Z running 0`。
+
+**影响与回滚**：影响范围仅日V角色识别训练包；不涉及 bot、NapCat、Living Persona。回滚：将 `config/character_packs/backups/ja_virtual_singers.charpack.bak-20260609-234739-pre-iroha-chibi-active` 恢复到 `config/character_packs/ja_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`。后续人物识别任务应继续补 BangDream 10 个 `chibi` 或日V `lily:expression`、`haru:chibi`；不要再把猫村 AHS 正比/包装/横幅旧候选当成待清缺口。
+
+---
+
 ## 2026-06-09 角色包日V MAYU AtPress / EXIT TUNES press release chibi 裁剪小批
 
 **变更类型**：角色识别训练包补源 / 运行态包替换（`ja_virtual_singers.charpack`；仅重启 `ccip-sidecar`，NapCat 未动）。
