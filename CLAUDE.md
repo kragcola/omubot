@@ -52,7 +52,7 @@ Key design choices:
 - **Usage tracking** — SQLite recording of all LLM calls (tokens, cache hits, latency); alerts admins on low cache hit rate or slow calls
 - **Config**: `BotConfig` (Pydantic) via `kernel/config.py` — TOML < env vars < CLI args
 - **Ruff**: `pyproject.toml`, RUF001/RUF002/RUF003 ignored (Chinese full-width chars)
-- **Docker**: **always `docker compose restart napcat`**, never `down`+`up` (device fingerprint → anti-fraud)
+- **Docker**: NapCat 极脆——`down`+`up` 必触发设备指纹重置（反风控），**且 `restart` 也可能丢登录态触发重新扫码**（2026-06-10 实证：plain `restart napcat` 即丢登录、bot 离线 4min、需人工扫码恢复，凭证目录完好也没用）。所以：**非必要不动 NapCat**；排查发图/富媒体问题禁止用任何需重启/重配 NapCat 的手段，改走被动观察或 bot 侧诊断日志；真要改 NapCat 配置先确认管理员能立刻扫码兜底。
 
 Deep dives → [omubot/docs/architecture.md](omubot/docs/architecture.md) | Docker/ops → [omubot/docs/operations.md](omubot/docs/operations.md)
 

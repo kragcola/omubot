@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-06-10 事故 · 为复现发图失败 restart NapCat 导致掉登录（D6 实证）
+
+**事件类型**：操作事故 + 恢复，无代码变更（配置已原样回退）。
+
+**起因**：排查配图 `rich media transfer failed (retcode=1200)` 时，为主动复现想开 NapCat 的 OneBot HTTP server（29300，v4 需 `network.httpServers`，现存配置是 legacy `http` 块、实际没起 server），改了 `napcat/config/onebot11_384801062.json` 加 httpServers，然后 `docker compose restart napcat`。
+
+**后果**：restart 后 NapCat **quick-login 失败、丢登录态**，弹出二维码等扫码，bot 10:50:16 离线，持续 ~4 分钟，直到管理员手动扫码（`napcat/cache/qrcode.png`）于 10:54:20 重连恢复（`reconnected, skipping first-connect setup`，消息流恢复正常）。QQ 凭证目录（`/app/.config/QQ/nt_qq*`）全程完好，但 restart 仍触发了重新登录。
+
+**根因/教训（D6 实证）**：CLAUDE.md D6「NapCat 永远只 restart 不 recreate」其实更严——**连 restart 都可能丢登录态**（本次 plain restart 即丢）。「主动发图复现」这条路代价过高：它依赖开 HTTP API → 必须动 NapCat → 重启风险直接命中 D6。结论：**今后排查发图问题，禁止用任何需要重启/重配 NapCat 的复现手段**，改用被动观察（看 `post_reply_sticker_send` 的 `sent=True/False` 比例）或在 bot 侧加诊断日志。
+
+**处理**：① 配置已 `cp` 备份后回退到改动前（无 httpServers，与改动前逐字节一致，29300 已不响应=server 关）；② 备份文件已清理；③ 登录态已恢复，bot 在线。
+
+**未决**：发图失败的真因仍未定论（NapCat 日志露过 `NTQQFileApi.getVideoUrlPacket` stack + `result:-1 rich media transfer failed`，packet backend `NativePacketClient` 加载正常）。下一步只走被动观察：累积 `post_reply_sticker_send` 样本看 `sent` 比例，再判定是偶发还是该账号富媒体限流。
+
+---
+
 ## 2026-06-10 表情包配图 · 修复 hook 接线漏分支（真根因）+ 阈值调参 + 观测性
 
 **变更类型**：bug 修复（配图路径从未在正常对话触发），改 [services/llm/client.py](services/llm/client.py) + [services/sticker/decision_provider.py](services/sticker/decision_provider.py) + [services/llm/thinker.py](services/llm/thinker.py) + 测试，已部署 rebuild。
