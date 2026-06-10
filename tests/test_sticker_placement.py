@@ -56,6 +56,7 @@ async def test_post_reply_sticker_sends_when_thinker_requests_and_tool_not_used(
                 turn_id="turn-1",
                 ctx=ToolContext(bot=bot, user_id="456", group_id="123", session_id="group_123"),
                 already_sent=False,
+                rng=lambda: 0.0,
             )
     finally:
         await client.close()

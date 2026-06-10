@@ -16,6 +16,7 @@ async def test_sticker_decision_provider_writes_feedback_signal() -> None:
         StickerDecisionContext(frequent_candidates=("s1",)),
         runtime_state=bus,
         scope=_scope(),
+        rng=lambda: 0.0,
     )
 
     snapshot = bus.get(MOOD_CURRENT_SLOT, scope=_scope())
@@ -31,6 +32,7 @@ async def test_mood_classifier_consumes_feedback_once_and_clears_slot() -> None:
         StickerDecisionContext(frequent_candidates=("s1",)),
         runtime_state=bus,
         scope=scope,
+        rng=lambda: 0.0,
     )
 
     decision = await MoodClassifier().classify_and_write(
@@ -59,6 +61,7 @@ async def test_sticker_density_feedback_skips_when_no_send() -> None:
         StickerDecisionContext(thinker_candidates=("hint",)),
         runtime_state=bus,
         scope=_scope(),
+        rng=lambda: 0.99,
     )
 
     assert decision.should_send is False

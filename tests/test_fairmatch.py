@@ -34,6 +34,7 @@ async def test_sticker_decision_provider_applies_fairmatch_usage_counts() -> Non
     decision = await StickerDecisionProvider().decide(
         StickerDecisionContext(frequent_candidates=("hot", "fresh")),
         usage_counts={"hot": 9, "fresh": 1},
+        rng=lambda: 0.0,
     )
 
     assert decision.should_send is True

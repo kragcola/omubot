@@ -7,8 +7,13 @@ import pytest
 from services.sticker import StickerDecisionContext, StickerDecisionProvider
 
 
-async def _decide(**kwargs):
-    return await StickerDecisionProvider().decide(StickerDecisionContext(**kwargs))
+async def _decide(*, rng=None, **kwargs):
+    # Default rng=0.0 → any positive probability sends, so tests that only care
+    # about "would it send at all" are deterministic. Tests that probe the rate
+    # pass an explicit rng.
+    return await StickerDecisionProvider().decide(
+        StickerDecisionContext(**kwargs), rng=(rng if rng is not None else (lambda: 0.0))
+    )
 
 
 async def test_sticker_decision_no_candidates() -> None:
@@ -19,13 +24,65 @@ async def test_sticker_decision_no_candidates() -> None:
     assert decision.candidate_pool == ()
 
 
-async def test_sticker_decision_frequent_sends_with_soft_probability() -> None:
-    decision = await _decide(frequent_candidates=("s1",))
-
-    assert decision.should_send is True
-    assert decision.trigger_source == "frequent"
-    # frequent 0.7 × normal 1.0 × energy(0.6→0.8) = 0.56
+# ---------------------------------------------------------------------------
+# Bernoulli sampling: send_probability is a RATE, not a threshold. The same
+# context sends sometimes and skips sometimes depending on the uniform draw.
+# ---------------------------------------------------------------------------
+async def test_sticker_decision_samples_below_rate_sends() -> None:
+    # frequent + thinker_ran + suggested → base 0.7 × energy(0.6→0.8) = 0.56.
+    decision = await _decide(
+        frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=True, rng=lambda: 0.1
+    )
     assert decision.send_probability == pytest.approx(0.56, abs=1e-3)
+    assert decision.should_send is True
+    assert decision.reason == "sampled_send"
+
+
+async def test_sticker_decision_samples_above_rate_skips() -> None:
+    decision = await _decide(
+        frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=True, rng=lambda: 0.9
+    )
+    assert decision.send_probability == pytest.approx(0.56, abs=1e-3)
+    assert decision.should_send is False
+    assert decision.reason == "sampled_skip"
+
+
+# ---------------------------------------------------------------------------
+# thinker-led veto: thinker ran + said no → fallback paths obey (do not send).
+# ---------------------------------------------------------------------------
+async def test_sticker_decision_thinker_veto_blocks_frequent() -> None:
+    decision = await _decide(
+        frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=False, rng=lambda: 0.0
+    )
+    assert decision.should_send is False
+    assert decision.reason == "thinker_veto"
+
+
+async def test_sticker_decision_thinker_veto_does_not_block_tool_call() -> None:
+    # An explicit send_sticker tool_call is the LLM's own action — thinker's
+    # whether-to-decorate veto must not override it.
+    decision = await _decide(
+        tool_call_candidates=("s1",), thinker_ran=True, thinker_suggested=False, rng=lambda: 0.0
+    )
+    assert decision.should_send is True
+    assert decision.trigger_source == "tool_call"
+
+
+async def test_sticker_decision_thinker_not_run_does_not_veto() -> None:
+    # force_reply / thinker disabled → thinker had no opinion. Must NOT be treated
+    # as a veto; the fallback baseline still gives an occasional sticker.
+    decision = await _decide(
+        frequent_candidates=("s1",), thinker_ran=False, rng=lambda: 0.0
+    )
+    assert decision.should_send is True
+    # thinker absent → modest baseline 0.4 × energy(0.6→0.8) = 0.32
+    assert decision.send_probability == pytest.approx(0.32, abs=1e-3)
+
+
+async def test_sticker_decision_thinker_ran_raises_rate_over_no_opinion() -> None:
+    ran = await _decide(frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=True)
+    absent = await _decide(frequent_candidates=("s1",), thinker_ran=False)
+    assert ran.send_probability > absent.send_probability
 
 
 async def test_sticker_decision_tool_call_wins_priority() -> None:
@@ -44,13 +101,16 @@ async def test_sticker_decision_tool_call_wins_priority() -> None:
 # energy axis: low energy lowers probability but NEVER to zero ("累 ≠ 不发")
 # ---------------------------------------------------------------------------
 async def test_sticker_decision_low_energy_reduces_but_does_not_block() -> None:
-    low = await _decide(mood_energy=0.0, frequent_candidates=("s1",))
-    high = await _decide(mood_energy=1.0, frequent_candidates=("s1",))
+    low = await _decide(
+        mood_energy=0.0, frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=True
+    )
+    high = await _decide(
+        mood_energy=1.0, frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=True
+    )
 
-    # floor 0.5: frequent 0.7 × 0.5 = 0.35 > 0 (still a real probability)
+    # floor 0.5: 0.7 × 0.5 = 0.35 > 0 (still a real probability)
     assert low.send_probability == pytest.approx(0.35, abs=1e-3)
     assert low.send_probability > 0.0
-    # high energy ×1.0 → 0.7, strictly higher than low energy
     assert high.send_probability > low.send_probability
 
 
@@ -67,26 +127,32 @@ async def test_sticker_decision_energy_is_monotonic() -> None:
 # client, the provider must keep sending.
 # ---------------------------------------------------------------------------
 async def test_sticker_decision_low_valence_still_sends() -> None:
-    decision = await _decide(mood_valence=-0.9, mood_energy=0.7, frequent_candidates=("s1",))
+    decision = await _decide(
+        mood_valence=-0.9, mood_energy=0.7, frequent_candidates=("s1",),
+        thinker_ran=True, thinker_suggested=True,
+    )
 
     assert decision.should_send is True
-    assert decision.reason == "single_decision"
+    assert decision.reason == "sampled_send"
     # sad → emotion rerank (empathetic class), still sends
     assert decision.rerank_strategy == "emotion"
 
 
 # ---------------------------------------------------------------------------
-# base_frequency baseline (web-configurable) is monotonic; off short-circuits
-# at the caller (here it just zeroes the probability).
+# base_frequency baseline (web-configurable) is monotonic; off short-circuits.
 # ---------------------------------------------------------------------------
 async def test_sticker_decision_base_frequency_monotonic() -> None:
-    rarely = await _decide(base_frequency="rarely", frequent_candidates=("s1",))
-    normal = await _decide(base_frequency="normal", frequent_candidates=("s1",))
-    frequently = await _decide(base_frequency="frequently", frequent_candidates=("s1",))
+    rarely = await _decide(
+        base_frequency="rarely", frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=True
+    )
+    normal = await _decide(
+        base_frequency="normal", frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=True
+    )
+    frequently = await _decide(
+        base_frequency="frequently", frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=True
+    )
 
     assert rarely.send_probability < normal.send_probability < frequently.send_probability
-    # frequently 1.4 multiplier should lift a frequent source over the 0.5 line
-    assert frequently.should_send is True
 
 
 async def test_sticker_decision_base_frequency_off_zeroes_probability() -> None:
@@ -97,57 +163,21 @@ async def test_sticker_decision_base_frequency_off_zeroes_probability() -> None:
 
 
 # ---------------------------------------------------------------------------
-# thinker:false demotes (×0.6) but does not veto (D1 = a)
-# ---------------------------------------------------------------------------
-async def test_sticker_decision_thinker_false_demotes_not_vetoes() -> None:
-    on = await _decide(thinker_suggested=True, mood_energy=1.0, tool_call_candidates=("s1",))
-    off = await _decide(thinker_suggested=False, mood_energy=1.0, tool_call_candidates=("s1",))
-
-    assert off.send_probability < on.send_probability
-    # tool_call 0.85 × 0.8 = 0.68 ≥ 0.4 → still sends despite thinker:false
-    assert off.send_probability == pytest.approx(0.68, abs=1e-3)
-    assert off.should_send is True
-
-
-async def test_sticker_decision_frequent_thinker_false_normal_energy_still_sends() -> None:
-    # Real-world case: ordinary reply, frequent source, mood energy ~0.57,
-    # thinker says no. Must still send (demote, not veto) — this is the exact
-    # scenario that was silently blocked before the threshold/multiplier tune.
-    decision = await _decide(
-        thinker_suggested=False, mood_energy=0.57, frequent_candidates=("s1",)
-    )
-
-    # frequent 0.7 × normal 1.0 × energy(0.57→0.785) × 0.8 ≈ 0.44 ≥ 0.4
-    assert decision.should_send is True
-    assert decision.send_probability >= 0.4
-
-
-async def test_sticker_decision_frequent_thinker_false_low_energy_skips() -> None:
-    # Tired + thinker says no → converge (skip), the legitimate quiet case.
-    decision = await _decide(
-        thinker_suggested=False, mood_energy=0.3, frequent_candidates=("s1",)
-    )
-
-    assert decision.should_send is False
-    assert decision.send_probability < 0.4
-
-
-async def test_sticker_decision_thinker_source_hint_only_below_threshold() -> None:
-    # thinker source base 0.45 × energy(0.6→0.8) = 0.36 < 0.5 → hint only
-    decision = await _decide(thinker_candidates=("t1",))
-
-    assert decision.should_send is False
-    assert decision.trigger_source == "thinker"
-    assert decision.reason == "thinker_hint_only"
-
-
-# ---------------------------------------------------------------------------
-# affection axis (B3): real stage now drives modulation
+# affection axis (B3): real stage drives modulation
 # ---------------------------------------------------------------------------
 async def test_sticker_decision_affection_is_monotonic() -> None:
-    stranger = await _decide(affection_stage="stranger", mood_energy=1.0, frequent_candidates=("s1",))
-    acquaint = await _decide(affection_stage="acquaint", mood_energy=1.0, frequent_candidates=("s1",))
-    close = await _decide(affection_stage="close", mood_energy=1.0, frequent_candidates=("s1",))
+    stranger = await _decide(
+        affection_stage="stranger", mood_energy=1.0, frequent_candidates=("s1",),
+        thinker_ran=True, thinker_suggested=True,
+    )
+    acquaint = await _decide(
+        affection_stage="acquaint", mood_energy=1.0, frequent_candidates=("s1",),
+        thinker_ran=True, thinker_suggested=True,
+    )
+    close = await _decide(
+        affection_stage="close", mood_energy=1.0, frequent_candidates=("s1",),
+        thinker_ran=True, thinker_suggested=True,
+    )
 
     assert stranger.send_probability < acquaint.send_probability < close.send_probability
 
@@ -161,19 +191,22 @@ async def test_sticker_decision_withdraw_affection_blocks() -> None:
 
 
 async def test_sticker_decision_close_affection_uses_persona_rerank() -> None:
-    decision = await _decide(affection_stage="close", mood_energy=1.0, frequent_candidates=("s1",))
+    decision = await _decide(
+        affection_stage="close", mood_energy=1.0, frequent_candidates=("s1",),
+        thinker_ran=True, thinker_suggested=True,
+    )
 
     assert decision.should_send is True
     assert decision.rerank_strategy == "persona"
 
 
 # ---------------------------------------------------------------------------
-# kaomoji gating: numeric playful (energy≥0.7 & valence≥0.4) replaces the old
-# Chinese-mismatched _PLAYFUL_MOODS set.
+# kaomoji gating: numeric playful (energy≥0.7 & valence≥0.4)
 # ---------------------------------------------------------------------------
 async def test_sticker_decision_kaomoji_suppressed_outside_playful() -> None:
     decision = await _decide(
-        register_label="quiet", mood_energy=0.3, mood_valence=0.0, kaomoji_candidates=("k1",)
+        register_label="quiet", mood_energy=0.3, mood_valence=0.0,
+        kaomoji_candidates=("k1",), rng=lambda: 0.5,
     )
 
     assert decision.should_send is False
@@ -189,12 +222,17 @@ async def test_sticker_decision_kaomoji_playful_numeric_sends() -> None:
 
 
 # ---------------------------------------------------------------------------
-# mood_label is now log-only and must not affect the decision
+# mood_label is log-only and must not affect the decision
 # ---------------------------------------------------------------------------
 async def test_sticker_decision_mood_label_does_not_gate() -> None:
-    # Old behaviour blocked "cold"/"tired"; now only the numeric axes matter.
-    cold = await _decide(mood_label="困倦", mood_energy=0.6, frequent_candidates=("s1",))
-    neutral = await _decide(mood_label="neutral", mood_energy=0.6, frequent_candidates=("s1",))
+    cold = await _decide(
+        mood_label="困倦", mood_energy=0.6, frequent_candidates=("s1",),
+        thinker_ran=True, thinker_suggested=True,
+    )
+    neutral = await _decide(
+        mood_label="neutral", mood_energy=0.6, frequent_candidates=("s1",),
+        thinker_ran=True, thinker_suggested=True,
+    )
 
     assert cold.send_probability == neutral.send_probability
     assert cold.should_send == neutral.should_send
@@ -222,8 +260,9 @@ async def test_sticker_decision_extra_candidates_join_pool() -> None:
         return ("extra",)
 
     decision = await StickerDecisionProvider().decide(
-        StickerDecisionContext(frequent_candidates=("s1",)),
+        StickerDecisionContext(frequent_candidates=("s1",), thinker_ran=True, thinker_suggested=True),
         extra_candidates=loader,
+        rng=lambda: 0.0,
     )
 
     assert decision.candidate_pool == ("s1", "extra")

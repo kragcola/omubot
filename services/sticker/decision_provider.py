@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random as _random
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -25,14 +26,17 @@ _DEFAULT_MOOD_VALENCE = 0.0
 # axis hard-blocks — "难过/累 ≠ 不发". The only near-block is affection=withdraw,
 # which comes from the *relationship*, not mood.
 _BASE_FREQUENCY_MULT = {"rarely": 0.5, "normal": 1.0, "frequently": 1.4, "off": 0.0}
-# D1=(a): thinker sticker:false demotes the post-reply path, it does not veto it.
-# 0.8 (not 0.6) so a normal-energy frequent reply still clears _SEND_THRESHOLD
-# when thinker says "no" — otherwise the demotion is a hard veto in disguise.
-_THINKER_FALSE_MULT = 0.8
-# Send when probability ≥ this. 0.4 (not 0.5) so thinker=false at normal energy
-# (frequent 0.7 × 0.8 × energy_mult ≈ 0.44) sends rather than being silently
-# blocked; thinker=true stays comfortably above it.
-_SEND_THRESHOLD = 0.4
+# thinker-led (2026-06-10): for the post-reply *fallback* paths (frequent/thinker),
+# the thinker's own sticker:false is a VETO — it owns "whether to decorate this
+# reply". This restores LLM autonomy after the old ×0.8 demote made every reply
+# carry a sticker. The veto never touches an explicit send_sticker tool_call or a
+# kaomoji-enforced round; those are not the thinker's call to make.
+_VETOABLE_SOURCES = frozenset({"frequent", "thinker"})
+# send_probability is no longer a deterministic gate — it's a Bernoulli rate that a
+# uniform draw is compared against. A reply at p=0.5 sends ~half the time, so the
+# same context no longer means "always sends". Floors/ceilings keep it sane.
+_MIN_SEND_PROBABILITY = 0.05  # below this we treat as "don't bother drawing"
+_MAX_SEND_PROBABILITY = 0.95  # never a guaranteed send for fallback paths
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +47,11 @@ class StickerDecisionContext:
     mood_valence: float = _DEFAULT_MOOD_VALENCE  # [-1,1] pleasure axis → class only
     affection_stage: str = "acquaint"
     base_frequency: str = "normal"  # web-configurable baseline: rarely/normal/frequently/off
-    thinker_suggested: bool = True  # thinker.sticker decision; False demotes (×0.6), never vetoes
+    # thinker-led semantics: thinker_ran distinguishes "thinker had no opinion"
+    # (force_reply / thinker disabled — must NOT veto) from "thinker ran and said
+    # no" (thinker_ran=True, thinker_suggested=False → veto the fallback paths).
+    thinker_ran: bool = False
+    thinker_suggested: bool = True  # thinker.sticker decision; only meaningful if thinker_ran
     cooldown_active: bool = False
     cooldown_ms: int = _DEFAULT_COOLDOWN_MS
     frequent_candidates: Sequence[str] = field(default_factory=tuple)
@@ -72,6 +80,7 @@ class StickerDecisionProvider:
         runtime_state: RuntimeStateBus | None = None,
         scope: Scope | None = None,
         usage_counts: Mapping[str, int] | None = None,
+        rng: Callable[[], float] | None = None,
     ) -> StickerDecision:
         extras = tuple(await extra_candidates()) if extra_candidates is not None else ()
         pool = fairmatch_rerank(_dedupe([
@@ -91,10 +100,18 @@ class StickerDecisionProvider:
         if context.affection_stage == "withdraw":
             # Only near-block left, and it comes from the relationship, not mood.
             return _decision(False, pool, strategy, context, source, probability, "affection_withdraw_gate")
-        if source == "thinker" and probability < _SEND_THRESHOLD:
-            return _decision(False, pool, strategy, context, source, probability, "thinker_hint_only")
+        # thinker-led veto: if the thinker ran and decided this reply shouldn't be
+        # decorated, the fallback paths (frequent/thinker) obey it. An explicit
+        # send_sticker tool_call or a kaomoji-enforced round are not vetoable.
+        if context.thinker_ran and not context.thinker_suggested and source in _VETOABLE_SOURCES:
+            return _decision(False, pool, strategy, context, source, probability, "thinker_veto")
+        # Bernoulli sample: send_probability is a *rate*, not a threshold. Same
+        # context no longer means "always sends" — a uniform draw decides.
+        draw = (rng or _random.random)()
+        should_send = draw < probability
         decision = _decision(
-            probability >= _SEND_THRESHOLD, pool, strategy, context, source, probability, "single_decision"
+            should_send, pool, strategy, context, source, probability,
+            "sampled_send" if should_send else "sampled_skip",
         )
         if decision.should_send:
             _write_density_feedback(runtime_state, scope)
@@ -149,20 +166,22 @@ def _is_playful(context: StickerDecisionContext) -> bool:
 def _send_probability(context: StickerDecisionContext, source: StickerTrigger, has_pool: bool) -> float:
     if not has_pool:
         return 0.0
-    base = {
-        "tool_call": 0.85,
-        "kaomoji": 0.65,
-        "frequent": 0.7,
-        "thinker": 0.45,
-        "none": 0.0,
-    }[source]
+    # Base Bernoulli rate per source. tool_call/kaomoji are explicit intents and
+    # keep high rates. The fallback paths (frequent/thinker) are thinker-led: when
+    # the thinker actively asked for a sticker (ran + suggested) the reply *wants*
+    # decoration → high rate; when the thinker didn't run at all (force_reply /
+    # disabled) we fall back to a modest baseline so naming the bot still gets the
+    # occasional sticker without spamming.
+    if source in _VETOABLE_SOURCES:
+        # ran + suggested=True here (ran + False is vetoed before sampling);
+        # thinker absent (force_reply / disabled) → modest baseline.
+        base = 0.7 if context.thinker_ran else 0.4
+    else:
+        base = {"tool_call": 0.85, "kaomoji": 0.65, "none": 0.0}[source]
     # web-configurable baseline frequency (rarely/normal/frequently/off)
     base *= _BASE_FREQUENCY_MULT.get(context.base_frequency, 1.0)
     # energy axis: tired → scale down (multiplier, never to zero)
     base *= _mood_energy_multiplier(context.mood_energy)
-    # thinker:false demotes the post-reply path rather than vetoing it (D1=a)
-    if not context.thinker_suggested:
-        base *= _THINKER_FALSE_MULT
     # affection axis: intimacy amplifies, strangers contract, withdraw near-mutes
     affection = context.affection_stage
     if affection == "close":
@@ -174,7 +193,11 @@ def _send_probability(context: StickerDecisionContext, source: StickerTrigger, h
     # kaomoji outside a playful register/mood stays suppressed
     if source == "kaomoji" and context.register_label != "playful" and not _is_playful(context):
         base = min(base, 0.2)
-    return max(0.0, min(1.0, base))
+    # Clamp to a sane Bernoulli rate. Fallback paths never become a guaranteed send.
+    if source in _VETOABLE_SOURCES:
+        base = min(base, _MAX_SEND_PROBABILITY)
+    base = max(0.0, min(1.0, base))
+    return base if base >= _MIN_SEND_PROBABILITY else 0.0
 
 
 def _rerank_strategy(

@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-06-10 表情包决策重做 · thinker 主导 + Bernoulli 概率采样（推翻"每段必回 + thinker 被架空"）
+
+**变更类型**：行为重构，改 [services/sticker/decision_provider.py](services/sticker/decision_provider.py) + [services/llm/client.py](services/llm/client.py) + 4 个测试。
+
+**问题（日志实证）**：上线后观察 `post_reply_sticker_send`，近 2h **send=5 / skip=0**——命中 hook 的回复 100% 配图，且 `prob` 恒定 `0.435`、`source=frequent`、`thinker=False`。同期 thinker 自己判了 6 次 `sticker=False`、1 次 True，全被无视。即"每段必回 + thinker 自主权完全失效"。
+
+**双根因**：
+
+1. **路由短路**：`frequent_candidates` = 全部带 usage_hint 的表情，而库里 61 张**全带 hint** → frequent 池恒满 → `_trigger_source` 永远返回 `frequent`，`thinker` 分支是死代码。
+2. **确定性门限 + 降权太轻**：旧 `decide()` 无随机，`prob ≥ 0.4 即必发`；thinker 说不(`_THINKER_FALSE_MULT=0.8`)只把 `0.7×energy0.785×0.8≈0.434` 压到仍过线。前一版 D1=a「demote not veto」的副作用。
+
+**修复（两项用户拍板的方向）**：
+
+1. **thinker 主导（veto）**：新增 `thinker_ran` 字段区分「thinker 没跑」(force_reply @bot 点名 / thinker 关闭 → `thinker_decision is None`，**不得 veto**) vs「跑了且说不」(`thinker_ran=True & suggested=False` → veto)。veto 只作用于兜底路径(`frequent`/`thinker`)，**不否决** LLM 显式 `send_sticker`(tool_call) 与 kaomoji-enforce。
+2. **真概率采样**：`send_probability` 从「门限」改为 Bernoulli **发送率**——`rng() < prob` 才发，同语境不再必回。base rate：兜底路径 thinker 在场 0.7 / 缺席 0.4，tool_call 0.85，kaomoji 0.65；仍叠 energy/affection/base_frequency 调制。`rng` 可注入便于测试（生产用 `random.random`）。
+
+**实测发送率**（2000 次模拟，energy=0.55 即线上值）：thinker 要→55%，thinker 不要→**0%**，thinker 缺席→33%，energy1.0→67%，energy0.1→36%。从「100% 必回 + 拒绝被无视」变成 thinker 说了算 + 概率波动。
+
+**影响与回滚**：纯决策逻辑，不动发图链路/存量数据。回滚 `git revert`。删除常量 `_THINKER_FALSE_MULT`/`_SEND_THRESHOLD`，reason 由 `single_decision`/`thinker_hint_only` 改为 `sampled_send`/`sampled_skip`/`thinker_veto`；日志加 `thinker_ran=` 字段。
+
+**验证（D4）**：① ruff + pyright 0 error；② 全量 `uv run pytest` **2597 passed**；③ 同模式扫描(D1)：grep 确认仅一处真 sticker `decide()` 调用点(client.py:1659)，3538 是不相干的 PauseExtend；删除常量无残留引用；④ 行为用 2000 次蒙特卡洛验证发送率分布如上。
+
+---
+
 ## 2026-06-10 表情包发不出真因 · 裸 JPEG 被腾讯拒（image_cache strip 剥掉 JFIF APP0）
 
 **变更类型**：bug 修复 + 存量数据修复，改 [services/media/image_cache.py](services/media/image_cache.py) + [services/media/sticker_store.py](services/media/sticker_store.py) + 新增 [services/media/jpeg_util.py](services/media/jpeg_util.py)、[scripts/dev/sticker_fix_naked_jpeg.py](scripts/dev/sticker_fix_naked_jpeg.py) + 测试。

@@ -1608,15 +1608,18 @@ class LLMClient:
         turn_id: str,
         ctx: ToolContext | None,
         already_sent: bool,
+        rng: Callable[[], float] | None = None,
     ) -> bool:
         if already_sent or not self._sticker_placement_enabled(group_id):
             return False
         base_frequency = self._resolve_sticker_base_frequency(group_id)
         if base_frequency == "off":
             return False
-        # D1=(a): thinker.sticker is no longer a hard veto — it rides into the
-        # decision as a probability demoter (thinker_suggested), so a thinker
-        # that says "no" to a neutral greeting can no longer永久禁配图.
+        # thinker-led (2026-06-10): the thinker owns "should this reply carry a
+        # sticker". thinker_ran distinguishes "thinker had no opinion" (force_reply
+        # / thinker disabled → thinker_decision is None, must NOT veto) from "ran
+        # and said no" (ran + sticker=False → veto the fallback path).
+        thinker_ran = thinker_decision is not None
         thinker_suggested = bool(getattr(thinker_decision, "sticker", False))
         scope = self._humanization_scope(
             session_id=session_id,
@@ -1646,6 +1649,7 @@ class LLMClient:
             mood_valence=mood_valence,
             affection_stage=self._current_affection_stage(scope),
             base_frequency=base_frequency,
+            thinker_ran=thinker_ran,
             thinker_suggested=thinker_suggested,
             cooldown_active=False,
             cooldown_ms=int(getattr(self._sticker_placement_config, "cooldown_ms", 45_000) or 45_000),
@@ -1662,13 +1666,14 @@ class LLMClient:
             runtime_state=cast(Any, self._runtime_state),
             scope=scope,
             usage_counts=self._sticker_usage_counts(),
+            rng=rng,
         )
         if not decision.should_send or not decision.candidate_pool:
             _log_msg_out.info(
                 "post_reply_sticker_skip | session={} reason={} prob={:.3f} source={} "
-                "thinker={} energy={:.2f} valence={:+.2f} affection={} freq={} pool={}",
+                "thinker_ran={} thinker={} energy={:.2f} valence={:+.2f} affection={} freq={} pool={}",
                 session_id, decision.reason, decision.send_probability, decision.trigger_source,
-                thinker_suggested, mood_energy, mood_valence, context.affection_stage,
+                thinker_ran, thinker_suggested, mood_energy, mood_valence, context.affection_stage,
                 base_frequency, len(decision.candidate_pool),
             )
             return False
@@ -1687,9 +1692,9 @@ class LLMClient:
         sent = str(result).startswith("已发送")
         _log_msg_out.info(
             "post_reply_sticker_send | session={} sticker={} sent={} prob={:.3f} source={} "
-            "thinker={} energy={:.2f} valence={:+.2f}",
+            "thinker_ran={} thinker={} energy={:.2f} valence={:+.2f}",
             session_id, sticker_id, sent, decision.send_probability, decision.trigger_source,
-            thinker_suggested, mood_energy, mood_valence,
+            thinker_ran, thinker_suggested, mood_energy, mood_valence,
         )
         return sent
 
