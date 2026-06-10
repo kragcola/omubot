@@ -755,5 +755,8 @@ async def think(
         _L.info("thinker_parse_recovered | mode={} action={} thought={!r}", mode, decision.action, decision.thought)
     elif mode == "heuristic":
         _L.info("thinker_parse_heuristic | action={} thought={!r}", decision.action, decision.thought)
-    _L.info("thinker | action={} thought={!r}", decision.action, decision.thought)
+    _L.info(
+        "thinker | action={} sticker={} thought={!r}",
+        decision.action, decision.sticker, decision.thought,
+    )
     return decision

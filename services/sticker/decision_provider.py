@@ -26,7 +26,13 @@ _DEFAULT_MOOD_VALENCE = 0.0
 # which comes from the *relationship*, not mood.
 _BASE_FREQUENCY_MULT = {"rarely": 0.5, "normal": 1.0, "frequently": 1.4, "off": 0.0}
 # D1=(a): thinker sticker:false demotes the post-reply path, it does not veto it.
-_THINKER_FALSE_MULT = 0.6
+# 0.8 (not 0.6) so a normal-energy frequent reply still clears _SEND_THRESHOLD
+# when thinker says "no" — otherwise the demotion is a hard veto in disguise.
+_THINKER_FALSE_MULT = 0.8
+# Send when probability ≥ this. 0.4 (not 0.5) so thinker=false at normal energy
+# (frequent 0.7 × 0.8 × energy_mult ≈ 0.44) sends rather than being silently
+# blocked; thinker=true stays comfortably above it.
+_SEND_THRESHOLD = 0.4
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,9 +91,11 @@ class StickerDecisionProvider:
         if context.affection_stage == "withdraw":
             # Only near-block left, and it comes from the relationship, not mood.
             return _decision(False, pool, strategy, context, source, probability, "affection_withdraw_gate")
-        if source == "thinker" and probability < 0.5:
+        if source == "thinker" and probability < _SEND_THRESHOLD:
             return _decision(False, pool, strategy, context, source, probability, "thinker_hint_only")
-        decision = _decision(probability >= 0.5, pool, strategy, context, source, probability, "single_decision")
+        decision = _decision(
+            probability >= _SEND_THRESHOLD, pool, strategy, context, source, probability, "single_decision"
+        )
         if decision.should_send:
             _write_density_feedback(runtime_state, scope)
         return decision

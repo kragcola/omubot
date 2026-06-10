@@ -12,7 +12,8 @@ from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
 from services.media.sticker_store import StickerStore
 from services.memory.short_term import ShortTermMemory
-from services.persona import PersonaRuntime
+from services.memory.timeline import GroupTimeline
+from services.persona import IdentitySnapshot, PersonaRuntime
 from services.tools.context import ToolContext
 from services.tools.registry import ToolRegistry
 from services.tools.sticker_tools import SendStickerTool
@@ -223,3 +224,60 @@ def test_bias_query_by_valence_appends_upbeat_terms_for_high_valence() -> None:
 
 def test_bias_query_by_valence_neutral_is_unchanged() -> None:
     assert LLMClient._bias_query_by_valence("在吗", 0.0) == "在吗"
+
+
+def _result(text: str) -> dict:
+    return {
+        "text": text,
+        "tool_uses": [],
+        "input_tokens": 120,
+        "output_tokens": 20,
+        "cache_read": 0,
+        "cache_create": 0,
+    }
+
+
+async def test_chat_no_tool_branch_invokes_post_reply_sticker_hook(
+    tmp_path, persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """Regression: the post-reply sticker hook must fire on the normal
+    no-tool terminal branch, not only on tool-exhaustion. Anchoring it solely
+    on tool exhaustion left the F-cluster placement path dead for ordinary
+    replies (the vast majority of turns)."""
+    runtime_state = create_humanization_state_bus()
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"))
+    store.add(_JPEG_DATA, "笑哭", "开心接梗时发")
+    tools = ToolRegistry()
+    tools.register(SendStickerTool(store, runtime_state=runtime_state))
+    client = LLMClient(
+        base_url="http://fake",
+        api_key="sk-fake",
+        model="test-model",
+        prompt_builder=PromptBuilder(persona_runtime=persona_runtime),
+        short_term=ShortTermMemory(),
+        tools=tools,
+        group_timeline=GroupTimeline(),
+        thinker_enabled=False,
+        runtime_state=runtime_state,
+        sticker_placement_config=SimpleNamespace(enabled=True, cooldown_ms=45_000),
+    )
+    try:
+        with patch.object(
+            client, "_send_post_reply_sticker_if_needed", new_callable=AsyncMock
+        ) as hook, patch(
+            "services.llm.client.call_api",
+            new_callable=AsyncMock,
+            side_effect=[_result("早上好呀~")],
+        ):
+            await client.chat(
+                session_id="group_100",
+                group_id="100",
+                user_id="u1",
+                user_content="早",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+
+    hook.assert_awaited_once()
+    assert hook.await_args.kwargs["already_sent"] is False

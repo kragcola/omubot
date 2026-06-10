@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-06-10 表情包配图 · 修复 hook 接线漏分支（真根因）+ 阈值调参 + 观测性
+
+**变更类型**：bug 修复（配图路径从未在正常对话触发），改 [services/llm/client.py](services/llm/client.py) + [services/sticker/decision_provider.py](services/sticker/decision_provider.py) + [services/llm/thinker.py](services/llm/thinker.py) + 测试，已部署 rebuild。
+
+**背景（上线后实测 0 配图）**：二轴改造（上一条目）上线后，灰度观察发现 `send_sticker ok` / `post_reply_sticker_contextual` 全程 **0 次**。逐门排查，**推翻两版错误归因**：① 初版怀疑「低能量收敛」→ 实时心情日志证伪（`energy=0.57 label=放松`，上午无能量惩罚，bot 本就不该话少）；② 二版怀疑「thinker:false ×0.6 卡死 0.5 阈值」→ 数学上 thinker=True 时 0.549 本应能发，不成立。
+
+**真根因（D1 教训：盯报错表象会连甩两次锅）**：`_send_post_reply_sticker_if_needed` 调用点**只挂在 tool-exhausted 分支**（工具轮次跑满，[client.py](services/llm/client.py) line ~5501），**漏挂了 `if not tool_uses` 正常收尾分支**（line ~4847，LLM 一轮回完不调工具就 `return last_seg`）。正常对话 99% 走后者 → 提前 return，配图 hook 从未执行。证据：过去 60 分钟 `tool_exhausted_reply` **0 次** vs 正常 `回复` **9 次**。这条兜底配图路自存在以来在正常对话里就是死代码，与 mood 二轴/thinker/概率全无关。
+
+**内容（三块）**：
+
+1. **接线修复**：在 `if not tool_uses` 收尾分支的 `return` 前补一次 `_send_post_reply_sticker_if_needed`（顺序与 tool-exhausted 分支一致：`_fire_post_reply` → `_maybe_extend` → sticker）。回归测试 `test_chat_no_tool_branch_invokes_post_reply_sticker_hook` 驱动无工具 `chat()` 断言 hook 被调用（修复前必失败）。
+2. **阈值调参**（hook 真能跑后才生效）：`_SEND_THRESHOLD` 0.5→0.4、`_THINKER_FALSE_MULT` 0.6→0.8。让 thinker=false + 常态 energy（frequent 0.7×0.8×energy≈0.44）也能发（降权不否决，符合 D1=a），但低能量（0.36）/stranger/rarely 仍收敛。新增两个边界测试。
+3. **观测性**：thinker 日志补 `sticker=` 字段；配图 hook 加 `post_reply_sticker_skip`（带 reason/prob/source/thinker/energy/valence/affection）与 `post_reply_sticker_send` 两条日志——之前全程静默，排查吃了大亏。
+
+**影响与回滚**：配图兜底路（路径③）现在正常对话会真正触发，是新行为上线，需观察 send_count 与频率。回滚：config 关 `sticker_placement.enabled=false` 秒级熄火；代码 `git revert` 本次 commit（路径①/②独立不受影响）。
+
+**验证（D4）**：① ruff + pyright 0 error；② 全量 `uv run pytest` **2591 passed / 17 skipped / 0 failed**（新增 hook 接线 + thinker:false 常态发 + 低能量 skip 三个回归）；③ 部署后将抓 `post_reply_sticker_send` / `post_reply_sticker_skip` 日志确认真触发（见下方部署条目）。
+
+---
+
 ## 2026-06-10 表情包配图 · 心情二轴改造（硬拦→乘子）
 
 **变更类型**：行为变更（配图判定契约重写），改 [services/sticker/decision_provider.py](services/sticker/decision_provider.py) + [services/llm/client.py](services/llm/client.py) + 3 个测试，未 rebuild（待下次部署随车）。方案见 [docs/tracking/sticker-mood-two-axis-plan-2026-06-09.md](docs/tracking/sticker-mood-two-axis-plan-2026-06-09.md)，决策点 D1=(a)/D2=bot MoodProfile/D3=1.4/D4=地板0.5 已拍板。

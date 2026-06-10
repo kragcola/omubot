@@ -104,9 +104,32 @@ async def test_sticker_decision_thinker_false_demotes_not_vetoes() -> None:
     off = await _decide(thinker_suggested=False, mood_energy=1.0, tool_call_candidates=("s1",))
 
     assert off.send_probability < on.send_probability
-    # tool_call 0.85 × 0.6 = 0.51 ≥ 0.5 → still can send despite thinker:false
-    assert off.send_probability == pytest.approx(0.51, abs=1e-3)
+    # tool_call 0.85 × 0.8 = 0.68 ≥ 0.4 → still sends despite thinker:false
+    assert off.send_probability == pytest.approx(0.68, abs=1e-3)
     assert off.should_send is True
+
+
+async def test_sticker_decision_frequent_thinker_false_normal_energy_still_sends() -> None:
+    # Real-world case: ordinary reply, frequent source, mood energy ~0.57,
+    # thinker says no. Must still send (demote, not veto) — this is the exact
+    # scenario that was silently blocked before the threshold/multiplier tune.
+    decision = await _decide(
+        thinker_suggested=False, mood_energy=0.57, frequent_candidates=("s1",)
+    )
+
+    # frequent 0.7 × normal 1.0 × energy(0.57→0.785) × 0.8 ≈ 0.44 ≥ 0.4
+    assert decision.should_send is True
+    assert decision.send_probability >= 0.4
+
+
+async def test_sticker_decision_frequent_thinker_false_low_energy_skips() -> None:
+    # Tired + thinker says no → converge (skip), the legitimate quiet case.
+    decision = await _decide(
+        thinker_suggested=False, mood_energy=0.3, frequent_candidates=("s1",)
+    )
+
+    assert decision.should_send is False
+    assert decision.send_probability < 0.4
 
 
 async def test_sticker_decision_thinker_source_hint_only_below_threshold() -> None:

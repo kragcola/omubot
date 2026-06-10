@@ -1664,6 +1664,13 @@ class LLMClient:
             usage_counts=self._sticker_usage_counts(),
         )
         if not decision.should_send or not decision.candidate_pool:
+            _log_msg_out.info(
+                "post_reply_sticker_skip | session={} reason={} prob={:.3f} source={} "
+                "thinker={} energy={:.2f} valence={:+.2f} affection={} freq={} pool={}",
+                session_id, decision.reason, decision.send_probability, decision.trigger_source,
+                thinker_suggested, mood_energy, mood_valence, context.affection_stage,
+                base_frequency, len(decision.candidate_pool),
+            )
             return False
         sticker_id = self._select_post_reply_sticker(
             store,
@@ -1677,7 +1684,14 @@ class LLMClient:
             return False
         tool_ctx = ctx or ToolContext(user_id=user_id, group_id=group_id, session_id=session_id)
         result = await tool.execute(tool_ctx, sticker_id=sticker_id)
-        return str(result).startswith("已发送")
+        sent = str(result).startswith("已发送")
+        _log_msg_out.info(
+            "post_reply_sticker_send | session={} sticker={} sent={} prob={:.3f} source={} "
+            "thinker={} energy={:.2f} valence={:+.2f}",
+            session_id, sticker_id, sent, decision.send_probability, decision.trigger_source,
+            thinker_suggested, mood_energy, mood_valence,
+        )
+        return sent
 
     def _select_post_reply_sticker(
         self,
@@ -5176,6 +5190,21 @@ class LLMClient:
                     humanization=humanization,
                     on_segment=on_segment,
                     last_segment_emitted_at=last_segment_emitted_at,
+                )
+                # Post-reply sticker decision also runs on the normal no-tool
+                # terminal branch — not just tool_exhausted. The vast majority
+                # of replies finish here (LLM answers in one turn without
+                # calling tools), so anchoring the hook only on tool exhaustion
+                # left the whole F-cluster placement path effectively dead.
+                await self._send_post_reply_sticker_if_needed(
+                    reply=full_reply,
+                    thinker_decision=thinker_decision,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=reply_turn_id,
+                    ctx=ctx,
+                    already_sent=_sticker_sent,
                 )
                 if slang_ask_user_fallback and not full_reply.strip():
                     return slang_ask_user_fallback
