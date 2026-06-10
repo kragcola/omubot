@@ -103,7 +103,7 @@ async def test_kaomoji_enforce_strict_allows_playful_mood(
         persona_runtime, identity_snapshot,
         strict=True,
         register_label="playful",
-        mood={"label": "playful"},
+        mood={"label": "兴奋", "energy": 0.9, "valence": 0.6},
     )
 
     assert final_reply == "第二轮补图"
@@ -117,7 +117,7 @@ async def test_kaomoji_enforce_strict_allows_high_mood(
         persona_runtime, identity_snapshot,
         strict=True,
         register_label="playful",
-        mood={"label": "high"},
+        mood={"label": "期待", "energy": 0.8, "valence": 0.5},
     )
 
     assert final_reply == "第二轮补图"

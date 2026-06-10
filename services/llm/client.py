@@ -23,6 +23,7 @@ from kernel.config import ResolvedHumanization
 from kernel.types import PromptBlock, ReplyContext, ThinkerContext
 from services.block_trace.types import PromptBlockCandidate
 from services.humanization.contract import (
+    AFFECTION_STAGE_SLOT,
     CLOCK_CURRENT_SLOT,
     LAST_METRICS_SLOT,
     REGISTER_LABEL_SLOT,
@@ -174,7 +175,15 @@ _CONTROL_TOKEN_RE = re.compile(
     r"(?is)\s*(?:\[\s*pass[_\s-]*turn\s*\]|pass[_\s-]*turn|passturn)\s*(?:[:：\-]\s*.*)?\s*"
 )
 _VISIBLE_TOOL_OUTPUT_NAMES = {"send_sticker", "send_group_msg"}
-_PLAYFUL_KAOMOJI_MOODS = frozenset({"playful", "high"})
+
+
+def _coerce_mood_axis(mood: object | None, key: str, default: float, *, lo: float, hi: float) -> float:
+    """Read a numeric MoodProfile axis (energy/valence), clamped to [lo, hi]."""
+    raw = mood.get(key, default) if isinstance(mood, dict) else getattr(mood, key, default)
+    try:
+        return max(lo, min(hi, float(raw)))
+    except (TypeError, ValueError):
+        return default
 _PAUSE_EXTEND_INSTRUCTION = (
     "你刚刚已经发出上一条群聊回复，现在只允许自然追发一小句补充。\n"
     "要求：像人类停顿后追加一句；不要重复上一条；不要解释你在追发；不要开启新话题；"
@@ -1404,6 +1413,36 @@ class LLMClient:
             return False
         return self._humanization_group_allowed(group_id)
 
+    def _resolve_sticker_base_frequency(self, group_id: str | None) -> str:
+        """Resolve the per-group baseline sticker frequency for probability scaling.
+
+        ``GroupStickerMode`` (inherit/off/rarely/normal/frequently) is already
+        web-configurable via admin SPA → ``GroupOverride.sticker_mode``. Here we
+        turn it into the baseline that the two-axis mood modulation rides on:
+        - ``off`` → caller returns False (whole post-reply path off, matches the
+          ``_STICKER_TOOL_NAMES`` blacklist semantics)
+        - ``inherit`` (already collapsed by ``resolve()``) → fall back to normal
+        - otherwise the literal rarely/normal/frequently
+        """
+        profile = self._resolve_group_profile(group_id)
+        mode = str(getattr(profile, "sticker_mode", "normal") or "normal") if profile else "normal"
+        if mode == "off":
+            return "off"
+        if mode in {"rarely", "normal", "frequently"}:
+            return mode
+        return "normal"  # inherit/unknown → neutral baseline
+
+    def _current_affection_stage(self, scope: Scope) -> str:
+        """Read the current affection stage from runtime state (B3 fix).
+
+        Previously the sticker context never carried a real stage (always the
+        ``acquaint`` default), so relationship-aware modulation never fired.
+        """
+        value = self._runtime_state_value(AFFECTION_STAGE_SLOT, scope)
+        raw = value.get("stage") if isinstance(value, dict) else getattr(value, "stage", None)
+        stage = str(raw or "").strip().lower()
+        return stage if stage in {"stranger", "acquaint", "familiar", "close", "withdraw"} else "acquaint"
+
     def _latest_assistant_text(self, *, session_id: str, group_id: str | None, is_group: bool) -> str:
         if is_group and group_id is not None and self._timeline is not None:
             for turn in reversed(list(self._timeline.get_turns(group_id))):
@@ -1572,8 +1611,13 @@ class LLMClient:
     ) -> bool:
         if already_sent or not self._sticker_placement_enabled(group_id):
             return False
-        if not bool(getattr(thinker_decision, "sticker", False)):
+        base_frequency = self._resolve_sticker_base_frequency(group_id)
+        if base_frequency == "off":
             return False
+        # D1=(a): thinker.sticker is no longer a hard veto — it rides into the
+        # decision as a probability demoter (thinker_suggested), so a thinker
+        # that says "no" to a neutral greeting can no longer永久禁配图.
+        thinker_suggested = bool(getattr(thinker_decision, "sticker", False))
         scope = self._humanization_scope(
             session_id=session_id,
             group_id=group_id,
@@ -1586,15 +1630,23 @@ class LLMClient:
         tool = self._tools.get("send_sticker")
         if tool is None:
             return False
+        mood_profile = self._current_humanization_mood(group_id=group_id, session_id=session_id)
+        mood_energy = _coerce_mood_axis(mood_profile, "energy", 0.6, lo=0.0, hi=1.0)
+        mood_valence = _coerce_mood_axis(mood_profile, "valence", 0.0, lo=-1.0, hi=1.0)
         context = StickerDecisionContext(
             register_label=self._humanization_state_label(
                 self._humanization_register(scope),
                 keys=("label", "register", "name"),
             ),
             mood_label=self._humanization_state_label(
-                self._current_humanization_mood(group_id=group_id, session_id=session_id),
+                mood_profile,
                 keys=("label", "mood", "name"),
             ),
+            mood_energy=mood_energy,
+            mood_valence=mood_valence,
+            affection_stage=self._current_affection_stage(scope),
+            base_frequency=base_frequency,
+            thinker_suggested=thinker_suggested,
             cooldown_active=False,
             cooldown_ms=int(getattr(self._sticker_placement_config, "cooldown_ms", 45_000) or 45_000),
             thinker_candidates=tuple(self._recent_sticker_ids(scope)),
@@ -1613,9 +1665,65 @@ class LLMClient:
         )
         if not decision.should_send or not decision.candidate_pool:
             return False
+        sticker_id = self._select_post_reply_sticker(
+            store,
+            candidate_pool=decision.candidate_pool,
+            session_id=session_id,
+            group_id=group_id,
+            scope=scope,
+            mood_valence=mood_valence,
+        )
+        if not sticker_id:
+            return False
         tool_ctx = ctx or ToolContext(user_id=user_id, group_id=group_id, session_id=session_id)
-        result = await tool.execute(tool_ctx, sticker_id=decision.candidate_pool[0])
+        result = await tool.execute(tool_ctx, sticker_id=sticker_id)
         return str(result).startswith("已发送")
+
+    def _select_post_reply_sticker(
+        self,
+        store: StickerStore,
+        *,
+        candidate_pool: tuple[str, ...],
+        session_id: str,
+        group_id: str | None,
+        scope: Scope,
+        mood_valence: float = 0.0,
+    ) -> str | None:
+        """Pick *which* sticker to send once the provider decided to send one.
+
+        Decouples "whether" from "which": ``StickerDecisionProvider`` only
+        decides *whether* to attach a sticker (energy/affection/cooldown gating)
+        over a frequency-fair candidate pool — that pool says nothing about the
+        current topic.  The actual *choice* should fit the conversation, so we
+        run a BM25 intent search across the whole library keyed off the recent
+        user message(s), skipping stickers already used recently in this scope.
+
+        valence (pleasure axis) biases the query toward an emotional class:
+        low valence → 共情/陪伴 (难过照发, but empathetic), high → 开心/欢呼.
+        Falls back to the pool's top entry when there is no query or nothing
+        matches (preserves prior behaviour for empty/contextless turns).
+        """
+        query = self._fallback_query(session_id=session_id, is_group=bool(group_id))
+        if query:
+            query = self._bias_query_by_valence(query, mood_valence)
+            recent = set(self._recent_sticker_ids(scope))
+            for sid in store.search_by_intent(query, top_k=5):
+                if sid and sid not in recent:
+                    _log_msg_out.info(
+                        "post_reply_sticker_contextual | session={} query={!r} sticker={}",
+                        session_id, query, sid,
+                    )
+                    return sid
+        return candidate_pool[0] if candidate_pool else None
+
+    @staticmethod
+    def _bias_query_by_valence(query: str, mood_valence: float) -> str:
+        """Append emotional-intent terms so图-文 eff/valence stays congruent."""
+        if mood_valence <= -0.3:
+            return f"{query} 安慰 共情 陪伴 难过"
+        if mood_valence >= 0.5:
+            return f"{query} 开心 兴奋 欢呼"
+        return query
 
     def _apply_mention_post_processor(self, reply: str, *, group_id: str | None) -> str:
         if (
@@ -3658,11 +3766,14 @@ class LLMClient:
             self._humanization_register(scope),
             keys=("label", "register", "name"),
         )
-        mood_label = self._humanization_state_label(
-            self._current_humanization_mood(group_id=group_id, session_id=session_id),
-            keys=("label", "mood", "name"),
-        )
-        return register_label == "playful" and mood_label in _PLAYFUL_KAOMOJI_MOODS
+        # D1 same-pattern fix (2026-06-10): the old `mood_label in
+        # _PLAYFUL_KAOMOJI_MOODS` check was dead — production mood labels are
+        # Chinese (兴奋/期待…), never "playful"/"high", so the strict branch
+        # always returned False. Use the numeric playful test instead.
+        mood_profile = self._current_humanization_mood(group_id=group_id, session_id=session_id)
+        mood_energy = _coerce_mood_axis(mood_profile, "energy", 0.6, lo=0.0, hi=1.0)
+        mood_valence = _coerce_mood_axis(mood_profile, "valence", 0.0, lo=-1.0, hi=1.0)
+        return register_label == "playful" and mood_energy >= 0.7 and mood_valence >= 0.4
 
     def _score_humanization_reply(
         self,

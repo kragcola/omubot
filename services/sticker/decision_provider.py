@@ -13,19 +13,31 @@ from services.system_module import RuntimeStateBus, Scope
 
 StickerTrigger = Literal["none", "tool_call", "kaomoji", "frequent", "thinker"]
 StickerRerankStrategy = Literal["none", "emotion", "intent", "persona"]
-_COLD_MOODS = {"cold", "tired"}
-_PLAYFUL_MOODS = {"playful", "high"}
 _MAX_CANDIDATES = 10
 _DEFAULT_COOLDOWN_MS = 45_000
 _MOOD_TTL_S = 300
 _FEEDBACK_STICKER_DENSITY_CAP = 0.3
+_DEFAULT_MOOD_ENERGY = 0.6
+_DEFAULT_MOOD_VALENCE = 0.0
+
+# Mood two-axis (2026-06-10): valence picks *which class* of sticker (handled in
+# client._select_post_reply_sticker), energy scales *probability* (here). Neither
+# axis hard-blocks — "难过/累 ≠ 不发". The only near-block is affection=withdraw,
+# which comes from the *relationship*, not mood.
+_BASE_FREQUENCY_MULT = {"rarely": 0.5, "normal": 1.0, "frequently": 1.4, "off": 0.0}
+# D1=(a): thinker sticker:false demotes the post-reply path, it does not veto it.
+_THINKER_FALSE_MULT = 0.6
 
 
 @dataclass(frozen=True, slots=True)
 class StickerDecisionContext:
     register_label: str = "neutral"
-    mood_label: str = "neutral"
+    mood_label: str = "neutral"  # retained for observability/logging only
+    mood_energy: float = _DEFAULT_MOOD_ENERGY  # [0,1] satiety axis → probability scale
+    mood_valence: float = _DEFAULT_MOOD_VALENCE  # [-1,1] pleasure axis → class only
     affection_stage: str = "acquaint"
+    base_frequency: str = "normal"  # web-configurable baseline: rarely/normal/frequently/off
+    thinker_suggested: bool = True  # thinker.sticker decision; False demotes (×0.6), never vetoes
     cooldown_active: bool = False
     cooldown_ms: int = _DEFAULT_COOLDOWN_MS
     frequent_candidates: Sequence[str] = field(default_factory=tuple)
@@ -70,9 +82,10 @@ class StickerDecisionProvider:
             return _decision(False, pool, strategy, context, source, probability, "cooldown_active")
         if not pool:
             return _decision(False, pool, "none", context, "none", 0.0, "no_candidates")
-        if _blocked_by_mood(context):
-            return _decision(False, pool, strategy, context, source, probability, "mood_or_affection_gate")
-        if source == "thinker" and probability < 0.7:
+        if context.affection_stage == "withdraw":
+            # Only near-block left, and it comes from the relationship, not mood.
+            return _decision(False, pool, strategy, context, source, probability, "affection_withdraw_gate")
+        if source == "thinker" and probability < 0.5:
             return _decision(False, pool, strategy, context, source, probability, "thinker_hint_only")
         decision = _decision(probability >= 0.5, pool, strategy, context, source, probability, "single_decision")
         if decision.should_send:
@@ -112,6 +125,19 @@ def _trigger_source(context: StickerDecisionContext) -> StickerTrigger:
     return "none"
 
 
+def _mood_energy_multiplier(energy: float) -> float:
+    """Low energy → 话少 → fewer stickers, but never zero ("累 ≠ 不发").
+
+    energy 1.0 → ×1.0; 0.5 → ×0.75; 0.0 → ×0.5. Linear, floor 0.5.
+    """
+    return 0.5 + 0.5 * max(0.0, min(1.0, energy))
+
+
+def _is_playful(context: StickerDecisionContext) -> bool:
+    """Numeric replacement for the old (Chinese-mismatched) _PLAYFUL_MOODS set."""
+    return context.mood_energy >= 0.7 and context.mood_valence >= 0.4
+
+
 def _send_probability(context: StickerDecisionContext, source: StickerTrigger, has_pool: bool) -> float:
     if not has_pool:
         return 0.0
@@ -122,25 +148,25 @@ def _send_probability(context: StickerDecisionContext, source: StickerTrigger, h
         "thinker": 0.45,
         "none": 0.0,
     }[source]
-    mood = context.mood_label
+    # web-configurable baseline frequency (rarely/normal/frequently/off)
+    base *= _BASE_FREQUENCY_MULT.get(context.base_frequency, 1.0)
+    # energy axis: tired → scale down (multiplier, never to zero)
+    base *= _mood_energy_multiplier(context.mood_energy)
+    # thinker:false demotes the post-reply path rather than vetoing it (D1=a)
+    if not context.thinker_suggested:
+        base *= _THINKER_FALSE_MULT
+    # affection axis: intimacy amplifies, strangers contract, withdraw near-mutes
     affection = context.affection_stage
-    if mood in _PLAYFUL_MOODS:
-        base = max(base, 0.7)
-    if mood in _COLD_MOODS:
-        base = min(base, 0.1)
     if affection == "close":
         base = min(0.95, base + 0.1)
     elif affection == "stranger":
         base = max(0.0, base - 0.15)
     elif affection == "withdraw":
         base = min(base, 0.05)
-    if source == "kaomoji" and context.register_label != "playful" and mood not in _PLAYFUL_MOODS:
+    # kaomoji outside a playful register/mood stays suppressed
+    if source == "kaomoji" and context.register_label != "playful" and not _is_playful(context):
         base = min(base, 0.2)
-    return base
-
-
-def _blocked_by_mood(context: StickerDecisionContext) -> bool:
-    return context.mood_label in _COLD_MOODS or context.affection_stage == "withdraw"
+    return max(0.0, min(1.0, base))
 
 
 def _rerank_strategy(
@@ -152,7 +178,8 @@ def _rerank_strategy(
         return "none"
     if context.affection_stage == "close":
         return "persona"
-    if context.mood_label in _PLAYFUL_MOODS or context.mood_label in _COLD_MOODS:
+    # emotion-driven rerank when the mood is strongly polarised on either axis
+    if _is_playful(context) or context.mood_valence <= -0.3:
         return "emotion"
     if source in {"tool_call", "kaomoji"}:
         return "intent"

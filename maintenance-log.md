@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-06-10 表情包配图 · 心情二轴改造（硬拦→乘子）
+
+**变更类型**：行为变更（配图判定契约重写），改 [services/sticker/decision_provider.py](services/sticker/decision_provider.py) + [services/llm/client.py](services/llm/client.py) + 3 个测试，未 rebuild（待下次部署随车）。方案见 [docs/tracking/sticker-mood-two-axis-plan-2026-06-09.md](docs/tracking/sticker-mood-two-axis-plan-2026-06-09.md)，决策点 D1=(a)/D2=bot MoodProfile/D3=1.4/D4=地板0.5 已拍板。
+
+**背景**：原配图判定把心情当**硬开关**——`_blocked_by_mood` 用英文集合 `_COLD_MOODS={"cold","tired"}` / `_PLAYFUL_MOODS` 匹配生产传入的**中文** label（困倦/兴奋…），永不相等 → 整段 mood 逻辑是死代码；且「难过/累一刀切禁发」违反二轴心理学（难过应换效价照发、累应降量非归零）。`affection_stage` 也从未真实传入（恒为默认 acquaint，B3）。
+
+**内容**：
+
+- **契约**：`StickerDecisionContext` 删 `mood_label` 主导，新增数值轴 `mood_energy[0,1]` / `mood_valence[-1,1]` + `base_frequency`（web 可配基线）+ `thinker_suggested`（thinker 提示）。`mood_label` 仅留日志。
+- **decision_provider**：删 `_blocked_by_mood`/`_COLD_MOODS`/`_PLAYFUL_MOODS`；`_mood_energy_multiplier`（energy 低→概率乘 0.5~1.0，**永不为 0**）；`_is_playful` 数值化（energy≥0.7 & valence≥0.4）；`_BASE_FREQUENCY_MULT`（rarely0.5/normal1.0/frequently1.4/off0.0）；thinker:false 改 ×0.6 降权而非一票否决（D1=a）；唯一近似「禁」是 affection=withdraw（来自关系非心情）。
+- **client.py**：① 删 thinker.sticker 硬 return False 闸（原始病根），改喂 `thinker_suggested`；② 构造 context 读 MoodProfile 真实 energy/valence（新 `_coerce_mood_axis`）；③ `_current_affection_stage` 从 `AFFECTION_STAGE_SLOT` 读真实 stage（修 B3）；④ `_resolve_sticker_base_frequency` 把 `GroupStickerMode` 接进概率（off→整条熄火）；⑤ `_select_post_reply_sticker` 加 `_bias_query_by_valence`：valence≤-0.3 注入「安慰 共情 陪伴」、≥0.5 注入「开心 兴奋 欢呼」，难过照发但发共情类（图-文效价一致）。
+- **D1 同模式扫描**：grep 出 [client.py:_should_force_kaomoji_sticker_round](services/llm/client.py) 同源 bug（`mood_label in _PLAYFUL_KAOMOJI_MOODS` 同样对不上中文、strict 分支恒 False），一并改数值判定并删除死常量 `_PLAYFUL_KAOMOJI_MOODS`。
+
+**影响与回滚**：
+
+- 配图兜底路（路径③）行为整体改变。**F1 已满足**：`config/config.json` 的 `sticker_placement.enabled` 已为 `true`（gitignored 运行时配置），代码部署即生效。
+- 回滚：config 关 `sticker_placement.enabled=false` 即整条兜底路熄火（秒级）；代码层 `git checkout` 两个源文件即可，路径①（LLM 主动 send_sticker）/②（kaomoji-enforce）逻辑独立不受影响。
+
+**验证（D4）**：① `uv run ruff check` + `uv run pyright`（0 error）；② 全量 `uv run pytest` **2588 passed / 17 skipped / 0 failed**；③ 新增/重写回归覆盖 plan §6 全清单（energy 单调不归零、valence 低仍发且 emotion rerank、base_frequency 单调 + off 归零、thinker:false 降权可发、affection 单调 + withdraw 拦、kaomoji 数值 playful 门、mood_label 不再参与判定、valence query 偏置三态）；④ 修正 2 个断言旧 string-label 行为的 kaomoji-enforce 测试为数值契约。
+
+---
+
 ## 2026-06-10 headroom 考察 + Claude Code 省 token 配置 + 工具调用原子 bash 规则
 
 **变更类型**：开发环境调优 + 纪律规则，未动 bot 代码/生产路径。改了用户级 Claude settings、repo 纪律文档（CLAUDE.md / AGENTS.md）、新增两份 tracking 文档，已提交 `5970824` + `74b0bc6`。
