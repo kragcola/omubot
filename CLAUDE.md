@@ -75,6 +75,11 @@ Fix any errors discovered during testing, even if they were pre-existing and not
 
 - **只读检查运行中服务锁着的 SQLite**：服务在跑时 DB 被锁，直接 `sqlite3` 可能阻塞或抢锁（D5 同源）。只读检查用 `sqlite3 'file:storage/<db>.db?mode=ro&immutable=1' '<query>'`，先 `.schema` / `PRAGMA table_info` 再 SELECT，不要在跑服务时写。
 - **macOS 沙盒下进程探测**：`pgrep` / 部分 `ps` 会报 `sysmond service not found` 或权限错误。查进程/端口改用 `docker compose ps`、容器日志、pidfile，或 `lsof -nP -iTCP:<port>`。
+- **NapCat OneBot HTTP API（本地调试，已常开）**：本机 NapCat 配了无鉴权 HTTP server `localhost:29300`（`napcat/config/onebot11_384801062.json` 的 `network.httpServers`，gitignored）。调试发消息/查状态直接打它，**不用动 bot 进程、不用重启 NapCat**（运行态已开，重启反而有掉登录风险见 Docker 条）。仅本机可达、无 token、零 API 花费——**仅限本机开发环境，生产/公网严禁这么配**。
+  - 查登录态：`curl -sX POST http://localhost:29300/get_login_info -d '{}'`
+  - 发图到测试群（**测试群=984198159**，别发 963737802 那个静默观察群）：先 `B64=$(docker compose exec -T bot python3 -c "import base64;print(base64.b64encode(open('/app/storage/stickers/<id>.jpg','rb').read()).decode())")`，再 `curl -sX POST http://localhost:29300/send_group_msg -H 'Content-Type: application/json' -d "{\"group_id\":984198159,\"message\":[{\"type\":\"image\",\"data\":{\"file\":\"base64://${B64}\"}}]}"`（base64:// 与 bot 发图路径一致；compose service 名是 `bot`，container 名是 `qq-bot`）。
+  - 撤回：`curl -sX POST http://localhost:29300/delete_msg -d '{"message_id":<id>}'`（超过 QQ 撤回时限会 timeout，best-effort）。
+  - 排查富媒体发送失败别再重启/重配 NapCat（见 Docker 条 D6）——直接用此 API 复现即可。
 
 ### 工具调用：有依赖的写操作合并原子执行 + 自验证
 
