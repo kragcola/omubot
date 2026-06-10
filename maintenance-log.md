@@ -4,6 +4,35 @@
 
 ---
 
+## 2026-06-10 Arbiter B（并行打断/合并）超时分层倒置 · 自上线从未成功一次
+
+**变更类型**：bug 修复 + 配置调参，改 [services/scheduler.py](services/scheduler.py)（代码）+ config/config.json `arbiter.timeout_ms`（运行态配置，gitignored）。
+
+**问题（用户追问"连续回复本该并行短文本 LLM 来回，为什么没有"引出）**：排查"@bot 真笨→只回一张图、隔一条'不对'又触发整段长文"时，发现连续消息退化成"一条消息一轮串行回复"，本该在主 LLM 生成途中并行打断/合并的 **Arbiter B 机制全程缺席**。日志实证：`arbiter_b_abort`（成功打断/改写）**历史总数 0**，`arbiter_b_timeout` 每条新消息必现，连续 3 次即 `arbiter_b_circuit_open` 熔断 30s。usage db 里 `call_type='arbiter'` 记录数 **0**——LLM 调用从没活到返回。
+
+**真因（超时三层全错位，实测确诊）**：
+- 实测 deepseek-v4-flash arbiter payload 延迟：min 1248 / **p50 1452 / p90 1946** / max 1946 ms（容器内 8 次采样）。
+- 内层 [arbiter.py:212](services/llm/arbiter.py#L212) `asyncio.timeout(timeout_ms/1000)`，timeout_ms=**1500**（config.json）——压不住 p90。
+- 外层 [scheduler.py](services/scheduler.py) `_arbiter_b_monitor` 的 `wait_for(judge_interruption, timeout=_GATE_TIMEOUT_S)`，`_GATE_TIMEOUT_S=`**0.8**——比内层还小，**每次必先超时**，把还在跑的内层请求直接取消（所以连 `arbiter fallback` 都没打出来：请求没活到报错）。
+- 排序倒置：`外层 0.8 < 内层 1.5 < 实际 p50 1.45`。外层永远第一个超时 → 3 次 → 熔断。Arbiter B 从未等到一次裁决。
+
+**修复**：
+1. **拆分常量**：原 `_GATE_TIMEOUT_S` 被两处复用且语义不同——① monitor 包裹 judge 调用、② gate.check 在 segment 间等裁决。拆成 `_MONITOR_JUDGE_TIMEOUT_S=3.0`（包裹 judge，须 ≥ 内层）与 `_GATE_TIMEOUT_S=0.8`（per-segment 短暂 stall，等不到就 fail-open 照发）。
+2. **内层 timeout_ms 1500→2500**（config.json，覆盖 p90 1946 + 余量；./config 是 bind mount，改完即生效无需 rebuild）。
+3. **修熔断误触发**：gate.check 的 0.8s 超时原本也累加 `_consecutive_timeouts` 并能独立开熔断。但 judge 真实要 ~1.5-2s > 0.8s，"本段裁决还没就绪"是常态不是故障——改为 fail-open 且**不计入熔断计数**，熔断只由 monitor 侧真实 judge 超时/报错（`resolve(timed_out=True)`）触发。
+
+**新不变式**：`p90 1.95s < 内层 2.5s ≤ 外层 monitor 3.0s`。已脚本校验成立。
+
+**影响与回滚**：回复热路径。Arbiter B 恢复后，连续 @／突发消息可在主回复生成途中被并行裁决合并或打断，不再退化串行。回滚：scheduler.py `git revert` + config.json timeout_ms 改回 1500。注意 per-segment stall 仍 0.8s，健康回复不会因等裁决卡顿（等不到即发）。
+
+**验证（D4）**：① 容器内实测 deepseek 延迟分布如上；② ruff + pyright 0 error；③ 全量 `uv run pytest` **2597 passed**（test_emission_gate / test_arbiter / test_arbiter_interruption 全绿，常量改值不破坏符号引用）；④ 不变式脚本校验 `p90<inner<=monitor` OK；⑤ 部署后观察 `arbiter_b_abort` 是否首次出现、`arbiter_b_timeout`/`circuit_open` 是否消失（见下方部署条目）。
+
+**同模式扫描（D1）**：`_GATE_TIMEOUT_S` 全仓 2 处用法已分别归位（monitor→新常量、check→保留并去掉熔断累加）；未发现第三处误用同一超时的位点。
+
+**遗留（未在本次修复）**：另两层根因——② force_reply 跳过 thinker（[client.py:4319](services/llm/client.py#L4319) `if self._thinker_enabled and not force_reply`）导致 @／语义门 force_reply 场景无弱回复/necessity 判断；③ kaomoji-only 回复文本被剥空后静默抑制（@bot 只回图不说话）。本次仅修最深的并行层（①），②③ 待定。
+
+---
+
 ## 2026-06-10 表情包决策重做 · thinker 主导 + Bernoulli 概率采样（推翻"每段必回 + thinker 被架空"）
 
 **变更类型**：行为重构，改 [services/sticker/decision_provider.py](services/sticker/decision_provider.py) + [services/llm/client.py](services/llm/client.py) + 4 个测试。

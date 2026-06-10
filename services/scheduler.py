@@ -38,6 +38,20 @@ if TYPE_CHECKING:
 
 _L = logger.bind(channel="scheduler")
 _CHAT_LOCK_LLM_TIMEOUT_S = 120.0
+# Arbiter B (interruption) timeout layering. MUST stay above the inner arbiter
+# LLM timeout (arbiter.timeout_ms, config.json) which itself must cover the
+# deepseek-flash p90. Measured 2026-06-10: deepseek-v4-flash arbiter payload
+# p50≈1.45s / p90≈1.95s. With the old 0.8s the outer monitor wait_for cancelled
+# the live inner call on EVERY message → 3 consecutive timeouts → circuit open →
+# Arbiter B never once succeeded (0 arbiter_b_abort in all history). The inner
+# LLM timeout is now 2500ms (config.json); this outer wrap must be ≥ that so the
+# inner call's own timeout/fallback fires first instead of being cancelled here.
+_MONITOR_JUDGE_TIMEOUT_S: float = 3.0
+# Separate budget: how long a single segment stalls waiting for an in-flight
+# verdict between emissions. Kept short so a healthy reply doesn't visibly lag
+# per segment — if the verdict isn't ready we fail-open and emit. This is NOT the
+# judge call timeout (that's _MONITOR_JUDGE_TIMEOUT_S); the monitor keeps polling
+# in the background and a late abort still lands on a later segment.
 _GATE_TIMEOUT_S: float = 0.8
 _MAX_ABORTS_PER_FIRE: int = 2
 _CB_THRESHOLD: int = 3
@@ -229,12 +243,16 @@ class _EmissionGate:
         try:
             await asyncio.wait_for(self._event.wait(), timeout=_GATE_TIMEOUT_S)
         except TimeoutError:
+            # Verdict not ready for THIS segment within the short stall budget.
+            # Fail-open (emit) — but do NOT count this toward the circuit breaker:
+            # the judge call legitimately takes ~1.5-2s (deepseek-flash p50≈1.45s),
+            # longer than this per-segment stall, so a not-ready verdict is the
+            # normal case, not an arbiter failure. The monitor keeps the call
+            # in-flight and a late abort lands on a later segment. Only genuine
+            # judge-call timeouts/errors (monitor side, resolve(timed_out=True))
+            # trip the breaker.
             self._state = "open"
-            self._consecutive_timeouts += 1
-            if self._consecutive_timeouts >= _CB_THRESHOLD:
-                self._circuit_open_until = _time_mod.monotonic() + _CB_HALF_OPEN_S
-                _L.warning("arbiter_b_circuit_open | will retry after {}s", _CB_HALF_OPEN_S)
-            _L.warning("gate_check_timeout | monitor may have crashed")
+            _L.debug("gate_check_verdict_not_ready | emitting, monitor still polling")
             return True
         return self._state != "abort"
 
@@ -1260,7 +1278,7 @@ class GroupChatScheduler:
                         user_id=user_id,
                         group_id=group_id,
                     ),
-                    timeout=_GATE_TIMEOUT_S,
+                    timeout=_MONITOR_JUDGE_TIMEOUT_S,
                 )
                 gate.resolve(result)
             except TimeoutError:
