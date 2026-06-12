@@ -80,3 +80,40 @@ def test_ascii_token_is_protected_until_whitespace() -> None:
     assert segmenter.push("super_long_token") == []
     assert segmenter.push(" 后面") == ["super_long_token"]
     assert segmenter.finish() == ["后面"]
+
+
+def test_repeated_ender_run_split_across_deltas_stays_whole() -> None:
+    # A run that straddles deltas (≥2 enders buffered) must defer until it stops growing,
+    # never cutting mid-run. Mirrors realistic SSE token granularity.
+    segmenter = StreamingSegmenter(StreamingSegmenterConfig(min_chars=2, soft_chars=8, hard_chars=20))
+    out: list[str] = []
+    for delta in ["好耶", "！！", "！", "太棒了呀"]:
+        out += segmenter.push(delta)
+    out += segmenter.finish()
+
+    assert "好耶！！！" in out
+    assert "！" not in out
+
+
+def test_ellipsis_run_not_split_in_stream() -> None:
+    segmenter = StreamingSegmenter(StreamingSegmenterConfig(min_chars=2, soft_chars=8, hard_chars=20))
+    out: list[str] = []
+    for delta in ["唔", "……", "在呢", "……"]:
+        out += segmenter.push(delta)
+    out += segmenter.finish()
+
+    assert out == ["唔……", "在呢……"]
+    assert not any(seg == "…" for seg in out)
+
+
+def test_proper_noun_with_punctuation_protected_in_stream() -> None:
+    segmenter = StreamingSegmenter(StreamingSegmenterConfig(min_chars=2, soft_chars=8, hard_chars=30))
+    out: list[str] = []
+    for delta in ["我喜欢", "MyGO!!!!!", " 你听过吗？"]:
+        out += segmenter.push(delta)
+    out += segmenter.finish()
+
+    joined = "".join(out)
+    assert "MyGO!!!!!" in joined
+    assert not any(seg == "!" for seg in out)
+

@@ -4,6 +4,176 @@
 
 ---
 
+## 2026-06-11 分句器拟人化：专名 / 省略号 / 叠标点保护 + LLM 换行硬边界（代码完成，待部署）
+
+**变更类型**：缺陷修复 + 拟人增强，5 文件（2 分句器 + persona source + 2 测试）。承接烤群日志：`……` 被切成 `…`/`…`，乐队专名 `BanG Dream! MyGO!!!!!` 被叹号切碎成 `BanG Dream!`/`MyGO!`/`!`/`!` 一串孤立气泡（[migration](docs/migrations/segmentation-proper-noun-punct-protection-2026-06-11.md)）。
+
+**调研**：三路并行（社会语言学 / 成熟项目 / 前沿论文）收敛同一结论——连续标点是一个韵律情感原子不可内部切；专名靠词典保护而非模型；正确范式是 pySBD/HarvestText 的 protected-span（mask→split→restore）。
+
+**根因**：[services/llm/segmentation.py](services/llm/segmentation.py) 默认路径 `natural_split`（生产 100% 走，`natural_split_enabled=true`）逐字符遇分隔符就切，`_protected_spans` 不保护连续标点 run / 省略号 / 含内部标点的专名；`_natural_merge_segments` 还随机吞掉 LLM 换行（LLM 辅助分段从未生效）。流式分句器同模式缺陷（默认 OFF）。
+
+**修了什么**（规则为主 + LLM 辅助，零新依赖）：
+1. **protected-span 扩展**：连续叠标点 run（`！！！`/`。。。`）、省略号（`……`/`...`）整体保护——run 内部不切、run 后可切，整体保留不折叠（保情感强度）。
+2. **专名保护**：ASCII 词尾标点黏附（`MyGO!`/`cool!!!` 视为词内）+ 小词典 `_PROPER_NOUN_PHRASES`（从 charpack `context_label` 抽取带内部标点的专名：`BanG Dream!`/`MyGO!!!!!`/`Hello, Happy World!`/`Wonderlands×Showtime`/`MORE MORE JUMP!`/`25時、ナイトコードで。`）。
+3. **LLM 换行硬边界**：`natural_split` 改为先 split("\n") 逐行处理，合并不跨行——LLM 用换行划的气泡不再被随机合并吞掉。
+4. **合并保留 ASCII 专名间空格**：`BanG Dream!`+`MyGO!!!!!` 合并不再粘成 `BanG Dream!MyGO!!!!!`。
+5. **D1 同模式**：镜像修复 streaming_segmenter（+ run 跨 delta 推迟切分），默认 OFF 但同补。
+6. **persona 引导**：source.md 加「换行分气泡 + 专名/省略号/叠标点整体不拆」规则。
+
+**影响范围**：所有 LLM 可见回复的分句；无 schema / 无依赖 / 无 NapCat 变更。**验证**：`uv run pytest` 全量 2642 passed / 17 skipped / 0 failed；ruff + pyright 改动文件全绿。**部署**：persona 改动需 import + hot-reload；代码改动需 rebuild bot。**回滚**：`git revert` 本次 commit。
+
+---
+
+## 2026-06-11 Arbiter-B 打断合并接通 + 确定性取消重开（代码完成，待部署）
+
+**变更类型**：缺陷修复，3 文件。承接烤群实测——同一用户连发三条 `emu`(@-only)，bot 回了**两条**带 `[CQ:reply]` 的独立回复，既没合并也没被打断（[migration](docs/migrations/arbiter-b-cancel-remerge-2026-06-11.md)）。用户判定：方向不是加延迟/限制，而是「打断合并按理论没实现」。
+
+**根因(三个洞)**：
+1. **通道断裂(根因)**：Arbiter-B monitor 读 `_pending_messages_since(baseline)`，但 emu#2/#3 在「Arbiter-A 决定开火 → `_do_chat` 取 baseline 快照」窗口内已落入 timeline pending、排在 baseline **之下** → monitor 永远空、6 小时 0 次 arm。它们只活在 `slot.pending_during_generation`，只驱动 finally 的第二次 fire，与打断器是两条不通的水管。
+2. **语义**：`_INTERRUPTION_SYSTEM_PROMPT`「纯补充不矛盾→continue」，裸 emu 连发被判 continue。
+3. **已发段不可逆**：gate 首段免检 + 已发段不撤回，首段一旦出库 abort 上限就是「首段+重开」两条。本次首段 23:41:02 才发、emu#2/#3 在 23:40:58–59 到达 → 有 4 秒空窗、首段未发、合一物理可行。
+
+**修了什么**(均不加延迟、纯事件驱动)：
+1. **确定性取消重开**：`notify` is_at 分支——首段未发 + 同 block_id 或同 user_id 的 @ 到达 → `running_task.cancel()`，复用既有 finally re-merge(`pending_during_generation`→`burst_pending`→Arbiter-A 统一开一条)。新增 `_GroupSlot.firing_block_id/firing_user_id/first_segment_sent`。
+2. **Arbiter-B monitor 改读 slot**：输入从 timeline baseline-since 改为直读 `slot.pending_during_generation`，消除 race 黑洞(覆盖首段已发的 post-emission 场景，砍未发段)。
+3. **中断 prompt 补语义**：增「连续追问/重复呼叫(同一人多次@或反复叫名)→ abort_unsent(折进统一回复)」。
+
+**时间轴覆盖**：首段未发→改动1 真合并;首段已发→改动2+3 诚实 abort-unsent(无法合一,只砍未发段)。
+
+**D 条款**：D1 扫了全部 `pending_during_generation.append`(6 个 live-task 分支,仅 is_at 加取消,其余 5 个不同 turn 类型刻意不扩散)、全部 `running_task.cancel()`(mute/clear_pending/close 在 cancel 前已清 pending,不会被 finally 复活);D2 `test_same_user_burst_*` + `test_first_segment_sent_blocks_cancel_remerge` 护栏 + `test_block_fire_queue_cleared_on_cancel`;D3 迁移清单已出;D4 全量 `pytest 2632 passed/17 skipped` + ruff + pyright(scheduler/arbiter) clean。
+
+**待办**：rebuild bot 部署(改的全是 .py)。**未部署**——本条记录代码完成态。
+
+---
+
+## 2026-06-11 多寻址路由 × 弱回复降级（已部署）
+
+**变更类型**：缺陷修复 + 行为新增，跨 8 模块。承接「我和 bot 说宝宝并@的消息没得到回应」调查（[research](docs/tracking/multi-addressee-topic-routing-research-2026-06-11.md) / [plan](docs/tracking/multi-addressee-topic-routing-impl-plan-2026-06-11.md) / [migration](docs/migrations/multi-addressee-topic-routing-2026-06-11.md)）。用户定级「未来级、非补丁」。
+
+**修了什么**：
+1. **缺陷②（标量覆写）**：arbiter burst 内多人@时 `slot.trigger` 被最后到达的@覆盖 → 回复 `[CQ:reply]` 指向错人（实测 20:06 丛非凡「姆。」顶掉真@用户）。改为 `_build_block_triggers` 按话题块分组：同块多@合并一次回复、异块各自 fire 锚到自己块的@消息。新增 `slot.block_fire_queue` 异块串行队列（无间隔，复用回合接力）。
+2. **缺陷①（宝宝沉默）**：role=ratified 续话遇概率 miss → SILENCE。改为降级 companion 弱回复（`_LIGHT_COOLDOWN_S` 限频；纯 overhearer 仍 SILENCE）。补 design §2.5-2d。
+3. **greeting 弱回复**：早安/早上好/在吗 等招呼，mirror closing，短路出对称 token（`_gen_light_token(kind="greeting")`）。router gated 同 closing（recent assistant + last_to_user，不答群里路过的招呼）。
+4. **多职 addressee_hint**：同块多@携带 `block_addressees`，prompt 列名 cue「多人同时叫你，一并回应」（仅强信号成员，词法兜底不进）。
+5. **STICKER_ONLY 防 SILENCE 地板**：companion 弱回复主 LLM 空文本 → 复用 `_fallback_ack`（表情优先→文字兜底），`force_reply or companion_hint is not None`。
+6. **thinker prompt 解封 companion**：旧文案「本期 companion 仍走普通 reply」压制了 companion，现解封并加 greeting/companion 动态提示。
+
+**数据结构变更**：`PendingMessage` +4 字段（target_message_id/block_id/evidence/obligation_level，全默认值向后兼容）；arbiter LLM payload 不再 `asdict` 全序列化（路由字段不进 prompt）；`_GroupSlot` +`block_fire_queue`。无 DB 迁移。
+
+**D 条款**：D1 扫了全部 `slot.trigger` 消费点（含 router flush——经核实@全绕过 coalescer，「flush 丢 trigger」为非问题，未加防御）；D2 `block_fire_queue` cancel 清空回归测试；D3 迁移清单已出；D4 全量 `pytest 2628 passed, 17 skipped` + ruff + pyright(8 文件) clean。
+
+**范围决策**：plan 块 1c（timeline get_pending 按 block 过滤）**未实施**——`burst_pending` 已是块路由唯一真相源（每条带 block_id），per-block fire 靠 `[CQ:reply]`+focus 指令定向，并行 timeline 过滤冗余。
+
+**待办**：rebuild bot 部署（改的全是 .py）；部署后线上验证多@/同块/异块/宝宝/早安各路由（测试群 984198159）。**未部署**——本条记录代码完成态。
+
+---
+
+## 2026-06-11 表情包修复线上初步回看（待回收：低 valence 路径未验证）
+
+部署后约 12 分钟、单个活跃会话（`group_993065015`，约 10 个回复周期）的线上日志回看。三处修复均确认生效，**但样本小且全程高 valence（+0.82），有一条路径未被真实流量验证到，标记待回收**。
+
+**已验证生效**：
+1. **选图修复**：两条 `post_reply_sticker_contextual` 的 query 均为 bot 自己回复文本 + valence 词（如 `'姆姆在此~\n怎么啦 \n有事找我玩？ 开心 兴奋 欢呼'`），无调度器样板文渗入。污染源 `_fallback_query` 路径已切除。
+2. **多样性**：3 次发送 = 3 张不同表情（`stk_7fa264cb` / `stk_1400e874` / `stk_b705084d`），无「总发某几个」。
+3. **放宽生效**：thinker 由改前 0/3 → **2 True / 3 False**；其中一次 True（“陪他闹一下”）被主 LLM 以 `send_sticker` tool_call 执行。主 LLM 另有 1 次主动 send_sticker（≥4 达标线生效）。
+4. **闸门正确**：`thinker_veto` 触发 2 次（thinker_ran=True & thinker=False & source=frequent → prob 归零），`sampled_skip` 5 次为 prob 0.344/0.602 伯努利采样的预期结果（非 bug）。无启动报错，NapCat 未动。
+
+**待回收（需更多样化会话才能验证）**：
+- 本窗口全程 valence=+0.82、energy=0.72，**难过/低落 → 共情/自嘲类**这条 mood 二轴路径、以及低能量缩放，均未被真实流量触发。
+- 待出现一段悲伤/严肃对话后回看：① 低 valence 是否正确换共情类而非不发；② 低 energy 是否按比例缩放发图概率；③ 多样性在更长窗口是否仍无重复堆积。
+
+---
+
+## 2026-06-11 表情包发图意愿放宽 · thinker 门槛 + guard 评分制达标线
+
+**变更类型**：行为调参，改 [services/llm/thinker.py](services/llm/thinker.py)（thinker prompt）、[config/persona/fengxiaomeng-v2/source.md](config/persona/fengxiaomeng-v2/source.md)（→ import → freeze）。承接「发图频率过低」调查（实测 thinker 3/3 判 sticker=False、主 LLM 主动 send_sticker 仅 1 次）。**不动乘法阻尼**（energy/affection/base_frequency 连乘按用户要求保留）。
+
+**两条发图路径的交互（读码确认，设计极端情况的前提）**：
+- thinker 只「建议」，真正发图只有两出口：① 主 LLM 调 `send_sticker`（tool_call），或 ② 主 LLM 没调时 post-reply 兜底（Bernoulli）。
+- `_sticker_sent` 是互斥锁（[client.py:5337](services/llm/client.py#L5337)）：主 LLM 一旦调 send_sticker → post-reply hook 收 `already_sent=True` 立即 return（[client.py:1643](services/llm/client.py#L1643)）→ **双发物理不可能**。
+- 四象限：①都发→发1张(主LLM选)；②thinker发/主LLM不发→兜底概率补；③thinker否决/主LLM发→主LLM赢(tool_call 不可被 veto，合理)；④都不发→thinker_veto prob=0 不发。
+
+**注入路径纠错**：生产 `humanization.context_providers=True && thinker_provider=True` → 走 [ThinkerProvider](services/block_trace/thinker_provider.py) PromptBlock（按本轮 `thinker_turn_id` 读 `THINKER_LAST_DECISION_SLOT`，写→读时序正确，注入有效）。[client.py:4773](services/llm/client.py#L4773) 的 inline `sticker: yes/no` 分支是 `not thinker_provider_active` 死代码，未生效。
+
+**改动**：
+1. thinker prompt（thinker.py:121）：sticker=true 从三重 AND（情绪 **且** 轻松日常 **且** 没发过）放宽为「情绪/欢呼/撒娇/吐槽/打趣/接梗/共情 任一即可」；唯一硬否决保留「刚发过」。mood 规则去掉「低能量/低落→sticker false」，改为「换情绪类别不是不发」（呼应 [project_sticker_mood_two_axis] 难过≠不发）。
+2. 主 LLM guard 评分制补**数字达标线**：原 guard.yaml 评分制「达标→send_sticker」从无及格线（且 `origin_anchor` 指向已退役 instruction.md、脱离 source.md）。补「总分 ≥4 分 → send_sticker」写入 source.md `# 8.4 行为指令`，走 importer → `.draft` → `--pending-freeze`，落入 runtime 实际加载的 `_pending_freeze/`。
+
+**D4 证据**：
+- 编译验证：`load_pending_freeze` → `core.guard` block 含「总分 ≥4 分就调用 send_sticker」（实测 `True`）。
+- 容器同步：`config/persona` 是 bind mount，freeze 结果已在 `/app/config/persona/.../　_pending_freeze/guard.yaml`（容器内 grep 命中）；**但 prompt 装配在内存，需 hot-reload 才重新装配**。thinker.py 是 .py，容器跑旧版需 **rebuild bot**。
+- 回归：thinker/persona/guard 相关 222 passed（无测试硬断言旧 thinker 措辞）；全量 2604 passed / 17 skipped。ruff + pyright clean。
+- **回滚**：thinker.py git revert；guard 改动 = source.md revert 后重跑 import --pending-freeze + hot-reload。
+
+**隐患记录（已审计 + 已修复）**：guard.yaml 评分制此前 `origin_anchor` 指向不存在的 v1 `instruction.md`，即 freeze 产物里有「无源」内容——下次任何人重跑 import 都会**静默丢失**。
+
+**脱源残留审计（2026-06-11 补做）**：逐条比对旧 freeze（instruction.md 来源）vs 当前 source.md，确认本次 import 静默丢失了 2 条无替代的表情包细则，已回写 source.md L110/L111 补回：
+1. 「表情包作为独立图片消息发送，不与文字混在一起；不把表情/动作用括号写进文字、不在文字中评论发送行为」（发送格式约束）。
+2. 「严肃/安慰时不发搞笑表情，贴合氛围——难过时换共情/自嘲类而非不发」。
+- 其余旧条目（颜文字可用、强行 Cheer Up、send_sticker 后禁元描述）source.md 已有或被 L107/L109 覆盖，无净损失。
+- 复跑 import → `--pending-freeze` 后验证：11 条 behavior_instructions **全部 anchor=source.md**；全 freeze 无任何 `instruction.md`/`soul/` 脱源 anchor（grep clean）；编译后 `core.guard` 含两条补回 + 达标线（均 `True`）。隐患来源（脱源 anchor）已根除。
+- **审计工具调用教训**：审计中一条 `for+grep -c` 循环“失败”实为 stdout 未回传（命令在沙盒已执行），逐段最小探针复跑全部正常——输出缺失先做探针隔离，勿盲目改写命令重试。
+
+**部署动作（两步，缺一不可）**：① `dot_clean . && docker compose up bot -d --build`（让 thinker.py + client.py 选图修复生效）；② rebuild 后确认 persona 已随容器加载新 freeze（rebuild 会重启进程 → `_on_connect` 重新装配 `_pending_freeze`，等价 hot-reload）。
+
+---
+
+## 2026-06-11 表情包选图误配修复 · post-reply 选图改用 bot 回复当 query
+
+**变更类型**：bug 修复，改 [services/llm/client.py](services/llm/client.py)（`_select_post_reply_sticker`）、[tests/test_sticker_placement.py](tests/test_sticker_placement.py)。承接「bot 发生日图但上下文无生日」调查。
+
+**问题（选图信号源用错）**：
+- 现象：用户只发 `emu。`（纯昵称呼叫），bot 回「叫得整齐~有什么好事」，post-reply 却选了 `stk_7f73de02`（描述「收到生日祝福时表达开心」）。上下文无生日。
+- 排查推翻了三个早期误判：① 242 张 silent-learn 偷学图的 `usage_hint` **全部 242/242 有高质量语义标签**（占位符只在 `description`，但 BM25 对 description 取 IDF≈0 不污染）；② BM25 检索器本身正常——query 带真实情绪词时选图精准（容器实测）；③ 库数据是好的。
+- **真根因**：`_select_post_reply_sticker` 的 query 来自 `_fallback_query`（抓 timeline 最近 user turn），那次抓到的是 **scheduler 触发样板文**「触发原因: 有人叫你 emu…不要把上文别的话题翻出来回答」。这串 filler（"话题/回答/祝"）在 BM25 里把生日图蹭到 21.12 分顶第一，盖过本该命中的开心图。即 garbage-query-in，与库数据/检索器无关。
+
+**修复（信号分层，容器真库验证）**：
+- 选图 query 改为 **bot 回复文本（`_strip_kaomoji_markup` 去 markup）+ valence 情绪词**，不再用 `_fallback_query`（`_fallback_query` 本身保留，line 2961 另有用途不动）。
+- 设计依据（真库 BM25 实测）：这些图 `usage_hint` 是情绪*标签*（"适合表达开心时发送"），所以 ① reply 带情绪词时 reply 主导选对类；② reply 是弱回复无情绪词时（"在呢在呢~"），退到 valence 追加词「开心 兴奋 欢呼」**单独也能选对类**。弱回复照常配图，且选得更准。
+
+**D4 证据**：
+- 修复前（旧污染 query）：生日图 top1 = 21.12 分。
+- 修复后（reply+valence，无样板文）：top1 = 开心兴奋图 20.89 分，**生日图掉到第 7 名**（出 top-5 选择窗口，不再被选）。
+- 回归：新增 `test_post_reply_sticker_weak_reply_uses_valence_class`（弱回复+正 valence 选开心图不选难过图）；改 3 个既有调用点从 `_short_term` 喂 query 改为 `reply=`。`tests/test_sticker_placement.py` 10 passed；sticker+kaomoji 全量 224 passed；全量 2604 passed / 17 skipped（deselect 已知 flake test_cache_alert_cooldown）。ruff + pyright clean。
+- **回滚**：`_select_post_reply_sticker` 单函数改动，git revert 即可；无 config / schema / 数据变更。
+
+**未动（产品取向待定，本次只修选图准确性）**：thinker sticker 门槛过严（3/3 否决）、guard 评分制缺数字达标线、发图频率乘法阻尼——这些是「发不发」调参，与「发哪张」选图正交，留待单独决策。
+
+---
+
+## 2026-06-11 弱回复遗留两层修复 · force_reply 跳过 thinker + kaomoji-only 静默抑制
+
+**变更类型**：bug 修复 + 新增灰度开关，改 [services/llm/client.py](services/llm/client.py)、[kernel/config.py](kernel/config.py)、[plugins/chat/plugin.py](plugins/chat/plugin.py)（代码）。承接 2026-06-10「@bot 真笨→只回一张图、隔一条'不对'触发整段长文」调查里标记的两层"遗留待定"。
+
+**问题 #2（force_reply 跳过 thinker → 弱回复结构性失效）**：
+- [client.py:4319](services/llm/client.py#L4319) 旧门 `if self._thinker_enabled and not force_reply:`。`force_reply` 由 scheduler 对 at_mention / correction / directed_followup / qq_interaction / video_always / force_after_wait / obligation=must 全部置 True（[scheduler.py:109](services/scheduler.py#L109)）。
+- thinker 是 **唯一** 产出 `light_kind`(companion/closing) 与 `reply_necessity` 的地方。所以每个 @ 和每个「不对」类短否定都跳过弱回复分类 → 直接整段主 LLM → 8 段长文。弱回复机制对所有寻址/语义门 force_reply 场景结构性失效。
+
+**#2 修复**：
+1. 新增 `thinker.force_reply_enabled`（默认 **true**，用户拍板）。门改为 `self._thinker_enabled and not nickname_only_call and (not force_reply or self._thinker_force_reply_enabled)`——nickname-only 仍走原 else 快路径不变。
+2. **wait-guard（防静默）**：thinker 在 force_reply 下若返回 `wait`，只有 **plain at_mention 且非 force_after_wait** 放行（让 scheduler 的 addressed-wait deferral [scheduler.py:1507](services/scheduler.py#L1507) 接管，既有设计）；其余 obligated 模式一律 `wait→reply` 覆盖，否则无 deferral 路径会静默丢回合。necessity-gate 无需改（force_reply ⟹ trigger 非 None ⟹ 自动 addressed-exempt）。
+3. 代价：@ 热路径每次多一次 thinker 调用（~1.5s）。回滚：config 置 `thinker.force_reply_enabled=false` 秒生效（bind mount）。
+
+**问题 #3（kaomoji-enforce 吞正文 + 纯颜文字哑火）**：
+- [client.py:5037](services/llm/client.py#L5037) 旧路径把含颜文字的 round-0 文本塞进 history、追加「只调 send_sticker 不要重复文字」user 指令、`continue` 多跑一轮 → round-1 文本被 control-token 剥空 + `has_visible_tool_output=True` → `reply_suppressed_empty`。**所有正文（不止颜文字）被静默吞掉**；纯颜文字寻址回合变成一张没字的图。
+
+**#3 修复**：
+1. 删掉「塞 history + continue」机制。新增 `_strip_kaomoji_markup()`（detector 的逆函数，只剥 `_text_has_kaomoji` 会命中的 span，保留其余正文）。
+2. enforce 触发 → 剥颜文字 → 残余正文照常分段发 → 配图改走既有 `_send_post_reply_sticker_if_needed`（2026-06-10 心情二轴 hook），新增 `force_send` 参数：**仅绕过 Bernoulli 发送门**，保留硬门（placement 关 / base_frequency=off / 无 store），空池则回退全库。
+3. 纯颜文字（剥完无正文）：直接 force_send 配图、返回 ""（用户选「表情包即回应」，不补口头 token）。注意：**单行单颜文字**（如 `(≧▽≦)`）在更上游被 `_clean_reply` 的 `_STAGE_DIR_SOLO_RE` 剥空，走 `_finalize_visible_reply` → 寻址回合的 `_fallback_ack` 已发上下文图（既有行为）；本修复覆盖的是 **内联/多颜文字** 能活过 clean 的场景。
+
+**D1 同模式扫描**：grep `not force_reply` / `force_reply and` 全仓——无其它 thinker-skip 位点；4884 的 `pass_turn and force_reply` 是同语义的 pass_turn 覆盖（一致非 bug）。grep `不要重复文字` / `forcing sticker round`——旧 kaomoji 强制轮是唯一位点，已删除。
+
+**D4 外部证据**：
+- ruff `services/llm/client.py kernel/config.py plugins/chat/plugin.py tests/*`：All checks passed。
+- pyright `services/llm/client.py`：0 errors。
+- `uv run pytest -q`（serial, pkill 防孤儿）：**2602 passed / 17 skipped**（deselect `test_usage.py::test_cache_alert_cooldown`——该用例 **本机 bot 容器在跑、锁/污染 usage sqlite 致 cooldown 状态跨测试泄漏**，首位运行也 `suppressed, cooldown`，与本次改动无关，未碰 `services/llm/usage*`）。
+- 新增/改测试：`test_thinker_runtime_state.py` +5（force_reply 跑 thinker / flag off 跳过 / at_mention wait honored / correction wait→reply / deferred-refire wait→reply）；`test_kaomoji_enforce.py` 重写 4 个旧「吞正文」断言为「剥颜文字发残余正文」+ 新增纯颜文字返回 "" 用例；`test_client.py` 把 `test_must_emit_skips_thinker_wait_and_emits_reply` 重写为 `test_must_emit_runs_thinker_and_overrides_wait`。
+
+**影响与回滚**：回复热路径（blast radius 大）。代码改动**未 rebuild**，待下次 `docker compose up bot -d --build` 随车生效。回滚：#2 = config `thinker.force_reply_enabled=false`（秒生效）或 `git revert`；#3 = `git revert`（无独立开关，但 `sticker_placement.enabled=false` 可整体熄火配图兜底）。
+
+---
+
 ## 2026-06-10 Arbiter B（并行打断/合并）超时分层倒置 · 自上线从未成功一次
 
 **变更类型**：bug 修复 + 配置调参，改 [services/scheduler.py](services/scheduler.py)（代码）+ config/config.json `arbiter.timeout_ms`（运行态配置，gitignored）。
@@ -191,6 +361,12 @@
 **验证与影响（D4 证据）**：① `uv run ruff check` 全过、`uv run pyright`（4 改动文件）0 errors；② 全量 `uv run pytest` = **2577 passed, 17 skipped**（新增频率闸 6 + 容量淘汰/候选/视图 9 共 15 条回归）；③ 部署后运行态实测：`format_prompt_view` 字符数 **42,796 → 7,725（−82%）**、行数 611→101；配置正确加载（max_count=300/learn_min=3/view_max=100）；bot `384801062 connected`、`Bot 就绪 ✓`、无 error/traceback，频率闸无报错；④ dream 运行态 override `storage/plugins/config/dream.json` 的 `sticker_delete_floor` 已在容器内由 500 改 150（仅容器 named volume 内有此文件，宿主机无）；⑤ NapCat 红线：全程 `2026-05-28T10:56:06 running`，仅 rebuild/recreate `qq-bot`。⑥ 注意：max_count 仅在新 add() 时触发淘汰，存量 616>300 会随后续偷取逐步淘汰至 300，不立即生效。
 
 **观察点**：① 频率闸下偷取速率应从「一晚 609」降到「几十」量级（部署后近窗口无动画表情消息进来，需更长观测窗坐实）；② 库存应随 add 触发的 max_count 淘汰回落到 ~300；③ Dream 24h 轮次应开始按候选清单淘汰 send_count=0 的 silent 表情。回滚：git 回退上述文件 + rebuild bot；dream floor 可在后台插件页或容器内 override 改回；无 DB 迁移，NapCat 不动。
+
+**观察点回收（2026-06-11，部署后约一天，容器内只读查 `stickers.db`）**：三点全部坐实。
+- **① 偷取速率断崖式下降** ✓：`stolen_silent_learn` 按天入库 = 06-09:33 / 06-10:187 / **06-11:27**。06-11 是全天后闸窗口，27/天 vs 改前「一晚 609」≈ **−96%**，频率闸（learn_min=3 群复发门槛）生效。（注：按天统计是「存活行」，受 max_count 淘汰偏向删旧 send_count=0，历史日数偏低估真实速率；06-11 为纯后闸全天窗口，是最干净的读数。）
+- **② 库存回落到上限** ✓：`total=299`（≤ max_count=300）。改前 616 已随 add 触发淘汰收敛到上限附近，容量硬护栏生效。
+- **③ Dream 量化淘汰运转** ✓：库存被钉在 299（紧贴 300 上限不溢出）= eviction 持续在跑；当前 `send_count=0` 仍 248/299、`send_count≥1` 51 张，受保护来源（migrated 51 张 + admin 1 + stolen 6）完好。库长期稳定在上限附近、靠淘汰 silent+send_count=0 候选腾位，符合 B1+B3 设计。
+- 本待回收事件已闭环，无后续动作。
 
 ---
 

@@ -12,6 +12,13 @@ _ASCII_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#\-+]*")
 _SENTENCE_BREAK = set("。！？!?~～…")
 _CLAUSE_BREAK = set("，,；;、")
 _TRAILING = set("」』）】》”’\"')")
+# Repeated enders / ellipsis runs are ONE indivisible prosodic unit — never cut inside
+# `！！！` / `……` / `MyGO!!!!!`. Mirrors services/llm/segmentation.py._PUNCT_RUN_RE.
+_PUNCT_RUN_RE = re.compile(r"([。！？!?~～，、；;])\1+|…+|—{2,}|\.{3,}")
+# Emphatic punctuation glued to an ascii-token tail belongs to the token (`cool!!!`, `MyGO!`).
+_ASCII_TRAILING_PUNCT_RE = re.compile(r"[!！?？~～…]+")
+# Marks that may extend into a longer run across deltas — defer cutting if one ends the buffer.
+_RUNNABLE_BREAK = set("。！？!?~～…")
 _OPEN_TO_CLOSE = {"（": "）", "(": ")", "「": "」", "『": "』", "【": "】", "[": "]", "《": "》"}
 _CLOSE_TO_OPEN = {close: open_ for open_, close in _OPEN_TO_CLOSE.items()}
 _REGISTER_FACTORS = {
@@ -102,6 +109,11 @@ class StreamingSegmenter:
             if pos < min_chars or not _safe_boundary(text, pos, protected):
                 continue
             if ch in _SENTENCE_BREAK:
+                # Defer only when a run (≥2 identical enders) already reaches the buffer end:
+                # `好耶！！` may grow to `好耶！！！！！` next delta, so don't cut yet. A lone trailing
+                # ender flushes immediately (latency contract). finish() flushes regardless.
+                if pos >= len(text) and len(text) >= 2 and text[-1] == text[-2] and text[-1] in _RUNNABLE_BREAK:
+                    return None
                 return pos
             if ch == "\n" and (pos >= target or text[max(0, index - 1):index] in _SENTENCE_BREAK):
                 return pos
@@ -124,9 +136,18 @@ def _label_factor(value: Any | None, mapping: dict[str, float]) -> float:
 
 
 def _protected_spans(text: str) -> list[tuple[int, int]]:
+    from services.llm.segmentation import _proper_noun_re  # local import avoids cycle at module load
+
     spans = [(m.start(), m.end()) for m in _CQ_RE.finditer(text)]
     spans.extend((m.start(), m.end()) for m in _URL_RE.finditer(text))
-    spans.extend((m.start(), m.end()) for m in _ASCII_RE.finditer(text))
+    spans.extend((m.start(), m.end()) for m in _proper_noun_re().finditer(text))
+    for m in _ASCII_RE.finditer(text):
+        start, end = m.start(), m.end()
+        tail = _ASCII_TRAILING_PUNCT_RE.match(text, end)
+        if tail is not None:
+            end = tail.end()
+        spans.append((start, end))
+    spans.extend((m.start(), m.end()) for m in _PUNCT_RUN_RE.finditer(text))
     spans.sort()
     merged: list[tuple[int, int]] = []
     for start, end in spans:

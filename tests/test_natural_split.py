@@ -154,3 +154,60 @@ def test_cancel_during_recursive_split_does_not_pollute_external_state(monkeypat
         natural_split("这一段需要触发递归拆分因为它足够长。", soft_max_chars=8, rng=_rng(0.0))
 
     assert state == []
+
+
+def test_ellipsis_run_is_never_split_inside() -> None:
+    # `……` (two U+2026) used to break into `…` / `…`. It is one prosodic unit now.
+    segments = natural_split("唔……在呢……", rng=_rng(0.0))
+
+    assert "……" in segments[0]
+    assert not any(segment == "…" for segment in segments)
+    assert "".join(segments).count("…") == 4
+
+
+def test_repeated_enders_stay_one_unit() -> None:
+    # `！！！` must not shatter into lone `！` bubbles, nor fold to a single `！`.
+    segments = natural_split("好耶！！！太棒了", rng=_rng(0.0))
+
+    assert "好耶！！！" in segments
+    assert not any(segment == "！" for segment in segments)
+    assert "好耶！！！太棒了".count("！") == sum(s.count("！") for s in segments)
+
+
+def test_proper_noun_with_internal_punctuation_not_split() -> None:
+    # `BanG Dream! MyGO!!!!!` shattered into `BanG Dream!`/`MyGO!`/`!`/`!` before the fix.
+    segments = natural_split("BanG Dream! MyGO!!!!!那个乐队的鼓手", rng=_rng(0.0))
+
+    assert "MyGO!!!!!" in segments
+    assert "BanG Dream!" in segments
+    assert not any(segment == "!" for segment in segments)
+
+
+def test_ascii_token_trailing_emphasis_is_kept_whole() -> None:
+    segments = natural_split("cool!!! 对吧", rng=_rng(0.0))
+
+    assert "cool!!!" in segments
+    assert not any(segment == "!" for segment in segments)
+
+
+def test_llm_newlines_are_hard_bubble_boundaries() -> None:
+    # Even at max merge probability, LLM-authored newlines must survive as separate bubbles.
+    segments = natural_split("第一条消息\n第二条消息\n第三条", rng=_rng(0.99))
+
+    assert segments == ["第一条消息", "第二条消息", "第三条"]
+
+
+def test_within_line_still_merges_under_high_strength() -> None:
+    # The newline hard boundary must NOT disable intra-line probabilistic merging.
+    segments = natural_split("你好呀，今天，过得怎样", rng=_rng(0.99))
+
+    assert len(segments) == 1
+
+
+def test_merge_keeps_space_between_ascii_proper_nouns() -> None:
+    # Merging `BanG Dream!` + `MyGO!!!!!` must not fuse into `BanG Dream!MyGO!!!!!`.
+    merged = segmentation._natural_merge_segments(
+        ["BanG Dream!", "MyGO!!!!!"], split_strength=0.0, rng=_rng(0.99)
+    )
+
+    assert merged == ["BanG Dream! MyGO!!!!!"]

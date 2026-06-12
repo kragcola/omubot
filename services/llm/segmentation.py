@@ -50,6 +50,33 @@ _REGISTER_ALIASES: dict[str, str] = {
 _KAOMOJI_RE = re.compile(r"[\(（][^\n()\uff08\uff09]{0,16}[｡ωд▽≧≦╥﹏‿◕✧・∀><^_-][^\n()\uff08\uff09]{0,16}[\)）]")
 _POSTFIX_CLOSERS = set("」』）”’》】)]}\"'")
 _REPEATED_PUNCTUATION = {"—", "…"}
+# Runs of identical enders/commas (≥2), any ellipsis run, em-dash runs, ascii ellipsis.
+# Treated as ONE indivisible prosodic unit (CMC "typographical tone of voice"): never cut
+# inside `！！！` / `？？？` / `。。。` / `……` / `...`; a boundary is still allowed right after
+# the whole run, so emphasis intensity is preserved instead of carved into lone-mark bubbles.
+_PUNCT_RUN_RE = re.compile(r"([。！？!?~～，、；;])\1+|…+|—{2,}|\.{3,}")
+# Emphatic punctuation glued to an ascii-token tail belongs to the token (`cool!!!`, `MyGO!`).
+_ASCII_TRAILING_PUNCT_CHARS = "!！?？~～…"
+_ASCII_TRAILING_PUNCT_RE = re.compile(r"[!！?？~～…]+")
+# Proper nouns whose internal punctuation otherwise shatters them (`MyGO!!!!!` -> `MyGO!`/`!`/`!`).
+# Seeded from character-pack context labels (config/character_packs/*.charpack manifest); kept as
+# a static constant so segmentation stays zero-IO and millisecond-fast. Add new franchise/band/song
+# names here as packs grow. Space-separated names (`Ave Mujica`) need no entry — already protected.
+_PROPER_NOUN_PHRASES: tuple[str, ...] = (
+    "25時、ナイトコードで。",
+    "Hello, Happy World!",
+    "MORE MORE JUMP!",
+    "Wonderlands×Showtime",
+    "BanG Dream!",
+    "MyGO!!!!!",
+)
+
+
+@lru_cache(maxsize=1)
+def _proper_noun_re() -> re.Pattern[str]:
+    # Longest-first alternation so `MyGO!!!!!` wins over a shorter prefix.
+    ordered = sorted(_PROPER_NOUN_PHRASES, key=len, reverse=True)
+    return re.compile("|".join(re.escape(phrase) for phrase in ordered))
 _CONTINUATION_PREFIX = set("，、。！？；：,.!?;:的地得了着过")
 _OPEN_TO_CLOSE = {
     "（": "）",
@@ -149,7 +176,21 @@ def _protected_spans(text: str) -> list[tuple[int, int]]:
         spans.append((match.start(), match.end()))
     for match in _URL_TOKEN_RE.finditer(text):
         spans.append((match.start(), match.end()))
+    for match in _proper_noun_re().finditer(text):
+        spans.append((match.start(), match.end()))
     for match in _ASCII_TOKEN_RE.finditer(text):
+        start, end = match.start(), match.end()
+        # Absorb emphatic punctuation glued to the token tail so `MyGO!!!!!` stays whole
+        # (the `!` run is part of the name, not a clause boundary).
+        tail = _ASCII_TRAILING_PUNCT_RE.match(text, end)
+        if tail is not None:
+            end = tail.end()
+        spans.append((start, end))
+    for match in _PUNCT_RUN_RE.finditer(text):
+        # Repeated enders / ellipsis runs are one indivisible unit. Protect the full run so no
+        # boundary lands inside it; `_inside_protected_span` is strict (start < i < end), so a
+        # boundary at `end` — i.e. right after the whole run — is still allowed. `……` stays whole
+        # and a cut may follow it; `好耶！！！` never splits into `好耶！！`/`！`.
         spans.append((match.start(), match.end()))
     spans.sort()
     merged: list[tuple[int, int]] = []
@@ -363,7 +404,17 @@ def _natural_merge_segments(segments: list[str], *, split_strength: float, rng: 
             if current.endswith("\n") or nxt.startswith("\n"):
                 current = current.rstrip() + "\n" + nxt.lstrip()
             else:
-                current = current.rstrip() + nxt.lstrip()
+                left, right = current.rstrip(), nxt.lstrip()
+                # Keep a single space between two latin/digit runs so adjacent ascii proper nouns
+                # don't fuse on merge: `hello`+`world`, and `BanG Dream!`+`MyGO!!!!!` (peek past the
+                # left tail's emphatic punctuation to find the real word char).
+                left_word = left.rstrip("".join(_ASCII_TRAILING_PUNCT_CHARS))
+                glue = (
+                    " "
+                    if left_word and right and _is_ascii_token_char(left_word[-1]) and _is_ascii_token_char(right[0])
+                    else ""
+                )
+                current = left + glue + right
             index += 1
         merged.append(current)
         index += 1
@@ -443,8 +494,17 @@ def natural_split(
         return []
 
     split_strength = _natural_split_strength(len(normalized), register)
-    segments = _natural_initial_segments(normalized)
-    segments = _natural_merge_segments(segments, split_strength=split_strength, rng=rng)
+    # LLM-authored newlines are HARD bubble boundaries: the model decided "send this as a separate
+    # message" (the humanlike multi-bubble convention). Process each line independently so random
+    # re-merge (_natural_merge_segments) can never glue across a newline — only within a line.
+    segments: list[str] = []
+    for line in normalized.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        line_segments = _natural_initial_segments(line)
+        line_segments = _natural_merge_segments(line_segments, split_strength=split_strength, rng=rng)
+        segments.extend(line_segments)
     segments = [_natural_cleanup_trailing_punctuation(segment, rng) for segment in segments]
     segments = [segment for segment in segments if segment]
 
