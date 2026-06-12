@@ -139,6 +139,17 @@ async def test_arbiter_interruption_returns_result() -> None:
     assert result.fallback is False
 
 
+def test_interruption_prompt_covers_repeated_calls() -> None:
+    """Regression: the interruption prompt must instruct abort_unsent for a user
+    repeatedly @-ing / re-calling the bot (the three-"emu" defect), so the burst
+    folds into one unified reply instead of per-message greeting echoes."""
+    from services.llm.arbiter import _INTERRUPTION_SYSTEM_PROMPT
+
+    assert "abort_unsent" in _INTERRUPTION_SYSTEM_PROMPT
+    assert "重复呼叫" in _INTERRUPTION_SYSTEM_PROMPT
+    assert "统一回复" in _INTERRUPTION_SYSTEM_PROMPT
+
+
 @pytest.mark.asyncio
 async def test_arbiter_correction_returns_result() -> None:
     session = _Session([_Response(_payload('{"needs_correction": true, "correction_type": "amend"}'))])

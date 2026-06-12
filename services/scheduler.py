@@ -125,11 +125,15 @@ def _should_force_reply(trigger: TriggerContext | None) -> bool:
 class _GroupSlot:
     __slots__ = (
         "arbiter_task",
+        "block_fire_queue",
         "burst_pending",
         "chat_lock",
         "closing_done",
         "consecutive_skip",
         "debounce_task",
+        "firing_block_id",
+        "firing_user_id",
+        "first_segment_sent",
         "last_fire_time",
         "last_light_time",
         "last_reply_content",
@@ -166,6 +170,14 @@ class _GroupSlot:
         self.last_role: str = "addressed"
         self.last_rws: dict[str, Any] | None = None
         self.trigger: TriggerContext | None = None
+        # Path Y (multi-addressee): when a burst spans multiple topic blocks,
+        # fire serially. `block_fire_queue` holds per-block merged
+        # TriggerContexts; the _do_chat finally-block drains it with NO
+        # inter-block gap. burst_pending is the source of truth for which @
+        # messages exist (each PendingMessage carries its own block_id /
+        # target_message_id), so we do NOT keep a parallel trigger list that
+        # could desync with the pending_during_generation path.
+        self.block_fire_queue: list[TriggerContext] = []
         self.chat_lock = asyncio.Lock()
         # Weak-reply (closing) state — P0.
         self.last_light_time: float = 0.0  # cooldown across light replies
@@ -174,6 +186,16 @@ class _GroupSlot:
         # after a quiet window so the @ obligation isn't dropped (bounded).
         self.wait_defer_task: asyncio.Task[None] | None = None
         self.wait_deferrals: int = 0
+        # Deterministic cancel-and-remerge (interrupt-merge): identity of the
+        # in-flight fire. When a same-block / same-user @ arrives mid-generation
+        # AND the first visible segment has NOT been sent yet, we cancel the
+        # running fire so the finally-block re-merges pending_during_generation
+        # into burst_pending and Arbiter-A fires ONE unified reply. Once the
+        # first segment is out ("已发段不撤回"), we no longer cancel — the
+        # post-emission case falls to Arbiter-B (abort unsent segments only).
+        self.firing_block_id: str = ""
+        self.firing_user_id: str = ""
+        self.first_segment_sent: bool = False
 
 
 class _EmissionGate:
@@ -549,9 +571,10 @@ class GroupChatScheduler:
             return
         # B1: feed every observed group message into topic-block attribution
         # before any gating, so the block map reflects the full stream.
+        observed_block = None
         if self._topic_tracker is not None and message_text:
             try:
-                self._topic_tracker.observe(
+                observed_block = self._topic_tracker.observe(
                     group_id,
                     message_id=message_id,
                     speaker=user_id,
@@ -569,6 +592,7 @@ class GroupChatScheduler:
         is_directed_followup = trigger is not None and trigger.mode == "directed_followup"
         is_correction = trigger is not None and trigger.mode == "correction"
         is_closing = trigger is not None and trigger.mode == "closing"
+        is_greeting = trigger is not None and trigger.mode == "greeting"
         if (
             identity.proactive is None
             and not is_at
@@ -576,6 +600,7 @@ class GroupChatScheduler:
             and not is_directed_followup
             and not is_correction
             and not is_closing
+            and not is_greeting
         ):
             # Skip non-@ messages when there are no proactive interjection rules.
             # @ mentions, directed followups, correction turns, closing farewells,
@@ -595,12 +620,22 @@ class GroupChatScheduler:
         if user_id:
             slot.last_user_id = user_id
         if trigger is not None:
-            slot.trigger = trigger  # always update so latest trigger takes priority
+            # Scalar shim: the non-arbiter @ path (single message → immediate
+            # _fire) and all non-@ paths read this. The multi-@ covering-write
+            # defect only manifests in the arbiter burst path, where the real
+            # carrier is burst_pending (each PendingMessage now carries its own
+            # block_id/target_message_id) — see _build_block_triggers.
+            slot.trigger = trigger
 
+        block_id = observed_block.block_id if observed_block is not None else ""
         pending_message = PendingMessage(
             content=message_text or (trigger.reason if trigger is not None else "") or "@我",
             user_id=user_id,
             timestamp=time.time(),
+            target_message_id=(trigger.target_message_id if trigger is not None else None),
+            block_id=block_id,
+            evidence=(trigger.mode if trigger is not None else ""),
+            obligation_level=(str(trigger.obligation) if trigger is not None else ""),
         )
 
         # ════════════════════════════════════════════════════════════════════
@@ -617,11 +652,37 @@ class GroupChatScheduler:
         if is_at:
             if slot.running_task and not slot.running_task.done():
                 slot.pending_during_generation.append(pending_message)
-                _L.debug(
-                    "scheduler | group={} @ queued during generation (n={})",
-                    group_id,
-                    len(slot.pending_during_generation),
+                # Deterministic interrupt-merge: a same-block OR same-user @
+                # arriving mid-generation is a continuation of the in-flight
+                # reply (the user is still addressing us about the same thing).
+                # If the first visible segment has NOT been sent yet, cancel the
+                # running fire — the _do_chat finally-block re-merges
+                # pending_during_generation into burst_pending and Arbiter-A
+                # fires ONE unified reply (no debounce, purely event-driven).
+                # Once the first segment is out we must NOT retract it
+                # ("已发段不撤回"); that post-emission case is left to Arbiter-B
+                # (abort unsent segments only).
+                same_addressee = bool(
+                    not slot.first_segment_sent
+                    and (
+                        (block_id and block_id == slot.firing_block_id)
+                        or (user_id and user_id == slot.firing_user_id)
+                    )
                 )
+                if same_addressee:
+                    _L.info(
+                        "scheduler | group={} same-addressee burst (block={} user={}) "
+                        "-> cancel & remerge (n={})",
+                        group_id, block_id or "_nob", user_id,
+                        len(slot.pending_during_generation),
+                    )
+                    slot.running_task.cancel()
+                else:
+                    _L.debug(
+                        "scheduler | group={} @ queued during generation (n={})",
+                        group_id,
+                        len(slot.pending_during_generation),
+                    )
                 return
             if self._arbiter_enabled(group_id):
                 slot.burst_pending.append(pending_message)
@@ -687,6 +748,30 @@ class GroupChatScheduler:
             slot.closing_done = True
             slot.last_light_time = now_wall
             _L.info("scheduler | group={} closing -> fire", group_id)
+            self._fire(group_id)
+            return
+
+        if is_greeting:
+            # Weak-reply: a greeting ("早安") invites a symmetric hello. Bypass
+            # the probability gate like closing, but gate on the shared light
+            # cooldown only (greeting is NOT terminal, so it does not set/honor
+            # closing_done — back-to-back 早安/晚安 in the same window stay
+            # cooldown-limited, not permanently deduped).
+            now_wall = time.time()
+            if (now_wall - slot.last_light_time) < _LIGHT_COOLDOWN_S:
+                _L.info("scheduler | group={} greeting within light cooldown, skip", group_id)
+                slot.trigger = None
+                return
+            if slot.running_task and not slot.running_task.done():
+                slot.pending_during_generation.append(pending_message)
+                _L.debug(
+                    "scheduler | group={} greeting queued during generation (n={})",
+                    group_id,
+                    len(slot.pending_during_generation),
+                )
+                return
+            slot.last_light_time = now_wall
+            _L.info("scheduler | group={} greeting -> fire", group_id)
             self._fire(group_id)
             return
 
@@ -877,6 +962,35 @@ class GroupChatScheduler:
             self._enqueue_reward(group_id, decision=True, rws=rws, threshold=threshold)
             self._fire(group_id)
         else:
+            # Companion rescue (weak-reply §2.5-2d): a ratified continuation —
+            # the user follows up in a block the bot is already part of (the
+            # "宝宝" case) — is a message that should be SEEN. Rather than letting
+            # a probability miss drop it to SILENCE, degrade to a companion weak
+            # reply (thinker picks light_kind=companion → short ack/sticker).
+            # Rate-limited by the shared light cooldown so it does not turn into
+            # "reply to every follow-up". Pure overhearers still go SILENCE.
+            now_wall = time.time()
+            if (
+                role == "ratified"
+                and (now_wall - slot.last_light_time) >= _LIGHT_COOLDOWN_S
+                and not (slot.running_task and not slot.running_task.done())
+            ):
+                _L.info(
+                    "scheduler | group={} prob skip -> companion rescue (ratified, role={})",
+                    group_id, role,
+                )
+                slot.consecutive_skip = 0
+                slot.last_light_time = now_wall
+                slot.last_response_class = ResponseClass.LIGHT_ACK.value
+                companion_trigger = TriggerContext(
+                    reason="对方在和你的对话里续话，该被看见——轻轻应一声",
+                    mode="companion",
+                    target_message_id=(trigger.target_message_id if trigger is not None else None),
+                    target_user_id=(slot.last_user_id or ""),
+                )
+                self._enqueue_reward(group_id, decision=True, rws=rws, threshold=threshold)
+                self._fire(group_id, block_trigger=companion_trigger)
+                return
             slot.consecutive_skip += 1
             slot.last_skip_time = now
             slot.last_response_class = ResponseClass.SILENCE.value
@@ -899,6 +1013,77 @@ class GroupChatScheduler:
     # B1-addressed: focus an addressed reply on the @-ed message + its topic
     # block, instead of replying to the whole stale multi-topic timeline.
     _FOCUS_TRIGGER_MODES = frozenset({"at_mention", "directed_followup", "correction", "qq_interaction"})
+
+    def _build_block_triggers(
+        self, group_id: str, pending: list[PendingMessage]
+    ) -> list[TriggerContext]:
+        """Group a burst of @ messages by topic block → one trigger per block.
+
+        Fixes the scalar covering-write defect: when several people @ the bot
+        in the same burst across different topics, each block gets its own
+        TriggerContext anchored to that block's @ message (representative),
+        instead of the last-arriving @ clobbering everyone else's reply target.
+        Same-topic @s merge into one trigger (combined addressees). Order
+        follows first-arrival so the earliest addressing fires first.
+        """
+        if not pending:
+            return []
+        # Preserve first-seen block order; "" (no block) falls back to a single
+        # synthetic group so the legacy single-trigger behavior is unchanged.
+        order: list[str] = []
+        groups: dict[str, list[PendingMessage]] = {}
+        for msg in pending:
+            key = msg.block_id or "_nob"
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(msg)
+
+        base = self._slots.get(group_id)
+        base_trigger = base.trigger if base is not None else None
+        triggers: list[TriggerContext] = []
+        for key in order:
+            members = groups[key]
+            # Anchor to the topic block's representative (@ message preferred),
+            # else the last-arriving @ in this block.
+            anchor_mid: int | None = None
+            if key != "_nob" and self._topic_tracker is not None:
+                block = self._topic_tracker.pick_block_by_id(group_id, key)
+                if block is not None:
+                    anchor_mid = block.representative_message_id()
+            if anchor_mid is None:
+                for msg in reversed(members):
+                    if msg.target_message_id is not None:
+                        anchor_mid = msg.target_message_id
+                        break
+            # Strong-signal addressees only (Q3): everyone in this burst block
+            # who carried an @-style target. Lexical-fallback co-members never
+            # appear in burst_pending, so membership here is already strong.
+            addressees: list[str] = []
+            for msg in members:
+                if msg.user_id and msg.user_id not in addressees:
+                    addressees.append(msg.user_id)
+            anchor_uid = ""
+            for msg in reversed(members):
+                if msg.target_message_id is not None and msg.user_id:
+                    anchor_uid = msg.user_id
+                    break
+            extra: dict[str, Any] = dict(base_trigger.extra) if base_trigger is not None else {}
+            if len(addressees) > 1:
+                extra["block_addressees"] = list(addressees)
+            extra["block_id"] = "" if key == "_nob" else key
+            triggers.append(
+                TriggerContext(
+                    reason=(base_trigger.reason if base_trigger is not None else "有人@了你"),
+                    mode="at_mention",
+                    target_message_id=anchor_mid,
+                    target_user_id=anchor_uid or (base_trigger.target_user_id if base_trigger is not None else ""),
+                    obligation=(base_trigger.obligation if base_trigger is not None else None),
+                    extra=extra,
+                )
+            )
+        return triggers
+
 
     def _focused_trigger_reason(self, trigger: TriggerContext) -> str:
         """Append a topic-focus directive to an addressed trigger's reason.
@@ -994,6 +1179,7 @@ class GroupChatScheduler:
         slot.msg_count = 0
         slot.trigger = None
         slot.pending_during_generation = []
+        slot.block_fire_queue = []
         if cancel_running and slot.running_task and not slot.running_task.done():
             slot.running_task.cancel()
             slot.running_task = None
@@ -1237,7 +1423,21 @@ class GroupChatScheduler:
             if slot.running_task and not slot.running_task.done():
                 slot.pending_during_generation.extend(slot.burst_pending)
                 return
-            self._fire(group_id)
+            # Path Y: split the burst by topic block. Same-topic @s merge into
+            # one reply; different-topic @s each get their own fire, anchored to
+            # their own block's representative message (no more last-@ clobber).
+            block_triggers = self._build_block_triggers(group_id, list(slot.burst_pending))
+            if len(block_triggers) <= 1:
+                self._fire(group_id, block_trigger=block_triggers[0] if block_triggers else None)
+            else:
+                _L.info(
+                    "arbiter_a_fire | group={} burst spans {} topic blocks -> serial fire",
+                    group_id, len(block_triggers),
+                )
+                # Fire the first block now; the rest drain back-to-back in the
+                # _do_chat finally-block (no inter-block gap).
+                slot.block_fire_queue = block_triggers[1:]
+                self._fire(group_id, block_trigger=block_triggers[0])
         except asyncio.CancelledError:
             raise
         finally:
@@ -1252,8 +1452,21 @@ class GroupChatScheduler:
         sent_texts: list[str],
         user_id: str,
     ) -> None:
-        """Poll pending user timeline entries and feed interruption verdicts into gate."""
+        """Feed interruption verdicts into the emission gate.
+
+        Reads ``slot.pending_during_generation`` directly (the canonical
+        during-generation queue filled by notify) rather than scanning the
+        timeline by a baseline snapshot. The old baseline approach had a race:
+        an @ that arrived between "Arbiter-A decides to fire" and "_do_chat
+        snapshots generation_pending_baseline" landed BELOW the baseline, so
+        ``_pending_messages_since`` never returned it and the monitor never
+        armed (observed: 0 Arbiter-B activations in production). The slot queue
+        has no such window — every mid-generation @ is visible here.
+        """
         if self._arbiter is None:
+            return
+        slot = self._slots.get(group_id)
+        if slot is None:
             return
         poll_interval = 0.15
         seen_keys: set[tuple[str, str]] = set()
@@ -1261,9 +1474,8 @@ class GroupChatScheduler:
             await asyncio.sleep(poll_interval)
             if gate.circuit_open:
                 continue
-            fresh_pending = self._pending_messages_since(group_id, baseline)
             new_pending = [
-                msg for msg in fresh_pending
+                msg for msg in list(slot.pending_during_generation)
                 if (msg.content, msg.user_id) not in seen_keys
             ]
             if not new_pending:
@@ -1486,7 +1698,7 @@ class GroupChatScheduler:
         ]
         return (rows + pending)[-limit:]
 
-    def _fire(self, group_id: str) -> None:
+    def _fire(self, group_id: str, *, block_trigger: TriggerContext | None = None) -> None:
         slot = self._slots.get(group_id)
         if not slot:
             return
@@ -1494,11 +1706,23 @@ class GroupChatScheduler:
         if slot.wait_defer_task and not slot.wait_defer_task.done():
             slot.wait_defer_task.cancel()
             slot.wait_defer_task = None
-        # Snapshot and clear trigger so it's consumed exactly once.
-        trigger = slot.trigger
-        slot.trigger = None
+        # Path Y: a per-block trigger (multi-addressee burst) takes precedence
+        # over the scalar slot.trigger; otherwise consume slot.trigger once.
+        if block_trigger is not None:
+            trigger = block_trigger
+            slot.trigger = None
+        else:
+            trigger = slot.trigger
+            slot.trigger = None
         slot.msg_count = 0
         slot.last_response_class = ResponseClass.FULL_REPLY.value
+        # Record the in-flight fire's addressee identity so a same-block /
+        # same-user @ arriving mid-generation can be recognized as a continuation
+        # of THIS reply and trigger cancel-and-remerge (see the is_at branch in
+        # notify). Reset the first-segment guard for the new fire.
+        slot.firing_block_id = str(trigger.extra.get("block_id", "") or "") if trigger is not None else ""
+        slot.firing_user_id = str(trigger.target_user_id or "") if trigger is not None else ""
+        slot.first_segment_sent = False
         slot.running_task = asyncio.create_task(self._do_chat(group_id, trigger=trigger))
         slot.running_task.add_done_callback(lambda _: None)
 
@@ -1919,6 +2143,10 @@ class GroupChatScheduler:
                             )
                             sent_segments += 1
                             _sent_texts.append(text)
+                            # First visible segment is now out — past this point
+                            # cancel-and-remerge must not retract it. Subsequent
+                            # same-block @s fall to Arbiter-B (unsent only).
+                            slot_ref.first_segment_sent = True
                             return True
 
                         resolved = self._group_config.resolve(int(group_id))
@@ -1953,6 +2181,7 @@ class GroupChatScheduler:
                                 target_user_id=uid,
                             )
                             sent_segments += 1
+                            slot_ref.first_segment_sent = True
                             _L.info(
                                 "scheduler reply send complete | group={} segments={} send_total={:.1f}s",
                                 group_id, sent_segments, send_total_elapsed,
@@ -2010,12 +2239,23 @@ class GroupChatScheduler:
 
         except asyncio.CancelledError:
             _L.debug("scheduler | group={} chat cancelled", group_id)
+            # D2 cancel-path: a cancelled fire (shutdown / clear_pending) must
+            # NOT spawn the next block — clear the queue so it cannot pollute a
+            # later run. (The finally still runs; with an empty queue it falls
+            # back to the pre-existing pending/msg_count re-fire behavior.)
+            if slot:
+                slot.block_fire_queue = []
         except Exception:
             _L.exception("scheduler | group={} chat error", group_id)
         finally:
             if slot:
                 slot.running_task = None
-                if slot.pending_during_generation:
+                # Path Y: drain the next topic block back-to-back (no gap) so a
+                # multi-addressee burst across topics gets one reply per block.
+                if slot.block_fire_queue:
+                    next_trigger = slot.block_fire_queue.pop(0)
+                    self._fire(group_id, block_trigger=next_trigger)
+                elif slot.pending_during_generation:
                     slot.burst_pending.extend(slot.pending_during_generation)
                     slot.pending_during_generation = []
                     if self._arbiter_enabled(group_id):

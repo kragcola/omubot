@@ -9,7 +9,7 @@ import pytest
 
 from kernel.config import GroupConfig, ReplySegmentationConfig, ResolvedHumanization
 from kernel.types import TriggerContext
-from services.llm.arbiter import InterruptionResult
+from services.llm.arbiter import InterruptionResult, PendingMessage
 from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.segmentation import ReplySegmentPlan
@@ -152,6 +152,9 @@ async def test_segment_aborted_on_arbiter_abort() -> None:
     async def _inject(**kwargs) -> None:
         if kwargs["send_count"] == 1:
             timeline.add("123", role="user", content="补充一句", speaker="小明(42)")
+            scheduler._slots["123"].pending_during_generation.append(  # type: ignore[attr-defined]
+                PendingMessage(content="补充一句", user_id="42", timestamp=0.0)
+            )
 
     bot = _BotStub(on_send=_inject)
     scheduler._bot = bot  # type: ignore[attr-defined]
@@ -183,6 +186,9 @@ async def test_segment_continues_on_arbiter_continue() -> None:
     async def _inject(**kwargs) -> None:
         if kwargs["send_count"] == 1:
             timeline.add("123", role="user", content="补充一句", speaker="小明(42)")
+            scheduler._slots["123"].pending_during_generation.append(  # type: ignore[attr-defined]
+                PendingMessage(content="补充一句", user_id="42", timestamp=0.0)
+            )
 
     bot = _BotStub(on_send=_inject)
     scheduler._bot = bot  # type: ignore[attr-defined]
@@ -282,6 +288,9 @@ async def test_arbiter_b_timeout_continues() -> None:
     async def _inject(**kwargs) -> None:
         if kwargs["send_count"] == 1:
             timeline.add("123", role="user", content="补充一句", speaker="小明(42)")
+            scheduler._slots["123"].pending_during_generation.append(  # type: ignore[attr-defined]
+                PendingMessage(content="补充一句", user_id="42", timestamp=0.0)
+            )
 
     bot = _BotStub(on_send=_inject)
     scheduler._bot = bot  # type: ignore[attr-defined]
