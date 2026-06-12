@@ -128,6 +128,22 @@ def _pick_empty_visible_reply_fallback() -> str:
     return secrets.choice(_EMPTY_VISIBLE_REPLY_FALLBACKS)
 
 
+def _extra_block_addressees(trigger: object | None) -> list[str]:
+    """Strong-signal addressee uids for a same-topic multi-@ burst (Path Y)."""
+    extra = getattr(trigger, "extra", None)
+    if not isinstance(extra, dict):
+        return []
+    raw = extra.get("block_addressees")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[str] = []
+    for uid in raw:
+        s = str(uid or "").strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
 def _build_sticker_cq(store: StickerStore, sticker_id: str) -> str | None:
     """Read a sticker from disk and return a OneBot CQ image code (base64).
 
@@ -151,6 +167,7 @@ def _build_sticker_cq(store: StickerStore, sticker_id: str) -> str | None:
 # avoid semantic mismatch (closing needs farewell, companion needs ack).
 _LIGHT_REPLY_CLOSING_FALLBACK = "好~"
 _LIGHT_REPLY_COMPANION_FALLBACK = "嗯~"
+_LIGHT_REPLY_GREETING_FALLBACK = "早~"  # symmetric greeting when LLM gen fails
 _LIGHT_REPLY_GENERIC_FALLBACK = "嗯~"  # legacy compat
 # Companion weak-reply direction injected into plugin_dynamic for the main LLM.
 # It constrains length/register only — it does NOT hardcode the reply text, and
@@ -387,6 +404,33 @@ def _text_has_kaomoji(text: str) -> bool:
         if any(c in _ACTION_INDICATOR_SINGLE for c in inner):
             return True
     return False
+
+
+def _strip_kaomoji_markup(text: str) -> str:
+    """Remove the kaomoji / action-description spans that :func:`_text_has_kaomoji`
+    detects, leaving the surrounding prose intact.
+
+    This is the inverse of the detector and is used by kaomoji-enforce (#3): when a
+    reply mixes prose with a kaomoji, the prose must still be emitted and the
+    kaomoji is converted into an attached sticker — not silently swallowed. Only
+    spans the detector would match are stripped, so ordinary parenthetical text
+    (no action indicator) is preserved. Returns the residual prose, possibly empty
+    (the reply was kaomoji-only).
+    """
+    if not text:
+        return text
+    out = _KAOMOJI_SPECIAL_RE.sub("", text)
+
+    def _drop_action(m: re.Match[str]) -> str:
+        inner = m.group(1)
+        if any(c in _ACTION_INDICATOR_SINGLE for c in inner):
+            return ""
+        return m.group(0)
+
+    out = _ACTION_PAREN_RE.sub(_drop_action, out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 class RateLimitError(RuntimeError):
@@ -1127,6 +1171,7 @@ class LLMClient:
         affection_engine: object | None = None,
         thinker_enabled: bool = True,
         thinker_max_tokens: int = 256,
+        thinker_force_reply_enabled: bool = True,
         thinker_necessity_gate_enabled: bool = False,
         thinker_necessity_gate_addressed_exempt: bool = True,
         mood_getter: Callable[..., Any] | None = None,
@@ -1191,6 +1236,7 @@ class LLMClient:
         self._affection_engine = affection_engine
         self._thinker_enabled = thinker_enabled
         self._thinker_max_tokens = thinker_max_tokens
+        self._thinker_force_reply_enabled = bool(thinker_force_reply_enabled)
         self._thinker_necessity_gate_enabled = bool(thinker_necessity_gate_enabled)
         self._thinker_necessity_gate_addressed_exempt = bool(thinker_necessity_gate_addressed_exempt)
         self._mood_getter = mood_getter
@@ -1467,6 +1513,14 @@ class LLMClient:
             or not self._addressee_hint_enabled(group_id)
         ):
             return ""
+        # Multi-addressee (Path Y): a same-topic burst @-ed the bot from several
+        # people at once. Name them all so the LLM addresses everyone in one
+        # reply, instead of silently dropping all but the trigger's single uid.
+        block_addressees = _extra_block_addressees(trigger)
+        if len(block_addressees) > 1:
+            multi = self._build_multi_addressee_hint(group_id, block_addressees)
+            if multi:
+                return multi
         result = self._addressee_hint_detector.detect(
             group_id=group_id,
             trigger=trigger,
@@ -1476,6 +1530,29 @@ class LLMClient:
         if result is None:
             return ""
         return self._addressee_hint_detector.build_hint(result)
+
+    def _build_multi_addressee_hint(self, group_id: str, uids: list[str]) -> str:
+        """Cue naming every strong-signal addressee in a same-topic @ burst."""
+        if self._addressee_hint_detector is None:
+            return ""
+        registry = getattr(self._addressee_hint_detector, "_registry", None)
+        names: list[str] = []
+        for uid in uids:
+            nick = ""
+            if registry is not None:
+                try:
+                    member = self._addressee_hint_detector._lookup_member(group_id, uid)
+                except Exception:
+                    member = None
+                if member is not None:
+                    nick = (member.card or member.nickname or str(member.user_id))
+            label = f"{nick}（QQ: {uid}）" if nick else f"QQ: {uid}"
+            if label not in names:
+                names.append(label)
+        if len(names) < 2:
+            return ""
+        joined = "、".join(names)
+        return f"[当前有多人同时叫你：{joined}。请在一条回复里一并回应他们]"
 
     @staticmethod
     def _extract_unknown_terms_from_text(text: str, *, max_terms: int = 4) -> list[str]:
@@ -1609,6 +1686,7 @@ class LLMClient:
         ctx: ToolContext | None,
         already_sent: bool,
         rng: Callable[[], float] | None = None,
+        force_send: bool = False,
     ) -> bool:
         if already_sent or not self._sticker_placement_enabled(group_id):
             return False
@@ -1666,24 +1744,40 @@ class LLMClient:
             runtime_state=cast(Any, self._runtime_state),
             scope=scope,
             usage_counts=self._sticker_usage_counts(),
+            threshold=float(
+                getattr(self._sticker_placement_config, "score_threshold", 0.5) or 0.5
+            ),
             rng=rng,
         )
-        if not decision.should_send or not decision.candidate_pool:
+        candidate_pool = decision.candidate_pool
+        # force_send (kaomoji-enforce #3): the reply carried a kaomoji that the LLM
+        # forgot to attach a sticker to — converting it to a sticker is the design
+        # intent, so bypass the Bernoulli send gate. Hard gates above (placement
+        # disabled / base_frequency=off / no store/tool) still apply. If the
+        # frequency-fair pool came back empty, fall back to the whole library.
+        if force_send and not candidate_pool:
+            candidate_pool = tuple(await self._sticker_extra_candidates()())
+        if (not force_send and not decision.should_send) or not candidate_pool:
             _log_msg_out.info(
                 "post_reply_sticker_skip | session={} reason={} prob={:.3f} source={} "
-                "thinker_ran={} thinker={} energy={:.2f} valence={:+.2f} affection={} freq={} pool={}",
+                "thinker_ran={} thinker={} energy={:.2f} valence={:+.2f} affection={} freq={} pool={} force={}",
                 session_id, decision.reason, decision.send_probability, decision.trigger_source,
                 thinker_ran, thinker_suggested, mood_energy, mood_valence, context.affection_stage,
-                base_frequency, len(decision.candidate_pool),
+                base_frequency, len(candidate_pool), force_send,
             )
             return False
         sticker_id = self._select_post_reply_sticker(
             store,
-            candidate_pool=decision.candidate_pool,
+            candidate_pool=candidate_pool,
+            reply=reply,
             session_id=session_id,
             group_id=group_id,
             scope=scope,
             mood_valence=mood_valence,
+            intent_floor=float(
+                getattr(self._sticker_placement_config, "intent_relevance_floor", 0.0) or 0.0
+            ),
+            force_send=force_send,
         )
         if not sticker_id:
             return False
@@ -1703,36 +1797,68 @@ class LLMClient:
         store: StickerStore,
         *,
         candidate_pool: tuple[str, ...],
+        reply: str,
         session_id: str,
         group_id: str | None,
         scope: Scope,
         mood_valence: float = 0.0,
+        intent_floor: float = 0.0,
+        force_send: bool = False,
     ) -> str | None:
         """Pick *which* sticker to send once the provider decided to send one.
 
         Decouples "whether" from "which": ``StickerDecisionProvider`` only
         decides *whether* to attach a sticker (energy/affection/cooldown gating)
         over a frequency-fair candidate pool — that pool says nothing about the
-        current topic.  The actual *choice* should fit the conversation, so we
-        run a BM25 intent search across the whole library keyed off the recent
-        user message(s), skipping stickers already used recently in this scope.
+        current topic.  The actual *choice* should fit *what the bot just said*,
+        so we run a BM25 intent search across the whole library.
 
-        valence (pleasure axis) biases the query toward an emotional class:
-        low valence → 共情/陪伴 (难过照发, but empathetic), high → 开心/欢呼.
-        Falls back to the pool's top entry when there is no query or nothing
-        matches (preserves prior behaviour for empty/contextless turns).
+        Query signal layering (2026-06-11 — fixes mis-matched stickers on weak
+        replies). The library's ``usage_hint`` fields are emotion *labels*
+        ("适合在表达开心时发送"), so BM25 matches best against emotional intent:
+        1. **bot reply text** (kaomoji/markup stripped) is the primary signal —
+           it is what *this* turn expresses, and when the reply carries emotion
+           words it pins the right class. The previous implementation keyed off
+           ``_fallback_query`` (the scheduler trigger-reason boilerplate / raw
+           user input), whose filler tokens ("话题/回答/祝") cross-matched
+           unrelated descriptions (e.g. a 生日 sticker) and dominated the score.
+        2. **valence emotion words** are always appended (低→共情/陪伴/难过,
+           高→开心/兴奋/欢呼). They both reinforce an emotional reply and carry
+           weak replies whose stripped text is empty — verified on the live
+           library to select the correct class on their own.
+        Falls back to the pool's top entry when there is no query (reply empty +
+        neutral valence) or nothing matches — UNLESS ``intent_floor`` > 0 and no
+        candidate clears it, in which case it returns None so the reply stays
+        text-only (2026-06-12: "匹配不到合适表情降级纯文字"). A kaomoji-enforce
+        round (``force_send``) bypasses the floor: the kaomoji-as-sticker intent
+        is explicit, so it still picks the pool's best rather than dropping图.
         """
-        query = self._fallback_query(session_id=session_id, is_group=bool(group_id))
+        stripped = _strip_kaomoji_markup(reply or "").strip()
+        query = self._bias_query_by_valence(stripped, mood_valence).strip()
         if query:
-            query = self._bias_query_by_valence(query, mood_valence)
             recent = set(self._recent_sticker_ids(scope))
-            for sid in store.search_by_intent(query, top_k=5):
-                if sid and sid not in recent:
+            scored = store.search_by_intent_scored(query, top_k=5)
+            for sid, score in scored:
+                if not sid or sid in recent:
+                    continue
+                if intent_floor > 0.0 and not force_send and score < intent_floor:
+                    # Best on-topic match is too weak — don't slap on an
+                    # off-topic sticker; let the reply go out as text.
                     _log_msg_out.info(
-                        "post_reply_sticker_contextual | session={} query={!r} sticker={}",
-                        session_id, query, sid,
+                        "post_reply_sticker_text_fallback | session={} query={!r} "
+                        "best_score={:.3f} floor={:.3f}",
+                        session_id, query, score, intent_floor,
                     )
-                    return sid
+                    return None
+                _log_msg_out.info(
+                    "post_reply_sticker_contextual | session={} query={!r} sticker={} score={:.3f}",
+                    session_id, query, sid, score,
+                )
+                return sid
+            # Query ran but every hit was a recently-used sticker. With a floor
+            # in force, prefer text over recycling a stale sticker.
+            if intent_floor > 0.0 and not force_send:
+                return None
         return candidate_pool[0] if candidate_pool else None
 
     @staticmethod
@@ -2716,17 +2842,46 @@ class LLMClient:
         group_id: str | None,
         identity_name: str,
     ) -> str:
-        """Generate a short, symmetric farewell token for a closing turn.
-
-        Runs speculatively (in parallel with the thinker). Returns "" on any
-        failure — the caller falls back to a static token, so this never raises
-        into the main path.
-        """
-        system = (
-            f"你是{identity_name}。对方正在向你道别或给对话收尾。"
-            "回一个对称、简短、口语化、有温度的告别 token（像「晚安哦」「好的呀明天见」「拜拜～」）。"
-            "贴合对方的语气，越短越好，只输出这一句，不要解释、不要引号、不要加表情符号说明。"
+        """Generate a short, symmetric farewell token for a closing turn."""
+        return await self._gen_light_token(
+            kind="closing",
+            conversation_text=conversation_text,
+            mood_text=mood_text,
+            user_id=user_id,
+            group_id=group_id,
+            identity_name=identity_name,
         )
+
+    async def _gen_light_token(
+        self,
+        *,
+        kind: str,
+        conversation_text: str,
+        mood_text: str,
+        user_id: str,
+        group_id: str | None,
+        identity_name: str,
+    ) -> str:
+        """Generate a short, symmetric token for a closing/greeting turn.
+
+        Runs synchronously after the thinker decides light_kind. Returns "" on
+        any failure — the caller falls back to a static token, so this never
+        raises into the main path.
+        """
+        if kind == "greeting":
+            system = (
+                f"你是{identity_name}。对方在向你打招呼（早安/早上好/晚上好之类）。"
+                "回一个对称、简短、口语化、有温度的问候 token（像「早呀～」「早上好哦」「嗨～」）。"
+                "贴合对方的语气，越短越好，只输出这一句，不要解释、不要引号、不要加表情符号说明。"
+            )
+            default_user = "（对方在打招呼）"
+        else:
+            system = (
+                f"你是{identity_name}。对方正在向你道别或给对话收尾。"
+                "回一个对称、简短、口语化、有温度的告别 token（像「晚安哦」「好的呀明天见」「拜拜～」）。"
+                "贴合对方的语气，越短越好，只输出这一句，不要解释、不要引号、不要加表情符号说明。"
+            )
+            default_user = "（对方在道别）"
         dynamic_blocks: list[str | dict[str, Any]] = []
         if mood_text:
             dynamic_blocks.append(mood_text)
@@ -2736,7 +2891,7 @@ class LLMClient:
             group_id=group_id,
             static_blocks=[system],
             dynamic_blocks=dynamic_blocks,
-            user_messages=[{"role": "user", "content": conversation_text or "（对方在道别）"}],
+            user_messages=[{"role": "user", "content": conversation_text or default_user}],
             max_tokens=24,
             auto_record_usage=False,
             requires_capabilities=("chat",),
@@ -2749,6 +2904,37 @@ class LLMClient:
         text = str(result.get("text", "") or "") if isinstance(result, dict) else str(result or "")
         cleaned, _ = _strip_control_tokens(_clean_reply(text))
         return cleaned.strip().strip('"').strip("'").strip()[:32]
+
+    async def _maybe_light_reply_sticker(
+        self,
+        *,
+        reply: str,
+        thinker_decision: object | None,
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        ctx: ToolContext | None,
+        light_kind: str,
+    ) -> None:
+        """Attach a sticker to a closing/greeting light reply when the thinker-led
+        score gate says so. The short-circuit token never reaches the main LLM's
+        post-reply sticker hook, so closing/greeting were structurally text-only
+        before — this lands "弱回复必须带温度" for them. Best-effort: a sticker
+        failure must never break the light reply itself."""
+        try:
+            turn_id = f"{session_id}:light:{light_kind}:{int(time.monotonic() * 1000)}"
+            await self._send_post_reply_sticker_if_needed(
+                reply=reply,
+                thinker_decision=thinker_decision,
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                turn_id=turn_id,
+                ctx=ctx,
+                already_sent=False,
+            )
+        except Exception as exc:
+            _log_msg_out.debug("light_reply sticker skipped | kind={} err={}", light_kind, exc)
 
     async def _handle_light_reply(
         self,
@@ -2766,6 +2952,8 @@ class LLMClient:
         thinker_usage: dict[str, int],
         session_id: str,
         t0: float,
+        thinker_decision: object | None = None,
+        ctx: ToolContext | None = None,
     ) -> dict[str, Any] | None:
         """Handle light_reply (closing/companion) as a unified short-circuit.
 
@@ -2775,6 +2963,11 @@ class LLMClient:
         Closing: generates a symmetric farewell token synchronously (not speculative,
         because the thinker decides light_kind after speculative window closes).
         Companion: injects a hint and continues to main LLM for a short ack.
+
+        Closing/greeting may still carry a sticker (2026-06-12): a warm "早呀～"
+        with a wave sticker is exactly what "弱回复必须带温度" asks for. The token
+        short-circuits the main LLM, so the sticker decision is run here directly
+        (same thinker-led score gate + text-fallback as the main path).
         """
         if thinker_action != "light_reply":
             return None
@@ -2819,7 +3012,70 @@ class LLMClient:
                 "light_reply | session={} kind=closing token={!r} emitted={}",
                 session_id, token, emitted,
             )
+            if emitted:
+                await self._maybe_light_reply_sticker(
+                    reply=token,
+                    thinker_decision=thinker_decision,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    ctx=ctx,
+                    light_kind="closing",
+                )
             return {"text": token, "light_reply": True, "light_kind": "closing"}
+
+        if light_kind == "greeting":
+            # Symmetric greeting token (mirror closing): 早安/早上好 demands a warm
+            # short hello, generated synchronously and short-circuiting main LLM.
+            token = await self._gen_light_token(
+                kind="greeting",
+                conversation_text=conversation_text,
+                mood_text=mood_text,
+                user_id=user_id,
+                group_id=group_id,
+                identity_name=identity_name,
+            )
+            token = (token or "").strip() or _LIGHT_REPLY_GREETING_FALLBACK
+            emitted = False
+            if on_segment is not None:
+                quote_id = getattr(trigger, "target_message_id", None) if trigger is not None else None
+                seg = f"[CQ:reply,id={quote_id}]{token}" if quote_id else token
+                try:
+                    await on_segment(seg)
+                    emitted = True
+                except Exception as exc:
+                    _log_msg_out.warning("light_reply greeting emit failed | err={}", exc)
+            if emitted and group_id is not None and timeline is not None:
+                try:
+                    cast(Any, timeline).add(group_id, role="assistant", content=token)
+                except Exception as exc:
+                    _log_msg_out.debug("light_reply greeting timeline write skipped | err={}", exc)
+            self._record_usage(
+                call_type="proactive",
+                user_id=user_id, group_id=group_id,
+                model=self._profile_for_task("thinker")[3],
+                provider_kind=self._profile_for_task("thinker")[4],
+                input_tokens=thinker_usage.get("input_tokens", 0),
+                cache_read_tokens=thinker_usage.get("cache_read", 0),
+                cache_create_tokens=thinker_usage.get("cache_create", 0),
+                output_tokens=thinker_usage.get("output_tokens", 0),
+                tool_rounds=0, elapsed_s=time.monotonic() - t0,
+            )
+            _log_msg_out.info(
+                "light_reply | session={} kind=greeting token={!r} emitted={}",
+                session_id, token, emitted,
+            )
+            if emitted:
+                await self._maybe_light_reply_sticker(
+                    reply=token,
+                    thinker_decision=thinker_decision,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    ctx=ctx,
+                    light_kind="greeting",
+                )
+            return {"text": token, "light_reply": True, "light_kind": "greeting"}
 
         if light_kind == "companion":
             # Companion: return a hint to inject into plugin_dynamic, then let
@@ -4316,7 +4572,19 @@ class LLMClient:
         speculative_slang_task: asyncio.Task[Any] | None = None
         companion_hint: str | None = None
         instruction_hint = ""
-        if self._thinker_enabled and not force_reply:
+        # #2 weak-reply on force_reply turns: the pre-reply thinker is the SOLE
+        # producer of light_kind (companion/closing) and reply_necessity. The old
+        # `not force_reply` gate skipped it on every @-mention / correction /
+        # directed_followup, so short negations ("不对") bypassed weak-reply
+        # classification and got a full multi-segment essay. Now run it on
+        # force_reply too (flag-gated, default on). Nickname-only calls keep their
+        # dedicated fast-path in the else branch (no semantic payload to think on).
+        run_thinker = (
+            self._thinker_enabled
+            and not nickname_only_call
+            and (not force_reply or self._thinker_force_reply_enabled)
+        )
+        if run_thinker:
             from services.llm.thinker import (
                 build_thinker_time_text,
                 think,
@@ -4465,6 +4733,26 @@ class LLMClient:
                 instruction_signal=thinker_instruction_signal,
             )
 
+            # #2 wait-guard: with the thinker now running on force_reply turns,
+            # a `wait` verdict must not silently drop an *obligated* reply. Only a
+            # plain @-mention may honor wait — the scheduler's addressed-wait
+            # deferral (_maybe_defer_addressed_wait, gated on mode==at_mention +
+            # _last_thinker_action=="wait") re-fires it after a quiet window. Every
+            # other force_reply mode (correction / directed_followup /
+            # qq_interaction / video_always / force_after_wait / obligation=must)
+            # has no deferral path, so override wait→reply to keep the obligation.
+            if force_reply and thinker_action == "wait":
+                trig_mode = str(getattr(trigger, "mode", "") or "")
+                deferred_refire = bool(trigger_extra.get("force_after_wait", False))
+                if trig_mode != "at_mention" or deferred_refire:
+                    _log_msg_out.info(
+                        "thinker_wait_override | session={} mode={!r} force_after_wait={} "
+                        "thought={!r} (obligated force_reply → reply)",
+                        session_id, trig_mode, deferred_refire, thinker_thought,
+                    )
+                    thinker_action = "reply"
+                    self._last_thinker_action = thinker_action
+
             if thinker_action == "wait":
                 elapsed = time.monotonic() - t0
                 _log_msg_out.info(
@@ -4523,10 +4811,12 @@ class LLMClient:
                 thinker_usage=thinker_decision.usage,
                 session_id=session_id,
                 t0=t0,
+                thinker_decision=thinker_decision,
+                ctx=ctx,
             )
             if light_result is not None:
-                if light_result.get("light_kind") == "closing":
-                    # Closing was handled; skip main LLM.
+                if light_result.get("light_kind") in ("closing", "greeting"):
+                    # Closing/greeting handled by short-circuit token; skip main LLM.
                     return None
                 if light_result.get("inject_companion_hint"):
                     # Companion: inject hint and continue to main LLM. The hint
@@ -4924,7 +5214,13 @@ class LLMClient:
                 reply, _reply_state = self._finalize_visible_reply(
                     reply=text or "...",
                     session_id=session_id,
-                    force_reply=force_reply,
+                    # Weak-reply floor (§3.5.5): a companion turn is an explicit
+                    # "you should be seen" decision (ratified续话/宝宝/点名). If the
+                    # main LLM yields no visible text, fall to a sticker-or-text
+                    # ack instead of SILENCE — a weak reply must not be stripped
+                    # to nothing. _fallback_ack already tries stickers by intent
+                    # first (§3.5.5 载体), then a non-empty text floor.
+                    force_reply=force_reply or companion_hint is not None,
                     has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
                     is_group=is_group,
                 )
@@ -5030,11 +5326,17 @@ class LLMClient:
                 reply = _apply_quote_reply_anchor(reply, quote_msg_id)
                 reply = self._apply_mention_post_processor(reply, group_id=group_id)
 
-                # Kaomoji enforcement: if the reply contains a kaomoji / action
-                # description but the LLM forgot to call send_sticker, inject a
-                # forced sticker-selection round (once only, and only if we have
-                # at least one round left).
-                if self._should_force_kaomoji_sticker_round(
+                # Kaomoji enforcement (#3): the reply carries a kaomoji / action
+                # description the LLM forgot to attach a sticker to. The old path
+                # stuffed the text into history and forced a "只发图不要重复文字"
+                # round, which silently swallowed ALL prose (reply_suppressed_empty)
+                # — an addressed turn could end wordless. Now: strip only the
+                # kaomoji span, emit the residual prose normally, and attach a
+                # sticker via the post-reply hook (force_send bypasses only the
+                # Bernoulli gate, not the off/placement hard gates). A pure-kaomoji
+                # reply (no prose survives) becomes a wordless sticker — the sticker
+                # stands as the reply.
+                kaomoji_force_sticker = self._should_force_kaomoji_sticker_round(
                     reply,
                     session_id=session_id,
                     group_id=group_id,
@@ -5042,24 +5344,45 @@ class LLMClient:
                     turn_id=reply_turn_id,
                     sticker_sent=_sticker_sent,
                     round_i=round_i,
-                ):
-                    _sticker_sent = True  # prevent re-entry
-                    assistant_content = []
-                    for tb in result.get("thinking_blocks", []):
-                        assistant_content.append(tb)
-                    if text:
-                        assistant_content.append({"type": "text", "text": text})
-                    messages.append({"role": "assistant", "content": assistant_content})
-                    messages.append({
-                        "role": "user",
-                        "content": [{
-                            "type": "text",
-                            "text": "请现在发送一个表情包来配合你刚才的颜文字"
-                                    "（只调用 send_sticker，不要重复文字内容）",
-                        }],
-                    })
-                    _log_thinking.info("kaomoji_enforce | forcing sticker round after kaomoji detected")
-                    continue
+                )
+                if kaomoji_force_sticker:
+                    residual = _strip_kaomoji_markup(reply)
+                    _log_thinking.info(
+                        "kaomoji_enforce | strip kaomoji + attach sticker (residual_len={})",
+                        len(residual),
+                    )
+                    reply = residual
+                    if not reply:
+                        # Pure-kaomoji: no prose survives → the sticker is the reply.
+                        sent = await self._send_post_reply_sticker_if_needed(
+                            reply="",
+                            thinker_decision=thinker_decision,
+                            session_id=session_id,
+                            group_id=group_id,
+                            user_id=user_id,
+                            turn_id=reply_turn_id,
+                            ctx=ctx,
+                            already_sent=_sticker_sent,
+                            force_send=True,
+                        )
+                        _sticker_sent = _sticker_sent or sent
+                        if is_group and group_id is not None and self._timeline is not None:
+                            self._timeline.set_input_tokens(group_id, result["input_tokens"])
+                        else:
+                            self._short_term.set_input_tokens(session_id, result["input_tokens"])
+                        self._record_usage(
+                            call_type="proactive" if is_group else "chat",
+                            user_id=user_id, group_id=group_id,
+                            model=main_model,
+                            provider_kind=str(result.get("provider_kind", main_api_format)),
+                            input_tokens=acc_input, cache_read_tokens=acc_cache_read,
+                            cache_create_tokens=acc_cache_create, output_tokens=acc_output,
+                            prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                            prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                            reasoning_replay_tokens=acc_reasoning_replay,
+                            tool_rounds=round_i, elapsed_s=acc_llm_elapsed,
+                        )
+                        return ""
 
                 plan = self._visible_reply_segment_plan(
                     reply,
@@ -5210,6 +5533,7 @@ class LLMClient:
                     turn_id=reply_turn_id,
                     ctx=ctx,
                     already_sent=_sticker_sent,
+                    force_send=kaomoji_force_sticker,
                 )
                 if slang_ask_user_fallback and not full_reply.strip():
                     return slang_ask_user_fallback
@@ -5298,7 +5622,8 @@ class LLMClient:
         reply, _reply_state = self._finalize_visible_reply(
             reply=result["text"] or "...",
             session_id=session_id,
-            force_reply=force_reply,
+            # Weak-reply floor (§3.5.5): companion turns never strip to SILENCE.
+            force_reply=force_reply or companion_hint is not None,
             has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
             is_group=is_group,
         )

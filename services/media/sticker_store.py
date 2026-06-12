@@ -570,6 +570,22 @@ class StickerStore:
             scored = self._retriever.score(query)
         return [sticker_id for sticker_id, _score in scored[:top_k]]
 
+    def search_by_intent_scored(self, query: str, top_k: int = 5) -> list[tuple[str, float]]:
+        """Like :meth:`search_by_intent` but keeps the BM25 relevance score.
+
+        Lets the caller apply a relevance floor — when even the best match scores
+        below the floor, the reply should stay text-only rather than attach an
+        off-topic sticker (2026-06-12: "匹配不到合适表情降级纯文字").
+        """
+        if not query or not query.strip():
+            return []
+        with self._lock:
+            if not self._index:
+                return []
+            self._ensure_search_index()
+            scored = self._retriever.score(query)
+        return [(sticker_id, float(score)) for sticker_id, score in scored[:top_k]]
+
     # ------------------------------------------------------------------
     # Prompt injection
     # ------------------------------------------------------------------

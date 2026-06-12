@@ -1903,11 +1903,47 @@ class StickerPlacementConfig(BaseModel):
         description="Enable post-reply sticker decision provider and segment-aware placement.",
     )
     cooldown_ms: int = 45_000
+    score_threshold: float = Field(
+        default=0.5,
+        description="Deterministic sticker send gate: send when the logit-linear "
+        "propensity score (sigmoid, [0,1]) >= this. Lower = more stickers. A narrow "
+        "soft band around it keeps slight randomness; outside it the decision is fixed.",
+        json_schema_extra={
+            "display_label": "表情发送阈值",
+            "help": "发图打分≥此值才发（0-1，越低越爱发图）。默认 0.5；想多发图调到 0.4，想克制调到 0.6。",
+            "recommended": "0.5",
+            "risk_level": "safe",
+            "restart_hint": "recommended",
+        },
+    )
+    intent_relevance_floor: float = Field(
+        default=0.5,
+        description="Minimum BM25 intent-match score for the chosen sticker. When no "
+        "library sticker matches the reply above this floor, the reply stays text-only "
+        "instead of attaching an off-topic sticker. 0 disables (always pick the best).",
+        json_schema_extra={
+            "display_label": "表情匹配相关性下限",
+            "help": "选中的表情与回复的匹配分需≥此值，否则这条纯文字发（不硬塞不贴题的图）。默认 0.5，0 关闭降级。",
+            "recommended": "0.5",
+            "risk_level": "safe",
+            "restart_hint": "recommended",
+        },
+    )
 
     @field_validator("cooldown_ms")
     @classmethod
     def _clamp_positive_sticker_cooldown(cls, value: int) -> int:
         return max(1, int(value))
+
+    @field_validator("score_threshold")
+    @classmethod
+    def _clamp_score_threshold(cls, value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    @field_validator("intent_relevance_floor")
+    @classmethod
+    def _clamp_intent_floor(cls, value: float) -> float:
+        return max(0.0, float(value))
 
 
 class TextPreflightConfig(BaseModel):

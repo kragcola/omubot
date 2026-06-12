@@ -119,11 +119,12 @@ async def test_post_reply_sticker_picks_contextual_match_over_frequency_top(tmp_
         runtime_state=runtime_state,
         sticker_placement_config=SimpleNamespace(enabled=True, cooldown_ms=45_000),
     )
-    # Seed a recent user message so _fallback_query yields a morning intent.
-    client._short_term.add("group_123", "user", "早上好呀大家")
+    # The bot's reply text is the query signal — a morning greeting reply
+    # should select the morning sticker via BM25 intent search.
     selected = client._select_post_reply_sticker(
         store,
         candidate_pool=(freq_id, morning_id),
+        reply="早上好呀大家",
         session_id="group_123",
         group_id="123",
         scope=client._humanization_scope(
@@ -135,7 +136,7 @@ async def test_post_reply_sticker_picks_contextual_match_over_frequency_top(tmp_
 
 
 async def test_post_reply_sticker_falls_back_to_pool_when_no_query(tmp_path) -> None:
-    """With no recent user message (no query), keep prior behaviour: pool top."""
+    """With an empty reply and neutral valence (no query), keep prior behaviour: pool top."""
     runtime_state = create_humanization_state_bus()
     store = StickerStore(storage_dir=str(tmp_path / "stickers"))
     a_id, _ = store.add(_JPEG_DATA, "笑哭", "开心接梗时发")
@@ -156,6 +157,7 @@ async def test_post_reply_sticker_falls_back_to_pool_when_no_query(tmp_path) -> 
     selected = client._select_post_reply_sticker(
         store,
         candidate_pool=(a_id, b_id),
+        reply="",
         session_id="group_999",
         group_id="999",
         scope=client._humanization_scope(
@@ -186,12 +188,12 @@ async def test_post_reply_sticker_skips_recently_used_contextual(tmp_path) -> No
         runtime_state=runtime_state,
         sticker_placement_config=SimpleNamespace(enabled=True, cooldown_ms=45_000),
     )
-    client._short_term.add("group_123", "user", "早上好呀大家")
     scope = client._humanization_scope(
         session_id="group_123", group_id="123", user_id="456", turn_id="turn-1"
     )
+    reply = "早上好呀大家"
     # Mark the top morning match as recently used; selection must pick the other.
-    top = store.search_by_intent("早上好呀大家", top_k=1)[0]
+    top = store.search_by_intent(reply, top_k=1)[0]
     client._runtime_state.set(
         STICKER_RECENT_USED_SLOT,
         {"sticker_ids": [top]},
@@ -202,6 +204,7 @@ async def test_post_reply_sticker_skips_recently_used_contextual(tmp_path) -> No
     selected = client._select_post_reply_sticker(
         store,
         candidate_pool=(freq_id, morning_a, morning_b),
+        reply=reply,
         session_id="group_123",
         group_id="123",
         scope=scope,
@@ -211,7 +214,127 @@ async def test_post_reply_sticker_skips_recently_used_contextual(tmp_path) -> No
     assert selected in {morning_a, morning_b}
 
 
-def test_bias_query_by_valence_appends_empathetic_terms_for_low_valence() -> None:
+async def test_post_reply_sticker_weak_reply_uses_valence_class(tmp_path) -> None:
+    """Weak reply (no emotion words in text) still selects by valence class.
+
+    Regression for the 2026-06-11 mis-match: a nickname-call turn produced a
+    reply with no emotion tokens. The old path keyed off ``_fallback_query``
+    (scheduler trigger boilerplate), whose filler tokens cross-matched an
+    unrelated sticker. The reply-as-query path falls back to the appended
+    valence words ("开心 兴奋 欢呼"), which pin the upbeat class on their own.
+    """
+    runtime_state = create_humanization_state_bus()
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"))
+    happy_id, _ = store.add(_JPEG_B, "兴奋", "适合在表达开心、兴奋或欢呼时发送")
+    sad_id, _ = store.add(_JPEG_C, "委屈", "适合在表达难过、委屈或想哭时发送")
+    tools = ToolRegistry()
+    tools.register(SendStickerTool(store, runtime_state=runtime_state))
+    client = LLMClient(
+        base_url="http://fake",
+        api_key="sk-fake",
+        model="test-model",
+        prompt_builder=PromptBuilder(persona_runtime=PersonaRuntime()),
+        short_term=ShortTermMemory(),
+        tools=tools,
+        thinker_enabled=False,
+        runtime_state=runtime_state,
+        sticker_placement_config=SimpleNamespace(enabled=True, cooldown_ms=45_000),
+    )
+    selected = client._select_post_reply_sticker(
+        store,
+        candidate_pool=(sad_id, happy_id),
+        reply="在呢在呢~",  # weak reply, no emotion tokens BM25 can match
+        session_id="group_123",
+        group_id="123",
+        scope=client._humanization_scope(
+            session_id="group_123", group_id="123", user_id="456", turn_id="turn-1"
+        ),
+        mood_valence=0.6,  # positive → appends 开心/兴奋/欢呼
+    )
+    await client.close()
+    assert selected == happy_id
+
+
+async def test_post_reply_sticker_no_match_falls_back_to_text(tmp_path) -> None:
+    """When no library sticker matches the reply above the intent floor, the
+    reply stays text-only (returns None) instead of attaching an off-topic
+    sticker (2026-06-12: "匹配不到合适表情降级纯文字")."""
+    runtime_state = create_humanization_state_bus()
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"))
+    # Library only has emotion stickers; the reply is about an unrelated topic.
+    store.add(_JPEG_B, "兴奋", "适合在表达开心、兴奋或欢呼时发送")
+    store.add(_JPEG_C, "委屈", "适合在表达难过、委屈或想哭时发送")
+    tools = ToolRegistry()
+    tools.register(SendStickerTool(store, runtime_state=runtime_state))
+    client = LLMClient(
+        base_url="http://fake",
+        api_key="sk-fake",
+        model="test-model",
+        prompt_builder=PromptBuilder(persona_runtime=PersonaRuntime()),
+        short_term=ShortTermMemory(),
+        tools=tools,
+        thinker_enabled=False,
+        runtime_state=runtime_state,
+        sticker_placement_config=SimpleNamespace(
+            enabled=True, cooldown_ms=45_000, score_threshold=0.5, intent_relevance_floor=0.5
+        ),
+    )
+    scope = client._humanization_scope(
+        session_id="group_123", group_id="123", user_id="456", turn_id="turn-1"
+    )
+    # High floor + a reply whose tokens don't match any usage_hint → no sticker.
+    selected = client._select_post_reply_sticker(
+        store,
+        candidate_pool=(),  # empty pool → no arbitrary fallback either
+        reply="量子色动力学的渐近自由",
+        session_id="group_123",
+        group_id="123",
+        scope=scope,
+        mood_valence=0.0,
+        intent_floor=99.0,  # nothing can clear this → must drop to text
+    )
+    await client.close()
+    assert selected is None
+
+
+async def test_post_reply_sticker_force_send_bypasses_intent_floor(tmp_path) -> None:
+    """kaomoji-enforce (force_send) bypasses the intent floor: the kaomoji-as-
+    sticker intent is explicit, so it picks the pool's best rather than dropping
+    to text even when nothing matches well."""
+    runtime_state = create_humanization_state_bus()
+    store = StickerStore(storage_dir=str(tmp_path / "stickers"))
+    happy_id, _ = store.add(_JPEG_B, "兴奋", "适合在表达开心、兴奋或欢呼时发送")
+    tools = ToolRegistry()
+    tools.register(SendStickerTool(store, runtime_state=runtime_state))
+    client = LLMClient(
+        base_url="http://fake",
+        api_key="sk-fake",
+        model="test-model",
+        prompt_builder=PromptBuilder(persona_runtime=PersonaRuntime()),
+        short_term=ShortTermMemory(),
+        tools=tools,
+        thinker_enabled=False,
+        runtime_state=runtime_state,
+        sticker_placement_config=SimpleNamespace(
+            enabled=True, cooldown_ms=45_000, score_threshold=0.5, intent_relevance_floor=0.5
+        ),
+    )
+    scope = client._humanization_scope(
+        session_id="group_123", group_id="123", user_id="456", turn_id="turn-1"
+    )
+    selected = client._select_post_reply_sticker(
+        store,
+        candidate_pool=(happy_id,),
+        reply="量子色动力学的渐近自由",
+        session_id="group_123",
+        group_id="123",
+        scope=scope,
+        mood_valence=0.0,
+        intent_floor=99.0,
+        force_send=True,  # explicit kaomoji intent → never drop图
+    )
+    await client.close()
+    assert selected == happy_id
     biased = LLMClient._bias_query_by_valence("今天好累", -0.6)
     assert biased.startswith("今天好累")
     assert "共情" in biased and "陪伴" in biased

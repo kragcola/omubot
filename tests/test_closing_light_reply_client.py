@@ -8,6 +8,7 @@ propagates (D2 — speculative gen must not swallow outer cancellation).
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -175,6 +176,111 @@ async def test_handle_light_reply_closing_uses_farewell_fallback(persona_runtime
     assert result["text"] == "好~"
 
 
+async def test_handle_light_reply_closing_invokes_sticker_hook(persona_runtime) -> None:
+    """2026-06-12: closing/greeting short-circuit the main LLM, so their sticker
+    decision must run here — otherwise they are structurally text-only and the
+    "弱回复必须带温度" intent is never honoured for them."""
+    client = await _client(persona_runtime)
+    client._call = AsyncMock(return_value={"text": "晚安哦"})  # type: ignore[method-assign]
+    sticker_hook = AsyncMock(return_value=False)
+    client._send_post_reply_sticker_if_needed = sticker_hook  # type: ignore[method-assign]
+
+    async def _emit(_segment: str) -> bool:
+        return True
+
+    try:
+        await client._handle_light_reply(
+            light_kind="closing",
+            thinker_action="light_reply",
+            conversation_text="睡了",
+            mood_text="",
+            user_id="1",
+            group_id="100",
+            identity_name="测试",
+            trigger=None,
+            on_segment=_emit,
+            timeline=None,
+            thinker_usage={},
+            session_id="group_100",
+            t0=0.0,
+            thinker_decision=SimpleNamespace(sticker=True),
+        )
+    finally:
+        await client.close()
+
+    sticker_hook.assert_awaited_once()
+    kwargs = sticker_hook.await_args.kwargs
+    assert kwargs["reply"] == "晚安哦"
+    assert kwargs["already_sent"] is False
+
+
+async def test_handle_light_reply_greeting_invokes_sticker_hook(persona_runtime) -> None:
+    client = await _client(persona_runtime)
+    client._call = AsyncMock(return_value={"text": "早呀~"})  # type: ignore[method-assign]
+    sticker_hook = AsyncMock(return_value=False)
+    client._send_post_reply_sticker_if_needed = sticker_hook  # type: ignore[method-assign]
+
+    async def _emit(_segment: str) -> bool:
+        return True
+
+    try:
+        await client._handle_light_reply(
+            light_kind="greeting",
+            thinker_action="light_reply",
+            conversation_text="早上好",
+            mood_text="",
+            user_id="1",
+            group_id="100",
+            identity_name="测试",
+            trigger=None,
+            on_segment=_emit,
+            timeline=None,
+            thinker_usage={},
+            session_id="group_100",
+            t0=0.0,
+            thinker_decision=SimpleNamespace(sticker=True),
+        )
+    finally:
+        await client.close()
+
+    sticker_hook.assert_awaited_once()
+
+
+async def test_handle_light_reply_sticker_failure_does_not_break_reply(persona_runtime) -> None:
+    """Best-effort: a sticker hook exception must not break the light reply."""
+    client = await _client(persona_runtime)
+    client._call = AsyncMock(return_value={"text": "晚安哦"})  # type: ignore[method-assign]
+    client._send_post_reply_sticker_if_needed = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("sticker boom")
+    )
+
+    async def _emit(_segment: str) -> bool:
+        return True
+
+    try:
+        result = await client._handle_light_reply(
+            light_kind="closing",
+            thinker_action="light_reply",
+            conversation_text="睡了",
+            mood_text="",
+            user_id="1",
+            group_id="100",
+            identity_name="测试",
+            trigger=None,
+            on_segment=_emit,
+            timeline=None,
+            thinker_usage={},
+            session_id="group_100",
+            t0=0.0,
+            thinker_decision=SimpleNamespace(sticker=True),
+        )
+    finally:
+        await client.close()
+
+    assert result is not None
+    assert result["text"] == "晚安哦"
+
+
 async def test_handle_light_reply_companion_injects_hint_without_emit(persona_runtime) -> None:
     client = await _client(persona_runtime)
     emit = AsyncMock(return_value=True)
@@ -223,3 +329,70 @@ async def test_handle_light_reply_ignores_non_light_action(persona_runtime) -> N
         await client.close()
 
     assert result is None
+
+
+async def test_handle_light_reply_greeting_generates_and_emits_token(persona_runtime) -> None:
+    client = await _client(persona_runtime)
+    client._call = AsyncMock(return_value={"text": "早呀~"})  # type: ignore[method-assign]
+    emitted: list[str] = []
+
+    async def _emit(segment: str) -> bool:
+        emitted.append(segment)
+        return True
+
+    try:
+        result = await client._handle_light_reply(
+            light_kind="greeting",
+            thinker_action="light_reply",
+            conversation_text="早安",
+            mood_text="",
+            user_id="1",
+            group_id="100",
+            identity_name="测试",
+            trigger=None,
+            on_segment=_emit,
+            timeline=None,
+            thinker_usage={},
+            session_id="group_100",
+            t0=0.0,
+        )
+    finally:
+        await client.close()
+
+    assert emitted == ["早呀~"]
+    assert result is not None
+    assert result["light_kind"] == "greeting"
+    assert result["text"] == "早呀~"
+
+
+async def test_handle_light_reply_greeting_uses_fallback(persona_runtime) -> None:
+    client = await _client(persona_runtime)
+    client._call = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
+    emitted: list[str] = []
+
+    async def _emit(segment: str) -> bool:
+        emitted.append(segment)
+        return True
+
+    try:
+        result = await client._handle_light_reply(
+            light_kind="greeting",
+            thinker_action="light_reply",
+            conversation_text="早",
+            mood_text="",
+            user_id="1",
+            group_id="100",
+            identity_name="测试",
+            trigger=None,
+            on_segment=_emit,
+            timeline=None,
+            thinker_usage={},
+            session_id="group_100",
+            t0=0.0,
+        )
+    finally:
+        await client.close()
+
+    assert emitted == ["早~"]
+    assert result is not None
+    assert result["text"] == "早~"

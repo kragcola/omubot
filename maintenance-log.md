@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-06-12 表情发图重做：去 Bernoulli 概率门 → 确定性评分（复用 RWS 范式）+ 配图缺口修复 + 无匹配降级纯文字 + 阈值进配置页（已部署）
+
+**变更类型**：行为重构 + 缺陷修复 + 配置，5 文件（decision_provider + sticker_store + client + config + 3 测试文件）。
+
+**起因（用户质疑链）**：烤群体检发现 bot 一张表情没发、只发了字符颜文字。逐层调研：① 6-10 `58d7b07` 引入的 Bernoulli 概率门把发图压到端到端 ~28%（thinker 要图 55% × 概率门 51% 两级串联相乘；概率门 base 0.7 封顶，energy0.46 再打折到 0.511）。② 用户追问"RWS 实装时删过概率，发图为何还留"——git 史证实：RWS（`b960a09`, 5-31）替换的是 scheduler 开火概率，sticker 概率门是独立另一套、且比 RWS 晚 10 天新引入，非漏删。③ 用户决定去掉纯概率、复用 RWS 系统。
+
+**调研结论（复用范式而非实例）**：RWS 的 bandit/reward 闭环靠"开火后群有无反应"，但配图动作无可观测群反应，reward 信号为空 → 不能直接复用。但 RWS 的 **logit 线性打分 + sigmoid + 阈值**范式（确定性、可解释、无随机）正是替代掷骰子的正解。
+
+**改了什么**：
+1. **确定性评分**（decision_provider.py）：新增 `compute_sticker_score()`（仿 `compute_rws`），各信号加权进 logit；`decide()` 改 `score >= threshold`，§3.5b 仅在阈值 ±0.1 窄带保留 rng 抖动。删 `_send_probability`/`_BASE_FREQUENCY_MULT`/`_mood_energy_multiplier`/`_MIN/_MAX_SEND_PROBABILITY`。thinker_veto/cooldown/withdraw 硬门不变。
+2. **无匹配降级纯文字**（sticker_store + client）：新增 `search_by_intent_scored()` 保留 BM25 分；`_select_post_reply_sticker` 当最高分 < `intent_relevance_floor` 时返回 None（这条纯文字发），不再硬塞 `candidate_pool[0]` 那张任意图。kaomoji-enforce（force_send）绕过 floor。
+3. **closing/greeting 配图缺口**（client `_handle_light_reply`）：这两类 short-circuit 主 LLM、结构性零配图，违背"弱回复必须带温度"。发完 token 后补 `_maybe_light_reply_sticker`（同评分门，best-effort 不破坏 light reply）。
+4. **阈值进配置页**（config）：`StickerPlacementConfig` 加 `score_threshold`(默认 0.5) + `intent_relevance_floor`(默认 0.5)，带 json_schema_extra → admin 配置页自动渲染，前端零改动。
+
+**行为变化**（蒙特卡洛，线上 energy0.46）：thinker 要图 ~51%→~100%、thinker 缺席 ~29%→~84%、veto 仍 0%、难过仍发。普通回复端到端 ~28%→~55%（≈thinker true 率）且**可预测**。
+
+**影响范围**：仅 sticker 决策内核 + 选图 + light_reply 配图 + 2 配置字段；无 schema 迁移、无 NapCat 变更。**验证（D4）**：全量 `uv run pytest` 2653 passed / 17 skipped / 0 failed；ruff + pyright 改动文件全绿；容器内实证 `score_threshold=0.5`/`intent_floor=0.5`/`search_by_intent_scored` live/thinker-wants score=0.922、Bot 384801062 connected 无 error。**部署**：rebuild bot，NapCat 全程 Running 未动。**回滚**：配置页 `score_threshold` 调高即软退；或 `git revert`。**文档**：方案 [tracking/sticker-deterministic-score-2026-06-12.md](docs/tracking/sticker-deterministic-score-2026-06-12.md)、D3 迁移清单 [migrations/sticker-deterministic-score-2026-06-12.md](docs/migrations/sticker-deterministic-score-2026-06-12.md)。
+
+---
+
+## 2026-06-12 Arbiter JSON 截断修复：_MAX_TOKENS 48→128 + 仲裁报错告警降噪（已部署）
+
+**变更类型**：缺陷修复，4 文件（arbiter + usage + 2 测试）。现象：管理员私信收到 `⚠ LLM call error: invalid_json:Expecting ',' delimiter: line 1 column 99 (char 98)`。
+
+**调查**（usage.db `llm_calls` 全量只读 SELECT）：invalid_json 共 20 条，**100% `call_type=arbiter` / model=deepseek-v4-flash**，占 arbiter 总调用 587 的 3.4%（全部错误 6.5%）。错误形态两种——`Unterminated string`(col 34) 与 `Expecting ',' delimiter`(col 98)——均为 **JSON 从中间被物理截断**特征。时间线：5-27（中断功能上线日）集中 19 条，6-12 偶发 1 条。
+
+**根因**：`_MAX_TOKENS=48` 太小。arbiter 三种输出里 interruption(`{"action","reason"}`) 与 correction 含**自由文本 `reason` 字段**，模型多写几字描述理由即超 48 token，JSON 还没闭合就被砍 → 解析失败。每次截断 = 整笔 input token（system+payload）白花 + 拿回废输出 + fallback 重走规则 + 私信刷管理员一条。arbiter 本有规则 fallback，**不影响 bot 回复**，纯属噪音与浪费。
+
+**修了什么**：
+- [arbiter.py](services/llm/arbiter.py) `_MAX_TOKENS` 48→128，留够闭合带 reason 的 JSON。**不增花销**：max_tokens 是上限非实际消耗，按实际生成计费；正常短输出花销不变，反而救回 3.4% 白花的截断调用。
+- [usage.py](services/llm/usage.py) `_check_alerts` error 分支：`call_type=='arbiter'` 只记日志、不私信（fallback 使其非降级，无需管理员介入）；其它 call_type 照常告警。
+
+**D1 同模式扫描**：grep 全仓 `max_tokens=<小值>` 的 JSON 输出位点。client.py:2867(24) 输出自由文本告别 token 非 JSON，无解析风险；reply_workflow.py:613(96) semantic gate 含 reason 但容量翻倍且 usage DB 零 invalid_json，无实证问题，不扩大改动。唯一实证截断位点 = arbiter。
+
+**影响范围**：仅 arbiter 输出上限 + arbiter 告警路由；无 schema / 无 NapCat 变更。**验证**：`uv run pytest` 全量 2649 passed / 17 skipped / 0 failed；ruff + pyright 改动文件全绿；新增 4 个回归测试（_MAX_TOKENS≥96 断言、arbiter error 不私信、非 arbiter error 仍告警）。容器内实证 `_MAX_TOKENS=128`、`arbiter DM-silence live=True`、Bot 384801062 connected 无 error。**部署**：commit 13643fc，rebuild bot，NapCat 全程 Running 未动。**回滚**：`git revert 13643fc`。
+
+---
+
 ## 2026-06-11 防自我复读：@应答不再重复刚自发说过的内容（代码完成，待部署）
 
 **变更类型**：缺陷修复，3 文件（scheduler + config + 测试）。烤群实证：bot 看到用户发的表情图，概率自发开火描述了一次（无引用，如"咦……这个表情被抓拍得好到位…我就是这副表情"），用户紧接着 @bot"这是谁"，bot 又从头描述同一张图一次（带引用，如"这可不就是我本人嘛~粉头发捂着嘴…"）。连续两张图各复现一次，看着像"前半描述、后半才突兀引用"，实为**同一张图被回了两次、内容重复**。
