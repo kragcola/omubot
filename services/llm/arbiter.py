@@ -16,7 +16,10 @@ from services.llm.provider import create_provider
 from services.llm.usage import UsageTracker
 
 _L = logger.bind(channel="arbiter")
-_MAX_TOKENS = 48
+# Must be large enough to close the JSON object even when the model writes a
+# free-text "reason" field (interruption/correction). 48 truncated mid-string
+# (~3.4% invalid_json), so the JSON never closed -> wasted call + admin alert.
+_MAX_TOKENS = 128
 
 _COMPLETENESS_SYSTEM_PROMPT = """你是 QQ 群聊完整性判断器。判断用户是否说完了当前这轮话。
 输出严格 JSON：{"complete": true/false, "confidence": 0.0-1.0}

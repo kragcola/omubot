@@ -127,6 +127,12 @@ class UsageTracker:
         if error:
             msg = f"⚠ LLM call error: {error}"
             _L.warning("usage_alert | {}", msg)
+            # Arbiter has a deterministic rule-based fallback, so its transient
+            # parse/timeout errors don't degrade the user-facing reply. Log them
+            # but don't DM the admin — otherwise every truncated/odd arbiter
+            # response spams an alert with no action to take.
+            if call_type == "arbiter":
+                return
             await self._alert_fn(msg)
             return  # error alert takes priority, skip others
 

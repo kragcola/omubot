@@ -208,6 +208,33 @@ async def test_alert_on_error(tracker: UsageTracker) -> None:
     assert "error" in alert_fn.call_args[0][0].lower() or "错误" in alert_fn.call_args[0][0]
 
 
+async def test_no_admin_dm_on_arbiter_error(tracker: UsageTracker) -> None:
+    # Arbiter has a rule-based fallback, so its transient parse/timeout errors
+    # don't degrade the reply — they must not DM the admin (anti-spam).
+    alert_fn = AsyncMock()
+    tracker.set_alert(alert_fn=alert_fn, cache_hit_warn=90.0, slow_threshold_s=999.0)
+    await tracker.record(
+        call_type="arbiter", user_id="1", group_id=None, model="deepseek-v4-flash",
+        input_tokens=20, cache_read_tokens=0, cache_create_tokens=0,
+        output_tokens=0, tool_rounds=0, elapsed_s=0.1,
+        error="invalid_json:Expecting ',' delimiter: line 1 column 99 (char 98)",
+    )
+    alert_fn.assert_not_called()
+
+
+async def test_non_arbiter_error_still_alerts(tracker: UsageTracker) -> None:
+    # Regression guard: the arbiter suppression must not silence other call types.
+    alert_fn = AsyncMock()
+    tracker.set_alert(alert_fn=alert_fn, cache_hit_warn=90.0, slow_threshold_s=999.0)
+    await tracker.record(
+        call_type="chat", user_id="1", group_id=None, model="m",
+        input_tokens=0, cache_read_tokens=0, cache_create_tokens=0,
+        output_tokens=0, tool_rounds=0, elapsed_s=0.5,
+        error="invalid_json:boom",
+    )
+    alert_fn.assert_called_once()
+
+
 async def test_no_alert_when_ok(tracker: UsageTracker) -> None:
     alert_fn = AsyncMock()
     tracker.set_alert(alert_fn=alert_fn, cache_hit_warn=90.0, slow_threshold_s=60.0)

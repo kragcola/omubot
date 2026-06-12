@@ -139,6 +139,15 @@ async def test_arbiter_interruption_returns_result() -> None:
     assert result.fallback is False
 
 
+def test_max_tokens_fits_reason_json() -> None:
+    """Regression: _MAX_TOKENS must leave room to close the JSON object even when
+    the model writes a free-text "reason"/"correction_type" field. 48 truncated
+    mid-string (~3.4% invalid_json), wasting the call and DM-spamming the admin."""
+    from services.llm.arbiter import _MAX_TOKENS
+
+    assert _MAX_TOKENS >= 96
+
+
 def test_interruption_prompt_covers_repeated_calls() -> None:
     """Regression: the interruption prompt must instruct abort_unsent for a user
     repeatedly @-ing / re-calling the bot (the three-"emu" defect), so the burst
