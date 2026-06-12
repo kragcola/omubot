@@ -219,6 +219,7 @@ class LogChannelConfig(BaseModel):
     system: bool = True
     debug: bool = False
     dream: bool = False
+    echo: bool = True
     bilibili: bool = True
     reply_workflow: bool = False
 
@@ -763,6 +764,15 @@ class ThinkerConfig(BaseModel):
 
     enabled: bool = False
     max_tokens: int = 256
+    force_reply_enabled: bool = Field(
+        default=True,
+        description="Run the pre-reply thinker even on force_reply turns (@-mention, "
+        "correction, directed_followup, …). Required for weak-reply classification "
+        "(light_kind / reply_necessity) on addressed turns — without it a short "
+        "negation like '不对' skips the thinker and gets a full multi-segment essay. "
+        "Costs one extra thinker call (~1.5s) on the @ hot path. Set false to restore "
+        "the legacy 'force_reply skips thinker' behavior.",
+    )
     necessity_gate_enabled: bool = Field(
         default=False,
         description="B3: downgrade a low-necessity proactive reply to wait (suppress 'showing off').",
@@ -1580,6 +1590,18 @@ class HumanizationConfig(BaseModel):
             "help": "低于该值时触发 light_ack；默认 0.4。",
             "recommended": "0.4",
             "risk_level": "careful",
+            "restart_hint": "recommended",
+        },
+    )
+    self_echo_window_s: float = Field(
+        default=15.0,
+        description="Window after the bot's own reply within which an @-mention is told not to "
+        "repeat what it just said (anti-self-echo). 0 disables.",
+        json_schema_extra={
+            "display_label": "防自我复读窗口（秒）",
+            "help": "刚自发回复后 N 秒内被 @，提示别重复刚说过的内容；默认 15s，0 关闭。",
+            "recommended": "15",
+            "risk_level": "safe",
             "restart_hint": "recommended",
         },
     )

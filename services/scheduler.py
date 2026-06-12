@@ -1085,7 +1085,7 @@ class GroupChatScheduler:
         return triggers
 
 
-    def _focused_trigger_reason(self, trigger: TriggerContext) -> str:
+    def _focused_trigger_reason(self, trigger: TriggerContext, slot: _GroupSlot | None = None) -> str:
         """Append a topic-focus directive to an addressed trigger's reason.
 
         Without this, an @-mention makes the bot reply to every lingering
@@ -1094,6 +1094,13 @@ class GroupChatScheduler:
         topic and not rake up older topic blocks. Gated on
         ``topic_block.enabled``; returns the original reason unchanged when
         disabled or for non-addressed modes.
+
+        Self-echo exception: when the bot *just* spoke (proactively commenting,
+        e.g. on an image) and the user then @-asks about the same thing, the
+        focus directive above would otherwise tell it to ignore "past topics"
+        — including its own fresh reply — and re-describe everything. Within
+        ``self_echo_window_s`` we instead tell it not to repeat what it just
+        said, so the @-reply becomes a short follow-up rather than a duplicate.
         """
         reason = str(getattr(trigger, "reason", "") or "")
         if self._topic_tracker is None:
@@ -1102,7 +1109,31 @@ class GroupChatScheduler:
         if mode not in self._FOCUS_TRIGGER_MODES:
             return reason
         directive = "（只回应对方这条消息当下的话题，不要把上文里别的、已经过去的话题也一并翻出来回答）"
+        echo = self._self_echo_directive(slot)
+        directive = f"{directive}{echo}" if echo else directive
         return f"{reason}{directive}" if reason else directive.strip("（）")
+
+    def _self_echo_directive(self, slot: _GroupSlot | None) -> str:
+        """Return an anti-self-echo directive when the bot replied within the
+        ``self_echo_window_s`` window, else empty string."""
+        if slot is None:
+            return ""
+        window_s = float(getattr(self._humanization_config, "self_echo_window_s", 15.0) or 0.0)
+        if window_s <= 0.0:
+            return ""
+        last_content = str(getattr(slot, "last_reply_content", "") or "").strip()
+        last_time = float(getattr(slot, "last_reply_time", 0.0) or 0.0)
+        if not last_content or last_time <= 0.0:
+            return ""
+        if time.time() - last_time > window_s:
+            return ""
+        preview = last_content if len(last_content) <= 40 else last_content[:40] + "…"
+        return (
+            "（你刚刚已经主动说过相关内容了：「"
+            f"{preview}"
+            "」，别重复刚才那些话，简短承接或换个角度补充就好；"
+            "要是真没什么新东西可说，轻轻回应对方一句即可，别再复述一遍）"
+        )
 
     def _receiver_role(
         self,
@@ -2048,7 +2079,7 @@ class GroupChatScheduler:
                             if trace_request_id:
                                 ctx.extra["u13_double_haiku_request_id"] = trace_request_id
                             self._timeline.add_pending_trigger(
-                                group_id, reason=self._focused_trigger_reason(trigger),
+                                group_id, reason=self._focused_trigger_reason(trigger, slot_ref),
                                 message_id=trigger.target_message_id,
                                 target_user_id=trigger.target_user_id,
                             )

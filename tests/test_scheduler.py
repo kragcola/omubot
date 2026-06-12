@@ -1206,8 +1206,12 @@ class TestOverhearerRole:
         assert len(llm.calls) == 1  # floor rescued the continuation
         await scheduler.close()
 
-    async def test_ratified_floor_zero_keeps_rws_behavior(self) -> None:
-        """Floor=0 (default) → no rescue; ratified still follows base prob."""
+    async def test_ratified_floor_zero_degrades_to_companion_rescue(self) -> None:
+        """Floor=0 (default) + ratified follow-up that the base prob would skip
+        now degrades to a companion weak-reply (the "宝宝降级" fix) instead of
+        SILENCE. A ratified continuation is a message that should be SEEN; rather
+        than dropping it on a probability miss, we fire a companion-mode trigger
+        so the thinker can pick a short ack/sticker."""
         llm = _FakeLLM(reply=None)
         scheduler = GroupChatScheduler(
             llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
@@ -1218,7 +1222,31 @@ class TestOverhearerRole:
         scheduler._topic_tracker.mark_bot_involved("111")
         scheduler.notify("111", user_id="u1", message_text="你懂雪人三项吗", message_id=1)
         await asyncio.sleep(0.1)
-        assert len(llm.calls) == 0  # no floor → base prob 0 skips
+        assert len(llm.calls) == 1  # companion rescue fired, not SILENCE
+        rescue_trigger = llm.calls[0]["trigger"]
+        assert rescue_trigger is not None and rescue_trigger.mode == "companion"
+        await scheduler.close()
+
+    async def test_ratified_companion_rescue_respects_light_cooldown(self) -> None:
+        """The companion rescue is rate-limited by the shared light cooldown so
+        it does not become "reply to every follow-up": a recent light reply
+        suppresses the rescue, leaving the continuation SILENT."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        scheduler._topic_tracker.observe("111", message_id=0, speaker="u1", text="姆姆你看", at_self=True)
+        scheduler._topic_tracker.mark_bot_involved("111")
+        # Pre-create the slot with a recent light reply → cooldown active.
+        from services.scheduler import _GroupSlot
+
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.last_light_time = time.time()
+        scheduler.notify("111", user_id="u1", message_text="你懂雪人三项吗", message_id=2)
+        await asyncio.sleep(0.1)
+        assert len(llm.calls) == 0  # within cooldown → no rescue, stays silent
         await scheduler.close()
 
 
@@ -1262,6 +1290,41 @@ class TestFocusedTriggerReason:
         s = self._scheduler(topic_block_config=None)  # tracker off
         trig = TriggerContext(reason="有人@了你", mode="at_mention", target_message_id=1, target_user_id="u1")
         assert s._focused_trigger_reason(trig) == "有人@了你"
+
+    def test_self_echo_directive_added_when_just_replied(self) -> None:
+        s = self._scheduler(topic_block_config=self._config())
+        slot = _GroupSlot()
+        slot.last_reply_content = "这个表情被抓拍得好到位，我就是这副表情"
+        slot.last_reply_time = time.time()
+        trig = TriggerContext(reason="有人@了你", mode="at_mention", target_message_id=1, target_user_id="u1")
+        out = s._focused_trigger_reason(trig, slot)
+        assert "不要把上文里别的" in out  # base directive still present
+        assert "你刚刚已经主动说过" in out  # self-echo exception appended
+        assert "别再复述一遍" in out
+
+    def test_self_echo_directive_skipped_outside_window(self) -> None:
+        s = self._scheduler(topic_block_config=self._config())
+        slot = _GroupSlot()
+        slot.last_reply_content = "刚说过的话"
+        slot.last_reply_time = time.time() - 999.0  # far outside 15s window
+        trig = TriggerContext(reason="有人@了你", mode="at_mention", target_message_id=1, target_user_id="u1")
+        out = s._focused_trigger_reason(trig, slot)
+        assert "你刚刚已经主动说过" not in out
+
+    def test_self_echo_directive_skipped_when_no_prior_reply(self) -> None:
+        s = self._scheduler(topic_block_config=self._config())
+        slot = _GroupSlot()  # last_reply_content empty, last_reply_time 0
+        trig = TriggerContext(reason="有人@了你", mode="at_mention", target_message_id=1, target_user_id="u1")
+        out = s._focused_trigger_reason(trig, slot)
+        assert "你刚刚已经主动说过" not in out
+
+    def test_self_echo_directive_absent_when_slot_not_passed(self) -> None:
+        # Backward-compat: callers that don't pass slot get the base directive only.
+        s = self._scheduler(topic_block_config=self._config())
+        trig = TriggerContext(reason="有人@了你", mode="at_mention", target_message_id=1, target_user_id="u1")
+        out = s._focused_trigger_reason(trig)
+        assert "不要把上文里别的" in out
+        assert "你刚刚已经主动说过" not in out
 
 
 class TestAddressedWaitDeferral:

@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-06-11 防自我复读：@应答不再重复刚自发说过的内容（代码完成，待部署）
+
+**变更类型**：缺陷修复，3 文件（scheduler + config + 测试）。烤群实证：bot 看到用户发的表情图，概率自发开火描述了一次（无引用，如"咦……这个表情被抓拍得好到位…我就是这副表情"），用户紧接着 @bot"这是谁"，bot 又从头描述同一张图一次（带引用，如"这可不就是我本人嘛~粉头发捂着嘴…"）。连续两张图各复现一次，看着像"前半描述、后半才突兀引用"，实为**同一张图被回了两次、内容重复**。
+
+**根因**（chat_lock 串行保证第二次能看到第一次回复，非时序竞态）：@ 走 `at_mention` 模式，`_focused_trigger_reason` 注入聚焦指令「只回应这条消息当下话题，不要把上文里已经过去的话题翻出来」。第一次自发回复此刻正属"已经过去的话题"——指令**恰好命令模型无视自己刚说过的同图**，重新描述。`slot.last_reply_content`/`last_reply_time` 基础设施已存在但只服务 correction 路径，普通 @ 没用上。
+
+**修了什么**（路 B：纯 prompt 层，不碰"被@必回"核心保证 / 工具集 / 引用逻辑）：
+- `_focused_trigger_reason` 加 `slot` 参数 + 自我感知例外：当 `last_reply_content` 在 `self_echo_window_s`（默认 15s）内非空，在聚焦指令后追加「你刚刚已经主动说过相关内容了：「<摘要>」，别重复刚才那些话，简短承接或换角度补充；真没新东西就轻轻回应一句，别再复述」。
+- 新增配置 `humanization.self_echo_window_s`（默认 15.0，0 关闭）。
+- 调用点 [scheduler.py](services/scheduler.py) `_do_chat` 传入 `slot_ref`。
+
+**引用落点不变**：第二条 @应答仍引用用户的 @ 消息（位置正确），只是内容从"重新描述图"变成"简短承接"。消除的是内容重复，那个"突兀感"随之消失。
+
+**影响范围**：仅 @应答（及 directed_followup/correction/qq_interaction）在刚自发回复后 15s 内的 prompt 文本；无 schema / 无依赖 / 无 NapCat 变更。**验证**：`uv run pytest` 全量 2646 passed / 17 skipped / 0 failed；ruff + pyright 改动文件全绿。**部署**：纯代码改动，rebuild bot。**回滚**：`git revert` 本次 commit，或配置置 `self_echo_window_s=0` 即时关闭。
+
+---
+
 ## 2026-06-11 分句器拟人化：专名 / 省略号 / 叠标点保护 + LLM 换行硬边界（代码完成，待部署）
 
 **变更类型**：缺陷修复 + 拟人增强，5 文件（2 分句器 + persona source + 2 测试）。承接烤群日志：`……` 被切成 `…`/`…`，乐队专名 `BanG Dream! MyGO!!!!!` 被叹号切碎成 `BanG Dream!`/`MyGO!`/`!`/`!` 一串孤立气泡（[migration](docs/migrations/segmentation-proper-noun-punct-protection-2026-06-11.md)）。
