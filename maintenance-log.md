@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-06-14 文档归档：已完成/已验收的迁移清单、执行追踪、审计调研移至 _archive
+
+**变更类型**：文档整理（纯 git mv，无代码/配置/运行态变更）。将已验收落地或调研内容已执行的 ~48 份文档移入各目录 `_archive/`。
+
+**归档范围**：
+- `docs/migrations/_archive/` — 16 篇已完成部署的 D3 迁移清单（RWS / spine / segmentation / sticker-score / weak-reply / arbiter / persona-v2 等；**保留 2 篇 PENDING: ccip-multi-character, topic-block-edge-model**）
+- `docs/tracking/_archive/` — 15 篇已完成的执行追踪 + 4 篇顶层调研/设计（agent-continuity-impl / sticker-* / weak-reply-audit / headroom-eval / group-concurrency-arch-plan / slang-governance 等；**保留 ~32 篇 ACTIVE/PENDING**）
+- `docs/audits/_archive/` — 9 篇调研已执行的审计 + 2 份支撑文件 + 5 份 `_assets/` JS 证据附件（prompt-cache / slang / reply-gating / qqbot-comparison / knowledge-graph-rag 等；**保留 6 篇 PENDING/未执行**）
+- `docs/superpowers/plans/_archive/` — 2 篇已收口路线图（ecosystem-roadmap, context-knowledge-system；**保留 1 篇 PENDING: multi-stage-pipeline**）
+
+**影响范围**：纯 git rename，零代码/配置/NapCat 变更。**回滚**：`git revert` 本次 commit。
+
+---
+
+
+**变更类型**：缺陷修复（设计-人设不自洽），2 文件（kernel/router + 1 测试）。
+
+**起因（启用后实测追溯）**：Living Persona 全量 2026-06-09 启用后，进容器拉 4 天实测数据复盘 A-M1 调参手感（R8 前置）。B 线表现超预期——`dream_reflection` 经历洞察卡 73 张、StoryArc `stage_play_competition_week` 从 `preparation` 推进到 `setback_replan`（变量随天数演化、L3 事件重规划真触发、事件预算守住 setback≤1）。但 **A-M1 tension 的落盘表 `storage/living_persona/m1_metrics.db` 全程只有 1 条事件**（一次真@，delta 0.03，从未接近 0.12 阈值）。初判"信号源稀疏"，被用户当场纠正：群里没真@，但**有大量伪@——连续叫 bot 昵称**（group 993065015 用户连环刷「emu。」，一分钟内 4 条）。
+
+**根因（同文件三条线判据不一致）**：`kernel/router.py` 里——① 回复义务 `is_addressed`（L1469-1473）认昵称前缀；② role/obligation 判定 `addressing.evidence`（L1553）认 `nickname_original`；③ **唯独 M1 tension 感知**用了最窄的 `_message_ats_self`（只认协议层真@）。persona source 白纸黑字"用名字/昵称叫我 = @我 = 直接对我说话"（昵称别名：凤笑梦/emu/笑梦/姆/姆姆/凤同学/凤/Emu），但 M1 把同等强度的昵称连呼当背景噪声丢弃 → tension 永远爬不起来，R8 要的烤群数据采集口径错了，不是样本稀疏。（注：`心情` 日志里偶见的 `tension=0.21~0.24` 是 MoodEngine part0 legacy 合并 tension 的 poke 老路径，与 M1 专属表不是一回事，勿混。）
+
+**修了什么**（采集口收敛到既有信号，最小改动）：
+- [kernel/router.py](kernel/router.py) M1 mention 触发条件从 `_message_ats_self(msg)` 改为复用上方已算好的 `AddressingContext`；新增谓词 `_addressing_triggers_m1_mention`，认 `target=="self" and evidence ∈ {at_self, nickname_original}`。判据与回复义务线同源。`register_m1_mention_irritation` wrapper 完全复用（内部已有 m1_enabled 门控 + 频率聚合 + 0.2 cap）。
+- **误报天然有保障**：`nickname_original` 只匹配句首昵称 + vocative 边界（空格/标点/句末），所以「看凤笑梦表情包」「《笑梦吃冰淇淋》视频」这类聊角色/发表情包不触发——router 早把"呼叫"与"提及"分开了，本次只是复用。
+- `reply_to_self` 刻意排除（回复 bot 语义弱于主动 cue，保持 mention=主动呼叫的纯粹），留作后续。
+
+**影响范围**：仅 A-M1 tension 信号采集口（mention 一侧）；poke 一侧、衰减动力学、阈值、prompt 行为指导均不变；无 schema / 无 NapCat 变更。`dialogue_climate.m1_enabled` 仍是灰度开关、运行态为开。**验证（D4）**：ruff + pyright 改动文件全绿；新增 4 个回归测试（真@触发✓、昵称呼叫触发✓、中间提及不触发✓、reply-to-self 不触发✓）；`tests/test_ingest_ordering_and_at_detection.py tests/test_router_qq_interactions.py tests/test_mood.py` 88 passed。容器内实证 `_addressing_triggers_m1_mention` 已进镜像（命中 2 处）、Bot 384801062 connected 无 error。**部署**：rebuild bot（`up bot --build`，只 recreate qq-bot）；NapCat 启动时间 `2026-06-11T09:25:38`/restart=0 与 rebuild 前逐字节一致、登录态正常未动。**回滚**：`git revert` 本次 commit，或 `dialogue_climate.m1_enabled=false` 即时关闭整个 M1。
+
+**待校准（移交后续）**：昵称接入后信号量将从"4天1次"暴涨到"数十次/天"，`_M1_IRRITATION_MENTION_TENSION=0.03` 单价可能很快撞 0.2 cap，需跑几天看 `m1_metrics.db` 真实分布后下调，这恰好补齐 R8 要的校准样本。详见 [Part A §8 运行实测](docs/tracking/living-persona-partA-dialogue-climate.md)。
+
+---
+
 ## 2026-06-12 表情发图重做：去 Bernoulli 概率门 → 确定性评分（复用 RWS 范式）+ 配图缺口修复 + 无匹配降级纯文字 + 阈值进配置页（已部署）
 
 **变更类型**：行为重构 + 缺陷修复 + 配置，5 文件（decision_provider + sticker_store + client + config + 3 测试文件）。
