@@ -216,7 +216,11 @@ class EchoPlugin(AmadeusPlugin):
             await self._humanizer.delay(visible, **self._get_humanizer_runtime(group_id))
             await ctx.bot.send_group_msg(group_id=int(group_id), message=Message(echo_reply))
         else:
-            segments = ctx.raw_message.get("segments")
+            # Repeat the ORIGINAL (pre-strip) segments so a nickname vocative
+            # like "姆。" is echoed in full, not the adapter-stripped "。".
+            # Fall back to stripped segments when the router didn't supply the
+            # original (e.g. non-group adapters or older callers).
+            segments = ctx.raw_message.get("echo_segments") or ctx.raw_message.get("segments")
             visible = _visible_text_for_humanizer(echo_key)
             await self._humanizer.delay(visible, **self._get_humanizer_runtime(group_id))
             await ctx.bot.send_group_msg(group_id=int(group_id), message=segments)

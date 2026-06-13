@@ -13,8 +13,12 @@ __pycache__
 .pytest_cache
 .ruff_cache
 .mypy_cache
+.cache/
 .__*
 .research/
+.workspace/
+tmp/
+pytest-of-kragcola/
 config/
 storage/
 storage.bind-mount-snapshot-*/

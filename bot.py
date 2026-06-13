@@ -91,6 +91,7 @@ _CHANNEL_LABELS = {
     "system": "系统    ",
     "debug": "调试    ",
     "dream": "梦境    ",
+    "echo": "复读    ",
     "bilibili": "B站     ",
 }
 
