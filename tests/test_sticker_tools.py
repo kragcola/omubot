@@ -76,7 +76,9 @@ def test_save_sticker_schema(store: StickerStore, superusers: set[str]) -> None:
     assert "image_tag" in props
     assert "description" in props
     assert "usage_hint" in props
-    assert set(schema["required"]) == {"image_tag", "description", "usage_hint", "requested_by"}
+    # requested_by is now optional (bot can proactively save without a requester).
+    assert set(schema["required"]) == {"image_tag", "description", "usage_hint"}
+    assert "requested_by" in props
 
 
 def test_save_sticker_name_and_description(store: StickerStore, superusers: set[str]) -> None:
@@ -245,6 +247,39 @@ async def test_save_sticker_bot_steal(
     entry = store.get(stk_id)
     assert entry is not None
     assert entry["source"] == "stolen"
+
+
+async def test_save_sticker_bot_proactive_no_requester(
+    store: StickerStore, superusers: set[str], jpeg_file: Path
+) -> None:
+    """Bot proactively saves with no requested_by at all: allowed, source='stolen'."""
+    tool = SaveStickerTool(store, superusers)
+    # No ctx.user_id (scheduler-driven), no requested_by -> bot's own decision.
+    ctx = _ctx_with_tag("", "img:1", str(jpeg_file))
+
+    result = await tool.execute(
+        ctx, image_tag="img:1", description="有趣的梗图", usage_hint="吐槽时发",
+    )
+
+    assert "已收录" in result
+    stk_id = result.split(" ")[0]
+    entry = store.get(stk_id)
+    assert entry is not None
+    assert entry["source"] == "stolen"
+
+
+async def test_save_sticker_named_non_admin_still_rejected(
+    store: StickerStore, superusers: set[str], jpeg_file: Path
+) -> None:
+    """A named non-admin requester is still rejected (no coaxing the bot on command)."""
+    tool = SaveStickerTool(store, superusers)
+    ctx = _ctx_with_tag("", "img:1", str(jpeg_file))
+
+    result = await tool.execute(
+        ctx, image_tag="img:1", description="x", usage_hint="y", requested_by="999",
+    )
+
+    assert "管理员" in result
 
 
 # ---------------------------------------------------------------------------

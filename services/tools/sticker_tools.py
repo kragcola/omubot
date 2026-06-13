@@ -32,8 +32,10 @@ class SaveStickerTool(Tool):
         return (
             "收录一张对话中的图片到你的表情包库。"
             "image_tag 使用图片旁边的 «img:N» 标签。"
-            "只在管理员要求时才调用，必须将管理员QQ号填入 requested_by。"
-            "只在你完全理解图片含义、清楚使用场景、且符合自己性格时才调用。"
+            "两种场景可以调用：① 管理员明确要求收录时，把管理员QQ号填入 requested_by；"
+            "② 你自己觉得这张表情有趣、好用、符合你的性格、且清楚使用场景时，主动收录，"
+            "此时 requested_by 留空。"
+            "只在你完全理解图片含义、清楚使用场景时才调用，不要收录看不懂或低质的图。"
         )
 
     @property
@@ -55,10 +57,10 @@ class SaveStickerTool(Tool):
                 },
                 "requested_by": {
                     "type": "string",
-                    "description": "发起请求的用户QQ号（群聊中从消息上下文提取）",
+                    "description": "发起请求的用户QQ号（管理员要求收录时必填；你自己主动收录时留空）",
                 },
             },
-            "required": ["image_tag", "description", "usage_hint", "requested_by"],
+            "required": ["image_tag", "description", "usage_hint"],
         }
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
@@ -70,16 +72,19 @@ class SaveStickerTool(Tool):
         user_is_admin = bool(ctx.user_id) and ctx.user_id in self._superusers
         requested_is_admin = bool(requested_by) and requested_by in self._superusers
 
-        # Trusted requester:
-        #   - explicit admin caller (user_is_admin)
-        #   - group chat where ctx.user_id is empty but requested_by is admin
-        # Bot proactive: caller is non-admin but requested_by is admin -> "stolen"
+        # Source resolution:
+        #   - explicit admin caller, or group chat where the request came from admin
+        #     -> trusted "admin" save
+        #   - bot proactive (no named requester): bot decided it likes the sticker
+        #     -> "stolen"
+        #   - a named non-admin requester is rejected (don't let group members
+        #     coax the bot into saving arbitrary images on command)
         if user_is_admin or (not ctx.user_id and requested_is_admin):
             source = "admin"
-        elif requested_is_admin:
+        elif requested_is_admin or not requested_by:
             source = "stolen"
         else:
-            return "只有管理员可以收录表情包"
+            return "只有管理员可以指名要求收录表情包"
 
         tag_map: dict[str, str] = ctx.extra.get("image_tags", {})
         path_str = tag_map.get(image_tag)
