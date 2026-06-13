@@ -31,3 +31,5 @@
   - 落地要点：删 `_blocked_by_mood`/英文 mood 集合死代码 → 二轴乘子（energy 缩放概率地板 0.5、valence 偏置选图 query）；thinker:false 改 ×0.6 降权非否决（D1=a）；affection_stage 真实接线（B3）；base_frequency 接 `GroupStickerMode`（off→熄火）；D1 同模式顺修 `_should_force_kaomoji_sticker_round` 同源死代码。
   - F1 已满足：`config/config.json` 的 `sticker_placement.enabled` 已为 true，部署即生效。回滚：config 关该开关秒级熄火，或 `git checkout` 两源文件。
   - NapCat 不得 recreate（D6）。
+
+- **话题块系统缺陷审计 + 重构评审 + 搜索审计**（待立项修复，**仅审计/评审未动代码**）：复杂多话题多人物极端模拟，发现 7 项缺陷（3 高 3 中/低）。报告 `docs/tracking/topic-block-multitopic-defects-audit-2026-06-11.md`（§1-5 缺陷，§6 用户"注册/合并/降级"提案评审，§7 学术搜索审计，§8 风险B再审）。根因：B 系列把"并发话题"建模成"参与者无序 set 并集"+无 message_id→block 反查+deque 插入序淘汰。**搜索审计关键转向**：该问题=NLP 成熟领域 conversation disentanglement（Kummerfeld 2019 IRC 语料），标准解=维护"消息→前驱边"、块=连通分量、单消息 attribute 为基本操作（**§6.3 澄清：用户"引用归入被引用块"=attribute 单条消息，正确，非 merge 块**）。**§8 风险B再审**：用户论点"引用回复复活低活跃块、绕开相似度门"结构正确（WeChat Q&R sequence-jumping 文献支持跨时复活），把风险B 收窄到"无引用接话"子集（保守~半数仍需相似度兜底）。**三条护栏**：①L2 不可"只审高活跃块"省算力（伤无引用复活）；②引用是强先验非硬真值（防 broadcast/reframe 误并）；③低活跃块衰减≠物理删除（否则 message_id 反查失败）。推荐路径 L0 边模型→L1 线性打分→L2 活跃度衰减（守护栏①）→L3 嵌入（可选）。缺陷6+B2 角色门 omubot 特有、文献不覆盖。**本轮未写任何修复代码。**

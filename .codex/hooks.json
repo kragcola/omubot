@@ -6,12 +6,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=$(jq -r '.tool_input.file_path // \"\"' 2>/dev/null); norm=${f#/Volumes/OmubotDisk/omubot/}; norm=${norm#./}; norm=${norm#omubot/}; if echo \"$norm\" | grep -qE '(maintenance-log|project-info)\\.md$'; then echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"你刚编辑了项目文档（'\"$norm\"'）。请确保 maintenance-log.md 和 docs/project-info.md 之间的信息保持一致，不要出现矛盾数据。\"}}'; fi",
+            "command": "f=$(jq -r '.tool_input.file_path // \"\"' 2>/dev/null); norm=${f#/Volumes/OmubotDisk/omubot/}; norm=${norm#./}; norm=${norm#omubot/}; if echo \"$norm\" | grep -qE '(maintenance-log|project-info)\\.md$'; then echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"项目文档已改（'\"$norm\"'）：必要时同步 maintenance-log/project-info。\"}}'; fi",
             "timeout": 3
           },
           {
             "type": "command",
-            "command": "f=$(jq -r '.tool_input.file_path // \"\"' 2>/dev/null); norm=${f#/Volumes/OmubotDisk/omubot/}; norm=${norm#./}; norm=${norm#omubot/}; if echo \"$norm\" | grep -qE '(^|/)(AGENTS\\.md|CLAUDE\\.md|bot\\.py|Dockerfile|docker-compose[^/]*|pyproject\\.toml|\\.codex/|\\.claude/|\\.agents/|config/(config\\.toml|config\\.json|soul/|\\.env)|services/|plugins/|kernel/|admin/|tests/|scripts/dev/)'; then echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"你刚修改了代码或配置（'\"$norm\"'）。请考虑是否需要在 maintenance-log.md 中追加一条维护记录：日期、变更类型、变更内容、影响范围。\"}}'; fi",
+            "command": "f=$(jq -r '.tool_input.file_path // \"\"' 2>/dev/null); norm=${f#/Volumes/OmubotDisk/omubot/}; norm=${norm#./}; norm=${norm#omubot/}; if echo \"$norm\" | grep -qE '(^|/)(AGENTS\\.md|CLAUDE\\.md|bot\\.py|Dockerfile|docker-compose[^/]*|pyproject\\.toml|\\.codex/|\\.claude/|\\.agents/|config/(config\\.toml|config\\.json|soul/|\\.env)|services/|plugins/|kernel/|admin/|tests/|scripts/dev/)'; then echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"高影响改动（'\"$norm\"'）：必要时同步 active tracker / maintenance-log。\"}}'; fi",
             "timeout": 3
           }
         ]

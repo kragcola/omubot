@@ -37,6 +37,7 @@ storage/backups/
 storage/image_cache/
 storage/stickers/
 storage/plugins/
+storage/living_persona/
 storage.bind-mount-snapshot-*/
 .restore-staging/
 storage-export/
@@ -69,6 +70,8 @@ local/cpa/
 !.claude/skills/omubot-admin-console/agents/openai.yaml
 !.claude/skills/omubot-design-system/
 !.claude/skills/omubot-design-system/SKILL.md
+!.claude/skills/omubot-continuity/
+!.claude/skills/omubot-continuity/SKILL.md
 !.claude/handoff/
 !.claude/handoff/*.md
 .vscode/
