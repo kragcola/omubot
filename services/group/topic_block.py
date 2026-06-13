@@ -187,6 +187,16 @@ class TopicBlockTracker:
         if block is not None:
             block.bot_involved = True
 
+    def pick_block_by_id(self, group_id: str, block_id: str) -> TopicBlock | None:
+        """Return the block with this id (any age), or None. Used by the
+        scheduler to anchor a per-block fire to its representative message."""
+        if not block_id:
+            return None
+        for b in self._blocks.get(group_id, ()):  # type: ignore[arg-type]
+            if b.block_id == block_id:
+                return b
+        return None
+
     def pick_anchor_block(
         self,
         group_id: str,
