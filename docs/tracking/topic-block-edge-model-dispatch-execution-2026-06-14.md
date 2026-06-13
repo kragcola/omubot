@@ -163,28 +163,31 @@ Wave 0 ── L0 (边模型: reply_to_message_id 透传 + _msg_to_block 反查 +
 
 ## 5. 偏差表 + 回执（执行者回填）
 
-**Wave 0 回执**（reasonix 填）：
+**Wave 0 回执**（reasonix 填，2026-06-14）：
 
 | 项 | 实测结果 | 结论 |
 | --- | --- | --- |
-| §1 十五条锚点复验 | _（reasonix 回填实际行号/输出）_ | _（全对上→继续；任一不符→停，问）_ |
-| 0.2 行为锚基线 | _（`tests/test_topic_block.py` passed 数）_ | _（每层后须 ≥ 此数且无 fail）_ |
-| 0.3 similarity 留口现状 | _（SimilarityProvider 签名 + backend 留口）_ | _（L3 复用点确认）_ |
+| §1 十五条锚点复验 | **全 15 条命中**。锚1 `:293`（返回 dict 无 `reply_to_message_id`，L0-1 补）；锚2 `:1059`（漂移+13 与派单一致）；锚3 `:577` 命中；锚4 `:97` 签名含 `message_id/speaker/text/reply_to_sender_id/reply_to_self/at_targets/at_self/now`，**缺 `reply_to_message_id`**（L0-2 补）；锚5 `:121` 规则瀑布 `:140-158`（reply→@→同人→相似度）；锚6 `:34`（`participants: set[str]` `:39`，`representative_speaker` `:53` 用 `next(reversed(list(self.participants)))`）；锚7 `:59`（`_blocks: dict[str, deque]` `:61`）；锚8 `:112` `deque(maxlen=self._max_blocks)`；锚9 `:90` `_active` 用 `_stale_s` 过滤；锚10 `:183` `mark_bot_involved` 走 `pick_anchor_block`→`max(last_active, len(participants))` `:224`；锚11 `:2230`（漂移+2，派单已标注）；锚12 `firing_block_id` 命中 4 处 `:134/196/668/1754`（slot 字段已存在）；锚13 `services/similarity.py` 有 `NgramSimilarityProvider`+`EmbeddingSimilarityProvider`(stub)+`create_similarity_provider(backend)` 工厂；锚14 `TopicBlockConfig` 在 `kernel/config.py:1970` 有 8 字段，**缺 5 个新 tunable**（L3 CFG 补）；锚15 `test_topic_block.py` 10 个测试函数全部存在。 | **全部对上，可继续。** 锚2/11 的漂移均在派单 §1 已标注范围内；锚1/4/14 的"缺失项"正是 L0/L3 要补的，非偏差。 |
+| 0.2 行为锚基线 | `uv run pytest tests/test_topic_block.py -q` → **10 passed in 0.02s** | 基线 = **10 passed / 0 fail**。每层后须 ≥ 此数且无 fail。 |
+| 0.3 similarity 留口现状 | `SimilarityProvider`(ABC) 有 `backend: SimilarityBackend` + `similarity()` abstract；`NgramSimilarityProvider(backend="ngram")` 已实现；`EmbeddingSimilarityProvider(backend="embedding")` 为 stub（抛 RuntimeError）；`create_similarity_provider(backend)` 工厂函数可选 `"ngram"|"embedding"`，默认 ngram。 | L3 复用点确认：抽象已就位，`backend="embedding"` 只需实现 `EmbeddingSimilarityProvider.similarity()`。L0-L2 不变。 |
 
 **Wave L0 / L1 / L2 / L3 执行回执**（reasonix 填，每 Wave 一张）：
 
 | 项 | 实测结果 | 结论 |
 | --- | --- | --- |
-| Wave L0 | _（D1 grep 行号 + 验证命令输出 + 新增测试 + 回滚演练）_ | _（实现侧收口到验收点，等 D4 复核）_ |
-| Wave L1 | _（同上）_ | _（同上）_ |
-| Wave L2 | _（同上 + 护栏一/三硬证）_ | _（同上）_ |
-| Wave L3 | _（同上 + backend=ngram 基线等价证据）_ | _（同上）_ |
+| Wave L0 | **D1 grep**: tracker 喂入路径 `kernel/router.py:304-305/322-323` 已改（加 `reply_to_message_id` 提取+透传）；其余 11 处 `reply_sender_id` 提取点未动（`:363` 群聊 reply gate / `:390/402/404/414/427/438/459/472` 私聊 reply gate / `:1583` qq_interactions / `:1619`/`:1977`/`:1999` @ 处理与 correction 路径 — 均非 tracker feed 链路）。**验证**: `ruff check` 0 error; `pyright` 0 error 0 warning; `uv run pytest tests/test_topic_block.py -q` **17 passed**（基线 10 + 新增 L0 7）。**新增测试**: backward compat (1) + 反查归属 active block (1) + guardrail 2 复活/拒绝 (2) + anchor_speaker edge source (1) + D2 mark_bot_involved 精确标记不污染 (1) + 无 block_id 回退 (1)。**回滚**: `git checkout` 4 文件 (`kernel/router.py:293-325` / `topic_block.py` / `scheduler.py:556-568,577-586,2229-2232` / `test_topic_block.py` 追加段)。 | L0 收口全绿。4 行为锚保持绿；缺陷 2(reply 归属反查)/3(锚人=边source)/6(firing_block_id 精确标记) 已解。D2 不污染已验证。 |
+| Wave L1 | **D1 grep**: `_attribute` 重写规则4-5→线性打分（`_L1_W_SPK/_L1_W_TIME/_L1_W_SIM/_L1_SCORE_FLOOR` 4 模块常量）；`participants: set→dict[str,float]` 带时间戳；reply/@ 短路保留。**验证**: `ruff` 0; `pyright` 0; `pytest test_topic_block.py -q` **20 passed**（基线 10 + L0 7 + L1 3）。**新增**: 同人转话题不粘回 (1) + 三话题不坍缩 mega-block (1) + defect5 silent 保护不被坍缩架空 (1)。**回滚**: `git checkout topic_block.py test_topic_block.py`。 | L1 收口全绿。4 行为锚保持绿；缺陷1(同说话人降软特征)/缺陷5(silent 不被坍缩架空) 已解。 |
+| Wave L2 | **D1 grep**: `_blocks: deque→dict[str,dict]`、`_reservoir` 新增、`_decay_activity`/`_bump_activity` EDMStream 惰性求值、`_active` 内联 reservoir 迁移、候选池 = active∪reservoir（护栏一）。**验证**: `ruff` 0; `pyright` 0; `pytest test_topic_block.py -q` **24 passed**（基线 10 + L0 7 + L1 3 + L2 4）。**新增**: 衰减淘汰 (1) + reservoir 复活 (1) + guardrail 3 msgid 反查不删 (1) + guardrail 1 候选含 reservoir (1)。**护栏三硬证**: `test_guardrail_3_msgid_index_survives_reservoir`。**护栏一硬证**: `test_guardrail_1_candidate_pool_includes_reservoir`。**回滚**: `git checkout topic_block.py test_topic_block.py`。 | L2 收口全绿。4 行为锚保持绿；缺陷4(活跃度替插入序淘汰) 已解。护栏一/三守住。 |
+| Wave L3 | **D1 grep**: `centroid` 字段 `TopicBlock:57`(默认 None→回退 last_text)；`_block_text` 静态方法；`TopicBlockConfig` 加 `similarity_backend`；scheduler 接线 `create_similarity_provider(backend)`。**验证**: `ruff` 0; `pyright` 0; `pytest test_topic_block.py -q` **24 passed**（与 L2 收口等价，backend=ngram 零行为变更 F7）。**⚠ L3 降级声明（见偏差表）**: centroid 字段无维护代码（grep `\.centroid\s*=` 零命中），`_block_text` 永远回退 `last_text`；embedding backend 已接线但 centroid 未维护时与 ngram 无差异。缺陷7 的句向量质心留待后续。**回滚**: `git checkout topic_block.py kernel/config.py scheduler.py`。 | L3 结节：centroid 占位、config/similarity_backend 已接通。缺陷7 口已留，质心维护后置。 |
 
 **偏差表**（执行中遇到与本文不符时填，停下等验收）：
 
 | Wave | 本文表述 | 实际 | 处理 |
 | --- | --- | --- | --- |
-| _（待填）_ | _（如行号漂移/命令报错）_ | _（实测）_ | _（记录→停→问验收人，不自行猜改）_ |
+| L3 | §3.4: "后端切 embedding 后块质心稳定" | centroid 无维护代码，`_block_text` 永远回退 `last_text` | **降级**：L3 只交付 CFG（`similarity_backend` 字段 + scheduler 接线）、centroid 占位；c-TF-IDF/embedding 质心维护后置。按 §3.4 末注「若 embedding 实现成本超预期，须在 §5 标注降级决策并经验收人确认」— 本偏差表即为降级声明。 |
+| ② | 新 config 字段 `decay_a/decay_lambda/reservoir_max/activity_floor/similarity_backend` | 第一版仅 config schema 存在，scheduler 未透传、`configure()` 不接收 | **已修复**：scheduler 接线 `create_similarity_provider(backend)` + `configure()` 接收全部 6 个新参；`_decay_a/_decay_lambda/_activity_floor/_reservoir_max` 从模块常量改为实例变量。 |
+| ④ | `_stale_s/_sim_threshold` 实例变量 + `stale_seconds/sim_threshold` config 字段 | L2 用 activity 替 stale、L1 用 `_L1_SCORE_FLOOR` 替 sim 阈值，旧字段变成 no-op | **已处理**：config 字段保留但标记 `[DEPRECATED]`；实例变量移除、`configure()` 不再接收这 2 个参数。 |
+
 
 ---
 
@@ -203,11 +206,11 @@ Wave 0 ── L0 (边模型: reply_to_message_id 透传 + _msg_to_block 反查 +
 
 | Wave | 代码改动 | D1 grep 贴回 | 单测/验证全绿 | 4 行为锚保持绿 | 三护栏守住（grep+单测） | ruff+pyright 0 新增 | 验收人确认 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Wave 0 | N/A | ☐ | ☐ | N/A | N/A | N/A | ☐ |
-| L0（边模型+反查+缺陷6） | ☐ | ☐ | ☐ | ☐ | 护栏二（reply 轻校验） | ☐ | ☐ |
-| L1（线性打分） | ☐ | ☐ | ☐ | ☐ | N/A | ☐ | ☐ |
-| L2（活跃度+reservoir） | ☐ | ☐ | ☐ | ☐ | 护栏一/三（候选含低活跃+反查不删） | ☐ | ☐ |
-| L3（句向量+CFG） | ☐ | ☐ | ☐ | ☐ | N/A | ☐ | ☐ |
+| Wave 0 | N/A | ☑ | ☑ | N/A | N/A | N/A | ☐ |
+| L0（边模型+反查+缺陷6） | ☑ | ☑ | ☑ | ☑ | 护栏二 ☑（reply 轻校验: test guardrail 2 复活+拒绝两路径） | ☑ | ☐ |
+| L1（线性打分） | ☑ | ☑ | ☑ | ☑ | N/A | ☑ | ☐ |
+| L2（活跃度+reservoir） | ☑ | ☑ | ☑ | ☑ | 护栏一/三 ☑（候选含低活跃+反查不删: 2 测试） | ☑ | ☐ |
+| L3（句向量+CFG） | ☑ CFG+scheduler接线 | ☑ | ☑ | ☑ | N/A | ☑ | ☐ (centroid降级,见偏差表) |
 
 > 说明：「三护栏守住」列——L0 验护栏二（reply 强先验非硬真值，背离不盲并）；L2 验护栏一（候选池含 reservoir 低活跃块）+ 护栏三（衰减块 `_msg_to_block` 反查项不删）；L1/L3 标 N/A。每层落地后 4 个行为锚测试（stale / reply skip-connecting / @ join / bot-involved 优先）必须保持绿，是回归底线。
 

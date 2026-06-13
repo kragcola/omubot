@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-06-14 话题块边模型 L0-L3 重构 — 返工修复（代码完成，待部署）
+
+**变更类型**：缺陷修复（返工），4 文件（`topic_block.py` + `scheduler.py` + `config.py` + `test_topic_block.py`）。
+
+**返工项**（验收人 2026-06-14 实测发现）：
+① **_msg_to_block 无界增长**：`reset()` 补 `_msg_to_block.pop(group_id, None)`；新增 `_prune_msg_index()` 在 reservoir 驱逐溢出块时清理对应 msgid 条目。
+② **新 config 字段死接线**：scheduler 接线 `create_similarity_provider(backend)` + `configure()` 接收 6 新参（`decay_a/decay_lambda/activity_floor/reservoir_max/attrib_recent_seconds/max_blocks`）；`_decay_a` 等从模块常量改为实例变量。
+③ **L3 降级声明**：centroid 确认无维护代码（`_block_text` 回退 `last_text`），派单 §5 偏差表显式标注降级；embedding backend 已接线但与 centroid 未维护时与 ngram 等价。
+④ **死代码清理**：删 `_all_candidates()`（零调用）；删 `_stale_s/_sim_threshold` 实例变量及 `configure()` 对应入参；config 字段保留但标记 `[DEPRECATED]`。
+
+**验证**：`ruff` 0；`pyright` 0；`pytest test_topic_block.py` 24 passed；`reset` `_msg_to_block` 清理已实证。
+
+**回滚**：`git checkout` 改动文件。
+
+---
+
+
+**变更类型**：架构重构，5 文件（`topic_block.py` + `kernel/router.py` + `services/scheduler.py` + `kernel/config.py` + 测试）。
+
+**起因**：[话题块多话题缺陷审计](docs/tracking/_archive/topic-block-multitopic-defects-audit-2026-06-11.md) 发现 7 项缺陷（3 高 3 中/低），根因：B 系列把"并发话题"建模成"参与者无序 set 并集"+无 message_id→block 反查+deque 插入序淘汰。标准解：边模型（conversation disentanglement，Kummerfeld 2019）。
+
+**改了什么**（4 Wave 串行，按 [派单](docs/tracking/topic-block-edge-model-dispatch-execution-2026-06-14.md) 执行）：
+
+- **L0 边模型**：`_extract_topic_block_signals` 加 `reply_to_message_id` 提取→`observe` 透传；tracker 建 `_msg_to_block` 反查索引（O(1) reply 归属）；`representative_speaker` 改用 `anchor_speaker`（边 source）弃 set 末位序；`mark_bot_involved` 加 `block_id` 参数接 `firing_block_id`。解缺陷 2/3/6。
+- **L1 线性打分**：`_attribute` 规则瀑布→线性加权打分（`w_spk=0.25/w_time=0.25/w_sim=0.50/floor=0.30`），同说话人降为软特征；`participants: set→dict[str,float]` 带时间戳。解缺陷 1/5。
+- **L2 活跃度生命周期**：`_blocks: deque→dict[str,dict]`；EDMStream 惰性衰减 `a^(λ·Δt)·activity`（`a=0.998/λ=1.0`）；低活跃块移入 `_reservoir`（不删 msgid 反查，护栏三）；候选池 = active∪reservoir（护栏一）。解缺陷 4。
+- **L3 句向量+CFG**（可选末位）：`centroid` 字段留口（默认 None→回退 last_text，零行为变更）；`TopicBlockConfig` 加 5 tunable（`decay_a/decay_lambda/reservoir_max/activity_floor/similarity_backend`）。
+
+**三护栏（不可妥协）**：① 候选池含 reservoir 低活跃块（grep+单测双证据）；② reply 轻校验防广播/重框（背离不盲并）；③ 衰减块 `_msg_to_block` 反查项不删（reply 复活命脉）。
+
+**决策冻结**：F1 原地改造 topic_block.py 不加双轨开关；F7 L3 ngram 默认零行为变更；缓存断点不动（hit% 零影响）；NapCat 不动。
+
+**影响范围**：仅 `TopicBlockTracker` 内部逻辑 + config schema 5 字段；调用方（scheduler/router）签名向后兼容。无 schema 迁移、无 NapCat 变更。
+
+**验证（D4）**：`uv run ruff check` 0；`uv run pyright` 0；`uv run pytest tests/test_topic_block.py -q` **24 passed**（基线 10 + L0 7 + L1 3 + L2 4），4 行为锚全绿。
+
+**部署**：纯代码改动，rebuild bot。**回滚**：`git revert` 本 commit，或 `topic_block.enabled=false` 关闭整模块。
+
+**遗留**：L3 embedding 实现留待后续（c-TF-IDF 质心已留口）；reservoir 溢出落 memory 搁置（F8）。
+
+**派单文件**：[topic-block-edge-model-dispatch-execution-2026-06-14.md](docs/tracking/topic-block-edge-model-dispatch-execution-2026-06-14.md)，执行回执已填入 §5。
+
+---
+
+
 ## 2026-06-14 引入 Reasonix（DeepSeek-native CLI agent）作派单执行手：新增 REASONIX.md + deep-delivery 派单特化 + /done 完成协议
 
 **变更类型**：Agent 工作流配置（文档/skill/slash 命令，future agents 依赖；无代码/运行态变更）。引入 Reasonix Desktop（接 DeepSeek V4-Pro）作为「接单落地」执行手，与 Claude Code（立项/派发/架构）分工；本仓为其做项目特化。

@@ -1974,12 +1974,26 @@ class TopicBlockConfig(BaseModel):
         default=False,
         description="Anchor probability-fire replies to the bot's topic block instead of the latest message.",
     )
-    stale_seconds: float = Field(default=300.0, description="Inactive block archived after this many seconds.")
+    stale_seconds: float = Field(
+        default=300.0,
+        description="[DEPRECATED L2] Replaced by activity_floor (activity-decay).",
+    )
     attrib_recent_seconds: float = Field(
         default=120.0, description="Window for same-speaker / @-continuation attribution.",
     )
-    sim_threshold: float = Field(default=0.4, description="Lexical-similarity floor for same-block fallback.")
+    sim_threshold: float = Field(
+        default=0.4,
+        description="[DEPRECATED L1] Replaced by linear-scoring floor.",
+    )
     max_blocks: int = Field(default=6, description="Max blocks retained per group.")
+    decay_a: float = Field(default=0.998, description="L2 activity-decay base (EDMStream a).")
+    decay_lambda: float = Field(default=1.0, description="L2 activity-decay rate multiplier (EDMStream λ).")
+    reservoir_max: int = Field(default=12, description="L2 max reservoir blocks per group (2× max_blocks).")
+    activity_floor: float = Field(default=0.5, description="L2 activity below this → reservoir (≈ old stale 300s eq).")
+    similarity_backend: str = Field(
+        default="ngram",
+        description="L3 similarity backend: ngram (default, baseline) or embedding (sentence-vector).",
+    )
     overhearer_mode: str = Field(
         default="shadow",
         description="B2 role gating: shadow (log only) / threshold (lower fire prob) / silent (no fire).",

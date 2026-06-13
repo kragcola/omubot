@@ -27,6 +27,7 @@ from services.scheduler_hawkes import HawkesCache, estimate_rho_from_times
 from services.scheduler_rws import DEFAULT_RWS_WEIGHTS, RWSBandit, RWSExplanation, RWSFeatures, compute_rws
 from services.scheduler_rws.reward import PendingDecision, ReactionSignals, RWSRewardQueue
 from services.scheduler_rws.rws import dual_decision
+from services.similarity import create_similarity_provider
 from services.system_module import Scope
 from services.tools.context import ToolContext
 
@@ -366,12 +367,16 @@ class GroupChatScheduler:
         self._thinker_config = thinker_config
         self._topic_tracker: TopicBlockTracker | None = None
         if bool(getattr(topic_block_config, "enabled", False)):
-            self._topic_tracker = TopicBlockTracker()
+            backend = str(getattr(topic_block_config, "similarity_backend", "ngram") or "ngram")
+            similarity = create_similarity_provider(backend)  # type: ignore[arg-type]
+            self._topic_tracker = TopicBlockTracker(similarity=similarity)
             self._topic_tracker.configure(
-                stale_seconds=getattr(topic_block_config, "stale_seconds", None),
                 attrib_recent_seconds=getattr(topic_block_config, "attrib_recent_seconds", None),
-                sim_threshold=getattr(topic_block_config, "sim_threshold", None),
                 max_blocks=getattr(topic_block_config, "max_blocks", None),
+                decay_a=getattr(topic_block_config, "decay_a", None),
+                decay_lambda=getattr(topic_block_config, "decay_lambda", None),
+                activity_floor=getattr(topic_block_config, "activity_floor", None),
+                reservoir_max=getattr(topic_block_config, "reservoir_max", None),
             )
 
     def set_bot(self, bot: Bot) -> None:
@@ -561,6 +566,7 @@ class GroupChatScheduler:
         message_text: str = "",
         message_id: int | None = None,
         reply_to_sender_id: str = "",
+        reply_to_message_id: int | None = None,
         reply_to_self: bool = False,
         at_targets: tuple[str, ...] = (),
         at_self: bool = False,
@@ -580,6 +586,7 @@ class GroupChatScheduler:
                     speaker=user_id,
                     text=message_text,
                     reply_to_sender_id=reply_to_sender_id,
+                    reply_to_message_id=reply_to_message_id,
                     reply_to_self=reply_to_self,
                     at_targets=at_targets,
                     at_self=at_self,
@@ -2227,7 +2234,9 @@ class GroupChatScheduler:
                         # goes silent on the user's very next line.
                         if sent_segments > 0 and self._topic_tracker is not None:
                             try:
-                                self._topic_tracker.mark_bot_involved(group_id)
+                                self._topic_tracker.mark_bot_involved(
+                                    group_id, block_id=slot_ref.firing_block_id,
+                                )
                             except Exception as exc:
                                 _L.debug("mark_bot_involved failed | group={} err={}", group_id, exc)
                         if sent_segments > 0:

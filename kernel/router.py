@@ -302,6 +302,7 @@ def _extract_topic_block_signals(
         return {}
     reply = getattr(event, "reply", None)
     reply_sender_id = str(getattr(getattr(reply, "sender", None), "user_id", "") or "")
+    reply_to_message_id = getattr(reply, "message_id", None) if reply is not None else None
     at_targets: list[str] = []
     at_self = False
     try:
@@ -319,6 +320,7 @@ def _extract_topic_block_signals(
     return {
         "message_id": getattr(event, "message_id", None),
         "reply_to_sender_id": "" if reply_sender_id == str(self_id) else reply_sender_id,
+        "reply_to_message_id": reply_to_message_id,
         "reply_to_self": _reply_targets_bot(reply, self_id),
         "at_targets": tuple(at_targets),
         "at_self": at_self,
