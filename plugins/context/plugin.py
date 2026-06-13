@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from collections import Counter
+from collections.abc import Sequence
+from typing import Any, cast
 
 from loguru import logger
 from pydantic import BaseModel
@@ -13,6 +16,11 @@ from kernel.config import load_plugin_config
 from kernel.types import AmadeusPlugin, PluginContext, PromptContext
 
 _L = logger.bind(channel="system")
+_SEMANTIC_QUERY_RE = re.compile(r"[0-9A-Za-z㐀-鿿぀-ヿ가-힯]")
+
+
+def _has_semantic_query_text(query: str) -> bool:
+    return bool(_SEMANTIC_QUERY_RE.search(query or ""))
 
 
 class ContextBudgetConfig(BaseModel):
@@ -54,8 +62,8 @@ class ContextPlugin(AmadeusPlugin):
         self._rrf_weights: dict[str, float] = {"doc": 0.5, "memory": 0.3, "graph": 0.2}
         self._budget = None  # services.context.packing.ContextBudget; resolved in on_startup
         self._use_token_budget = True
-        self._service = None
-        self._graph = None
+        self._service: Any = None
+        self._graph: Any = None
         self._pending_graph_tasks: set[asyncio.Task[dict[str, int]]] = set()
 
     async def on_startup(self, ctx: PluginContext) -> None:
@@ -125,6 +133,13 @@ class ContextPlugin(AmadeusPlugin):
         query = rewritten or ctx.conversation_text.strip()
         if not query:
             return
+        if not _has_semantic_query_text(query):
+            _L.info(
+                "context prompt pack skipped | query_source={} query={!r} reason=punctuation_only",
+                "rewritten" if rewritten else "raw",
+                _safe_query(query),
+            )
+            return
         query_source = "rewritten" if rewritten else "raw"
         # PR5: thinker decided which sources to query. "skip" → no retrieval injection.
         # PR6 fix: still call build_prompt_context so ContextService records the skip event in
@@ -190,8 +205,11 @@ class ContextPlugin(AmadeusPlugin):
             await asyncio.gather(*self._pending_graph_tasks, return_exceptions=True)
         self._pending_graph_tasks.clear()
 
-    def _schedule_graph_extract(self, hits: list[object]) -> None:
-        task = asyncio.create_task(self._graph.extract_from_context_hits(list(hits)))
+    def _schedule_graph_extract(self, hits: Sequence[object]) -> None:
+        graph = self._graph
+        if graph is None:
+            return
+        task = asyncio.create_task(cast(Any, graph).extract_from_context_hits(list(hits)))
         self._pending_graph_tasks.add(task)
 
         def _on_done(done: asyncio.Task[dict[str, int]]) -> None:

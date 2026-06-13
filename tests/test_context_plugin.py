@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 
@@ -117,6 +118,20 @@ async def test_context_plugin_skip_mode_still_records_metrics_via_service() -> N
 
 
 @pytest.mark.asyncio
+async def test_context_plugin_skips_punctuation_only_query() -> None:
+    fake = _FakeContextService()
+    plugin = _enabled_context_plugin()
+    plugin._service = fake
+
+    prompt_ctx = _prompt_ctx()
+    prompt_ctx.conversation_text = "。"
+    await plugin.on_pre_prompt(prompt_ctx)
+
+    assert fake.calls == []
+    assert [block.label for block in prompt_ctx.blocks] == []
+
+
+@pytest.mark.asyncio
 async def test_context_plugin_on_startup_overrides_pre_existing_service(tmp_path) -> None:
     """PR6 fix: ChatPlugin (priority=0) pre-creates ctx.context_service with library
     defaults; ContextPlugin (priority=7) MUST overwrite it so configured RRF / budget
@@ -167,7 +182,7 @@ def _enabled_context_plugin() -> ContextPlugin:
 def _enabled_knowledge_plugin(*, context_takeover: bool) -> KnowledgePlugin:
     plugin = KnowledgePlugin()
     plugin._enabled = True
-    plugin._kb = _FakeKnowledgeBase()
+    plugin._kb = cast(Any, _FakeKnowledgeBase())
     plugin._max_chunks = 3
     plugin._context_takeover = context_takeover
     return plugin
