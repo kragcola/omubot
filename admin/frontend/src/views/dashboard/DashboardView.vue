@@ -54,6 +54,7 @@ interface DashboardSlot {
   activity: string
   mood_hint: string
   location: string
+  description?: string
 }
 
 interface DashboardSchedule {
@@ -1073,6 +1074,9 @@ function goTo(route: string) {
                   <div class="dash-timeline__activity">
                     {{ slot.activity || '未命名活动' }}
                   </div>
+                  <p v-if="slot.description" class="dash-timeline__desc">
+                    {{ slot.description }}
+                  </p>
                   <div v-if="slot.location || slot.mood_hint" class="dash-timeline__meta">
                     <template v-if="slot.location">
                       {{ slot.location }}
@@ -1828,6 +1832,17 @@ function goTo(route: string) {
 .dash-timeline__slot--past .dash-timeline__activity {
   color: var(--om-text-2);
   font-weight: 500;
+}
+
+.dash-timeline__desc {
+  margin: 4px 0 0;
+  color: var(--om-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dash-timeline__slot--past .dash-timeline__desc {
+  color: var(--om-text-3);
 }
 
 .dash-timeline__meta {

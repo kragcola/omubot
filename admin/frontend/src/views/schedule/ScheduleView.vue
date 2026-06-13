@@ -37,6 +37,7 @@ interface ScheduleSlot {
   activity: string
   mood_hint: string
   location?: string
+  description?: string
 }
 
 interface DailySchedule {
@@ -176,6 +177,9 @@ async function loadData(silent = false) {
                     </div>
                     <p class="schedule-timeline__activity">
                       {{ slot.activity }}
+                    </p>
+                    <p v-if="slot.description" class="schedule-timeline__desc">
+                      {{ slot.description }}
                     </p>
                     <p class="schedule-timeline__hint">
                       {{ slot.mood_hint || '当前没有 mood hint。' }}
@@ -379,19 +383,25 @@ async function loadData(silent = false) {
   font-weight: 700;
 }
 
-.schedule-timeline__activity,
-.schedule-timeline__hint {
+.schedule-timeline__activity {
   margin: 8px 0 0;
   font-size: 13px;
   line-height: 1.7;
-}
-
-.schedule-timeline__activity {
   color: var(--om-text-1);
 }
 
-.schedule-timeline__hint {
+.schedule-timeline__desc {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.75;
   color: var(--om-text-2);
+}
+
+.schedule-timeline__hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--om-text-3);
 }
 
 .schedule-progress-list {

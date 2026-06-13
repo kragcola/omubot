@@ -93,6 +93,7 @@ def create_schedule_router(
                                 "activity": s.activity,
                                 "mood_hint": s.mood_hint,
                                 "location": getattr(s, "location", ""),
+                                "description": getattr(s, "description", ""),
                             }
                             for s in (schedule.slots or [])
                         ],

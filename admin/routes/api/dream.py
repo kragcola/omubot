@@ -23,6 +23,10 @@ def create_dream_router(
             "running": getattr(dream_agent, "_running", False),
             "interval_hours": getattr(dream_agent, "_interval_hours", 0),
             "max_rounds": getattr(dream_agent, "_max_rounds", 5),
+            "sticker_delete_floor": getattr(dream_agent, "_sticker_delete_floor", 0),
+            "sticker_count": (
+                getattr(getattr(dream_agent, "_sticker_store", None), "count", None)
+            ),
         }
 
     @router.post("/dream/trigger")
