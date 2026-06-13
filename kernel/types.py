@@ -171,6 +171,7 @@ class PluginContext:
     card_store: Any = None
     retrieval: Any = None
     context_service: Any = None
+    context_prompt_owner: str = ""
     knowledge_base: Any = None
     knowledge_graph: Any = None
     memo_extractor: Any = None
@@ -268,11 +269,47 @@ class PluginContext:
 
 
 @dataclass
+class AddressingContext:
+    """Canonical evidence for whether a group turn addresses the bot.
+
+    Keep both original and stripped text because adapters such as NoneBot may
+    strip a matched nickname from ``event.message`` before downstream gates run.
+    Hard evidence here must survive router → scheduler → LLM handoff.
+    """
+
+    addressed: bool = False
+    target: Literal["self", "other", "ambiguous", "none"] = "none"
+    confidence: float = 0.0
+    evidence: str = "none"
+    original_text: str = ""
+    stripped_text: str = ""
+    matched_nickname: str = ""
+    at_targets: tuple[str, ...] = ()
+    reply_sender_id: str = ""
+
+
+@dataclass
+class ReplyObligation:
+    """Reply obligation carried by strong trigger paths.
+
+    ``must`` means the bot owes at least one visible response. Timing layers may
+    delay it briefly (arbiter/completeness), but cannot downgrade it to silence.
+    """
+
+    level: Literal["must", "should", "may", "never"] = "may"
+    reason: str = ""
+    source: str = ""
+    priority: int = 0
+    addressing: AddressingContext | None = None
+
+
+@dataclass
 class TriggerContext:
     """描述调度器为何决定触发回复。
 
     替代 ad-hoc 的 video_hint dict + force_reply bool，成为所有触发类型的统一表示。
-    mode 决定调度器的行为（强制触发 vs 概率触发）；extra 携带插件提供的数据。
+    mode 决定调度器的行为（强制触发 vs 概率触发）；obligation 携带不可丢失的
+    回复义务；extra 携带插件提供的数据。
     """
 
     reason: str = ""  # 人类可读的触发原因，如 "有人@了你" / "视频分享:《xxx》"
@@ -281,6 +318,7 @@ class TriggerContext:
     mode: str = "probability"
     target_message_id: int | None = None  # 触发消息的 QQ message_id
     target_user_id: str = ""  # 触发消息的发送者
+    obligation: ReplyObligation | None = None
     extra: dict[str, Any] = field(default_factory=dict)  # 插件数据（bilibili_talk_value, interest_score 等）
 
 

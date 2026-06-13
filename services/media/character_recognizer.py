@@ -32,11 +32,18 @@ class CharacterRecognition:
     matched: bool
     character_id: str | None = None
     character_name: str | None = None
+    candidate_character_id: str | None = None
+    candidate_character_name: str | None = None
     relation: str | None = None
     work: str | None = None
     context_label: str | None = None
     difference: float | None = None
     threshold: float | None = None
+    detection_count: int | None = None
+    detection_score: float | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    crop_padding: float | None = None
+    crop_bbox: tuple[float, float, float, float] | None = None
     cache_hit: bool = False
     registry_version: str | None = None
     api_version: str | None = None
@@ -241,6 +248,8 @@ class CharacterRecognizer:
                     matched=bool(cid or cname),
                     character_id=str(cid) if cid else None,
                     character_name=str(cname) if cname else None,
+                    candidate_character_id=str(cid) if cid else None,
+                    candidate_character_name=str(cname) if cname else None,
                     relation=(str(cached["relation"]) if cached.get("relation") else None),
                     work=work,
                     context_label=context_label,
@@ -278,25 +287,44 @@ class CharacterRecognizer:
             return []
 
         results: list[CharacterRecognition] = []
+        detection_count = int(payload["detection_count"]) if payload.get("detection_count") is not None else None
         for item in payload.get("characters") or []:
             if not isinstance(item, dict):
                 continue
             character_id = str(item.get("character_id") or "").strip() or None
+            candidate_character_id = str(item.get("candidate_character_id") or "").strip() or character_id
+            candidate_character_id = candidate_character_id or None
             matched = bool(item.get("matched"))
             metadata = await self._metadata_from_db(character_id) or self._metadata_for(character_id)
             manifest_meta = self._metadata_for(character_id)
             work = manifest_meta.work if manifest_meta else None
             context_label = manifest_meta.context_label if manifest_meta else work
             remote_name = str(item.get("character_name") or "").strip() or None
+            candidate_metadata = (
+                await self._metadata_from_db(candidate_character_id)
+                or self._metadata_for(candidate_character_id)
+            )
+            remote_candidate_name = str(item.get("candidate_character_name") or "").strip() or None
             results.append(CharacterRecognition(
                 matched=matched,
                 character_id=character_id,
                 character_name=(metadata.name if metadata else remote_name),
+                candidate_character_id=candidate_character_id,
+                candidate_character_name=(
+                    candidate_metadata.name if candidate_metadata else remote_candidate_name
+                ),
                 relation=(metadata.relation if metadata else None),
                 work=work,
                 context_label=context_label,
                 difference=float(item["difference"]) if item.get("difference") is not None else None,
                 threshold=float(payload["threshold"]) if payload.get("threshold") is not None else None,
+                detection_count=detection_count,
+                detection_score=float(item["detection_score"]) if item.get("detection_score") is not None else None,
+                bbox=_as_float_bbox(item.get("bbox")),
+                crop_padding=(
+                    float(item["crop_padding"]) if item.get("crop_padding") is not None else None
+                ),
+                crop_bbox=_as_float_bbox(item.get("crop_bbox")),
                 cache_hit=False,
                 registry_version=str(payload.get("registry_version") or "").strip() or None,
                 api_version=str(payload.get("api_version") or "").strip() or None,
@@ -377,6 +405,7 @@ class CharacterRecognizer:
                 matched=True,
                 character_id=None,
                 character_name=at_res.character_name,
+                candidate_character_name=at_res.character_name,
                 relation="known",
                 work=at_res.work or None,
                 context_label=at_res.work or None,
@@ -395,18 +424,29 @@ class CharacterRecognizer:
             return None
         matched = bool(payload.get("matched"))
         character_id = str(payload.get("character_id") or "").strip() or None
+        candidate_character_id = str(payload.get("candidate_character_id") or "").strip() or character_id
+        candidate_character_id = candidate_character_id or None
         # Prefer registry DB (per-bot relation), fall back to charpack manifest.
         metadata = await self._metadata_from_db(character_id) or self._metadata_for(character_id)
+        candidate_metadata = (
+            await self._metadata_from_db(candidate_character_id)
+            or self._metadata_for(candidate_character_id)
+        )
         # `work` (出处/series) is intrinsic to the character, not per-bot, so it
         # always comes from the charpack manifest catalog — never the DB.
         manifest_meta = self._metadata_for(character_id)
         work = manifest_meta.work if manifest_meta else None
         context_label = manifest_meta.context_label if manifest_meta else work
         remote_name = str(payload.get("character_name") or "").strip() or None
+        remote_candidate_name = str(payload.get("candidate_character_name") or "").strip() or None
         return CharacterRecognition(
             matched=matched,
             character_id=character_id,
             character_name=(metadata.name if metadata else remote_name),
+            candidate_character_id=candidate_character_id,
+            candidate_character_name=(
+                candidate_metadata.name if candidate_metadata else remote_candidate_name
+            ),
             relation=(metadata.relation if metadata else None),
             work=work,
             context_label=context_label,
@@ -417,3 +457,13 @@ class CharacterRecognizer:
             api_version=str(payload.get("api_version") or "").strip() or None,
             source=str(payload.get("source") or "ccip-sidecar"),
         )
+
+
+def _as_float_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(item) for item in value)
+    except (TypeError, ValueError):
+        return None
+    return (x0, y0, x1, y1)

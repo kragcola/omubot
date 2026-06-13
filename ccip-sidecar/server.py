@@ -31,6 +31,14 @@ class CharacterEntry:
     embedding: np.ndarray
 
 
+@dataclass(frozen=True)
+class _CropMatch:
+    entry: CharacterEntry | None
+    difference: float | None
+    padding: float
+    crop_bbox: tuple[int, int, int, int]
+
+
 class CharacterRegistry:
     def __init__(self, packs_dir: Path) -> None:
         self._packs_dir = packs_dir
@@ -153,6 +161,7 @@ MATCH_THRESHOLD = float(os.getenv("CCIP_MATCH_THRESHOLD", "0.17847511429108218")
 PACKS_DIR = Path(os.getenv("CCIP_PACKS_DIR", "/app/config/character_packs")).resolve()
 CACHE_MAX_ENTRIES = int(os.getenv("CCIP_CACHE_MAX_ENTRIES", "1024"))
 _MULTI_CHAR_ENABLED = os.getenv("CCIP_MULTI_CHAR_ENABLED", "1").strip() in ("1", "true", "yes")
+_MULTI_CROP_PADDING_RATIOS = (0.0, 0.15, 0.30, 0.50)
 IMAGE_UPLOAD = File(...)
 
 registry = CharacterRegistry(PACKS_DIR)
@@ -176,6 +185,8 @@ def _identify(image_data: bytes) -> dict[str, Any]:
             "matched": False,
             "character_id": None,
             "character_name": None,
+            "candidate_character_id": None,
+            "candidate_character_name": None,
             "difference": None,
             "threshold": MATCH_THRESHOLD,
             "score": None,
@@ -204,6 +215,8 @@ def _identify(image_data: bytes) -> dict[str, Any]:
         "matched": matched,
         "character_id": best_entry.character_id if best_entry and matched else None,
         "character_name": best_entry.character_name if best_entry and matched else None,
+        "candidate_character_id": best_entry.character_id if best_entry else None,
+        "candidate_character_name": best_entry.character_name if best_entry else None,
         "difference": best_difference,
         "threshold": MATCH_THRESHOLD,
         "score": (1.0 / (1.0 + best_difference)) if best_difference is not None else None,
@@ -230,6 +243,67 @@ def _find_nearest(feature: np.ndarray, entries: list[CharacterEntry]) -> tuple[C
     return best_entry, best_diff
 
 
+def _expand_bbox(
+    bbox: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    padding_ratio: float,
+) -> tuple[int, int, int, int]:
+    image_width, image_height = image_size
+    x0, y0, x1, y1 = (int(value) for value in bbox)
+
+    x0 = max(0, min(x0, max(0, image_width - 1)))
+    y0 = max(0, min(y0, max(0, image_height - 1)))
+    x1 = max(x0 + 1, min(int(x1), image_width))
+    y1 = max(y0 + 1, min(int(y1), image_height))
+
+    box_width = max(1, x1 - x0)
+    box_height = max(1, y1 - y0)
+    x_padding = box_width * max(0.0, padding_ratio)
+    y_padding = box_height * max(0.0, padding_ratio)
+
+    return (
+        max(0, int(x0 - x_padding)),
+        max(0, int(y0 - y_padding)),
+        min(image_width, int(x1 + x_padding)),
+        min(image_height, int(y1 + y_padding)),
+    )
+
+
+def _choose_crop_match(matches: list[_CropMatch]) -> _CropMatch:
+    """Prefer tight confident crops; otherwise take the first padded hit.
+
+    Tight crops are most local and least likely to pull in a neighbouring
+    character.  Padding is only a rescue path for misses where hair/body context
+    is needed to cross the CCIP threshold.
+    """
+    tight = matches[0]
+    if tight.entry is not None and tight.difference is not None and tight.difference <= MATCH_THRESHOLD:
+        return tight
+
+    for match in matches[1:]:
+        if match.entry is not None and match.difference is not None and match.difference <= MATCH_THRESHOLD:
+            return match
+
+    return tight
+
+
+def _single_as_multi_characters(single: dict[str, Any]) -> list[dict[str, Any]]:
+    cid = single.get("character_id")
+    cname = single.get("character_name")
+    candidate_id = single.get("candidate_character_id") or (str(cid) if cid else None)
+    candidate_name = single.get("candidate_character_name") or (str(cname) if cname else None)
+    if not (cid or cname or candidate_id or candidate_name):
+        return []
+    return [{
+        "character_id": str(cid) if cid else None,
+        "character_name": str(cname) if cname else None,
+        "candidate_character_id": candidate_id,
+        "candidate_character_name": candidate_name,
+        "difference": single.get("difference"),
+        "matched": bool(single.get("matched")),
+    }]
+
+
 def _identify_multi(image_data: bytes) -> dict[str, Any]:
     """Multi-character CCIP: detect heads → per-crop CCIP.
 
@@ -245,16 +319,9 @@ def _identify_multi(image_data: bytes) -> dict[str, Any]:
 
     if not _MULTI_CHAR_ENABLED:
         single = _identify(image_data)
-        cid = single.get("character_id")
-        cname = single.get("character_name")
         return {
             "matched": bool(single.get("matched")),
-            "characters": [{
-                "character_id": str(cid) if cid else None,
-                "character_name": str(cname) if cname else None,
-                "difference": single.get("difference"),
-                "matched": bool(single.get("matched")),
-            }] if cid or cname else [],
+            "characters": _single_as_multi_characters(single),
             "detection_count": 0,
             "threshold": MATCH_THRESHOLD,
             "registry_version": registry_version,
@@ -269,16 +336,9 @@ def _identify_multi(image_data: bytes) -> dict[str, Any]:
         # detection model unavailable → degrade to single full-image path
         _L.warning("detect_heads failed, falling back to single full-image CCIP")
         single = _identify(image_data)
-        cid = single.get("character_id")
-        cname = single.get("character_name")
         return {
             "matched": bool(single.get("matched")),
-            "characters": [{
-                "character_id": str(cid) if cid else None,
-                "character_name": str(cname) if cname else None,
-                "difference": single.get("difference"),
-                "matched": bool(single.get("matched")),
-            }] if cid or cname else [],
+            "characters": _single_as_multi_characters(single),
             "detection_count": 0,
             "threshold": MATCH_THRESHOLD,
             "registry_version": registry_version,
@@ -289,16 +349,9 @@ def _identify_multi(image_data: bytes) -> dict[str, Any]:
     if len(heads) <= 1:
         # Single or no character — full-image CCIP is accurate enough.
         single = _identify(image_data)
-        cid = single.get("character_id")
-        cname = single.get("character_name")
         return {
             "matched": bool(single.get("matched")),
-            "characters": [{
-                "character_id": str(cid) if cid else None,
-                "character_name": str(cname) if cname else None,
-                "difference": single.get("difference"),
-                "matched": bool(single.get("matched")),
-            }] if cid or cname else [],
+            "characters": _single_as_multi_characters(single),
             "detection_count": len(heads),
             "threshold": MATCH_THRESHOLD,
             "registry_version": registry_version,
@@ -306,10 +359,17 @@ def _identify_multi(image_data: bytes) -> dict[str, Any]:
             "source": "ccip-sidecar",
         }
 
-    # Multi-character: batch CCIP on each detected head crop.
+    # Multi-character: batch CCIP on each detected head crop.  Tight crops are
+    # evaluated first, then modest padding rescues misses that need hair/body
+    # context while avoiding the high-contamination full-neighbour case.
     crops: list[Image.Image] = []
-    for (x0, y0, x1, y1), _label, _score in heads:
-        crops.append(image.crop((int(x0), int(y0), int(x1), int(y1))))
+    crop_records: list[tuple[int, float, tuple[int, int, int, int]]] = []
+    for head_index, ((x0, y0, x1, y1), _label, _score) in enumerate(heads):
+        bbox = (int(x0), int(y0), int(x1), int(y1))
+        for padding_ratio in _MULTI_CROP_PADDING_RATIOS:
+            crop_bbox = _expand_bbox(bbox, image.size, padding_ratio)
+            crop_records.append((head_index, padding_ratio, crop_bbox))
+            crops.append(image.crop(crop_bbox))
 
     try:
         features = ccip_batch_extract_features(crops, model=MODEL_NAME)
@@ -317,17 +377,33 @@ def _identify_multi(image_data: bytes) -> dict[str, Any]:
         _L.warning("ccip_batch_extract_features failed, degrading to per-crop inference")
         features = [ccip_extract_feature(c, model=MODEL_NAME) for c in crops]
 
-    characters: list[dict[str, Any]] = []
-    for feat, ((x0, y0, x1, y1), _label, score) in zip(features, heads, strict=True):
+    grouped_matches: list[list[_CropMatch]] = [[] for _ in heads]
+    for feat, (head_index, padding_ratio, crop_bbox) in zip(features, crop_records, strict=True):
         best_entry, best_diff = _find_nearest(feat, registry_entries)
+        grouped_matches[head_index].append(_CropMatch(
+            entry=best_entry,
+            difference=best_diff,
+            padding=padding_ratio,
+            crop_bbox=crop_bbox,
+        ))
+
+    characters: list[dict[str, Any]] = []
+    for matches, ((x0, y0, x1, y1), _label, score) in zip(grouped_matches, heads, strict=True):
+        selected = _choose_crop_match(matches)
+        best_entry = selected.entry
+        best_diff = selected.difference
         matched = best_entry is not None and best_diff is not None and best_diff <= MATCH_THRESHOLD
         characters.append({
             "character_id": best_entry.character_id if best_entry and matched else None,
             "character_name": best_entry.character_name if best_entry and matched else None,
+            "candidate_character_id": best_entry.character_id if best_entry else None,
+            "candidate_character_name": best_entry.character_name if best_entry else None,
             "difference": best_diff,
             "matched": matched,
             "detection_score": float(score),
             "bbox": [float(x0), float(y0), float(x1), float(y1)],
+            "crop_padding": selected.padding,
+            "crop_bbox": [float(value) for value in selected.crop_bbox],
         })
 
     return {
@@ -445,6 +521,41 @@ def _aliases(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _training_stats(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    stats: dict[str, Any] = {}
+    for key in ("image_count", "embedded_count", "sample_count"):
+        raw = value.get(key)
+        if isinstance(raw, (int, float)) and raw >= 0:
+            stats[key] = int(raw)
+
+    forms = value.get("forms")
+    if isinstance(forms, dict):
+        clean_forms = {
+            str(form).strip(): int(count)
+            for form, count in forms.items()
+            if str(form).strip() and isinstance(count, (int, float)) and count >= 0
+        }
+        if clean_forms:
+            stats["forms"] = clean_forms
+
+    sources = value.get("sources")
+    if isinstance(sources, list):
+        clean_sources = [str(item).strip() for item in sources if str(item).strip()]
+        if clean_sources:
+            stats["sources"] = clean_sources
+
+    missing_forms = value.get("missing_forms")
+    if isinstance(missing_forms, list):
+        clean_missing = [str(item).strip() for item in missing_forms if str(item).strip()]
+        if clean_missing:
+            stats["missing_forms"] = clean_missing
+
+    return stats or None
 
 
 def _matches_prefix(filename: str, prefix: str) -> bool:
@@ -609,13 +720,22 @@ def _build_series_pack(
         raw_context_label = str(raw.get("context_label") or "").strip()
         if raw_context_label:
             entry["context_label"] = raw_context_label
+        training_stats = _training_stats(raw.get("training_stats"))
+        if training_stats is not None:
+            training_stats.setdefault("embedded_count", embedded)
+            training_stats.setdefault("image_count", len(matched))
+            training_stats.setdefault("sample_count", len(samples))
+            entry["training_stats"] = training_stats
         characters.append(entry)
-        per_character.append({
+        per_item: dict[str, Any] = {
             "character_id": cid,
             "embedded": embedded,
             "total": len(matched),
             "samples": len(samples),
-        })
+        }
+        if training_stats is not None:
+            per_item["training_stats"] = training_stats
+        per_character.append(per_item)
 
     manifest: dict[str, Any] = {
         "pack": pack,

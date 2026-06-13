@@ -28,11 +28,13 @@ from nonebot.rule import to_me
 
 from kernel.bus import PluginBus
 from kernel.types import (
+    AddressingContext,
     Content,
     ContentBlock,
     ImageRefBlock,
     MessageContext,
     PluginContext,
+    ReplyObligation,
     TextBlock,
 )
 from services.humanization import AFFECTION_FAMILIARITY_SLOT
@@ -42,6 +44,7 @@ from services.humanization.qq_interactions import (
     parse_qq_interaction_signal,
     register_m1_mention_irritation,
 )
+from services.media.visual_evidence import StickerEvidence, VisualEvidence, render_visual_evidence
 from services.name_registry import NameVariationRegistry
 from services.private_conversation import (
     get_private_conversation_actor,
@@ -60,6 +63,7 @@ _log_reply_workflow = _base_logger.bind(channel="reply_workflow")
 
 _REPLY_PREVIEW_MAX = 50
 _REPLY_PREVIEW_MAX_SELF = 200
+_REPLY_PREVIEW_MAX_VISUAL = 500
 _DIRECTED_FOLLOWUP_RE = re.compile(
     r"^(我也?)?(能|可以|可不可以|能不能)(来|去|参加|一起|加入|玩)(吗|嘛|么)?[。.!！?？~～\s]*$"
     r"|^(我也?)?可以(吗|嘛|么)?[。.!！?？~～\s]*$"
@@ -88,6 +92,43 @@ def _content_to_text(content: Content) -> str:
         for block in content
         if isinstance(block, dict) and block.get("type") == "text" and "text" in block
     )
+
+
+_SEMANTIC_TEXT_RE = re.compile(r"[0-9A-Za-z㐀-鿿぀-ヿ가-힯]")
+
+
+def _has_semantic_text(text: str) -> bool:
+    return bool(_SEMANTIC_TEXT_RE.search(text or ""))
+
+
+def _nickname_stripped_to_empty_payload(addressing: AddressingContext) -> bool:
+    """True when NoneBot stripped a nickname and only punctuation/space remains."""
+    return (
+        addressing.evidence == "nickname_original"
+        and bool(addressing.matched_nickname)
+        and not _has_semantic_text(addressing.stripped_text)
+    )
+
+
+def _content_has_non_text_blocks(content: Content) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") != "text"
+        for block in content
+    )
+
+
+def _is_nickname_only_call(addressing: AddressingContext, content: Content) -> bool:
+    if not _nickname_stripped_to_empty_payload(addressing):
+        return False
+    if _content_has_non_text_blocks(content):
+        return False
+    return not _has_semantic_text(_content_to_text(content))
+
+
+def _semantic_plain_text_for_addressing(addressing: AddressingContext, plain_text: str) -> str:
+    if _nickname_stripped_to_empty_payload(addressing):
+        return addressing.original_text.strip() or plain_text
+    return plain_text
 
 
 def _extract_group_command_text(
@@ -158,7 +199,7 @@ def _is_bot_nickname_prefix(prefix: str, bot_nicknames: list[str] | tuple[str, .
         return False
     for nickname in bot_nicknames:
         nick = str(nickname).strip()
-        if nick and normalized.startswith(nick):
+        if nick and re.match(rf"^{re.escape(nick)}(?=$|[\s,，。.!！?？:：、~～…])", normalized, re.IGNORECASE):
             return True
     return False
 
@@ -209,8 +250,9 @@ def _match_nickname_addressing(
     first_text = str(first_seg.data.get("text", "") or "")
     if not first_text:
         return None
-    # Replicate _check_nickname's matching: ^nickname followed by optional
-    # whitespace/punctuation or end-of-string.
+    # Replicate _check_nickname's matching, but keep common CJK/Latin vocative
+    # punctuation too: ``emu。`` is a direct call even after NoneBot strips it to
+    # just ``。`` for downstream handlers.
     regex = "|".join(
         re.escape(str(nick).strip())
         for nick in bot_nicknames
@@ -218,7 +260,7 @@ def _match_nickname_addressing(
     )
     if not regex:
         return None
-    m = re.search(rf"^({regex})([\s,，]*|$)", first_text, re.IGNORECASE)
+    m = re.search(rf"^({regex})(?=$|[\s,，。.!！?？:：、~～…])", first_text, re.IGNORECASE)
     return str(m.group(1)) if m else None
 
 
@@ -281,6 +323,118 @@ def _extract_topic_block_signals(
         "at_targets": tuple(at_targets),
         "at_self": at_self,
     }
+
+
+def _original_plaintext(event: MessageEvent) -> str:
+    original = getattr(event, "original_message", None)
+    if original is None:
+        return event.get_plaintext()
+    try:
+        return original.extract_plain_text().strip()
+    except Exception:
+        return event.get_plaintext()
+
+
+def _original_segments(event: MessageEvent, fallback: Message) -> Message:
+    """Pre-strip message segments for echo repetition.
+
+    NoneBot strips a matched nickname prefix from ``event.message`` (so a
+    vocative like ``姆。`` becomes just ``。`` for downstream handlers). The echo
+    plugin must repeat what the user actually typed, so it needs the original,
+    un-stripped segments. ``event.original_message`` is the deep copy made
+    before stripping; fall back to the stripped message when it is unavailable.
+    """
+    original = getattr(event, "original_message", None)
+    if original is None or not original:
+        return fallback
+    return cast(Message, original)
+
+
+def _resolve_addressing_context(
+    event: MessageEvent,
+    msg: Message,
+    *,
+    self_id: str,
+    bot_nicknames: list[str] | tuple[str, ...],
+    is_addressed: bool,
+) -> AddressingContext:
+    reply_sender_id = str(getattr(getattr(event.reply, "sender", None), "user_id", "") or "")
+    at_targets: list[str] = []
+    at_self = False
+    for seg in msg:
+        if seg.type != "at":
+            continue
+        qq = str(seg.data.get("qq", "") or "")
+        if not qq or qq == "all":
+            continue
+        if qq == str(self_id):
+            at_self = True
+        else:
+            at_targets.append(qq)
+
+    original_text = _original_plaintext(event)
+    stripped_text = event.get_plaintext()
+    matched_nickname = _match_nickname_addressing(event, bot_nicknames)
+    if at_self:
+        return AddressingContext(
+            addressed=True,
+            target="self",
+            confidence=1.0,
+            evidence="at_self",
+            original_text=original_text,
+            stripped_text=stripped_text,
+            matched_nickname=matched_nickname or "",
+            at_targets=tuple(at_targets),
+            reply_sender_id=reply_sender_id,
+        )
+    if matched_nickname:
+        return AddressingContext(
+            addressed=True,
+            target="self",
+            confidence=1.0,
+            evidence="nickname_original",
+            original_text=original_text,
+            stripped_text=stripped_text,
+            matched_nickname=matched_nickname,
+            at_targets=tuple(at_targets),
+            reply_sender_id=reply_sender_id,
+        )
+    if reply_sender_id and reply_sender_id == str(self_id):
+        return AddressingContext(
+            addressed=True,
+            target="self",
+            confidence=0.9,
+            evidence="reply_to_self",
+            original_text=original_text,
+            stripped_text=stripped_text,
+            matched_nickname="",
+            at_targets=tuple(at_targets),
+            reply_sender_id=reply_sender_id,
+        )
+    if is_addressed:
+        target = "ambiguous" if at_targets else "self"
+        return AddressingContext(
+            addressed=True,
+            target=target,
+            confidence=0.72 if target == "ambiguous" else 0.8,
+            evidence="adapter_fallback",
+            original_text=original_text,
+            stripped_text=stripped_text,
+            matched_nickname="",
+            at_targets=tuple(at_targets),
+            reply_sender_id=reply_sender_id,
+        )
+    return AddressingContext(
+        addressed=False,
+        target="none",
+        confidence=0.0,
+        evidence="none",
+        original_text=original_text,
+        stripped_text=stripped_text,
+        matched_nickname="",
+        at_targets=tuple(at_targets),
+        reply_sender_id=reply_sender_id,
+    )
 
 
 async def _at_trigger_targets_self(
@@ -769,10 +923,12 @@ async def _describe_image_data(
     mood_group_id: str | int | None = None,
     mood_session_id: str = "",
 ) -> str | None:
-    """Describe one image via the full pipeline, shared by the main and quoted
-    branches: desc_cache → sticker_store → character_recognizer (+ mood nudge) →
-    Qwen VL fallback. Recognized characters prefix the description with
-    `角色名（出处）：`. Returns None when no describer is available/succeeds.
+    """Describe one image via the shared visual evidence pipeline.
+
+    Sticker lookup, character recognition, low-confidence candidates, and Qwen
+    VL are collected as annotations on the same image. This prevents a legacy
+    sticker description from short-circuiting identity evidence, while still
+    preserving sticker text as a fallback or weak hint.
 
     Centralizing this keeps quoted-reply images (`@bot 引用图 这是谁`) on the
     same recognition path as directly-posted images — previously the quoted
@@ -786,17 +942,24 @@ async def _describe_image_data(
         _log_debug.debug("desc cache HIT | hash={}", img_hash)
         return desc_cache[img_hash]
 
-    desc: str | None = None
+    sticker: StickerEvidence | None = None
 
     if sticker_store is not None:
         sticker_id = sticker_store.lookup_by_hash(data)
         if sticker_id is not None:
             entry = sticker_store.get(sticker_id)
             if entry is not None and entry.get("description"):
-                desc = entry.get("description")
+                sticker = StickerEvidence(
+                    sticker_id=sticker_id,
+                    description=str(entry.get("description") or ""),
+                    usage_hint=str(entry.get("usage_hint") or ""),
+                    ocr_text=str(entry.get("ocr_text") or ""),
+                    source=str(entry.get("source") or ""),
+                )
                 _log_debug.debug("sticker cache HIT | id={}", sticker_id)
 
-    if desc is None and character_recognizer is not None:
+    results = []
+    if character_recognizer is not None:
         results = await character_recognizer.identify(data, media_type=media_type)
         matched = [r for r in results if r.matched and r.character_name]
         if matched:
@@ -817,27 +980,26 @@ async def _describe_image_data(
                         except Exception:
                             _log_debug.debug("mood recognition-nudge skipped")
                         break
-            # Build comma-separated label: "A（细上下文）、B（细上下文）：描述".
-            # `work` is intentionally broad for pack grouping/migration; when a
-            # pack provides `context_label`, use that richer prompt-facing label.
-            labels: list[str] = []
-            for r in matched:
-                context_label = getattr(r, "context_label", None) or r.work
-                if context_label:
-                    labels.append(f"{r.character_name}（{context_label}）")
-                else:
-                    labels.append(r.character_name)
-            char_label = "、".join(labels)
-            if vision_client is not None:
-                vision_desc = await vision_client.describe_image(data)
-                if vision_desc:
-                    desc = f"{char_label}：{vision_desc}"
-            if desc is None:
-                desc = f"{char_label}表情包"
 
-    if desc is None and vision_client is not None:
+    vision_desc: str | None = None
+    should_run_vl = (
+        vision_client is not None
+        and (
+            bool(results)
+            or sticker is None
+            or sticker.weak_authority
+        )
+    )
+    if should_run_vl and vision_client is not None:
         _log_debug.debug("desc cache MISS | hash={} -> Qwen VL", img_hash)
-        desc = await vision_client.describe_image(data)
+        vision_desc = await vision_client.describe_image(data)
+
+    desc = render_visual_evidence(VisualEvidence(
+        image_sha256_short=img_hash,
+        sticker=sticker,
+        recognitions=tuple(results),
+        vision_description=vision_desc,
+    ))
 
     if desc:
         desc_cache[img_hash] = desc
@@ -902,9 +1064,28 @@ async def _render_message(
                                 async with session.get(url) as img_resp:
                                     if img_resp.status == 200:
                                         img_data = await img_resp.read()
+                                        media_type = "image/jpeg"
+                                        if image_cache is not None:
+                                            file_id = str(seg.data.get("file", "") or "").strip()
+                                            file_id = file_id.split(".")[0] if "." in file_id else file_id
+                                            if not file_id:
+                                                file_id = f"quoted_{hashlib.sha256(img_data).hexdigest()[:24]}"
+                                            ref = await image_cache.save_bytes(img_data, file_id=file_id)
+                                            if ref is not None:
+                                                from pathlib import Path
+
+                                                try:
+                                                    img_data = Path(ref["path"]).read_bytes()
+                                                    media_type = str(ref.get("media_type", media_type))
+                                                except Exception:
+                                                    _log_debug.debug(
+                                                        "quoted cached image read failed | file_id={}",
+                                                        file_id,
+                                                    )
                                         # Full pipeline: sticker → CCIP/AnimeTrace → VL.
                                         desc = await _describe_image_data(
                                             img_data,
+                                            media_type=media_type,
                                             vision_client=vision_client,
                                             character_recognizer=character_recognizer,
                                             sticker_store=sticker_store,
@@ -937,6 +1118,8 @@ async def _render_message(
                         if card:
                             seg_descs.append(f"[卡片: {card}]")
                 original = "".join(seg_descs)
+                if "[图片:" in original:
+                    cap = max(cap, _REPLY_PREVIEW_MAX_VISUAL)
             if len(original) > cap:
                 original = original[:cap] + "…"
             sender_name = "我" if is_reply_to_bot else nick
@@ -1247,7 +1430,14 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         allow_speaking = ctx.config.group.allows_active_group(event.group_id) and not muted
 
         msg = event.get_message()
-        echo_key = build_echo_key(msg)
+        # Echo detection uses the ORIGINAL (pre-strip) message: NoneBot strips a
+        # matched nickname prefix, so "姆。" / "emu。" both collapse to "。" in the
+        # stripped segments. Keying off the stripped text would (a) conflate
+        # distinct vocatives into one repeat counter and (b) make the bot repeat a
+        # bare "。" instead of the full "姆。". When no nickname was stripped,
+        # original == stripped, so normal echoes are unaffected.
+        echo_segments = _original_segments(event, msg)
+        echo_key = build_echo_key(echo_segments)
         plain_text = event.get_plaintext()
         upstream_cfg = getattr(ctx.config, "upstream_command_filter", None)
         upstream_result = should_drop_message(
@@ -1276,24 +1466,39 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         # the probabilistic gray zone where it can lose the RWS roll.
         if not is_addressed and _message_ats_self(msg, bot.self_id):
             is_addressed = True
-        if not is_addressed and getattr(ctx, "bot_nicknames", []) and any(
-            nick in plain_text for nick in ctx.bot_nicknames
-        ):
-            is_addressed = True
+        if not is_addressed and getattr(ctx, "bot_nicknames", []):
+            # Text nicknames are vocatives, not arbitrary substrings.  A nickname
+            # buried mid-sentence is content, while a prefix nickname is an
+            # addressing signal equivalent to @bot.
+            is_addressed = _is_bot_nickname_prefix(plain_text, getattr(ctx, "bot_nicknames", []))
+
+        addressing = _resolve_addressing_context(
+            event,
+            msg,
+            self_id=str(bot.self_id),
+            bot_nicknames=getattr(ctx, "bot_nicknames", ()),
+            is_addressed=is_addressed,
+        )
+        semantic_plain_text = _semantic_plain_text_for_addressing(addressing, plain_text)
 
         nickname = event.sender.nickname or str(event.user_id)
 
-        # Build MessageContext and fire bus.on_message for interceptors
+        # Build MessageContext and fire bus.on_message for interceptors.  Use the
+        # semantic plaintext for downstream plugins; keep the adapter-stripped text
+        # in raw_message for audit because NoneBot may strip nickname vocatives.
         msg_ctx = MessageContext(
             session_id=f"group_{group_id}",
             group_id=group_id,
             user_id=str(event.user_id),
-            content=plain_text,
+            content=semantic_plain_text,
             raw_message={
                 "message_id": event.message_id,
                 "echo_key": echo_key,
-                "plain_text": plain_text,
+                "plain_text": semantic_plain_text,
+                "stripped_plain_text": plain_text,
+                "original_plain_text": addressing.original_text,
                 "segments": msg,
+                "echo_segments": echo_segments,
             },
             is_at=is_addressed,
             is_private=False,
@@ -1310,14 +1515,14 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         # full interceptor chain below.
         if not allow_speaking:
             await bus.fire_on_message(msg_ctx, silent_mode=True)
-            if plain_text:
-                preview = plain_text if len(plain_text) <= 120 else plain_text[:120] + "…"
+            if semantic_plain_text:
+                preview = semantic_plain_text if len(semantic_plain_text) <= 120 else semantic_plain_text[:120] + "…"
                 _log_msg_in.info("group={} silent_learn {}({}) | {}", group_id, nickname, event.user_id, preview)
                 ctx.timeline.add(
                     group_id,
                     role="user",
                     speaker=f"{nickname}({event.user_id})",
-                    content=plain_text,
+                    content=semantic_plain_text,
                     message_id=event.message_id,
                 )
             return
@@ -1340,38 +1545,64 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
             # When the message @'s another human in addition to the bot,
             # the question is likely directed at that person, not us — a
             # bare "这是谁" with a double-@ means "hey Alice, who is this",
-            # and the bot should not chip in.  We still let the LLM
-            # addressee detector override (it may confidently say "bot"),
-            # but the fallback flips from "me" to "not me".
+            # and the bot should not chip in.  Hard self-addressing evidence
+            # (text nickname in original_message, direct @self, reply-to-self)
+            # wins before the detector sees NoneBot's stripped text.
             has_other_at = _message_has_other_at(msg, bot.self_id)
 
-            addressee_self = await _at_trigger_targets_self(
-                rendered_message=str(msg),
-                plain_text=plain_text,
-                reply_sender_id=str(getattr(getattr(event.reply, "sender", None), "user_id", "") or ""),
-                self_id=str(bot.self_id),
-                bot_nicknames=getattr(ctx, "bot_nicknames", ()),
-                addressed_fallback=is_addressed and not has_other_at,
-            )
-            # Preserve the addressing form: when the user said "姆怎么是龙王"
-            # the nickname gets stripped, the LLM sees only "怎么是龙王" and
-            # doesn't know it's being talked about.  Injecting the matched
-            # nickname into the trigger reason gives the LLM the missing
-            # anchor ("有人叫你「姆」") without restoring the stripped
-            # nickname into the user-message text (which would read as the
-            # user talking to someone else named "姆").
-            nickname = _match_nickname_addressing(
+            if addressing.target == "self" and addressing.evidence in {
+                "at_self",
+                "nickname_original",
+                "reply_to_self",
+            }:
+                addressee_self = True
+            else:
+                addressee_self = await _at_trigger_targets_self(
+                    rendered_message=str(msg),
+                    plain_text=plain_text,
+                    reply_sender_id=str(getattr(getattr(event.reply, "sender", None), "user_id", "") or ""),
+                    self_id=str(bot.self_id),
+                    bot_nicknames=getattr(ctx, "bot_nicknames", ()),
+                    addressed_fallback=is_addressed and not has_other_at,
+                )
+            matched_nickname = addressing.matched_nickname or _match_nickname_addressing(
                 event, getattr(ctx, "bot_nicknames", ()),
             )
-            reason = f"有人叫你「{nickname}」" if nickname else "有人@了你"
+            reason = f"有人叫你「{matched_nickname}」" if matched_nickname else "有人@了你"
+            obligation = ReplyObligation(
+                level="must" if addressee_self else "may",
+                reason="self_addressed" if addressee_self else "ambiguous_addressing",
+                source=str(addressing.evidence or "router"),
+                priority=100 if addressee_self else 10,
+                addressing=addressing,
+            )
+            _log_reply_workflow.info(
+                "addressing_resolved | group={} event={} target={} obligation={} "
+                "evidence={} matched={} original={!r} stripped={!r}",
+                group_id,
+                event.message_id,
+                addressing.target,
+                obligation.level,
+                addressing.evidence,
+                matched_nickname,
+                addressing.original_text[:80],
+                addressing.stripped_text[:80],
+            )
             trigger = TriggerContext(
                 reason=reason,
                 mode="at_mention",
                 target_message_id=event.message_id,
                 target_user_id=str(event.user_id),
+                obligation=obligation,
                 extra={
                     "addressee_self": addressee_self,
                     "reply_sender_id": str(getattr(getattr(event.reply, "sender", None), "user_id", "") or ""),
+                    "addressing_evidence": addressing.evidence,
+                    "matched_nickname": matched_nickname,
+                    "addressing_original_text": addressing.original_text,
+                    "addressing_stripped_text": addressing.stripped_text,
+                    "nickname_stripped_to_empty_payload": _nickname_stripped_to_empty_payload(addressing),
+                    "nickname_only_call": False,
                 },
             )
 
@@ -1425,12 +1656,18 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
             if not content:
                 if is_addressed:
+                    timeline_content = "@我"
+                    if _nickname_stripped_to_empty_payload(addressing):
+                        timeline_content = addressing.original_text.strip() or timeline_content
+                    if trigger is not None and trigger.mode == "at_mention":
+                        trigger.extra["nickname_only_call"] = _nickname_stripped_to_empty_payload(addressing)
+                        trigger.extra["semantic_text"] = timeline_content
                     _log_msg_in.info("group={} @-only (empty content)", group_id)
                     ctx.timeline.add(
                         group_id,
                         role="user",
                         speaker=f"{nickname}({event.user_id})",
-                        content="@我",
+                        content=timeline_content,
                         message_id=event.message_id,
                     )
                     if not muted:
@@ -1440,11 +1677,22 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                             user_id=str(event.user_id),
                             trigger=trigger,
                             is_addressed=is_addressed,
-                            message="@我",
+                            message=timeline_content,
                             event=event,
                             self_id=str(bot.self_id),
                         )
                 return
+
+            nickname_only_call = _is_nickname_only_call(addressing, content)
+            if nickname_only_call:
+                # Preserve the original vocative as the semantic text.  NoneBot
+                # has stripped the nickname from event.message, so the rendered
+                # content would otherwise be just "。" and poison reply gates /
+                # context retrieval.
+                content = addressing.original_text.strip() or content
+            if trigger is not None and trigger.mode == "at_mention":
+                trigger.extra["nickname_only_call"] = nickname_only_call
+                trigger.extra["semantic_text"] = _content_to_text(content)
 
             preview = content if isinstance(content, str) else "".join(
                 str(b.get("text", ""))
@@ -1635,6 +1883,30 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 trigger = TriggerContext(
                     reason="用户在收尾告别，回一个对称的告别 token",
                     mode="closing",
+                    target_message_id=event.message_id,
+                    target_user_id=str(event.user_id),
+                )
+        # Weak-reply: greeting/opening detection. Mirror of closing — a bare "早安"
+        # in an ongoing two-person exchange invites a symmetric hello. Gated on the
+        # same recent-assistant condition so the bot does NOT answer every group-wide
+        # morning greeting it merely overhears.
+        if (
+            trigger is None
+            and not is_addressed
+            and has_recent_assistant
+            and last_assistant_to_user
+        ):
+            from services.reply_workflow import classify_greeting_intent
+
+            if classify_greeting_intent(_content_to_text(content)):
+                from kernel.types import TriggerContext
+
+                _log_reply_workflow.info(
+                    "greeting_intent | group={} user={}", group_id, event.user_id,
+                )
+                trigger = TriggerContext(
+                    reason="用户在跟你打招呼，回一个对称的招呼 token",
+                    mode="greeting",
                     target_message_id=event.message_id,
                     target_user_id=str(event.user_id),
                 )

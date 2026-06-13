@@ -7,7 +7,9 @@ normal-proportion art and chat/sticker-like images should both be represented.
 Default sampling:
   - all 60: official full art + official list art + official thumb
   - Bestdori-backed 40: + one game trim, one LiveSD, one stamp
+  - Ave Mujica 5: + official mini-anime chibi art
   - Ave Mujica 5: + one stamp
+  - late 20: + two official BanG Dream! Our Notes character images
 
 This lands a single bangdream.charpack via the ccip-sidecar /build-series-pack
 endpoint. Generated pack data under config/character_packs is runtime data and
@@ -17,13 +19,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import re
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 import requests
 
@@ -38,9 +42,68 @@ OFFICIAL_ASSET_BASE = (
 )
 BESTDORI_ASSET_BASE = "https://bestdori.com/assets/jp"
 BESTDORI_CARDS_API = "https://bestdori.com/api/cards/all.5.json"
+OUR_NOTES_ASSET_BASE = (
+    "https://bang-dream-on.bushimo.jp/wordpress/wp-content/themes/"
+    "bang-dream-on/assets/images/common"
+)
+MINI_ANIME_ASSET_BASE = (
+    "https://anime.bang-dream.com/bandorichan/wordpress/wp-content/themes/"
+    "bandorichan_v0/assets/webp/common/character"
+)
 SAMPLE_MAX = 256
 VALID_RELATIONS = {"self", "friend", "known"}
 SLUG_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+BESTDORI_SKIP_TRIM_RESOURCE_RE = re.compile(
+    r"^(?:bili_|res900|res\d{3}(?:500|501|900|901|s\d+)$)"
+)
+REQUIRED_FORM_BUCKETS = ("full_body", "normal_proportion", "chibi", "expression")
+OUR_NOTES_BANDS = {"avemujica", "yumemita", "millsage", "ikka-dumb-rock"}
+MINI_ANIME_CHIBI_SLUGS = {
+    "misumi_uika": "uika",
+    "wakaba_mutsumi": "mutsumi",
+    "yahata_umiri": "umiri",
+    "yutenji_nyamu": "nyamu",
+    "togawa_sakiko": "sakiko",
+}
+TRUSTED_CHIBI_URLS: dict[str, list[tuple[str, str]]] = {
+    "nakamachi_arale": [
+        (
+            "trusted_chibi_amiami_goods_04673015_nakamachi_arale",
+            "https://img.amiami.jp/images/product/main/253/GOODS-04673015.jpg",
+        ),
+    ],
+    "miyanaga_nonoka": [
+        (
+            "trusted_chibi_amiami_goods_04673016_miyanaga_nonoka",
+            "https://img.amiami.jp/images/product/main/253/GOODS-04673016.jpg",
+        ),
+    ],
+    "minetsuki_ritsu": [
+        (
+            "trusted_chibi_amiami_goods_04673017_minetsuki_ritsu",
+            "https://img.amiami.jp/images/product/main/253/GOODS-04673017.jpg",
+        ),
+    ],
+    "fuji_miyako": [
+        (
+            "trusted_chibi_amiami_goods_04673018_fuji_miyako",
+            "https://img.amiami.jp/images/product/main/253/GOODS-04673018.jpg",
+        ),
+    ],
+    "sengoku_yuno": [
+        (
+            "trusted_chibi_amiami_goods_04673019_sengoku_yuno",
+            "https://img.amiami.jp/images/product/main/253/GOODS-04673019.jpg",
+        ),
+    ],
+}
+IMAGE_DOWNLOAD_TIMEOUT = 30
+IMAGE_DOWNLOAD_RETRIES = 3
+IMAGE_DOWNLOAD_RETRY_BACKOFF = 0.8
+
+
+class HttpGetSession(Protocol):
+    def get(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -63,7 +126,7 @@ BAND_LABELS = {
     "avemujica": "BanG Dream! / Ave Mujica",
     "yumemita": "BanG Dream! / 夢限大みゅーたいぷ",
     "millsage": "BanG Dream! / Ma'cherie",
-    "ikka-dumb-rock": "BanG Dream! / Mugendai Mewtype",
+    "ikka-dumb-rock": "BanG Dream! / 一家Dumb Rock!",
 }
 
 
@@ -137,24 +200,128 @@ def fetch_json(url: str) -> Any:
     return resp.json()
 
 
-def download_image(sess: requests.Session, url: str) -> tuple[bytes, str] | None:
+def cache_paths(cache_dir: Path, url: str) -> tuple[Path, Path]:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return cache_dir / f"{digest}.bin", cache_dir / f"{digest}.json"
+
+
+def read_cached_image(cache_dir: Path | None, url: str) -> tuple[bytes, str] | None:
+    if cache_dir is None:
+        return None
+    data_path, meta_path = cache_paths(cache_dir, url)
+    if not data_path.exists() or not meta_path.exists():
+        return None
     try:
-        resp = sess.get(url, headers=HEADERS, timeout=30)
-    except requests.RequestException:
+        data = data_path.read_bytes()
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
-    content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-    if resp.status_code != 200 or not content_type.startswith("image/") or len(resp.content) < 1024:
+    content_type = str(meta.get("content_type") or "").split(";", 1)[0].strip().lower()
+    if not content_type.startswith("image/") or len(data) < 1024:
         return None
-    return resp.content, content_type
+    return data, content_type
+
+
+def write_cached_image(cache_dir: Path | None, url: str, data: bytes, content_type: str) -> None:
+    if cache_dir is None:
+        return
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        data_path, meta_path = cache_paths(cache_dir, url)
+        data_path.write_bytes(data)
+        meta_path.write_text(
+            json.dumps({"url": url, "content_type": content_type}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+def download_image(
+    sess: HttpGetSession,
+    url: str,
+    *,
+    cache_dir: Path | None,
+) -> tuple[bytes, str] | None:
+    cached = read_cached_image(cache_dir, url)
+    if cached is not None:
+        return cached
+    for attempt in range(1, IMAGE_DOWNLOAD_RETRIES + 1):
+        try:
+            resp = sess.get(url, headers=HEADERS, timeout=IMAGE_DOWNLOAD_TIMEOUT)
+        except requests.RequestException:
+            if attempt < IMAGE_DOWNLOAD_RETRIES:
+                time.sleep(IMAGE_DOWNLOAD_RETRY_BACKOFF * attempt)
+                continue
+            return None
+        content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if resp.status_code == 200 and content_type.startswith("image/") and len(resp.content) >= 1024:
+            write_cached_image(cache_dir, url, resp.content, content_type)
+            return resp.content, content_type
+        if attempt < IMAGE_DOWNLOAD_RETRIES:
+            time.sleep(IMAGE_DOWNLOAD_RETRY_BACKOFF * attempt)
+    return None
 
 
 def official_urls(entry: RosterEntry) -> list[tuple[str, str, str]]:
     base = f"{OFFICIAL_ASSET_BASE}/{entry.band_slug}"
     slug = entry.official_slug
-    return [
+    urls = [
         ("normal", "official_full", f"{base}/img_full_{slug}_01.webp"),
         ("normal", "official_list", f"{base}/img_list_{slug}.webp"),
         ("expression", "official_thumb", f"{base}/img_thumb_{slug}_01.webp"),
+    ]
+    if entry.band_slug == "yumemita":
+        urls.extend([
+            ("normal", "official_list_01", f"{base}/img_list_{slug}_01.webp"),
+            ("normal", "official_list_02", f"{base}/img_list_{slug}_02.webp"),
+        ])
+    urls.extend(our_notes_urls(entry))
+    return urls
+
+
+def our_notes_slug(official_slug: str) -> str:
+    parts = official_slug.split("-")
+    if len(parts) != 2:
+        return official_slug
+    return f"{parts[1]}-{parts[0]}"
+
+
+def our_notes_urls(entry: RosterEntry) -> list[tuple[str, str, str]]:
+    if entry.band_slug not in OUR_NOTES_BANDS:
+        return []
+    slug = our_notes_slug(entry.official_slug)
+    return [
+        (
+            "normal",
+            "ournotes_index",
+            f"{OUR_NOTES_ASSET_BASE}/index/img_{slug}.webp",
+        ),
+        (
+            "normal",
+            "ournotes_character_2",
+            f"{OUR_NOTES_ASSET_BASE}/character/img_{slug}_2.webp",
+        ),
+    ]
+
+
+def mini_anime_chibi_urls(entry: RosterEntry) -> list[tuple[str, str, str]]:
+    slug = MINI_ANIME_CHIBI_SLUGS.get(entry.character_id)
+    if slug is None:
+        return []
+    return [
+        (
+            "expression",
+            f"mini_anime_chibi_{slug}",
+            f"{MINI_ANIME_ASSET_BASE}/avemujica/img_chara-{slug}.webp",
+        )
+    ]
+
+
+def trusted_chibi_urls(entry: RosterEntry) -> list[tuple[str, str, str]]:
+    return [
+        ("expression", source, url)
+        for source, url in TRUSTED_CHIBI_URLS.get(entry.character_id, [])
     ]
 
 
@@ -167,6 +334,8 @@ def bestdori_trim_urls(cards: dict[str, Any], bestdori_id: int, scan: int) -> li
     ]
     for _, card in sorted(entries, reverse=True):
         resource = str(card["resourceSetName"])
+        if BESTDORI_SKIP_TRIM_RESOURCE_RE.match(resource):
+            continue
         selected.append((
             "normal",
             f"trim_{resource}",
@@ -198,6 +367,22 @@ def bestdori_stamp_urls(bestdori_id: int, limit: int) -> list[tuple[str, str, st
         )
         for idx in range(1, limit + 1)
     ]
+
+
+def source_form(source: str) -> str:
+    if source == "official_full":
+        return "full_body"
+    if source.startswith("official_list") or source.startswith("trim_") or source.startswith("ournotes_"):
+        return "normal_proportion"
+    if (
+        source.startswith("livesd_")
+        or source.startswith("mini_anime_chibi_")
+        or source.startswith("trusted_chibi_")
+    ):
+        return "chibi"
+    if source == "official_thumb" or source.startswith("stamp_"):
+        return "expression"
+    return "other"
 
 
 def load_characters(path: Path) -> list[dict[str, Any]]:
@@ -291,7 +476,7 @@ def build_pack_via_embed(
     files: list[tuple[str, tuple[str, bytes, str]]],
     timeout: int,
 ) -> dict[str, Any]:
-    import numpy as np
+    np = cast(Any, __import__("numpy"))
 
     pack = "bangdream"
     work = "BanG Dream!"
@@ -356,6 +541,9 @@ def build_pack_via_embed(
         raw_work = str(raw.get("work") or "").strip()
         if raw_work and raw_work != work:
             entry["work"] = raw_work
+        training_stats = raw.get("training_stats")
+        if isinstance(training_stats, dict):
+            entry["training_stats"] = training_stats
         manifest_characters.append(entry)
         per_character.append({
             "character_id": cid,
@@ -446,6 +634,7 @@ def main() -> None:
     ap.add_argument("--sd", type=int, default=1)
     ap.add_argument("--stamps", type=int, default=1)
     ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--image-cache-dir", type=Path, default=Path(".cache/character-pack-images/bangdream"))
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -468,9 +657,12 @@ def main() -> None:
     files: list[tuple[str, tuple[str, bytes, str]]] = []
     total_normal = 0
     total_expression = 0
+    training_stats_by_id: dict[str, dict[str, Any]] = {}
 
     for entry in ROSTER:
         candidates = official_urls(entry)
+        candidates.extend(mini_anime_chibi_urls(entry))
+        candidates.extend(trusted_chibi_urls(entry))
         if entry.bestdori_id and entry.bestdori_id <= 40:
             candidates.extend(bestdori_trim_urls(cards, entry.bestdori_id, args.card_scan))
             candidates.extend(bestdori_sd_urls(entry.bestdori_id, args.sd))
@@ -479,11 +671,12 @@ def main() -> None:
 
         per_kind = {"normal": 0, "expression": 0}
         per_source: list[str] = []
+        per_form = {form: 0 for form in REQUIRED_FORM_BUCKETS}
         trim_downloaded = 0
         for kind, source, url in candidates:
             if source.startswith("trim_") and trim_downloaded >= args.card_trims:
                 continue
-            image = download_image(sess, url)
+            image = download_image(sess, url, cache_dir=args.image_cache_dir)
             if image is None:
                 continue
             data, content_type = image
@@ -494,17 +687,34 @@ def main() -> None:
             if source.startswith("trim_"):
                 trim_downloaded += 1
             per_source.append(source)
+            form = source_form(source)
+            if form in per_form:
+                per_form[form] += 1
 
         if per_kind["normal"] < 1 or per_kind["expression"] < 1:
             raise SystemExit(f"{entry.character_id} has unbalanced/empty forms: {per_kind}")
+        missing_forms = [form for form in REQUIRED_FORM_BUCKETS if per_form.get(form, 0) < 1]
+        training_stats_by_id[entry.character_id] = {
+            "image_count": per_kind["normal"] + per_kind["expression"],
+            "forms": {form: count for form, count in per_form.items() if count > 0},
+            "sources": per_source,
+            "missing_forms": missing_forms,
+        }
         total_normal += per_kind["normal"]
         total_expression += per_kind["expression"]
         print(
             f"{entry.character_id:22s} normal={per_kind['normal']} "
-            f"expression={per_kind['expression']} sources={','.join(per_source)}"
+            f"expression={per_kind['expression']} "
+            f"missing_forms={','.join(missing_forms) or '-'} "
+            f"sources={','.join(per_source)}"
         )
 
     print(f"\nimages={len(files)} normal={total_normal} expression={total_expression}")
+    for item in characters:
+        cid = str(item.get("character_id") or "")
+        stats = training_stats_by_id.get(cid)
+        if stats is not None:
+            item["training_stats"] = stats
     if args.dry_run:
         return
 

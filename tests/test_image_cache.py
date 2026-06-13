@@ -73,6 +73,25 @@ class TestSaveAndLoad:
         assert "/ab/" in ref["path"] or "\\ab\\" in ref["path"]
 
     @_requires_libvips
+    async def test_save_bytes_shares_cache_key_with_save(self, cache: ImageCache) -> None:
+        """save_bytes() lets quoted images reuse the same normalized cache path."""
+        import pyvips  # type: ignore[import-untyped]
+
+        img: Any = pyvips.Image.black(32, 32).copy(interpretation="srgb")  # pyright: ignore[reportOptionalMemberAccess,reportCallIssue]
+        buf = img.jpegsave_buffer(Q=90)
+
+        ref = await cache.save_bytes(buf, file_id="quotedabc")
+        assert ref is not None
+        assert ref["media_type"] == "image/jpeg"
+        assert Path(ref["path"]).exists()
+
+        mock_session = AsyncMock()
+        cached = await cache.save(mock_session, url="http://example.com/quoted.jpg", file_id="quotedabc")
+
+        assert cached == ref
+        mock_session.get.assert_not_called()
+
+    @_requires_libvips
     async def test_save_transparent_png_preserves_alpha(self, cache: ImageCache) -> None:
         buf = _PNG_BYTES
 
