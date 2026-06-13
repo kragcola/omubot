@@ -1524,6 +1524,7 @@ class ChatPlugin(AmadeusPlugin):
             affection_engine=ctx.affection_engine,
             thinker_enabled=config.thinker.enabled,
             thinker_max_tokens=config.thinker.max_tokens,
+            thinker_force_reply_enabled=config.thinker.force_reply_enabled,
             thinker_necessity_gate_enabled=config.thinker.necessity_gate_enabled,
             thinker_necessity_gate_addressed_exempt=config.thinker.necessity_gate_addressed_exempt,
             mood_getter=runtime_mood_getter if ctx.mood_engine else None,

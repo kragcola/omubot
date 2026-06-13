@@ -856,11 +856,18 @@ class TestPassTurn:
 
             assert result is not None and result.strip() != ""
 
-    async def test_must_emit_skips_thinker_wait_and_emits_reply(
+    async def test_must_emit_runs_thinker_and_overrides_wait(
         self, identity_snapshot, prompt, short_term, tools, timeline, card_store,
     ) -> None:
+        # #2: must_emit (force_reply) now RUNS the thinker — it is the sole
+        # producer of light_kind / reply_necessity. A non-@ obligated turn has no
+        # scheduler deferral path, so a thinker `wait` is overridden to reply and
+        # the obligated turn still emits (must_emit's invariant holds under the
+        # corrected mechanism). must_emit has no trigger.mode, so it is treated as
+        # non-@ obligated → wait→reply.
         async for client in _client(prompt, short_term, tools, timeline=timeline, card_store=card_store):
             client._thinker_enabled = True
+            client._thinker_force_reply_enabled = True
             gid = "12345"
             timeline.add(gid, role="user", content="。", speaker="user(111)")
 
@@ -868,6 +875,20 @@ class TestPassTurn:
                 patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
                 patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=MOCK_RESULT_FULL),
             ):
+                mock_think.return_value = SimpleNamespace(
+                    action="wait",
+                    topic_intent_label="闲聊",
+                    retrieve_mode="skip",
+                    rewritten_query="",
+                    thought="想等等",
+                    unknown_terms=[],
+                    sticker=False,
+                    tone="日常",
+                    instruction_signal="none",
+                    light_kind="",
+                    reply_necessity="high",
+                    usage={"input_tokens": 10, "cache_read": 0, "cache_create": 0, "output_tokens": 2},
+                )
                 result = await client.chat(
                     session_id=f"group_{gid}",
                     user_id="111",
@@ -879,7 +900,8 @@ class TestPassTurn:
                 )
 
             assert result == "reply text"
-            mock_think.assert_not_called()
+            mock_think.assert_awaited_once()  # thinker now runs on must_emit
+            assert client._last_thinker_action == "reply"  # wait overridden
 
     async def test_nickname_only_call_routes_to_companion_llm(
         self, identity_snapshot, prompt, short_term, tools, timeline, card_store,

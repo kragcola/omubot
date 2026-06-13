@@ -436,3 +436,41 @@ def test_classify_closing_intent_negative(text: str) -> None:
 def test_classify_closing_intent_too_long_rejected() -> None:
     # 句尾有 closing token 但整句过长 → 不算 closing。
     assert classify_closing_intent("今天真的聊了好多东西好开心那就先这样") is False
+
+
+# ---------------------------------------------------------------------------
+# classify_greeting_intent (弱回复: greeting 招呼型检测, mirror closing)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    "早安",
+    "早上好",
+    "早",
+    "早呀~",
+    "早上好哇",
+    "晚上好",
+    "在吗",
+    "在不在",
+    "hi",
+    "hello",
+    "你好",
+    "morning",
+])
+def test_classify_greeting_intent_positive(text: str) -> None:
+    from services.reply_workflow import classify_greeting_intent
+
+    assert classify_greeting_intent(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "早安是什么意思",          # 定义式疑问，非招呼
+    "早上好为什么这么说",      # 疑问
+    "今天好累",                # 无 greeting token
+    "",                        # 空
+    "早上好我跟你说个事情今天的安排有变要重新讨论一下",  # 超长
+])
+def test_classify_greeting_intent_negative(text: str) -> None:
+    from services.reply_workflow import classify_greeting_intent
+
+    assert classify_greeting_intent(text) is False

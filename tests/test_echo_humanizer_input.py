@@ -115,7 +115,54 @@ async def test_echo_plugin_uses_visible_text_and_scheduler_runtime() -> None:
 
 
 @pytest.mark.asyncio
-async def test_element_detector_passes_runtime_for_template_reply() -> None:
+async def test_echo_plugin_repeats_original_segments_over_stripped() -> None:
+    """When the router supplies pre-strip ``echo_segments`` (nickname vocative),
+    echo must repeat those, not the adapter-stripped ``segments`` (bare "。")."""
+    plugin = EchoPlugin()
+    plugin._config = EchoConfig(enabled=True, ignore_command_messages=True)
+    plugin._tracker = cast(Any, SimpleNamespace(process=lambda *_args: "姆。"))
+    plugin._humanizer = _HumanizerSpy()
+    plugin._scheduler = _SchedulerStub({"register": None, "slot": None, "mood": None})
+    plugin._timeline = _TimelineStub()
+    bot = SimpleNamespace(send_group_msg=AsyncMock())
+    original = [{"type": "text", "data": {"text": "姆。"}}]
+    stripped = [{"type": "text", "data": {"text": "。"}}]
+
+    consumed = await plugin.on_message(_message_context(
+        plain_text="姆。",
+        raw_message={
+            "plain_text": "姆。",
+            "echo_key": "姆。",
+            "segments": stripped,
+            "echo_segments": original,
+        },
+        bot=bot,
+    ))
+
+    assert consumed is True
+    bot.send_group_msg.assert_awaited_once_with(group_id=100, message=original)
+
+
+@pytest.mark.asyncio
+async def test_echo_plugin_falls_back_to_segments_without_original() -> None:
+    """Back-compat: when no ``echo_segments`` is supplied, echo uses ``segments``."""
+    plugin = EchoPlugin()
+    plugin._config = EchoConfig(enabled=True, ignore_command_messages=True)
+    plugin._tracker = cast(Any, SimpleNamespace(process=lambda *_args: "哈哈"))
+    plugin._humanizer = _HumanizerSpy()
+    plugin._scheduler = _SchedulerStub({"register": None, "slot": None, "mood": None})
+    plugin._timeline = _TimelineStub()
+    bot = SimpleNamespace(send_group_msg=AsyncMock())
+    segments = [{"type": "text", "data": {"text": "哈哈"}}]
+
+    consumed = await plugin.on_message(_message_context(
+        plain_text="哈哈",
+        raw_message={"plain_text": "哈哈", "echo_key": "哈哈", "segments": segments},
+        bot=bot,
+    ))
+
+    assert consumed is True
+    bot.send_group_msg.assert_awaited_once_with(group_id=100, message=segments)
     plugin = ElementDetectorPlugin()
     plugin._detector = cast(
         ElementDetector,

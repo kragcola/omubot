@@ -87,16 +87,20 @@ async def _chat_reply(
     return final_reply, mock_api.await_count
 
 
-async def test_kaomoji_enforce_strict_default_preserves_v1_round(
+async def test_kaomoji_enforce_strips_kaomoji_emits_residual_prose(
     persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
 ) -> None:
+    # #3: enforce fires (strict=False always fires when kaomoji present) → the
+    # kaomoji span is stripped and the residual prose ("好耶") is emitted in a
+    # SINGLE round. The old path forced a second "只发图" round that swallowed
+    # all prose; that round no longer exists.
     final_reply, rounds = await _chat_reply(persona_runtime, identity_snapshot, strict=False)
 
-    assert final_reply == "第二轮补图"
-    assert rounds == 2
+    assert final_reply == "好耶"
+    assert rounds == 1
 
 
-async def test_kaomoji_enforce_strict_allows_playful_mood(
+async def test_kaomoji_enforce_strict_playful_strips_residual(
     persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
 ) -> None:
     final_reply, rounds = await _chat_reply(
@@ -106,11 +110,11 @@ async def test_kaomoji_enforce_strict_allows_playful_mood(
         mood={"label": "兴奋", "energy": 0.9, "valence": 0.6},
     )
 
-    assert final_reply == "第二轮补图"
-    assert rounds == 2
+    assert final_reply == "好耶"
+    assert rounds == 1
 
 
-async def test_kaomoji_enforce_strict_allows_high_mood(
+async def test_kaomoji_enforce_strict_high_mood_strips_residual(
     persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
 ) -> None:
     final_reply, rounds = await _chat_reply(
@@ -120,13 +124,34 @@ async def test_kaomoji_enforce_strict_allows_high_mood(
         mood={"label": "期待", "energy": 0.8, "valence": 0.5},
     )
 
-    assert final_reply == "第二轮补图"
-    assert rounds == 2
+    assert final_reply == "好耶"
+    assert rounds == 1
+
+
+async def test_kaomoji_enforce_pure_kaomoji_returns_empty(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    # #3 pure-kaomoji: no prose survives the strip → the reply becomes a wordless
+    # sticker (the sticker stands as the reply), and chat() returns "". Uses two
+    # inline kaomoji so the reply survives _clean_reply (a *solo* single
+    # parenthetical is stripped upstream by _STAGE_DIR_SOLO_RE and never reaches
+    # the enforce path — addressed turns get a context sticker via _fallback_ack
+    # instead). No sticker store in this fixture, so the send is a no-op; the
+    # point is that chat() returns "" rather than echoing the kaomoji as text.
+    final_reply, rounds = await _chat_reply(
+        persona_runtime, identity_snapshot,
+        strict=False,
+        reply="(≧▽≦)(｡･ω･｡)",
+    )
+
+    assert final_reply == ""
+    assert rounds == 1
 
 
 async def test_kaomoji_enforce_strict_blocks_non_playful_register(
     persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
 ) -> None:
+    # Strict gate not satisfied → enforce does NOT fire → kaomoji preserved as-is.
     final_reply, rounds = await _chat_reply(
         persona_runtime, identity_snapshot,
         strict=True,

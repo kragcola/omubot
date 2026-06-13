@@ -313,6 +313,58 @@ def classify_closing_intent(text: str) -> bool:
     return False
 
 
+# Greeting tokens (mirror closing): a highly conventionalized opening adjacency
+# pair. A greeting invites a symmetric hello, so we route it to the greeting
+# weak-reply the same way closing routes to a farewell.
+_GREETING_TOKENS = (
+    "早安",
+    "早上好",
+    "早",
+    "早呀",
+    "早啊",
+    "早哇",
+    "中午好",
+    "下午好",
+    "晚上好",
+    "好久不见",
+    "在吗",
+    "在么",
+    "在不在",
+    "hi",
+    "hello",
+    "哈喽",
+    "你好",
+    "您好",
+    "morning",
+    "goodmorning",
+)
+_GREETING_QUESTION_RE = re.compile(r"是什么|什么意思|为什么|怎么")
+_GREETING_MAX_LEN = 10
+
+
+def classify_greeting_intent(text: str) -> bool:
+    """Return True when ``text`` is a conversation-opening greeting token.
+
+    Mirror of :func:`classify_closing_intent`: short message whose normalized
+    form is, or starts with, a greeting token, with no定义-style question
+    ("早安是什么意思"). "在吗？" stays a greeting (the trailing ? is fine for an
+    opening), but "早安什么意思" is rejected.
+    """
+    normalized = normalize_followup_text(text)
+    if not normalized:
+        return False
+    if len(normalized) > _GREETING_MAX_LEN:
+        return False
+    lowered = normalized.lower()
+    if _GREETING_QUESTION_RE.search(normalized):
+        return False
+    for token in _GREETING_TOKENS:
+        tok = token.lower()
+        if lowered == tok or lowered.startswith(tok):
+            return True
+    return False
+
+
 
 def should_call_semantic_gate(features: ReplyGateFeatures, *, max_chars: int = 48) -> tuple[bool, str]:
     text = normalize_followup_text(features.current_text)

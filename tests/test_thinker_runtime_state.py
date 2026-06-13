@@ -658,3 +658,164 @@ async def test_necessity_gate_suppresses_overhearer_role(
         await client.close()
     assert result is None  # overhearer + low → suppressed
     main_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #2: force_reply now runs the thinker (weak-reply classification on @ turns)
+# ---------------------------------------------------------------------------
+
+
+def _trigger(mode: str, **extra):
+    return SimpleNamespace(mode=mode, extra=dict(extra), obligation=None)
+
+
+@pytest.mark.asyncio
+async def test_force_reply_runs_thinker_when_enabled(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """#2: with force_reply_enabled (default), an @-mention turn (force_reply)
+    runs the pre-reply thinker — the sole producer of light_kind /
+    reply_necessity. Previously `not force_reply` skipped it entirely."""
+    client = await _client(persona_runtime)
+    client._thinker_force_reply_enabled = True
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = _think_ns(action="reply")
+            result = await client.chat(
+                session_id="group_100",
+                user_id="100",
+                user_content="",
+                identity=identity_snapshot,
+                group_id="100",
+                force_reply=True,
+                trigger=_trigger("at_mention", addressee_self=True),
+            )
+    finally:
+        await client.close()
+    assert result == "reply text"
+    mock_think.assert_awaited_once()  # thinker ran on the force_reply turn
+
+
+@pytest.mark.asyncio
+async def test_force_reply_skips_thinker_when_disabled(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """Flag off → legacy behavior: force_reply skips the thinker."""
+    client = await _client(persona_runtime)
+    client._thinker_force_reply_enabled = False
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = _think_ns(action="reply")
+            result = await client.chat(
+                session_id="group_100",
+                user_id="100",
+                user_content="",
+                identity=identity_snapshot,
+                group_id="100",
+                force_reply=True,
+                trigger=_trigger("at_mention", addressee_self=True),
+            )
+    finally:
+        await client.close()
+    assert result == "reply text"
+    mock_think.assert_not_awaited()  # legacy skip
+
+
+@pytest.mark.asyncio
+async def test_force_reply_at_mention_honors_wait_for_deferral(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """A plain @-mention may honor a thinker `wait` — the scheduler's
+    addressed-wait deferral (gated on mode==at_mention + _last_thinker_action
+    =='wait') re-fires it. chat() returns None and leaves _last_thinker_action
+    == 'wait' so the deferral path can pick it up."""
+    client = await _client(persona_runtime)
+    client._thinker_force_reply_enabled = True
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT) as main_call,
+        ):
+            mock_think.return_value = _think_ns(action="wait", thought="等用户说完")
+            result = await client.chat(
+                session_id="group_100",
+                user_id="100",
+                user_content="",
+                identity=identity_snapshot,
+                group_id="100",
+                force_reply=True,
+                trigger=_trigger("at_mention", addressee_self=True),
+            )
+    finally:
+        await client.close()
+    assert result is None  # wait honored
+    assert client._last_thinker_action == "wait"  # deferral can re-fire
+    main_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_force_reply_correction_overrides_wait(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """#2 wait-guard: a non-@ obligated force_reply (correction) has NO deferral
+    path, so a thinker `wait` must be overridden to reply — otherwise the
+    obligated turn is silently dropped."""
+    client = await _client(persona_runtime)
+    client._thinker_force_reply_enabled = True
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT) as main_call,
+        ):
+            mock_think.return_value = _think_ns(action="wait", thought="先等等")
+            result = await client.chat(
+                session_id="group_100",
+                user_id="100",
+                user_content="",
+                identity=identity_snapshot,
+                group_id="100",
+                force_reply=True,
+                trigger=_trigger("correction"),
+            )
+    finally:
+        await client.close()
+    assert result == "reply text"  # wait overridden → reply emitted
+    assert client._last_thinker_action == "reply"
+    main_call.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_force_reply_deferred_refire_overrides_wait(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    """A deferred addressed re-fire (force_after_wait) is the LAST chance — its
+    quiet window already elapsed, so a fresh `wait` must NOT defer again; the
+    guard overrides it to reply even though the mode is at_mention."""
+    client = await _client(persona_runtime)
+    client._thinker_force_reply_enabled = True
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT) as main_call,
+        ):
+            mock_think.return_value = _think_ns(action="wait", thought="还想等")
+            result = await client.chat(
+                session_id="group_100",
+                user_id="100",
+                user_content="",
+                identity=identity_snapshot,
+                group_id="100",
+                force_reply=True,
+                trigger=_trigger("at_mention", addressee_self=True, force_after_wait=True),
+            )
+    finally:
+        await client.close()
+    assert result == "reply text"  # no second deferral → reply
+    assert client._last_thinker_action == "reply"
+    main_call.assert_called()
