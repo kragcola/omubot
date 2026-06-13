@@ -23,6 +23,7 @@ import pytest
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
 from kernel.router import (
+    _addressing_triggers_m1_mention,
     _group_ingest_lock,
     _is_nickname_only_call,
     _message_ats_self,
@@ -224,3 +225,77 @@ async def test_group_ingest_lock_serializes_commit_order() -> None:
     await asyncio.gather(image, text)
     # Without the lock the fast text would commit first; with it, arrival order holds.
     assert commit_order == ["image", "text"]
+
+
+# ---------------------------------------------------------------------------
+# M1 irritation mention gating: a text-nickname vocative must feed the tension
+# sensor just like a protocol @, while a mid-sentence character mention must
+# not.  Regression for the采集口 gap where nickname spam ("emu。" repeated)
+# never moved M1 tension because the sensor only fired on _message_ats_self.
+# ---------------------------------------------------------------------------
+
+
+def _addressing_for(
+    *,
+    original: Message,
+    stripped: Message,
+    is_addressed: bool,
+    msg: Message | None = None,
+    reply=None,
+):
+    event = SimpleNamespace(
+        original_message=original,
+        get_plaintext=lambda: stripped.extract_plain_text(),
+        reply=reply,
+    )
+    return _resolve_addressing_context(
+        event,  # type: ignore[arg-type]
+        msg if msg is not None else stripped,
+        self_id=SELF_ID,
+        bot_nicknames=("emu", "笑梦", "凤笑梦"),
+        is_addressed=is_addressed,
+    )
+
+
+def test_m1_mention_fires_on_protocol_at() -> None:
+    msg = Message([_seg_at(SELF_ID), MessageSegment.text("在吗")])
+    addressing = _addressing_for(
+        original=msg, stripped=msg, msg=msg, is_addressed=True
+    )
+    assert addressing.evidence == "at_self"
+    assert _addressing_triggers_m1_mention(addressing) is True
+
+
+def test_m1_mention_fires_on_nickname_vocative() -> None:
+    # NoneBot strips the matched nickname prefix → downstream sees just "。".
+    addressing = _addressing_for(
+        original=Message([MessageSegment.text("emu。")]),
+        stripped=Message([MessageSegment.text("。")]),
+        is_addressed=True,
+    )
+    assert addressing.evidence == "nickname_original"
+    assert _addressing_triggers_m1_mention(addressing) is True
+
+
+def test_m1_mention_ignores_midsentence_character_mention() -> None:
+    # Talking *about* the character ("看凤笑梦表情包") is not a vocative: the
+    # nickname is not a head-of-message prefix, so addressing falls through to
+    # "none" and must not move tension.
+    text = Message([MessageSegment.text("看凤笑梦表情包")])
+    addressing = _addressing_for(
+        original=text, stripped=text, msg=text, is_addressed=False
+    )
+    assert addressing.evidence == "none"
+    assert _addressing_triggers_m1_mention(addressing) is False
+
+
+def test_m1_mention_ignores_reply_to_self() -> None:
+    # Replying to the bot is a real interaction but weaker than a deliberate
+    # mention; keep it out of the irritation sensor (only @ / nickname count).
+    text = Message([MessageSegment.text("好的")])
+    reply = SimpleNamespace(sender=SimpleNamespace(user_id=int(SELF_ID)))
+    addressing = _addressing_for(
+        original=text, stripped=text, msg=text, is_addressed=False, reply=reply
+    )
+    assert addressing.evidence == "reply_to_self"
+    assert _addressing_triggers_m1_mention(addressing) is False

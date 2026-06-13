@@ -437,6 +437,19 @@ def _resolve_addressing_context(
     )
 
 
+# Evidence kinds that count as the user explicitly addressing the bot for the
+# purpose of M1 irritation: a protocol @self, or a head-of-message text
+# nickname with a vocative boundary ("emu。", "笑梦").  Both are deliberate
+# cues at the same strength; a mid-sentence character mention or a sticker
+# caption resolves to other evidence (or none) and is excluded, so nickname
+# spam moves tension while talking *about* the character does not.
+_M1_MENTION_EVIDENCE = frozenset({"at_self", "nickname_original"})
+
+
+def _addressing_triggers_m1_mention(addressing: AddressingContext) -> bool:
+    return addressing.target == "self" and addressing.evidence in _M1_MENTION_EVIDENCE
+
+
 async def _at_trigger_targets_self(
     *,
     rendered_message: str,
@@ -1527,7 +1540,12 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 )
             return
 
-        if _message_ats_self(msg, bot.self_id):
+        # M1 irritation treats a text-nickname vocative ("emu。", "笑梦") as an
+        # explicit mention, same as a protocol @.  The reply-obligation path
+        # already equates the two (is_addressed / addressing.evidence), so the
+        # tension sensor must too — otherwise the dominant real-world form of
+        # "being repeatedly cue'd" (nickname spam) never moves tension.
+        if _addressing_triggers_m1_mention(addressing):
             register_m1_mention_irritation(
                 ctx,
                 group_id=group_id,

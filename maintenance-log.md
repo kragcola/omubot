@@ -4,7 +4,26 @@
 
 ---
 
-## 2026-06-14 文档归档：已完成/已验收的迁移清单、执行追踪、审计调研移至 _archive
+## 2026-06-14 引入 Reasonix（DeepSeek-native CLI agent）作派单执行手：新增 REASONIX.md + deep-delivery 派单特化 + /done 完成协议
+
+**变更类型**：Agent 工作流配置（文档/skill/slash 命令，future agents 依赖；无代码/运行态变更）。引入 Reasonix Desktop（接 DeepSeek V4-Pro）作为「接单落地」执行手，与 Claude Code（立项/派发/架构）分工；本仓为其做项目特化。
+
+**背景**：用户主力 Claude 4.8 + Claude Code（VSCode 插件）。评估 Reasonix + DeepSeek V4-Pro 替代「不稳定 Codex + 降智 GPT-5.5」做派单后的落地执行。结论：V4-Pro 工程推理与前沿基本持平（SWE-bench Verified ~80.6%），差距主要在 agent harness 成熟度，而 Reasonix 正是为 DeepSeek 缓存机制特化的原生 harness，落地接单（已 scoped 任务）是其甜区。形态选 Desktop GUI（用户不习惯纯 CLI）。
+
+**做了什么**：
+
+- **新增 [REASONIX.md](REASONIX.md)**（项目根，73 行）：Reasonix 专属项目记忆。源码实锤 Reasonix 自动加载 `REASONIX.md / AGENTS.md / CLAUDE.md`（`internal/memory/doc.go` docNames），同目录多份全部 fold 进 system-prompt prefix（boot 时一次）。内容：定位 delivery executor、显式声明 `.agents/skills/**` 下 skill 可加载可触发（**修正初版误写的「skill 不适用」**）、区分「omubot-continuity 原则适用」vs「Codex 的 ACTIVE.md tracker 文件不必维护（仅 cross-agent handoff 时更新）」、macOS sandbox 默认断网需手开。
+- **特化 [omubot-deep-delivery](.agents/skills/omubot-deep-delivery/SKILL.md)**（79→111 行，`.agents` + `.claude` 两份同步）：新增「Delivery Executor Mode」一节，针对实测 5 类失败模式——① 权限内信息自读不问；② 动手前复述目标+验收标准；③ 声明完成前重读自己 diff；④ 自验证工具箱（pytest/pyright/ruff/sqlite 只读/NapCat `localhost:29300`），仅主观体感可移交用户，「我测不了」非合法完成态；⑤ 失败先诊断换法、带证据才升级，不未尝试就甩回。
+- **新增 [/done 完成协议](.reasonix/commands/done.md)**（`.reasonix/commands/`，39 行，仅 Reasonix 读）：声明完成前强制 8 步——重读 diff / D1 同模式扫描 / 静态检查 / 测试 / 运行态外部状态 / 负向碰撞 / 回滚路径 / maintenance-log，必须贴真实输出，禁止空断言。
+
+**影响范围**：纯 agent 配置层；不碰任何业务代码、运行态、NapCat。AGENTS.md 一字未动（Codex 继续用，零风险）。Claude Code 行为仅受 deep-delivery 特化影响（内容为条件式中立，对派单方无害）。
+
+**验证**：`.agents` 与 `.claude` 两份 deep-delivery `diff -q` 一致；「Delivery Executor Mode」两份均在；REASONIX.md 盘上为修正版（无初版 "hunting for" 旧措辞残留）；/done 在 `.reasonix/commands/` 在盘。**待用户在 app 内 `/new` 干净 boot 后实测生效**（初版误写的 REASONIX.md 曾被 boot 进旧 session prefix 致 Reasonix 一度拒用 skill，已改盘修正，需重 boot 清除记忆尾巴）。
+
+**回滚**：删除 REASONIX.md、`.reasonix/commands/done.md`，`git checkout .agents/skills/omubot-deep-delivery/SKILL.md .claude/skills/omubot-deep-delivery/SKILL.md` 还原 deep-delivery。各项独立可单独回退。**注**：REASONIX.md / .reasonix/ 当前为 git untracked，提交前需先 `git status` 甄别 `.reasonix/` 内 Reasonix 自建 session/缓存文件，仅 add `commands/`。
+
+---
+
 
 **变更类型**：文档整理（纯 git mv，无代码/配置/运行态变更）。将已验收落地或调研内容已执行的 ~48 份文档移入各目录 `_archive/`。
 

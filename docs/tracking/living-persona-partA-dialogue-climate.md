@@ -145,6 +145,26 @@ Dialogue Climate 立项：
 
 ---
 
+## 8. 运行实测与修订（启用后回填）
+
+> A-M1 随 Living Persona 全量于 **2026-06-09 启用**（`dialogue_climate.m1_enabled=true`，runtime override）。本章记录启用后的真实数据与据此做的修订，是 §6.1「烤群灰度观测 1–2 周校准 τ/阈值」的执行记录。
+
+### 8.1 2026-06-14 采集口缺口：昵称呼叫此前未进 tension 感知（已修）
+
+**实测**（启用后 4 天，进容器只读 `storage/living_persona/m1_metrics.db`）：M1 tension 事件**全程仅 1 条**（一次真@，delta 0.03，峰值 0.03，从未触阈 0.12）。初判"信号源稀疏"是错的——同窗口群里有大量**伪@：连续叫 bot 昵称**（group 993065015 用户连环刷「emu。」，一分钟内 4 条）。
+
+**根因**：`kernel/router.py` 三条线判据不一致——回复义务 `is_addressed`（认昵称前缀）、role 判定 `addressing.evidence`（认 `nickname_original`）都把昵称等同于 @，**唯独 M1 mention 感知用了最窄的 `_message_ats_self`（只认协议层真@）**。而 persona source 明确"用名字/昵称叫我 = @我 = 直接对我说话"（别名：凤笑梦/emu/笑梦/姆/姆姆/凤同学/凤/Emu）。结果：真实世界"被连续 cue"的主要形态（昵称连呼）对 tension 零贡献，R8 的采集口径错了，不是样本不够。
+
+**修订**（采集口收敛到既有信号，2 文件）：M1 mention 触发条件改用上方已算好的 `AddressingContext`，新增谓词 `_addressing_triggers_m1_mention`，认 `target=="self" and evidence ∈ {at_self, nickname_original}`，与回复义务线同源。误报天然有保障（`nickname_original` 只匹配句首昵称+vocative 边界，「看凤笑梦表情包」不触发）；`reply_to_self` 刻意排除（语义弱于主动 cue）。4 个回归测试覆盖。详见 [维护日志 2026-06-14](../../maintenance-log.md)。
+
+### 8.2 待校准（R8 接续）
+
+- **mention 单价**：`_M1_IRRITATION_MENTION_TENSION=0.03`。昵称接入后信号量从"4天1次"→"数十次/天"，连呼可能很快撞 0.2 cap（`_M1_IRRITATION_TENSION_CAP`），需跑几天看 `m1_metrics.db` 真实分布后下调。**这恰好补齐 R8 长期缺的校准样本**——8.1 修复前根本采不到数据。
+- **τ_tension 半衰期**：默认 `_M1_DEFAULT_TENSION_TAU_S=600s`，待积累超阈触发样本后用 `m1_tension_metrics()`（injection_count / trigger_rate / half_life_s）实测回放校准。
+- **M2 解冻前置仍未满足**：§6.1 要求"M1 调参手感确认"才批 M2，8.1 之前数据为空、谈不上手感；现在采集口修好，需重新积累 1–2 周有效样本再评估。
+
+---
+
 ## 附：核验命令留痕（D4）
 
 ```text
