@@ -1,0 +1,92 @@
+# Test matrix: 4 standalone NapCat instances (admin + 3 plain accounts).
+# Pure napcat + OneBot HTTP — NO bot brain (no LLM, no persona).
+# Driven manually or by test scripts via each instance's HTTP API.
+#
+# Brought up independently of the production stack so the test matrix can be
+# torn down without touching napcat (emu 384801062) / bot / pmubot:
+#   docker compose -f docker-compose.test-matrix.yml up -d
+#   docker compose -f docker-compose.test-matrix.yml down
+#
+# pmubot (container ops console) auto-manages these via the name regex
+# ^(?:napcat|qq-bot)(?:-.+)?$ — no pmubot code change needed.
+#
+# Port map (host -> container). All bound to 127.0.0.1 (local-only, never public).
+#   instance            role     WebUI(6099)   OneBot HTTP(29300)
+#   napcat-test-admin   admin    6101          29320
+#   napcat-test-1       plain1   6102          29321
+#   napcat-test-2       plain2   6103          29322
+#   napcat-test-3       plain3   6104          29323
+# (avoids emu 6099/29300/29301 and bot2 6100/29310/29311)
+
+services:
+  napcat-test-admin:
+    image: mlikiowa/napcat-docker:v4.15.0
+    container_name: napcat-test-admin
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6101:6099"
+      - "127.0.0.1:29320:29300"
+    volumes:
+      - ./napcat/bots/test-admin/config:/app/napcat/config
+      - ./napcat/bots/test-admin/data:/app/.config/QQ
+    environment:
+      - NAPCAT_GID=0
+      - NAPCAT_UID=0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 1g
+    mem_reservation: 256m
+
+  napcat-test-1:
+    image: mlikiowa/napcat-docker:v4.15.0
+    container_name: napcat-test-1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6102:6099"
+      - "127.0.0.1:29321:29300"
+    volumes:
+      - ./napcat/bots/test-t1/config:/app/napcat/config
+      - ./napcat/bots/test-t1/data:/app/.config/QQ
+    environment:
+      - NAPCAT_GID=0
+      - NAPCAT_UID=0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 1g
+    mem_reservation: 256m
+
+  napcat-test-2:
+    image: mlikiowa/napcat-docker:v4.15.0
+    container_name: napcat-test-2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6103:6099"
+      - "127.0.0.1:29322:29300"
+    volumes:
+      - ./napcat/bots/test-t2/config:/app/napcat/config
+      - ./napcat/bots/test-t2/data:/app/.config/QQ
+    environment:
+      - NAPCAT_GID=0
+      - NAPCAT_UID=0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 1g
+    mem_reservation: 256m
+
+  napcat-test-3:
+    image: mlikiowa/napcat-docker:v4.15.0
+    container_name: napcat-test-3
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6104:6099"
+      - "127.0.0.1:29323:29300"
+    volumes:
+      - ./napcat/bots/test-t3/config:/app/napcat/config
+      - ./napcat/bots/test-t3/data:/app/.config/QQ
+    environment:
+      - NAPCAT_GID=0
+      - NAPCAT_UID=0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 1g
+    mem_reservation: 256m

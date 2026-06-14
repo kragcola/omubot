@@ -101,6 +101,9 @@ _RUNTIME_METRIC_KEYS = (
     "coalesce_enqueued",
     "coalesce_flushed",
     "coalesce_bypassed",
+    "anchor_reinject_count",
+    "slang_lookup_resolved",
+    "slang_lookup_unresolved",
 )
 
 

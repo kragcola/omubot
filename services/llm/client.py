@@ -1635,6 +1635,24 @@ class LLMClient:
             if isinstance(result, SlangResult) and str(result.explanation or "").strip()
         }
         unresolved_terms = [term for term in terms if term not in resolved_terms]
+        if resolved_terms:
+            source_counts: dict[str, int] = {}
+            for result in resolved_terms.values():
+                src = str(getattr(result, "source", "") or "unknown")
+                source_counts[src] = source_counts.get(src, 0) + 1
+            await self._record_runtime_metric(
+                metric_key="slang_lookup_resolved",
+                group_id=group_id,
+                amount=len(resolved_terms),
+                metadata={"requested": len(terms), "sources": source_counts},
+            )
+        if unresolved_terms:
+            await self._record_runtime_metric(
+                metric_key="slang_lookup_unresolved",
+                group_id=group_id,
+                amount=len(unresolved_terms),
+                metadata={"requested": len(terms)},
+            )
         return resolved_terms, unresolved_terms
 
     def _sticker_extra_candidates(self) -> Callable[[], Awaitable[list[str]]]:
@@ -4102,6 +4120,33 @@ class LLMClient:
         except Exception:
             _log_debug.debug("humanization metrics persist skipped | request={}", request_id)
 
+    async def _record_runtime_metric(
+        self,
+        *,
+        metric_key: str,
+        group_id: str | None = None,
+        amount: int = 1,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist a runtime metric event to the block-trace store (best-effort).
+
+        Mirrors the store access used by ``_record_humanization_metrics``. Used to
+        give otherwise-invisible features (anchor reinjection, slang lookup) a
+        queryable observability signal in ``runtime_metric_events``.
+        """
+        store = getattr(self._budget_manager, "_store", None)
+        if store is None or not hasattr(store, "record_runtime_metric"):
+            return
+        try:
+            await store.record_runtime_metric(
+                metric_key=metric_key,
+                group_id=group_id or "",
+                amount=amount,
+                metadata=metadata or {},
+            )
+        except Exception:
+            _log_debug.debug("runtime metric persist skipped | key={}", metric_key)
+
     async def _maybe_rewrite_humanization_reply(
         self,
         *,
@@ -5092,6 +5137,12 @@ class LLMClient:
                 is_group=is_group,
                 anchor_turn=anchor_injection.anchor_turn,
             )
+            if anchor_injection.anchor_turn is not None and anchor_injection.anchor_turn > 0:
+                await self._record_runtime_metric(
+                    metric_key="anchor_reinject_count",
+                    group_id=group_id,
+                    metadata={"anchor_turn": int(anchor_injection.anchor_turn)},
+                )
             acc_llm_elapsed += float(result.get("call_elapsed_s", 0.0) or 0.0)
             acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
             acc_output += result.get("output_tokens", 0)
@@ -5610,6 +5661,12 @@ class LLMClient:
             is_group=is_group,
             anchor_turn=anchor_injection.anchor_turn,
         )
+        if anchor_injection.anchor_turn is not None and anchor_injection.anchor_turn > 0:
+            await self._record_runtime_metric(
+                metric_key="anchor_reinject_count",
+                group_id=group_id,
+                metadata={"anchor_turn": int(anchor_injection.anchor_turn)},
+            )
         acc_llm_elapsed += float(result.get("call_elapsed_s", 0.0) or 0.0)
         acc_input += result["input_tokens"] - result.get("cache_read", 0) - result.get("cache_create", 0)
         acc_output += result.get("output_tokens", 0)

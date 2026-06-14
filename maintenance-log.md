@@ -4,6 +4,83 @@
 
 ---
 
+## 2026-06-14 arbiter C (correction) 触发路径压测（仅审计未改代码）
+
+**变更类型**：压测审计（无代码改动）。arbiter A/B 前几轮已端到端验证，C（correction）是唯一没压过的 arbiter 路径，配置全开（`correction_enabled=True correction_window_s=30.0`）。
+
+**结论：arbiter C 在当前运行态下实际无法触发**，3 轮多账号投喂（苹果→iPhone / 北京票→出差 / 猫→狗）**0 次触发**，judge_correction 从未被调用。两个结构性根因（详见 `docs/tracking/arbiter-c-correction-stress-2026-06-14.md`）：
+1. **30s 窗口太窄**：实测修正消息从发出到被 router 评估隔 31/41/45s 全超窗。延迟源=emu 串行处理（chat lock，回复 total 4–11s）+ 非@消息走 debounce 5s + coalesce + semantic_gate ~1s LLM 调用累积。`time.time()-last_reply_time<=30` 直接卡死。
+2. **semantic_gate 职能重叠**：router 1820 行先评估 semantic_gate，对"澄清/纠正上一轮"判 `intent=clarify_previous force_reply consumed=True`（实测 confidence 0.85/0.90）→ directed_followup 兜住。semantic_gate 已完全覆盖"用户纠正 bot"场景，arbiter C 是冗余路径。
+
+**建议**（未实施）：废弃 arbiter C（下线 `correction_enabled`）——semantic_gate 的 clarify_previous + directed_followup 已处理该场景，且不受 30s 窗口/串行时序限制；arbiter C 每次多一次 LLM 调用却几乎永不触发。
+
+**验证（D4）**：3 轮投喂逐轮记录 emu 回复时刻/修正消息评估时刻/semantic_gate 判定/最终 trigger.mode，全程无 `arbiter_c_correction` 日志。撤回初判"light_reply 不写 last_reply_content"假设（核对 scheduler.py:2207-2229，light_reply 仍在 _do_chat 内照常设值）。debug 通道复原 false，emu online。**未改代码**。
+
+---
+
+## 2026-06-14 persona_drift 误伤/漏拦审计（观察项①，仅审计未改代码）
+
+**变更类型**：缺陷审计（无代码改动，结论记录）。观察项① 验「persona_drift 不误伤自我介绍」。persona_drift 是确定性正则，静态喂样本比群聊随机采样彻底；运行态实测 bot_name=`凤笑梦`（`identity.name`，persona `fengxiaomeng-v2`，非 napcat 昵称「emu不吃小杯面」），用真名跑矩阵 + 一次活体确认。
+
+**发现三根因**（详见 `docs/tracking/persona-drift-false-positive-audit-2026-06-14.md`）：
+1. **误伤自我介绍**：合法自报真名「我叫凤笑梦，很高兴认识你～」被 stripper 剥成「很高兴认识你～」（名字被抹）；「我是凤笑梦呀」剥成「呀」。
+2. **漏拦纯 AI 声明**：`strip_declarations` 末尾 `if matched and not cleaned: return text, matched`——声明剥完整句为空时为避免返回空串而**原样放行**，导致「我是一个AI」单句透传（passed=True）。
+3. **剥错方向**：「我是凤笑梦，我是一个AI」剥成「我是一个AI」——删合法真名、留违规 AI 声明，与目标相反。
+
+**实测缓解**：活体压测（984198159 让 emu 自我介绍）实测 emu 走 **light_reply greeting 短路**（`action=light_reply kind=greeting`，直接 emit `我叫凤笑梦，很高兴认识你～`），**完全绕过 `_apply_visible_reply_guardrails`**，stripper 没跑。这解释了线上 `persona_drift_hits` 长期≈0：高频自我介绍恰好走不过 guardrail 的短路。误伤实际影响低、**漏拦风险中**（主路径若吐纯 AI 声明会原样发群）。
+
+**验证（D4）**：缺陷为确定性正则，`docker compose exec bot .venv/bin/python` 直调 `persona_drift_rule`/`strip_declarations` 喂 8+ 样本复现，逐条记录 hit/changed/passed/输出；活体确认 emu 自报名字走 light_reply 短路。debug 通道压测后已复原 false，emu online。**未改任何代码**——修复路径（保护 name-only 声明、修漏拦 fallback、修剥除方向 + D2 回归）记在审计报告，待立项。
+
+---
+
+## 2026-06-14 anchor/slang 观察埋点补全 + 多账号压测验证 ②③⑤（代码变更，已部署）
+
+**变更类型**：可观测性埋点补全（代码改动，已 rebuild bot 部署）。背景：上一条「E/F 簇全开」留了 5 个运行态观察项，压测时发现 ②`anchor_reinject_count`、⑤`slang_lookup` 这两项**根本采不到数据**——根因不是流量不够，是埋点缺失：anchor 注入/commit 路径（[anchor_reinjection.py](services/llm/anchor_reinjection.py) 全文 + client.py 两个 commit 点）和 slang resolve 路径（[client.py `_resolve_slang_results`](services/llm/client.py)）既无 `_L` 日志也无 metric 写入，数据只塞进 reply 的 metadata dict 后丢弃。`_GUARDRAIL_METRIC_KEYS` 虽列了 `persona_drift_hits` 等，但 store 侧无对应 INSERT 调用。
+
+**改了什么**（D1 同模式扫描后定位，纯增量埋点，零现有逻辑改动）：
+1. **services/llm/client.py 新增 `_record_runtime_metric`**：复用 `_record_humanization_metrics` 的 store 拿法（`getattr(self._budget_manager, "_store", None)`），best-effort fire-and-forget 调 `store.record_runtime_metric`，无 store 时安全 no-op。
+2. **② anchor**：两个 anchor commit 点（streaming + 非 streaming 分支，client.py ~5177/~5701）注入成功时记 `anchor_reinject_count`，metadata 带 `anchor_turn`。
+3. **⑤ slang**：`_resolve_slang_results` 返回前记 `slang_lookup_resolved`（amount=命中数，metadata 带 source 分布 local_db/tianapi）+ `slang_lookup_unresolved`（未命中数）。
+4. **services/block_trace/store.py**：3 个新 key 登记进 `_RUNTIME_METRIC_KEYS`，使 `stats()` 的 `_sum_runtime_metrics` 能聚合带出（否则被白名单过滤）。
+
+**为何必须 rebuild**：`services/` 打进镜像非 bind-mount（仅 storage 卷/config/admin-static 是挂载），埋点不 rebuild 不进运行容器。`docker compose up bot -d --build` 只重建 qq-bot，**napcat 未动**（emu 384801062 登录态完好，get_status online:true）。另注：storage 是**命名卷** `omubot-storage` 非宿主 `./storage`——这解释了为何宿主 `storage/*.db` 停在 5-21 而容器内库（block_trace.db 100MB）活跃写入；只读查运行态 DB 必须 `docker compose exec bot` 进容器查，查宿主那份是假象。
+
+**验证（D4，外部可观察证据）**：
+- ① 测试：全量 `pytest 2680 passed, 17 skipped`（含 4 新回归：stats 聚合新 key、client helper 真写 DB、无 store no-op）；ruff 通过；pyright 0 errors。
+- ② 外部状态：多账号矩阵（Kucycx 2192849458 / 七喜bot 1368720427 / 爱笑的紫毛奶奶 3808827879）向 984198159 投喂，容器内 `runtime_metric_events` 实测：`anchor_reinject_count` 2 条（anchor_turn=7）、`slang_lookup_resolved` amount=2（sources={local_db:2}）、`slang_lookup_unresolved` 累计 17、`coalesce_*` 10/9/12。`store.stats()` 聚合 6 个 runtime key 全部正确带出。
+- ③ 端到端：emu 实际回复用上了 resolved 释义（「搬史=搬低质量内容，'史'是'屎'谐音」），unresolved 词（薯片侠）诚实兜底「确实没听过」。**正向发现**：LLM 会主动调 `slang_lookup` 工具（搬史/咕噜噜大魔王/薯片侠），观察项⑤原"prompt 未引导"疑问闭环为正向。
+- ④ 回滚路径：压测临时 `log.channels.debug=true`（备份 `config.json.bak-20260614-163106-pre-debug-stress`）已复原 false 并 restart bot，emu online:true。代码回滚=`git checkout services/llm/client.py services/block_trace/store.py`。
+
+**影响范围**：仅新增 `runtime_metric_events` 写入（observability），不改回复/调度/prompt 逻辑。新埋点对所有群生效但只在对应特性触发时写，无额外开销路径。
+
+**遗留**：① persona_drift detector 层已落 humanization_metrics.metadata（压测期未真 drift 故 hits=0，待诱发样本验证不误伤自我介绍）；测试矩阵 4 实例仍在跑（admin 未登录、3 普通号在线）。
+
+---
+
+## 2026-06-14 取消 arbiter 灰度 + E/F 簇分批启用（运行态配置变更，已部署）
+
+**变更类型**：运行态配置调整（`config/config.json`，bind-mount，restart bot 生效；未改代码）。背景：bot 处于开发阶段，access 白名单锁定 2 个 active 测试群（993065015 烤/17人、984198159 测试/6人），其余 8 个真实大群（终末地690/chrono ark 1819/残兽基地1985 等）均 `presence_mode=silent_learn`，在 [router.py:1531](kernel/router.py#L1531) `if not allow_speaking: return` 上游硬拦，够不到 arbiter/拟人/notify 链。故"全量"真实爆炸半径=这 2 个测试群，静默群零干扰。
+
+**改了什么**：
+1. **arbiter 取消灰度**：`arbiter.runtime_groups ["993065015"] → []`（空=不限群；`_enabled_for_group` 白名单语义）。arbiter A/B/C 现在 2 个 active 群均生效。
+2. **直开 4 项**（成熟件，关闭理由已消解或可控）：`slang_lookup`（本地 slang.db 1978 词，纯读无外呼）、`memory.semantic`（**backend 保持 ngram**，embedding 仍是 stub 勿切）、`persona_drift`（剥"我是X"漂移句）、`anchor_reinjection`（注入瞬态人设锚点）。
+3. **coalesce 开 + 收窗口**：`enabled false→true`，`idle_window_seconds 5.0→2.5`（按 maintenance-log:2187 S4 建议先收窗再开，降非寻址消息体感延迟；@/trigger 路径走 bypass 不受影响）。
+4. **保持关闭 2 项**（需改代码非改 flag）：`schedule_overshare`（leak 正则裸子串 `吃饭/休息/上课` 整句误删，须先收紧正则）、`addressee_hint`（算了置信度不卡阈值，低置信指错人，须加门槛 + 配 mention）。
+
+**影响范围**：仅 2 个 active 测试群的回复出口/prompt 构建/调度路径；8 个 silent_learn 大群不受影响（上游 return）。access 白名单、presence、humanization.runtime_groups（本就空）均未动。
+
+**验证（D4）**：① 改后 config 自验证读回 7 项状态全部符合预期（含 arbiter 未回退）；② restart bot 仅重启 qq-bot 容器，napcat（emu不吃小杯面 384801062，Up 2 days）登录态逐字节未动、curl get_login_info 正常；③ bot `Bot 384801062 connected`、`loading history groups=2`、22 plugins + dream agent 启动、无 ERROR/CRITICAL；④ slang store initialized + provider/tool 注册（slang_lookup 链路 live）；⑤ config 备份 `config.json.bak-20260614-150723`。
+
+**观察待办（开发阶段在测试群盯日志，见 ACTIVE.md Pending）**：
+- `persona_drift_hits` / `persona_drift_rewritten`：确认不误伤正常自我介绍。
+- `anchor_reinject_count` + cache 命中率：确认锚点不被复读、token 占用可接受。
+- coalesce 体感：非寻址连发是否合理塌缩、2.5s 窗口是否仍偏慢。
+- `arbiter_b_abort`：取消灰度后扩到 984198159，盯首个正向打断样本（dc0c0f3 修复后 timeout/circuit 已归零，但正向生效仍无 live 样本）。
+- slang_lookup：DB 已有料，真痛点是 LLM 主动调用率近 0（prompt 引导问题），观察是否被调用。
+
+**回滚**：恢复备份 `config.json.bak-20260614-150723` 后 `docker compose restart bot`；或逐项 flag 改回 false / arbiter.runtime_groups 改回 `["993065015"]`。不碰 NapCat。
+
+---
 ## 2026-06-14 话题块边模型 L0-L3 重构 — 返工修复（代码完成，待部署）
 
 **变更类型**：缺陷修复（返工），4 文件（`topic_block.py` + `scheduler.py` + `config.py` + `test_topic_block.py`）。

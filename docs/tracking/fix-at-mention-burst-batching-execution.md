@@ -689,14 +689,15 @@ docker compose restart bot
 | **P1.2** | 1 | ✅ | `GroupSlot` 已新增 `burst_pending` / `arbiter_task` / `last_reply_*` |
 | **P1.3** | 1 | ✅ | `tests/test_arbiter_scheduler.py` 6 条集成测试已通过 |
 | **P2.1** | 2 | ✅ | `on_segment` 已升级为 `Awaitable[bool]` |
-| **P2.2** | 2 | ✅ | `_do_chat` 已接 Arbiter-B interrupt 判断 |
+| **P2.2** | 2 | ✅ 代码 / ⚠️ 曾全程失效 | `_do_chat` 已接 Arbiter-B interrupt 判断。**但 5-27 上线～6-10 中断从未成功一次**（`arbiter_b_abort` 历史 0，每条消息 `arbiter_b_timeout`，3 次即熔断）——根因超时分层倒置（外层 monitor 0.8s < 内层 judge 1.5s < 实测 p90 1.95s），dc0c0f3（6-10 15:38）已修，见下方「P2 中断修复对账」行 |
 | **P2.3** | 2 | ✅ | `SegmentAborted` + partial timeline 写入已落地 |
 | **P2.4** | 2 | ✅ | `tests/test_arbiter_interruption.py` 5 条测试已补齐并通过 |
 | **P3.1** | 3 | ✅ | `kernel/router.py` 已接 Arbiter-C correction 路径 |
 | **P3.2** | 3 | ✅ | `scheduler` 已稳定记录/清空 `last_reply_time/content` |
 | **P3.3** | 3 | ✅ | `tests/test_arbiter_correction.py` 已新增并通过 |
-| **灰度-1** | 4 | 🟡 | `arbiter.enabled=true` + `runtime_groups=["993065015"]` 已入场；24h 观测待执行 |
-| **灰度-2** | 4 | ⏳ | 双群 48h 观测 |
+| **P2 中断修复对账** | 2 | ✅ 故障消除 / ⏳ 正向待验 | dc0c0f3（commit Jun 10 15:38）修超时分层 + 内层 timeout_ms 1500→2500 + 熔断不计 per-segment stall。**对账实证（2026-06-14 验收人核）**：① `arbiter_b_timeout`/`circuit_open` 末次出现 = 6-10 12:36（修复部署前），**6-11～6-14 逐日 0**——故障症状彻底消失 ✅；② 但同期 `arbiter_b_abort`（成功打断）仍 **0 次**：B monitor 部署后正常 arm（日志有 `arbiter wait`/`judge_interruption` 痕迹），只是单群 993065015 这几日未出现"生成途中新消息且 judge 判 abort"的真实场景，故"正向打断生效"尚无 live 样本 ⏳ |
+| **灰度-1** | 4 | 🟡 进行中（非全量） | `arbiter.enabled=true` + `runtime_groups=["993065015"]`（**容器 config 实测**，仍单群，**未全量**）。A/C 已 live：6-11～6-13 `arbiter_a_fire` 62 次、`arbiter_c_correction` 3 次、usage `arbiter` 调用 615（修复前 0）✅。B 待真实打断场景验证（见上行） |
+| **灰度-2** | 4 | ⏳ | 双群 48h 观测（前置：灰度-1 收集到 ≥1 次 `arbiter_b_abort` 正向样本，确认中断真正生效，否则等于带病扩面） |
 | **全量** | 4 | ⏳ | arbiter.enabled=true 全群 |
 
 ---

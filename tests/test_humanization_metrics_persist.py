@@ -172,3 +172,70 @@ async def test_runtime_metric_stats_aggregate_router_and_scheduler_events(
     assert stats["coalesce_flushed"] == 2
     assert stats["coalesce_bypassed"] == 1
     assert stats["pair_guard_outbound_recorded"] == 4
+
+
+async def test_runtime_metric_stats_aggregate_anchor_and_slang_events(
+    store: BlockTraceStore,
+) -> None:
+    await store.record_runtime_metric(metric_key="anchor_reinject_count", group_id="100", amount=1)
+    await store.record_runtime_metric(metric_key="anchor_reinject_count", group_id="100", amount=1)
+    await store.record_runtime_metric(metric_key="slang_lookup_resolved", group_id="100", amount=3)
+    await store.record_runtime_metric(metric_key="slang_lookup_unresolved", group_id="100", amount=2)
+
+    stats = await store.stats()
+
+    assert stats["anchor_reinject_count"] == 2
+    assert stats["slang_lookup_resolved"] == 3
+    assert stats["slang_lookup_unresolved"] == 2
+
+
+async def test_client_record_runtime_metric_writes_through_store(
+    store: BlockTraceStore,
+) -> None:
+    """The LLMClient helper must persist a queryable runtime_metric_events row.
+
+    Regression guard for the anchor/slang observability埋点: a no-op helper (the
+    pre-fix state) would leave these features invisible no matter how much traffic
+    flows. Asserts external observable state (a DB row), not a return value.
+    """
+    from services.llm.client import LLMClient
+
+    class _FakeBudgetManager:
+        def __init__(self, trace_store: BlockTraceStore) -> None:
+            self._store = trace_store
+
+    client = LLMClient.__new__(LLMClient)
+    client._budget_manager = _FakeBudgetManager(store)  # type: ignore[attr-defined]
+
+    await client._record_runtime_metric(
+        metric_key="anchor_reinject_count",
+        group_id="984198159",
+        metadata={"anchor_turn": 6},
+    )
+    await client._record_runtime_metric(
+        metric_key="slang_lookup_resolved",
+        group_id="984198159",
+        amount=2,
+        metadata={"requested": 3, "sources": {"local_db": 2}},
+    )
+
+    rows = await store.list_runtime_metrics(group_id="984198159")
+    by_key = {row["metric_key"]: row for row in rows}
+    assert by_key["anchor_reinject_count"]["amount"] == 1
+    assert by_key["anchor_reinject_count"]["metadata"] == {"anchor_turn": 6}
+    assert by_key["slang_lookup_resolved"]["amount"] == 2
+    assert by_key["slang_lookup_resolved"]["metadata"]["sources"] == {"local_db": 2}
+
+
+async def test_client_record_runtime_metric_silent_without_store() -> None:
+    """Helper must be a safe no-op when the store handle is absent (boot/degraded)."""
+    from services.llm.client import LLMClient
+
+    class _NoStoreBudgetManager:
+        pass
+
+    client = LLMClient.__new__(LLMClient)
+    client._budget_manager = _NoStoreBudgetManager()  # type: ignore[attr-defined]
+
+    # Must not raise even though no store is reachable.
+    await client._record_runtime_metric(metric_key="anchor_reinject_count", group_id="1")
