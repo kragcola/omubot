@@ -81,6 +81,55 @@
 **回滚**：恢复备份 `config.json.bak-20260614-150723` 后 `docker compose restart bot`；或逐项 flag 改回 false / arbiter.runtime_groups 改回 `["993065015"]`。不碰 NapCat。
 
 ---
+
+## 2026-06-14 STICKER_ONLY 弱回复第四档激活（代码完成，待部署）
+
+**变更类型**：功能接通，3 文件（`thinker.py` + `client.py` + 2 测试文件）。
+
+**起因**：弱回复四档（closing/greeting/companion/sticker_only）中前三档已全量上线（commit `6e50f7d`），第四档 `sticker_only` 的 enum 已定义但无 think→client 消费链路。用户要求接通：thinker 判"一张表情足矣"→直发语义检索选出的表情、不出文字。
+
+**改了什么**：
+- **W1 thinker**：`_ALLOWED_LIGHT_KINDS` 白名单加 `"sticker_only"`；prompt 弱回复段补第四小节（纯图型：对方发纯情绪/表情、文字多余的场景）；JSON schema 同步。
+- **W2 client**：`_maybe_light_reply_sticker` 加 `force_send=False` 透传参；`_handle_light_reply` 加 `sticker_only` 分支（调 `_send_post_reply_sticker_if_needed(reply="", force_send=True)` 发纯图）；F5 降级：发图失败→退回 `companion` 短文字（绝不静默）；caller 短路元组加 `"sticker_only"`。
+
+**决策**：
+- F1 走 `light_kind` 链路，不接 `ResponseClass.STICKER_ONLY` enum 消费分支
+- F2 选 (b) 路径：sticker_only 直接调 `_send_post_reply_sticker_if_needed`（不通过 `_maybe_light_reply_sticker`），因 sticker_only 的 F5 降级需要"失败→回退文字"，而 `_maybe_light_reply_sticker` 是静默吞异常（closing/greeting 语义）
+- F3 选图复用语义检索（`reply=""` → `_bias_query_by_valence` 情绪词检索）
+- F4 `last_response_class` 回填未做（非阻塞，留后置）
+
+**影响范围**：仅 thinker prompt + client `_handle_light_reply` 新分支 + caller 短路元组增一字；closing/greeting/companion 三态行为字节级不变。无 schema 迁移、无 NapCat 变更、无新 config 开关。
+
+**§6 死代码自查**：`STICKER_ONLY` 仅 enum 定义命中（`kernel/types.py:46`），无消费者；未新写发送/选图函数；未加 config 开关；F5 降级复用 companion 通路；`_maybe_light_reply_sticker` 新增 `force_send` 参但 closing/greeting 两调用点未传（默认 False）。
+
+**验证（D4）**：`ruff` 0；`pyright` 0；`pytest test_thinker.py test_closing_light_reply_client.py` **52 passed (0 fail)**。新增 6 测试：W1 白名单解析+prompt 包含 (2)；W2 发图成功短路 (1) + F5 降级 (1) + 异常降级 (1) + closing/greeting 回归 (1)。
+
+**部署**：纯代码改动，rebuild bot。**回滚**：`git revert`，或 thinker 白名单移除 `"sticker_only"` → 归一化自动清空该值。
+
+**派单文件**：[sticker-only-weak-reply-dispatch-execution-2026-06-11.md](docs/tracking/sticker-only-weak-reply-dispatch-execution-2026-06-11.md)，回执已填入。
+
+---
+
+
+
+## 2026-06-11 STICKER_ONLY 弱回复激活 — 派单立项（文档，未动代码）
+
+**变更类型**：派发/流程文档，1 文件（`docs/tracking/sticker-only-weak-reply-dispatch-execution-2026-06-11.md`）。
+
+**背景**：弱回复机制（四档 `ResponseClass`）的 closing/greeting/companion 三态已全线上线（commit `6e50f7d`，06-07 审计 C1/C2 已修，06-14 live 实证 companion 走修复后路径正确）。四档中仅剩 `STICKER_ONLY`——"一张表情足矣、不出文字"的弱回复载体——未激活；其前置（sticker_store 迁 SQLite + `search_by_intent` + `ocr_text` 三态）均已就绪。
+
+**派单要点**（防死代码为核心纪律）：
+- **走 light_kind 链路，不接 `ResponseClass.STICKER_ONLY` enum**：该 enum 成员全仓零消费者，弱回复真实链路走 thinker `light_kind` + `_handle_light_reply`。派单 §0 F1 + §6 死代码红线明确禁止"为让 enum 有人用"去接没人消费的分支。
+- **复用而非新建**：W2 发图复用 `_send_post_reply_sticker_if_needed(force_send=True)`、选图复用 `_select_post_reply_sticker`（空 reply + valence 偏置 query）、封装复用 `_maybe_light_reply_sticker`。
+- **F5 降级**：选不到合适图时退回 companion 短文字（复用现有通路），绝不静默（设计红线 ostracism）、不硬塞无关图。
+- **两 Wave 串行同 PR**：W1（thinker 产出第四档）+ W2（client 消费），禁止 W1 单独上线产出无消费者标签。
+
+**影响面**：纯派发文档，未改任何运行代码/配置。接单人待指派。
+
+**回滚**：删派单文件即可（无代码改动）。
+
+---
+
 ## 2026-06-14 话题块边模型 L0-L3 重构 — 返工修复（代码完成，待部署）
 
 **变更类型**：缺陷修复（返工），4 文件（`topic_block.py` + `scheduler.py` + `config.py` + `test_topic_block.py`）。

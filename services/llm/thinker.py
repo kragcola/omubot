@@ -30,7 +30,7 @@ _L = logger.bind(channel="thinking")
 _ALLOWED_ACTIONS = {"reply", "wait", "light_reply"}
 _ALLOWED_MODES = {"skip", "doc", "fact", "hybrid"}
 _ALLOWED_TONES = {"元气", "日常", "安慰", "认真"}
-_ALLOWED_LIGHT_KINDS = frozenset({"", "companion", "closing", "greeting"})
+_ALLOWED_LIGHT_KINDS = frozenset({"", "companion", "closing", "greeting", "sticker_only"})
 _ALLOWED_NECESSITY = frozenset({"high", "medium", "low"})
 _ALLOWED_TOPIC_INTENT_LABELS = frozenset({
     "闲聊",
@@ -158,7 +158,8 @@ THINKER_SYSTEM_PROMPT = """你是{name}的思考中枢。你需要在回复之�
 - **closing（收尾型）**：对方在道别/收尾（晚安、睡了、先这样、明天见、拜拜、溜了）。对话不能单方面终止——对方说"晚安"是在邀请你完成一次对称的告别，**该回一个对称的告别 token**（"晚安哦""好的呀明天见"），而不是沉默、也不是展开新话题。**只要上下文显示对方在向你收尾，就用 `action=light_reply, light_kind=closing`。**
 - **greeting（招呼型）**：对方在向你打招呼（早安、早上好、早、晚上好、hi、在吗）。和 closing 对称——招呼是一次需要对称回应的相邻对，**该回一个简短的招呼 token**（"早呀～""早上好哦""在的"），不要展开话题。**对方明确在跟你打招呼时，用 `action=light_reply, light_kind=greeting`。**
 - **companion（陪伴型）**：日常闲聊、对方在叙述，或对方喊了你但没有具体信息量（被点名、续话、纯寒暄），你只想轻轻应一声表示在场（"嗯嗯""哈哈""在呢"）。**这类该被看见但无需展开的消息用 `action=light_reply, light_kind=companion`**，让对方知道你在，而不是沉默。
-- 不是收尾/招呼、也不是单纯陪伴 → 用 reply 或 wait，`light_kind` 留空。
+- **sticker_only（纯图型）**：对方发了一张表情/一句纯情绪宣泄（"哈哈哈""草""😭"），或气氛到了一个用文字反而多余、回一张表情最自然的点——你只想用一张表情回应，**不出文字**。用 `action=light_reply, light_kind=sticker_only`。**注意**：这和 companion 不同，companion 是"短文字 ack 可带图"，sticker_only 是"纯图、无字"。**只在你觉得文字多余、一张图才是最好的回应时用它**，不是所有能配图的场景都用它。需要任何信息量、需要文字承载的，仍用 reply 或 companion。选不到合适表情时系统会自动退回一句短文字。
+- 不是收尾/招呼、也不是单纯陪伴或纯图 → 用 reply 或 wait，`light_kind` 留空。
 
 ## 回复必要性（reply_necessity）——你这条回复是"被需要"还是"刷存在感"
 在决定 reply 之前，诚实评估这条回复的必要性，避免无谓地刷存在感：
@@ -169,7 +170,7 @@ THINKER_SYSTEM_PROMPT = """你是{name}的思考中枢。你需要在回复之�
 
 ## 输出格式
 只输出一行 JSON：
-{{"action": "reply|wait|light_reply", "light_kind": "companion|closing|greeting|", "reply_necessity": "high|medium|low", "topic_intent_label": "闲聊|关心|安抚|打趣|吐槽|询问|提议|信息同步|技术讨论|反对", "instruction_signal": "none|low|medium|high", "retrieve_mode": "skip|doc|fact|hybrid", "rewritten_query": "查询语句或空", "thought": "你的简短思考（30字以内）", "sticker": true/false, "tone": "元气|日常|安慰|认真", "unknown_terms": ["不确定的词"]}}"""  # noqa: E501
+{{"action": "reply|wait|light_reply", "light_kind": "companion|closing|greeting|sticker_only|", "reply_necessity": "high|medium|low", "topic_intent_label": "闲聊|关心|安抚|打趣|吐槽|询问|提议|信息同步|技术讨论|反对", "instruction_signal": "none|low|medium|high", "retrieve_mode": "skip|doc|fact|hybrid", "rewritten_query": "查询语句或空", "thought": "你的简短思考（30字以内）", "sticker": true/false, "tone": "元气|日常|安慰|认真", "unknown_terms": ["不确定的词"]}}"""  # noqa: E501
 
 
 class ThinkDecision:

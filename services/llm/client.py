@@ -3095,6 +3095,46 @@ class LLMClient:
                 )
             return {"text": token, "light_reply": True, "light_kind": "greeting"}
 
+        if light_kind == "sticker_only":
+            # sticker_only: thinker chose "a sticker is enough, no text needed".
+            # Send a single sticker via semantic retrieval (reply="" → valence-biased
+            # query per F3). force_send=True skips the probability gate (F2: the
+            # thinker's intent to send is explicit, like kaomoji-enforce).
+            # F5 degradation: if sticker send fails (intent floor / empty library),
+            # fall back to companion — do NOT silently skip the turn.
+            sticker_sent = False
+            try:
+                turn_id = f"{session_id}:light:sticker_only:{int(time.monotonic() * 1000)}"
+                sticker_sent = await self._send_post_reply_sticker_if_needed(
+                    reply="",
+                    thinker_decision=thinker_decision,
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    turn_id=turn_id,
+                    ctx=ctx,
+                    already_sent=False,
+                    force_send=True,
+                )
+            except Exception as exc:
+                _log_msg_out.debug(
+                    "light_reply sticker_only send failed | session={} err={}",
+                    session_id, exc,
+                )
+            if sticker_sent:
+                _log_msg_out.info(
+                    "light_reply | session={} kind=sticker_only -> sticker sent",
+                    session_id,
+                )
+                return {"light_reply": True, "light_kind": "sticker_only", "text": ""}
+            # F5: sticker unavailable → fall back to companion (short text ack,
+            # never silent). Reuse the companion hint pathway.
+            _log_msg_out.info(
+                "light_reply | session={} kind=sticker_only -> F5 fallback to companion",
+                session_id,
+            )
+            return {"inject_companion_hint": True, "light_kind": "companion"}
+
         if light_kind == "companion":
             # Companion: return a hint to inject into plugin_dynamic, then let
             # main LLM generate a short ack. This is design §2.5 复用点 A.
@@ -4860,7 +4900,7 @@ class LLMClient:
                 ctx=ctx,
             )
             if light_result is not None:
-                if light_result.get("light_kind") in ("closing", "greeting"):
+                if light_result.get("light_kind") in ("closing", "greeting", "sticker_only"):
                     # Closing/greeting handled by short-circuit token; skip main LLM.
                     return None
                 if light_result.get("inject_companion_hint"):

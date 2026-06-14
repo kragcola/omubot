@@ -396,3 +396,147 @@ async def test_handle_light_reply_greeting_uses_fallback(persona_runtime) -> Non
     assert emitted == ["早~"]
     assert result is not None
     assert result["text"] == "早~"
+
+
+# ── W2 sticker_only tests ──────────────────────────────────────────────
+
+
+async def test_handle_light_reply_sticker_only_sends_sticker_short_circuits(
+    persona_runtime,
+) -> None:
+    """W2: sticker_only sends a sticker via semantic retrieval and short-circuits
+    the main LLM (no text output)."""
+    client = await _client(persona_runtime)
+    sticker_hook = AsyncMock(return_value=True)
+    client._send_post_reply_sticker_if_needed = sticker_hook  # type: ignore[method-assign]
+
+    try:
+        result = await client._handle_light_reply(
+            light_kind="sticker_only",
+            thinker_action="light_reply",
+            conversation_text="对方发了个表情",
+            mood_text="",
+            user_id="1",
+            group_id="100",
+            identity_name="测试",
+            trigger=None,
+            on_segment=None,
+            timeline=None,
+            thinker_usage={},
+            session_id="group_100",
+            t0=0.0,
+            thinker_decision=SimpleNamespace(sticker=True),
+        )
+    finally:
+        await client.close()
+
+    sticker_hook.assert_awaited_once()
+    kwargs = sticker_hook.await_args.kwargs
+    assert kwargs["force_send"] is True
+    assert kwargs["reply"] == ""  # no text, sticker-only
+    assert result == {"light_reply": True, "light_kind": "sticker_only", "text": ""}
+
+
+async def test_handle_light_reply_sticker_only_f5_fallback_to_companion(
+    persona_runtime,
+) -> None:
+    """W2 F5: when sticker send fails (empty library / intent floor), fall back
+    to companion (short text ack), NOT silent."""
+    client = await _client(persona_runtime)
+    sticker_hook = AsyncMock(return_value=False)
+    client._send_post_reply_sticker_if_needed = sticker_hook  # type: ignore[method-assign]
+
+    try:
+        result = await client._handle_light_reply(
+            light_kind="sticker_only",
+            thinker_action="light_reply",
+            conversation_text="对方发了个表情",
+            mood_text="",
+            user_id="1",
+            group_id="100",
+            identity_name="测试",
+            trigger=None,
+            on_segment=None,
+            timeline=None,
+            thinker_usage={},
+            session_id="group_100",
+            t0=0.0,
+            thinker_decision=SimpleNamespace(sticker=True),
+        )
+    finally:
+        await client.close()
+
+    assert result is not None
+    assert result.get("inject_companion_hint") is True
+    assert result.get("light_kind") == "companion"
+
+
+async def test_handle_light_reply_sticker_only_exception_f5_fallback(
+    persona_runtime,
+) -> None:
+    """W2 F5: sticker send exception → fall back to companion, not crash."""
+    client = await _client(persona_runtime)
+    sticker_hook = AsyncMock(side_effect=RuntimeError("sticker db locked"))
+    client._send_post_reply_sticker_if_needed = sticker_hook  # type: ignore[method-assign]
+
+    try:
+        result = await client._handle_light_reply(
+            light_kind="sticker_only",
+            thinker_action="light_reply",
+            conversation_text="对方发了个表情",
+            mood_text="",
+            user_id="1",
+            group_id="100",
+            identity_name="测试",
+            trigger=None,
+            on_segment=None,
+            timeline=None,
+            thinker_usage={},
+            session_id="group_100",
+            t0=0.0,
+            thinker_decision=SimpleNamespace(sticker=True),
+        )
+    finally:
+        await client.close()
+
+    assert result is not None
+    assert result.get("inject_companion_hint") is True
+    assert result.get("light_kind") == "companion"
+
+
+async def test_closing_greeting_still_default_force_send_false(
+    persona_runtime,
+) -> None:
+    """W2 regression: closing/greeting behavior unchanged by sticker_only.
+    Path (b): sticker_only bypasses _maybe_light_reply_sticker entirely,
+    so closing/greeting never see force_send=True."""
+    client = await _client(persona_runtime)
+    client._call = AsyncMock(return_value={"text": "晚安哦"})  # type: ignore[method-assign]
+    sticker_hook = AsyncMock(return_value=False)
+    client._send_post_reply_sticker_if_needed = sticker_hook  # type: ignore[method-assign]
+
+    async def _emit(segment: str) -> bool:
+        return True
+
+    try:
+        await client._handle_light_reply(
+            light_kind="closing",
+            thinker_action="light_reply",
+            conversation_text="睡了",
+            mood_text="",
+            user_id="1",
+            group_id="100",
+            identity_name="测试",
+            trigger=None,
+            on_segment=_emit,
+            timeline=None,
+            thinker_usage={},
+            session_id="group_100",
+            t0=0.0,
+            thinker_decision=SimpleNamespace(sticker=True),
+        )
+    finally:
+        await client.close()
+
+    # Closing produces a farewell token and returns it — no crash.
+    sticker_hook.assert_awaited()

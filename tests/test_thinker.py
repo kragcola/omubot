@@ -380,3 +380,21 @@ def test_thinker_prompt_mentions_reply_necessity() -> None:
     prompt = THINKER_SYSTEM_PROMPT.format(name="测试")
     assert "reply_necessity" in prompt
     assert "刷存在感" in prompt
+
+
+# ── W1 sticker_only tests ──────────────────────────────────────────────
+
+def test_parse_light_kind_sticker_only_is_allowed() -> None:
+    """W1: sticker_only is in the white-list and parses correctly."""
+    decision = parse_think_output(
+        '{"action":"light_reply","light_kind":"sticker_only","thought":"一张图够了"}'
+    )
+    assert decision is not None
+    assert decision.light_kind == "sticker_only"
+
+
+def test_thinker_prompt_mentions_sticker_only() -> None:
+    """W1: the thinker prompt documents sticker_only as the fourth light_kind."""
+    prompt = THINKER_SYSTEM_PROMPT.format(name="测试")
+    assert "sticker_only" in prompt
+    assert "纯图型" in prompt
