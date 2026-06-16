@@ -15,6 +15,7 @@ from services.dialogue_climate.dynamics import (
 )
 from services.dialogue_climate.m1_metrics import M1MetricsRecorder
 from services.dialogue_climate.m2_metrics import ClimateMetricsRecorder
+from services.dialogue_climate.policy import PolicyOutput, synthesize
 from services.dialogue_climate.state import (
     CLIMATE_DIMENSIONS,
     ClimateSignal,
@@ -31,5 +32,7 @@ __all__ = [
     "ClimateSignal",
     "ClimateState",
     "M1MetricsRecorder",
+    "PolicyOutput",
+    "synthesize",
 ]
 

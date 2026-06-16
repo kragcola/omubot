@@ -190,9 +190,43 @@ Dialogue Climate 立项：
 - **边界负证据**：`grep ClimateState|ClimateEngine|m2_enabled` 在 plugins/kernel/services（除 dialogue_climate 自身与测试）仅命中 `plugin.py` 的 `m2_enabled` 配置字段定义——无 generator/chat/mood/client 消费者，休眠态成立。
 - **回滚**：`m2_enabled` 默认关 = 零行为变更（无消费者，天然成立）；删 2 新文件 + 移除 config 字段，或 `git checkout`；无 DB / 无 NapCat 变更。
 
-### 9.4 仍未做（M3/M4）
+### 9.4 仍未做（M2 当时）
 
-Sensor 适配层、on_post_reply 反馈回路、ClimatePolicy 合成、PromptAdapter/HumanizerAdapter/ThinkerAdapter 让位、provider 让位、baseline durable 持久化、接 prompt/humanizer/thinker。M3 立项仍以"积累 1–2 周 M1 有效样本 + M2 引擎稳定"为前置。
+(此节记录 M2 落地时的状态；M3/M4 已于 2026-06-16 续做，见 §10。)
+
+Sensor 适配层、on_post_reply 反馈回路、ClimatePolicy 合成、PromptAdapter/HumanizerAdapter/ThinkerAdapter 让位、provider 让位、baseline durable 持久化、接 prompt/humanizer/thinker。
+
+---
+
+## 10. M3/M4 实现侧落地（2026-06-16，休眠态，默认关）
+
+> 承接 M2（§9）。用户裁定"不做最小闭环，要做就全量"+ 4 个架构点冻结（见 [M3/M4 调研](dialogue-climate-m3-m4-research-2026-06-16.md) §5、[实现方案](dialogue-climate-m3-m4-impl-plan-2026-06-16.md)）。全程灰度 `m2_enabled`/`m3_sensors_enabled`/`m4_policy_enabled` 默认关，关时逐字节回归基线。
+
+### 10.1 落地范围（Wave 串行）
+
+- **M3-0**：ClimateEngine 键 per-(group,session)→**per-(group,user)**（F1）+ `clear_stale` 过期清理；tension 迁移地基（M1↔M2 闭式等价性测试钉死）。
+- **M3-1**：`services/dialogue_climate/sensors.py`（`Sensor`/`SensorHub` + Schedule/Irritation/Circadian）；运行态接线（schedule on_pre_prompt 馈 Schedule/Circadian；qq_interactions 馈 Irritation，F2 tension 切 ClimateEngine 并行 M1）；`m3_sensors_enabled` 配置。
+- **M3-2**：Interaction（per-user familiarity，F1 直接落位）/ Calendar（富版 calendar_context，F3）/ Message（复活 MoodClassifier 的 label→climate 映射，F4）三 sensor + familiarity/calendar 运行态馈入。
+- **M3-3**：`m2_metrics.py` `ClimateMetricsRecorder`→`storage/living_persona/m2_climate.db`（6 维快照 + signal 分布）；ClimateEngine recorder 钩子；schedule `on_post_reply` 反馈回路（F6 用 elapsed_ms/user_id）。
+- **M4**：`policy.py` `ClimatePolicy.synthesize`（纯函数，ClimateState→reply_bias/delay_multiplier/mood_label/guidance，阈值对齐设计主文 §9）；schedule on_pre_prompt 在 `m4_policy_enabled` 时注入"对话气候"block 并**让位 M1 tension block**（climate 接管 tension）；`m4_policy_enabled` 配置。
+
+### 10.2 与 plan 的偏离（如实记录）
+
+- **provider-bus 让位收窄**：plan 原想走 PromptProviderBus + `has_provider` 让位（register_provider 范式）。调研发现 `QueryContext` 拿不到内存 ClimateEngine（只有 RuntimeStateBus），走 provider 须先把 ClimateState 推过 bus 槽（需自有 contract + ownership）。改用 ClimatePolicy 纯函数 + 持有 engine 的 schedule plugin 直接注入，达成核心目标省掉 bus 复杂度。affection block（priority 20）与 climate block 暂共存，未强行合并为单一 block。
+- **Humanizer/Thinker adapter 收窄**：`PolicyOutput` 已返回 `delay_multiplier`/`reply_bias` 结构化字段，但未接到 Humanizer/Thinker 消费点（更深热路径），字段就绪、消费留增量。
+- **MessageSensor 运行态馈入收窄**：sensor 类 + 测试就绪、在 default_sensors，但 classifier 接到用户消息路径喂 `message_label` 未做（涉与 sticker 槽协调），现馈入为 no-op。
+
+### 10.3 收口证据（D4）
+
+- `ruff` `All checks passed!`、`pyright` `0 errors`、3 schedule JSON 合法。
+- 新增测试：`test_climate_dynamics.py`(19，含 per-(group,user) 隔离/clear_stale/M1↔M2 等价)、`test_climate_sensors.py`(21)、`test_climate_m2_metrics.py`(6)、`test_climate_policy.py`(8)。
+- 全量 `pytest` **2743 passed / 17 skipped**（flag 默认关无回归；`-k schedule` 189 passed）。
+- **边界负证据**：M3 提交时 grep 确认 reply 路径无 ClimateState 消费者；M4 后唯一消费者是 schedule on_pre_prompt 的 `_maybe_inject_climate_block`，且 `m4_policy_enabled` 默认关。
+- **回滚**：三 flag 默认关零行为变更；M4 关时走旧 M1 block（双跑过渡保留）；删 climate 文件 + 移除 config 字段或 `git checkout`。
+
+### 10.4 仍未做（M4 增量 / 后续）
+
+provider-bus 让位、affection+climate 单一 block 合并、Humanizer/Thinker adapter 消费 delay/bias、MessageSensor classifier 运行态馈入、baseline durable 持久化、tension M1 完全退役（现双跑）。M4 上线需 shadow→active 灰度对比再夺旧路径。
 
 ---
 

@@ -27,6 +27,8 @@
 
 ## Pending (separate line — not the Current task)
 
+- **Dialogue Climate M3/M4 全量已落地（2026-06-16，休眠默认关，待部署）**：承接 A-M2。M3（commit `f547344`）= ClimateEngine 升 per-(group,user) + clear_stale + `sensors.py`(6 sensor) + `m2_metrics.py`(ClimateMetricsRecorder→m2_climate.db) + 运行态接线 + on_post_reply 反馈。M4（本轮 commit）= `policy.py` ClimatePolicy 纯函数 + schedule 注入"对话气候"block + 让位 M1 tension block。三 flag `m2_enabled`/`m3_sensors_enabled`/`m4_policy_enabled` 默认关，零行为变更。全量 2743 passed。偏离 plan 处（provider-bus 让位/adapter 消费/MessageSensor 馈入/block 合并/tension M1 退役）如实记录在 [Part A §10.2/§10.4](living-persona-partA-dialogue-climate.md)，留增量。上线需 shadow→active。**M4 commit 待提交、未部署**。
+
 - **A-M2 全维 ClimateState 引擎已落地（2026-06-16，实现侧，休眠默认关，待部署）**：`services/dialogue_climate/state.py`（ClimateState 6 维 + ClimateSignal）+ `dynamics.py`（ClimateDynamics on-read 闭式 + ClimateEngine，按 R5 不用 tick/不做动量项）+ 4 配置文件加 `dialogue_climate.m2_enabled`（默认关）+ `tests/test_climate_dynamics.py` 15 例。**休眠态**：无 reply-path 消费者（grep 仅命中 plugin.py 配置字段），flag 关零行为变更。调参用公开实证锚定（Verduyn 2015 情绪时长 + emotional inertia AR(1) ESM），因 M1 live 校准样本仍空（6-14 采集口修复后 0 条自然 tension 事件）。验证：ruff/pyright 0、test_climate_dynamics 15 passed、-k schedule 186 passed 无回归。未做 M3/M4（sensor/policy/adapter/持久化/接 prompt）。详见 [Part A §9](living-persona-partA-dialogue-climate.md)。**未提交、未部署**（提交待用户确认）。
 
 - **空间日志插件（qzone_journal）已立项（2026-06-16，仅文档）**：`docs/tracking/qzone-journal-plugin-charter-2026-06-16.md`。基础版发 bot 一天「值得发的事」到 QQ 空间，进阶版联动 story_arc + 群友共造故事。QZone 发布可行性已实证（NapCat 4.15.0 无 OneBot 发说说 action，但 `get_cookies(user.qzone.qq.com)` 能拿 p_skey + `get_csrf_token` ok → 走 g_tk + emotion_cgi 经典路径，纯 HTTP 不碰 NapCat 重启）。用户裁定：事件触发选材、真人化名+不虚构（严守 Part C）、**living 系列先行（下一步做 A-M2）**、本轮不写代码。进阶版依赖 Part C 主体（搁置待调研），后置。

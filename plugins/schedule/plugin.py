@@ -26,6 +26,7 @@ class DialogueClimateConfig(BaseModel):
     m1_enabled: bool = False
     m2_enabled: bool = False
     m3_sensors_enabled: bool = False
+    m4_policy_enabled: bool = False
 
 
 class ScheduleConfig(BaseModel):
@@ -61,6 +62,8 @@ class SchedulePlugin(AmadeusPlugin):
         self._dialogue_climate_m1_enabled = False
         self._event_replan_enabled = False
         self._climate_sensor_hub = None
+        self._climate_engine = None
+        self._m4_policy_enabled = False
         self._affection_engine = None
         self._calendar_service = None
         self._story_arc_store = None
@@ -74,6 +77,8 @@ class SchedulePlugin(AmadeusPlugin):
         self._event_replan_enabled = bool(getattr(ctx, "schedule_event_replan_enabled", False))
         self._story_arc_store = getattr(ctx, "story_arc_store", None)
         self._climate_sensor_hub = getattr(ctx, "climate_sensor_hub", None)
+        self._climate_engine = getattr(ctx, "climate_engine", None)
+        self._m4_policy_enabled = bool(getattr(ctx, "dialogue_climate_m4_enabled", False))
         self._affection_engine = getattr(ctx, "affection_engine", None)
         self._calendar_service = getattr(ctx, "calendar_service", None)
 
@@ -129,6 +134,11 @@ class SchedulePlugin(AmadeusPlugin):
                     priority=11,
                     source="schedule.event_replan",
                 )
+        # M4: when ClimatePolicy is active it owns the affect→prompt block and
+        # supersedes the M1 tension block (climate now owns tension). Otherwise
+        # fall back to the M1 guidance block (live path, unchanged).
+        if self._maybe_inject_climate_block(ctx):
+            return
         guidance_builder = getattr(self._mood_engine, "build_m1_tension_guidance", None)
         if self._dialogue_climate_m1_enabled and callable(guidance_builder):
             guidance_value = guidance_builder(
@@ -169,6 +179,35 @@ class SchedulePlugin(AmadeusPlugin):
                 group_id=str(ctx.group_id or ""),
                 user_id=str(ctx.user_id or ""),
             )
+
+    def _maybe_inject_climate_block(self, ctx: PromptContext) -> bool:
+        """M4: synthesize ClimatePolicy from the resolved ClimateState and inject
+        a single "对话气候" block. Returns True when it took over (so the caller
+        skips the legacy M1 block — climate supersedes it). No-op + False unless
+        m4_policy_enabled and the engine is live. Best-effort.
+        """
+        if not self._m4_policy_enabled:
+            return False
+        engine = self._climate_engine
+        if engine is None or not getattr(engine, "enabled", False):
+            return False
+        try:
+            from services.dialogue_climate.policy import synthesize
+
+            state = engine.resolve(group_id=ctx.group_id, user_id=ctx.user_id)
+            policy = synthesize(state)
+            if policy.guidance:
+                ctx.add_block(
+                    text=policy.guidance,
+                    label="对话气候",
+                    position="dynamic",
+                    priority=12,
+                    source="schedule.m4_climate",
+                )
+            return True  # climate owns the affect block this turn (supersedes M1)
+        except Exception as exc:  # never break the prompt path
+            _L.debug("climate policy block failed | err={}", exc)
+            return False
 
     def _feed_climate_sensors(self, ctx: PromptContext) -> None:
         """M3: feed Schedule/Circadian/Interaction/Calendar signals per reply.

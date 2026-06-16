@@ -26,6 +26,28 @@
 
 ---
 
+## 2026-06-16 Dialogue Climate M3/M4 全量落地（休眠默认关，待部署）
+
+**变更类型**：新功能，承接同日 A-M2（§9）。两个 commit：M3（`f547344`，16 files）+ M4（本轮）。**全程灰度 `m2_enabled`/`m3_sensors_enabled`/`m4_policy_enabled` 默认关，关时零行为变更。**
+
+**背景**：用户要求继续 A-M2 后裁定"不做最小闭环，要做就全量"。先出 [M3/M4 调研](docs/tracking/dialogue-climate-m3-m4-research-2026-06-16.md)（摸清 6 sensor 现状，发现 4 处代码现实偏离设计主文）+ [实现方案](docs/tracking/dialogue-climate-m3-m4-impl-plan-2026-06-16.md)，用户冻结 4 决策：① ClimateEngine 升 per-(group,user)；② tension 迁移 ClimateEngine 唯一持有；③ CalendarSensor 接富版 calendar_context；④ MessageSensor 复活 MoodClassifier。
+
+**M3（f547344）**：ClimateEngine 升 per-(group,user) + clear_stale；`sensors.py`（Sensor/SensorHub + 6 sensor：Schedule/Irritation/Circadian/Interaction/Calendar/Message）；`m2_metrics.py`（ClimateMetricsRecorder→`storage/living_persona/m2_climate.db`）；运行态接线（schedule on_pre_prompt 馈 mood/circadian/familiarity/calendar；qq_interactions 馈 irritation；schedule on_post_reply 反馈回路）。tension M1↔M2 闭式等价性有测试钉死。
+
+**M4（本轮）**：`policy.py` `ClimatePolicy.synthesize`（纯函数 ClimateState→reply_bias/delay_multiplier/mood_label/guidance）；schedule on_pre_prompt 在 `m4_policy_enabled` 时注入"对话气候"block 并让位 M1 tension block。
+
+**调参锚定**：沿用 M2 的 Verduyn 2015 情绪时长 + emotional inertia AR(1) ESM（per-hour λ，tension 最快 trust/familiarity 最慢）。
+
+**与 plan 偏离（如实记录，详见 [Part A §10.2](docs/tracking/living-persona-partA-dialogue-climate.md)）**：① provider-bus 让位收窄——QueryContext 拿不到内存 ClimateEngine，改用纯函数 policy + schedule 直接注入；② affection block 与 climate block 暂共存未合并；③ Humanizer/Thinker adapter 字段就绪未接消费；④ MessageSensor classifier 运行态馈入未做（no-op）。
+
+**验证（D4）**：ruff/pyright 0；新增 4 测试文件（dynamics 19 + sensors 21 + m2_metrics 6 + policy 8）；全量 **2743 passed / 17 skipped**（flag 默认关无回归）。边界负证据：唯一 reply 路径消费者是 `_maybe_inject_climate_block`，m4 默认关。
+
+**回滚**：三 flag 默认关零行为变更；M4 关时走旧 M1 block（双跑过渡）；删 climate 文件 + config 字段或 git checkout。无 DB schema 变更（m2_climate.db 是新独立表）；无 NapCat 变更。
+
+**未做（后续增量）**：provider-bus 让位、affection+climate 单一 block 合并、adapter 消费 delay/bias、MessageSensor 运行态馈入、tension M1 完全退役、baseline 持久化。上线需 shadow→active 灰度。
+
+---
+
 ## 2026-06-16 空间日志插件（qzone_journal）立项 + QZone 发布可行性实证（仅文档，无代码）
 
 **变更类型**：立项文档 + 可行性考察。新增 [docs/tracking/qzone-journal-plugin-charter-2026-06-16.md](docs/tracking/qzone-journal-plugin-charter-2026-06-16.md)。**未写任何插件代码、未实发说说、未落盘任何 cookie。**

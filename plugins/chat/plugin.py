@@ -1246,6 +1246,9 @@ class ChatPlugin(AmadeusPlugin):
                         ctx.climate_engine,
                         m3_sensors_enabled=schedule_cfg.dialogue_climate.m3_sensors_enabled,
                     )
+                    ctx.dialogue_climate_m4_enabled = bool(
+                        schedule_cfg.dialogue_climate.m4_policy_enabled
+                    )
                     if schedule_cfg.dialogue_climate.m3_sensors_enabled:
                         from services.dialogue_climate import ClimateMetricsRecorder
 

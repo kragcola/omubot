@@ -45,6 +45,10 @@
         "m3_sensors_enabled": {
           "type": "boolean",
           "title": "启用 A-M3 Sensor 适配层（喂信号入 ClimateEngine）"
+        },
+        "m4_policy_enabled": {
+          "type": "boolean",
+          "title": "启用 A-M4 ClimatePolicy（ClimateState 注入 prompt + 让位 M1 block）"
         }
       }
     },
