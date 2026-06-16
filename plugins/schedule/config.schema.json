@@ -37,6 +37,10 @@
         "m1_enabled": {
           "type": "boolean",
           "title": "启用 A-M1 tension 单维闭环"
+        },
+        "m2_enabled": {
+          "type": "boolean",
+          "title": "启用 A-M2 全维 ClimateState 引擎（休眠，待 M3 接 sensor）"
         }
       }
     },

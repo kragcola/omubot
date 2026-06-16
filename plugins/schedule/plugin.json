@@ -34,6 +34,7 @@
       "story_arc_enabled",
       "event_replan_enabled",
       "dialogue_climate.m1_enabled",
+      "dialogue_climate.m2_enabled",
       "mood_anomaly_chance",
       "mood_refresh_minutes"
     ]

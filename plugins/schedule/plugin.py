@@ -19,9 +19,11 @@ from plugins.schedule.types import Schedule
 
 
 class DialogueClimateConfig(BaseModel):
-    """Dialogue Climate M1 flags. Dormant until Wave 1E consumes them."""
+    """Dialogue Climate flags. M1 (tension) is live; M2 (full ClimateState) is
+    dormant behind ``m2_enabled`` until M3 wires sensors in."""
 
     m1_enabled: bool = False
+    m2_enabled: bool = False
 
 
 class ScheduleConfig(BaseModel):

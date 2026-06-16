@@ -80,7 +80,7 @@ MoodEngine 现状是 **15 分钟 TTL 惰性缓存 + 过期才重算**（[mood.py
 | ~~P0 旧~~ | ~~激活 MoodClassifier + 接 CouplingPolicy~~ | —— | —— | **作废**（被 part0 取代） |
 | **P-now** | reaction/poke → MoodEngine 三维 nudge | commit `1b82fa2` | —— | ✅ 已上线 2026-06-08 |
 | **M1（MVP）** | tension 单维闭环 | IrritationSensor + on-read tension 动力学 + prompt 行为指导 | P-now | 本书申请立项 |
-| M2 | ClimateState 统一状态对象 + on-read 动力学引擎（全维） | `services/dialogue_climate/state.py` + `dynamics.py` | M1 | 搁置·保留 |
+| M2 | ClimateState 统一状态对象 + on-read 动力学引擎（全维） | `services/dialogue_climate/state.py` + `dynamics.py` | M1 | **实现侧已落地 2026-06-16**（休眠，默认关，未接 sensor；见 §9） |
 | M3 | Sensor 适配层（schedule/calendar/message/interaction/circadian）+ 反馈回路 | 6 个 Sensor + on_post_reply 写回 | M2 | 搁置·保留 |
 | M4 | ClimatePolicy 合成 + Adapter 输出 + provider 让位 | Policy + PromptAdapter/HumanizerAdapter | M3 | 搁置·保留 |
 
@@ -162,6 +162,37 @@ Dialogue Climate 立项：
 - **mention 单价**：`_M1_IRRITATION_MENTION_TENSION=0.03`。昵称接入后信号量从"4天1次"→"数十次/天"，连呼可能很快撞 0.2 cap（`_M1_IRRITATION_TENSION_CAP`），需跑几天看 `m1_metrics.db` 真实分布后下调。**这恰好补齐 R8 长期缺的校准样本**——8.1 修复前根本采不到数据。
 - **τ_tension 半衰期**：默认 `_M1_DEFAULT_TENSION_TAU_S=600s`，待积累超阈触发样本后用 `m1_tension_metrics()`（injection_count / trigger_rate / half_life_s）实测回放校准。
 - **M2 解冻前置仍未满足**：§6.1 要求"M1 调参手感确认"才批 M2，8.1 之前数据为空、谈不上手感；现在采集口修好，需重新积累 1–2 周有效样本再评估。
+
+---
+
+## 9. M2 实现侧落地（2026-06-16，休眠态，默认关）
+
+> 用户在知情"M1 调参样本仍为空（6-14 采集口修复后约 2 天，自然流量 0 条新 tension 事件；live `m1_metrics.db` 仅 13 条 6-13 压测残留）、§6.1 前置未满足、R7/R8 风险"后，裁定**直接落地 M2 全维实现侧**，调参用公开实证数据辅助锚定（不拍脑袋）。本节是该决定的执行记录。
+
+### 9.1 落地范围（对标 Wave 2 story_arc：建模块+开关+测试，不接消费者）
+
+- 新增 `services/dialogue_climate/state.py`：`ClimateState`（6 维 energy/valence/openness/tension/trust/familiarity + 3 baseline + 元数据，字段对齐设计主文 §5 Phase 1）、`ClimateSignal`（M3 sensor 输出契约，本批只定义不产信号）、`clamp01`。
+- 新增 `services/dialogue_climate/dynamics.py`：`ClimateDynamics`（on-read 闭式 `resolve`/`apply_signal`/`drift_baseline`，差异化 λ，familiarity 调 α，**按 §2.3 不做动量项**）+ `ClimateEngine`（per-key transient 容器，镜像 MoodEngine M1 模式，`m2_enabled` 门控）+ `ClimateDynamicsConfig`。
+- 配置 4 文件加 `dialogue_climate.m2_enabled`（默认 `false`，restart_required）：`plugin.py`/`config.default.json`/`config.schema.json`/`plugin.json`。
+- 新增 `tests/test_climate_dynamics.py`（15 例）。
+
+### 9.2 调参：公开实证数据锚定（替代设计主文占位 λ）
+
+因 live 校准样本为空，差异化衰减率改以已发表的情感动力学数据锚定（M3 接 sensor 后用真实信号再调）：
+
+- **Verduyn & Lavrijsen (2015), _Motivation and Emotion_ 39:119–127**：27 种情绪里悲伤最长（~120h），烦躁/惊讶/羞耻最短，悲伤可达烦躁 ~240×。→ 锚定快/慢维**比例**：tension/irritation 必须最快衰减、trust/familiarity 最慢。落为 per-hour λ：tension 0.69（半衰期 ~1h）> energy 0.35 > valence 0.17 > openness 0.14 > trust 0.012（~58h）> familiarity 0.004（~173h ≈ 1 周）；tension:familiarity ≈ 170×（取 Verduyn 比例精神，不照搬其临床自报绝对量级）。
+- **Emotional inertia / AR(1) ESM 文献**（Kuppens、Hamaker；de Haan-Rietdijk 2017 连续时间 ESM）：自回归惯性映射到指数平滑 α（默认 0.2，familiarity 提升）；连续时间建模背书 R5 的 on-read 闭式选择。
+
+### 9.3 收口证据（D4）
+
+- `ruff check` `All checks passed!`；`pyright` `0 errors, 0 warnings`；3 个 schedule JSON `python -m json.tool` 通过。
+- `tests/test_climate_dynamics.py` 15 passed（核心：固定 Δt 闭式解析值 = `baseline+diff·exp(−λΔt)`、差异化衰减 tension>trust、α familiarity 提升、baseline 漂移、disabled 零写入）；`tests/test_mood.py + test_climate_dynamics.py` 66 passed；`-k schedule` 186 passed（flag 默认关无回归）。
+- **边界负证据**：`grep ClimateState|ClimateEngine|m2_enabled` 在 plugins/kernel/services（除 dialogue_climate 自身与测试）仅命中 `plugin.py` 的 `m2_enabled` 配置字段定义——无 generator/chat/mood/client 消费者，休眠态成立。
+- **回滚**：`m2_enabled` 默认关 = 零行为变更（无消费者，天然成立）；删 2 新文件 + 移除 config 字段，或 `git checkout`；无 DB / 无 NapCat 变更。
+
+### 9.4 仍未做（M3/M4）
+
+Sensor 适配层、on_post_reply 反馈回路、ClimatePolicy 合成、PromptAdapter/HumanizerAdapter/ThinkerAdapter 让位、provider 让位、baseline durable 持久化、接 prompt/humanizer/thinker。M3 立项仍以"积累 1–2 周 M1 有效样本 + M2 引擎稳定"为前置。
 
 ---
 

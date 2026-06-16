@@ -4,6 +4,77 @@
 
 ---
 
+## 2026-06-16 A-M2 全维 ClimateState 引擎落地（实现侧，休眠默认关，待部署）
+
+**变更类型**：新功能，2 个新源文件 + 1 个新测试 + 4 配置文件 + Part A 文档 §9。**休眠态：`dialogue_climate.m2_enabled` 默认关，无 reply-path 消费者，零行为变更。**
+
+**背景**：用户要求继续 A-M2（Living Persona 系列 Part A 全维情绪）。M2 解冻前置（§6.1「M1 烤群实测调参手感」）实测**未满足**——进容器查 `m1_metrics.db` 仅 13 条事件，全在 6-13 单日单群且 mention/poke=0（6-14 采集口修复前的压测残留）；6-14 修复后到 6-16 自然流量 **0 条新 tension 事件**（两 active 群有 1611/1315 条消息，群是活的，是"连续 cue 到触阈"场景本就稀疏）。用户在知情 R7/R8 风险后裁定**直接落地实现侧**，调参用公开实证数据锚定。
+
+**做了什么**：
+- `services/dialogue_climate/state.py`：`ClimateState`（6 维 + 3 baseline + 元数据，对齐设计主文 §5）、`ClimateSignal`（M3 sensor 契约，仅定义）、`clamp01`。
+- `services/dialogue_climate/dynamics.py`：`ClimateDynamics`（on-read 闭式 resolve/apply_signal/drift_baseline，差异化 λ，familiarity 调 α，**按 R5/§2.3 不做动量项、不用 tick**）+ `ClimateEngine`（per-key transient，镜像 MoodEngine M1，m2_enabled 门控）+ `ClimateDynamicsConfig`。
+- 配置：`plugin.py`(`DialogueClimateConfig.m2_enabled`) + `config.default.json` + `config.schema.json` + `plugin.json`(restart_required)。
+- `tests/test_climate_dynamics.py` 15 例。
+
+**调参锚定（公开实证，非拍脑袋）**：① Verduyn & Lavrijsen (2015) Motiv Emot 39:119–127——27 情绪悲伤最长 ~120h、烦躁最短、悲伤 ~240× 烦躁 → 锚定 tension 最快衰减、trust/familiarity 最慢；落为 per-hour λ：tension 0.69(~1h) > energy 0.35 > valence 0.17 > openness 0.14 > trust 0.012(~58h) > familiarity 0.004(~173h)，tension:familiarity ≈170×。② emotional inertia / AR(1) ESM 文献（Kuppens/Hamaker/de Haan-Rietdijk 连续时间 ESM）→ 映射指数平滑 α、背书 on-read 闭式（R5）。M3 接 sensor 后用真实信号再调。
+
+**验证（D4）**：ruff `All checks passed!`、pyright `0 errors`、3 JSON 合法；`test_climate_dynamics.py` 15 passed、`test_mood.py + test_climate_dynamics.py` 66 passed、`-k schedule` 186 passed（flag 默认关无回归）；边界负证据 grep——plugins/kernel/services 除自身与测试外仅命中 `plugin.py` 的 m2_enabled 字段，无消费者，休眠成立。
+
+**未做（M3/M4）**：Sensor 适配、on_post_reply 反馈、ClimatePolicy、PromptAdapter/HumanizerAdapter/ThinkerAdapter、provider 让位、durable 持久化、接 prompt/humanizer/thinker。M3 前置仍为「积累 1–2 周 M1 有效样本 + M2 引擎稳定」。
+
+**回滚**：`m2_enabled` 默认关零行为变更；删 2 新文件 + 移除 config 字段或 `git checkout`；无 DB / 无 NapCat 变更。详见 [Part A §9](docs/tracking/living-persona-partA-dialogue-climate.md)。
+
+---
+
+## 2026-06-16 空间日志插件（qzone_journal）立项 + QZone 发布可行性实证（仅文档，无代码）
+
+**变更类型**：立项文档 + 可行性考察。新增 [docs/tracking/qzone-journal-plugin-charter-2026-06-16.md](docs/tracking/qzone-journal-plugin-charter-2026-06-16.md)。**未写任何插件代码、未实发说说、未落盘任何 cookie。**
+
+**背景**：用户提需求——新增插件级模块「空间日志」。基础版把 bot 一天里"值得发的事"发到 QQ 空间；进阶版联动世界书（story_arc）+ 群友共造故事发融合叙事的空间。
+
+**可行性关键结论（本机 NapCat 4.15.0 实证）**：标准 OneBot 11 无发说说 action；探测 `set_qzone_text`/`send_qzone`/`publish_qzone` 等及 `get_supported_actions` 全部 `不支持的Api`。但经典 cookie 路径可行——`POST /get_cookies {"domain":"user.qzone.qq.com"}`（须带 `Content-Type: application/json`）实测 `ok` 且 cookie 含 `p_skey`/`skey`/`uin`（len 486）；`get_csrf_token`、`get_login_info` 均 ok。即可走 `get_cookies → 算 g_tk → POST QZone emotion_cgi_publish_v6`，**纯 HTTP 不碰 NapCat 重启**（符合 NapCat 红线）。
+
+**用户裁定（写入文档）**：① 本轮只出立项文档，不写代码；② 选材=**事件触发**（有事才发，天然限频缓解风控）；③ 进阶版真人边界=**化名 + 不虚构线下行为，严守 Part C 红线**（公开空间红线比群内叙事更严）；④ **living 系列改动先行**——下一步回到 [A-M2 全维情绪](docs/tracking/living-persona-partA-dialogue-climate.md)（情绪波动也是选材信号源，先行有协同）。
+
+**风险登记（文档 §2.3/§5）**：QZone CGI 非官方接口（中）、自动发触风控（高，事件触发+频率护栏缓解）、p_skey 敏感凭证（高，即取即用不落盘）、公开不可逆外发（高，建议人工审核闸门）、进阶版真人隐私越界（高，Part C 红线）。
+
+**数据来源已就绪**：`schedule.day_narrative` / `story_arc.last_events` / Dream `dream_reflection` 经历洞察卡 / `FictionPartnerState`——Living Persona 上线后均存在，无需新造。
+
+**落地顺序**：本轮文档 → A-M2 先行 → 基础版实现（只发 bot 自己 + fiction 伙伴/arc，人工审核闸门，灰度测试号）→ 进阶版（依赖 Part C 主体跑通，后置）。
+
+**待确认（实现期前）**：发布闸门（人工审核 vs 自动发）、频率护栏阈值、灰度测试号、g_tk 算法与 emotion_cgi 字段需抓真实请求核验。
+
+**回滚**：纯文档，无运行态变更，无需回滚；删文档即可。
+
+---
+
+## 2026-06-14 persona_drift 三缺陷修复 + 根治 guardrail 规则 import-顺序 bug（代码变更，待部署）
+
+**变更类型**：缺陷修复，5 个源文件 + 2 个测试文件。承接同日「persona_drift 误伤/漏拦审计」（观察项①，原标注待立项），本轮落地修复。
+
+**修了什么（审计三缺陷）**：
+
+- **(b) 漏拦纯 AI/设定声明（最高优先级，安全缺陷）**：`strip_declarations` 原 `if matched and not cleaned: return text, matched`——声明剥空时原样透传违规原文（`我是一个AI` / `我的人设是温柔` 单句被放行）。改为：当 fail-closed 由「硬声明」驱动时返回空串 → `persona_drift_rule` 报 `passed=False` → 上层 `_apply_visible_reply_guardrails` 走 `_guardrail_fallback`「我重新整理一下再接」。
+- **(c) 剥错方向**：`我是凤笑梦，我是一个AI` 原被改写成 `我是一个AI`（删真名留 AI 声明）。新增：改写后残留若 `_is_hard_declaration` 仍命中则丢弃该残留并 fail-closed。
+- **(a) 误伤自我介绍**：按用户裁定「正常人不会自报『我就是我的名字』，自报真名算 drift，应当修改」——保持剥名方向（`我叫凤笑梦，很高兴认识你～`→`很高兴认识你～`）。
+- **关键区分**：新增 `_is_hard_declaration`（AI/型号/人设/真名关键词/WxS，可触发 fail-closed）vs 泛化软匹配（`DECLARATION_PATTERNS[0]` 的 `我是X`，剥空仍透传）——避免误伤 `我是个吃货`/`我是来帮忙的` 这类正常说话。**不动 `DECLARATION_PATTERNS`**（被 drift_detector + compiler 共享）。
+
+**附带根治：guardrail 规则注册顺序的 import-时序 bug**：
+
+- 现象：`test_persona_drift_stripper.py + test_drift_overshare_e2e.py` 组合跑时 e2e 失败（`persona_drift_hits=0`）；纯 baseline 全量 suite 因 collection 顺序恰好不触发，故长期潜伏。
+- 根因：4 个 guardrail rule 模块各自在底部 `register_rule()` 自注册，`sentinel_registry.py` 靠 import 顺序编码「persona_drift 先于 schedule_overshare」，但循环 import + 测试直接先 import stripper 时，自注册排到末尾。当 schedule_overshare 抢先跑，会把含「真名+时间」的整句（`我是凤笑梦，下午3:00…`）按句整剥，连带删掉声明、饿死 persona_drift。
+- 修复：给规则加显式 `order`（`RULE_ORDER_SENTINEL/DEDUP/PERSONA_DRIFT/SCHEDULE_OVERSHARE/THINKER_PHRASE`），`SentinelRegistry` 存 `(order, seq, handler)`、`apply` 时按 `(order, seq)` 稳定排序。执行顺序恒定，脱离 import 时序。`register_rule(handler, *, order=...)` 新增 kw 参（默认 `RULE_ORDER_DEFAULT=100` 向后兼容）。
+
+**改动文件**：`services/llm/sentinel_registry.py`（order 机制 + 排序）、`persona_drift_stripper.py`（三缺陷）、`dedup_gate.py` / `schedule_overshare_detector.py` / `thinker_phrase_detector.py`（各传 order）；测试 `tests/test_persona_drift_stripper.py`（+6 fail-closed/不误伤回归）、`tests/test_sentinel_registry.py`（+3 ordering 回归，锁定 persona_drift 先于 schedule_overshare）。
+
+**验证（D4）**：ruff 0 / pyright 0；曾失败的组合两种顺序均 14 passed；全量 `uv run pytest` **2689 passed, 17 skipped**（baseline 2680 + 9 新测试）。确定性矩阵复核审计 8 样本：漏拦/剥错方向/名+成员声明均 `passed=False` 走 fallback，正常句透传不误伤。
+
+**残留次要瑕疵（未扩大范围）**：`我是凤笑梦呀` 剥名后留 `呀` 残渣（既有 `_rewrite_sentence` 标点尾问题，非审计三缺陷之一）；线上自我介绍走 light_reply greeting 短路不过 guardrail，影响极低。
+
+**部署**：纯代码改动，rebuild bot 生效。**回滚**：`git revert` 本次 commit；或单独还原 `persona_drift_stripper.py` 即恢复旧行为（order 机制无害可保留）。
+
+---
+
 ## 2026-06-14 arbiter C (correction) 触发路径压测（仅审计未改代码）
 
 **变更类型**：压测审计（无代码改动）。arbiter A/B 前几轮已端到端验证，C（correction）是唯一没压过的 arbiter 路径，配置全开（`correction_enabled=True correction_window_s=30.0`）。

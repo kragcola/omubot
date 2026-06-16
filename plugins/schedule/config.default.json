@@ -9,7 +9,8 @@
     "story_arc_enabled": false,
     "event_replan_enabled": false,
     "dialogue_climate": {
-      "m1_enabled": false
+      "m1_enabled": false,
+      "m2_enabled": false
     },
     "mood_anomaly_chance": 0.05,
     "mood_refresh_minutes": 30
