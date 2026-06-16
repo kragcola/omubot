@@ -1234,6 +1234,24 @@ class ChatPlugin(AmadeusPlugin):
                     ctx.mood_engine.set_m1_recorder(M1MetricsRecorder())
                 except Exception as exc:
                     _L.warning("m1 metrics recorder wiring failed | err={}", exc)
+            # Dialogue Climate M2/M3: full-dimension ClimateEngine + Sensor hub.
+            # Dormant unless m2_enabled; sensors fed only when m3_sensors_enabled.
+            if schedule_cfg.dialogue_climate.m2_enabled:
+                try:
+                    from services.dialogue_climate import ClimateEngine
+                    from services.dialogue_climate.sensors import SensorHub
+
+                    ctx.climate_engine = ClimateEngine(m2_enabled=True)
+                    ctx.climate_sensor_hub = SensorHub(
+                        ctx.climate_engine,
+                        m3_sensors_enabled=schedule_cfg.dialogue_climate.m3_sensors_enabled,
+                    )
+                    if schedule_cfg.dialogue_climate.m3_sensors_enabled:
+                        from services.dialogue_climate import ClimateMetricsRecorder
+
+                        ctx.climate_engine.set_recorder(ClimateMetricsRecorder())
+                except Exception as exc:
+                    _L.warning("climate engine wiring failed | err={}", exc)
             ctx.schedule_gen = ScheduleGenerator(
                 store=ctx.schedule_store,
                 generate_at_hour=schedule_cfg.generate_at_hour,

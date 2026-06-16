@@ -233,6 +233,8 @@ class PluginContext:
     backup_scheduler: Any = None
     mood_engine: Any = None
     dialogue_climate_m1_enabled: bool = False
+    climate_engine: Any = None
+    climate_sensor_hub: Any = None
     schedule_event_replan_enabled: bool = False
     affection_engine: Any = None
     schedule_store: Any = None

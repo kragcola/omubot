@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -13,7 +14,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from kernel.types import AmadeusPlugin, PluginContext, PromptContext
+from kernel.types import AmadeusPlugin, PluginContext, PromptContext, ReplyContext
 from plugins.schedule.story_arc import StoryArc, StoryArcEventCandidate, record_event_trigger
 from plugins.schedule.types import Schedule
 
@@ -24,6 +25,7 @@ class DialogueClimateConfig(BaseModel):
 
     m1_enabled: bool = False
     m2_enabled: bool = False
+    m3_sensors_enabled: bool = False
 
 
 class ScheduleConfig(BaseModel):
@@ -58,6 +60,9 @@ class SchedulePlugin(AmadeusPlugin):
         self._schedule_started = False
         self._dialogue_climate_m1_enabled = False
         self._event_replan_enabled = False
+        self._climate_sensor_hub = None
+        self._affection_engine = None
+        self._calendar_service = None
         self._story_arc_store = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
@@ -68,6 +73,9 @@ class SchedulePlugin(AmadeusPlugin):
         self._dialogue_climate_m1_enabled = bool(getattr(ctx, "dialogue_climate_m1_enabled", False))
         self._event_replan_enabled = bool(getattr(ctx, "schedule_event_replan_enabled", False))
         self._story_arc_store = getattr(ctx, "story_arc_store", None)
+        self._climate_sensor_hub = getattr(ctx, "climate_sensor_hub", None)
+        self._affection_engine = getattr(ctx, "affection_engine", None)
+        self._calendar_service = getattr(ctx, "calendar_service", None)
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:
         if not ctx.schedule_enabled or self._schedule_gen is None:
@@ -110,6 +118,7 @@ class SchedulePlugin(AmadeusPlugin):
                     f" anomaly={profile.anomaly_reason!r}" if profile.anomaly_reason else "",
                 )
             ctx.add_block(text=text, label="当前时间", position="dynamic", priority=10, source="schedule")
+        self._feed_climate_sensors(ctx)
         if self._event_replan_enabled:
             replan_guidance = self._build_event_replan_guidance(ctx)
             if replan_guidance:
@@ -136,6 +145,91 @@ class SchedulePlugin(AmadeusPlugin):
                     priority=12,
                     source="schedule.m1",
                 )
+
+    async def on_post_reply(self, ctx: ReplyContext) -> None:
+        """M3 feedback loop: a reply to this user happened → small climate nudge.
+
+        Closes the perceive→act→feedback loop (design master §4). Uses only the
+        fields ReplyContext actually carries (F6: user_id/group_id/elapsed_ms —
+        no register/length). No-op unless the hub is wired + m3 enabled.
+        """
+        hub = self._climate_sensor_hub
+        if hub is None or not getattr(hub, "enabled", False):
+            return
+        engine = getattr(hub, "_engine", None)
+        if engine is None:
+            return
+        with contextlib.suppress(Exception):  # never break the post-reply chain
+            # A completed reply to this user is a small positive interaction:
+            # nudge openness up slightly (we engaged), keyed per-(group, user).
+            engine.register_signal(
+                dim="openness",
+                delta=0.05,
+                source="post_reply",
+                group_id=str(ctx.group_id or ""),
+                user_id=str(ctx.user_id or ""),
+            )
+
+    def _feed_climate_sensors(self, ctx: PromptContext) -> None:
+        """M3: feed Schedule/Circadian/Interaction/Calendar signals per reply.
+
+        No-op unless the SensorHub is wired and m3_sensors_enabled (the hub gates
+        internally). Per-(group, user) keyed. Irritation is fed on its own
+        @/poke path (qq_interactions); Message on the classifier path. Here we
+        contribute mood dims + local hour + per-user familiarity + rich day
+        context. Best-effort — never raise into the prompt path.
+        """
+        hub = self._climate_sensor_hub
+        if hub is None or not getattr(hub, "enabled", False):
+            return
+        try:
+            from services.dialogue_climate.sensors import SensorInput
+
+            now = datetime.now()
+            profile = self._mood_engine.cached_profile(group_id=ctx.group_id, session_id=ctx.session_id)
+            familiarity = self._resolve_familiarity(ctx.user_id)
+            is_holiday, self_birthday = self._resolve_day_context(now)
+            data = SensorInput(
+                group_id=str(ctx.group_id or ""),
+                user_id=str(ctx.user_id or ""),
+                mood_energy=getattr(profile, "energy", None) if profile else None,
+                mood_valence=getattr(profile, "valence", None) if profile else None,
+                mood_openness=getattr(profile, "openness", None) if profile else None,
+                hour=now.hour,
+                familiarity=familiarity,
+                is_holiday=is_holiday,
+                has_self_birthday=self_birthday,
+            )
+            hub.collect(data)
+        except Exception as exc:  # never break the reply path
+            _L.debug("climate sensor feed failed | err={}", exc)
+
+    def _resolve_familiarity(self, user_id: str) -> float | None:
+        """Per-user familiarity from AffectionEngine (None when unavailable)."""
+        engine = self._affection_engine
+        if engine is None or not user_id or user_id == "0":
+            return None
+        fn = getattr(engine, "familiarity_score", None)
+        if not callable(fn):
+            return None
+        try:
+            return float(fn(user_id))
+        except Exception:
+            return None
+
+    def _resolve_day_context(self, now: Any) -> tuple[bool, bool]:
+        """Rich day context (calendar_context) → (is_holiday, is_self_birthday)."""
+        service = self._calendar_service
+        if service is None:
+            return False, False
+        fn = getattr(service, "get_day_context", None)
+        if not callable(fn):
+            return False, False
+        try:
+            dc = fn(now)
+            return bool(getattr(dc, "is_holiday", False)), bool(getattr(dc, "is_self_birthday", False))
+        except Exception:
+            return False, False
 
     def _build_event_replan_guidance(self, ctx: PromptContext) -> str:
         if self._schedule_store is None or self._story_arc_store is None:

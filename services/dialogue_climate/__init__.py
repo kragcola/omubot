@@ -14,6 +14,7 @@ from services.dialogue_climate.dynamics import (
     ClimateEngine,
 )
 from services.dialogue_climate.m1_metrics import M1MetricsRecorder
+from services.dialogue_climate.m2_metrics import ClimateMetricsRecorder
 from services.dialogue_climate.state import (
     CLIMATE_DIMENSIONS,
     ClimateSignal,
@@ -26,6 +27,7 @@ __all__ = [
     "ClimateDynamics",
     "ClimateDynamicsConfig",
     "ClimateEngine",
+    "ClimateMetricsRecorder",
     "ClimateSignal",
     "ClimateState",
     "M1MetricsRecorder",

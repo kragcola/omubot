@@ -41,6 +41,10 @@
         "m2_enabled": {
           "type": "boolean",
           "title": "启用 A-M2 全维 ClimateState 引擎（休眠，待 M3 接 sensor）"
+        },
+        "m3_sensors_enabled": {
+          "type": "boolean",
+          "title": "启用 A-M3 Sensor 适配层（喂信号入 ClimateEngine）"
         }
       }
     },

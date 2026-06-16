@@ -208,6 +208,40 @@ def _register_m1_irritation_frequency(
         return False
 
 
+def _feed_climate_irritation(
+    ctx: PluginContext,
+    *,
+    group_id: str,
+    actor_user_id: str,
+    mention_count: int,
+    poke_count: int,
+) -> None:
+    """M3 (F2): feed @/poke irritation into the ClimateEngine tension dimension.
+
+    Per-(group, actor) keyed via the SensorHub's IrritationSensor. Runs in
+    parallel with the M1 path during the transition (the closed-form law is
+    identical, see the migration-equivalence test); M1 stays the live consumer
+    until M4 reads ClimateEngine tension. No-op unless the hub is wired + enabled.
+    Best-effort — never raise into the interaction path.
+    """
+    hub = getattr(ctx, "climate_sensor_hub", None)
+    if hub is None or not getattr(hub, "enabled", False):
+        return
+    try:
+        from services.dialogue_climate.sensors import SensorInput
+
+        hub.collect(
+            SensorInput(
+                group_id=str(group_id or ""),
+                user_id=str(actor_user_id or ""),
+                mention_count=int(mention_count or 0),
+                poke_count=int(poke_count or 0),
+            )
+        )
+    except Exception as exc:
+        logger.debug("climate irritation feed skipped | err={}", exc)
+
+
 def register_m1_mention_irritation(
     ctx: PluginContext,
     *,
@@ -228,6 +262,13 @@ def register_m1_mention_irritation(
         group_id=group_id,
         actor_user_id=actor_user_id,
         now=current_time,
+    )
+    _feed_climate_irritation(
+        ctx,
+        group_id=group_id,
+        actor_user_id=actor_user_id,
+        mention_count=mention_count,
+        poke_count=poke_count,
     )
     return _register_m1_irritation_frequency(
         ctx,

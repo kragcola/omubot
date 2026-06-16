@@ -148,26 +148,83 @@ def test_drift_baseline_moves_toward_current_and_neutral():
 
 def test_engine_disabled_register_is_noop():
     eng = ClimateEngine(m2_enabled=False)
-    changed = eng.register_signal(dim="tension", delta=0.5, group_id="g1")
+    changed = eng.register_signal(dim="tension", delta=0.5, group_id="g1", user_id="u1")
     assert changed is False
     assert eng.state_count() == 0
 
 
 def test_engine_disabled_resolve_returns_neutral():
     eng = ClimateEngine(m2_enabled=False)
-    state = eng.resolve(group_id="g1", session_id="s1")
+    state = eng.resolve(group_id="g1", user_id="u1")
     assert state == ClimateState.neutral()
     assert eng.state_count() == 0
 
 
-def test_engine_enabled_records_per_key_on_read_decay():
+def test_engine_enabled_records_per_group_user_on_read_decay():
     eng = ClimateEngine(m2_enabled=True)
-    assert eng.register_signal(dim="tension", delta=0.5, group_id="g1", now_ts=0.0)
+    assert eng.register_signal(dim="tension", delta=0.5, group_id="g1", user_id="u1", now_ts=0.0)
     assert eng.state_count() == 1
     half_life_s = math.log(2.0) / DECAY_RATES["tension"] * _HOUR
     # registered tension = α·0.5 = 0.1 (default alpha 0.2); after one half-life → 0.05
-    resolved = eng.resolve(group_id="g1", now_ts=half_life_s)
+    resolved = eng.resolve(group_id="g1", user_id="u1", now_ts=half_life_s)
     assert abs(resolved.tension - 0.05) < 1e-9
-    # a different key is independent / neutral
-    other = eng.resolve(group_id="g2", now_ts=half_life_s)
-    assert other == ClimateState.neutral()
+    # same group, different user is independent / neutral
+    other_user = eng.resolve(group_id="g1", user_id="u2", now_ts=half_life_s)
+    assert other_user == ClimateState.neutral()
+    # same user, different group is independent / neutral
+    other_group = eng.resolve(group_id="g2", user_id="u1", now_ts=half_life_s)
+    assert other_group == ClimateState.neutral()
+
+
+def test_engine_per_user_states_isolated_within_group():
+    eng = ClimateEngine(m2_enabled=True)
+    eng.register_signal(dim="familiarity", delta=0.8, group_id="g1", user_id="u1", now_ts=0.0)
+    eng.register_signal(dim="familiarity", delta=0.2, group_id="g1", user_id="u2", now_ts=0.0)
+    assert eng.state_count() == 2
+    s1 = eng.resolve(group_id="g1", user_id="u1", now_ts=0.0)
+    s2 = eng.resolve(group_id="g1", user_id="u2", now_ts=0.0)
+    assert s1.familiarity > s2.familiarity
+
+
+def test_engine_clear_stale_prunes_old_keys():
+    eng = ClimateEngine(m2_enabled=True)
+    eng.register_signal(dim="tension", delta=0.5, group_id="g1", user_id="u1", now_ts=0.0)
+    eng.register_signal(dim="tension", delta=0.5, group_id="g1", user_id="u2", now_ts=1000.0)
+    assert eng.state_count() == 2
+    # prune anything older than 500s as of t=1000 → u1 (last update 0) goes, u2 stays
+    pruned = eng.clear_stale(max_age_s=500.0, now_ts=1000.0)
+    assert pruned == 1
+    assert eng.state_count() == 1
+    assert eng.resolve(group_id="g1", user_id="u1", now_ts=1000.0) == ClimateState.neutral()
+
+
+def test_engine_clear_stale_disabled_is_noop():
+    eng = ClimateEngine(m2_enabled=False)
+    assert eng.clear_stale() == 0
+
+
+# -- tension migration groundwork (F2): M1 → ClimateEngine closed-form equivalence
+
+
+def test_tension_migration_closed_form_equivalence_with_m1():
+    """ClimateDynamics tension resolution == M1 resolve_m1_tension_on_read.
+
+    Both decay toward 0 as ``v·exp(-Δt/τ)``. M1 uses τ in seconds; ClimateDynamics
+    uses per-hour λ (= 3600/τ). Given matching constants the two must agree to
+    floating point, proving the tension migration (F2) is a pure owner swap, not
+    a behaviour change in the decay law. The *tuned* time constant differs (M1
+    τ=600s vs M2 ~5217s) — that is a deliberate calibration decision recorded in
+    the M3 plan, separate from the law's correctness asserted here.
+    """
+    from plugins.schedule.mood import resolve_m1_tension_on_read
+
+    tau_s = 600.0
+    lam_per_hour = 3600.0 / tau_s
+    cfg = ClimateDynamicsConfig(decay_rates={**DECAY_RATES, "tension": lam_per_hour})
+    dyn = ClimateDynamics(cfg)
+    for dt in (0.0, 60.0, 300.0, 600.0, 1800.0):
+        m1 = resolve_m1_tension_on_read(0.8, 0.0, 0.0, dt, tau_s=tau_s)
+        state = ClimateState(tension=0.8, last_update_ts=0.0)
+        m2 = dyn.resolve(state, now_ts=dt).tension
+        assert abs(m1 - m2) < 1e-9
+

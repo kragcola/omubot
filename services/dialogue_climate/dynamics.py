@@ -35,9 +35,11 @@ toward the Verduyn ratio. All overridable via ClimateDynamicsConfig.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from services.dialogue_climate.state import (
     BASELINE_DIMENSIONS,
@@ -157,16 +159,22 @@ class ClimateDynamics:
 
 
 class ClimateEngine:
-    """Per-(group, session) transient ClimateState container.
+    """Per-(group, user) transient ClimateState container.
 
-    Mirrors the MoodEngine M1 pattern: state is in-memory only, keyed by
-    (group_id, session_id), resolved on read with closed-form decay. Gated by
-    ``m2_enabled`` — when disabled, ``register_signal`` is a no-op and
-    ``resolve`` returns a fresh neutral state without storing anything, so the
-    engine is a zero-behaviour-change increment until M3 wires sensors in.
+    M3 keys state on ``(group_id, user_id)`` (Part A M3 decision F1): each member
+    carries their own ClimateState within a group, so the per-user trust /
+    familiarity dimensions land naturally instead of being squashed into one
+    per-group value. State is in-memory only, resolved on read with closed-form
+    decay (mirrors the MoodEngine M1 pattern). Gated by ``m2_enabled`` — when
+    disabled, ``register_signal`` is a no-op and ``resolve`` returns a fresh
+    neutral state without storing anything (zero-behaviour-change increment).
 
-    Dormant by design: no reply-path consumer reads this in M2.
+    Because the key fans out by member, ``clear_stale`` prunes states whose last
+    update is older than ``max_age_s`` (default 24h) to bound memory; call it
+    periodically (e.g. from the Dream loop) the way M1 prunes its tension state.
     """
+
+    _DEFAULT_STALE_AGE_S = 86400.0  # 24h
 
     def __init__(
         self,
@@ -177,10 +185,18 @@ class ClimateEngine:
         self._enabled = bool(m2_enabled)
         self._dynamics = ClimateDynamics(config)
         self._states: dict[tuple[str, str], ClimateState] = {}
+        # Optional durable recorder (Wave M3-3 gray-run). None by default so the
+        # default path and every unit test are unaffected. Best-effort hook;
+        # must never raise into the reply path.
+        self._recorder: Any = None
+
+    def set_recorder(self, recorder: Any) -> None:
+        """Attach a durable ClimateMetricsRecorder (see services.dialogue_climate)."""
+        self._recorder = recorder
 
     @staticmethod
-    def _key(group_id: str | int | None, session_id: str) -> tuple[str, str]:
-        return (str(group_id or ""), str(session_id or ""))
+    def _key(group_id: str | int | None, user_id: str | int | None) -> tuple[str, str]:
+        return (str(group_id or ""), str(user_id or ""))
 
     @property
     def enabled(self) -> bool:
@@ -193,35 +209,46 @@ class ClimateEngine:
         delta: float,
         source: str = "",
         group_id: str | int | None = None,
-        session_id: str = "",
+        user_id: str | int | None = None,
         now_ts: float | None = None,
     ) -> bool:
-        """Apply a sensed nudge to the per-key state. No-op when disabled."""
+        """Apply a sensed nudge to the per-(group, user) state. No-op when disabled."""
         if not self._enabled or not delta:
             return False
         now = time.monotonic() if now_ts is None else float(now_ts)
         signal = ClimateSignal(dim=dim, delta=float(delta), source=source, ts=now)
         if not signal.is_valid():
             return False
-        key = self._key(group_id, session_id)
+        key = self._key(group_id, user_id)
         prior = self._states.get(key)
         if prior is None:
             prior = ClimateState.neutral()
             prior.last_update_ts = now
         self._states[key] = self._dynamics.apply_signal(prior, signal, now)
+        if self._recorder is not None:
+            with contextlib.suppress(Exception):  # never break the reply path
+                self._recorder.record_signal(
+                    group_id=key[0],
+                    user_id=key[1],
+                    signal_dim=signal.dim,
+                    signal_delta=signal.delta,
+                    signal_source=signal.source,
+                    state=self._states[key],
+                    monotonic_ts=now,
+                )
         return True
 
     def resolve(
         self,
         *,
         group_id: str | int | None = None,
-        session_id: str = "",
+        user_id: str | int | None = None,
         now_ts: float | None = None,
     ) -> ClimateState:
         """Read the on-read-decayed state. Neutral (unstored) when disabled."""
         if not self._enabled:
             return ClimateState.neutral()
-        key = self._key(group_id, session_id)
+        key = self._key(group_id, user_id)
         state = self._states.get(key)
         if state is None:
             return ClimateState.neutral()
@@ -230,8 +257,23 @@ class ClimateEngine:
         self._states[key] = resolved
         return resolved
 
+    def clear_stale(self, *, max_age_s: float | None = None, now_ts: float | None = None) -> int:
+        """Prune states whose last update is older than ``max_age_s``.
+
+        Bounds per-(group, user) fan-out. Returns the number pruned. Safe to call
+        when disabled (no-op, nothing stored).
+        """
+        if not self._states:
+            return 0
+        max_age = self._DEFAULT_STALE_AGE_S if max_age_s is None else float(max_age_s)
+        now = time.monotonic() if now_ts is None else float(now_ts)
+        stale = [k for k, s in self._states.items() if now - s.last_update_ts > max_age]
+        for k in stale:
+            del self._states[k]
+        return len(stale)
+
     def state_count(self) -> int:
-        """Number of stored per-key states (observability / test hook)."""
+        """Number of stored per-(group, user) states (observability / test hook)."""
         return len(self._states)
 
 
