@@ -74,6 +74,65 @@ def has_softener(text: str) -> bool:
         return True
     return any(t.endswith(e) for e in _ENDEARMENT)
 
+# ── block-level register classifier (轻松玩笑 vs 正经讨论) ─────────────────
+# Unit: all texts in one (group, block, speaker). Returns "casual" / "serious" / "mixed".
+# Rule-based, lightweight: no model needed.
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FFFF"  # misc symbols, emoji
+    "☀-➿"           # misc symbols
+    "︀-️]",         # variation selectors
+    re.UNICODE,
+)
+_FORMAL_CONN = re.compile(r"因为|所以|但是|虽然|尽管|然而|综上|总结|分析|总体上|从.*来看|如果.*则|此外|另外|综合")
+_SLANG_RE = re.compile(r"哈哈|哈哈哈|啊啊|嗯嗯|呜呜|笑死|好家伙|牛逼|nb|牛b|hhh|www|666|emmm|诶|欸|唉")
+
+def classify_register(texts: list[str]) -> str:
+    """Classify a block's register as 'casual' / 'serious' / 'mixed'.
+
+    Scores each message on casual vs serious signals; the block-level label
+    is the majority, with a 'mixed' fallback when neither dominates.
+
+    Casual signals: short message, emoji-dense, softener-dense, slang.
+    Serious signals: longer message, formal connectives, questions, no emoji.
+    """
+    if not texts:
+        return "mixed"
+    casual_votes = serious_votes = 0
+    for t in texts:
+        if not t:
+            continue
+        n = len(t)
+        has_emoji = bool(_EMOJI_RE.search(t))
+        has_formal = bool(_FORMAL_CONN.search(t))
+        has_slang = bool(_SLANG_RE.search(t))
+        has_soft = has_softener(t)
+        is_question = t.rstrip().endswith("?") or t.rstrip().endswith("？")
+        casual_score = (
+            (1 if n < 15 else 0)
+            + (1 if has_emoji else 0)
+            + (1 if has_slang else 0)
+            + (1 if has_soft else 0)
+        )
+        serious_score = (
+            (1 if n >= 30 else 0)
+            + (2 if has_formal else 0)
+            + (1 if is_question else 0)
+            + (1 if not has_emoji else 0)
+        )
+        if casual_score > serious_score:
+            casual_votes += 1
+        elif serious_score > casual_score:
+            serious_votes += 1
+    total = casual_votes + serious_votes
+    if total == 0:
+        return "mixed"
+    ratio = casual_votes / total
+    if ratio >= 0.65:
+        return "casual"
+    if ratio <= 0.35:
+        return "serious"
+    return "mixed"
+
 # ── co-activation via cnsenti DUTIR pos/neg word counts ───────────────────
 def coactivation_min(text: str) -> float:
     """min(pos_words, neg_words): both valences present in one message (Larsen MIN)."""
@@ -118,7 +177,9 @@ def h1_metrics(series: list[float], shuffle: bool = False) -> dict | None:
 # ── rebuild per-(block, speaker) unit from corpus ─────────────────────────
 def load_units(db_path: str, min_msgs: int):
     """One analysis unit = one speaker's ordered messages within one topic block.
-    Returns list of dicts: {role, valence_series, min_series, neg_msgs, neg_softened}."""
+    Returns list of dicts: {role, register, valence_series, min_series, neg_msgs, neg_softened}.
+    register: 'casual' / 'serious' / 'mixed' — classified at block level (all speakers combined).
+    """
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     rows = con.execute(
         "SELECT group_id, block_id, speaker, role, text, message_id, captured_at "
@@ -127,12 +188,18 @@ def load_units(db_path: str, min_msgs: int):
     con.close()
 
     grouped: dict[tuple, list] = defaultdict(list)
+    block_all_texts: dict[tuple, list] = defaultdict(list)  # (g, b) → all texts (all speakers)
     for g, b, sp, role, text, _mid, _ts in rows:
         grouped[(g, b, sp, role)].append(text or "")
+        block_all_texts[(g, b)].append(text or "")
+
+    # classify register at block level (all speakers combined)
+    block_register: dict[tuple, str] = {
+        (g, b): classify_register(txts) for (g, b), txts in block_all_texts.items()
+    }
 
     units = []
-    for (g, b, sp, role), texts in grouped.items():  # noqa: B007  (g,b,sp for key only)
-        # valence series = one value per sentence across the speaker's messages in this block
+    for (g, b, sp, role), texts in grouped.items():  # noqa: B007
         vseries: list[float] = []
         min_vals: list[float] = []
         neg_msgs = neg_softened = 0
@@ -140,11 +207,10 @@ def load_units(db_path: str, min_msgs: int):
             sents = split_zh(t)
             for s in sents:
                 vseries.append(valence(s))
-            # H2 per-message: co-activation + softener-on-negative
             mv = coactivation_min(t)
             min_vals.append(mv)
             msg_val = np.mean([valence(s) for s in sents]) if sents else 0.0
-            if msg_val < -0.15:  # negative message
+            if msg_val < -0.15:
                 neg_msgs += 1
                 if has_softener(t):
                     neg_softened += 1
@@ -152,10 +218,12 @@ def load_units(db_path: str, min_msgs: int):
             continue
         units.append({
             "role": role, "group": g, "block": b,
+            "register": block_register.get((g, b), "mixed"),
             "valence_series": vseries,
             "min_coactivation": float(np.mean(min_vals)) if min_vals else 0.0,
             "neg_msgs": neg_msgs, "neg_softened": neg_softened,
         })
+    return units
     return units
 
 # ── effect size + comparison ──────────────────────────────────────────────
@@ -207,20 +275,29 @@ def main() -> None:
     ap.add_argument("--db", default="../../../storage/topic_corpus.db")
     ap.add_argument("--min-msgs", type=int, default=4)
     ap.add_argument("--report", default="results_p2.json")
+    ap.add_argument("--register", choices=["all", "casual", "serious", "mixed"], default="all",
+                    help="Filter analysis to a specific register (default: all)")
     args = ap.parse_args()
     np.random.seed(17)
 
-    units = load_units(args.db, args.min_msgs)
-    nh = sum(1 for u in units if u["role"] == "human")
-    na = sum(1 for u in units if u["role"] == "ai")
+    all_units = load_units(args.db, args.min_msgs)
+    nh = sum(1 for u in all_units if u["role"] == "human")
+    na = sum(1 for u in all_units if u["role"] == "ai")
+    reg_counts = {r: sum(1 for u in all_units if u["register"] == r) for r in ("casual","serious","mixed")}
     print(f"units: human={nh}, ai={na} (min sentences/unit={args.min_msgs})")
+    print(f"register distribution: {reg_counts}")
     if nh < 5 or na < 5:
         print("NOT ENOUGH DATA yet -- enable corpus_capture and let it accumulate.")
         with open(args.report, "w") as fh:
             json.dump({"status": "insufficient_data", "n_human": nh, "n_ai": na}, fh, indent=2)
         return
 
-    res = {"counts": {"human": nh, "ai": na}, "H1": {}, "H1_null": {}, "H2": {}}
+    units = all_units if args.register == "all" else [u for u in all_units if u["register"] == args.register]
+    print(f"analysing register={args.register!r}: {sum(1 for u in units if u['role']=='human')} human, "
+          f"{sum(1 for u in units if u['role']=='ai')} ai units")
+
+    res = {"counts": {"human": nh, "ai": na}, "register_filter": args.register,
+           "register_distribution": reg_counts, "H1": {}, "H1_null": {}, "H2": {}}
     print("\n=== H1 dynamics (human vs AI) ===")
     for k in ("SD", "MSSD", "RMSSD", "AR1", "ZCR"):
         c = compare(units, k)
