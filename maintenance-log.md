@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-06-17 话题块研究语料采集（显性标注、可回退、默认关，未部署）
+
+**变更类型**：新功能（研究用旁路采集），1 新源文件 + 1 新测试 + scheduler 接线 + config 字段。**休眠态：`topic_block.corpus_capture_enabled` 默认关，零行为变更。** 用途：为 Affective Divergence 研究（[research/affective-divergence/](research/affective-divergence/)）P2 提供中文真实对话的人/AI 平行语料——omubot 本身即活语料源（群友=human，emu=ai）。
+
+**背景**：P2 需把语料从英文（HC3/RAID）换到中文真实群聊。调研现状（代码实证）：① `messages.db` 已累积 61.4 万条（user 59.7 万 / assistant 1.7 万，5-01→6-17），role 天然分人/AI；② 但 `topic_block` 是**纯内存不落盘**（重启即丢 block 归属），且 reply/@ 边不进 messages.db（`content_json` 仅纯文本）。故"按话题块采集对话人+词条"缺一道**归属落盘的桥**。工作区核查：无任何"block_id 持久化/采集"立项文档可合并（edge-model L0-L3 已由 reasonix 落地 commit 68c69e3，无并发冲突）。
+
+**做了什么**（纯旁路，不碰 messages.db / 回复逻辑 / 缓存前缀 / NapCat）：
+
+- `services/group/corpus_capture.py`：`CorpusCapture` sink + `CaptureRow`，同步 best-effort 写独立 `storage/topic_corpus.db`。表 `topic_corpus` 存 {group_id, message_id, block_id, role(human/ai), speaker(默认 SHA256+盐 hash), text(全文), reply_to_message_id, reply_to_speaker(hash), at_targets(hash JSON), reply_to_self, at_self, 块参数快照(activity/participants/bot_involved/msg_count), captured_at}。
+- `services/scheduler.py`：构造期按 flag 建 sink（仅 `enabled` 且 `corpus_capture_enabled` 时）；`observe()` 后挂 capture 调用，role 由 `user_id==self_id` 判定。失败吞掉不影响 dispatch。
+- `kernel/config.py`：`TopicBlockConfig` 加 4 字段（`corpus_capture_enabled` 默认 False、`corpus_capture_hash_speakers` 默认 True、`corpus_capture_salt`、`corpus_capture_db_path`）。
+- `config/config.json`：topic_block 块加 capture 开关（关）+ 中文注释。
+- `tests/test_corpus_capture.py`：5 例（hash/明文/hash 稳定可链同人/边+role 持久化/未 init no-op）。
+
+**用户裁定**：speaker 落盘即 hash（不存明文 QQ，合规）；text 存全文（P2 中文情感标注 + H2 补偿回弹需原文）。
+
+**验证（D4，外部可观察证据）**：ruff `All checks passed!`、pyright `0 errors`（corpus_capture.py + scheduler.py）；`config.json` 合法且 Pydantic 加载 capture_enabled=False；全量 `uv run pytest` **2748 passed, 17 skipped**（baseline 2743 + 5 新测试，无回归）；端到端 smoke（observe→capture 4 条人/AI 混合流）实测：rows=4、roles={human:3,ai:1}、同一 QQ 哈希稳定可链（msg1/msg4 同 hash）、reply 边把 4 条聚进 b1、bot_involved 快照正确，且 `你会不会嫌我烦啊，亲爱的`(补偿称呼)/`(小声`(括号削弱) 原文逐字落盘。
+
+**回退**：① 置 `corpus_capture_enabled=false`（默认即关）→ sink 不构造、observe 后直接跳过，零 I/O；② 删 `storage/topic_corpus.db`；③ 代码 `git revert` 本次 commit。三级回退互独立。**未部署**（纯代码，需 rebuild bot 生效；采集仅在 2 个 active 测试群有效，8 个 silent_learn 群上游 return 不入此路径）。
+
+**未做**：离线中文情感标注管线（采集后另做，不动 bot）；admin SPA 开关 UI（config.json 已可控，暂不前端化）。
+
+---
+---
+
 ## 2026-06-16 A-M2 全维 ClimateState 引擎落地（实现侧，休眠默认关，待部署）
 
 **变更类型**：新功能，2 个新源文件 + 1 个新测试 + 4 配置文件 + Part A 文档 §9。**休眠态：`dialogue_climate.m2_enabled` 默认关，无 reply-path 消费者，零行为变更。**
@@ -44,7 +69,9 @@
 
 **回滚**：三 flag 默认关零行为变更；M4 关时走旧 M1 block（双跑过渡）；删 climate 文件 + config 字段或 git checkout。无 DB schema 变更（m2_climate.db 是新独立表）；无 NapCat 变更。
 
-**未做（后续增量）**：provider-bus 让位、affection+climate 单一 block 合并、adapter 消费 delay/bias、MessageSensor 运行态馈入、tension M1 完全退役、baseline 持久化。上线需 shadow→active 灰度。
+**未做（后续增量）**：provider-bus 让位、affection+climate 单一 block 合并、adapter 消费 delay/bias、MessageSensor 运行态馈入、tension M1 完全退役、baseline 持久化。
+
+**运行态启用（2026-06-16，用户裁定开发阶段不灰度直接启用）**：bot 仅 2 个开放测试群 + 静默观察群，无需灰度。运行态 override `/app/storage/plugins/config/schedule.json` 的 `dialogue_climate` 四 flag（m1/m2/m3/m4）全开，`docker compose restart bot` 生效（restart_required）。验证：NapCat 指纹 `2026-05-28T10:56:06...running 0` restart 前后逐字节一致未动；bot 连 OneBot 正常收消息无 error；有效配置四 flag 全 True。`m2_climate.db` 待测试群首次互动触发 register_signal 后建表。回滚：恢复备份 `schedule.json.bak-20260616-m234-enable` 后 `docker compose restart bot`（不碰 NapCat）。
 
 ---
 

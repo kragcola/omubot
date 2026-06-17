@@ -2007,6 +2007,26 @@ class TopicBlockConfig(BaseModel):
         description="Min fire probability for a ratified continuation (user follows up in a block the bot is in). "
         "0 disables. A positive floor stops low time-of-day multipliers from crushing a live back-and-forth.",
     )
+    corpus_capture_enabled: bool = Field(
+        default=False,
+        description="OFF by default. When true, persist each observed message with its topic-block "
+        "attribution (block_id, role, edges, block-param snapshot) to storage/topic_corpus.db for "
+        "offline research. Pure side-channel: does not touch messages.db, reply logic, cache, or NapCat. "
+        "Disable + delete the db to fully revert.",
+    )
+    corpus_capture_hash_speakers: bool = Field(
+        default=True,
+        description="When capturing, SHA256-hash speaker QQ ids (with salt) instead of storing plaintext. "
+        "Keeps per-speaker time series linkable while avoiding storing identifiable QQ numbers.",
+    )
+    corpus_capture_salt: str = Field(
+        default="omubot-topic-corpus",
+        description="Salt for speaker-id hashing when corpus_capture_hash_speakers is true.",
+    )
+    corpus_capture_db_path: str = Field(
+        default="storage/topic_corpus.db",
+        description="SQLite path for the research corpus side-channel.",
+    )
 
     @field_validator("overhearer_mode")
     @classmethod

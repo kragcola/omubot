@@ -16,6 +16,7 @@ from loguru import logger
 
 from kernel.config import GroupConfig
 from kernel.types import ResponseClass, TriggerContext
+from services.group.corpus_capture import CaptureRow, CorpusCapture
 from services.group.topic_block import TopicBlockTracker
 from services.humanization import CLOCK_CURRENT_SLOT, REGISTER_LABEL_SLOT
 from services.llm.arbiter import ArbiterClient, InterruptionResult, PendingMessage
@@ -378,6 +379,18 @@ class GroupChatScheduler:
                 activity_floor=getattr(topic_block_config, "activity_floor", None),
                 reservoir_max=getattr(topic_block_config, "reservoir_max", None),
             )
+        # Optional research corpus capture (explicit, opt-in, reversible).
+        # Pure side-channel: own db, no effect on dispatch / messages.db / cache.
+        self._corpus_capture: CorpusCapture | None = None
+        if self._topic_tracker is not None and bool(
+            getattr(topic_block_config, "corpus_capture_enabled", False)
+        ):
+            self._corpus_capture = CorpusCapture(
+                str(getattr(topic_block_config, "corpus_capture_db_path", "storage/topic_corpus.db")),
+                hash_speakers=bool(getattr(topic_block_config, "corpus_capture_hash_speakers", True)),
+                salt=str(getattr(topic_block_config, "corpus_capture_salt", "omubot-topic-corpus")),
+            )
+            self._corpus_capture.init()
 
     def set_bot(self, bot: Bot) -> None:
         self._bot = bot
@@ -593,6 +606,31 @@ class GroupChatScheduler:
                 )
             except Exception as exc:
                 _L.debug("topic_block observe failed | group={} err={}", group_id, exc)
+            # Research corpus capture (no-op unless explicitly enabled).
+            if self._corpus_capture is not None and observed_block is not None:
+                try:
+                    role = "ai" if (self._self_id and user_id == self._self_id) else "human"
+                    self._corpus_capture.capture(
+                        CaptureRow(
+                            group_id=group_id,
+                            message_id=message_id,
+                            block_id=observed_block.block_id,
+                            role=role,
+                            speaker=user_id or "",
+                            text=message_text or "",
+                            reply_to_message_id=reply_to_message_id,
+                            reply_to_speaker=reply_to_sender_id or "",
+                            at_targets=tuple(at_targets),
+                            reply_to_self=reply_to_self,
+                            at_self=at_self,
+                            block_activity=observed_block.activity,
+                            block_participants=len(observed_block.participants),
+                            block_bot_involved=observed_block.bot_involved,
+                            block_msg_count=len(observed_block.message_ids),
+                        )
+                    )
+                except Exception as exc:
+                    _L.debug("corpus capture failed | group={} err={}", group_id, exc)
         identity = self._persona_runtime.identity_snapshot()
         is_at = trigger is not None and trigger.mode == "at_mention"
         is_video_always = trigger is not None and trigger.mode == "video_always"
