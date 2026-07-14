@@ -6,7 +6,7 @@
     "en": "Food"
   },
   "description": "食物推荐：/吃什么 根据偏好、地区、时间推荐食物",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "priority": 25,
   "tier": "user",
   "toggle_policy": "restart_required",

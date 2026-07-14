@@ -23,7 +23,7 @@ async def test_shutdown_cancels_and_clears_feedback_task_state() -> None:
 
     task = asyncio.create_task(blocking_feedback())
     plugin._feedback_tasks.add(task)
-    plugin._feedback_running.add("user-1")
+    plugin._feedback_running.add(("user-1", "group-1"))
 
     try:
         await entered.wait()

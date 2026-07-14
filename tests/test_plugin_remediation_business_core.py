@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -40,7 +40,7 @@ async def test_food_not_spicy_excludes_spicy_candidates(tmp_path: Path) -> None:
     await store.init()
     try:
         plugin = FoodPlugin()
-        plugin._ctx = SimpleNamespace(
+        cast(Any, plugin)._ctx = SimpleNamespace(
             card_store=store,
             llm_client=_FailingLLM(),
             tool_registry=None,
@@ -54,7 +54,13 @@ async def test_food_not_spicy_excludes_spicy_candidates(tmp_path: Path) -> None:
             _food("清粥", "清淡"),
             _food("鸡蛋羹", "清淡"),
         ]
-        plugin._tutorial_shown.add("123")
+        await store.get_or_create_series(
+            "food_tutorial:123",
+            scope="user",
+            scope_id="123",
+            label="食物推荐教程",
+            source="food_plugin",
+        )
         sent: list[str] = []
 
         async def capture_reply(cmd_ctx: Any, text: str) -> None:

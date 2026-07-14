@@ -21,6 +21,7 @@ import hashlib
 import json
 import random
 import re
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,7 +34,7 @@ from pydantic import BaseModel
 from kernel.config import load_plugin_config
 from kernel.types import AmadeusPlugin, Command, MessageContext, PluginContext
 from services.llm.provider import extract_text
-from services.memory.card_store import NewCard
+from services.memory.card_store import NewCard, NewCardSeries
 from services.tools.context import ToolContext
 
 _L = logger.bind(channel="food")
@@ -64,6 +65,12 @@ _FOOD_PROMPT_PRIVATE = """你是一个食物推荐助手。根据提供的食物
 - 列表中可能包含各种类型，公正对待
 - 只返回食物名称，不要描述、推荐理由、或任何其他文字
 - 不要使用markdown格式"""
+
+_FOOD_TUTORIAL_TEXT = (
+    "你还没设置过口味偏好呢~\n"
+    "发送 /food help 查看如何设置，之后推荐会更准哦\n"
+    "（本消息只显示一次）"
+)
 
 # Rejection keywords: single-char must be standalone (not part of a word).
 # Multi-char keywords can match anywhere.
@@ -198,7 +205,7 @@ async def _parse_intent(
 class FoodPlugin(AmadeusPlugin):
     name = "food"
     description = "食物推荐：/吃什么 根据偏好、地区、时间推荐食物"
-    version = "0.1.6"
+    version = "0.1.7"
     priority = 25
     optional_dependencies = {"web_search": ">=0.1.0"}  # noqa: RUF012
 
@@ -207,21 +214,20 @@ class FoodPlugin(AmadeusPlugin):
         self._ctx: PluginContext | None = None
         # Short-term rejection memory: {user_id: [(food_name, timestamp), ...]}
         self._recent: dict[str, list[tuple[str, float]]] = {}
-        self._pref_cache: dict[str, dict[str, Any]] = {}
         self._max_recent = 5
         self._recent_ttl = 1800  # 30 minutes
         # Feedback window: {user_id: (group_id, timestamp, last_food_name)}
         self._pending_feedback: dict[tuple[str, str], tuple[float, str]] = {}
         self._feedback_window = 120  # seconds
-        # Concurrent feedback guard: set of user_ids with in-flight re-recs
-        self._feedback_running: set[str] = set()
+        # Concurrent feedback guard, matching the per-user/per-group window owner.
+        self._feedback_running: set[tuple[str, str]] = set()
         # Search cache: {query: (result_text, timestamp)}
         self._search_cache: dict[str, tuple[str, float]] = {}
         self._search_cache_ttl = 1800  # 30 minutes
         # Concurrent access protection for _recent
         self._recent_lock = asyncio.Lock()
-        # Users who have already seen the first-time tutorial
-        self._tutorial_shown: set[str] = set()
+        # Serialize durable tutorial claims so concurrent commands cannot both send it.
+        self._tutorial_claim_lock = asyncio.Lock()
         # Hold references to background feedback tasks so they aren't GC'd
         self._feedback_tasks: set[asyncio.Task[None]] = set()
         # Food library: loaded from JSON, used as fallback when web search fails
@@ -380,15 +386,11 @@ class FoodPlugin(AmadeusPlugin):
             _L.warning("card read failed, using empty prefs | user={}", user_id)
             cards = {"likes": [], "dislikes": [], "location": ""}
 
-        # First-time user: no cards at all → show brief tip once, then proceed
+        # First-time user: durable at-most-once tutorial, then proceed.
         if not cards["likes"] and not cards["dislikes"] and not cards["location"] \
-                and user_id not in self._tutorial_shown:
-            self._tutorial_shown.add(user_id)
-            _L.info("first-time user, showing tip | user={}", user_id)
-            await self._send_reply(cmd_ctx,
-                "你还没设置过口味偏好呢~\n"
-                "发送 /food help 查看如何设置，之后推荐会更准哦\n"
-                "（本消息只显示一次）")
+                and await self._claim_tutorial(user_id):
+            _L.info("first-time user, tutorial claimed | user={}", user_id)
+            await self._send_reply(cmd_ctx, _FOOD_TUTORIAL_TEXT)
 
         reply = await self._do_recommend(user_id, user_text, is_private=cmd_ctx.is_private)
         if reply is None:
@@ -423,15 +425,14 @@ class FoodPlugin(AmadeusPlugin):
 
         user_id = ctx.user_id
         group_id = ctx.group_id
+        feedback_key = (user_id, group_id)
 
-        pending = self._pending_feedback.get((user_id, group_id))
+        self._cleanup_pending_feedback(time.time())
+        pending = self._pending_feedback.get(feedback_key)
         if pending is None:
             return False
 
-        pending_ts, pending_food = pending
-        if time.time() - pending_ts > self._feedback_window:
-            del self._pending_feedback[(user_id, group_id)]
-            return False
+        _pending_ts, pending_food = pending
 
         text = ctx.raw_message.get("plain_text", "").strip()
         if not text:
@@ -439,17 +440,17 @@ class FoodPlugin(AmadeusPlugin):
 
         # Check if the message reads as negative feedback
         if not _is_rejection(text):
-            del self._pending_feedback[(user_id, group_id)]
+            del self._pending_feedback[feedback_key]
             return False
 
-        # Guard against concurrent feedback from same user
-        if user_id in self._feedback_running:
+        # Guard against duplicate feedback for the same recommendation window.
+        if feedback_key in self._feedback_running:
             return True
 
         _L.info("feedback rejection | user={} food={!r} text={!r}", user_id, pending_food, text)
 
         # Clear window and add rejection
-        del self._pending_feedback[(user_id, group_id)]
+        del self._pending_feedback[feedback_key]
         async with self._recent_lock:
             self._recent.setdefault(user_id, []).append((pending_food, time.time()))
             if len(self._recent[user_id]) > self._max_recent:
@@ -459,7 +460,7 @@ class FoodPlugin(AmadeusPlugin):
         bot = ctx.bot
 
         # Run search+LLM in background to avoid blocking the message pipeline
-        self._feedback_running.add(user_id)
+        self._feedback_running.add(feedback_key)
         task = asyncio.create_task(
             self._feedback_recommend(bot, group_id, user_id, feedback_text,
                                      message_id=ctx.message_id),
@@ -504,7 +505,7 @@ class FoodPlugin(AmadeusPlugin):
                 self._pending_feedback[(user_id, group_id)] = (time.time(), food_name)
                 await self._record_served_safe(user_id, food_name)
         finally:
-            self._feedback_running.discard(user_id)
+            self._feedback_running.discard((user_id, group_id))
 
     # =========================================================================
     # Food library filtering
@@ -1050,7 +1051,6 @@ class FoodPlugin(AmadeusPlugin):
             confidence=0.9,
             source="user_config",
         ), source_msg_id=str(getattr(cmd_ctx.event, "message_id", "") or ""), captured_by="food_plugin")
-        self._pref_cache.pop(cmd_ctx.user_id, None)
         _L.info("location set | user={} location={}", cmd_ctx.user_id, location)
         if cmd_ctx.is_private:
             await self._send_reply(cmd_ctx, f"记住了~你在「{location}」")
@@ -1134,7 +1134,7 @@ class FoodPlugin(AmadeusPlugin):
         await cmd_ctx.bot.send(cmd_ctx.event, Message(text))
 
     async def _cleanup_recent(self) -> None:
-        """Remove expired entries from short-term rejection memory and search cache."""
+        """Remove expired entries from process-local recommendation state."""
         now = time.time()
         async with self._recent_lock:
             for uid in list(self._recent):
@@ -1147,13 +1147,18 @@ class FoodPlugin(AmadeusPlugin):
         for query in list(self._search_cache):
             if now - self._search_cache[query][1] > self._search_cache_ttl:
                 del self._search_cache[query]
+        self._cleanup_pending_feedback(now)
+
+    def _cleanup_pending_feedback(self, now: float) -> None:
+        for key, (created_at, _food_name) in list(self._pending_feedback.items()):
+            if now - created_at > self._feedback_window:
+                del self._pending_feedback[key]
 
     async def _read_user_prefs(self, user_id: str) -> dict[str, Any]:
         """Read user's food-related cards from CardStore.
 
         Only considers cards created by this plugin (source="user_config" with
-        food-specific content prefixes).  Returns {"likes": [...], "dislikes": [...], "location": ""}.
-        Results are cached in self._pref_cache.
+        food-specific content prefixes). Returns likes, dislikes, and location.
         """
         ctx = self._ctx
         if ctx is None or ctx.card_store is None:
@@ -1177,9 +1182,57 @@ class FoodPlugin(AmadeusPlugin):
             elif c.category == "fact" and c.source == "user_config" and ("位于" in content or "住在" in content):
                 location = content.replace("位于", "").replace("住在", "").strip("，。、 ")
 
-        result = {"likes": likes, "dislikes": dislikes, "location": location}
-        self._pref_cache[user_id] = result
-        return result
+        return {"likes": likes, "dislikes": dislikes, "location": location}
+
+    async def _claim_tutorial(self, user_id: str) -> bool:
+        """Persist and claim the one-time tutorial before any outbound send.
+
+        Returning False on storage failure preserves the at-most-once contract:
+        a message that cannot be durably claimed is not sent.
+        """
+        ctx = self._ctx
+        store = getattr(ctx, "card_store", None) if ctx is not None else None
+        if store is None:
+            _L.warning("tutorial skipped | user={} reason=no_card_store", user_id)
+            return False
+
+        series_key = f"food_tutorial:{user_id}"
+        async with self._tutorial_claim_lock:
+            try:
+                existing = await store.get_series_by_key(series_key)
+                if existing is not None:
+                    return False
+                history_keys = (
+                    f"food_pref:{user_id}",
+                    f"food_served:{user_id}",
+                )
+                has_food_history = False
+                for history_key in history_keys:
+                    if await store.get_series_by_key(history_key) is not None:
+                        has_food_history = True
+                        break
+                await store.create_series(NewCardSeries(
+                    series_key=series_key,
+                    scope="user",
+                    scope_id=user_id,
+                    label="食物推荐教程",
+                    source="food_plugin",
+                ))
+                if has_food_history:
+                    _L.info("tutorial marker migrated | user={} reason=food_history", user_id)
+                    return False
+            except sqlite3.IntegrityError:
+                _L.debug("tutorial skipped | user={} reason=claim_already_taken", user_id)
+                return False
+            except Exception as exc:
+                _L.warning(
+                    "tutorial skipped | user={} reason=claim_failed error={}: {}",
+                    user_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                return False
+        return True
 
     async def _add_preference(
         self,
@@ -1217,8 +1270,6 @@ class FoodPlugin(AmadeusPlugin):
                 series_id=series.series_id,
             ), source_msg_id=source_msg_id or None, captured_by="food_plugin")
             _L.info("preference added | user={} type={} value={}", user_id, pref_type, value)
-
-        self._pref_cache.pop(user_id, None)
 
     async def _record_served(self, user_id: str, food_name: str) -> None:
         """Record a served food recommendation as an event card in a series."""

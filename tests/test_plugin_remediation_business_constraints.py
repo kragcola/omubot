@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -390,7 +390,7 @@ async def test_food_illegal_llm_choice_uses_only_legal_fallback(
     store = CardStore(str(tmp_path / "memory.db"))
     await store.init()
     try:
-        plugin = _food_plugin(store, _ConstantLLM(llm_text), library)
+        plugin = await _food_plugin(store, _ConstantLLM(llm_text), library)
         sent: list[str] = []
         plugin._send_reply = _capture_reply(sent)  # type: ignore[method-assign]
 
@@ -410,7 +410,7 @@ async def test_food_recent_llm_choice_falls_back_and_records_only_new_item(tmp_p
     store = CardStore(str(tmp_path / "memory.db"))
     await store.init()
     try:
-        plugin = _food_plugin(
+        plugin = await _food_plugin(
             store,
             _ConstantLLM("鸡蛋羹"),
             [_food("鸡蛋羹"), _food("热汤面")],
@@ -435,7 +435,7 @@ async def test_food_disliked_llm_choice_falls_back_to_legal_item(tmp_path: Path)
     store = CardStore(str(tmp_path / "memory.db"))
     await store.init()
     try:
-        plugin = _food_plugin(
+        plugin = await _food_plugin(
             store,
             _ConstantLLM("鸡蛋羹"),
             [_food("鸡蛋羹"), _food("热汤面")],
@@ -456,13 +456,13 @@ async def test_food_disliked_llm_choice_falls_back_to_legal_item(tmp_path: Path)
         await store.close()
 
 
-def _food_plugin(
+async def _food_plugin(
     store: CardStore,
     llm_client: Any,
     library: list[dict[str, str]],
 ) -> FoodPlugin:
     plugin = FoodPlugin()
-    plugin._ctx = SimpleNamespace(
+    cast(Any, plugin)._ctx = SimpleNamespace(
         card_store=store,
         llm_client=llm_client,
         tool_registry=None,
@@ -470,7 +470,13 @@ def _food_plugin(
     plugin._search_enabled = False
     plugin._food_library_max_items = 40
     plugin._food_library = library
-    plugin._tutorial_shown.add("123")
+    await store.get_or_create_series(
+        "food_tutorial:123",
+        scope="user",
+        scope_id="123",
+        label="食物推荐教程",
+        source="food_plugin",
+    )
     return plugin
 
 
@@ -534,9 +540,11 @@ async def test_food_web_results_are_context_only_and_local_candidates_remain_leg
                 return {"text": "热汤面"}
 
         llm = _PromptCaptureLLM()
-        plugin = _food_plugin(store, llm, [_food("热汤面")])
+        plugin = await _food_plugin(store, llm, [_food("热汤面")])
         plugin._search_enabled = True
-        plugin._ctx.tool_registry = SimpleNamespace(get=lambda name: _SearchTool() if name == "web_search" else None)
+        cast(Any, plugin._ctx).tool_registry = SimpleNamespace(
+            get=lambda name: _SearchTool() if name == "web_search" else None,
+        )
 
         sent: list[str] = []
         plugin._send_reply = _capture_reply(sent)  # type: ignore[method-assign]
