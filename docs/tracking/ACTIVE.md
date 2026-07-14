@@ -8,13 +8,13 @@
 - tracker: none
 - objective: none
 - status: complete
-- checkpoint: 插件两轮 33 项完成矩阵、三轮 closure review、D1 同根项及运行期 Style tick 预算缺口全部关闭；最终 full 3372 passed / 17 skipped / 161 warnings，Ruff/Pyright/typed/manifests/layout/frontend 与最终运行固定窗全绿。
-- completed_at: 2026-07-15 CST
+- checkpoint: FoodPlugin 一次性教程改为 CardStore durable UNIQUE claim，跨重启/跨实例 at-most-once；旧历史静默迁移、store fail-closed、send cancel/error、feedback 回收与跨群 owner 均闭环。最终 review 0/0/0，full 3383 passed / 17 skipped。
+- completed_at: 2026-07-15 06:38 CST
 - next_step: none
-- last_completed: `docs/tracking/existing-plugin-remediation-completion-audit-2026-07-14.md`
-- implementation_commit: `715445a`（本地 `main`，尚未 push）
-- deployment: bot image `e31c2a630cd...`（tag `omubot-bot:plugin-closure-style-tick-final-20260715`）/ container `41a5346c3278...` / restart=0 / OOM=false。
-- rollback: 精确上一版 `omubot-bot:pre-style-tick-fix-20260715`=`671078e6bf6c...`；只允许 bot-only recreate；NapCat `19f6cf...` 不得 restart/recreate/down。
+- last_completed: `docs/tracking/food-plugin-durable-tutorial-audit-2026-07-15.md`
+- implementation_commit: `232de5a`（本地 `main`，尚未 push）
+- deployment: bot image `b3a40ac03839...`（tag `omubot-bot:food-tutorial-durable-20260715`）/ container `e9c44251c4de...` / restart=0 / OOM=false。
+- rollback: `omubot-bot:pre-food-tutorial-fix-20260715`=`e31c2a630cd3...`；只允许 bot-only recreate；NapCat `19f6cf...` 不得 restart/recreate/down。
 
 ## Recovery Order
 

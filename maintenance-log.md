@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-07-15 Food 一次性教程持久化与 feedback 状态 owner 修复上线
+
+**变更类型**：插件持久化正确性 / 并发 claim / 短期状态回收 / bot-only 部署。对应 `docs/tracking/food-plugin-durable-tutorial-audit-2026-07-15.md`，实现提交 `232de5a`。
+
+**根因与修复**：Food 原用进程内 `_tutorial_shown` 表示“本消息只显示一次”，重启必然丢失；生产 `memory_cards.db` 已有 `food_tutorial:1416930401`，当前代码却完全不读。教程现使用兼容 key `food_tutorial:<user>`，在 outbound 前直接 `create_series()` 竞争 `series_key` UNIQUE：同实例由 lock 串行，跨实例/进程只有真正创建 marker 的调用者发送。既有 marker 直接跳过；`food_pref:*`/`food_served:*` 旧历史静默迁移；CardStore 缺失或失败 fail-closed，仍继续推荐；send error/cancel 后 marker 保留，明确选择 at-most-once。移除只写不读的 `_pref_cache`。二次 owner 审计同时修复 120 秒 feedback 窗口不全局回收，以及 pending 按 `(user,group)`、running 只按 user 导致跨群反馈被吞的问题；两者现统一为 tuple owner，并在消息/推荐入口回收过期窗口。插件版本同步为 `0.1.7`。
+
+**验证与复审**：双实例确定性交错 RED 曾稳定得到教程 2 次，改用 UNIQUE insert 后为 1 次；feedback RED 为 64 个过期窗口残留和第二群任务未启动，修复后转绿。Food/manifest/command/lifecycle 聚合 66 passed，定向 Ruff/Pyright 0；最终 full pytest **3383 passed / 17 skipped / 162 warnings**。最终独立 review `0 Critical / 0 Important / 0 Minor`。全仓 Ruff/Pyright 仍被用户现有 coursework/research/IPv6 未提交内容阻断，本轮未改这些无关文件。
+
+**部署与运行验收**：仅执行 `docker compose build bot` 和 `docker compose up -d --no-deps --force-recreate bot`。新 image `b3a40ac03839...`、tag `omubot-bot:food-tutorial-durable-20260715`、container `e9c44251c4de...`、restart=0、OOM=false；Admin 200，Application complete，OneBot connected，outbound guard/protocol trace installed。Food 源码与 manifest 宿主/镜像 SHA256 0 mismatch，strict plugin layout 通过。生产库只读 `quick_check=ok`，目标旧 marker 存在，运行镜像 `_claim_tutorial(1416930401)=False`，marker 数 3→3，未产生 QQ 消息。OneBot 连接后的观察窗 bot error/Traceback/hook timeout=0、NapCat outbound/send/error=0；窗口群入站为 0，故不把它外推为公开群流量守卫实证。
+
+**回滚与边界**：旧 image `e31c2a630cd3...` 已标记 `omubot-bot:pre-food-tutorial-fix-20260715`；回滚只切该 image 并 bot-only recreate。NapCat 全程保持 container `19f6cf13607c...`、image `cde89d766604...`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。提交时继续显式白名单，禁止 `git add -A` 扫入 deep-delivery、角色包、coursework、research、NapCat 数据和本机产物。
+
+---
+
 ## 2026-07-15 两轮插件审计 33 项、三轮 closure 补强与 Style tick 运行修复最终上线
 
 **变更类型**：插件完成审计 / 命令与工具事务 / owner 收敛 / health truth / cancellation commit barrier / CI 门禁 / bot-only 部署。对应 `docs/tracking/existing-plugin-remediation-completion-audit-2026-07-14.md`；最终结论为第一轮 16 项与第二轮 17 项共 `33 PROVEN / 0 WEAK / 0 MISSING`，三轮 closure review 及最终运行补丁复核均 `0 Critical / 0 Important`。
