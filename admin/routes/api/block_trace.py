@@ -7,6 +7,10 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from services.block_trace.store import BlockTraceStore
+from services.storage.retention import (
+    RetentionRequest,
+    create_bound_retention_service,
+)
 
 
 def create_block_trace_router(
@@ -62,12 +66,29 @@ def create_block_trace_router(
     @router.post("/prune")
     async def prune(
         keep_days: int = Query(7, ge=1, le=90),
+        batch_size: int = Query(1000, ge=1, le=10_000),
+        dry_run: bool = Query(False),
     ) -> dict[str, Any]:
         store = _resolve_store()
         if store is None:
             return {"ok": False, "error": "BlockTraceStore not available"}
-        deleted = await store.prune(keep_days=keep_days)
-        return {"ok": True, "deleted": deleted}
+        result = await create_bound_retention_service(store).run(
+            "block_trace",
+            RetentionRequest(
+                enabled=True,
+                dry_run=dry_run,
+                keep_days=keep_days,
+                batch_size=batch_size,
+            ),
+        )
+        return {
+            "ok": True,
+            "status": result.status,
+            "dry_run": result.dry_run,
+            "candidate_count": result.candidate_count,
+            "deleted": result.deleted_count,
+            "details": result.details,
+        }
 
     @router.get("/alignment")
     async def alignment(limit: int = Query(500, ge=1, le=2000)) -> dict[str, Any]:

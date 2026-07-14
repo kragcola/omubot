@@ -46,6 +46,10 @@ from services.llm.mention_post_processor import process_mentions
 from services.llm.plan_then_utter import PlanThenUtter
 from services.llm.prompt_builder import PromptBuilder
 from services.llm.provider import ToolUse, create_provider, is_deepseek_v4_model, provider_mode
+from services.llm.reply_guardrail_stage import (
+    VisibleReplyGuardrailInput,
+    VisibleReplyGuardrailStage,
+)
 from services.llm.segmentation import (
     ReplySegmentationConfig,
     ReplySegmentPlan,
@@ -88,6 +92,7 @@ _log_msg_out = _base_logger.bind(channel="message_out")
 _log_thinking = _base_logger.bind(channel="thinking")
 _log_compact = _base_logger.bind(channel="compact")
 _log_debug = _base_logger.bind(channel="debug")
+_CONSTRUCTOR_CLEANUP_TASKS: set[asyncio.Future[None]] = set()
 
 _SEGMENT_SEP = "---cut---"
 _SEGMENT_DELAY = 0.8  # seconds between segment sends (human-like pacing)
@@ -1205,14 +1210,6 @@ class LLMClient:
         admins: dict[str, str] | None = None,
         known_other_bots: dict[str, list[str]] | None = None,
     ) -> None:
-        connector = aiohttp.TCPConnector(
-            enable_cleanup_closed=True,
-            keepalive_timeout=15,
-        )
-        self._session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=aiohttp.ClientTimeout(total=120, sock_read=30),
-        )
         self._base_url = base_url
         self._api_key = api_key
         self._model = model
@@ -1276,6 +1273,9 @@ class LLMClient:
             schedule_overshare_config=schedule_overshare_config,
             persona_drift_config=persona_drift_config,
         )
+        self._visible_reply_guardrail_stage = VisibleReplyGuardrailStage(
+            self._evaluate_visible_reply_guardrails
+        )
         self._humanization_runtime_groups = frozenset(
             str(group_id).strip()
             for group_id in (humanization_runtime_groups or ())
@@ -1302,40 +1302,67 @@ class LLMClient:
         identity = self._prompt.persona_runtime.identity_snapshot()
         voice_block = self._prompt.persona_runtime.block_for("core.voice")
         examples_block = self._prompt.persona_runtime.block_for("core.examples")
-        self._anchor_reinjector = AnchorReinjector(
-            bot_name=identity.name,
-            personality=identity.personality,
-            proactive=identity.proactive,
-            voice_text=voice_block.text if voice_block is not None else "",
-            examples_text=examples_block.text if examples_block is not None else "",
-            config=anchor_reinjection_config,
-        )
         drift_cfg = persona_drift_config or getattr(self._sentinel_guardrail_config, "persona_drift", None)
-        self._drift_detector = DriftDetector(
-            bot_name=identity.name,
-            personality=identity.personality,
-            voice_text=voice_block.text if voice_block is not None else "",
-            examples_text=examples_block.text if examples_block is not None else "",
-            lambda_=float(getattr(drift_cfg, "lambda_ewma", 0.3) or 0.3),
-            theta_repair=float(getattr(drift_cfg, "theta_repair", 0.6) or 0.6),
-            theta_block=float(getattr(drift_cfg, "theta_block", 0.85) or 0.85),
-            repair_max_retries=int(getattr(drift_cfg, "repair_max_retries", 1) or 1),
-            enabled=bool(getattr(drift_cfg, "enabled", False)),
+        drift_lambda = float(getattr(drift_cfg, "lambda_ewma", 0.3) or 0.3)
+        drift_theta_repair = float(getattr(drift_cfg, "theta_repair", 0.6) or 0.6)
+        drift_theta_block = float(getattr(drift_cfg, "theta_block", 0.85) or 0.85)
+        drift_repair_max_retries = int(getattr(drift_cfg, "repair_max_retries", 1) or 1)
+        slang_api_key = str(getattr(self._slang_lookup_config, "tianapi_key", "") or "")
+        slang_timeout_ms = int(getattr(self._slang_lookup_config, "timeout_ms", 500) or 500)
+        slang_daily_limit = int(getattr(self._slang_lookup_config, "daily_limit", 100) or 100)
+        slang_cache_size = int(getattr(self._slang_lookup_config, "cache_size", 500) or 500)
+        slang_circuit_breaker_threshold = int(
+            getattr(self._slang_lookup_config, "circuit_breaker_threshold", 3) or 3
         )
-        self._slang_lookup_client = SlangLookupClient(
-            store_getter=self._slang_store_getter,
-            api_key=str(getattr(self._slang_lookup_config, "tianapi_key", "") or ""),
-            timeout_ms=int(getattr(self._slang_lookup_config, "timeout_ms", 500) or 500),
-            daily_limit=int(getattr(self._slang_lookup_config, "daily_limit", 100) or 100),
-            cache_size=int(getattr(self._slang_lookup_config, "cache_size", 500) or 500),
-            circuit_breaker_threshold=int(
-                getattr(self._slang_lookup_config, "circuit_breaker_threshold", 3) or 3
-            ),
-            circuit_breaker_cooldown_s=int(
-                getattr(self._slang_lookup_config, "circuit_breaker_cooldown_s", 300) or 300
-            ),
-            session=self._session,
+        slang_circuit_breaker_cooldown_s = int(
+            getattr(self._slang_lookup_config, "circuit_breaker_cooldown_s", 300) or 300
         )
+        connector = aiohttp.TCPConnector(
+            enable_cleanup_closed=True,
+            keepalive_timeout=15,
+        )
+        try:
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=120, sock_read=30),
+            )
+            self._anchor_reinjector = AnchorReinjector(
+                bot_name=identity.name,
+                personality=identity.personality,
+                proactive=identity.proactive,
+                voice_text=voice_block.text if voice_block is not None else "",
+                examples_text=examples_block.text if examples_block is not None else "",
+                config=anchor_reinjection_config,
+            )
+            self._drift_detector = DriftDetector(
+                bot_name=identity.name,
+                personality=identity.personality,
+                voice_text=voice_block.text if voice_block is not None else "",
+                examples_text=examples_block.text if examples_block is not None else "",
+                lambda_=drift_lambda,
+                theta_repair=drift_theta_repair,
+                theta_block=drift_theta_block,
+                repair_max_retries=drift_repair_max_retries,
+                enabled=bool(getattr(drift_cfg, "enabled", False)),
+            )
+            self._slang_lookup_client = SlangLookupClient(
+                store_getter=self._slang_store_getter,
+                api_key=slang_api_key,
+                timeout_ms=slang_timeout_ms,
+                daily_limit=slang_daily_limit,
+                cache_size=slang_cache_size,
+                circuit_breaker_threshold=slang_circuit_breaker_threshold,
+                circuit_breaker_cooldown_s=slang_circuit_breaker_cooldown_s,
+                session=self._session,
+            )
+        except BaseException:
+            connector_close_task = asyncio.ensure_future(aiohttp.BaseConnector.close(connector))
+            _CONSTRUCTOR_CLEANUP_TASKS.add(connector_close_task)
+            connector_close_task.add_done_callback(_CONSTRUCTOR_CLEANUP_TASKS.discard)
+            session = getattr(self, "_session", None)
+            if session is not None:
+                session.detach()
+            raise
 
     async def close(self) -> None:
         await self._session.close()
@@ -2134,7 +2161,52 @@ class LLMClient:
             return stripped or "我换个自然一点的说法。"
         return "我重新整理一下再接。"
 
-    def _apply_visible_reply_guardrails(
+    def _evaluate_visible_reply_guardrails(
+        self,
+        reply: str,
+        *,
+        enabled: bool,
+        thinker_thought: str,
+        last_assistant_text: str,
+        user_message: str,
+        session_count: int,
+        bot_name: str,
+    ) -> tuple[str, tuple[GuardrailHit, ...], dict[str, Any], bool]:
+        if not reply.strip() or not enabled:
+            return reply, (), {}, False
+        result = apply_guardrails(
+            reply,
+            thinker_thought=thinker_thought,
+            last_assistant_text=last_assistant_text,
+            user_message=user_message,
+            session_count=session_count,
+            bot_name=bot_name,
+            config=self._sentinel_guardrail_config,
+        )
+        metadata = self._guardrail_metrics_metadata(result.hits)
+        if result.metadata:
+            metadata.update(result.metadata)
+        if not result.hits:
+            return result.text or reply, (), metadata, bool(result.blocked)
+        if result.passed:
+            cleaned = result.text.strip()
+            if cleaned:
+                return cleaned, result.hits, metadata, bool(result.blocked)
+            fallback = self._guardrail_fallback(
+                reply=reply,
+                hits=result.hits,
+                thinker_thought=thinker_thought,
+            )
+            return fallback, result.hits, metadata, bool(result.blocked)
+        fallback = self._guardrail_fallback(
+            reply=reply,
+            hits=result.hits,
+            thinker_thought=thinker_thought,
+        )
+        metadata["guardrail_blocked"] = bool(result.blocked)
+        return fallback, result.hits, metadata, bool(result.blocked)
+
+    async def _apply_visible_reply_guardrails(
         self,
         *,
         reply: str,
@@ -2144,48 +2216,30 @@ class LLMClient:
         thinker_thought: str,
         user_message: str,
     ) -> tuple[str, dict[str, Any], tuple[GuardrailHit, ...]]:
-        if not reply.strip() or not self._sentinel_guardrail_enabled(group_id):
-            return reply, {}, ()
-        last_assistant_text = self._latest_assistant_text(
-            session_id=session_id,
-            group_id=group_id,
-            is_group=is_group,
-        )
-        session_count = self._schedule_overshare_session_count(
-            session_id=session_id,
-            group_id=group_id,
-            is_group=is_group,
-        )
-        result = apply_guardrails(
-            reply,
-            thinker_thought=thinker_thought,
-            last_assistant_text=last_assistant_text,
-            user_message=user_message,
-            session_count=session_count,
-            bot_name=self._prompt.persona_runtime.identity_snapshot().name,
-            config=self._sentinel_guardrail_config,
-        )
-        metadata = self._guardrail_metrics_metadata(result.hits)
-        if result.metadata:
-            metadata.update(result.metadata)
-        if not result.hits:
-            return result.text or reply, metadata, ()
-        if result.passed:
-            cleaned = result.text.strip()
-            if cleaned:
-                return cleaned, metadata, result.hits
-            return self._guardrail_fallback(
+        stage_output = await self._visible_reply_guardrail_stage.run(
+            VisibleReplyGuardrailInput(
                 reply=reply,
-                hits=result.hits,
+                enabled=self._sentinel_guardrail_enabled(group_id),
                 thinker_thought=thinker_thought,
-            ), metadata, result.hits
-        fallback = self._guardrail_fallback(
-            reply=reply,
-            hits=result.hits,
-            thinker_thought=thinker_thought,
+                last_assistant_text=self._latest_assistant_text(
+                    session_id=session_id,
+                    group_id=group_id,
+                    is_group=is_group,
+                ),
+                user_message=user_message,
+                session_count=self._schedule_overshare_session_count(
+                    session_id=session_id,
+                    group_id=group_id,
+                    is_group=is_group,
+                ),
+                bot_name=self._prompt.persona_runtime.identity_snapshot().name,
+            )
         )
-        metadata["guardrail_blocked"] = bool(result.blocked)
-        return fallback, metadata, result.hits
+        return (
+            stage_output.reply,
+            dict(stage_output.metadata),
+            cast(tuple[GuardrailHit, ...], stage_output.hits),
+        )
 
     def set_group_config(self, group_config: Any | None) -> None:
         self._group_config = group_config
@@ -2782,7 +2836,7 @@ class LLMClient:
         try:
             overrides = self._authority_store.snapshot() if self._authority_store is not None else {}
             mood = None
-            if self._mood_getter is not None:
+            if self._plugin_capability_enabled("schedule") and self._mood_getter is not None:
                 try:
                     mood = self._mood_getter(group_id=group_id, session_id=f"group_{group_id}" if group_id else "")
                 except TypeError:
@@ -4042,7 +4096,7 @@ class LLMClient:
         return recent
 
     def _current_humanization_mood(self, *, group_id: str | None, session_id: str) -> Any:
-        if self._mood_getter is None:
+        if not self._plugin_capability_enabled("schedule") or self._mood_getter is None:
             return None
         try:
             try:
@@ -4426,9 +4480,20 @@ class LLMClient:
     # Thinker helpers
     # ------------------------------------------------------------------
 
+    def _plugin_capability_enabled(self, name: str) -> bool:
+        """Gate direct service consumers against the live PluginBus owner."""
+        bus = getattr(self, "_bus", None)
+        get_plugin = getattr(bus, "get_plugin", None)
+        if not callable(get_plugin):
+            return True
+        plugin = get_plugin(name)
+        if plugin is None:
+            return True
+        return bool(getattr(plugin, "enabled", False))
+
     def _build_thinker_mood_text(self, *, group_id: str | None = None, session_id: str = "") -> str:
         """Build a one-line mood summary for the pre-reply thinker."""
-        if self._mood_getter is None:
+        if not self._plugin_capability_enabled("schedule") or self._mood_getter is None:
             return ""
         try:
             try:
@@ -4450,7 +4515,7 @@ class LLMClient:
 
     def _build_provider_mood_fit_target(self, *, group_id: str | None = None, session_id: str = "") -> float | None:
         """Compress current mood into a 0..1 fit target for prompt providers."""
-        if self._mood_getter is None:
+        if not self._plugin_capability_enabled("schedule") or self._mood_getter is None:
             return None
         try:
             try:
@@ -4471,7 +4536,7 @@ class LLMClient:
 
     def _build_thinker_affection_text(self, user_id: str) -> str:
         """Build a one-line relationship summary for the pre-reply thinker."""
-        if self._affection_engine is None:
+        if not self._plugin_capability_enabled("affection") or self._affection_engine is None:
             return ""
         try:
             engine = self._affection_engine
@@ -5354,7 +5419,7 @@ class LLMClient:
                         drift_metadata=drift_reply.drift_metadata,
                     )
                 else:
-                    guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_visible_reply_guardrails(
+                    guardrail_reply, guardrail_metadata, guardrail_hits = await self._apply_visible_reply_guardrails(
                         reply=drift_reply.reply,
                         session_id=session_id,
                         group_id=group_id,
@@ -5764,7 +5829,7 @@ class LLMClient:
                 drift_metadata=drift_reply.drift_metadata,
             )
         else:
-            guardrail_reply, guardrail_metadata, guardrail_hits = self._apply_visible_reply_guardrails(
+            guardrail_reply, guardrail_metadata, guardrail_hits = await self._apply_visible_reply_guardrails(
                 reply=drift_reply.reply,
                 session_id=session_id,
                 group_id=group_id,

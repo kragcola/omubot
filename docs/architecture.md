@@ -60,7 +60,7 @@ omubot/
 │   ├── echo/               #   复读检测
 │   ├── element_detector/   #   消息元素检测（特殊消息类型识别）
 │   ├── group_admin/        #   群管理
-│   ├── history_loader/     #   历史消息加载
+│   ├── history_loader/     #   HistoryBackfill 兼容导出与 capability manifest
 │   ├── http_api/           #   HTTP API 工具
 │   ├── memo/               #   记忆卡片
 │   ├── schedule/           #   模拟日程
@@ -77,12 +77,12 @@ omubot/
 
 ### 插件形态
 
-Omubot 运行时只加载统一目录插件：
+Omubot 运行时只加载统一目录包。普通运行时插件形态如下：
 
 ```
 plugins/memo/
-├── plugin.py              # 入口（必须）
-├── plugin.json            # manifest v3 元数据清单，覆盖类属性
+├── plugin.py              # 运行时入口
+├── plugin.json            # 必需的 manifest v3 canonical 元数据清单
 ├── config.default.json    # 默认配置
 ├── config.schema.json     # Web 配置 schema
 ├── plugin.sig             # (可选) 本地 detached attestation / SHA256 声明
@@ -90,27 +90,50 @@ plugins/memo/
 ```
 
 - 目录名 = `plugin.name`
-- `plugins/<name>/plugin.py` 中放 `AmadeusPlugin` 子类
+- 普通运行时包在 `plugins/<name>/plugin.py` 中提供 `AmadeusPlugin` 子类
+- `capability_only: true` 的 manifest-only 包不注册 PluginBus 实例；其 `plugin.py` 只能保留有界兼容导出，不能伪装运行时 owner
 - 旧根目录单文件插件不会被加载，只会在本地插件索引里标记为 blocked
 
 ### plugin.json 清单
 
-可选的 `plugin.json`，覆盖类属性，方便 CI/CD 和打包工具读取：
+必需的 `plugin.json` 是 runtime、Admin、索引和 CI 共用的 canonical 合同：
 
 ```json
 {
-    "name": "memo",
-    "version": "1.0.0",
-    "description": "记忆卡片系统",
-    "priority": 20,
-    "enabled": true,
-    "dependencies": {
-        "chat": ">=1.0.0"
-    }
+  "manifest_version": 3,
+  "name": "memo",
+  "display_name": {"zh": "记忆", "en": "Memo"},
+  "description": "记忆系统：卡片索引、实体记忆注入、对话后提取",
+  "version": "1.1.5",
+  "priority": 30,
+  "tier": "user",
+  "toggle_policy": "restart_required",
+  "category": "memory",
+  "permissions": ["prompt", "reply", "tool", "storage", "network"],
+  "capabilities": ["memory_cards", "memo_extract"],
+  "author": "Omubot",
+  "min_omubot_version": "",
+  "dependencies": {},
+  "required_dependencies": {},
+  "optional_dependencies": {"context": ">=0.1.0"},
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "dir",
+      "user_max_chars",
+      "group_max_chars",
+      "index_max_lines",
+      "history_enabled"
+    ]
+  },
+  "store": {"visibility": "marketplace_ready", "marketplace_id": ""},
+  "capability_only": false
 }
 ```
 
-加载优先级：`plugin.json` > 类属性默认值。`PluginBus` 在 `discover_plugins()` 时解析。
+`PluginBus` 在导入插件代码前完成 strict parse、目录身份、版本、配置路径和配置文件合同校验；未知字段、坏类型、重名或不兼容版本都会 fail-closed。类属性只保留运行时兼容与 CI parity，不是第二份 manifest 真值。
 
 ### plugin.sig 预留
 
@@ -180,19 +203,15 @@ stop_tick_loop() → 停止 tick 循环
 bus.discover_plugins("plugins")
 ```
 
-两轮扫描：
-1. Pass 1: 子目录 + `plugin.py`（优先）
-2. Pass 2: 独立 `.py` 文件（跳过 `__init__`，同名时目录优先）
-
-已注册的插件自动跳过。`plugin.json` 在发现时解析并覆盖实例属性。
+运行时只扫描包含 `plugin.py` 和合法 `plugin.json` 的目录包。根目录独立 `.py` / `.json` 只由 PluginIndex 标记为 legacy blocked，不进入 PluginBus。已注册目录会跳过；manifest 在代码 import 前解析一次，再以 typed model 应用到实例。
 
 ### 依赖解析
 
 用 Kahn 算法拓扑排序插件依赖图：
-- 缺失依赖 → warning，跳过该依赖边
-- 版本不兼容 → warning，跳过该依赖边
-- 循环依赖 → warning，回退到 priority 排序
-- 被禁用的插件 → 跳过 on_startup
+- `dependencies` 是 legacy required alias；新声明使用 `required_dependencies` / `optional_dependencies`
+- required 依赖缺失、禁用、版本不兼容或成环 → 依赖方 fail-closed，并在 health 中给出诊断
+- optional 依赖不可用或会引入环 → 忽略该可选边，插件仍可启动
+- 同一依赖层内按 priority 稳定排序；重复 runtime name 在注册阶段直接拒绝
 
 ### 优先级规则
 
@@ -224,7 +243,7 @@ bus.discover_plugins("plugins")
 | WebFetchPlugin | 1 | 目录 | `register_tools` |
 | HttpApiPlugin | 1 | 目录 | `register_tools` |
 | GroupAdminPlugin | 1 | 目录 | `register_tools` |
-| HistoryLoaderPlugin | 5 | 目录 / 系统级 | `on_bot_connect` |
+| HistoryBackfill | - | 核心连接阶段 / 系统能力 | `RuntimeConnectionPipeline` 在插件 hooks 前调用 |
 | KnowledgePlugin | 8 | 目录 | `on_pre_prompt` |
 | AffectionPlugin | 10 | 目录 | `on_startup`, `on_pre_prompt`, `on_post_reply` |
 | SchedulePlugin | 20 | 目录 | `on_bot_connect`, `on_shutdown`, `on_pre_prompt` |
@@ -232,7 +251,7 @@ bus.discover_plugins("plugins")
 | MemoPlugin | 30 | 目录 | `on_startup`, `register_tools`, `on_pre_prompt`, `on_post_reply` |
 | StickerPlugin | 40 | 目录 | `register_tools`, `on_pre_prompt` |
 | SlangPlugin | 42 | 目录 | `on_message`, `on_pre_prompt`, `on_tick`, `register_tools` |
-| DreamPlugin | 150 | 目录 | `on_startup`, `on_shutdown`, `on_tick` |
+| DreamPlugin | 150 | 目录 | `on_startup`, `on_bot_connect`, `on_shutdown` |
 | BilibiliPlugin | 190 | 目录 | `on_message` |
 | EchoPlugin | 200 | 目录 | `on_message` |
 | ElementDetectorPlugin | 210 | 目录 | `on_message` |
@@ -249,7 +268,7 @@ bus.discover_plugins("plugins")
 - **Persona v2 runtime** — `config/persona/<persona_id>/source.md` is the single-file source; `services/persona/importer.py` compiles it into the multi-block prompt under `freeze/` (`core.identity`, `runtime.adapter`, `runtime.behavior`, `runtime.proactive`, etc.). `PersonaRuntime` (singleton) loads the freeze artifact at `_on_connect`, substitutes `{bot_self_id}` placeholders via `bind_bot_self_id`, and exposes `static_text()` to PromptBuilder. Hot-reload via POST `/api/admin/persona/hot-reload/{id}` swaps the bundle in-place with last-known-good fallback. Legacy v1 (`config/soul/identity.md` + `instruction.md` + `IdentityManager` + shadow compare + parity audit) was retired in the 2026-05-27 C-series cutover.
 - **Memory layers** — Short-term: in-memory deque per session. Long-term: typed cards in `storage/memory_cards.db` via CardStore (SQLite, 7 categories × 3 scopes, with supersedes edges). Group timeline: append-only turns + pending buffer per group (`GroupTimeline`), with summary from compaction and SQLite persistence via `MessageLog`. Max 200 groups in memory (LRU eviction).
 - **Session IDs** — `group_{group_id}` for group chats, `private_{user_id}` for DMs.
-- **History bootstrap** — On bot connect, `history_loader` pulls recent messages from NapCat HTTP API for all groups, populating the group timeline (with image caching and sticker recognition). After loading, the scheduler fires once per group to catch up on missed messages.
+- **History bootstrap** — On bot connect, `services.history_backfill` runs as a core `RuntimeConnectionPipeline` stage before PluginBus hooks. It loads recent messages for allowed groups with image caching and sticker recognition; `plugins/history_loader` is a manifest-only capability plus compatibility exports, not a runtime plugin.
 
 ## Proactive Chat (GroupChatScheduler)
 

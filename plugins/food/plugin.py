@@ -90,7 +90,6 @@ _TASTE_HINT_WORDS: frozenset[str] = frozenset({
 class FoodConfig(BaseModel):
     """Food recommendation runtime settings."""
 
-    enabled: bool = True
     recent_max: int = 5
     recent_ttl: int = 1800
     feedback_window: int = 120
@@ -201,7 +200,7 @@ class FoodPlugin(AmadeusPlugin):
     description = "食物推荐：/吃什么 根据偏好、地区、时间推荐食物"
     version = "0.1.6"
     priority = 25
-    dependencies = {"web_search": ">=0.1.0"}  # noqa: RUF012
+    optional_dependencies = {"web_search": ">=0.1.0"}  # noqa: RUF012
 
     def __init__(self) -> None:
         super().__init__()
@@ -224,7 +223,7 @@ class FoodPlugin(AmadeusPlugin):
         # Users who have already seen the first-time tutorial
         self._tutorial_shown: set[str] = set()
         # Hold references to background feedback tasks so they aren't GC'd
-        self._feedback_tasks: set[asyncio.Task] = set()
+        self._feedback_tasks: set[asyncio.Task[None]] = set()
         # Food library: loaded from JSON, used as fallback when web search fails
         self._food_library: list[dict[str, str]] = []
         self._food_library_max_items = 40  # max items to send to LLM
@@ -234,12 +233,16 @@ class FoodPlugin(AmadeusPlugin):
     async def on_startup(self, ctx: PluginContext) -> None:
         self._ctx = ctx
         cfg = load_plugin_config("plugins/food/config.default.json", FoodConfig)
-        self.enabled = cfg.enabled
+        config_store = getattr(ctx, "plugin_config_store", None)
+        saved_config = config_store.get(self.name) if config_store is not None else {}
         self._max_recent = max(1, cfg.recent_max)
         self._recent_ttl = max(60, cfg.recent_ttl)
         self._feedback_window = max(10, cfg.feedback_window)
-        self._search_enabled = bool(cfg.search_enabled)
-        self._food_library_max_items = max(5, cfg.food_library_max_items)
+        self._search_enabled = bool(saved_config.get("search_enabled", cfg.search_enabled))
+        self._food_library_max_items = max(
+            5,
+            int(saved_config.get("food_library_max_items", cfg.food_library_max_items)),
+        )
         # Load food library
         lib_path = Path(__file__).parent / "food_library.json"
         try:
@@ -252,10 +255,44 @@ class FoodPlugin(AmadeusPlugin):
         except Exception:
             _L.error("failed to load food library", exc_info=True)
 
+    async def on_shutdown(self, ctx: PluginContext) -> None:
+        tasks = tuple(self._feedback_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._feedback_tasks.clear()
+        self._feedback_running.clear()
+        self._ctx = None
+
+    def _on_feedback_task_done(self, task: asyncio.Task[None]) -> None:
+        self._feedback_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            _L.error(
+                "feedback task failed | error={}: {}",
+                type(error).__name__,
+                error,
+            )
+
     def _scheduler_is_muted(self, group_id: str) -> bool:
         scheduler = getattr(self._ctx, "scheduler", None)
         is_muted = getattr(scheduler, "is_muted", None)
         return bool(callable(is_muted) and is_muted(group_id))
+
+    def apply_runtime_settings(
+        self,
+        values: dict[str, Any],
+        *,
+        changed_fields: frozenset[str],
+    ) -> frozenset[str]:
+        applied: set[str] = set()
+        if "search_enabled" in changed_fields:
+            self._search_enabled = bool(values.get("search_enabled", False))
+            applied.add("search_enabled")
+        return frozenset(applied)
 
     def register_commands(self) -> list:
         return [
@@ -425,11 +462,12 @@ class FoodPlugin(AmadeusPlugin):
         self._feedback_running.add(user_id)
         task = asyncio.create_task(
             self._feedback_recommend(bot, group_id, user_id, feedback_text,
-                                     message_id=ctx.message_id)
+                                     message_id=ctx.message_id),
+            name=f"plugin:food:feedback:{group_id}:{user_id}",
         )
         # Keep a reference so the task isn't GC'd before completion
         self._feedback_tasks.add(task)
-        task.add_done_callback(self._feedback_tasks.discard)
+        task.add_done_callback(self._on_feedback_task_done)
         return True
 
     async def _feedback_recommend(
@@ -492,6 +530,19 @@ class FoodPlugin(AmadeusPlugin):
         exclusions: dict[str, set[str]] = {}
         if not text:
             return exclusions
+
+        # Short taste negations such as "不辣" do not match the generic
+        # "不要/不吃" patterns below, but still need to constrain the pool.
+        negative_tastes = (
+            "麻辣", "酸辣", "甜辣", "咸鲜", "清淡", "咖喱", "麻酱",
+            "辣", "甜", "酸", "咸", "苦", "麻",
+        )
+        taste_pattern = "|".join(map(re.escape, negative_tastes))
+        for match in re.finditer(
+            rf"不({taste_pattern})(?=的?(?:$|[，。！？、,\s]))",
+            text,
+        ):
+            exclusions.setdefault("taste", set()).add(match.group(1))
 
         # Match: 不要X, 不吃X, 别X, 不想吃X
         for pattern in [r"不要(\S+)", r"不吃(\S+)", r"别(\S+)", r"不想吃(\S+)", r"讨厌(\S+)"]:
@@ -626,6 +677,8 @@ class FoodPlugin(AmadeusPlugin):
 
         # 3. Positive taste/category preference filtering
         taste_filter = self._extract_taste_filter(requirements) or self._extract_taste_filter(user_text)
+        if taste_filter in exclusions.get("taste", set()):
+            taste_filter = None
         if taste_filter:
             before = len(pool)
             # Match tastes that contain the filter (e.g. "辣" matches "辣", "麻辣", "酸辣")
@@ -639,11 +692,9 @@ class FoodPlugin(AmadeusPlugin):
             before = len(pool)
             recent_set = {r.strip() for r in recent_foods}
             pool = [e for e in pool if e["name"] not in recent_set]
-            if len(pool) < 3:
-                pool = [e for e in self._food_library if e["name"] not in recent_set]
             _L.debug("recent exclusion | {} → {}", before, len(pool))
 
-        # 5. Apply stored user preferences (private chat only, cards passed in)
+        # 5. Apply stored user preferences
         if cards:
             # Boost liked items by duplicating them (increases selection probability)
             liked = set(cards.get("likes", []))
@@ -779,13 +830,13 @@ class FoodPlugin(AmadeusPlugin):
         if requirements and requirements != user_text:
             user_parts.append(f"用户需求：{requirements}")
 
-        # Read user preference cards (private only) for both prompt and library filter
-        cards: dict[str, Any] | None = None
+        # Preferences always constrain selection. Only private-chat prompts expose
+        # their details to the model.
+        try:
+            cards: dict[str, Any] | None = await self._read_user_prefs(user_id)
+        except Exception:
+            cards = {"likes": [], "dislikes": [], "location": ""}
         if is_private:
-            try:
-                cards = await self._read_user_prefs(user_id)
-            except Exception:
-                cards = {"likes": [], "dislikes": [], "location": ""}
             if cards.get("likes"):
                 user_parts.append(f"喜欢：{'、'.join(cards['likes'][:8])}")
             if cards.get("dislikes"):
@@ -793,26 +844,28 @@ class FoodPlugin(AmadeusPlugin):
             if cards.get("location"):
                 user_parts.append(f"地区：{cards['location']}")
 
-        fallback_items: list[dict[str, str]] = []
-        if search_text:
-            user_parts.append(f"\n以下是搜索「{search_query}」的结果，请从中挑选：\n\n{search_text}")
-        else:
-            # Web search failed — fall back to food library
-            fallback_items = self._filter_food_library(
-                period, requirements, user_text, recent_foods, cards,
+        # The local library is the legal candidate set in every mode. Web
+        # results can add context, but must never become an unconstrained
+        # source of food names that bypasses exclusion/recent/dislike rules.
+        fallback_items = self._filter_food_library(
+            period, requirements, user_text, recent_foods, cards,
+        )
+        if fallback_items:
+            formatted = self._format_library_items(fallback_items)
+            user_parts.append(
+                f"\n以下是结构化食物候选，必须从中挑选一款：\n\n{formatted}"
             )
-            if fallback_items:
-                formatted = self._format_library_items(fallback_items)
-                user_parts.append(f"\n以下是食物库中的选项，请从中挑选一款：\n\n{formatted}")
+            if not search_text:
                 _L.info("library fallback | items={} period={}", len(fallback_items), period)
-            else:
-                user_parts.append("\n（未找到合适的食物，请根据你的知识推荐）")
+        else:
+            user_parts.append("\n（没有满足约束的本地候选，本轮不推荐）")
+
+        if search_text and fallback_items:
+            user_parts.append(
+                f"\n以下网络信息仅用于补充判断，不得引入候选列表之外的食物：\n\n{search_text}"
+            )
 
         user_parts.append("请推荐一款食物。")
-        if not fallback_items:
-            fallback_items = self._filter_food_library(
-                period, requirements, user_text, recent_foods, cards,
-            )
 
         system_prompt = _FOOD_PROMPT_PRIVATE if is_private else _FOOD_PROMPT_GROUP
         system_blocks = [{"type": "text", "text": system_prompt}]
@@ -848,6 +901,32 @@ class FoodPlugin(AmadeusPlugin):
             return None
 
         food_name = _extract_food_name(text)
+        legal_names = {
+            item["name"].strip()
+            for item in fallback_items
+            if item.get("name", "").strip()
+        }
+        if food_name not in legal_names:
+            _L.warning(
+                "recommend rejected | mode={} user={} food={!r} reason=not_in_candidates",
+                selection_mode,
+                user_id,
+                food_name,
+            )
+            text = self._local_recommend_fallback(
+                fallback_items,
+                user_id,
+                period,
+                requirements,
+                user_text,
+            )
+            selection_mode = "invalid_llm_fallback_local"
+            if not text:
+                return None
+            food_name = _extract_food_name(text)
+        else:
+            text = food_name
+
         async with self._recent_lock:
             self._recent.setdefault(user_id, []).append((food_name, time.time()))
             if len(self._recent[user_id]) > self._max_recent:
@@ -1000,15 +1079,29 @@ class FoodPlugin(AmadeusPlugin):
         """Toggle web search on/off for food recommendations."""
         arg = cmd_ctx.args.strip().lower()
         if arg in ("on", "开", "启用", "打开"):
-            self._search_enabled = True
-            _L.info("search enabled | by={}", cmd_ctx.user_id)
-            await self._send_reply(cmd_ctx, "Web 搜索已开启，/吃什么 将先搜索网络再结合食物库推荐")
+            enabled = True
         elif arg in ("off", "关", "关闭", "禁用"):
-            self._search_enabled = False
-            _L.info("search disabled | by={}", cmd_ctx.user_id)
-            await self._send_reply(cmd_ctx, "Web 搜索已关闭，/吃什么 将直接从本地食物库（1094条）推荐")
+            enabled = False
         else:
             await self._send_reply(cmd_ctx, "用法：/food search on 或 /food search off")
+            return
+
+        config_store = getattr(self._ctx, "plugin_config_store", None)
+        if config_store is not None:
+            values = config_store.get(self.name)
+            values["search_enabled"] = enabled
+            config_store.set_values(self.name, values)
+
+        self.apply_runtime_settings(
+            {"search_enabled": enabled},
+            changed_fields=frozenset({"search_enabled"}),
+        )
+        if enabled:
+            _L.info("search enabled | by={}", cmd_ctx.user_id)
+            await self._send_reply(cmd_ctx, "Web 搜索已开启，/吃什么 将先搜索网络再结合食物库推荐")
+        else:
+            _L.info("search disabled | by={}", cmd_ctx.user_id)
+            await self._send_reply(cmd_ctx, "Web 搜索已关闭，/吃什么 将直接从本地食物库（1094条）推荐")
 
     # =========================================================================
     # /food — show usage when no sub-command

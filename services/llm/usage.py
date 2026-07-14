@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -9,6 +10,10 @@ from typing import Any
 
 import aiosqlite
 from loguru import logger
+
+from services.storage import close_with_checkpoint, connect_sqlite
+from services.storage.migrations import Migration, MigrationRunner
+from services.storage.schema_contracts import verify_catalog_schema_async
 
 _L = logger.bind(channel="usage")
 
@@ -51,6 +56,46 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
+async def _ensure_usage_columns(db: aiosqlite.Connection) -> None:
+    cursor = await db.execute("PRAGMA table_info(llm_calls)")
+    try:
+        rows = await cursor.fetchall()
+    finally:
+        await cursor.close()
+    existing = {str(row["name"]) for row in rows}
+    additions = {
+        "provider_kind": "TEXT NOT NULL DEFAULT ''",
+        "prompt_cache_hit_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "prompt_cache_miss_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "reasoning_replay_tokens": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, ddl in additions.items():
+        if column not in existing:
+            await db.execute(f"ALTER TABLE llm_calls ADD COLUMN {column} {ddl}")
+
+
+async def _apply_usage_v1(db: aiosqlite.Connection) -> None:
+    await db.execute(_CREATE_TABLE)
+    await _ensure_usage_columns(db)
+    for statement in _CREATE_INDEXES:
+        await db.execute(statement)
+
+
+async def _verify_usage_v1(db: aiosqlite.Connection) -> bool:
+    return bool(await verify_catalog_schema_async("usage", db, 1))
+
+
+_USAGE_V1_DDL = "\n".join((_CREATE_TABLE, *_CREATE_INDEXES))
+_USAGE_V1 = Migration(
+    version=1,
+    name="usage_baseline_v1",
+    checksum="sha256:" + hashlib.sha256(_USAGE_V1_DDL.encode()).hexdigest(),
+    apply=_apply_usage_v1,
+    verify=_verify_usage_v1,
+    adopt_existing=True,
+)
+
+
 class UsageTracker:
     def __init__(self, db_path: str = "storage/usage.db") -> None:
         self._db_path = db_path
@@ -66,34 +111,18 @@ class UsageTracker:
         self._last_cache_alert_ts: float = 0.0
 
     async def init(self) -> None:
-        self._db = await aiosqlite.connect(self._db_path)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute(_CREATE_TABLE)
-        await self._ensure_schema()
-        for idx in _CREATE_INDEXES:
-            await self._db.execute(idx)
-        await self._db.commit()
+        await MigrationRunner(db_path=self._db_path, db_id="usage").ensure((_USAGE_V1,))
+        self._db = await connect_sqlite(self._db_path)
 
     async def close(self) -> None:
         if self._db:
-            await self._db.close()
+            await close_with_checkpoint(self._db, name="usage")
             self._db = None
 
     async def _ensure_schema(self) -> None:
         if not self._db:
             return
-        cursor = await self._db.execute("PRAGMA table_info(llm_calls)")
-        rows = await cursor.fetchall()
-        existing = {str(row["name"]) for row in rows}
-        additions = {
-            "provider_kind": "TEXT NOT NULL DEFAULT ''",
-            "prompt_cache_hit_tokens": "INTEGER NOT NULL DEFAULT 0",
-            "prompt_cache_miss_tokens": "INTEGER NOT NULL DEFAULT 0",
-            "reasoning_replay_tokens": "INTEGER NOT NULL DEFAULT 0",
-        }
-        for column, ddl in additions.items():
-            if column not in existing:
-                await self._db.execute(f"ALTER TABLE llm_calls ADD COLUMN {column} {ddl}")
+        await _ensure_usage_columns(self._db)
 
     def set_alert(
         self,

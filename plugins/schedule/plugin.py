@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import contextlib
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -54,7 +54,7 @@ class SchedulePlugin(AmadeusPlugin):
 
     def __init__(self) -> None:
         super().__init__()
-        self._mood_engine = None
+        self._mood_engine: Any = None
         self._schedule_store = None
         self._schedule_gen = None
         self._timeline = None
@@ -64,7 +64,9 @@ class SchedulePlugin(AmadeusPlugin):
         self._climate_sensor_hub = None
         self._climate_engine = None
         self._m4_policy_enabled = False
-        self._affection_engine = None
+        self._affection_engine: Any = None
+        self._affection_enabled = False
+        self._bus: Any = None
         self._calendar_service = None
         self._story_arc_store = None
 
@@ -80,6 +82,10 @@ class SchedulePlugin(AmadeusPlugin):
         self._climate_engine = getattr(ctx, "climate_engine", None)
         self._m4_policy_enabled = bool(getattr(ctx, "dialogue_climate_m4_enabled", False))
         self._affection_engine = getattr(ctx, "affection_engine", None)
+        self._affection_enabled = bool(
+            getattr(ctx, "affection_enabled", self._affection_engine is not None)
+        )
+        self._bus = getattr(ctx, "bus", None)
         self._calendar_service = getattr(ctx, "calendar_service", None)
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:
@@ -98,9 +104,11 @@ class SchedulePlugin(AmadeusPlugin):
                     await self._schedule_gen.ensure_today(ctx.llm_client._call)
 
     async def on_shutdown(self, ctx: PluginContext) -> None:
-        if self._schedule_gen is not None:
-            await self._schedule_gen.stop()
-            _L.info("schedule generator stopped")
+        del ctx
+        if not self._schedule_started or self._schedule_gen is None:
+            return
+        self._schedule_started = False
+        await self._schedule_gen.stop()
 
     async def on_pre_prompt(self, ctx: PromptContext) -> None:
         if self._mood_engine is None or self._schedule_store is None:
@@ -245,6 +253,18 @@ class SchedulePlugin(AmadeusPlugin):
 
     def _resolve_familiarity(self, user_id: str) -> float | None:
         """Per-user familiarity from AffectionEngine (None when unavailable)."""
+        get_plugin = getattr(self._bus, "get_plugin", None)
+        if callable(get_plugin):
+            owner = get_plugin("affection")
+            affection_enabled = (
+                bool(getattr(owner, "enabled", False))
+                if owner is not None
+                else self._affection_enabled
+            )
+            if not affection_enabled:
+                return None
+        elif not self._affection_enabled:
+            return None
         engine = self._affection_engine
         if engine is None or not user_id or user_id == "0":
             return None
@@ -252,7 +272,7 @@ class SchedulePlugin(AmadeusPlugin):
         if not callable(fn):
             return None
         try:
-            return float(fn(user_id))
+            return float(cast(Any, fn)(user_id))
         except Exception:
             return None
 

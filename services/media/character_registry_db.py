@@ -11,6 +11,8 @@ read-only in the sidecar, relation kept per-bot here.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import time
@@ -57,10 +59,17 @@ class CharacterRegistryDB:
 
     async def init(self) -> None:
         db = await connect_sqlite(self._db_path)
-        await db.execute(_CREATE_REGISTRY)
-        await db.execute(_CREATE_PACK_META)
-        await db.commit()
         self._db = db
+        try:
+            await db.execute(_CREATE_REGISTRY)
+            await db.execute(_CREATE_PACK_META)
+            await db.commit()
+        except BaseException:
+            self._db = None
+            close_task = asyncio.create_task(db.close())
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(close_task)
+            raise
 
     async def close(self) -> None:
         if self._db is not None:

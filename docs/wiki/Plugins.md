@@ -13,16 +13,16 @@ plugins/<name>/
   config.schema.json
 ```
 
-根目录单文件插件已取消运行时加载。`PluginBus.discover_plugins()` 只加载 `plugins/<name>/plugin.py`；若本地索引发现旧 `plugins/<name>.py` 或根目录 `<name>.json`，会标记为 `blocked: legacy_single_file_unsupported`，不会进入运行时。
+根目录单文件插件已取消运行时加载。`PluginBus.discover_plugins()` 加载 `plugins/<name>/plugin.py` 中的 Plugin 类；manifest 声明 `capability_only: true` 的目录即使保留兼容 `plugin.py` 也不会进入运行时。若本地索引发现旧 `plugins/<name>.py` 或根目录 `<name>.json`，会标记为 `blocked: legacy_single_file_unsupported`。
 
-运行时配置固定从 JSON 合并：
+运行时配置按 manifest 声明的 JSON 路径合并：
 
 ```text
-plugins/<name>/config.default.json
+plugins/<name>/<config.defaults>
 storage/plugins/config/<name>.json
 ```
 
-合并顺序为 `config.default.json` → Admin 保存的 runtime override → 环境/启动禁用项。旧 `plugins/*.toml` 与 `plugins/*/plugin.toml` 已不再作为主配置路径。
+合并顺序为 manifest defaults → Admin 保存的 runtime override → 环境/启动禁用项；schema 来自 `config.schema`。路径必须位于插件目录内并指向有效文件。旧 `plugins/*.toml` 与 `plugins/*/plugin.toml` 已不再作为主配置路径。
 
 标准配置文件格式：
 
@@ -46,27 +46,35 @@ storage/plugins/config/<name>.json
   "name": "slang",
   "display_name": { "zh": "群内黑话", "en": "Slang" },
   "description": "群内黑话：学习候选、审核后注入当前群语境",
-  "version": "0.1.0",
-  "tier": "system|user",
-  "toggle_policy": "locked|runtime|restart_required",
-  "category": "core|memory|expression|tool|pipeline|ops",
-  "permissions": [],
-  "capabilities": [],
+  "version": "0.1.17",
+  "priority": 42,
+  "tier": "user",
+  "toggle_policy": "restart_required",
+  "capability_only": false,
+  "category": "expression",
+  "permissions": ["message", "prompt", "tick", "tool", "storage", "network"],
+  "capabilities": ["slang_learning", "slang_lookup"],
+  "author": "Omubot",
   "min_omubot_version": "",
+  "dependencies": {},
+  "required_dependencies": {},
+  "optional_dependencies": {},
   "config": {
     "defaults": "config.default.json",
     "schema": "config.schema.json",
-    "apply_mode": "hot|restart_required|read_only",
+    "apply_mode": "read_only",
     "restart_required_fields": []
   },
   "store": {
-    "visibility": "internal|local|marketplace_ready",
+    "visibility": "marketplace_ready",
     "marketplace_id": ""
   }
 }
 ```
 
-系统级插件会被运行时锁定，Web 端和 API 都不能关闭。当前系统锁定能力包为 `chat`、`context`、`history_loader`、`vision`。插件中心默认隐藏系统能力，需要通过“显示系统插件”高级入口查看。
+枚举值必须选取单个合法值，不能把候选值用 `|` 写进 JSON。新依赖使用 `required_dependencies` / `optional_dependencies`；legacy `dependencies` 仅作为 required alias。版本约束支持 `*`、三段 SemVer，以及 `>=`、`<=`、`>`、`<`、`==`、`^`、`~` 前缀。
+
+系统级运行时插件会被锁定；manifest-only 系统能力不注册 PluginBus 实例。当前系统能力包为 `chat`、`context`、`history_loader`、`vision`，其中后两者只读展示。插件中心默认隐藏系统能力，需要通过“显示系统插件”高级入口查看。
 
 ## 当前本地包清单（23 个）
 
@@ -74,33 +82,36 @@ storage/plugins/config/<name>.json
 | --- | --- | --- | --- | --- | --- |
 | `chat` | 1.1.25 | system | locked | core | 核心聊天：消息路由、LLM 调用、tool loop |
 | `context` | 0.1.9 | system | locked | core | 统一上下文：memory/doc/graph 检索与动态 Prompt 打包 |
-| `history_loader` | 1.1.2 | system | locked | core | 启动时加载群历史消息 |
+| `history_loader` | 1.2.0 | system | locked | core | manifest-only；核心连接阶段加载群历史，状态来自 RuntimeConnectionPipeline |
 | `vision` | 1.1.2 | system | locked | core | 图片描述能力；角色识别链路通过该系统能力接线 |
-| `memo` | 1.1.5 | user | runtime | memory | 记忆卡片：7 类 3 作用域，检索门控与工具 |
-| `knowledge` | 0.1.5 | user | runtime | memory | 文档知识库：Markdown 扫描、持久索引、检索调试 |
-| `calendar_context` | 1.0.0 | user | runtime | memory | 日期上下文：节日/日历等时间语境 |
+| `memo` | 1.1.5 | user | restart_required | memory | 记忆卡片：7 类 3 作用域，检索门控与工具 |
+| `knowledge` | 0.1.5 | user | restart_required | memory | 文档知识库：Markdown 扫描、持久索引、检索调试 |
+| `calendar_context` | 1.0.0 | user | restart_required | memory | 唯一 CalendarContextService，并拥有 BirthdayGreeter tick |
 | `affection` | 1.1.2 | user | runtime | memory | 好感度系统：分数、昵称、态度调节 |
-| `schedule` | 1.1.5 | user | runtime | memory | 模拟日程与心情状态 |
-| `slang` | 0.1.17 | user | runtime | expression | 群内黑话：候选、审核、AI 复核、backlog、漂移治理 |
-| `style` | 1.0.0 | user | runtime | expression | 表达学习：表达样本、动态风格档案、Prompt 注入 |
-| `sticker` | 1.1.6 | user | runtime | expression | 表情包：保存、发送、管理与 OCR / 轻量语义检索 |
+| `schedule` | 1.1.5 | user | restart_required | memory | 拥有 ScheduleGenerator；消费 calendar_service，不拥有日历或生日 tick |
+| `slang` | 0.1.17 | user | restart_required | expression | 群内黑话：候选、审核、AI 复核、backlog、漂移治理 |
+| `style` | 1.0.0 | user | restart_required | expression | 表达学习：表达样本、动态风格档案、Prompt 注入 |
+| `sticker` | 1.2.0 | user | restart_required | expression | 表情包：保存、发送、管理与 OCR / 轻量语义检索 |
 | `echo` | 1.1.2 | user | runtime | expression | 复读检测：5 分钟内同消息 3 次触发 |
 | `web_search` | 1.1.1 | user | runtime | tool | 网页搜索，用于实时信息和 AI 复核 |
 | `web_fetch` | 1.1.1 | user | runtime | tool | 网页内容抓取 |
 | `datetime` | 1.1.1 | user | runtime | tool | 时间日期查询工具 |
 | `http_api` | 1.1.1 | user | runtime | tool | 通用 HTTP API 调用 |
 | `group_admin` | 1.1.1 | user | runtime | tool | 群管理工具（禁言、头衔、发消息） |
-| `food` | 0.1.6 | user | runtime | tool | 饮食/点餐相关指令 |
+| `food` | 0.1.6 | user | restart_required | tool | 饮食/点餐相关指令；search_enabled 支持字段级热更新 |
 | `bilibili` | 1.1.4 | user | runtime | tool | B 站链接解析与封面摘要 |
 | `element_detector` | 1.1.3 | user | runtime | pipeline | 特殊消息元素检测 |
-| `dream` | 1.1.3 | user | runtime | ops | 梦境整合：定期整理记忆、清理表情包 |
-| `debug_commands` | 1.3.1 | user | runtime | ops | `/plugins`、`/version` 等调试指令 |
+| `dream` | 1.1.3 | user | restart_required | ops | 仅拥有 DreamAgent tick 与 typed ctx.dream handle |
+| `debug_commands` | 1.3.1 | user | restart_required | ops | `/plugins`、`/version` 等调试指令 |
 
 说明：
 
 - “23 个”指本地 `plugins/*/plugin.json` 包/能力包数量。
-- 日常可启停的是 19 个 user/runtime 插件。
-- `vision` 与 `context` 属于系统能力包，不进入普通启停流。
+- PluginBus 当前加载 21 个插件，其中 19 个用户插件按各自 runtime/restart 策略管理。
+- `history_loader` 与 `vision` 是 manifest-only 能力；`chat` 与 `context` 是锁定的运行时插件，四者都不进入普通启停流。
+- `runtime` 会在当前进程刷新 hook、tool 与 command；`restart_required` 只持久化目标状态，重启 Bot 后应用；`locked`/manifest-only 不进入普通启停事务。
+- `calendar_context` 是日期、节假日与生日上下文的唯一 owner；`schedule` 通过 required dependency 消费该 service。provider 缺失、禁用或版本不兼容时 Schedule fail-closed，不读取旧数据表。
+- `dream` 不再拥有生日或记忆整合；`MemoryConsolidatorLifecycle` 是 Application component。`history_loader` 没有 PluginBus instance，其状态由连接 pipeline 暴露。
 
 ## 本地插件索引与治理
 
@@ -168,7 +179,7 @@ LLM 工具循环 → 插件注册的工具可被 LLM 调用
      ↓
 on_post_reply → 回复后的副作用（记录好感度、表达反馈等）
      ↓
-on_tick → 定时触发（Dream、Slang reviewer 等）
+on_tick → 定时触发（Calendar birthday、DreamAgent、Slang reviewer 等）
 ```
 
 ## 工具注册

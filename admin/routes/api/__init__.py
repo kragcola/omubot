@@ -7,6 +7,7 @@ from the global PluginContext.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
@@ -45,6 +46,7 @@ def create_api_router(
     talk_schedule: Any = None,
     llm_client: Any = None,
     bot: Any = None,
+    repo_root: str | Path | None = None,
 ) -> APIRouter:
     """Create the aggregated /api/admin router."""
     router = APIRouter(prefix="/api/admin")
@@ -60,7 +62,9 @@ def create_api_router(
     from admin.routes.api.context import create_context_router
     from admin.routes.api.cross_group import create_cross_group_router
     from admin.routes.api.dashboard import create_dashboard_router
+    from admin.routes.api.databases import create_databases_router
     from admin.routes.api.dream import create_dream_router
+    from admin.routes.api.effective_config import create_effective_config_router
     from admin.routes.api.episodes import create_episodes_router
     from admin.routes.api.events import create_events_router
     from admin.routes.api.groups import create_groups_router
@@ -79,6 +83,7 @@ def create_api_router(
     from admin.routes.api.protocol import create_protocol_router
     from admin.routes.api.providers import create_providers_router
     from admin.routes.api.replay import create_replay_router
+    from admin.routes.api.research_events import create_research_events_router
     from admin.routes.api.sandbox import create_sandbox_router
     from admin.routes.api.schedule import create_schedule_router
     from admin.routes.api.scheduler import create_scheduler_router
@@ -109,7 +114,11 @@ def create_api_router(
         config_path=config_path,
     ))
     router.include_router(create_config_router(config_path=config_path))
+    router.include_router(create_effective_config_router(config_path=config_path))
     router.include_router(create_context_router(ctx=ctx, bus=bus))
+    router.include_router(create_databases_router(
+        repo_root=Path(repo_root).resolve() if repo_root is not None else Path.cwd(),
+    ))
     router.include_router(create_logs_router(log_dir=log_dir))
     router.include_router(create_memory_router(
         card_store=card_store, group_memory_config=group_memory_config,
@@ -126,6 +135,7 @@ def create_api_router(
         ctx=ctx,
     ))
     router.include_router(create_plugins_router(
+        ctx=ctx,
         bus=bus,
         tool_registry=tool_registry,
         plugin_state_store=plugin_state_store,
@@ -137,6 +147,7 @@ def create_api_router(
         llm_client=llm_client,
     ))
     router.include_router(create_protocol_router(config=config, ctx=ctx, bot=bot))
+    router.include_router(create_research_events_router(ctx=ctx))
     router.include_router(create_scheduler_router(scheduler=scheduler, ctx=ctx))
     router.include_router(create_replay_router(ctx=ctx))
     router.include_router(create_system_router(
@@ -144,6 +155,7 @@ def create_api_router(
         short_term_memory=short_term_memory, humanizer=humanizer,
         ctx=ctx,
         bot=bot,
+        talk_schedule=talk_schedule,
     ))
     router.include_router(create_knowledge_router(
         knowledge_base=knowledge_base,

@@ -145,7 +145,7 @@ def run_bot_update() -> dict[str, object]:
         "git_dirty": _git_dirty(repo_root),
         "before": before,
         "backup_command": "bash scripts/backup-databases.sh",
-        "compose_command": "docker compose up -d --build --no-deps bot",
+        "compose_command": "docker compose up -d --build --no-deps --force-recreate bot",
     }
 
     backup = _run(
@@ -161,7 +161,16 @@ def run_bot_update() -> dict[str, object]:
     for update_attempts in range(1, 3):
         try:
             _run(
-                ["docker", "compose", "up", "-d", "--build", "--no-deps", "bot"],
+                [
+                    "docker",
+                    "compose",
+                    "up",
+                    "-d",
+                    "--build",
+                    "--no-deps",
+                    "--force-recreate",
+                    "bot",
+                ],
                 cwd=repo_root,
                 env=env,
                 timeout_seconds=3600,

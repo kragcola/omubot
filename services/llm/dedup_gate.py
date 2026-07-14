@@ -7,6 +7,7 @@ import unicodedata
 from dataclasses import dataclass
 
 from services.llm.sentinel_registry import (
+    RULE_ORDER_DEDUP,
     GuardrailContext,
     GuardrailHit,
     GuardrailResult,
@@ -110,4 +111,4 @@ def dedup_rule(text: str, ctx: GuardrailContext) -> GuardrailResult:
     )
 
 
-register_rule(dedup_rule)
+register_rule(dedup_rule, order=RULE_ORDER_DEDUP)

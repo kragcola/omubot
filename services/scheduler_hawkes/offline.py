@@ -10,6 +10,13 @@ from typing import Any, cast
 
 from loguru import logger
 
+from kernel.background_tasks import (
+    BackgroundTaskSupervisor,
+    RestartPolicy,
+    ShutdownPolicy,
+    TaskKind,
+    TaskSpec,
+)
 from services.scheduler_hawkes.cache import HawkesCache, snapshot_from_times
 
 _L = logger.bind(channel="scheduler")
@@ -24,6 +31,7 @@ class HawkesOfflineRefresher:
         interval_s: float = 600.0,
         window_s: float = 3600.0,
         limit_per_group: int = 500,
+        task_supervisor: BackgroundTaskSupervisor | None = None,
     ) -> None:
         self._message_log = message_log
         self._cache = cache or HawkesCache()
@@ -31,6 +39,7 @@ class HawkesOfflineRefresher:
         self._window_s = max(60.0, float(window_s))
         self._limit_per_group = max(10, int(limit_per_group))
         self._task: asyncio.Task[None] | None = None
+        self._task_supervisor = task_supervisor
 
     @property
     def cache(self) -> HawkesCache:
@@ -39,14 +48,32 @@ class HawkesOfflineRefresher:
     def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
-        self._task = asyncio.create_task(self._loop())
+        if self._task_supervisor is None:
+            self._task = asyncio.create_task(self._loop())
+        else:
+            self._task = self._task_supervisor.spawn(
+                TaskSpec(
+                    name="scheduler_hawkes.refresh",
+                    owner="services.scheduler_hawkes",
+                    kind=TaskKind.PERIODIC,
+                    restart=RestartPolicy.ON_FAILURE,
+                    shutdown=ShutdownPolicy.CANCEL,
+                    max_restarts=3,
+                    backoff_seconds=1.0,
+                    max_backoff_seconds=30.0,
+                ),
+                self._loop,
+            )
 
     async def stop(self) -> None:
         if self._task is None:
             return
-        self._task.cancel()
-        with suppress(asyncio.CancelledError):
-            await self._task
+        if self._task_supervisor is not None:
+            await self._task_supervisor.stop_owner("services.scheduler_hawkes")
+        else:
+            self._task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._task
         self._task = None
 
     async def run_once(self, *, now: float | None = None) -> int:

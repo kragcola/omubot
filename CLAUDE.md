@@ -15,11 +15,11 @@ uv run pyright                 # Type check
 | Run locally | `docker compose up napcat -d && uv run python bot.py` |
 | Run all in Docker | `docker compose up -d` |
 | Restart bot (config changes) | `docker compose restart bot` |
-| Rebuild bot (code/deps) | `dot_clean . && docker compose up bot -d --build` |
+| Rebuild bot (code/deps) | `dot_clean . && docker compose build bot && docker compose up -d --no-deps --force-recreate bot` |
 | Usage TUI | `uv run python -m services.llm.usage_cli tui day\|week\|month [date]` |
 | Usage API | `GET /api/usage/today`, `/api/usage/month`, `/api/usage/top-users`, `/api/usage/top-groups` |
 | Admin Dashboard | `http://localhost:8081/admin/` — token auth via `ADMIN_TOKEN` env var |
-| Build & deploy | `./scripts/deploy.sh` |
+| Build & deploy | `cd admin/frontend && npm run build && cd ../.. && docker compose build bot && docker compose up -d --no-deps --force-recreate bot` |
 
 ## Architecture
 
@@ -69,11 +69,11 @@ Fix any errors discovered during testing, even if they were pre-existing and not
 - **D4 完成声明含证据**：声明"fix 完成"时必须在日志里给出：① 同模式扫描结果；② 外部可观察证据（sqlite SELECT、HTTP 状态码、日志片段）；③ 回滚路径。
 - **D5 pytest 防孤儿**：跑全量 pytest 前先 `pkill -9 -f pytest`，否则可能跟 IDE 抢 sqlite 文件锁导致死锁。
 - **D6 admin SPA 同步路径**：`admin/static` 是 bind mount——只改前端 `npm run build` 即生效，无需 docker rebuild；改了 .py 才需要 rebuild bot。
-- **D7 部署前 git hygiene**：deploy / build / merge 前必跑 `git stash list && git status -uno`；`stash apply` exit 0 不等于成功，必抽查 `git diff` 确认 hunks 真落地；`storage/*.db*` / `*.bak*` 走 .gitignore 物理护栏，不用 `git add -A`。
+- **D7 部署前 git hygiene**：deploy / build / merge 前必跑 `git stash list`、`git status -uno` 和 `git ls-files --others --exclude-standard`；`-uno` 不能替代 untracked 审计，`stash apply` exit 0 也不等于成功，必抽查 `git diff` 确认 hunks 真落地；`storage/*.db*` / `*.bak*` 走 .gitignore 物理护栏，不用 `git add -A`。
 
 ### 本机环境提示
 
-- **只读检查运行中服务锁着的 SQLite**：服务在跑时 DB 被锁，直接 `sqlite3` 可能阻塞或抢锁（D5 同源）。只读检查用 `sqlite3 'file:storage/<db>.db?mode=ro&immutable=1' '<query>'`，先 `.schema` / `PRAGMA table_info` 再 SELECT，不要在跑服务时写。
+- **只读检查运行中 SQLite**：普通可写打开可能争用锁、产生 sidecar 或改变连接状态。live/WAL-aware 检查用 `sqlite3 'file:storage/<db>.db?mode=ro' '<query>'`，容量同时统计主 DB、`-wal`、`-shm`、`-journal`；不要给 live DB 加 `immutable=1`，它只适合明确离线、不再变化且无需 WAL replay 的静态备份 payload。先核对 schema、`PRAGMA user_version`、索引和 `PRAGMA quick_check`，运行期间不得写库。
 - **macOS 沙盒下进程探测**：`pgrep` / 部分 `ps` 会报 `sysmond service not found` 或权限错误。查进程/端口改用 `docker compose ps`、容器日志、pidfile，或 `lsof -nP -iTCP:<port>`。
 - **NapCat OneBot HTTP API（本地调试，已常开）**：本机 NapCat 配了无鉴权 HTTP server `localhost:29300`（`napcat/config/onebot11_384801062.json` 的 `network.httpServers`，gitignored）。调试发消息/查状态直接打它，**不用动 bot 进程、不用重启 NapCat**（运行态已开，重启反而有掉登录风险见 Docker 条）。仅本机可达、无 token、零 API 花费——**仅限本机开发环境，生产/公网严禁这么配**。
   - 查登录态：`curl -sX POST http://localhost:29300/get_login_info -d '{}'`

@@ -3,32 +3,37 @@
 ## Docker Compose（推荐）
 
 ```bash
-# 首次启动
+# 首次空环境启动；已有 NapCat 登录态时不得重复执行 NapCat 行
 cp .env.example config/.env
 cp config.example.toml config/config.toml
 # 人设走 v2：admin SPA「人设管理」上传 source.md -> import -> freeze -> hot-reload
-docker compose up napcat -d
-docker compose up -d --build bot ccip-sidecar
+docker compose up -d napcat
+docker compose build bot
+docker compose up -d --no-deps bot
+docker compose build ccip-sidecar
+docker compose up -d --no-deps ccip-sidecar
 ```
 
 日常运维常用命令：
 
 ```bash
 docker compose restart bot                          # 仅配置变更
-docker compose up -d --build --no-deps bot         # bot 代码/依赖变更
-docker compose up -d --build --no-deps ccip-sidecar # 角色识别 sidecar 变更
+docker compose build bot                            # bot 代码/依赖变更
+docker compose up -d --no-deps --force-recreate bot
+docker compose up -d --build --no-deps --force-recreate ccip-sidecar # 角色识别 sidecar 变更
 docker compose restart napcat                      # 断线重连，唯一安全方式
 docker compose logs bot --tail=50
 docker compose logs ccip-sidecar --tail=50
 ```
 
-前端仅改 `admin/frontend` 时，不需要 rebuild bot；执行 `npm run build` 让 `admin/static` 更新即可。
+前端仅改 `admin/frontend` 时，不需要 rebuild bot；执行 `npm run build` 让 `admin/static` 更新即可。因为 `admin/static` 是宿主 bind mount，部署前必须同时快照该目录；后端回滚时恢复对应 SPA 快照，不能只切换旧 image。
 
 ## 关键规则
 
 - **永远不要 `docker compose down` + `up` 重启 napcat**：device fingerprint 变化会触发腾讯反欺诈，始终使用 `docker compose restart napcat`。
 - **Bot / Sidecar 改动分开重建**：`bot` 与 `ccip-sidecar` 各自按需 `--no-deps --build`，不要顺手重建 `napcat`。
 - **`admin/static` 是 bind mount**：前端 build 产物会直接生效；后端 API 改动仍需要 rebuild `bot`。
+- **回滚是 image + host static 成对操作**：旧 bot image 与它对应的 `admin/static` 快照必须一起恢复，再 bot-only recreate。
 - **NapCat WebUI**：`http://localhost:6099/webui`。
 
 ## 端口
@@ -51,7 +56,9 @@ cd /Volumes/OmubotDisk/omubot
 source ./scripts/dev/env.sh
 bash ./scripts/dev/doctor.sh
 uv sync
-docker compose up napcat -d
+# 仅首次空环境且不存在既有登录态时执行；已有环境必须跳过
+docker compose up -d napcat
+# 已有环境断线时只能使用：docker compose restart napcat
 uv run python bot.py
 ```
 

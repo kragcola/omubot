@@ -1,5 +1,5 @@
-"""Compatibility exports for the History Loader directory plugin."""
+"""Compatibility exports for the core history-backfill stage."""
 
-from plugins.history_loader.plugin import HistoryLoaderPlugin, _extract_content, load_group_history
+from plugins.history_loader.plugin import _extract_content, load_group_history, run_history_backfill
 
-__all__ = ["HistoryLoaderPlugin", "_extract_content", "load_group_history"]
+__all__ = ["_extract_content", "load_group_history", "run_history_backfill"]

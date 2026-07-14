@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from kernel.types import MessageContext
+from plugins.calendar_context.birthday_greeter import BirthdayGreeter
+from plugins.calendar_context.plugin import CalendarContextPlugin
 from plugins.echo.plugin import EchoConfig, EchoPlugin
 from plugins.element_detector.plugin import ElementDetector, ElementDetectorPlugin, ElementMatch
 from plugins.food.plugin import FoodPlugin
@@ -101,3 +103,25 @@ async def test_food_feedback_recommend_skips_send_when_group_muted() -> None:
 
     bot.send_group_msg.assert_not_called()
     plugin._do_recommend.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_calendar_birthday_greeter_skips_send_when_group_muted(tmp_path) -> None:
+    greeter = BirthdayGreeter(tmp_path / "birthdays.json")
+    greeter.add_member("123", "测试成员", greeter._today_mmdd(), ["100"])
+    bot = SimpleNamespace(send_group_msg=AsyncMock())
+    plugin = CalendarContextPlugin()
+    plugin._greeter = greeter
+    plugin._bot = bot
+    ctx = cast(
+        Any,
+        SimpleNamespace(
+            llm_client=None,
+            scheduler=_SchedulerStub(muted=True),
+        ),
+    )
+
+    await plugin.on_tick(ctx)
+
+    bot.send_group_msg.assert_not_awaited()
+    assert greeter.sent_log == {}

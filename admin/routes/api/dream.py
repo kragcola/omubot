@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, cast
 
 from fastapi import APIRouter
 
@@ -18,16 +19,11 @@ def create_dream_router(
         if dream_agent is None:
             return {"available": False}
 
-        return {
-            "available": True,
-            "running": getattr(dream_agent, "_running", False),
-            "interval_hours": getattr(dream_agent, "_interval_hours", 0),
-            "max_rounds": getattr(dream_agent, "_max_rounds", 5),
-            "sticker_delete_floor": getattr(dream_agent, "_sticker_delete_floor", 0),
-            "sticker_count": (
-                getattr(getattr(dream_agent, "_sticker_store", None), "count", None)
-            ),
-        }
+        snapshot = getattr(dream_agent, "snapshot", None)
+        if not callable(snapshot):
+            return {"available": True}
+        snapshot_call = cast(Callable[[], Mapping[str, object]], snapshot)
+        return {"available": True, **dict(snapshot_call())}
 
     @router.post("/dream/trigger")
     async def trigger_dream():
@@ -35,15 +31,11 @@ def create_dream_router(
             return {"ok": False, "error": "DreamAgent not available"}
 
         try:
-            # DreamAgent.start() expects an api_call callable
-            # We pass None to signal a one-shot manual trigger
-            if hasattr(dream_agent, "_do_cycle"):
-                import asyncio
-                asyncio.create_task(dream_agent._do_cycle())  # noqa: RUF006
-            elif hasattr(dream_agent, "start"):
-                return {"ok": False, "error": "DreamAgent already has a running loop"}
-            else:
-                return {"ok": False, "error": "DreamAgent has no _do_cycle method"}
+            trigger_once = getattr(dream_agent, "trigger_once", None)
+            if not callable(trigger_once):
+                return {"ok": False, "error": "DreamAgent has no trigger_once method"}
+            trigger_once_call = cast(Callable[[], Awaitable[None]], trigger_once)
+            await trigger_once_call()
             return {"ok": True, "message": "Dream cycle triggered"}
         except Exception as e:
             return {"ok": False, "error": str(e)}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 from datetime import datetime, timedelta
@@ -13,6 +14,8 @@ import aiosqlite
 
 from services.block_trace.types import PromptBlockTrace
 from services.storage import close_with_checkpoint, connect_sqlite
+from services.storage.migrations import Migration, MigrationRunner
+from services.storage.schema_contracts import verify_catalog_schema_async
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -104,6 +107,42 @@ _RUNTIME_METRIC_KEYS = (
     "anchor_reinject_count",
     "slang_lookup_resolved",
     "slang_lookup_unresolved",
+)
+
+
+async def _apply_block_trace_v1(db: aiosqlite.Connection) -> None:
+    await db.execute(_CREATE_TABLE)
+    for statement in _CREATE_INDEXES:
+        await db.execute(statement)
+    await db.execute(_CREATE_HUMANIZATION_METRICS_TABLE)
+    for statement in _CREATE_HUMANIZATION_METRICS_INDEXES:
+        await db.execute(statement)
+    await db.execute(_CREATE_RUNTIME_METRICS_TABLE)
+    for statement in _CREATE_RUNTIME_METRICS_INDEXES:
+        await db.execute(statement)
+
+
+async def _verify_block_trace_v1(db: aiosqlite.Connection) -> bool:
+    return bool(await verify_catalog_schema_async("block_trace", db, 1))
+
+
+_BLOCK_TRACE_V1_DDL = "\n".join(
+    (
+        _CREATE_TABLE,
+        *_CREATE_INDEXES,
+        _CREATE_HUMANIZATION_METRICS_TABLE,
+        *_CREATE_HUMANIZATION_METRICS_INDEXES,
+        _CREATE_RUNTIME_METRICS_TABLE,
+        *_CREATE_RUNTIME_METRICS_INDEXES,
+    )
+)
+_BLOCK_TRACE_V1 = Migration(
+    version=1,
+    name="block_trace_baseline_v1",
+    checksum="sha256:" + hashlib.sha256(_BLOCK_TRACE_V1_DDL.encode()).hexdigest(),
+    apply=_apply_block_trace_v1,
+    verify=_verify_block_trace_v1,
+    adopt_existing=True,
 )
 
 
@@ -251,18 +290,11 @@ class BlockTraceStore:
         return self._db
 
     async def init(self) -> None:
+        await MigrationRunner(db_path=self._db_path, db_id="block_trace").ensure(
+            (_BLOCK_TRACE_V1,)
+        )
         db = await connect_sqlite(self._db_path)
         self._db = db
-        await db.execute(_CREATE_TABLE)
-        for stmt in _CREATE_INDEXES:
-            await db.execute(stmt)
-        await db.execute(_CREATE_HUMANIZATION_METRICS_TABLE)
-        for stmt in _CREATE_HUMANIZATION_METRICS_INDEXES:
-            await db.execute(stmt)
-        await db.execute(_CREATE_RUNTIME_METRICS_TABLE)
-        for stmt in _CREATE_RUNTIME_METRICS_INDEXES:
-            await db.execute(stmt)
-        await db.commit()
 
     async def close(self) -> None:
         if self._db is not None:
@@ -524,3 +556,91 @@ class BlockTraceStore:
         )
         await db.commit()
         return cursor.rowcount
+
+    async def apply_retention(
+        self,
+        *,
+        keep_days: int,
+        batch_size: int,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        """Apply the block-trace owner's bounded, three-table policy."""
+        if keep_days < 1:
+            raise ValueError("keep_days must be at least 1")
+        if not 1 <= batch_size <= 10_000:
+            raise ValueError("batch_size must be between 1 and 10000")
+
+        cutoff = (
+            datetime.now(TZ_SHANGHAI) - timedelta(days=keep_days)
+        ).isoformat(timespec="seconds")
+        tables = (
+            "prompt_block_traces",
+            "humanization_metrics",
+            "runtime_metric_events",
+        )
+        db = self._conn()
+        details = {table: 0 for table in tables}
+
+        if dry_run:
+            remaining = batch_size
+            for table in tables:
+                if remaining <= 0:
+                    break
+                cursor = await db.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM (
+                        SELECT 1 FROM {table}
+                        WHERE created_at < ?
+                        ORDER BY created_at ASC, rowid ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (cutoff, remaining),
+                )
+                try:
+                    row = await cursor.fetchone()
+                finally:
+                    await cursor.close()
+                count = int(row[0]) if row is not None else 0
+                details[table] = count
+                remaining -= count
+            return {
+                "candidate_count": sum(details.values()),
+                "deleted_count": 0,
+                "details": details,
+            }
+
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            remaining = batch_size
+            for table in tables:
+                if remaining <= 0:
+                    break
+                cursor = await db.execute(
+                    f"""
+                    DELETE FROM {table}
+                    WHERE rowid IN (
+                        SELECT rowid FROM {table}
+                        WHERE created_at < ?
+                        ORDER BY created_at ASC, rowid ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (cutoff, remaining),
+                )
+                deleted = max(int(cursor.rowcount), 0)
+                await cursor.close()
+                details[table] = deleted
+                remaining -= deleted
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+
+        deleted_count = sum(details.values())
+        return {
+            "candidate_count": deleted_count,
+            "deleted_count": deleted_count,
+            "details": details,
+        }

@@ -76,7 +76,8 @@ docker compose up napcat -d
 ## 第五步：启动 Bot
 
 ```bash
-docker compose up bot -d --build
+docker compose build bot
+docker compose up -d --no-deps --force-recreate bot
 ```
 
 查看日志确认启动成功：
@@ -203,19 +204,42 @@ mkdir -p plugins/my_plugin
 touch plugins/my_plugin/plugin.py
 ```
 
-可选添加 `plugin.json` 覆盖元数据：
+必须添加完整的 `plugin.json` ManifestV3：
 
 ```json
 {
-    "name": "my_plugin",
-    "version": "1.0.0",
-    "priority": 50,
-    "enabled": true,
-    "dependencies": {"chat": ">=1.0.0"}
+  "manifest_version": 3,
+  "name": "my_plugin",
+  "display_name": {"zh": "我的插件", "en": "My Plugin"},
+  "description": "示例工具插件",
+  "version": "1.0.0",
+  "priority": 50,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "tool",
+  "permissions": [],
+  "capabilities": [],
+  "author": "Omubot",
+  "min_omubot_version": "1.5.0",
+  "dependencies": {},
+  "required_dependencies": {},
+  "optional_dependencies": {},
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "hot",
+    "restart_required_fields": []
+  },
+  "store": {"visibility": "local", "marketplace_id": ""},
+  "capability_only": false
 }
 ```
 
-然后在 `plugin.py` 中继承 `AmadeusPlugin`，实现需要的钩子即可。
+同时创建 manifest 声明的 defaults/schema 文件，然后在 `plugin.py` 中继承 `AmadeusPlugin`，实现需要的钩子。提交前执行：
+
+```bash
+uv run python scripts/check_plugin_manifests.py
+```
 
 ### 可用钩子
 

@@ -51,6 +51,20 @@ class GuardrailContext:
 
 RuleHandler = Callable[[str, GuardrailContext], GuardrailResult]
 
+# Explicit execution order for A-cluster rules. Rules run in ascending order so
+# the pipeline is deterministic regardless of module import timing — each rule
+# module self-registers on import, and circular imports made the arrival order
+# (and thus the old append-only order) non-deterministic. In particular
+# persona_drift MUST run before schedule_overshare: a sentence like
+# "我是{name}，下午3:00…" carries both a declaration and a time leak, and if
+# schedule_overshare strips the whole sentence first, persona_drift is starved.
+RULE_ORDER_SENTINEL = 0
+RULE_ORDER_DEDUP = 10
+RULE_ORDER_PERSONA_DRIFT = 20
+RULE_ORDER_SCHEDULE_OVERSHARE = 30
+RULE_ORDER_THINKER_PHRASE = 40
+RULE_ORDER_DEFAULT = 100
+
 
 _DEFAULT_SENTINELS: tuple[SentinelEntry, ...] = (
     SentinelEntry("sentinel_image", re.compile(r"«图片(?::[^»]*)?[^»]*»"), action="strip"),
@@ -91,9 +105,20 @@ def _dedupe_hits(existing: list[GuardrailHit], new_hits: Sequence[GuardrailHit])
 
 class SentinelRegistry:
     def __init__(self) -> None:
-        self._rules: list[RuleHandler] = []
+        # Each entry is (order, sequence, handler). ``order`` gives an explicit,
+        # import-timing-independent execution order; ``sequence`` preserves
+        # registration order as a stable tiebreaker within the same ``order``.
+        self._rules: list[tuple[int, int, RuleHandler]] = []
+        self._seq = 0
         for entry in _DEFAULT_SENTINELS:
             self.register(entry)
+
+    def _add_rule(self, handler: RuleHandler, order: int) -> None:
+        self._rules.append((order, self._seq, handler))
+        self._seq += 1
+
+    def _ordered_rules(self) -> list[RuleHandler]:
+        return [handler for _order, _seq, handler in sorted(self._rules, key=lambda item: (item[0], item[1]))]
 
     def register(self, entry: SentinelEntry) -> None:
         pattern = _compile_pattern(entry.pattern)
@@ -124,10 +149,10 @@ class SentinelRegistry:
             cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
             return GuardrailResult(passed=True, text=cleaned, hits=hits)
 
-        self._rules.append(_rule)
+        self._add_rule(_rule, RULE_ORDER_SENTINEL)
 
-    def register_rule(self, handler: RuleHandler) -> None:
-        self._rules.append(handler)
+    def register_rule(self, handler: RuleHandler, *, order: int = RULE_ORDER_DEFAULT) -> None:
+        self._add_rule(handler, order)
 
     def apply(
         self,
@@ -152,7 +177,7 @@ class SentinelRegistry:
             bot_name=bot_name,
             config=config,
         )
-        for rule in self._rules:
+        for rule in self._ordered_rules():
             result = rule(current, context)
             if result.text or result.passed:
                 current = result.text
@@ -193,8 +218,8 @@ def register(entry: SentinelEntry) -> None:
     _REGISTRY.register(entry)
 
 
-def register_rule(handler: RuleHandler) -> None:
-    _REGISTRY.register_rule(handler)
+def register_rule(handler: RuleHandler, *, order: int = RULE_ORDER_DEFAULT) -> None:
+    _REGISTRY.register_rule(handler, order=order)
 
 
 def apply_guardrails(
@@ -218,7 +243,10 @@ def apply_guardrails(
     )
 
 
-# Register non-sentinel A-cluster rules on import.
+# Register non-sentinel A-cluster rules on import. Execution order is governed by
+# the explicit ``order`` each rule passes to ``register_rule`` (see RULE_ORDER_*),
+# NOT by the order of these imports — so import timing / circular imports can no
+# longer reshuffle the pipeline.
 from services.llm import dedup_gate as _dedup_gate  # noqa: E402,F401
 from services.llm import persona_drift_stripper as _persona_drift_stripper  # noqa: E402,F401
 from services.llm import schedule_overshare_detector as _schedule_overshare_detector  # noqa: E402,F401

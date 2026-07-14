@@ -46,7 +46,7 @@ class ContextConfig(BaseModel):
 
 class ContextPlugin(AmadeusPlugin):
     name = "context"
-    description = "统一上下文：聚合记忆卡片、文档知识和图谱事实"
+    description = "统一聚合记忆卡片、文档知识和未来图谱事实的系统级上下文插件"
     version = "0.1.9"
     priority = 7
 

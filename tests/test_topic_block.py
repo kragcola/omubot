@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from services.group.topic_block import TopicBlock, TopicBlockTracker
 
 
@@ -367,6 +369,34 @@ def test_activity_decay_evicts_stale_blocks() -> None:
     assert len(active) == 0  # stale block moved to reservoir
 
 
+def test_new_block_after_full_decay_stays_registered() -> None:
+    """A new block created after all active blocks decay remains reachable."""
+    t = _tracker()
+    g = "g1"
+    old = t.observe(g, message_id=1, speaker="u1", text="aaaaaa", now=0.0)
+
+    fresh = t.observe(g, message_id=2, speaker="u2", text="zzzzzz", now=10_000.0)
+
+    assert t._reservoir[g][old.block_id] is old
+    assert t._blocks[g][fresh.block_id] is fresh
+    assert t.pick_block_by_id(g, fresh.block_id) is fresh
+    assert t._msg_to_block[g][2] == fresh.block_id
+
+
+def test_capacity_eviction_counts_current_arrival_first() -> None:
+    """The current arrival is applied before choosing the coldest block."""
+    t = _tracker()
+    t.configure(max_blocks=1)
+    g = "g1"
+    old = t.observe(g, message_id=1, speaker="u1", text="aaaaaa", now=0.0)
+
+    fresh = t.observe(g, message_id=2, speaker="u2", text="zzzzzz", now=1.0)
+
+    assert t._blocks[g][fresh.block_id] is fresh
+    assert t._reservoir[g][old.block_id] is old
+    assert t.pick_anchor_block(g, now=1.0, require_bot_involved=False) is fresh
+
+
 def test_reservoir_revival_via_reply_edge() -> None:
     """L2-2 guardrail 3: a reservoir block's msgid reverse index survives,
     so a reply can revive it back to active pool."""
@@ -387,6 +417,28 @@ def test_reservoir_revival_via_reply_edge() -> None:
     # Block is back in active pool.
     assert len(t._blocks.get(g, {})) >= 1
     assert blk.block_id not in t._reservoir.get(g, {})
+
+
+def test_reservoir_revival_counts_arrival_once() -> None:
+    """Reviving ownership does not add a second activity bump."""
+    t = _tracker()
+    g = "g1"
+    block = t.observe(g, message_id=1, speaker="u1", text="old", now=0.0)
+    t._active(g, now=10_000.0)
+    t._decay_activity(block, 10_001.0)
+    before = block.activity
+
+    revived = t.observe(
+        g,
+        message_id=2,
+        speaker="u2",
+        text="reply",
+        reply_to_sender_id="u1",
+        reply_to_message_id=1,
+        now=10_001.0,
+    )
+
+    assert revived.activity == pytest.approx(before + 1.0)
 
 
 def test_guardrail_3_msgid_index_survives_reservoir() -> None:
@@ -419,4 +471,3 @@ def test_guardrail_1_candidate_pool_includes_reservoir() -> None:
                     now=10_001.0)
     # Should revive block A (high similarity), not open a new one.
     assert 1 in blk.message_ids
-

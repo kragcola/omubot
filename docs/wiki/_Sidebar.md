@@ -6,6 +6,7 @@
 - [表达学习](Style-Learning)
 - [对话归档](Conversation-Archive)
 - [知识库](Knowledge-System)
+- [数据库课程交付 2026](Database-Coursework-2026)
 - [配置](Configuration)
 - [轻量语义检索](Semantic-Retrieval)
 - [命令](Commands)

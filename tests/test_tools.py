@@ -1,13 +1,72 @@
 """工具系统测试：注册表、SSRF 校验、鉴权。"""
 
+import asyncio
+from typing import Any
+
 import pytest
 
+from services.tools.base import Tool
 from services.tools.context import ToolContext
 from services.tools.datetime_tool import DateTimeTool
 from services.tools.group_admin import MuteUserTool
 from services.tools.registry import ToolRegistry
 from services.tools.web_fetch import _is_safe_url
 from services.tools.web_search import WebSearchTool
+
+
+class _BlockingTool(Tool):
+    def __init__(self, name: str = "blocking") -> None:
+        self._name = name
+        self.entered = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.completed = False
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return "blocks until cancelled"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {}
+
+    async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
+        self.entered.set()
+        try:
+            await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        self.completed = True
+        return "completed"
+
+
+class _CancellationSwallowingTool(_BlockingTool):
+    def __init__(self) -> None:
+        super().__init__("swallowing")
+        self.cancel_count = 0
+
+    async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
+        try:
+            await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            self.cancel_count += 1
+        try:
+            await asyncio.sleep(0.15)
+        except asyncio.CancelledError:
+            self.cancel_count += 1
+            raise
+        self.completed = True
+        return "late success"
+
+
+class _InternalTimeoutTool(_BlockingTool):
+    async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
+        raise TimeoutError("tool-owned timeout")
+
 
 # ── SSRF 校验 ──
 
@@ -66,6 +125,72 @@ async def test_registry_empty() -> None:
     assert registry.empty
     registry.register(DateTimeTool())
     assert not registry.empty
+
+
+async def test_registry_rejects_duplicate_tool_name() -> None:
+    registry = ToolRegistry()
+    original = _BlockingTool("duplicate")
+    registry.register(original)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        registry.register(_BlockingTool("duplicate"))
+
+    assert registry.get("duplicate") is original
+
+
+async def test_registry_tool_deadline_cancels_execution() -> None:
+    registry = ToolRegistry(default_timeout_seconds=0.02)
+    tool = _BlockingTool()
+    registry.register(tool)
+
+    result = await registry.call(tool.name, "{}", ToolContext(user_id="123"))
+
+    assert "超时" in result
+    assert tool.cancelled.is_set()
+    assert tool.completed is False
+
+
+async def test_registry_outer_cancellation_propagates() -> None:
+    registry = ToolRegistry(default_timeout_seconds=10)
+    tool = _BlockingTool()
+    registry.register(tool)
+
+    task = asyncio.create_task(
+        registry.call(tool.name, "{}", ToolContext(user_id="123"))
+    )
+    await tool.entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert tool.cancelled.is_set()
+    assert tool.completed is False
+
+
+async def test_registry_deadline_cannot_be_bypassed_by_swallowing_cancel() -> None:
+    registry = ToolRegistry(default_timeout_seconds=0.02)
+    tool = _CancellationSwallowingTool()
+    registry.register(tool)
+
+    started_at = asyncio.get_running_loop().time()
+    result = await registry.call(tool.name, "{}", ToolContext(user_id="123"))
+    elapsed = asyncio.get_running_loop().time() - started_at
+    await asyncio.sleep(0.05)
+
+    assert elapsed < 0.08
+    assert "超时" in result
+    assert tool.cancel_count >= 2
+    assert tool.completed is False
+
+
+async def test_registry_does_not_misclassify_tool_owned_timeout_error() -> None:
+    registry = ToolRegistry(default_timeout_seconds=10)
+    tool = _InternalTimeoutTool("internal_timeout")
+    registry.register(tool)
+
+    result = await registry.call(tool.name, "{}", ToolContext(user_id="123"))
+
+    assert result == "工具执行出错，请稍后重试"
 
 
 # ── 群管理鉴权 ──

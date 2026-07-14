@@ -19,6 +19,39 @@ plugins/<name>/
 
 `class` 名称建议以 `Plugin` 结尾，`name` 用于标识。需要兼容旧导入时，在 `__init__.py` re-export 关键类和函数。
 
+`plugin.json` 是必需的 canonical ManifestV3。以下 payload 可直接通过 strict parser；对应的 defaults/schema 文件也必须存在：
+
+```json
+{
+  "manifest_version": 3,
+  "name": "hello",
+  "display_name": {"zh": "问候", "en": "Hello"},
+  "description": "演示插件",
+  "version": "0.1.0",
+  "priority": 100,
+  "tier": "user",
+  "toggle_policy": "runtime",
+  "category": "tool",
+  "permissions": [],
+  "capabilities": [],
+  "author": "Omubot",
+  "min_omubot_version": "1.5.0",
+  "dependencies": {},
+  "required_dependencies": {},
+  "optional_dependencies": {},
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "hot",
+    "restart_required_fields": []
+  },
+  "store": {"visibility": "local", "marketplace_id": ""},
+  "capability_only": false
+}
+```
+
+插件 ID 必须以小写字母开头，且只含小写字母、数字和下划线。未知字段、坏 SemVer、目录名不一致、配置路径越界、重复 runtime name 或更高的最低 Omubot 版本都会阻止加载。提交前运行 `uv run python scripts/check_plugin_manifests.py`。
+
 ## 最简插件
 
 ```python
@@ -34,7 +67,9 @@ class HelloPlugin(AmadeusPlugin):
         pass  # 初始化资源
 ```
 
-### 属性一览
+### 运行时类兼容属性
+
+类属性用于实例运行和 CI parity，不能替代 `plugin.json`。其中 `enabled` 是运行时治理状态，不是 manifest 顶层字段。
 
 | 属性 | 类型 | 必需 | 说明 |
 |------|------|------|------|
@@ -42,9 +77,11 @@ class HelloPlugin(AmadeusPlugin):
 | `description` | `str` | 是 | 一行简介，显示在 `/plugins` 列表中 |
 | `version` | `str` | 是 | 语义化版本号 |
 | `priority` | `int` | 是 | 越小越先执行（见下方优先级表） |
-| `author` | `str` | 否 | 开发者签名，默认 `"Omubot"` |
-| `dependencies` | `dict` | 否 | 依赖声明，如 `{"web_search": ">=0.1.0"}` |
-| `enabled` | `bool` | 否 | 是否启用，默认 `True` |
+| `author` | `str` | 否 | 运行时兼容元数据；manifest 中必填 |
+| `dependencies` | `dict` | 否 | legacy required alias；新插件使用下面两项 |
+| `required_dependencies` | `dict` | 否 | 缺失/禁用/不兼容时阻止插件启动的依赖 |
+| `optional_dependencies` | `dict` | 否 | 可用时参与排序、不可用时允许降级的依赖 |
+| `enabled` | `bool` | 否 | 运行时治理状态，默认 `True`；不得写入 manifest |
 
 ### 优先级规范
 
@@ -54,7 +91,7 @@ class HelloPlugin(AmadeusPlugin):
 | 1-9 | 基础设施工具 | DateTimePlugin, WebSearchPlugin |
 | 10-49 | 业务插件 | FoodPlugin, StickerPlugin, MemoPlugin |
 | 50-99 | 辅助业务 | — |
-| 100-199 | 后台任务 | HistoryLoaderPlugin, DreamPlugin |
+| 100-199 | 后台任务 | DreamPlugin |
 | 200-299 | 管线拦截 | EchoPlugin, ElementDetectorPlugin |
 | 300+ | 第三方/实验性 | DebugCommandPlugin |
 

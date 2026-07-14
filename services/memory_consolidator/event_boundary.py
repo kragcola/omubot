@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any, cast
 
 
 class EventBoundaryDetector:
@@ -17,7 +18,11 @@ class EventBoundaryDetector:
         query_recent = getattr(message_log, "query_recent", None)
         if not callable(query_recent):
             return False
-        rows = await query_recent(str(group_id), limit=1)
+        query_recent_call = cast(
+            Callable[..., Awaitable[Sequence[Mapping[str, Any]]]],
+            query_recent,
+        )
+        rows = await query_recent_call(str(group_id), limit=1)
         if not rows:
             return False
         try:
@@ -37,7 +42,12 @@ class EventBoundaryDetector:
         recent_profiles = getattr(mood_engine, "recent_profiles", None)
         if not callable(recent_profiles):
             return False
-        profiles = recent_profiles(group_id=str(group_id), session_id=f"group_{group_id}", within_s=1800.0)
+        recent_profiles_call = cast(Callable[..., Sequence[Any]], recent_profiles)
+        profiles = recent_profiles_call(
+            group_id=str(group_id),
+            session_id=f"group_{group_id}",
+            within_s=1800.0,
+        )
         if len(profiles) < 2:
             return False
         first = float(getattr(profiles[0], "valence", 0.0))

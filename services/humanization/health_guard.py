@@ -10,6 +10,14 @@ from typing import NamedTuple
 
 from loguru import logger
 
+from kernel.background_tasks import (
+    BackgroundTaskSupervisor,
+    RestartPolicy,
+    ShutdownPolicy,
+    TaskKind,
+    TaskSpec,
+)
+
 _DEGRADED_GROUPS: dict[str, float] = {}
 _HEALTHY_SINCE: dict[str, float] = {}
 
@@ -37,6 +45,7 @@ class HumanizationHealthGuard:
         recover_threshold: float = 0.85,
         recover_s: float = 600.0,
         now: Callable[[], float] | None = None,
+        task_supervisor: BackgroundTaskSupervisor | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.interval_s = interval_s
@@ -45,6 +54,7 @@ class HumanizationHealthGuard:
         self.recover_s = recover_s
         self._now = now or time.time
         self._task: asyncio.Task[None] | None = None
+        self._task_supervisor = task_supervisor
     def poll_once(self) -> list[CacheHitSample]:
         if not self.db_path.is_file():
             return []
@@ -83,14 +93,32 @@ class HumanizationHealthGuard:
                 _HEALTHY_SINCE.pop(gid, None)
     def start(self) -> None:
         if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._loop())
+            if self._task_supervisor is None:
+                self._task = asyncio.create_task(self._loop())
+            else:
+                self._task = self._task_supervisor.spawn(
+                    TaskSpec(
+                        name="humanization.health_guard",
+                        owner="services.humanization",
+                        kind=TaskKind.PERIODIC,
+                        restart=RestartPolicy.ON_FAILURE,
+                        shutdown=ShutdownPolicy.CANCEL,
+                        max_restarts=3,
+                        backoff_seconds=1.0,
+                        max_backoff_seconds=30.0,
+                    ),
+                    self._loop,
+                )
 
     async def stop(self) -> None:
         if self._task is None:
             return
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
+        if self._task_supervisor is not None:
+            await self._task_supervisor.stop_owner("services.humanization")
+        else:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
         self._task = None
 
     async def _loop(self) -> None:

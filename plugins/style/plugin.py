@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from kernel.config import load_plugin_config
 from kernel.types import AmadeusPlugin, PluginContext, PromptContext, ReplyContext
-from services.style import StyleStore
+from services.learning_extract_coordinator import (
+    ExtractRunParams,
+    run_coordinated_extract,
+)
+from services.style import StyleStore, run_style_manual_extract
 
 _L = logger.bind(channel="system")
 
@@ -48,6 +54,7 @@ class StylePlugin(AmadeusPlugin):
         self._owns_store = False
         self._provider_superseded: bool = False
         self._last_extract_monotonic: float = 0.0
+        self._tick_task: asyncio.Task[None] | None = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
         cfg = self._config_override or load_plugin_config("plugins/style/config.default.json", StyleConfig)
@@ -69,14 +76,15 @@ class StylePlugin(AmadeusPlugin):
 
         ctx_store = getattr(ctx, "style_store", None)
         if ctx_store is not None:
-            self._store = ctx_store
-            if not getattr(self._store, "initialized", False):
-                await self._store.init()
+            store = cast(StyleStore, ctx_store)
+            self._store = store
+            if not getattr(store, "initialized", False):
+                await store.init()
         else:
             db_path = Path(getattr(ctx, "storage_dir", Path("storage"))) / "style.db"
             self._store = StyleStore(db_path)
             await self._store.init()
-            ctx.style_store = self._store
+            cast(Any, ctx).style_store = self._store
             self._owns_store = True
         _L.info(
             "style plugin enabled | max_items={} max_chars={} global_groups={}",
@@ -133,6 +141,12 @@ class StylePlugin(AmadeusPlugin):
 
     async def on_shutdown(self, ctx: PluginContext) -> None:
         del ctx
+        tick_task = self._tick_task
+        self._tick_task = None
+        if tick_task is not None:
+            if not tick_task.done():
+                tick_task.cancel()
+            await asyncio.gather(tick_task, return_exceptions=True)
         if self._owns_store and self._store is not None:
             await self._store.close()
         self._store = None
@@ -187,6 +201,19 @@ class StylePlugin(AmadeusPlugin):
     async def on_tick(self, ctx: PluginContext) -> None:
         if not self._enabled or self._store is None:
             return
+        if self._tick_task is not None and not self._tick_task.done():
+            _L.debug("style tick skipped | background job still running")
+            return
+        self._tick_task = asyncio.create_task(
+            self._run_tick_job(ctx),
+            name="style:periodic-extract",
+        )
+        self._tick_task.add_done_callback(self._on_tick_job_done)
+
+    async def _run_tick_job(self, ctx: PluginContext) -> None:
+        style_store = self._store
+        if not self._enabled or style_store is None:
+            return
         from services import learning_settings
 
         settings = learning_settings.load(getattr(ctx, "storage_dir", "storage"))
@@ -197,16 +224,14 @@ class StylePlugin(AmadeusPlugin):
         now = time.monotonic()
         if now - self._last_extract_monotonic < interval_s:
             return
-        self._last_extract_monotonic = now
-        message_log = getattr(ctx, "message_log", None)
+        message_log = getattr(ctx, "msg_log", None)
         llm_client = getattr(ctx, "llm_client", None)
         if message_log is None or llm_client is None:
             return
-        try:
-            from admin.routes.api.style import run_style_manual_extract
 
-            await run_style_manual_extract(
-                style_store=self._store,
+        async def extract() -> dict[str, Any]:
+            return await run_style_manual_extract(
+                style_store=style_store,
                 message_log=message_log,
                 llm_client=llm_client,
                 slang_store=getattr(ctx, "slang_store", None),
@@ -214,9 +239,36 @@ class StylePlugin(AmadeusPlugin):
                 limit=40,
                 max_batches=1,
             )
+
+        try:
+            result = await run_coordinated_extract(
+                ctx,
+                noun="style",
+                params=ExtractRunParams(
+                    limit=40,
+                    max_batches=1,
+                    timeout_seconds=120.0,
+                ),
+                runner=extract,
+            )
+            if result.get("ok") is False:
+                _L.debug(
+                    "style periodic extract skipped | error={}",
+                    result.get("error"),
+                )
+                return
+            self._last_extract_monotonic = now
             _L.info("style periodic extract completed")
         except Exception as exc:
             _L.warning("style periodic extract failed | err={}", exc)
+
+    def _on_tick_job_done(self, task: asyncio.Task[None]) -> None:
+        if self._tick_task is task:
+            self._tick_task = None
+        if task.cancelled():
+            return
+        with contextlib.suppress(Exception):
+            task.result()
 
 
 def config_schema() -> dict[str, Any]:

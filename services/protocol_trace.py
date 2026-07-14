@@ -27,7 +27,7 @@ class ProtocolTraceStore:
         if bot is None or not hasattr(bot, "call_api"):
             return False
         bot_id = id(bot)
-        if bot_id in self._wrapped_bot_ids or getattr(bot, "_omubot_protocol_trace_wrapped", False):
+        if bot_id in self._wrapped_bot_ids or vars(bot).get("_omubot_protocol_trace_wrapped", False):
             return False
 
         original = bot.call_api

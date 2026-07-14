@@ -188,7 +188,11 @@ async def test_dispatch_tolerates_repeated_trailing_punctuation_on_subcommand(bo
     like_handler.assert_awaited_once()
 
 
-async def test_unknown_command_with_trailing_punctuation_still_does_not_match(bot, event, plugin_ctx) -> None:
+async def test_unknown_command_with_trailing_punctuation_is_consumed_by_command_layer(
+    bot,
+    event,
+    plugin_ctx,
+) -> None:
     handler = AsyncMock()
     dispatcher = CommandDispatcher(_Bus([Command(name="debug", handler=handler)]))
 
@@ -202,8 +206,10 @@ async def test_unknown_command_with_trailing_punctuation_still_does_not_match(bo
         plugin_ctx=plugin_ctx,
     )
 
-    assert matched is False
+    assert matched is True
     handler.assert_not_awaited()
+    bot.send.assert_awaited_once()
+    assert "/unknown" in str(bot.send.await_args)
 
 
 async def test_dispatch_handler_failure_replies_to_user(bot, event, plugin_ctx) -> None:

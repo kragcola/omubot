@@ -28,6 +28,7 @@ from services.plugin_config import PluginConfigStore
 from services.plugin_state import PluginStateStore
 from services.protocol_trace import ProtocolConnectionHistory, ProtocolTraceStore
 from services.slang import SlangSettings, SlangStore
+from services.storage.catalog import DEFAULT_DATABASE_CATALOG
 from services.tools.base import Tool
 from services.tools.registry import ToolRegistry
 
@@ -957,6 +958,44 @@ def test_plugin_state_refuses_locked_system_plugin(tmp_path: Path) -> None:
     assert state_store.get("chat") is None
 
 
+def test_context_plugin_uses_canonical_system_identity_across_admin_routes(
+    tmp_path: Path,
+) -> None:
+    bus = PluginBus()
+    plugin = _AlphaPlugin()
+    plugin.name = "context"
+    bus.register(plugin)
+    state_store = PluginStateStore(tmp_path / "plugin-state.json")
+    plugin_root = tmp_path / "plugins"
+    plugin_root.mkdir()
+    app = FastAPI()
+    app.include_router(
+        create_plugins_router(
+            bus=bus,
+            plugin_state_store=state_store,
+            plugin_root=plugin_root,
+        ),
+        prefix="/api/admin",
+    )
+    client = TestClient(app)
+
+    listed = client.get("/api/admin/plugins?include_system=true").json()["plugins"]
+    context = next(item for item in listed if item["name"] == "context")
+    detail = client.get("/api/admin/plugins/context").json()
+    disabled = client.post(
+        "/api/admin/plugins/context/state",
+        json={"enabled": False},
+    ).json()
+
+    for payload in (context, detail):
+        assert payload["tier"] == "system"
+        assert payload["toggle_policy"] == "locked"
+        assert payload["locked"] is True
+    assert disabled["ok"] is False
+    assert plugin.enabled is True
+    assert state_store.get("context") is None
+
+
 def test_plugin_list_hides_system_plugins_by_default(tmp_path: Path) -> None:
     plugin_root = tmp_path / "plugins"
     plugin_root.mkdir()
@@ -1729,11 +1768,10 @@ def test_system_runtime_errors_endpoint_and_health(tmp_path: Path) -> None:
 def test_system_services_health_endpoint(tmp_path: Path) -> None:
     storage_dir = tmp_path / "storage"
     storage_dir.mkdir()
-    for name in (
-        "messages.db", "memory_cards.db", "slang.db", "usage.db",
-        "style.db", "knowledge_graph.db", "knowledge_index.db", "learning_normalizer.db",
-    ):
-        with sqlite3.connect(storage_dir / name) as conn:
+    for spec in DEFAULT_DATABASE_CATALOG.all():
+        db_path = tmp_path / spec.path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(db_path) as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS marker (id INTEGER PRIMARY KEY)")
 
     config = BotConfig.model_validate({
@@ -2186,4 +2224,3 @@ def test_persona_hot_reload_rejects_invalid_persona_id() -> None:
     assert data["ok"] is False
     assert "persona_id" in data["error"]
     assert runtime.loaded_paths == []
-

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+
+from kernel.background_tasks import BackgroundTaskSupervisor
 from services.scheduler_hawkes import HawkesCache, HawkesOfflineRefresher
 
 
@@ -30,3 +33,23 @@ async def test_hawkes_offline_refresher_updates_cache(tmp_path) -> None:
     snapshot = cache.load("100", max_age_s=9_999_999_999)
     assert snapshot is not None
     assert snapshot.message_count == 2
+
+
+async def test_hawkes_refresher_loop_is_owned_by_supervisor(tmp_path) -> None:
+    supervisor = BackgroundTaskSupervisor()
+    refresher = HawkesOfflineRefresher(
+        message_log=_MessageLog(),
+        cache=HawkesCache(tmp_path / "hawkes.db"),
+        task_supervisor=supervisor,
+    )
+
+    refresher.start()
+    await asyncio.sleep(0)
+
+    [snapshot] = supervisor.snapshot()
+    assert snapshot.name == "scheduler_hawkes.refresh"
+    assert snapshot.owner == "services.scheduler_hawkes"
+    await refresher.stop()
+    assert supervisor.snapshot()[0].state == "cancelled"
+
+    await supervisor.stop()

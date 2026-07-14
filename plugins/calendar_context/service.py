@@ -18,12 +18,12 @@ from bs4.exceptions import FeatureNotFound
 from loguru import logger
 
 try:
-    import chinese_calendar as chinese_holiday_lib
+    import chinese_calendar as chinese_holiday_lib  # pyright: ignore[reportMissingImports]
 except Exception:  # pragma: no cover - optional runtime fallback
     chinese_holiday_lib = None
 
 try:
-    from lunardate import LunarDate
+    from lunardate import LunarDate  # pyright: ignore[reportMissingImports, reportMissingModuleSource]
 except Exception:  # pragma: no cover - optional runtime fallback
     LunarDate = None
 
@@ -236,6 +236,11 @@ class CalendarContextService:
                     if inner:
                         expanded.add(inner)
         self._self_names = {name for name in expanded if name}
+
+    @property
+    def self_names(self) -> tuple[str, ...]:
+        """Return the configured identity names without exposing mutable state."""
+        return tuple(sorted(self._self_names))
 
     def load_dataset(
         self,

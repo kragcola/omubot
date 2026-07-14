@@ -79,7 +79,7 @@ class ElementDetector:
 
 class ElementDetectorPlugin(AmadeusPlugin):
     name = "element_detector"
-    description = "要素察觉：识别特定句式并回复（预设模板或LLM生成）"
+    description = "要素察觉：识别特定句式并回复预设模板或 LLM 生成内容"
     version = "1.1.3"
     priority = 210
 

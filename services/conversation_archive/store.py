@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -15,6 +16,40 @@ from loguru import logger
 from services.storage import close_with_checkpoint, connect_sqlite
 
 _L = logger.bind(channel="debug")
+
+
+async def _await_task_through_cancellation(
+    task: asyncio.Task[Any],
+    *,
+    suppress_cancellation: bool = False,
+) -> tuple[Any, asyncio.CancelledError | None, int]:
+    """Wait for one cleanup/commit task without letting repeated cancel detach it."""
+    current = asyncio.current_task()
+    baseline_cancelling = current.cancelling() if current is not None else 0
+    first_cancellation: asyncio.CancelledError | None = None
+    cancellation_count = 0
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation_count += 1
+            if first_cancellation is None:
+                first_cancellation = exc
+    if suppress_cancellation:
+        _suppress_caught_cancellations(
+            cancellation_count,
+            baseline=baseline_cancelling,
+        )
+    return task.result(), first_cancellation, cancellation_count
+
+
+def _suppress_caught_cancellations(count: int, *, baseline: int) -> None:
+    current = asyncio.current_task()
+    if current is None:
+        return
+    added_during_barrier = max(0, current.cancelling() - baseline)
+    for _ in range(max(count, added_during_barrier)):
+        current.uncancel()
 
 _CREATE_LEGACY_GROUP_MESSAGES = """
 CREATE TABLE IF NOT EXISTS group_messages (
@@ -715,22 +750,44 @@ class ConversationArchive:
                 to_pk = self._last_message_pk(rows, fallback=max_pk)
         backtrack_from_pk = max(0, from_pk - max(0, int(backtrack_window)))
         to_created_at = self._last_created_at(rows, fallback=from_created_at)
-        run_id = await self.start_scan_run(
-            scanner_name=scanner_name,
-            chat_type=chat_type,
-            chat_id=chat_id,
-            scope_key=scope_key,
-            from_message_pk=from_pk,
-            to_message_pk=to_pk,
-            backtrack_from_message_pk=backtrack_from_pk,
-            meta={
-                "source": "archive",
-                "legacy_group_id": legacy_group_id,
-                "limit": safe_limit,
-                "bootstrap_to_recent": bootstrap_to_recent,
-                **(meta or {}),
-            },
+        start_task = asyncio.create_task(
+            self.start_scan_run(
+                scanner_name=scanner_name,
+                chat_type=chat_type,
+                chat_id=chat_id,
+                scope_key=scope_key,
+                from_message_pk=from_pk,
+                to_message_pk=to_pk,
+                backtrack_from_message_pk=backtrack_from_pk,
+                meta={
+                    "source": "archive",
+                    "legacy_group_id": legacy_group_id,
+                    "limit": safe_limit,
+                    "bootstrap_to_recent": bootstrap_to_recent,
+                    **(meta or {}),
+                },
+            ),
+            name=f"archive-scan-start:{scanner_name}:{chat_id}",
         )
+        run_id, cancellation, _ = await _await_task_through_cancellation(start_task)
+        if cancellation is not None:
+            cleanup_task = asyncio.create_task(
+                self.finish_scan_run(
+                    str(run_id),
+                    status="abandoned",
+                    error="cancelled before scan batch return",
+                ),
+                name=f"archive-scan-return-cleanup:{run_id}",
+            )
+            try:
+                await _await_task_through_cancellation(cleanup_task)
+            except Exception as exc:
+                _L.error(
+                    "archive scan return cleanup failed | run={} error={}",
+                    run_id,
+                    exc,
+                )
+            raise cancellation
         return {
             "source": "archive",
             "scanner_name": scanner_name,
@@ -769,31 +826,48 @@ class ConversationArchive:
         if batch.get("source") != "archive":
             return
         run_id = str(batch.get("run_id") or "")
-        if run_id:
-            await self.finish_scan_run(
-                run_id,
-                status=status,
-                scanned_count=scanned_count,
-                extracted_count=extracted_count,
-                filtered_count=filtered_count,
-                saved_count=saved_count,
-                error=error,
-                meta=meta,
+
+        async def commit_finish() -> None:
+            if run_id:
+                await self.finish_scan_run(
+                    run_id,
+                    status=status,
+                    scanned_count=scanned_count,
+                    extracted_count=extracted_count,
+                    filtered_count=filtered_count,
+                    saved_count=saved_count,
+                    error=error,
+                    meta=meta,
+                )
+            if (
+                status != "success"
+                or not advance_cursor
+                or not batch.get("can_advance")
+            ):
+                return
+            await self.upsert_cursor(
+                scanner_name=str(batch["scanner_name"]),
+                chat_type=str(batch["chat_type"]),
+                chat_id=str(batch["chat_id"]),
+                scope_key=str(batch.get("scope_key") or "chat"),
+                required=bool(batch.get("required", True)),
+                last_message_pk=int(batch.get("to_message_pk") or 0),
+                last_created_at=float(batch.get("last_created_at") or 0),
+                scanner_version=str(batch.get("scanner_version") or ""),
+                params_hash=str(batch.get("params_hash") or ""),
+                status="active",
+                meta={"last_run_id": run_id, **(meta or {})},
             )
-        if status != "success" or not advance_cursor or not batch.get("can_advance"):
-            return
-        await self.upsert_cursor(
-            scanner_name=str(batch["scanner_name"]),
-            chat_type=str(batch["chat_type"]),
-            chat_id=str(batch["chat_id"]),
-            scope_key=str(batch.get("scope_key") or "chat"),
-            required=bool(batch.get("required", True)),
-            last_message_pk=int(batch.get("to_message_pk") or 0),
-            last_created_at=float(batch.get("last_created_at") or 0),
-            scanner_version=str(batch.get("scanner_version") or ""),
-            params_hash=str(batch.get("params_hash") or ""),
-            status="active",
-            meta={"last_run_id": run_id, **(meta or {})},
+
+        finish_task = asyncio.create_task(
+            commit_finish(),
+            name=f"archive-scan-finish:{run_id or 'legacy'}",
+        )
+        # Finishing a batch is a commit barrier. Once it starts, the run and
+        # cursor outcome wins over cancellation arriving inside that window.
+        await _await_task_through_cancellation(
+            finish_task,
+            suppress_cancellation=True,
         )
 
     async def _legacy_scan_batch(

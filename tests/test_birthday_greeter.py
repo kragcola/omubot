@@ -124,12 +124,28 @@ async def test_greet_multiple_groups(greeter: BirthdayGreeter, mock_bot: MagicMo
     assert sent_groups == {111, 222}
 
 
-async def test_send_failure_still_records_greeted(greeter: BirthdayGreeter, mock_bot: MagicMock) -> None:
-    """A failed send for one group must not crash the run; the member is still
-    marked greeted so a retry next tick doesn't double-send to working groups."""
+async def test_all_send_failures_do_not_record_greeted(
+    greeter: BirthdayGreeter,
+    mock_bot: MagicMock,
+) -> None:
     greeter.add_member("123", "小明", "03-15", ["111"])
     _pin_today(greeter, "03-15")
     mock_bot.send_group_msg.side_effect = RuntimeError("network")
+
+    greeted = await greeter.check_and_greet(mock_bot)
+
+    assert greeted == []
+    assert greeter.sent_log == {}
+
+
+async def test_partial_send_failure_still_records_greeted(
+    greeter: BirthdayGreeter,
+    mock_bot: MagicMock,
+) -> None:
+    """A later retry must not duplicate a wish that reached another group."""
+    greeter.add_member("123", "小明", "03-15", ["111", "222"])
+    _pin_today(greeter, "03-15")
+    mock_bot.send_group_msg.side_effect = [None, RuntimeError("network")]
 
     greeted = await greeter.check_and_greet(mock_bot)
 
@@ -145,7 +161,7 @@ async def test_send_failure_still_records_greeted(greeter: BirthdayGreeter, mock
 async def test_old_sent_log_cleaned(greeter: BirthdayGreeter, mock_bot: MagicMock) -> None:
     # Seed an old log entry (well beyond the 7-day window) directly.
     greeter._data["sent_log"] = {"2020-01-01": ["999"]}
-    greeter.add_member("123", "小明", "03-15", ["g1"])
+    greeter.add_member("123", "小明", "03-15", ["111"])
     _pin_today(greeter, "03-15")
 
     await greeter.check_and_greet(mock_bot)

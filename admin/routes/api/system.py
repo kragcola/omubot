@@ -8,9 +8,12 @@ import re
 import shutil
 import time
 from collections.abc import Callable
+from importlib import import_module
 from typing import Any
 
 from fastapi import APIRouter
+
+from services.talk_schedule import TalkSchedule
 
 
 def create_system_router(
@@ -21,9 +24,24 @@ def create_system_router(
     bot: Any = None,
     ctx: Any = None,
     restart_executor: Callable[[int], None] | None = None,
+    talk_schedule: TalkSchedule | None = None,
 ) -> APIRouter:
     router = APIRouter()
     restart_tasks: list[asyncio.Task[None]] = []
+    injected_talk_schedule = talk_schedule
+    fallback_talk_schedule = TalkSchedule()
+
+    def _get_time_multiplier() -> float:
+        ts = injected_talk_schedule or getattr(ctx, "talk_schedule", None)
+        if ts is not None:
+            try:
+                return float(ts.get_time_multiplier())
+            except Exception:
+                pass
+        try:
+            return fallback_talk_schedule.get_time_multiplier()
+        except Exception:
+            return 1.0
 
     def _schedule_restart(delay_seconds: float = 0.6) -> bool:
         exit_fn = restart_executor or os._exit
@@ -262,7 +280,7 @@ def create_system_router(
         # System resources via psutil (preferred)
         used_psutil = False
         try:
-            import psutil
+            psutil = import_module("psutil")
 
             proc = psutil.Process(os.getpid())
             info["cpu_percent"] = psutil.cpu_percent(interval=0.1)
@@ -312,120 +330,9 @@ def create_system_router(
             "char_delay": getattr(h, "char_delay", 0.02),
         }
 
-    @router.get("/talk-schedule")
-    async def talk_schedule():
-        try:
-            from services.talk_schedule import get_time_multiplier
-            return {"time_multiplier": get_time_multiplier()}
-        except Exception:
-            return {"time_multiplier": 1.0}
-
-    @router.post("/backup")
-    async def backup(profile: str = "daily"):
-        from pathlib import Path
-
-        from services.storage.backup import BackupLockedError, BackupService
-
-        svc = BackupService(storage_dir=Path("storage"), repo_root=Path.cwd())
-        try:
-            manifest = svc.create(profile=profile, host_mode=False)
-        except BackupLockedError:
-            return {"ok": False, "error": "另一个备份正在进行中"}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-        if manifest.get("status") == "no_space":
-            return {"ok": False, "error": "磁盘空间不足"}
-
-        summary = manifest.get("summary", {})
-        return {
-            "ok": summary.get("trusted", False),
-            "backup_id": manifest.get("backup_id"),
-            "summary": summary,
-            "complete": manifest.get("complete", True),
-            "skipped_host_only": manifest.get("skipped_host_only", []),
-            "message": f"备份已创建: {manifest.get('backup_id')}",
-        }
-
-    @router.get("/backup/list")
-    async def backup_list(profile: str = "daily", all_profiles: bool = False):
-        from pathlib import Path
-
-        from services.storage.backup import BackupService
-
-        svc = BackupService(storage_dir=Path("storage"), repo_root=Path.cwd())
-        if all_profiles:
-            all_backups = []
-            for p in ("daily", "pre-change", "migration"):
-                all_backups.extend(svc.list_backups(profile=p))
-            all_backups.sort(
-                key=lambda b: b.get("created_at", ""), reverse=True
-            )
-            return {"backups": all_backups}
-        return {"backups": svc.list_backups(profile=profile)}
-
-    @router.get("/backup/settings")
-    async def get_backup_settings():
-        return {
-            "enabled": config.backup.enabled,
-            "daily_time": config.backup.daily_time,
-            "keep_days": config.backup.keep_days,
-            "default_profile": config.backup.default_profile,
-            "pre_change_enabled": config.backup.pre_change_enabled,
-            "pre_change_keep_count": config.backup.pre_change_keep_count,
-        }
-
-    @router.post("/backup/settings")
-    async def update_backup_settings(payload: dict):
-        import json
-        from pathlib import Path
-
-        from kernel.config import BackupConfig
-
-        try:
-            new_config = BackupConfig.model_validate(payload)
-        except Exception as e:
-            return {"ok": False, "error": f"校验失败: {e}"}
-
-        config_path = Path("config/config.json")
-        if not config_path.exists():
-            return {"ok": False, "error": "config.json 不存在"}
-
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-        new_values = new_config.model_dump()
-        raw["backup"] = new_values
-
-        serialized = json.dumps(raw, ensure_ascii=False, indent=2)
-        tmp = config_path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(serialized)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp, config_path)
-
-        reload_ok = True
-        reload_error = None
-        try:
-            sched = getattr(ctx, "backup_scheduler", None) if ctx is not None else None
-            if sched is not None:
-                sched.reload(
-                    daily_time=new_config.daily_time,
-                    keep_days=new_config.keep_days,
-                    default_profile=new_config.default_profile,
-                    enabled=new_config.enabled,
-                    quick_check_enabled=new_config.quick_check_enabled,
-                    quick_check_interval_minutes=new_config.quick_check_interval_minutes,
-                )
-        except Exception as e:
-            reload_ok = False
-            reload_error = str(e)
-
-        return {
-            "ok": True,
-            "settings": new_values,
-            "reload_ok": reload_ok,
-            "reload_error": reload_error,
-        }
+    @router.get("/talk-schedule", name="talk_schedule")
+    async def talk_schedule_info():
+        return {"time_multiplier": _get_time_multiplier()}
 
     @router.post("/system/restart")
     async def restart():

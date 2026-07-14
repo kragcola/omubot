@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
 
+from services.talk_schedule import TalkSchedule
+
 CST = ZoneInfo("Asia/Shanghai")
 
 
@@ -16,11 +18,12 @@ def create_schedule_router(
     *,
     mood_engine: Any = None,
     schedule_store: Any = None,
-    talk_schedule: Any = None,
+    talk_schedule: TalkSchedule | None = None,
     dream_agent: Any = None,
     ctx: Any = None,
 ) -> APIRouter:
     router = APIRouter()
+    fallback_talk_schedule = TalkSchedule()
 
     def _mood():
         return mood_engine or getattr(ctx, "mood_engine", None)
@@ -28,17 +31,16 @@ def create_schedule_router(
     def _sched_store():
         return schedule_store or getattr(ctx, "schedule_store", None)
 
-    def _get_time_multiplier():
-        """Resolve time multiplier — try ctx then direct import."""
+    def _get_time_multiplier() -> float | None:
+        """Resolve the injected schedule, then fall back to the default store."""
         ts = talk_schedule or getattr(ctx, "talk_schedule", None)
         if ts is not None:
             try:
-                return ts.get_time_multiplier()
+                return float(ts.get_time_multiplier())
             except Exception:
                 pass
         try:
-            from services.talk_schedule import get_time_multiplier
-            return get_time_multiplier()
+            return fallback_talk_schedule.get_time_multiplier()
         except Exception:
             return None
 

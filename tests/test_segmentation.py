@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernel.config import ReplySegmentationConfig
-from plugins.chat.plugin import ChatPlugin
+from plugins.debug_commands.plugin import DebugCommandPlugin
 from services.llm.segmentation import segment_reply
 
 
@@ -197,7 +197,7 @@ def test_fixture_cases_cover_real_examples() -> None:
 
 @pytest.mark.asyncio
 async def test_debug_split_uses_new_segmenter_and_reports_reasons() -> None:
-    plugin = ChatPlugin()
+    plugin = DebugCommandPlugin()
     sent: list[str] = []
     bot = SimpleNamespace()
 

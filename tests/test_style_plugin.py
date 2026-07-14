@@ -1,10 +1,16 @@
+import asyncio
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
+from kernel.bus import PluginBus
 from kernel.types import Identity, PluginContext, PromptContext, ReplyContext
 from plugins.style.plugin import StyleConfig, StylePlugin
+from services.learning_extract_coordinator import LearningExtractCoordinator
 from services.style import NewStyleExpression, StyleStore
 
 
@@ -15,7 +21,7 @@ def test_style_manifest_declares_reply_permission() -> None:
 
 
 @pytest.fixture
-async def style_store(tmp_path) -> StyleStore:
+async def style_store(tmp_path) -> AsyncIterator[StyleStore]:
     store = StyleStore(tmp_path / "style.db")
     await store.init()
     yield store
@@ -34,7 +40,7 @@ def _prompt_ctx(group_id: str, text: str) -> PromptContext:
 
 def _plugin_ctx(store: StyleStore) -> PluginContext:
     ctx = PluginContext()
-    ctx.style_store = store
+    cast(Any, ctx).style_store = store
     return ctx
 
 
@@ -147,3 +153,262 @@ async def test_style_plugin_disabled_does_not_create_block(style_store: StyleSto
     await plugin.on_pre_prompt(prompt_ctx)
 
     assert prompt_ctx.blocks == []
+
+
+@pytest.mark.asyncio
+async def test_style_tick_uses_canonical_msg_log_and_calls_coordinator(
+    style_store: StyleStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = StylePlugin(StyleConfig())
+    ctx = PluginContext(
+        storage_dir=tmp_path,
+        msg_log=object(),
+        llm_client=object(),
+    )
+    cast(Any, ctx).style_store = style_store
+    await plugin.on_startup(ctx)
+    extract_called = asyncio.Event()
+
+    async def coordinated_extract(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        extract_called.set()
+        return {"ok": True}
+
+    coordinator = AsyncMock(side_effect=coordinated_extract)
+    monkeypatch.setattr(
+        "services.learning_settings.load",
+        lambda _storage_dir: {
+            "style": {
+                "extract_enabled": True,
+                "extract_interval_minutes": 0,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "plugins.style.plugin.run_coordinated_extract",
+        coordinator,
+    )
+
+    try:
+        await plugin.on_tick(ctx)
+        await asyncio.wait_for(extract_called.wait(), timeout=1.0)
+    finally:
+        await plugin.on_shutdown(ctx)
+
+    coordinator.assert_awaited_once()
+    await_args = coordinator.await_args
+    assert await_args is not None
+    assert await_args.kwargs["noun"] == "style"
+
+
+@pytest.mark.asyncio
+async def test_style_tick_is_reachable_through_manifest_governed_plugin_bus(
+    style_store: StyleStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = StylePlugin(StyleConfig())
+    bus = PluginBus()
+    bus.register(plugin)
+    coordinator = LearningExtractCoordinator()
+    message_log = object()
+    llm_client = object()
+    ctx = PluginContext(
+        storage_dir=tmp_path,
+        msg_log=message_log,
+        llm_client=llm_client,
+    )
+    cast(Any, ctx).style_store = style_store
+    cast(Any, ctx).learning_extract_coordinator = coordinator
+    extract_called = asyncio.Event()
+
+    async def manual_extract_runner(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        extract_called.set()
+        return {"ok": True}
+
+    manual_extract = AsyncMock(side_effect=manual_extract_runner)
+    monkeypatch.setattr(
+        "services.learning_settings.load",
+        lambda _storage_dir: {
+            "style": {
+                "extract_enabled": True,
+                "extract_interval_minutes": 0,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "plugins.style.plugin.run_style_manual_extract",
+        manual_extract,
+    )
+
+    await bus.fire_on_startup(ctx)
+    try:
+        await bus.fire_on_tick(ctx)
+        await asyncio.wait_for(extract_called.wait(), timeout=1.0)
+    finally:
+        await bus.fire_on_shutdown(ctx)
+        await coordinator.stop()
+
+    manual_extract.assert_awaited_once_with(
+        style_store=style_store,
+        message_log=message_log,
+        llm_client=llm_client,
+        slang_store=None,
+        auto_approve=False,
+        limit=40,
+        max_batches=1,
+    )
+    assert len(coordinator.runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_style_tick_does_not_block_bus_or_start_duplicate_extract(
+    style_store: StyleStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = StylePlugin(StyleConfig())
+    bus = PluginBus()
+    bus.register(plugin)
+    ctx = PluginContext(
+        storage_dir=tmp_path,
+        msg_log=object(),
+        llm_client=object(),
+    )
+    cast(Any, ctx).style_store = style_store
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def coordinated_extract(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        started.set()
+        await release.wait()
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "services.learning_settings.load",
+        lambda _storage_dir: {
+            "style": {
+                "extract_enabled": True,
+                "extract_interval_minutes": 0,
+            }
+        },
+    )
+    coordinator = AsyncMock(side_effect=coordinated_extract)
+    monkeypatch.setattr(
+        "plugins.style.plugin.run_coordinated_extract",
+        coordinator,
+    )
+
+    await bus.fire_on_startup(ctx)
+    first_tick = asyncio.create_task(bus.fire_on_tick(ctx))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        assert first_tick.done(), "on_tick must return while extraction continues in the background"
+
+        await bus.fire_on_tick(ctx)
+        assert coordinator.await_count == 1
+    finally:
+        release.set()
+        await first_tick
+        await bus.fire_on_shutdown(ctx)
+
+
+@pytest.mark.asyncio
+async def test_style_shutdown_cancels_and_awaits_background_extract(
+    style_store: StyleStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = StylePlugin(StyleConfig())
+    ctx = PluginContext(
+        storage_dir=tmp_path,
+        msg_log=object(),
+        llm_client=object(),
+    )
+    cast(Any, ctx).style_store = style_store
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def coordinated_extract(*_args: Any, **_kwargs: Any) -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        "services.learning_settings.load",
+        lambda _storage_dir: {
+            "style": {
+                "extract_enabled": True,
+                "extract_interval_minutes": 0,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "plugins.style.plugin.run_coordinated_extract",
+        AsyncMock(side_effect=coordinated_extract),
+    )
+
+    await plugin.on_startup(ctx)
+    await plugin.on_tick(ctx)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await plugin.on_shutdown(ctx)
+
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_style_shutdown_closes_real_coordinator_run(
+    style_store: StyleStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = StylePlugin(StyleConfig())
+    coordinator = LearningExtractCoordinator()
+    ctx = PluginContext(
+        storage_dir=tmp_path,
+        msg_log=object(),
+        llm_client=object(),
+    )
+    cast(Any, ctx).style_store = style_store
+    cast(Any, ctx).learning_extract_coordinator = coordinator
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def manual_extract(*_args: Any, **_kwargs: Any) -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        "services.learning_settings.load",
+        lambda _storage_dir: {
+            "style": {
+                "extract_enabled": True,
+                "extract_interval_minutes": 0,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "plugins.style.plugin.run_style_manual_extract",
+        AsyncMock(side_effect=manual_extract),
+    )
+
+    await plugin.on_startup(ctx)
+    await plugin.on_tick(ctx)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await plugin.on_shutdown(ctx)
+
+    assert cancelled.is_set()
+    assert len(coordinator.runs) == 1
+    run = next(iter(coordinator.runs.values()))
+    assert run["status"] != "running"
+    assert run["finished_at"]
+    await coordinator.stop()

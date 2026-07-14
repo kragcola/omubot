@@ -2,20 +2,8 @@
 
 from __future__ import annotations
 
-import tomllib
-from pathlib import Path
+from kernel.version import VERSION
 
-
-def _read_version() -> str:
-    """Read version from pyproject.toml so there is a single source of truth."""
-    try:
-        data = tomllib.loads(Path("pyproject.toml").read_text())
-        return str(data["project"]["version"])
-    except Exception:
-        return "0.0.0"
-
-
-VERSION = _read_version()
 GITHUB_REPO = "kragcola/omubot"
 
 

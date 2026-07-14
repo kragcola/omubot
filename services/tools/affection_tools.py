@@ -1,20 +1,27 @@
 """Affection-related tools: set_nickname."""
 
-from typing import Any
+from typing import Any, Protocol
 
 from loguru import logger
 
-from plugins.affection.engine import AffectionEngine
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 
 _L = logger.bind(channel="affection")
 
 
+class AffectionEnginePort(Protocol):
+    def set_group_nickname(self, user_id: str, nickname: str, *, group_id: str | None) -> None: ...
+
+    def set_nickname(self, user_id: str, nickname: str) -> None: ...
+
+    def set_suffix(self, user_id: str, suffix: str) -> None: ...
+
+
 class SetNicknameTool(Tool):
     """Allow the LLM to store a preferred nickname for a user."""
 
-    def __init__(self, engine: AffectionEngine) -> None:
+    def __init__(self, engine: AffectionEnginePort) -> None:
         self._engine = engine
 
     @property

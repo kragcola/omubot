@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import inspect
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -10,17 +12,20 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from kernel.bus import SYSTEM_PLUGIN_NAMES
+from kernel.manifest import validate_plugin_config_values
 from services.plugin_index import PluginIndexService
+from services.plugin_toggle import PluginToggleService
 from services.version import VERSION
 
 PLUGIN_API_VERSION = 3
 PLUGIN_LAYOUT_VERSION = 2
-SYSTEM_PLUGIN_WHITELIST = frozenset({"chat", "history_loader", "vision"})
 LEGACY_BLOCK_REASON = "legacy_single_file_detected"
 
 
 def create_plugins_router(
     *,
+    ctx: Any = None,
     bus: Any = None,
     tool_registry: Any = None,
     plugin_state_store: Any = None,
@@ -44,12 +49,12 @@ def create_plugins_router(
             return "unknown"
 
     def _normalize_tier(name: str, tier: str) -> str:
-        if name in SYSTEM_PLUGIN_WHITELIST:
+        if name in SYSTEM_PLUGIN_NAMES:
             return "system"
         return "user"
 
     def _normalize_toggle_policy(name: str, toggle_policy: str, tier: str) -> str:
-        if name in SYSTEM_PLUGIN_WHITELIST or tier == "system":
+        if name in SYSTEM_PLUGIN_NAMES or tier == "system":
             return "locked"
         if toggle_policy == "restart_required":
             return "restart_required"
@@ -128,21 +133,49 @@ def create_plugins_router(
     def _plugin_commands(plugin: Any) -> list[dict[str, Any]]:
         if not _allows(plugin, "command"):
             return []
+
+        def serialize_command(
+            cmd: Any,
+            *,
+            inherited_admin: bool = False,
+            inherited_private: bool = False,
+        ) -> dict[str, Any]:
+            admin_only = inherited_admin or bool(getattr(cmd, "admin_only", False))
+            private_only = inherited_private or bool(getattr(cmd, "private_only", False))
+            gates: list[str] = []
+            if admin_only:
+                gates.append("admin")
+            if private_only:
+                gates.append("private")
+            subcommands = [
+                serialize_command(
+                    subcommand,
+                    inherited_admin=admin_only,
+                    inherited_private=private_only,
+                )
+                for subcommand in list(getattr(cmd, "sub_commands", []) or [])
+            ]
+            return {
+                "plugin": getattr(plugin, "name", "unknown"),
+                "name": cmd.name,
+                "description": cmd.description,
+                "usage": getattr(cmd, "usage", ""),
+                "pattern": getattr(cmd, "pattern", ""),
+                "aliases": list(getattr(cmd, "aliases", []) or []),
+                "admin_only": admin_only,
+                "private_only": private_only,
+                "require_args": bool(getattr(cmd, "require_args", False)),
+                "hidden": bool(getattr(cmd, "hidden", False)),
+                "passthrough_unknown": bool(getattr(cmd, "passthrough_unknown", False)),
+                "permission": ",".join(gates) if gates else "public",
+                "subcommands": subcommands,
+                "sub_commands": subcommands,
+            }
+
         commands = []
         try:
             for cmd in plugin.register_commands():
-                gates: list[str] = []
-                if getattr(cmd, "admin_only", False):
-                    gates.append("admin")
-                if getattr(cmd, "private_only", False):
-                    gates.append("private")
-                commands.append({
-                    "plugin": getattr(plugin, "name", "unknown"),
-                    "name": cmd.name,
-                    "description": cmd.description,
-                    "usage": getattr(cmd, "usage", ""),
-                    "permission": ",".join(gates) if gates else "public",
-                })
+                commands.append(serialize_command(cmd))
         except Exception:
             return []
         return commands
@@ -180,7 +213,9 @@ def create_plugins_router(
             return "throttled", "已保护", "warning"
         if state == "degraded":
             return "degraded", "需关注", "warning"
-        return state or "unknown", "状态未知", "error"
+        if state == "running":
+            return "running", "运行中", "info"
+        return state or "unknown", "状态未知", "default"
 
     def _normalize_health_payload(health: dict[str, Any] | None) -> dict[str, Any]:
         payload = dict(health or {})
@@ -190,6 +225,116 @@ def create_plugins_router(
         payload.setdefault("display_label", display_label)
         payload.setdefault("display_type", display_type)
         return payload
+
+    def _capability_health(name: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "name": name,
+            "enabled": True,
+            "state": "unknown",
+            "calls": 0,
+            "errors": 0,
+        }
+        if name == "vision":
+            client = getattr(ctx, "vision_client", None) if ctx is not None else None
+            if client is None:
+                payload.update({
+                    "enabled": False,
+                    "state": "disabled",
+                    "meta": {"available": False},
+                })
+                return _normalize_health_payload(payload)
+
+            try:
+                snapshot = client.health_snapshot()
+            except Exception as exc:
+                snapshot = {
+                    "available": True,
+                    "status": "failed",
+                    "calls": 0,
+                    "errors": 1,
+                    "last_error": f"{type(exc).__name__}: {exc}",
+                }
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+
+            available = bool(snapshot.get("available", True))
+            status = str(snapshot.get("status") or ("healthy" if available else "unavailable"))
+            try:
+                calls = max(0, int(snapshot.get("calls", 0) or 0))
+            except (TypeError, ValueError):
+                calls = 0
+            try:
+                errors = max(0, int(snapshot.get("errors", 0) or 0))
+            except (TypeError, ValueError):
+                errors = 0
+            last_error = str(snapshot.get("last_error") or "")
+            payload.update({
+                "enabled": available,
+                "state": (
+                    "disabled"
+                    if not available
+                    else {
+                        "failed": "degraded",
+                        "degraded": "degraded",
+                        "error": "degraded",
+                        "healthy": "healthy",
+                        "success": "healthy",
+                    }.get(status, "unknown")
+                ),
+                "calls": calls,
+                "errors": errors,
+                "last_error": last_error,
+                "meta": {
+                    **snapshot,
+                    "available": available,
+                    "status": status,
+                },
+            })
+            return _normalize_health_payload(payload)
+        if name != "history_loader":
+            return _normalize_health_payload(payload)
+
+        pipeline = getattr(ctx, "connection_pipeline", None) if ctx is not None else None
+        try:
+            raw_status = getattr(pipeline, "history_backfill_status", None)
+            if callable(raw_status):
+                raw_status = raw_status()
+        except Exception as exc:
+            raw_status = {
+                "status": "unavailable",
+                "runs": 0,
+                "last_error": f"{type(exc).__name__}: {exc}",
+            }
+        if not isinstance(raw_status, dict):
+            raw_status = {
+                "status": "unavailable",
+                "runs": 0,
+                "last_error": "",
+            }
+
+        stage_status = str(raw_status.get("status") or "unavailable")
+        try:
+            runs = max(0, int(raw_status.get("runs", 0) or 0))
+        except (TypeError, ValueError):
+            runs = 0
+        last_error = str(raw_status.get("last_error") or "")
+        payload.update({
+            "state": {
+                "success": "healthy",
+                "failed": "degraded",
+                "running": "running",
+                "idle": "unknown",
+            }.get(stage_status, "unknown"),
+            "calls": runs,
+            "errors": 1 if stage_status == "failed" else 0,
+            "last_error": last_error,
+            "meta": {
+                "status": stage_status,
+                "runs": runs,
+                "last_error": last_error,
+            },
+        })
+        return _normalize_health_payload(payload)
 
     def _persistent_enabled(name: str) -> bool | None:
         if plugin_state_store is None or not hasattr(plugin_state_store, "get"):
@@ -237,6 +382,15 @@ def create_plugins_router(
             return merged
         return deepcopy(values) if values is not None else deepcopy(defaults)
 
+    def _flatten_settings(value: Any, *, prefix: str = "") -> dict[str, Any]:
+        if isinstance(value, dict) and value:
+            flattened: dict[str, Any] = {}
+            for key, child in value.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                flattened.update(_flatten_settings(child, prefix=path))
+            return flattened
+        return {prefix: value} if prefix else {}
+
     def _settings_payload(plugin: Any) -> dict[str, Any]:
         name = str(getattr(plugin, "name", "unknown") or "unknown")
         raw_tier = str(getattr(plugin, "tier", "user") or "user")
@@ -246,7 +400,6 @@ def create_plugins_router(
         if (
             tier == "system"
             or toggle_policy == "locked"
-            or str(config_spec.get("apply_mode") or "") == "read_only"
         ):
             return {
                 "schema": {},
@@ -261,14 +414,45 @@ def create_plugins_router(
                 "apply_mode": "read_only",
                 "requires_restart": False,
                 "restart_required_fields": [],
+                "config_error": "",
             }
         schema = dict(getattr(plugin, "settings_schema", {}) or {})
         entry = {"values": {}, "defaults": {}, "effective_values": {}, "updated_at": 0.0}
+        config_error = ""
         if plugin_config_store is not None and hasattr(plugin_config_store, "get_entry"):
             try:
                 entry = plugin_config_store.get_entry(getattr(plugin, "name", "unknown"))
-            except Exception:
+            except Exception as exc:
+                config_error = str(exc)
                 entry = {"values": {}, "defaults": {}, "effective_values": {}, "updated_at": 0.0}
+
+        apply_mode = str(
+            entry.get("apply_mode")
+            or config_spec.get("apply_mode")
+            or "restart_required"
+        )
+        entry_restart_fields = entry.get("restart_required_fields")
+        restart_required_fields = (
+            list(entry_restart_fields)
+            if isinstance(entry_restart_fields, list)
+            else list(config_spec.get("restart_required_fields") or [])
+        )
+        if apply_mode == "read_only":
+            return {
+                "schema": {},
+                "values": {},
+                "defaults": {},
+                "effective_values": {},
+                "updated_at": 0.0,
+                "path": str(entry.get("path") or ""),
+                "default_path": str(entry.get("default_path") or ""),
+                "schema_path": str(entry.get("schema_path") or ""),
+                "has_saved_values": False,
+                "apply_mode": "read_only",
+                "requires_restart": False,
+                "restart_required_fields": restart_required_fields,
+                "config_error": config_error,
+            }
 
         if not schema and isinstance(entry.get("schema"), dict):
             schema = dict(entry.get("schema") or {})
@@ -298,9 +482,10 @@ def create_plugins_router(
             "default_path": str(entry.get("default_path") or ""),
             "schema_path": str(entry.get("schema_path") or ""),
             "has_saved_values": bool(values),
-            "apply_mode": str(config_spec.get("apply_mode") or "hot"),
-            "requires_restart": str(config_spec.get("apply_mode") or "hot") == "restart_required",
-            "restart_required_fields": list(config_spec.get("restart_required_fields") or []),
+            "apply_mode": apply_mode,
+            "requires_restart": apply_mode == "restart_required",
+            "restart_required_fields": restart_required_fields,
+            "config_error": config_error,
         }
 
     def _settings_config_status(settings: dict[str, Any], *, locked: bool, legacy_blocked: bool = False) -> str:
@@ -321,6 +506,21 @@ def create_plugins_router(
         raw_policy = str(getattr(plugin, "toggle_policy", "runtime") or "runtime")
         tier, toggle_policy = _normalized_identity(name, raw_tier, raw_policy)
         return tier == "system" or toggle_policy == "locked"
+
+    def _dependency_payload(plugin: Any) -> dict[str, dict[str, Any]]:
+        dependencies = _safe_dict(getattr(plugin, "dependencies", None))
+        required = {
+            **dependencies,
+            **_safe_dict(getattr(plugin, "required_dependencies", None)),
+        }
+        optional = _safe_dict(getattr(plugin, "optional_dependencies", None))
+        for dependency_name in required:
+            optional.pop(dependency_name, None)
+        return {
+            "dependencies": dependencies,
+            "required_dependencies": required,
+            "optional_dependencies": optional,
+        }
 
     def _plugin_payload(
         plugin: Any,
@@ -351,6 +551,7 @@ def create_plugins_router(
             "locked": locked,
             "permissions": list(getattr(plugin, "permissions", []) or []),
             "capabilities": list(getattr(plugin, "capabilities", []) or []),
+            **_dependency_payload(plugin),
             "config_spec": _safe_dict(getattr(plugin, "config_spec", {})),
             "store": _safe_dict(getattr(plugin, "store", {})),
             "configurable": config_status == "ready",
@@ -365,6 +566,7 @@ def create_plugins_router(
 
     def _capability_payload(entry: dict[str, Any], *, legacy_blocked: bool = False) -> dict[str, Any]:
         name = str(entry.get("name") or "unknown")
+        health = _capability_health(name)
         raw_tier = str(entry.get("tier") or "system")
         raw_policy = str(entry.get("toggle_policy") or "locked")
         tier, toggle_policy = _normalized_identity(name, raw_tier, raw_policy)
@@ -376,7 +578,7 @@ def create_plugins_router(
             "description": str(entry.get("description") or "系统能力声明"),
             "version": str(entry.get("version") or "0.0.0"),
             "priority": int(entry.get("priority") or 100),
-            "enabled": True,
+            "enabled": bool(health.get("enabled", False)),
             "persistent_enabled": None,
             "author": "Omubot",
             "category": str(entry.get("category") or "core"),
@@ -385,6 +587,9 @@ def create_plugins_router(
             "locked": locked,
             "permissions": [],
             "capabilities": list(entry.get("capabilities") or []),
+            "dependencies": _safe_dict(entry.get("dependencies")),
+            "required_dependencies": _safe_dict(entry.get("required_dependencies")),
+            "optional_dependencies": _safe_dict(entry.get("optional_dependencies")),
             "config_spec": {"apply_mode": "read_only", "restart_required_fields": []},
             "store": _safe_dict(entry.get("store") or {}),
             "configurable": False,
@@ -392,16 +597,7 @@ def create_plugins_router(
             "min_omubot_version": str(entry.get("min_omubot_version") or ""),
             "hook_budget_ms": 0,
             "package": entry,
-            "health": {
-                "name": str(entry.get("name") or "unknown"),
-                "enabled": True,
-                "state": "healthy",
-                "display_state": "healthy",
-                "display_label": "健康",
-                "display_type": "success",
-                "calls": 0,
-                "errors": 0,
-            },
+            "health": health,
             "capability_only": True,
         }
 
@@ -641,6 +837,8 @@ def create_plugins_router(
             return {"ok": False, "error": "PluginBus not available"}
         if plugin_config_store is None or not hasattr(plugin_config_store, "set_values"):
             return {"ok": False, "error": "Plugin config store not available"}
+        config_store = plugin_config_store
+        assert config_store is not None
 
         try:
             index_payload = index_service.build_index(bus=bus)
@@ -654,8 +852,14 @@ def create_plugins_router(
         plugin = bus.get_plugin(name)
         if plugin is None:
             return {"ok": False, "error": f"Plugin '{name}' not found"}
-        config_spec = dict(getattr(plugin, "config_spec", {}) or {})
-        if _is_locked(plugin) or str(config_spec.get("apply_mode") or "") == "read_only":
+        previous_settings = _settings_payload(plugin)
+        config_error = str(previous_settings.get("config_error") or "")
+        if config_error:
+            return {"ok": False, "error": config_error}
+        if (
+            _is_locked(plugin)
+            or str(previous_settings.get("apply_mode") or "") == "read_only"
+        ):
             return {"ok": False, "error": "系统级插件配置只读"}
 
         body = await request.json()
@@ -663,19 +867,116 @@ def create_plugins_router(
         if not isinstance(values, dict):
             return {"ok": False, "error": "values must be an object"}
 
-        try:
-            plugin_config_store.set_values(name, values)
-            settings = _settings_payload(plugin)
-            return {
-                "ok": True,
-                "plugin": name,
-                "applied": settings.get("apply_mode") == "hot",
-                "requires_restart": bool(settings.get("requires_restart")),
-                "restart_required_fields": settings.get("restart_required_fields", []),
-                "settings": settings,
+        previous_effective = dict(previous_settings.get("effective_values") or {})
+        defaults = dict(previous_settings.get("defaults") or {})
+        next_effective = _merge_defaults(defaults, values)
+        schema = previous_settings.get("schema")
+        if isinstance(schema, dict) and schema:
+            try:
+                validate_plugin_config_values(
+                    schema,
+                    next_effective,
+                    plugin_name=name,
+                )
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+        previous_flat = _flatten_settings(previous_effective)
+        next_flat = _flatten_settings(next_effective)
+        changed_fields = {
+            key
+            for key in previous_flat.keys() | next_flat.keys()
+            if previous_flat.get(key) != next_flat.get(key)
+        }
+        apply_mode = str(
+            previous_settings.get("apply_mode") or "restart_required"
+        )
+        config_spec = dict(getattr(plugin, "config_spec", {}) or {})
+        restart_fields_declared = "restart_required_fields" in config_spec
+        if hasattr(config_store, "get_entry"):
+            try:
+                manifest_entry = config_store.get_entry(name)
+            except Exception:
+                manifest_entry = {}
+            restart_fields_declared = restart_fields_declared or isinstance(
+                manifest_entry.get("restart_required_fields"),
+                list,
+            )
+        declared_restart_fields = {
+            str(field)
+            for field in previous_settings.get("restart_required_fields") or []
+        }
+        if apply_mode == "hot":
+            hot_fields = set(changed_fields)
+            pending_restart_fields: set[str] = set()
+        elif apply_mode == "restart_required" and restart_fields_declared:
+            pending_restart_fields = {
+                field
+                for field in changed_fields
+                if any(
+                    field == declared
+                    or field.startswith(f"{declared}.")
+                    for declared in declared_restart_fields
+                )
             }
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+            hot_fields = changed_fields - pending_restart_fields
+        else:
+            hot_fields = set()
+            pending_restart_fields = set(changed_fields)
+
+        async def apply_runtime_settings(
+            effective_values: dict[str, Any],
+            fields: set[str],
+        ) -> set[str]:
+            hook = getattr(plugin, "apply_runtime_settings", None)
+            if not callable(hook):
+                raise RuntimeError(
+                    f"Plugin '{name}' declares hot settings but has no runtime apply hook"
+                )
+            result = hook(
+                dict(effective_values),
+                changed_fields=frozenset(fields),
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            if not isinstance(result, (set, frozenset, list, tuple)):
+                raise RuntimeError(
+                    f"Plugin '{name}' runtime apply hook returned an invalid field set"
+                )
+            applied = {str(field) for field in result}
+            if applied != fields:
+                raise RuntimeError(
+                    f"Plugin '{name}' did not apply all hot settings: "
+                    f"expected={sorted(fields)} applied={sorted(applied)}"
+                )
+            return applied
+
+        applied_fields: set[str] = set()
+        if hot_fields:
+            try:
+                applied_fields = await apply_runtime_settings(next_effective, hot_fields)
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    await apply_runtime_settings(previous_effective, hot_fields)
+                return {"ok": False, "error": str(exc)}
+
+        try:
+            config_store.set_values(name, values)
+        except Exception as exc:
+            if applied_fields:
+                with contextlib.suppress(Exception):
+                    await apply_runtime_settings(previous_effective, applied_fields)
+            return {"ok": False, "error": str(exc)}
+
+        settings = _settings_payload(plugin)
+        return {
+            "ok": True,
+            "plugin": name,
+            "applied": bool(applied_fields),
+            "applied_fields": sorted(applied_fields),
+            "requires_restart": bool(pending_restart_fields),
+            "restart_required_fields": sorted(pending_restart_fields),
+            "settings": settings,
+        }
 
     @router.post("/plugins/{name}/state")
     async def set_plugin_state(name: str, request: Request):
@@ -693,38 +994,25 @@ def create_plugins_router(
 
         body = await request.json()
         enabled = bool(body.get("enabled"))
-        plugin = bus.get_plugin(name)
-        if plugin is None:
-            return {"ok": False, "error": f"Plugin '{name}' not found"}
-        if not enabled and _is_locked(plugin):
-            return {"ok": False, "error": "系统级插件无法关闭"}
-        if not bus.set_plugin_enabled(name, enabled):
-            return {"ok": False, "error": f"Plugin '{name}' not found"}
-
-        if plugin_state_store is not None and hasattr(plugin_state_store, "set_enabled") and not _is_locked(plugin):
-            try:
-                plugin_state_store.set_enabled(name, enabled)
-            except Exception as e:
-                return {
-                    "ok": False,
-                    "error": f"插件状态已切换，但持久化失败: {e}",
-                }
-
-        if tool_registry is not None and hasattr(tool_registry, "clear"):
-            try:
-                tool_registry.clear()
-                for tool in bus.collect_tools():
-                    tool_registry.register(tool)
-            except Exception as e:
-                return {
-                    "ok": False,
-                    "error": f"插件状态已切换，但工具注册表刷新失败: {e}",
-                }
-
-        return {
-            "ok": True,
-            "plugin": _plugin_payload(plugin, _health_by_name().get(name)) if plugin else None,
-        }
+        service = PluginToggleService(
+            bus=bus,
+            tool_registry=(
+                tool_registry
+                if tool_registry is not None and hasattr(tool_registry, "clear")
+                else None
+            ),
+            plugin_state_store=(
+                plugin_state_store
+                if plugin_state_store is not None and hasattr(plugin_state_store, "set_enabled")
+                else None
+            ),
+            is_locked=_is_locked,
+            serialize_plugin=lambda plugin: _plugin_payload(
+                plugin,
+                _health_by_name().get(name),
+            ),
+        )
+        return service.toggle(name, enabled)
 
     @router.get("/tools")
     async def list_tools():

@@ -69,6 +69,9 @@ interface PluginPackageInfo {
   governance_label: string
   action_hint: string
   warnings: string[]
+  dependencies?: Record<string, string>
+  required_dependencies?: Record<string, string>
+  optional_dependencies?: Record<string, string>
   store?: Record<string, any>
 }
 
@@ -110,6 +113,9 @@ interface Plugin {
   config_status?: 'ready' | 'missing_schema' | 'read_only' | 'legacy_blocked' | string
   permissions?: string[]
   capabilities?: string[]
+  dependencies?: Record<string, string>
+  required_dependencies?: Record<string, string>
+  optional_dependencies?: Record<string, string>
   config_spec?: Record<string, any>
   store?: Record<string, any>
   health?: PluginHealth
@@ -132,6 +138,14 @@ interface Command {
   description: string
   usage: string
   permission: string
+  pattern?: string
+  aliases?: string[]
+  admin_only?: boolean
+  private_only?: boolean
+  require_args?: boolean
+  passthrough_unknown?: boolean
+  subcommands?: Command[]
+  sub_commands?: Command[]
 }
 
 interface PluginSettings {
@@ -150,7 +164,6 @@ interface PluginSettings {
 }
 
 interface PluginDetail extends Plugin {
-  dependencies?: Record<string, string>
   commands?: Command[]
   tools?: Tool[]
   settings_schema?: Record<string, any>
@@ -333,6 +346,46 @@ const selectedSettingsSchema = computed(() =>
 
 const selectedSettingFields = computed(() => schemaFields(selectedSettingsSchema.value))
 
+const selectedRestartRequiredFields = computed(() =>
+  new Set(selectedDetail.value?.settings?.restart_required_fields || []),
+)
+
+function settingRequiresRestart(key: string) {
+  if (selectedDetail.value?.settings?.apply_mode !== 'restart_required') return false
+  const declared = selectedRestartRequiredFields.value
+  return declared.size === 0 || declared.has(key)
+}
+
+const hasRestartRequiredSettings = computed(() =>
+  selectedSettingFields.value.some(field => settingRequiresRestart(field.key)),
+)
+
+const hasHotSettings = computed(() =>
+  selectedSettingFields.value.some(field => !settingRequiresRestart(field.key)),
+)
+
+const settingsApplySummary = computed(() => {
+  if (hasRestartRequiredSettings.value && hasHotSettings.value) {
+    return {
+      label: '部分字段需重启',
+      description: '热更新字段保存后立即生效，其余字段在重启后生效',
+      type: 'warning' as const,
+    }
+  }
+  if (hasRestartRequiredSettings.value) {
+    return {
+      label: '需重启',
+      description: '保存后需要在线重启生效',
+      type: 'warning' as const,
+    }
+  }
+  return {
+    label: '热更新',
+    description: '保存后可热更新生效',
+    type: 'success' as const,
+  }
+})
+
 const settingsDirty = computed(() =>
   JSON.stringify(settingsDraft.value) !== settingsOriginalJson.value
   || selectedSettingFields.value.some((field) => {
@@ -473,13 +526,28 @@ async function setPluginEnabled(plugin: Plugin, enabled: boolean) {
       body: { enabled },
     })
     if (!data.ok) throw new Error(data.error || '状态切换失败')
-    message.success(enabled ? '插件已启用' : '插件已停用')
+    if (data.requires_restart) message.success('插件状态已保存，重启后生效')
+    else message.success(enabled ? '插件已启用' : '插件已停用')
     await loadPlugins(true)
   } catch (error) {
     message.error(error instanceof Error ? error.message : '状态切换失败')
   } finally {
     stateChanging.value = { ...stateChanging.value, [plugin.name]: false }
   }
+}
+
+function pluginTargetEnabled(plugin: Plugin) {
+  if (plugin.toggle_policy !== 'restart_required') return plugin.enabled
+  return typeof plugin.persistent_enabled === 'boolean'
+    ? plugin.persistent_enabled
+    : plugin.enabled
+}
+
+function pendingRestartLabel(plugin: Plugin) {
+  if (plugin.toggle_policy !== 'restart_required') return ''
+  const targetEnabled = pluginTargetEnabled(plugin)
+  if (targetEnabled === plugin.enabled) return ''
+  return targetEnabled ? '待重启启用' : '待重启停用'
 }
 
 async function saveSettings() {
@@ -515,6 +583,13 @@ function displayName(plugin: Plugin | PluginPackageInfo | PluginDetail) {
 
 function englishName(plugin: Plugin | PluginPackageInfo | PluginDetail) {
   return plugin.display_name?.en || plugin.name
+}
+
+function dependencySummary(dependencies?: Record<string, string>) {
+  const entries = Object.entries(dependencies || {})
+  return entries.length
+    ? entries.map(([name, constraint]) => `${name} ${constraint}`).join('、')
+    : '无'
 }
 
 function pluginNeedsAttention(plugin: Plugin) {
@@ -741,6 +816,9 @@ function formatCount(value: number | undefined) {
             <NSpace v-if="selectedDetail" align="center">
               <NTag :type="healthType(selectedDetail)" round>{{ healthLabel(selectedDetail) }}</NTag>
               <NTag :type="configStatusType(selectedDetail)" round>{{ configStatusLabel(selectedDetail) }}</NTag>
+              <NTag v-if="pendingRestartLabel(selectedDetail)" type="warning" round>
+                {{ pendingRestartLabel(selectedDetail) }}
+              </NTag>
               <NTag v-if="selectedDetail.locked || selectedDetail.tier === 'system'" type="info" round>系统级 / 锁定 / 不可关闭</NTag>
             </NSpace>
           </div>
@@ -792,6 +870,8 @@ function formatCount(value: number | undefined) {
                 <span>版本</span><strong>v{{ selectedDetail.version }}</strong>
                 <span>分类</span><strong>{{ selectedDetail.category || 'general' }}</strong>
                 <span>级别</span><strong>{{ selectedDetail.tier === 'system' ? '系统级（不可关闭）' : '用户级' }}</strong>
+                <span>必需依赖</span><strong>{{ dependencySummary(selectedDetail.required_dependencies) }}</strong>
+                <span>可选依赖</span><strong>{{ dependencySummary(selectedDetail.optional_dependencies) }}</strong>
                 <span>命令</span><strong>{{ selectedDetail.commands?.length || 0 }}</strong>
                 <span>工具</span><strong>{{ selectedDetail.tools?.length || 0 }}</strong>
               </div>
@@ -814,7 +894,8 @@ function formatCount(value: number | undefined) {
                 <NSpace align="center">
                   <NButton v-if="selectedDetail.name === 'slang'" text @click="goSlangSettings">打开黑话设置</NButton>
                   <NTag v-if="selectedDetail.locked || selectedDetail.settings?.apply_mode === 'read_only'" type="info" round>只读</NTag>
-                  <NTag v-else-if="selectedDetail.settings?.requires_restart" type="warning" round>保存后需重启</NTag>
+                  <NTag v-else-if="hasRestartRequiredSettings && hasHotSettings" type="warning" round>部分字段需重启</NTag>
+                  <NTag v-else-if="hasRestartRequiredSettings" type="warning" round>保存后需重启</NTag>
                   <NTag v-else-if="selectedSettingFields.length" type="success" round>可在线保存</NTag>
                 </NSpace>
               </div>
@@ -831,10 +912,10 @@ function formatCount(value: number | undefined) {
                 <div class="settings-status-strip">
                   <div>
                     <strong>{{ selectedSettingFields.length }} 项可配置</strong>
-                    <span>{{ selectedDetail.settings?.requires_restart ? '保存后需要在线重启生效' : '保存后可热更新生效' }}</span>
+                    <span>{{ settingsApplySummary.description }}</span>
                   </div>
-                  <NTag :type="selectedDetail.settings?.requires_restart ? 'warning' : 'success'" round>
-                    {{ selectedDetail.settings?.requires_restart ? '需重启' : '热更新' }}
+                  <NTag :type="settingsApplySummary.type" round>
+                    {{ settingsApplySummary.label }}
                   </NTag>
                 </div>
 
@@ -846,7 +927,17 @@ function formatCount(value: number | undefined) {
                     :class="{ 'setting-row--object-array': field.kind === 'object-array' }"
                   >
                     <div class="setting-copy">
-                      <strong>{{ field.label }}</strong>
+                      <NSpace align="center" :size="8">
+                        <strong>{{ field.label }}</strong>
+                        <NTag
+                          v-if="hasRestartRequiredSettings && hasHotSettings"
+                          :type="settingRequiresRestart(field.key) ? 'warning' : 'success'"
+                          size="small"
+                          round
+                        >
+                          {{ settingRequiresRestart(field.key) ? '需重启' : '热更新' }}
+                        </NTag>
+                      </NSpace>
                       <span>{{ field.description || field.key }}</span>
                     </div>
                     <div class="setting-control-wrap">
@@ -967,8 +1058,41 @@ function formatCount(value: number | undefined) {
               <h3>命令工具</h3>
               <div class="runtime-list">
                 <article v-for="command in selectedDetail.commands || []" :key="command.name">
-                  <strong>/{{ command.name }}</strong>
+                  <div class="command-heading">
+                    <strong>/{{ command.name }}</strong>
+                    <div class="command-tags">
+                      <NTag v-if="command.admin_only" size="small" type="warning" round>仅管理员</NTag>
+                      <NTag v-if="command.private_only" size="small" type="info" round>仅私聊</NTag>
+                      <NTag v-if="command.passthrough_unknown" size="small" round>透传未知子命令</NTag>
+                    </div>
+                  </div>
                   <span>{{ command.description || command.usage || '无说明' }}</span>
+                  <small v-if="command.aliases?.length" class="command-meta">
+                    别名：{{ command.aliases.map(alias => `/${alias}`).join('、') }}
+                  </small>
+                  <small v-if="command.pattern" class="command-meta">匹配：{{ command.pattern }}</small>
+                  <div
+                    v-if="(command.subcommands || command.sub_commands || []).length"
+                    class="command-subcommands"
+                  >
+                    <div
+                      v-for="subcommand in command.subcommands || command.sub_commands || []"
+                      :key="subcommand.name"
+                      class="command-subcommand"
+                    >
+                      <div class="command-heading">
+                        <strong>/{{ command.name }} {{ subcommand.name }}</strong>
+                        <div class="command-tags">
+                          <NTag v-if="subcommand.admin_only" size="small" type="warning" round>仅管理员</NTag>
+                          <NTag v-if="subcommand.private_only" size="small" type="info" round>仅私聊</NTag>
+                        </div>
+                      </div>
+                      <span>{{ subcommand.description || subcommand.usage || '无说明' }}</span>
+                      <small v-if="subcommand.aliases?.length" class="command-meta">
+                        别名：{{ subcommand.aliases.join('、') }}
+                      </small>
+                    </div>
+                  </div>
                 </article>
                 <article v-for="tool in selectedDetail.tools || []" :key="tool.function?.name || tool.plugin">
                   <strong>{{ tool.function?.name || 'tool' }}</strong>
@@ -1157,6 +1281,9 @@ function formatCount(value: number | undefined) {
                     <template #icon><NIcon :component="SettingsOutline" /></template>
                     {{ configStatusLabel(plugin) }}
                   </NTag>
+                  <NTag v-if="pendingRestartLabel(plugin)" type="warning" round>
+                    {{ pendingRestartLabel(plugin) }}
+                  </NTag>
                   <NTag round>{{ plugin.category || 'general' }}</NTag>
                 </div>
               </div>
@@ -1183,7 +1310,7 @@ function formatCount(value: number | undefined) {
                 <div class="plugin-state-control">
                   <NSwitch
                     v-if="plugin.tier !== 'system' && !plugin.locked"
-                    :value="plugin.enabled"
+                    :value="pluginTargetEnabled(plugin)"
                     :loading="stateChanging[plugin.name]"
                     @update:value="value => setPluginEnabled(plugin, value)"
                   />
@@ -1693,6 +1820,42 @@ function formatCount(value: number | undefined) {
 
 .runtime-list span {
   color: var(--om-text-3);
+}
+
+.command-heading,
+.command-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.command-heading {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.command-tags {
+  flex-wrap: wrap;
+}
+
+.command-meta {
+  color: var(--om-text-3);
+  overflow-wrap: anywhere;
+}
+
+.command-subcommands {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--om-border);
+}
+
+.command-subcommand {
+  display: grid;
+  gap: 4px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--om-surface-solid);
 }
 
 .settings-actions {

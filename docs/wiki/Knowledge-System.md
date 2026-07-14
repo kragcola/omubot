@@ -292,7 +292,8 @@ storage/plugins/config/knowledge.json
 如果改了代码或 Docker 镜像内文件，需要重建：
 
 ```bash
-docker compose up -d --build bot
+docker compose build bot
+docker compose up -d --no-deps --force-recreate bot
 ```
 
 ### 5. 重建索引

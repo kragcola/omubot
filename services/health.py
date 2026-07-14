@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -76,37 +75,6 @@ def _resolve_path(raw_path: Any, fallback: Path) -> Path:
     return fallback
 
 
-def _sqlite_probe(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {
-            "name": path.name,
-            "path": str(path),
-            "exists": False,
-            "status": "warning",
-            "detail": "数据库文件尚不存在",
-            "size_bytes": 0,
-        }
-
-    try:
-        with sqlite3.connect(str(path), timeout=1.0) as conn:
-            quick_check = str(conn.execute("PRAGMA quick_check").fetchone()[0])
-            journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0])
-        status = "ok" if quick_check.lower() == "ok" else "error"
-        detail = f"quick_check={quick_check}, journal={journal_mode}"
-    except Exception as exc:
-        status = "error"
-        detail = str(exc)[:180]
-
-    return {
-        "name": path.name,
-        "path": str(path),
-        "exists": True,
-        "status": status,
-        "detail": detail,
-        "size_bytes": path.stat().st_size if path.exists() else 0,
-    }
-
-
 async def _count_from_store(store: Any, sql: str) -> int | None:
     db = getattr(store, "_db", None)
     if db is None:
@@ -134,6 +102,8 @@ async def collect_service_health(
         _check_llm(ctx=ctx, config=config),
         _check_plugin_bus(ctx=ctx),
         _check_runtime_errors(ctx=ctx),
+        _check_background_tasks(ctx=ctx),
+        _check_history_backfill(ctx=ctx),
         _check_napcat(ctx=ctx, config=config, bot=bot),
         _check_protocol_trace(ctx=ctx),
         _check_sqlite(ctx=ctx, storage_dir=storage_dir),
@@ -166,6 +136,8 @@ def _service_action(service_id: str) -> str:
         "llm": "检查默认 profile、API Key 与 Provider 连通性，必要时在维护窗口内切换或重启。",
         "plugin_bus": "进入插件页查看慢调用或异常插件，批量改动后建议做一次硬重启。",
         "runtime_errors": "先看关键错误摘要，再进入日志页定位高频问题。",
+        "background_tasks": "检查失败任务的 owner 与 last_error，再决定重启对应服务或 Bot。",
+        "history_backfill": "检查连接阶段的历史回填错误与运行日志；修复后重新连接 Bot 验证。",
         "napcat": "确认 NapCat 登录态、连接状态与最近错误，再决定是否重启协议层。",
         "protocol_trace": "检查 OneBot 请求失败和 pending 堆积，确认协议端能力是否正常。",
         "sqlite": "先创建备份，再检查数据库文件、磁盘空间与 quick_check 结果。",
@@ -180,6 +152,8 @@ def _alert_thresholds() -> dict[str, str]:
         "llm": "仅当默认 profile 缺失关键字段或无法解析时升级为顶部告警",
         "plugin_bus": "errors >= 1，或 throttled_plugins >= 1，或 slow_calls >= 3，或 permission_denials >= 5",
         "runtime_errors": "critical >= 1，或 errors >= 1，或 warnings >= 3",
+        "background_tasks": "failed >= 1，或 backoff >= 1",
+        "history_backfill": "failed 立即升级为 error；idle/running 不产生 warning",
         "napcat": "未连接即升级为顶部告警",
         "protocol_trace": "failed >= 3，或 pending >= 5",
         "sqlite": "任意数据库 quick_check 失败，或缺失库 >= 2",
@@ -417,13 +391,36 @@ def _check_plugin_bus(*, ctx: Any = None) -> dict[str, Any]:
     permission_denials = sum(int(item.get("permission_denials", 0) or 0) for item in health)
     throttled_plugins = sum(1 for item in health if str(item.get("state", "")) == "throttled")
     suppressed_calls = sum(int(item.get("suppressed_calls", 0) or 0) for item in health)
+    optional_dependency_degraded = sum(
+        1
+        for item in health
+        if bool(item.get("optional_dependency_degraded", False))
+    )
+    command_health_provider = getattr(bus, "command_registry_health", None)
+    raw_command_registry = (
+        command_health_provider()
+        if callable(command_health_provider)
+        else {"status": "unknown", "failed_refreshes": 0, "last_error": ""}
+    )
+    command_registry = (
+        raw_command_registry
+        if isinstance(raw_command_registry, dict)
+        else {"status": "unknown", "failed_refreshes": 0, "last_error": ""}
+    )
+    command_registry_error = str(command_registry.get("status", "unknown")) == "error"
 
-    if not plugins:
+    if command_registry_error:
+        status = "error"
+        detail = f"Command registry 刷新失败：{command_registry.get('last_error') or '未知冲突'}"
+    elif not plugins:
         status = "warning"
         detail = "当前没有注册插件"
     elif throttled_plugins:
         status = "warning"
         detail = f"{throttled_plugins} 个插件进入软隔离，已临时跳过高频 Hook"
+    elif optional_dependency_degraded:
+        status = "warning"
+        detail = f"{optional_dependency_degraded} 个插件的可选依赖不可用"
     elif errors:
         status = "warning"
         detail = f"{errors} 次插件异常，建议查看插件页详情"
@@ -448,6 +445,8 @@ def _check_plugin_bus(*, ctx: Any = None) -> dict[str, Any]:
             "slow_calls": slow_calls,
             "permission_denials": permission_denials,
             "suppressed_calls": suppressed_calls,
+            "optional_dependency_degraded": optional_dependency_degraded,
+            "command_registry": command_registry,
         },
     )
 
@@ -489,6 +488,153 @@ def _check_runtime_errors(*, ctx: Any = None) -> dict[str, Any]:
             "unique": unique,
             "top_issue": top_issue,
         },
+    )
+
+
+def _check_background_tasks(*, ctx: Any = None) -> dict[str, Any]:
+    supervisor = (
+        getattr(ctx, "background_task_supervisor", None)
+        if ctx is not None
+        else None
+    )
+    if supervisor is None or not hasattr(supervisor, "snapshot"):
+        return _service(
+            "background_tasks",
+            "Background Tasks",
+            "warning",
+            "后台任务监督器尚未安装",
+            meta={"tasks": [], "failed_count": 0, "backoff_count": 0},
+        )
+    try:
+        snapshots = tuple(supervisor.snapshot())
+    except Exception as exc:
+        return _service(
+            "background_tasks",
+            "Background Tasks",
+            "error",
+            f"后台任务快照读取失败：{exc}",
+            meta={"tasks": [], "failed_count": 1, "backoff_count": 0},
+        )
+
+    tasks: list[dict[str, Any]] = []
+    for snapshot in snapshots:
+        tasks.append({
+            "name": str(getattr(snapshot, "name", "")),
+            "owner": str(getattr(snapshot, "owner", "")),
+            "kind": str(getattr(getattr(snapshot, "kind", ""), "value", getattr(snapshot, "kind", ""))),
+            "restart": str(
+                getattr(
+                    getattr(snapshot, "restart", ""),
+                    "value",
+                    getattr(snapshot, "restart", ""),
+                )
+            ),
+            "shutdown": str(
+                getattr(
+                    getattr(snapshot, "shutdown", ""),
+                    "value",
+                    getattr(snapshot, "shutdown", ""),
+                )
+            ),
+            "state": str(getattr(snapshot, "state", "unknown")),
+            "attempts": int(getattr(snapshot, "attempts", 0) or 0),
+            "restarts": int(getattr(snapshot, "restarts", 0) or 0),
+            "max_restarts": int(getattr(snapshot, "max_restarts", 0) or 0),
+            "last_error": str(getattr(snapshot, "last_error", "") or ""),
+            "done": bool(getattr(snapshot, "done", False)),
+            "cancelled": bool(getattr(snapshot, "cancelled", False)),
+            "failure_history": [
+                {
+                    "occurred_at": str(getattr(failure, "occurred_at", "")),
+                    "attempt": int(getattr(failure, "attempt", 0) or 0),
+                    "error": str(getattr(failure, "error", "") or ""),
+                }
+                for failure in getattr(snapshot, "failure_history", ())
+            ],
+        })
+    failed_count = sum(item["state"] == "failed" for item in tasks)
+    backoff_count = sum(item["state"] == "backoff" for item in tasks)
+    running_count = sum(item["state"] == "running" for item in tasks)
+    if failed_count:
+        status = "error"
+        detail = f"{failed_count} 个后台任务失败"
+    elif backoff_count:
+        status = "warning"
+        detail = f"{backoff_count} 个后台任务等待重启"
+    else:
+        status = "ok"
+        detail = f"{running_count}/{len(tasks)} 个后台任务运行中"
+    return _service(
+        "background_tasks",
+        "Background Tasks",
+        status,
+        detail,
+        metric=f"{running_count} running / {failed_count} failed",
+        meta={
+            "tasks": tasks,
+            "task_count": len(tasks),
+            "running_count": running_count,
+            "failed_count": failed_count,
+            "backoff_count": backoff_count,
+        },
+    )
+
+
+def _check_history_backfill(*, ctx: Any = None) -> dict[str, Any]:
+    pipeline = getattr(ctx, "connection_pipeline", None) if ctx is not None else None
+    try:
+        raw_status = getattr(pipeline, "history_backfill_status", None)
+        if callable(raw_status):
+            raw_status = raw_status()
+    except Exception as exc:
+        raw_status = {
+            "status": "unavailable",
+            "runs": 0,
+            "last_error": f"{type(exc).__name__}: {exc}",
+        }
+
+    if not isinstance(raw_status, dict):
+        raw_status = {
+            "status": "unavailable",
+            "runs": 0,
+            "last_error": "",
+        }
+
+    stage_status = str(raw_status.get("status") or "unavailable")
+    try:
+        runs = max(0, int(raw_status.get("runs", 0) or 0))
+    except (TypeError, ValueError):
+        runs = 0
+    last_error = str(raw_status.get("last_error") or "")
+    meta = {
+        "status": stage_status,
+        "runs": runs,
+        "last_error": last_error,
+    }
+
+    if stage_status == "success":
+        status = "ok"
+        detail = "最近一次连接历史回填成功"
+    elif stage_status == "running":
+        status = "ok"
+        detail = "连接历史回填正在运行"
+    elif stage_status == "failed":
+        status = "error"
+        detail = f"连接历史回填失败：{last_error or 'unknown error'}"
+    elif stage_status == "idle":
+        status = "unknown"
+        detail = "等待 Bot 连接后执行历史回填"
+    else:
+        status = "unknown"
+        detail = "历史回填状态源尚不可用"
+
+    return _service(
+        "history_backfill",
+        "History Backfill",
+        status,
+        detail,
+        metric=f"{runs} runs / {stage_status}",
+        meta=meta,
     )
 
 
@@ -547,18 +693,13 @@ def _check_protocol_trace(*, ctx: Any = None) -> dict[str, Any]:
 
 
 def _check_sqlite(*, ctx: Any = None, storage_dir: Path) -> dict[str, Any]:
-    from services.storage.backup import BACKUP_REGISTRY
+    from services.storage.status import inspect_database_catalog
 
-    repo_root = storage_dir.parent
-    paths = [
-        repo_root / item.path
-        for item in BACKUP_REGISTRY
-        if item.item_type == "sqlite"
-    ]
-    probes = [_sqlite_probe(path) for path in paths]
-    error_count = sum(1 for item in probes if item["status"] == "error")
-    missing_count = sum(1 for item in probes if not item["exists"])
-    ok_count = sum(1 for item in probes if item["status"] == "ok")
+    snapshot = inspect_database_catalog(storage_dir.parent)
+    probes = [item.to_dict() for item in snapshot.items]
+    error_count = snapshot.error_count
+    missing_count = snapshot.missing_count
+    ok_count = snapshot.ok_count
     if error_count:
         status = "error"
         detail = f"{error_count} 个 SQLite 数据库检查失败"

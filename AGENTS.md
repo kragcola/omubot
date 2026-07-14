@@ -56,9 +56,9 @@ uv run pyright
 | Run locally | `docker compose up napcat -d && uv run python bot.py` |
 | Run all in Docker | `docker compose up -d` |
 | Restart bot for config-only changes | `docker compose restart bot` |
-| Rebuild bot for code/dependency changes | `dot_clean . && docker compose up bot -d --build` |
+| Rebuild bot for code/dependency changes | `dot_clean . && docker compose build bot && docker compose up -d --no-deps --force-recreate bot` |
 | Admin Dashboard | `http://localhost:8081/admin/` |
-| Build and deploy | `./scripts/deploy.sh` |
+| Build and deploy | `cd admin/frontend && npm run build && cd ../.. && docker compose build bot && docker compose up -d --no-deps --force-recreate bot` |
 
 ## NapCat Red Line
 
@@ -83,17 +83,22 @@ trigger Tencent anti-fraud and force re-login.
   needed; stale workers can hold SQLite locks.
 - **D6 Admin SPA path**: `admin/static` is a bind mount. Frontend-only changes
   need `npm run build`, not a bot rebuild; Python changes need a bot rebuild.
-- **D7 Git hygiene**: before deploy/build/merge, check `git stash list` and
-  `git status -uno`; never rely on `stash apply` exit code alone.
+- **D7 Git hygiene**: before deploy/build/merge, check `git stash list`,
+  `git status -uno`, and `git ls-files --others --exclude-standard`; never rely
+  on `stash apply` exit code alone or let `-uno` hide untracked build inputs.
 
 ## Local Environment Notes
 
-- **Read-only inspection of SQLite DBs held by a running service**: while a
-  service is up the DB is locked, so a plain `sqlite3` open can block or
-  contend for the lock (same root as D5). For read-only checks use
-  `sqlite3 'file:storage/<db>.db?mode=ro&immutable=1' '<query>'`, and run
-  `.schema` / `PRAGMA table_info` before ad hoc SELECTs. Do not write while the
-  service is running.
+- **Read-only inspection of live SQLite DBs**: a plain writable open can
+  contend for locks, create sidecars, or change connection state. Use
+  `sqlite3 'file:storage/<db>.db?mode=ro' '<query>'` so committed WAL state is
+  included, and count the main DB plus `-wal`, `-shm`, and `-journal` when
+  reporting capacity. Do not add `immutable=1` for a live DB: it bypasses
+  normal locking/change detection and can miss active WAL state. Use
+  `mode=ro&immutable=1` only for an offline, unchanging backup payload known
+  not to require WAL replay. Inspect schema, `PRAGMA user_version`, indexes,
+  and `PRAGMA quick_check` before ad hoc SELECTs. Never write while the service
+  is running.
 - **Process probing in the macOS sandbox**: `pgrep` and some `ps` calls fail
   with `sysmond service not found` or permission errors. Prefer
   `docker compose ps`, container logs, pidfiles, or `lsof -nP -iTCP:<port>`.

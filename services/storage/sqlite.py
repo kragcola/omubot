@@ -15,6 +15,8 @@ from typing import Any
 import aiosqlite
 from loguru import logger
 
+from services.storage.catalog import ConnectionProfile
+
 _L = logger.bind(channel="sqlite")
 
 
@@ -23,8 +25,12 @@ async def connect_sqlite(
     *,
     row_factory: bool = True,
     busy_timeout_ms: int = 5000,
+    profile: ConnectionProfile = ConnectionProfile.WAL_NORMAL,
 ) -> aiosqlite.Connection:
-    """Open a service SQLite connection with Omubot's default PRAGMA set."""
+    """Open a service SQLite connection with a declared PRAGMA profile."""
+    if not isinstance(profile, ConnectionProfile):
+        raise ValueError(f"invalid SQLite connection profile: {profile!r}")
+
     path = Path(db_path)
     if path.parent:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,8 +40,15 @@ async def connect_sqlite(
         if row_factory:
             db.row_factory = aiosqlite.Row
 
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA synchronous=NORMAL")
+        if profile is ConnectionProfile.WAL_NORMAL:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA synchronous=NORMAL")
+        elif profile is ConnectionProfile.DELETE_FULL:
+            await db.execute("PRAGMA journal_mode=DELETE")
+            await db.execute("PRAGMA synchronous=FULL")
+        else:
+            await db.execute("PRAGMA journal_mode=DELETE")
+            await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("PRAGMA foreign_keys=ON")
         await db.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
     except Exception:
@@ -43,6 +56,24 @@ async def connect_sqlite(
             await db.close()
         raise
     return db
+
+
+async def read_user_version_read_only(db_path: str | Path) -> int:
+    """Read an existing database version without applying connection profiles."""
+    path = Path(db_path)
+    if not path.exists():
+        return 0
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    db = await aiosqlite.connect(uri, uri=True)
+    try:
+        cursor = await db.execute("PRAGMA user_version")
+        try:
+            row = await cursor.fetchone()
+        finally:
+            await cursor.close()
+        return int(row[0]) if row is not None else 0
+    finally:
+        await db.close()
 
 
 async def close_with_checkpoint(

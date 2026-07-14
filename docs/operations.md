@@ -14,21 +14,36 @@
 
 ```bash
 docker compose restart bot           # Config changes only
-docker compose up bot -d --build     # Code/dependency/Dockerfile changes
+docker compose build bot             # Code/dependency/Dockerfile changes
+docker compose up -d --no-deps --force-recreate bot
 ```
 
 **Note**: `docker compose restart` does not rebuild images.
+The bot-only recreate command must include `--no-deps`; otherwise Compose may
+start or otherwise touch the `napcat` dependency.
 
 The bot image uses a two-stage Docker build. `GIT_COMMIT` build arg is baked in and logged at startup for version identification.
 
-## Deploy Script
+## Bot-only deploy
 
-`scripts/deploy.sh` automates building and deploying:
+There is no repository `scripts/deploy.sh`. Use the explicit, auditable path:
 
-1. Auto-detects version: uses git tag if present, otherwise `vYYYYMMDD-{short_hash}`
-2. Builds bot image with `GIT_COMMIT` build arg
-3. Tags image as `qq-bot:{version}` and `qq-bot:latest`
-4. Runs `docker compose up bot -d`
+1. Run `git stash list`, `git status -uno`, and
+   `git ls-files --others --exclude-standard`.
+2. Before rebuilding the SPA, snapshot the current host `admin/static` under
+   `.workspace/rollback/<deployment-id>/admin-static`; record its file count
+   and SHA256 manifest.
+3. Build the Admin SPA with `cd admin/frontend && npm run build`.
+4. Tag the currently running bot image as the rollback image, and record the
+   matching host-static snapshot path next to that tag.
+5. Run `docker compose build bot`.
+6. Run `docker compose up -d --no-deps --force-recreate bot`.
+7. Verify bot health and confirm the NapCat container identity, `StartedAt`,
+   and restart count are unchanged.
+
+Rollback must restore both halves: replace host `admin/static` from the
+recorded snapshot, retag the rollback bot image as `omubot-bot:latest`, then
+run only `docker compose up -d --no-deps --force-recreate bot`.
 
 ## Storage Layout
 
@@ -59,6 +74,7 @@ storage/
 | `nonebot-adapter-onebot` | OneBot V11 protocol adapter |
 | `aiohttp` | Anthropic API SSE streaming |
 | `pydantic` | Config validation |
+| `jsonschema` | Plugin ManifestV3 defaults/Admin override schema validation |
 | `aiosqlite` | Usage tracking SQLite async |
 | `rich` | Usage TUI dashboard |
 | `pyvips` | Image downscaling (requires libvips system lib) |

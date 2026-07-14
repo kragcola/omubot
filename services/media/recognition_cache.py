@@ -10,6 +10,8 @@ treatment (named volume DB, checkpoint-on-close).
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 from pathlib import Path
 
@@ -47,22 +49,29 @@ class RecognitionCache:
 
     async def init(self) -> None:
         db = await connect_sqlite(self._db_path)
-        await db.execute(_CREATE)
-        await db.execute(_INDEX)
-        # Idempotent migration: add `work` to a pre-existing table (AnimeTrace
-        # source-work context). SQLite has no "ADD COLUMN IF NOT EXISTS".
-        cur = await db.execute("PRAGMA table_info(image_recognition_cache)")
-        cols = {str(r[1]) for r in await cur.fetchall()}
-        await cur.close()
-        migrations = {
-            "work": "ALTER TABLE image_recognition_cache ADD COLUMN work TEXT",
-            "context_label": "ALTER TABLE image_recognition_cache ADD COLUMN context_label TEXT",
-        }
-        for col, sql in migrations.items():
-            if col not in cols:
-                await db.execute(sql)
-        await db.commit()
         self._db = db
+        try:
+            await db.execute(_CREATE)
+            await db.execute(_INDEX)
+            # Idempotent migration: add `work` to a pre-existing table (AnimeTrace
+            # source-work context). SQLite has no "ADD COLUMN IF NOT EXISTS".
+            cur = await db.execute("PRAGMA table_info(image_recognition_cache)")
+            cols = {str(r[1]) for r in await cur.fetchall()}
+            await cur.close()
+            migrations = {
+                "work": "ALTER TABLE image_recognition_cache ADD COLUMN work TEXT",
+                "context_label": "ALTER TABLE image_recognition_cache ADD COLUMN context_label TEXT",
+            }
+            for col, sql in migrations.items():
+                if col not in cols:
+                    await db.execute(sql)
+            await db.commit()
+        except BaseException:
+            self._db = None
+            close_task = asyncio.create_task(db.close())
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(close_task)
+            raise
 
     async def close(self) -> None:
         if self._db is not None:

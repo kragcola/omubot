@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from plugins.schedule.calendar import DayContext
+from plugins.calendar_context.service import DayContext
 from plugins.schedule.types import Schedule, TimeSlot
 from services.runtime_clock import (
     CST,
@@ -20,7 +20,9 @@ def test_now_cst_uses_shanghai_timezone() -> None:
     current = now_cst()
 
     assert current.tzinfo is CST
-    assert current.utcoffset().total_seconds() == 8 * 3600
+    offset = current.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 8 * 3600
 
 
 def test_today_key_converts_aware_datetime_to_cst() -> None:

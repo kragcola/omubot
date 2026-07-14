@@ -13,7 +13,13 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from plugins.schedule.calendar import get_day_context
+from kernel.background_tasks import (
+    BackgroundTaskSupervisor,
+    RestartPolicy,
+    ShutdownPolicy,
+    TaskKind,
+    TaskSpec,
+)
 from plugins.schedule.store import ScheduleStore
 from plugins.schedule.story_arc import (
     FictionPartnerProfile,
@@ -116,6 +122,8 @@ class ScheduleGenerator:
         partner_state_store: FictionPartnerStateStoreLike | None = None,
         fiction_partner_profiles: tuple[FictionPartnerProfile, ...] = (),
         event_replan_enabled: bool = False,
+        task_supervisor: BackgroundTaskSupervisor | None = None,
+        calendar_service: Any | None = None,
     ) -> None:
         self._store = store
         self._generate_at_hour = generate_at_hour
@@ -129,11 +137,28 @@ class ScheduleGenerator:
         self._fiction_partner_profiles = fiction_partner_profiles
         self._event_replan_enabled = bool(event_replan_enabled)
         self._task: asyncio.Task[None] | None = None
+        self._task_supervisor = task_supervisor
+        self._calendar_service = calendar_service
 
     def start(self, api_call: ApiCaller) -> None:
         if self._task is not None:
             return
-        self._task = asyncio.create_task(self._loop(api_call))
+        if self._task_supervisor is None:
+            self._task = asyncio.create_task(self._loop(api_call))
+        else:
+            self._task = self._task_supervisor.spawn(
+                TaskSpec(
+                    name="schedule.generator",
+                    owner="plugins.schedule",
+                    kind=TaskKind.PERIODIC,
+                    restart=RestartPolicy.ON_FAILURE,
+                    shutdown=ShutdownPolicy.CANCEL,
+                    max_restarts=3,
+                    backoff_seconds=5.0,
+                    max_backoff_seconds=60.0,
+                ),
+                lambda: self._loop(api_call),
+            )
         _L.info("schedule generator started | generate_at={}:00 CST", self._generate_at_hour)
 
     async def ensure_today(self, api_call: ApiCaller) -> bool:
@@ -156,9 +181,12 @@ class ScheduleGenerator:
 
     async def stop(self) -> None:
         if self._task and not self._task.done():
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+            if self._task_supervisor is not None:
+                await self._task_supervisor.stop_owner("plugins.schedule")
+            else:
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
         self._task = None
 
     # ------------------------------------------------------------------
@@ -174,6 +202,12 @@ class ScheduleGenerator:
                 await self._generate(api_call)
             except Exception:
                 _L.exception("schedule generation failed")
+
+    def _day_context(self, now: datetime) -> Any | None:
+        getter = getattr(self._calendar_service, "get_day_context", None)
+        if callable(getter):
+            return getter(now)
+        return None
 
     async def _generate(self, api_call: ApiCaller) -> None:
         now = datetime.now(CST)
@@ -193,28 +227,36 @@ class ScheduleGenerator:
             ),
         }]
 
-        day_ctx = get_day_context(now)
+        day_ctx = self._day_context(now)
+        raw_day_type = getattr(
+            day_ctx,
+            "day_type",
+            "school_day" if now.weekday() < 5 else "weekend",
+        )
         day_type_cn = {
             "school_day": "上学日",
             "weekend": "周末",
             "holiday": "节假日",
             "makeup_day": "调休日（周末补课）",
-        }.get(day_ctx.day_type, day_ctx.day_type)
+        }.get(str(raw_day_type), str(raw_day_type))
 
         user_parts = [
             f"请生成 {today_str} 的日程。",
             "",
             f"今日信息：{_weekday_cn(now.weekday())}，{day_type_cn}",
         ]
-        if day_ctx.holiday_name:
-            user_parts.append(f"正在放{day_ctx.holiday_name}假。")
-        if day_ctx.special_day:
-            user_parts.append(f"今天是{day_ctx.special_day}。")
-        if day_ctx.has_birthday:
-            for b in day_ctx.birthdays:
+        holiday_name = str(getattr(day_ctx, "holiday_name", "") or "")
+        special_day = str(getattr(day_ctx, "special_day", "") or "")
+        birthdays = list(getattr(day_ctx, "birthdays", ()) or ())
+        if holiday_name:
+            user_parts.append(f"正在放{holiday_name}假。")
+        if special_day:
+            user_parts.append(f"今天是{special_day}。")
+        if birthdays:
+            for b in birthdays:
                 wxs_tag = "（W×S成员）" if b.is_wxs_member else ""
                 user_parts.append(f"今天是{b.name_cn}（{b.group}）的生日！{wxs_tag}")
-        if day_ctx.is_makeup_day:
+        if bool(getattr(day_ctx, "is_makeup_day", False)):
             user_parts.append("虽然是周末但因为调休要上课，心情略带无奈。")
         if self._persona_driven_enabled:
             persona_text = _render_persona_schedule_brief(self._persona_brief)

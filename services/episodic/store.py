@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import secrets
 from collections.abc import Awaitable, Callable
@@ -22,6 +23,8 @@ from services.cross_group import (
     visibility_to_db,
 )
 from services.storage import close_with_checkpoint, connect_sqlite
+from services.storage.migrations import Migration, MigrationRunner
+from services.storage.schema_contracts import verify_catalog_schema_async
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -107,6 +110,58 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_episode_obs_today ON episode_observations(observed_at, episode_id)",
     "CREATE INDEX IF NOT EXISTS idx_episode_obs_scope ON episode_observations(scope, group_id, observed_at)",
 ]
+
+
+async def _ensure_episode_column(
+    db: aiosqlite.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    cursor = await db.execute(f"PRAGMA table_info({table})")
+    try:
+        names = {str(row["name"]) for row in await cursor.fetchall()}
+    finally:
+        await cursor.close()
+    if column not in names:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+async def _apply_episodic_v1(db: aiosqlite.Connection) -> None:
+    await db.execute(_CREATE_EPISODES_TABLE)
+    await db.execute(_CREATE_REVISIONS_TABLE)
+    await db.execute(_CREATE_OBSERVATIONS_TABLE)
+    for statement in _CREATE_INDEXES:
+        await db.execute(statement)
+    await _ensure_episode_column(
+        db,
+        "episodes",
+        "cross_group_enabled_for_groups",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    await _ensure_episode_column(
+        db,
+        "episodes",
+        "cross_group_enabled_reason",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+
+
+async def _verify_episodic_v1(db: aiosqlite.Connection) -> bool:
+    return bool(await verify_catalog_schema_async("episodic", db, 1))
+
+
+_EPISODIC_V1_DDL = "\n".join(
+    (_CREATE_EPISODES_TABLE, _CREATE_REVISIONS_TABLE, _CREATE_OBSERVATIONS_TABLE, *_CREATE_INDEXES)
+)
+_EPISODIC_V1 = Migration(
+    version=1,
+    name="episodic_baseline_v1",
+    checksum="sha256:" + hashlib.sha256(_EPISODIC_V1_DDL.encode()).hexdigest(),
+    apply=_apply_episodic_v1,
+    verify=_verify_episodic_v1,
+    adopt_existing=True,
+)
 
 
 @dataclass
@@ -305,28 +360,14 @@ class EpisodeStore:
         return self._db
 
     async def init(self) -> None:
+        await MigrationRunner(db_path=self._db_path, db_id="episodic").ensure(
+            (_EPISODIC_V1,)
+        )
         self._db = await connect_sqlite(self._db_path)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute(_CREATE_EPISODES_TABLE)
-        await self._db.execute(_CREATE_REVISIONS_TABLE)
-        await self._db.execute(_CREATE_OBSERVATIONS_TABLE)
-        for idx_sql in _CREATE_INDEXES:
-            await self._db.execute(idx_sql)
-        await self._ensure_column(
-            "episodes", "cross_group_enabled_for_groups", "TEXT NOT NULL DEFAULT '[]'"
-        )
-        await self._ensure_column(
-            "episodes", "cross_group_enabled_reason", "TEXT NOT NULL DEFAULT ''"
-        )
-        await self._db.commit()
         logger.info("EpisodeStore initialized: {}", self._db_path)
 
     async def _ensure_column(self, table: str, column: str, definition: str) -> None:
-        db = self._require_db()
-        cursor = await db.execute(f"PRAGMA table_info({table})")
-        names = {str(row["name"]) for row in await cursor.fetchall()}
-        if column not in names:
-            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        await _ensure_episode_column(self._require_db(), table, column, definition)
 
     async def close(self) -> None:
         if self._db:

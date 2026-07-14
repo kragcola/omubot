@@ -55,10 +55,11 @@ class AffectionEngine:
             profile.daily_count = 0
             profile.daily_date = today
 
-        max_daily_interactions = int(self._daily_cap / self._score_increment)
-        if profile.daily_count >= max_daily_interactions:
-            self._write_familiarity_state(user_id, profile)
-            return profile
+        if self._score_increment > 0:
+            max_daily_interactions = int(self._daily_cap / self._score_increment)
+            if profile.daily_count >= max_daily_interactions:
+                self._write_familiarity_state(user_id, profile)
+                return profile
 
         if profile.first_interaction == "":
             profile.first_interaction = now.isoformat()

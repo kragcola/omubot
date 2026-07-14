@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from kernel.background_tasks import BackgroundTaskSupervisor
 from plugins.schedule import generator as generator_module
 from plugins.schedule.generator import (
     PersonaScheduleBrief,
@@ -223,6 +225,29 @@ class TestExtractText:
 
     def test_empty_returns_empty(self):
         assert _extract_text({"text": ""}) == ""
+
+
+async def test_schedule_generator_loop_is_owned_by_supervisor(tmp_path, monkeypatch) -> None:
+    supervisor = BackgroundTaskSupervisor()
+    store = ScheduleStore(storage_dir=str(tmp_path / "schedule"))
+    generator = ScheduleGenerator(store=store, task_supervisor=supervisor)
+    started = asyncio.Event()
+
+    async def loop(_api_call: Any) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(generator, "_loop", loop)
+    generator.start(object())  # type: ignore[arg-type]
+    await started.wait()
+
+    [snapshot] = supervisor.snapshot()
+    assert snapshot.name == "schedule.generator"
+    assert snapshot.owner == "plugins.schedule"
+    await generator.stop()
+    assert supervisor.snapshot()[0].state == "cancelled"
+
+    await supervisor.stop()
 
 
 class TestPersonaDrivenScheduleFlag:

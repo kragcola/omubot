@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -21,6 +20,13 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from pydantic import BaseModel
 
+from kernel.background_tasks import (
+    BackgroundTaskSupervisor,
+    RestartPolicy,
+    ShutdownPolicy,
+    TaskKind,
+    TaskSpec,
+)
 from kernel.types import AmadeusPlugin, PluginContext
 from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
@@ -442,6 +448,7 @@ class DreamAgent:
         story_arc_store: Any | None = None,
         message_log: Any | None = None,
         mood_engine: Any | None = None,
+        task_supervisor: BackgroundTaskSupervisor | None = None,
     ) -> None:
         self._store = store
         self._interval_hours = interval_hours
@@ -459,23 +466,67 @@ class DreamAgent:
         self._mood_engine = mood_engine
         self._running: bool = False
         self._loop_task: asyncio.Task[None] | None = None
+        self._task_supervisor = task_supervisor
+        self._api_call: ApiCaller | None = None
 
     def start(self, api_call: ApiCaller) -> None:
         """Start the independent background dream loop."""
+        self._api_call = api_call
         if self._loop_task is not None:
             return
-        self._loop_task = asyncio.create_task(self._loop(api_call))
+        if self._task_supervisor is None:
+            self._loop_task = asyncio.create_task(self._loop(api_call))
+        else:
+            self._loop_task = self._task_supervisor.spawn(
+                TaskSpec(
+                    name="dream.loop",
+                    owner="plugins.dream",
+                    kind=TaskKind.PERIODIC,
+                    restart=RestartPolicy.ON_FAILURE,
+                    shutdown=ShutdownPolicy.CANCEL,
+                    max_restarts=2,
+                    backoff_seconds=5.0,
+                    max_backoff_seconds=60.0,
+                ),
+                lambda: self._loop(api_call),
+            )
         self._loop_task.add_done_callback(self._on_loop_done)
         dream_logger.info("dream loop started | interval={}h", self._interval_hours)
 
     async def stop(self) -> None:
         """Cancel the background loop and wait for it to finish."""
         if self._loop_task is not None:
-            self._loop_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._loop_task
+            if self._task_supervisor is not None:
+                await self._task_supervisor.stop_owner("plugins.dream")
+            else:
+                self._loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._loop_task
             self._loop_task = None
+            self._api_call = None
             dream_logger.info("dream loop stopped")
+
+    def snapshot(self) -> dict[str, object]:
+        """Return the public runtime state consumed by the Admin API."""
+        return {
+            "running": self._running,
+            "interval_hours": self._interval_hours,
+            "max_rounds": self._max_rounds,
+            "sticker_delete_floor": self._sticker_delete_floor,
+            "sticker_count": (
+                self._sticker_store.count
+                if self._sticker_store is not None
+                else None
+            ),
+        }
+
+    async def trigger_once(self) -> None:
+        """Run one dream cycle through the configured public lifecycle handle."""
+        if self._api_call is None:
+            raise RuntimeError("DreamAgent has not started")
+        if self._running:
+            raise RuntimeError("DreamAgent is already running")
+        await self._run(self._api_call)
 
     async def _loop(self, api_call: ApiCaller) -> None:
         """Run immediately on start, then sleep → run → repeat."""
@@ -923,15 +974,15 @@ class DreamPlugin(AmadeusPlugin):
     def __init__(self) -> None:
         super().__init__()
         self._dream_agent = None
-        self._event_boundary_detector = None
         self._started = False
-        self._bot: Any = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
         from kernel.config import load_plugin_config
 
         dream_cfg = load_plugin_config("plugins/dream/config.default.json", DreamConfig)
         if not dream_cfg.enabled:
+            self._dream_agent = None
+            ctx.dream = None
             _L = logger.bind(channel="dream")
             _L.info("dream disabled in config, skipping")
             return
@@ -951,10 +1002,12 @@ class DreamPlugin(AmadeusPlugin):
             story_arc_store=getattr(ctx, "story_arc_store", None),
             message_log=getattr(ctx, "msg_log", None),
             mood_engine=getattr(ctx, "mood_engine", None),
+            task_supervisor=getattr(ctx, "background_task_supervisor", None),
         )
+        ctx.dream = self._dream_agent
 
     async def on_bot_connect(self, ctx: PluginContext, bot: Any) -> None:
-        self._bot = bot
+        del bot
         if self._dream_agent is None or self._started:
             return
         self._dream_agent.start(ctx.llm_client._call)
@@ -963,81 +1016,12 @@ class DreamPlugin(AmadeusPlugin):
         _L.info("dream agent started")
 
     async def on_shutdown(self, ctx: PluginContext) -> None:
-        if self._dream_agent is not None:
-            await self._dream_agent.stop()
+        agent = self._dream_agent
+        self._dream_agent = None
+        self._started = False
+        if getattr(ctx, "dream", None) is agent:
+            ctx.dream = None
+        if agent is not None:
+            await agent.stop()
             _L = logger.bind(channel="dream")
             _L.info("dream agent stopped")
-
-    async def on_tick(self, ctx: PluginContext) -> None:
-        from services import learning_settings
-        from services.memory_consolidator.event_boundary import EventBoundaryDetector
-
-        _L = logger.bind(channel="dream")
-
-        birthday_greeter = getattr(ctx, "birthday_greeter", None)
-        if birthday_greeter is not None and self._bot is not None:
-            try:
-                llm_client = getattr(ctx, "llm_client", None)
-                greeted = await birthday_greeter.check_and_greet(self._bot, llm_client=llm_client)
-                if greeted:
-                    _L.info("birthday_greeter sent wishes | qq={}", greeted)
-            except Exception as exc:
-                _L.warning("birthday_greeter failed | err={}", exc)
-
-        settings = learning_settings.load(getattr(ctx, "storage_dir", "storage"))
-        consolidator_cfg = settings.get("consolidator", {})
-        if not consolidator_cfg.get("auto_enabled", False):
-            return
-        consolidator = getattr(ctx, "memory_consolidator", None)
-        if consolidator is None:
-            return
-        msg_log = getattr(ctx, "msg_log", None)
-        if msg_log is None:
-            return
-        _L = logger.bind(channel="dream")
-        try:
-            group_ids = await msg_log.list_group_ids() if hasattr(msg_log, "list_group_ids") else []
-            if self._event_boundary_detector is None:
-                self._event_boundary_detector = EventBoundaryDetector()
-            if _ebr_enabled():
-                mood_engine = getattr(ctx, "mood_engine", None)
-                ebr_hits = 0
-                for gid in group_ids[:5]:
-                    triggered, reason = await self._event_boundary_detector.detect(
-                        group_id=str(gid),
-                        message_log=msg_log,
-                        mood_engine=mood_engine,
-                    )
-                    if not triggered:
-                        continue
-                    await consolidator.run_once(
-                        group_id=str(gid),
-                        triggered_by=f"event_boundary:{reason}",
-                        max_batches=1,
-                        batch_size=30,
-                    )
-                    ebr_hits += 1
-                if ebr_hits:
-                    _L.info("consolidator event-boundary tick completed | groups={}", ebr_hits)
-            interval_s = int(consolidator_cfg.get("interval_minutes", 360)) * 60
-            now = time.monotonic()
-            if not hasattr(self, "_last_consolidator_monotonic"):
-                self._last_consolidator_monotonic: float = 0.0
-            if now - self._last_consolidator_monotonic < interval_s:
-                return
-            self._last_consolidator_monotonic = now
-            for gid in group_ids[:5]:
-                await consolidator.run_once(
-                    group_id=str(gid),
-                    triggered_by="periodic_tick",
-                    max_batches=1,
-                    batch_size=30,
-                )
-            _L.info("consolidator periodic tick completed | groups={}", len(group_ids[:5]))
-        except Exception as exc:
-            _L.warning("consolidator periodic tick failed | err={}", exc)
-
-
-def _ebr_enabled() -> bool:
-    raw = os.getenv("EBR_ENABLED", "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}

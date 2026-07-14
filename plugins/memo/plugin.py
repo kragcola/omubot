@@ -21,7 +21,6 @@ from kernel.types import (
 )
 from services.llm.llm_request import LLMRequest
 from services.memory.card_store import CardStore, NewCard
-from services.tools.base import Tool
 
 
 class MemoConfig(BaseModel):
@@ -159,7 +158,16 @@ class MemoPlugin(AmadeusPlugin):
         self._memo_extractor = ctx.memo_extractor
         self._context_takeover = getattr(ctx, "context_prompt_owner", "") == "context"
 
-    def register_tools(self) -> list[Tool]:
+    async def on_shutdown(self, ctx: PluginContext) -> None:
+        tasks = tuple(self._pending_extractions)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._pending_extractions.clear()
+        self._memo_extractor = None
+
+    def register_tools(self) -> list[Any]:
         if self._card_store is None:
             return []
         from services.tools.memo_tools import CardLookupTool, CardUpdateTool
@@ -219,7 +227,8 @@ class MemoPlugin(AmadeusPlugin):
                 group_id=ctx.group_id,
                 user_msg=ctx.user_msg,
                 bot_reply=ctx.reply_content,
-            )
+            ),
+            name=f"plugin:memo:extract:{ctx.group_id or 'private'}:{ctx.user_id}",
         )
 
         scope = "group" if ctx.group_id else "user"
@@ -227,6 +236,14 @@ class MemoPlugin(AmadeusPlugin):
 
         def _on_extraction_done(t: asyncio.Task[None]) -> None:
             self._pending_extractions.discard(t)
+            if not t.cancelled():
+                error = t.exception()
+                if error is not None:
+                    _L.error(
+                        "memo extraction task failed | error={}: {}",
+                        type(error).__name__,
+                        error,
+                    )
             self._index_cache = None
             if self._retrieval is not None:
                 self._retrieval.invalidate_entity(scope, scope_id)

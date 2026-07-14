@@ -14,6 +14,10 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext, PromptContext
+from services.learning_extract_coordinator import (
+    ExtractRunParams,
+    run_coordinated_extract,
+)
 from services.slang import (
     SlangBacklogReviewer,
     SlangDatabaseCorruptError,
@@ -287,8 +291,27 @@ class SlangPlugin(AmadeusPlugin):
                     # Not enough time since last run — skip and align monotonic.
                     self._last_extract_monotonic = now - elapsed.total_seconds()
                     return
+        async def extract() -> dict[str, Any]:
+            return await self.run_manual_extract(
+                limit=settings.extraction_batch_limit,
+            )
+
+        result = await run_coordinated_extract(
+            ctx,
+            noun="slang",
+            params=ExtractRunParams(
+                limit=settings.extraction_batch_limit,
+                timeout_seconds=_TICK_JOB_TIMEOUT_S * 0.85,
+            ),
+            runner=extract,
+        )
+        if result.get("ok") is False:
+            _L.debug(
+                "slang periodic extract skipped | error={}",
+                result.get("error"),
+            )
+            return
         self._last_extract_monotonic = now
-        await self.run_manual_extract(limit=settings.extraction_batch_limit)
 
     def _on_tick_job_done(self, task: asyncio.Task[None]) -> None:
         if self._tick_task is task:

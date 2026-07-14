@@ -10,6 +10,7 @@
   "priority": 8,
   "tier": "system",
   "toggle_policy": "locked",
+  "capability_only": true,
   "category": "core",
   "permissions": [
     "network"

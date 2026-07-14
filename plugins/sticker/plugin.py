@@ -11,12 +11,13 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel
 
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext, PromptContext, Tool
+from services.admin_access import effective_admin_ids
 from services.media.sticker_capture import (
     DEFAULT_STICKER_USAGE_HINT,
     emit_emotion_tag,
@@ -204,8 +205,6 @@ class StickerPlugin(AmadeusPlugin):
         self._recurrence_gate = _RecurrenceGate(min_occurrences=1, window_seconds=86400.0)
 
     async def on_startup(self, ctx: PluginContext) -> None:
-        import nonebot
-
         from kernel.config import load_plugin_config
 
         sticker_cfg = load_plugin_config("plugins/sticker/config.default.json", StickerConfig)
@@ -213,7 +212,7 @@ class StickerPlugin(AmadeusPlugin):
         self._vision_client = getattr(ctx, "vision_client", None)
         self._image_cache = ctx.image_cache
         self._ctx = ctx
-        self._superusers = set(ctx.config.admins.keys()) | nonebot.get_driver().config.superusers
+        self._superusers = effective_admin_ids(ctx)
         self._sticker_frequency = sticker_cfg.frequency
         self._group_config = getattr(ctx.config, "group", None)
         self._recurrence_gate = _RecurrenceGate(
@@ -229,11 +228,11 @@ class StickerPlugin(AmadeusPlugin):
             SaveStickerTool,
             SendStickerTool,
         )
-        return cast(list[Tool], [
+        return [
             SaveStickerTool(self._sticker_store, self._superusers),
             SendStickerTool(self._sticker_store, runtime_state=getattr(self._ctx, "runtime_state", None)),
             ManageStickerTool(self._sticker_store, self._superusers),
-        ])
+        ]
 
     async def on_message(self, ctx: MessageContext) -> bool:
         """非主动发言态群里，把群友发的表情静默吸进表情库。

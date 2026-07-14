@@ -9,6 +9,9 @@ Asserts:
 - archive cursor advances on success, holds on failure
 - D2 cancel-path: ``asyncio.wait_for`` timeout leaves run row marked
   ``failed`` with no orphaned normalizer rows
+- external cancellation closes the real archive scan row without advancing
+  its cursor
+- repeated cancellation cannot return before archive scan cleanup finishes
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import services.memory_consolidator.consolidator as consolidator_module
 from services.conversation_archive.store import ConversationArchive
 from services.learning_normalizer.store import LearningNormalizerStore
 from services.memory_consolidator import (
@@ -97,6 +101,17 @@ class SlowStubLLM(StubLLM):
         return await super()._call(request)
 
 
+class HangingStubLLM:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def _call(self, request: Any) -> dict[str, Any]:
+        del request
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("hanging LLM should only finish by cancellation")
+
+
 @pytest.fixture
 async def archive(tmp_path):
     arc = ConversationArchive(str(tmp_path / "messages.db"))
@@ -139,6 +154,61 @@ async def _seed_archive(archive: ConversationArchive, group_id: str = "g_test") 
             message_id=idx,
             created_at=1_700_000_000.0 + idx,
         )
+
+
+async def _seed_consolidator_cursor(
+    archive: ConversationArchive,
+    *,
+    group_id: str,
+) -> None:
+    await archive.upsert_cursor(
+        scanner_name="memory_consolidator",
+        chat_type="group",
+        chat_id=group_id,
+        scope_key="chat",
+        required=True,
+        last_message_pk=0,
+        last_created_at=0.0,
+        scanner_version="v1",
+        params_hash="default-2026-05-21",
+        status="active",
+    )
+
+
+async def _consolidator_scan_rows(
+    archive: ConversationArchive,
+    *,
+    group_id: str,
+) -> list[dict[str, Any]]:
+    assert archive._db is not None
+    result = await archive._db.execute(
+        "SELECT status, error, finished_at FROM conversation_scan_runs "
+        "WHERE scanner_name = 'memory_consolidator' AND chat_type = 'group' "
+        "AND chat_id = ? ORDER BY started_at",
+        (group_id,),
+    )
+    return [dict(row) for row in await result.fetchall()]
+
+
+async def _assert_cancelled_scan_closed_without_cursor_advance(
+    archive: ConversationArchive,
+    *,
+    group_id: str,
+) -> None:
+    rows = await _consolidator_scan_rows(archive, group_id=group_id)
+    assert rows, "expected the real archive scanner to create a run row"
+    assert all(row["status"] != "running" for row in rows), rows
+    assert all(row["finished_at"] is not None for row in rows), rows
+    assert all(row["status"] in {"abandoned", "cancelled"} for row in rows), rows
+
+    cursor = await archive.get_cursor(
+        scanner_name="memory_consolidator",
+        chat_type="group",
+        chat_id=group_id,
+        scope_key="chat",
+    )
+    assert cursor is not None
+    assert int(cursor["last_message_pk"] or 0) == 0
 
 
 @pytest.mark.asyncio
@@ -303,3 +373,253 @@ async def test_run_once_cancel_marks_run_failed(archive, store, normalizer):
     # no orphaned candidates were recorded for the failed run
     orphans = await store.list_candidates(run_id=latest.run_id)
     assert orphans == []
+
+
+@pytest.mark.asyncio
+async def test_run_once_external_cancel_closes_archive_scan_and_holds_cursor(
+    archive,
+    store,
+    normalizer,
+):
+    group_id = "g_external_cancel"
+    await _seed_archive(archive, group_id=group_id)
+    await _seed_consolidator_cursor(archive, group_id=group_id)
+    hanging_llm = HangingStubLLM()
+    consolidator = MemoryConsolidator(
+        store=store,
+        archive=archive,
+        normalizer=normalizer,
+        llm_client=hanging_llm,
+    )
+    task = asyncio.create_task(
+        consolidator.run_once(
+            group_id=group_id,
+            triggered_by="test",
+            scope="group",
+            max_batches=1,
+            batch_size=10,
+        )
+    )
+    await asyncio.wait_for(hanging_llm.started.wait(), timeout=1.0)
+
+    task.cancel("external cancellation")
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(task, timeout=1.0)
+    assert raised.value.args == ("external cancellation",)
+    await _assert_cancelled_scan_closed_without_cursor_advance(
+        archive,
+        group_id=group_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_once_repeated_cancel_waits_for_archive_scan_cleanup(
+    archive,
+    store,
+    normalizer,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    group_id = "g_repeated_cancel"
+    await _seed_archive(archive, group_id=group_id)
+    await _seed_consolidator_cursor(archive, group_id=group_id)
+    hanging_llm = HangingStubLLM()
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    real_finish_scan_batch = consolidator_module._archive_finish_scan_batch
+
+    async def controlled_finish_scan_batch(*args: Any, **kwargs: Any) -> None:
+        is_cancel_cleanup = kwargs.get("status") in {"abandoned", "cancelled"}
+        if is_cancel_cleanup:
+            cleanup_started.set()
+            await cleanup_release.wait()
+        await real_finish_scan_batch(*args, **kwargs)
+        if is_cancel_cleanup:
+            cleanup_finished.set()
+
+    monkeypatch.setattr(
+        consolidator_module,
+        "_archive_finish_scan_batch",
+        controlled_finish_scan_batch,
+    )
+    consolidator = MemoryConsolidator(
+        store=store,
+        archive=archive,
+        normalizer=normalizer,
+        llm_client=hanging_llm,
+    )
+    task = asyncio.create_task(
+        consolidator.run_once(
+            group_id=group_id,
+            triggered_by="test",
+            scope="group",
+            max_batches=1,
+            batch_size=10,
+        )
+    )
+    await asyncio.wait_for(hanging_llm.started.wait(), timeout=1.0)
+
+    task.cancel("initial cancellation")
+    try:
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
+    except TimeoutError:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+        pytest.fail("archive cancellation cleanup did not start")
+
+    task.cancel("repeated cancellation")
+    await asyncio.sleep(0)
+    returned_before_cleanup = task.done()
+    rows_before_release = await _consolidator_scan_rows(
+        archive,
+        group_id=group_id,
+    )
+
+    cleanup_release.set()
+    await asyncio.wait_for(cleanup_finished.wait(), timeout=1.0)
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert returned_before_cleanup is False, rows_before_release
+    assert rows_before_release, "scan row must exist before cleanup is released"
+    assert all(row["status"] == "running" for row in rows_before_release), (
+        rows_before_release
+    )
+    assert raised.value.args == ("initial cancellation",)
+    await _assert_cancelled_scan_closed_without_cursor_advance(
+        archive,
+        group_id=group_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_once_cancel_after_owner_finish_commit_has_consistent_outcome(
+    archive,
+    store,
+    normalizer,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    group_id = "g_owner_finish_commit_cancel"
+    await _seed_archive(archive, group_id=group_id)
+    await _seed_consolidator_cursor(archive, group_id=group_id)
+    finish_committed = asyncio.Event()
+    allow_finish_return = asyncio.Event()
+    real_finish_run = store.finish_run
+
+    async def controlled_finish_run(*args: Any, **kwargs: Any) -> Any:
+        result = await real_finish_run(*args, **kwargs)
+        if not finish_committed.is_set():
+            finish_committed.set()
+            await allow_finish_return.wait()
+        return result
+
+    monkeypatch.setattr(store, "finish_run", controlled_finish_run)
+    consolidator = MemoryConsolidator(
+        store=store,
+        archive=archive,
+        normalizer=normalizer,
+        llm_client=StubLLM(),
+    )
+    task = asyncio.create_task(
+        consolidator.run_once(
+            group_id=group_id,
+            triggered_by="test",
+            scope="group",
+            max_batches=1,
+            batch_size=10,
+        )
+    )
+
+    async with asyncio.timeout(1.0):
+        await finish_committed.wait()
+        task.cancel("cancel after owner finish commit")
+        await asyncio.sleep(0)
+        allow_finish_return.set()
+        try:
+            report = await task
+        except asyncio.CancelledError as exc:
+            outcome: dict[str, Any] = {
+                "kind": "cancelled",
+                "cancel_args": exc.args,
+                "report_status": None,
+            }
+        else:
+            outcome = {
+                "kind": "returned",
+                "cancel_args": None,
+                "report_status": report.status,
+            }
+
+        runs = await store.list_runs(limit=5)
+        assert runs, "owner run row must exist"
+        latest = runs[0]
+        outcome_is_consistent = (
+            outcome["kind"] == "returned"
+            and outcome["report_status"] == "done"
+            and latest.status == "done"
+        ) or (
+            outcome["kind"] == "cancelled"
+            and outcome["cancel_args"] == ("cancel after owner finish commit",)
+            and latest.status == "failed"
+        )
+        observed = {
+            "outcome": outcome,
+            "owner_status": latest.status,
+            "owner_finished_at": latest.finished_at,
+        }
+        assert (
+            latest.status != "running"
+            and latest.finished_at > 0
+            and outcome_is_consistent
+        ), observed
+
+
+@pytest.mark.asyncio
+async def test_run_once_cancel_after_owner_start_commit_closes_run(
+    archive,
+    store,
+    normalizer,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    start_committed = asyncio.Event()
+    allow_start_return = asyncio.Event()
+    real_start_run = store.start_run
+
+    async def controlled_start_run(*args: Any, **kwargs: Any) -> str:
+        run_id = await real_start_run(*args, **kwargs)
+        start_committed.set()
+        await allow_start_return.wait()
+        return run_id
+
+    monkeypatch.setattr(store, "start_run", controlled_start_run)
+    consolidator = MemoryConsolidator(
+        store=store,
+        archive=archive,
+        normalizer=normalizer,
+        llm_client=StubLLM(),
+    )
+    task = asyncio.create_task(
+        consolidator.run_once(
+            group_id="g_owner_start_commit_cancel",
+            triggered_by="test",
+            scope="group",
+            max_batches=1,
+            batch_size=10,
+        )
+    )
+
+    async with asyncio.timeout(1.0):
+        await start_committed.wait()
+        task.cancel("cancel after owner start commit")
+        await asyncio.sleep(0)
+        allow_start_return.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+
+        runs = await store.list_runs(limit=5)
+        assert runs, "owner run row must exist"
+        latest = runs[0]
+        assert raised.value.args == ("cancel after owner start commit",)
+        assert latest.status == "failed"
+        assert latest.finished_at > 0

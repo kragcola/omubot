@@ -136,7 +136,7 @@ class BilibiliConfig(BaseModel):
 
 @dataclass
 class _VideoCacheEntry:
-    info: dict
+    info: dict | float
     stored_at: float
 
 
@@ -152,6 +152,44 @@ class _VideoId:
         if self.bvid:
             return self.bvid
         return f"av{self.aid}"
+
+
+def _video_id_from_bangumi_episode(episode: object) -> _VideoId | None:
+    """Extract a normal video ID from one bangumi episode-list item."""
+    if not isinstance(episode, dict):
+        return None
+
+    bvid = episode.get("bvid")
+    if isinstance(bvid, str) and bvid:
+        return _VideoId(bvid=bvid)
+
+    aid = episode.get("aid")
+    if isinstance(aid, int) and aid > 0:
+        return _VideoId(aid=aid)
+    if isinstance(aid, str) and aid.isdigit() and int(aid) > 0:
+        return _VideoId(aid=int(aid))
+
+    link = episode.get("link")
+    if isinstance(link, str):
+        return extract_video_id(link)
+    return None
+
+
+def _bangumi_episode_is_playable(episode: object) -> bool:
+    """Prefer visible/on-demand episodes while retaining metadata fallbacks."""
+    if not isinstance(episode, dict):
+        return False
+    if episode.get("is_view_hide") in (True, 1, "1"):
+        return False
+
+    rights = episode.get("rights")
+    if isinstance(rights, dict):
+        if rights.get("area_limit") in (True, 1, "1"):
+            return False
+        for key in ("allow_demand", "can_watch", "allow_play"):
+            if key in rights:
+                return rights[key] not in (False, 0, "0", None)
+    return True
 
 
 def extract_video_id(text: str) -> _VideoId | None:
@@ -320,7 +358,7 @@ def format_video_summary(info: dict, cover_desc: str | None = None) -> str:
 
 class BilibiliPlugin(AmadeusPlugin):
     name = "bilibili"
-    description = "B站视频链接识别：拉取标题/封面/简介/标签，注入消息上下文"
+    description = "B站视频链接识别：拉取标题、封面、简介并注入消息上下文"
     version = "1.1.4"
     priority = 190
 
@@ -390,13 +428,20 @@ class BilibiliPlugin(AmadeusPlugin):
         if vid is None and info is None and combined_text and has_bilibili_link(combined_text):
             resolved_text = await self._resolve_b23_links(combined_text)
             vid = extract_video_id(resolved_text)
+            if vid is None and _EP_PATTERN.search(resolved_text):
+                vid = await self._resolve_urls_to_vid(resolved_text)
             if vid is not None:
                 source = "text"
 
         if vid is None and info is None:
             return False
 
-        vid_key = vid.key if vid else info.get("bvid", "search")
+        if vid is not None:
+            vid_key = vid.key
+        elif info is not None:
+            vid_key = info.get("bvid", "search")
+        else:  # narrowed above; retained for static-analysis exhaustiveness
+            return False
 
         # Fetch video info by ID if not already found via search
         if vid is not None and info is None:
@@ -612,13 +657,59 @@ class BilibiliPlugin(AmadeusPlugin):
     async def _resolve_urls_to_vid(url: str) -> _VideoId | None:
         """Try to extract a video ID from a URL string.
 
-        Handles direct bilibili URLs, b23.tv short links, and QQ document
-        redirect URLs (qqdocurl) by following HTTP redirects.
+        Handles direct bilibili URLs, bangumi episode/season links, b23.tv
+        short links, and QQ document redirect URLs by following redirects.
         """
         # Already a full bilibili URL with BV/av
         vid = extract_video_id(url)
         if vid:
             return vid
+
+        # Bangumi URLs do not contain a normal video ID. Resolve them through
+        # bilibili_api so the rest of the pipeline can keep using Video.get_info.
+        bangumi_match = _EP_PATTERN.search(url)
+        if bangumi_match:
+            bangumi_id = bangumi_match.group(1)
+            try:
+                from bilibili_api import bangumi
+
+                if bangumi_id.startswith("ep"):
+                    episode = bangumi.Episode(epid=int(bangumi_id[2:]))
+                    bvid = await episode.get_bvid()
+                    if bvid:
+                        return _VideoId(bvid=bvid)
+                    aid = await episode.get_aid()
+                    return _VideoId(aid=int(aid)) if aid and aid.isdigit() else None
+
+                season = bangumi.Bangumi(ssid=int(bangumi_id[2:]))
+                episode_list = await season.get_episode_list()
+                sections: list[object] = [episode_list.get("main_section")]
+                extra_sections = episode_list.get("section") or []
+                if isinstance(extra_sections, list):
+                    sections.extend(extra_sections)
+
+                episodes: list[object] = []
+                for section in sections:
+                    if isinstance(section, dict):
+                        section_episodes = section.get("episodes") or []
+                        if isinstance(section_episodes, list):
+                            episodes.extend(section_episodes)
+
+                # Prefer an actually playable episode, but retain a metadata
+                # fallback for season lists whose rights fields are incomplete.
+                for playable_only in (True, False):
+                    for episode_data in episodes:
+                        if playable_only and not _bangumi_episode_is_playable(episode_data):
+                            continue
+                        vid = _video_id_from_bangumi_episode(episode_data)
+                        if vid:
+                            return vid
+            except Exception as e:
+                _log.warning(
+                    "bilibili | bangumi resolve failed id={} error_type={} error={!r}",
+                    bangumi_id, type(e).__name__, str(e)[:200],
+                )
+            return None
 
         # Try to resolve b23.tv short links
         if _B23_PATTERN.search(url):
@@ -655,7 +746,7 @@ class BilibiliPlugin(AmadeusPlugin):
         now = time.monotonic()
         vid_key = vid.key
         entry = self._cache.get(vid_key)
-        if entry and (now - entry.stored_at) < self._cache_ttl:
+        if entry and isinstance(entry.info, dict) and (now - entry.stored_at) < self._cache_ttl:
             _log.debug("bilibili | cache HIT vid={}", vid_key)
             return entry.info
 
@@ -685,7 +776,7 @@ class BilibiliPlugin(AmadeusPlugin):
         cache_key = f"__search__{keyword}"
         now = time.monotonic()
         entry = self._cache.get(cache_key)
-        if entry and (now - entry.stored_at) < self._cache_ttl:
+        if entry and isinstance(entry.info, dict) and (now - entry.stored_at) < self._cache_ttl:
             _log.debug("bilibili | search cache HIT keyword={!r}", keyword)
             return entry.info
 
@@ -771,9 +862,13 @@ class BilibiliPlugin(AmadeusPlugin):
         cache_key = f"__interest__{title}"
         now = time.monotonic()
         entry = self._cache.get(cache_key)
-        if entry and (now - entry.stored_at) < self._cache_ttl:
+        if entry and isinstance(entry.info, (int, float)) and (now - entry.stored_at) < self._cache_ttl:
             _log.debug("bilibili | interest LLM cache HIT title={!r}", title)
-            return entry.info
+            return float(entry.info)
+
+        llm_client = self._llm_client
+        if llm_client is None:
+            return None
 
         request = LLMRequest(
             task="bilibili_intent",
@@ -784,7 +879,7 @@ class BilibiliPlugin(AmadeusPlugin):
         )
 
         try:
-            result = await self._llm_client._call(request)
+            result = await llm_client._call(request)
             raw = (result.get("text") or "").strip()
             if not raw:
                 # deepseek-v4-flash may consume all tokens in thinking blocks
@@ -795,7 +890,8 @@ class BilibiliPlugin(AmadeusPlugin):
                 _log.debug("bilibili | interest LLM text empty, falling back to thinking blocks len={}", len(raw))
             # Extract the first number (prompt asks to output number first)
             _log.info("bilibili | interest LLM raw={!r} title={!r}", raw[:300], title[:60])
-            score = int(re.search(r"\d+", raw).group()) if re.search(r"\d+", raw) else None
+            score_match = re.search(r"\d+", raw)
+            score = int(score_match.group()) if score_match else None
         except Exception:
             _log.warning("bilibili | interest LLM call failed title={!r}", title)
             return None

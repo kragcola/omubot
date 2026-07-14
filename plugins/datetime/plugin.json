@@ -17,6 +17,9 @@
   "capabilities": [
     "datetime_tool"
   ],
+  "optional_dependencies": {
+    "calendar_context": ">=1.0.0"
+  },
   "min_omubot_version": "",
   "config": {
     "defaults": "config.default.json",

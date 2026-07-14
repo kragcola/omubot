@@ -10,10 +10,13 @@ cd omubot
 cp .env.example config/.env
 cp config.example.toml config/config.toml
 # 人设走 v2：admin SPA「人设管理」上传 source.md -> import -> freeze -> hot-reload
-docker compose up -d
+# 仅首次空环境显式启动 NapCat；已有登录态不要执行该行
+docker compose up -d napcat
+docker compose build bot
+docker compose up -d --no-deps bot
 ```
 
-> 当前配置加载器优先读取 `config/config.json`，并兼容已有 `config/config.toml`。Admin 配置页保存时会写出 JSON 主配置。此机器的活跃开发工作区是 `/Volumes/OmubotDisk/omubot`；旧路径 `$HOME/OmubotWorkspace/omubot` 与 `/Volumes/我的电脑/omubot` 已废弃。
+> 当前配置加载器优先读取 `config/config.json`，并兼容已有 `config/config.toml`。Admin 配置页保存时会写出 JSON 主配置。已有环境的 Bot 上线必须使用 `docker compose build bot` 后接 `docker compose up -d --no-deps --force-recreate bot`，不得用泛化 Compose 命令触及 NapCat。此机器的活跃开发工作区是 `/Volumes/OmubotDisk/omubot`；旧路径 `$HOME/OmubotWorkspace/omubot` 与 `/Volumes/我的电脑/omubot` 已废弃。
 
 ## 当前状态
 
@@ -26,6 +29,7 @@ docker compose up -d
 | 管理端 | Vue 3 + Naive UI，Calm Ops / 雾青控制台风格 |
 | 运行拓扑 | `napcat` + `bot` + `ccip-sidecar`；`pmubot` 作为可选控制平面 |
 | 知识目录 | 生产聊天默认扫描 `docs/knowledge`；`docs/wiki` 继续作为研发/运维 wiki |
+| 课程交付 | [数据库课程交付 2026](Database-Coursework-2026)：报告、HTML 幻灯片、精简数据库 Web 和源码包已准备 |
 
 ## 核心特性
 
@@ -41,6 +45,7 @@ docker compose up -d
 - **对话归档底座**：`ConversationArchive` 提供消息事件流、scanner cursor、运行审计、证据引用和留存 dry-run 原语。
 - **群画像与访问控制**：按群 profile 覆盖参与模式、工具 allow/block、回复风格、表情模式、黑话学习与 `silent_learn`。
 - **系统运维**：Admin Dashboard、配置 diff/审计/快照回滚、日志、协议连接/trace、健康阈值告警、运行态错误存储。
+- **数据库课程交付**：从 Omubot 抽取消息、记忆、知识、图谱、黑话、表达和统计等数据库业务域，提供报告、HTML 幻灯片、精简数据库运营前端和脱敏源码包。
 
 ## 技术栈
 

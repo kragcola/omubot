@@ -182,7 +182,6 @@ class TopicBlockTracker:
             self._reservoir.pop(group_id, None)
         active = self._blocks.setdefault(group_id, {})
         active[block.block_id] = block
-        self._bump_activity(block)
 
     def _prune_msg_index(self, group_id: str, block_id: str) -> None:
         """Remove _msg_to_block entries pointing to a specific block."""
@@ -213,7 +212,6 @@ class TopicBlockTracker:
     ) -> TopicBlock:
         """Attribute one message to a topic block (strongest signal first)."""
         now = time.monotonic() if now is None else now
-        group_blocks = self._blocks.setdefault(group_id, {})
         active = self._active(group_id, now)
         target = self._attribute(
             group_id, active, speaker, text,
@@ -221,16 +219,16 @@ class TopicBlockTracker:
         )
         if target is None:
             target = TopicBlock(block_id=self._next_block_id())
-            group_blocks[target.block_id] = target
+            self._blocks.setdefault(group_id, {})[target.block_id] = target
         reservoir = self._reservoir.get(group_id, {})
         if target.block_id in reservoir:
             self._revive_from_reservoir(group_id, target)
+        self._apply(group_id, target, message_id, speaker, text, at_targets, at_self, reply_to_self, now)
         active_now = self._blocks.get(group_id, {})
         while len(active_now) > self._max_blocks:
             _, coldest = min(active_now.items(), key=lambda kv: kv[1].activity)
             self._move_to_reservoir(group_id, coldest)
             active_now = self._blocks.get(group_id, {})
-        self._apply(group_id, target, message_id, speaker, text, at_targets, at_self, reply_to_self, now)
         return target
 
     def _attribute(

@@ -16,7 +16,9 @@ parent router); responses follow the existing admin convention of plain dicts.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +64,7 @@ def _serialize_quick_check(scheduler: Any) -> dict[str, Any]:
 
 
 def _persist_backup_config(config_path: str, payload: dict[str, Any]) -> None:
-    """Patch config.json's `backup` block in-place; admin auth is upstream."""
+    """Atomically patch config.json's `backup` block; auth is upstream."""
     p = Path(config_path)
     if not p.exists():
         # Nothing to patch; scheduler still gets the live update via reload().
@@ -74,7 +76,16 @@ def _persist_backup_config(config_path: str, payload: dict[str, Any]) -> None:
     backup_block = data.get("backup") or {}
     backup_block.update({k: v for k, v in payload.items() if v is not None})
     data["backup"] = backup_block
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    serialized = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    tmp = p.with_suffix(f"{p.suffix}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, p)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def create_backup_router(
@@ -83,6 +94,7 @@ def create_backup_router(
     config_path: str,
 ) -> APIRouter:
     router = APIRouter(prefix="/backup", tags=["backup"])
+    settings_lock = asyncio.Lock()
 
     @router.get("/settings")
     async def get_settings() -> dict[str, Any]:
@@ -98,33 +110,85 @@ def create_backup_router(
         # Pydantic-bound payload — only fields explicitly set are applied.
         body = payload.model_dump(exclude_none=True)
 
-        # Validate via Pydantic before applying — daily_time format & ranges.
-        from kernel.config import BackupConfig
-        merged = {**backup_scheduler.settings, **body}
-        try:
-            BackupConfig(**merged)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"配置非法: {exc}") from exc
+        async with settings_lock:
+            # Read, merge, validate, reload, and persist under one owner lock.
+            # Otherwise two partial requests can both merge from the same stale
+            # scheduler snapshot and the later reload can undo the earlier one.
+            from kernel.config import BackupConfig
 
-        backup_scheduler.reload(
-            daily_time=merged["daily_time"],
-            keep_days=merged["keep_days"],
-            default_profile=merged["default_profile"],
-            enabled=merged["enabled"],
-            quick_check_enabled=merged["quick_check_enabled"],
-            quick_check_interval_minutes=merged["quick_check_interval_minutes"],
-        )
-        _persist_backup_config(config_path, body)
+            merged = {**backup_scheduler.settings, **body}
+            try:
+                BackupConfig(**merged)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"配置非法: {exc}") from exc
+
+            async def apply_settings() -> None:
+                await backup_scheduler.reload(
+                    daily_time=merged["daily_time"],
+                    keep_days=merged["keep_days"],
+                    default_profile=merged["default_profile"],
+                    enabled=merged["enabled"],
+                    quick_check_enabled=merged["quick_check_enabled"],
+                    quick_check_interval_minutes=merged["quick_check_interval_minutes"],
+                )
+                _persist_backup_config(config_path, body)
+
+            transaction = asyncio.create_task(
+                apply_settings(),
+                name="admin:backup-settings",
+            )
+            try:
+                await asyncio.shield(transaction)
+            except asyncio.CancelledError:
+                await transaction
+                raise
         _L.info(f"backup settings updated via admin: {body}")
         return backup_scheduler.settings
 
     @router.get("/list")
-    async def list_backups(profile: str = "daily") -> dict[str, Any]:
+    async def list_backups(
+        profile: str = "daily",
+        all_profiles: bool = False,
+    ) -> dict[str, Any]:
         if backup_scheduler is None:
             raise HTTPException(status_code=503, detail="backup scheduler 未启用")
         service = backup_scheduler._service
+        if all_profiles:
+            items: list[dict[str, Any]] = []
+            if hasattr(service, "list_backups"):
+                for candidate in ("daily", "pre-change", "migration"):
+                    items.extend(service.list_backups(profile=candidate))
+            items.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+            return {"backups": items}
         items = service.list_backups(profile=profile) if hasattr(service, "list_backups") else []
         return {"items": items, "profile": profile}
+
+    @router.post("")
+    async def create_backup_legacy(profile: str = "daily") -> dict[str, Any]:
+        """Preserve the original query-param manual-backup endpoint."""
+        if backup_scheduler is None:
+            raise HTTPException(status_code=503, detail="backup scheduler 未启用")
+        from services.storage.backup import BackupLockedError
+
+        try:
+            manifest = await backup_scheduler.run_now(profile=profile)
+        except BackupLockedError:
+            return {"ok": False, "error": "另一个备份正在进行中"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+        if manifest.get("status") == "no_space":
+            return {"ok": False, "error": "磁盘空间不足"}
+
+        summary = manifest.get("summary", {})
+        return {
+            "ok": summary.get("trusted", False),
+            "backup_id": manifest.get("backup_id"),
+            "summary": summary,
+            "complete": manifest.get("complete", True),
+            "skipped_host_only": manifest.get("skipped_host_only", []),
+            "message": f"备份已创建: {manifest.get('backup_id')}",
+        }
 
     @router.post("/create")
     async def create_backup(payload: BackupCreatePayload | None = None) -> dict[str, Any]:

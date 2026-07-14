@@ -19,6 +19,7 @@ from services.memory_consolidator.feedback_sources import (
     fetch_style_feedback_signals,
     fetch_style_rejected_expressions,
 )
+from services.memory_consolidator.lifecycle import MemoryConsolidatorLifecycle
 from services.memory_consolidator.promoter import EpisodePromoter, PromoteResult
 from services.memory_consolidator.reflector import (
     ReflectionGenerator,
@@ -68,6 +69,7 @@ __all__ = [
     "FactPayload",
     "GraphRelationPayload",
     "MemoryConsolidator",
+    "MemoryConsolidatorLifecycle",
     "NegativeSignal",
     "PromoteResult",
     "ReflectionGenerator",

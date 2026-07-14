@@ -4,12 +4,55 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from services.media.character_recognizer import CharacterRecognizer
 from services.media.character_registry_db import CharacterRegistryDB
 from services.media.recognition_cache import RecognitionCache
+from services.storage import connect_sqlite
+
+
+class _FailingSchemaConnection:
+    def __init__(
+        self,
+        connection: Any,
+        *,
+        fail_on: str,
+        error_factory: Any,
+    ) -> None:
+        self._connection = connection
+        self._fail_on = fail_on
+        self._error_factory = error_factory
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        if self._fail_on == "execute":
+            raise self._error_factory()
+        return await self._connection.execute(*args, **kwargs)
+
+    async def executescript(self, *args: Any, **kwargs: Any) -> Any:
+        if self._fail_on == "execute":
+            raise self._error_factory()
+        return await self._connection.executescript(*args, **kwargs)
+
+    async def commit(self) -> None:
+        if self._fail_on == "commit":
+            raise self._error_factory()
+        await self._connection.commit()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+
+async def _connection_is_closed(connection: Any) -> bool:
+    try:
+        cursor = await connection.execute("SELECT 1")
+    except ValueError as exc:
+        return "no active connection" in str(exc)
+    await cursor.close()
+    return False
 
 
 class _StubRecognizer(CharacterRecognizer):
@@ -31,6 +74,69 @@ class _StubRecognizer(CharacterRecognizer):
             "threshold": 0.18,
             "source": "ccip-sidecar",
         }
+
+
+@pytest.mark.parametrize(
+    ("connect_target", "store_type"),
+    [
+        (
+            "services.media.character_registry_db.connect_sqlite",
+            CharacterRegistryDB,
+        ),
+        (
+            "services.media.recognition_cache.connect_sqlite",
+            RecognitionCache,
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("fail_on", "error_factory", "expected_error"),
+    [
+        (
+            "execute",
+            lambda: RuntimeError("schema execution failed"),
+            RuntimeError,
+        ),
+        ("commit", asyncio.CancelledError, asyncio.CancelledError),
+    ],
+)
+@pytest.mark.asyncio
+async def test_init_failure_closes_connected_db_and_clears_store_state(
+    tmp_path: Path,
+    connect_target: str,
+    store_type: type[CharacterRegistryDB] | type[RecognitionCache],
+    fail_on: str,
+    error_factory: Any,
+    expected_error: type[BaseException],
+) -> None:
+    """Schema failure/cancellation must not leave a live or retained connection."""
+    real_connections: list[Any] = []
+
+    async def failing_connect(*args: Any, **kwargs: Any) -> _FailingSchemaConnection:
+        connection = await connect_sqlite(*args, **kwargs)
+        real_connections.append(connection)
+        return _FailingSchemaConnection(
+            connection,
+            fail_on=fail_on,
+            error_factory=error_factory,
+        )
+
+    store = store_type(str(tmp_path / f"{store_type.__name__}-{fail_on}.db"))
+    with (
+        patch(connect_target, new=failing_connect),
+        pytest.raises(expected_error),
+    ):
+        await store.init()
+
+    assert len(real_connections) == 1, "connect_sqlite must succeed before schema failure"
+    connection = real_connections[0]
+    connection_closed = await _connection_is_closed(connection)
+    try:
+        assert store._db is None
+        assert connection_closed
+    finally:
+        if not connection_closed:
+            await connection.close()
 
 
 @pytest.mark.asyncio

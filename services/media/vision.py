@@ -39,6 +39,31 @@ class VisionClient:
         self._model = model
         self._timeout_s = timeout_s
         self._max_tokens = max(1, int(max_tokens))
+        self._calls = 0
+        self._errors = 0
+        self._last_error = ""
+
+    def health_snapshot(self) -> dict[str, object]:
+        available = bool(self._base_url and self._api_key and self._model)
+        if not available:
+            status = "unavailable"
+        elif self._last_error:
+            status = "failed"
+        elif self._calls:
+            status = "healthy"
+        else:
+            status = "idle"
+        return {
+            "available": available,
+            "status": status,
+            "calls": self._calls,
+            "errors": self._errors,
+            "last_error": self._last_error,
+        }
+
+    def _record_failure(self, error: str) -> None:
+        self._errors += 1
+        self._last_error = error
 
     async def describe_image(
         self,
@@ -50,6 +75,7 @@ class VisionClient:
 
         Returns None on any failure (network, API error, unexpected response).
         """
+        self._calls += 1
         b64 = base64.b64encode(image_data).decode()
         data_url = f"data:{media_type};base64,{b64}"
 
@@ -83,18 +109,29 @@ class VisionClient:
             ):
                     if resp.status >= 400:
                         body_text = await resp.text()
+                        self._record_failure(
+                            f"HTTP {resp.status}: {body_text[:300]}"
+                        )
                         logger.error(
                             "Qwen VL {} | body={}", resp.status, body_text[:300]
                         )
                         return None
                     data = await resp.json()
         except (aiohttp.ClientError, TimeoutError, json.JSONDecodeError) as e:
+            self._record_failure(f"{type(e).__name__}: {e}")
             logger.warning("Qwen VL request failed: {} ({})", e, type(e).__name__)
             return None
 
         try:
             desc = data["choices"][0]["message"]["content"]
-            return desc.strip()
-        except (KeyError, IndexError, TypeError) as e:
+            if not isinstance(desc, str):
+                raise TypeError("vision response content must be a string")
+            desc = desc.strip()
+            if not desc:
+                raise ValueError("empty vision response")
+            self._last_error = ""
+            return desc
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            self._record_failure(f"{type(e).__name__}: {e}")
             logger.warning("Qwen VL unexpected response format: {}", e)
             return None

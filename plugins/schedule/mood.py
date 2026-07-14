@@ -6,11 +6,15 @@ import contextlib
 import math
 import random
 import time
-from typing import Any
+from typing import Any, cast
 
-from plugins.schedule.calendar import get_day_context
-from plugins.schedule.calendar import get_self_name as _get_self_name
 from plugins.schedule.types import MoodProfile, Schedule
+from services.humanization.m1_irritation import (
+    compute_m1_irritation_tension_delta as compute_m1_irritation_tension_delta,
+)
+from services.humanization.m1_irritation import (
+    register_m1_irritation_signal as register_m1_irritation_signal,
+)
 from services.runtime_clock import format_cn_datetime, now_cst
 
 # ------------------------------------------------------------------
@@ -112,10 +116,6 @@ _ANOMALY_REASONS: dict[str, list[str]] = {
 # ------------------------------------------------------------------
 
 _M1_DEFAULT_TENSION_TAU_S = 600.0
-_M1_IRRITATION_MENTION_TENSION = 0.03
-_M1_IRRITATION_POKE_TENSION = 0.04
-_M1_IRRITATION_BURST_BONUS = 0.01
-_M1_IRRITATION_TENSION_CAP = 0.2
 _M1_TENSION_BASELINE = 0.0
 _M1_TENSION_PROMPT_THRESHOLD = 0.12
 _M1_TENSION_PRUNE_EPSILON = 0.001
@@ -140,53 +140,6 @@ def resolve_m1_tension_on_read(
     return max(0.0, min(1.0, resolved))
 
 
-def compute_m1_irritation_tension_delta(
-    *,
-    mention_count: int = 0,
-    poke_count: int = 0,
-    m1_enabled: bool = False,
-) -> float:
-    """Convert @/poke burst counts into a bounded dormant M1 tension delta."""
-    if not m1_enabled:
-        return 0.0
-    mentions = max(0, int(mention_count or 0))
-    pokes = max(0, int(poke_count or 0))
-    total = mentions + pokes
-    if total <= 0:
-        return 0.0
-    delta = (
-        mentions * _M1_IRRITATION_MENTION_TENSION
-        + pokes * _M1_IRRITATION_POKE_TENSION
-        + max(0, total - 1) * _M1_IRRITATION_BURST_BONUS
-    )
-    return max(0.0, min(_M1_IRRITATION_TENSION_CAP, delta))
-
-
-def register_m1_irritation_signal(
-    mood_engine: Any,
-    *,
-    mention_count: int = 0,
-    poke_count: int = 0,
-    group_id: str | int | None = None,
-    session_id: str = "",
-    m1_enabled: bool = False,
-) -> bool:
-    """Register dormant M1 irritation through the existing interaction channel."""
-    delta = compute_m1_irritation_tension_delta(
-        mention_count=mention_count,
-        poke_count=poke_count,
-        m1_enabled=m1_enabled,
-    )
-    if delta <= 0.0 or mood_engine is None:
-        return False
-    mood_engine.register_interaction_signal(
-        tension_d=delta,
-        group_id=group_id,
-        session_id=session_id,
-        m1_tension_enabled=True,
-    )
-    return True
-
 # ------------------------------------------------------------------
 # MoodEngine
 # ------------------------------------------------------------------
@@ -199,9 +152,11 @@ class MoodEngine:
         self,
         anomaly_chance: float = 0.2,
         refresh_minutes: int = 15,
+        calendar_service: Any | None = None,
     ) -> None:
         self._anomaly_chance = anomaly_chance
         self._refresh_s = refresh_minutes * 60
+        self._calendar_service = calendar_service
         self._cache: dict[tuple[str, str], tuple[MoodProfile, float]] = {}
         self._history: dict[tuple[str, str], list[tuple[MoodProfile, float]]] = {}
         # Transient interaction nudges: seeing self/friend stickers warms the
@@ -548,18 +503,19 @@ class MoodEngine:
             profile.energy -= 0.05  # social fatigue
 
         # 5. Day-type modifiers (calendar-based)
-        day_ctx = get_day_context(now_cst())
-        if day_ctx.is_holiday:
-            profile.valence += 0.15
-            profile.energy += 0.1
-        elif day_ctx.is_makeup_day:
-            profile.valence -= 0.05
-        if day_ctx.has_birthday:
-            profile.valence += 0.1
-            profile.openness += 0.1
-            if day_ctx.is_self_birthday:
+        day_ctx = self._day_context(now_cst())
+        if day_ctx is not None:
+            if day_ctx.is_holiday:
                 profile.valence += 0.15
                 profile.energy += 0.1
+            elif day_ctx.is_makeup_day:
+                profile.valence -= 0.05
+            if day_ctx.has_birthday:
+                profile.valence += 0.1
+                profile.openness += 0.1
+                if day_ctx.is_self_birthday:
+                    profile.valence += 0.15
+                    profile.energy += 0.1
 
         # 6. Anomaly check — 20% chance to flip mood significantly
         anomaly = random.random() < self._anomaly_chance
@@ -656,7 +612,7 @@ class MoodEngine:
                 lines.append(f"\n【你现在正在做的事】{slot.description or slot.activity}")
 
         # Special day / birthday hints
-        day_ctx = get_day_context(now)
+        day_ctx = self._day_context(now)
         day_lines = self._build_day_context_lines(day_ctx)
         if day_lines:
             lines.extend(day_lines)
@@ -682,28 +638,41 @@ class MoodEngine:
 
     @staticmethod
     def _build_day_context_lines(day_ctx: object) -> list[str]:
-        """Build day-context hint lines for the mood block. 导入放在方法内避免循环引用。"""
-        from plugins.schedule.calendar import DayContext
-
+        """Build day-context hints from the canonical duck-typed calendar API."""
         lines: list[str] = []
-        if not isinstance(day_ctx, DayContext):
+        if day_ctx is None or not hasattr(day_ctx, "day_type"):
             return lines
+        day = cast(Any, day_ctx)
 
-        if day_ctx.holiday_name:
-            lines.append(f"\n【今日特殊】正在放{day_ctx.holiday_name}假，你在休假中。")
-        elif day_ctx.is_makeup_day:
+        if day.holiday_name:
+            lines.append(f"\n【今日特殊】正在放{day.holiday_name}假，你在休假中。")
+        elif day.is_makeup_day:
             lines.append("\n【今日特殊】今天是调休日——虽然是周末但要上课，心情略带无奈。")
 
-        if day_ctx.special_day:
-            lines.append(f"\n【今日特殊】今天是{day_ctx.special_day}，可以在聊天中自然地提到。")
+        if day.special_day:
+            lines.append(f"\n【今日特殊】今天是{day.special_day}，可以在聊天中自然地提到。")
 
-        if day_ctx.is_self_birthday:
+        if day.is_self_birthday:
             lines.append(
                 "\n【今日特殊】今天是你的生日！如果有人提到或问起，害羞但开心地承认就好，"
                 '不用主动喊「今天是我生日」。'
             )
-        for b in day_ctx.birthdays:
-            if day_ctx.is_self_birthday and b.name_cn == _get_self_name():
+        self_names = {
+            str(name)
+            for name in (getattr(day, "self_names", set()) or set())
+            if str(name)
+        }
+        for b in day.birthdays:
+            birthday_names = {
+                str(name)
+                for name in (
+                    getattr(b, "name_cn", ""),
+                    getattr(b, "name_jp", ""),
+                    *(getattr(b, "aliases", ()) or ()),
+                )
+                if str(name)
+            }
+            if day.is_self_birthday and self_names & birthday_names:
                 continue  # handled above
             elif b.is_wxs_member:
                 lines.append(
@@ -717,6 +686,13 @@ class MoodEngine:
                 )
 
         return lines
+
+    def _day_context(self, now: Any) -> Any | None:
+        service = self._calendar_service
+        getter = getattr(service, "get_day_context", None)
+        if callable(getter):
+            return getter(now)
+        return None
 
 
 def _classify(profile: MoodProfile) -> str:

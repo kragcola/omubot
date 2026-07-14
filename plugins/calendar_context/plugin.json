@@ -9,11 +9,14 @@
   "version": "1.0.0",
   "priority": -5,
   "tier": "user",
-  "toggle_policy": "runtime",
+  "toggle_policy": "restart_required",
   "category": "memory",
   "permissions": [
+    "lifecycle",
     "prompt",
-    "storage"
+    "storage",
+    "tick",
+    "network"
   ],
   "capabilities": [
     "calendar_context",

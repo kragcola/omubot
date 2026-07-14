@@ -16,7 +16,6 @@
     "prompt",
     "reply",
     "tool",
-    "command",
     "storage",
     "network"
   ],

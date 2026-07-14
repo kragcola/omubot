@@ -7,6 +7,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -18,7 +19,13 @@ from services.storage.backup import (
     _backup_directory,
     _backup_file,
     _backup_sqlite,
+    _cli_restore,
+    _database_metadata,
+    _sha256_file,
+    build_restore_plan,
 )
+from services.storage.catalog import DEFAULT_DATABASE_CATALOG
+from services.storage.schema_contracts import get_schema_contract
 
 
 @pytest.fixture
@@ -33,13 +40,12 @@ def backup_env(tmp_path: Path):
     (config_persona / "source.md").write_text("test persona")
     (config / "config.json").write_text(json.dumps({"test": True}))
 
-    # Create all 8 required SQLite DBs
-    for db_name in [
-        "slang.db", "messages.db", "usage.db", "style.db",
-        "memory_cards.db", "knowledge_graph.db", "knowledge_index.db",
-        "learning_normalizer.db",
-    ]:
-        db_path = storage / db_name
+    # Keep the fixture aligned with required daily registry entries.
+    for item in BACKUP_REGISTRY:
+        if item.item_type != "sqlite" or not item.required or "daily" not in item.profiles:
+            continue
+        db_path = tmp_path / item.path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path))
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
         conn.execute("INSERT INTO test VALUES (1)")
@@ -81,12 +87,386 @@ def test_sqlite_backup_failure_is_not_silent_success(backup_env):
 
 def test_backup_registry_includes_known_databases():
     sqlite_items = [i for i in BACKUP_REGISTRY if i.item_type == "sqlite"]
-    assert len(sqlite_items) == 8
-    ids = {i.id for i in sqlite_items}
-    assert "slang" in ids
-    assert "messages" in ids
-    assert "usage" in ids
-    assert "memory_cards" in ids
+    registry_databases = {item.id: item.path for item in sqlite_items}
+    catalog_databases = {
+        spec.id: spec.path for spec in DEFAULT_DATABASE_CATALOG.all()
+    }
+
+    assert registry_databases == catalog_databases
+    research = next(item for item in sqlite_items if item.id == "research_events")
+    assert research.required is False
+    assert research.sensitive is True
+    assert research.profiles == ["migration"]
+
+
+def _write_sqlite_restore_fixture(
+    tmp_path: Path,
+    *,
+    db_id: str = "usage",
+    user_version: int = 1,
+    schema_version: int | None = 2,
+    include_database_metadata: bool = True,
+    flattened_legacy_path: bool = False,
+) -> Path:
+    backup_dir = tmp_path / "restore-fixture"
+    spec = DEFAULT_DATABASE_CATALOG.get(db_id)
+    relative_path = Path(spec.path).relative_to("storage")
+    backup_path = backup_dir / "sqlite" / (
+        relative_path.name if flattened_legacy_path else relative_path
+    )
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(backup_path) as connection:
+        contract = get_schema_contract(db_id)
+        if contract is None:
+            connection.execute("CREATE TABLE preserved (id INTEGER PRIMARY KEY)")
+        else:
+            for table in contract.tables:
+                definitions: list[str] = []
+                for column in table.columns:
+                    parts = [f'"{column.name}"', column.declared_type]
+                    if column.primary_key_position:
+                        parts.append("PRIMARY KEY")
+                        if "autoincrement" in table.required_sql_fragments:
+                            parts.append("AUTOINCREMENT")
+                    if column.not_null:
+                        parts.append("NOT NULL")
+                    if column.default_sql is not None:
+                        parts.extend(("DEFAULT", column.default_sql))
+                    definitions.append(" ".join(parts))
+                for unique_columns in table.unique_constraints:
+                    columns = ", ".join(f'"{column}"' for column in unique_columns)
+                    clause = f"UNIQUE ({columns})"
+                    if "on conflict ignore" in table.required_sql_fragments:
+                        clause += " ON CONFLICT IGNORE"
+                    definitions.append(clause)
+                for foreign_key in table.foreign_keys:
+                    columns = ", ".join(
+                        f'"{column}"' for column in foreign_key.columns
+                    )
+                    referenced = ", ".join(
+                        f'"{column}"' for column in foreign_key.referenced_columns
+                    )
+                    definitions.append(
+                        f"FOREIGN KEY ({columns}) REFERENCES "
+                        f'"{foreign_key.referenced_table}" ({referenced}) '
+                        f"ON UPDATE {foreign_key.on_update} "
+                        f"ON DELETE {foreign_key.on_delete}"
+                    )
+                connection.execute(
+                    f'CREATE TABLE "{table.name}" ({", ".join(definitions)})'
+                )
+            for index in contract.indexes:
+                columns = ", ".join(f'"{column}"' for column in index.columns)
+                unique = "UNIQUE " if index.unique else ""
+                where = f" WHERE {index.where_sql}" if index.where_sql else ""
+                connection.execute(
+                    f'CREATE {unique}INDEX "{index.name}" '
+                    f'ON "{index.table}" ({columns}){where}'
+                )
+        connection.execute(f"PRAGMA user_version = {user_version}")
+
+    item: dict[str, Any] = {
+        "id": db_id,
+        "type": "sqlite",
+        "status": "ok",
+        "source_path": spec.path,
+        "sha256": _sha256_file(backup_path),
+    }
+    if include_database_metadata:
+        item["database"] = _database_metadata(backup_path, spec)
+    manifest = {
+        "backup_id": "restore-fixture",
+        "items": [item],
+        "summary": {"trusted": True},
+    }
+    if schema_version is not None:
+        manifest["schema_version"] = schema_version
+    (backup_dir / "manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    return backup_dir
+
+
+def test_restore_plan_accepts_current_database_version(tmp_path: Path) -> None:
+    backup_dir = _write_sqlite_restore_fixture(tmp_path, user_version=1)
+
+    plan = build_restore_plan(backup_dir)
+
+    assert plan.can_apply is True
+    assert plan.legacy_manifest is False
+    assert plan.items[0].compatibility == "compatible"
+    assert plan.items[0].user_version == 1
+    assert plan.items[0].target_user_version == 1
+
+
+def test_restore_plan_allows_legacy_version_for_upgrade_on_start(
+    tmp_path: Path,
+) -> None:
+    backup_dir = _write_sqlite_restore_fixture(tmp_path, user_version=0)
+
+    plan = build_restore_plan(backup_dir)
+
+    assert plan.can_apply is True
+    assert plan.items[0].compatibility == "upgrade_on_start"
+
+
+def test_restore_plan_blocks_unknown_future_database_version(tmp_path: Path) -> None:
+    backup_dir = _write_sqlite_restore_fixture(
+        tmp_path,
+        db_id="research_events",
+        user_version=2,
+    )
+
+    plan = build_restore_plan(backup_dir)
+
+    assert plan.can_apply is False
+    assert plan.items[0].compatibility == "future_version"
+    assert "target" in plan.items[0].reason
+
+
+def test_legacy_manifest_requires_explicit_unverified_schema_override(
+    tmp_path: Path,
+) -> None:
+    backup_dir = _write_sqlite_restore_fixture(
+        tmp_path,
+        db_id="living_persona_m1_metrics",
+        schema_version=None,
+        include_database_metadata=False,
+        flattened_legacy_path=True,
+    )
+
+    blocked = build_restore_plan(backup_dir)
+    allowed = build_restore_plan(backup_dir, allow_unverified_schema=True)
+
+    assert blocked.legacy_manifest is True
+    assert blocked.can_apply is False
+    assert blocked.items[0].compatibility == "legacy_unverified"
+    assert allowed.can_apply is True
+    assert allowed.items[0].compatibility == "legacy_override"
+    assert allowed.items[0].backup_path.endswith("sqlite/m1_metrics.db")
+
+
+def test_restore_plan_blocks_manifest_metadata_payload_mismatch(
+    tmp_path: Path,
+) -> None:
+    backup_dir = _write_sqlite_restore_fixture(tmp_path, user_version=1)
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["items"][0]["database"]["user_version"] = 0
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    plan = build_restore_plan(backup_dir)
+
+    assert plan.can_apply is False
+    assert plan.items[0].compatibility == "metadata_mismatch"
+
+
+@pytest.mark.parametrize("user_version", [0, 1])
+def test_restore_plan_blocks_self_consistent_malformed_governed_schema(
+    tmp_path: Path,
+    user_version: int,
+) -> None:
+    backup_dir = _write_sqlite_restore_fixture(
+        tmp_path,
+        db_id="usage",
+        user_version=user_version,
+    )
+    spec = DEFAULT_DATABASE_CATALOG.get("usage")
+    backup_path = backup_dir / "sqlite" / Path(spec.path).relative_to("storage")
+    with sqlite3.connect(backup_path) as connection:
+        connection.execute("DROP INDEX idx_llm_calls_type")
+
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["items"][0]["sha256"] = _sha256_file(backup_path)
+    manifest["items"][0]["database"] = _database_metadata(backup_path, spec)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    plan = build_restore_plan(backup_dir)
+
+    assert plan.can_apply is False
+    assert plan.items[0].compatibility == "schema_mismatch"
+    assert "governed schema contract" in plan.items[0].reason
+
+
+@pytest.mark.parametrize("user_version", [0, 1])
+def test_restore_plan_blocks_schema_without_required_constraints(
+    tmp_path: Path,
+    user_version: int,
+) -> None:
+    backup_dir = _write_sqlite_restore_fixture(
+        tmp_path,
+        db_id="usage",
+        user_version=user_version,
+    )
+    spec = DEFAULT_DATABASE_CATALOG.get("usage")
+    backup_path = backup_dir / "sqlite" / Path(spec.path).relative_to("storage")
+    with sqlite3.connect(backup_path) as connection:
+        connection.execute("ALTER TABLE llm_calls RENAME TO malformed_llm_calls")
+        connection.execute(
+            "CREATE TABLE llm_calls AS SELECT * FROM malformed_llm_calls WHERE 0"
+        )
+        connection.execute("DROP TABLE malformed_llm_calls")
+        connection.execute("CREATE INDEX idx_llm_calls_ts ON llm_calls(ts)")
+        connection.execute("CREATE INDEX idx_llm_calls_user ON llm_calls(user_id)")
+        connection.execute("CREATE INDEX idx_llm_calls_group ON llm_calls(group_id)")
+        connection.execute("CREATE INDEX idx_llm_calls_type ON llm_calls(call_type)")
+        connection.execute(f"PRAGMA user_version = {user_version}")
+
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["items"][0]["sha256"] = _sha256_file(backup_path)
+    manifest["items"][0]["database"] = _database_metadata(backup_path, spec)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    plan = build_restore_plan(backup_dir)
+
+    assert plan.can_apply is False
+    assert plan.items[0].compatibility == "schema_mismatch"
+
+
+def test_restore_plan_rejects_untrusted_manifest_before_item_selection(
+    tmp_path: Path,
+) -> None:
+    backup_dir = _write_sqlite_restore_fixture(tmp_path, user_version=1)
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["summary"]["trusted"] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest is not trusted"):
+        build_restore_plan(backup_dir, item_id="usage")
+
+
+@pytest.mark.parametrize("required_status", ["failed", "skipped"])
+def test_restore_plan_rejects_required_incomplete_item_before_partial_restore(
+    tmp_path: Path,
+    required_status: str,
+) -> None:
+    backup_dir = _write_sqlite_restore_fixture(tmp_path, user_version=1)
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["items"].append(
+        {
+            "id": "slang",
+            "type": "sqlite",
+            "status": required_status,
+            "source_path": DEFAULT_DATABASE_CATALOG.get("slang").path,
+            "required": True,
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match=rf"required backup item slang is {required_status}",
+    ):
+        build_restore_plan(backup_dir, item_id="usage")
+
+
+def test_restore_plan_uses_registry_requiredness_when_manifest_understates_it(
+    tmp_path: Path,
+) -> None:
+    backup_dir = _write_sqlite_restore_fixture(tmp_path, user_version=1)
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["items"].append(
+        {
+            "id": "slang",
+            "type": "sqlite",
+            "status": "skipped",
+            "source_path": DEFAULT_DATABASE_CATALOG.get("slang").path,
+            "required": False,
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="required backup item slang is skipped"):
+        build_restore_plan(backup_dir, item_id="usage")
+
+
+def test_restore_apply_refuses_future_version_before_mutating_live_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup_dir = _write_sqlite_restore_fixture(
+        tmp_path,
+        db_id="research_events",
+        user_version=2,
+    )
+    live_path = tmp_path / "storage" / "research_events.db"
+    live_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(live_path) as connection:
+        connection.execute("CREATE TABLE live_marker (value TEXT)")
+        connection.execute("INSERT INTO live_marker VALUES ('preserve-me')")
+        connection.execute("PRAGMA user_version = 1")
+    before_bytes = live_path.read_bytes()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit):
+        _cli_restore(backup_dir, force=True)
+
+    assert live_path.read_bytes() == before_bytes
+    assert not (tmp_path / "storage" / "backups" / "pre-restore").exists()
+
+
+def test_missing_optional_sqlite_is_skipped_without_untrusting_manifest(backup_env):
+    repo_root, storage = backup_env
+    research_path = repo_root / DEFAULT_DATABASE_CATALOG.get("research_events").path
+    assert not research_path.exists()
+
+    manifest = BackupService(storage_dir=storage, repo_root=repo_root).create(
+        profile="migration",
+        host_mode=False,
+    )
+
+    research = next(item for item in manifest["items"] if item["id"] == "research_events")
+    assert research["status"] == "skipped"
+    assert manifest["summary"]["trusted"] is True
+
+
+def test_sqlite_backup_preserves_paths_relative_to_storage(backup_env):
+    repo_root, storage = backup_env
+    nested_paths = (
+        Path("storage/living_persona/m1_metrics.db"),
+        Path("storage/stickers/stickers.db"),
+    )
+    for relative_path in nested_paths:
+        db_path = repo_root / relative_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("CREATE TABLE nested_data (id INTEGER PRIMARY KEY)")
+
+    manifest = BackupService(storage_dir=storage, repo_root=repo_root).create(
+        profile="daily",
+        host_mode=False,
+    )
+    backup_path = repo_root / manifest["backup_path"] / "sqlite"
+
+    assert (backup_path / "living_persona" / "m1_metrics.db").exists()
+    assert (backup_path / "stickers" / "stickers.db").exists()
+    assert not (backup_path / "m1_metrics.db").exists()
+    assert not (backup_path / "stickers.db").exists()
+
+
+def test_sqlite_manifest_item_includes_database_governance_metadata(backup_env):
+    repo_root, storage = backup_env
+    manifest = BackupService(storage_dir=storage, repo_root=repo_root).create(
+        profile="daily",
+        host_mode=False,
+    )
+    slang = next(item for item in manifest["items"] if item["id"] == "slang")
+    database = slang["database"]
+    catalog_spec = DEFAULT_DATABASE_CATALOG.get("slang")
+
+    assert slang["status"] == "ok"
+    assert database["db_id"] == "slang"
+    assert database["owner"] == catalog_spec.owner
+    assert database["user_version"] == 0
+    assert database["target_user_version"] == catalog_spec.target_user_version
+    assert isinstance(database["schema_fingerprint"], str)
+    assert database["schema_fingerprint"]
 
 
 def test_backup_skips_host_only_in_bot_mode(backup_env):
@@ -184,14 +564,25 @@ def test_health_check_reads_backup_registry(backup_env):
     from services.health import _check_sqlite
     result = _check_sqlite(storage_dir=storage)
     assert result["id"] == "sqlite"
-    # _check_sqlite probes every sqlite item in BACKUP_REGISTRY (8 dbs).
-    # Total = ok + missing + error.
+    catalog_ids = {spec.id for spec in DEFAULT_DATABASE_CATALOG.all()}
+    databases = result["meta"]["databases"]
+    assert {database["db_id"] for database in databases} == catalog_ids
     total = (
         result["meta"]["ok_count"]
         + result["meta"]["missing_count"]
         + result["meta"]["error_count"]
     )
-    assert total == 8
+    assert total == len(catalog_ids)
+    missing = [database for database in databases if not database["exists"]]
+    assert missing
+    assert all(database["status"] == "missing" for database in missing)
+    assert all("user_version" in database for database in databases)
+    assert all("target_user_version" in database for database in databases)
+    assert all("connection_profile" in database for database in databases)
+    assert all("backup_profile" in database for database in databases)
+    assert all("retention_profile" in database for database in databases)
+    assert result["status"] == "warning"
+    assert result["meta"]["error_count"] == 0
 
 
 def test_health_check_warns_stale_backup(backup_env):
@@ -331,9 +722,15 @@ def test_quick_check_probe_passes_for_clean_db(backup_env):
         quick_check_enabled=True,
     )
     results = sched._probe_all_sqlite()
-    assert len(results) >= 1
+    assert {result.db_id for result in results} == {
+        spec.id for spec in DEFAULT_DATABASE_CATALOG.all()
+    }
     # Fixture creates valid DBs; all probes that exist should be ok.
-    existing = [r for r in results if r.quick_check != "missing"]
+    existing = [
+        result
+        for result in results
+        if result.quick_check not in {"missing", "missing_optional"}
+    ]
     assert all(r.ok for r in existing), [
         (r.db_id, r.quick_check, r.error) for r in existing if not r.ok
     ]
@@ -384,3 +781,25 @@ def test_quick_check_handles_missing_db(backup_env):
     assert slang is not None
     assert slang.ok is False
     assert slang.quick_check == "missing"
+
+
+def test_quick_check_treats_missing_optional_database_as_healthy_skip(backup_env):
+    """An absent optional Catalog DB is expected, not a corruption signal."""
+    repo_root, storage = backup_env
+    from services.storage.backup_scheduler import BackupScheduler
+
+    research_path = repo_root / DEFAULT_DATABASE_CATALOG.get("research_events").path
+    assert not research_path.exists()
+    sched = BackupScheduler(
+        storage_dir=storage,
+        repo_root=repo_root,
+        enabled=True,
+        quick_check_enabled=True,
+    )
+
+    results = sched._probe_all_sqlite()
+    research = next(result for result in results if result.db_id == "research_events")
+
+    assert research.ok is True
+    assert research.quick_check == "missing_optional"
+    assert research.error is None

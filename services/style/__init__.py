@@ -6,6 +6,7 @@ from services.style.extractor import (
     format_style_messages,
     select_style_source_row,
 )
+from services.style.manual_extract import run_style_manual_extract
 from services.style.store import (
     NewStyleExpression,
     StyleEvidence,
@@ -39,5 +40,6 @@ __all__ = [
     "StyleStore",
     "format_style_messages",
     "normalize_style_key",
+    "run_style_manual_extract",
     "select_style_source_row",
 ]

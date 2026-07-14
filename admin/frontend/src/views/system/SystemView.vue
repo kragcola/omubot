@@ -7,6 +7,7 @@ import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import RestartBotButton from '../../components/common/RestartBotButton.vue'
 import SystemAdvancedEntry from './components/SystemAdvancedEntry.vue'
+import SystemDatabases from './components/SystemDatabases.vue'
 import SystemHero from './components/SystemHero.vue'
 import SystemMaintenance from './components/SystemMaintenance.vue'
 import SystemPolicies from './components/SystemPolicies.vue'
@@ -497,6 +498,8 @@ async function testProviderProfile(name: string) {
           :services-health="servicesHealth"
           :attention-count="servicesNeedingAttention"
         />
+
+        <SystemDatabases />
 
         <SystemRuntimeErrors :runtime-errors="runtimeErrors" />
 

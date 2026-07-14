@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from services.block_trace.store import BlockTraceStore
 from services.humanization import create_humanization_state_bus
-from services.llm.client import LLMClient
+from services.llm.client import MAX_TOOL_ROUNDS, LLMClient, ToolUse
 from services.llm.prompt_builder import PromptBuilder
 from services.memory.short_term import ShortTermMemory
 from services.memory.timeline import GroupTimeline
@@ -80,6 +81,169 @@ async def _client(
             ],
         ),
     )
+
+
+class _RecordingVisibleReplyGuardrailStage:
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    async def run(self, stage_input: Any) -> SimpleNamespace:
+        self.calls.append(stage_input)
+        return SimpleNamespace(
+            reply="stage-cleaned",
+            hits=(),
+            metadata={"guardrail_stage": "recording-fake"},
+            blocked=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_normal_terminal_delegates_visible_reply_to_guardrail_stage(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+    tmp_path,
+) -> None:
+    timeline = GroupTimeline()
+    timeline.add("100", role="user", content="previous user message", speaker="user(100)")
+    timeline.add("100", role="assistant", content="previous assistant reply")
+    trace_store = BlockTraceStore(tmp_path / "trace-stage-delegation.db")
+    await trace_store.init()
+    client = await _client(persona_runtime, timeline, trace_store, guardrail_enabled=True)
+    stage = _RecordingVisibleReplyGuardrailStage()
+    cast(Any, client)._visible_reply_guardrail_stage = stage
+
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch(
+                "services.llm.client.call_api",
+                new_callable=AsyncMock,
+                return_value=_result("raw visible reply"),
+            ),
+        ):
+            mock_think.return_value = SimpleNamespace(
+                action="reply",
+                topic_intent_label="闲聊",
+                retrieve_mode="skip",
+                rewritten_query="",
+                thought="private thinker thought",
+                unknown_terms=[],
+                sticker=False,
+                tone="日常",
+                instruction_signal="none",
+                light_kind="",
+                reply_necessity="high",
+                usage={},
+            )
+            reply = await client.chat(
+                session_id="group_100",
+                group_id="100",
+                user_id="100",
+                user_content="current user message",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+        await trace_store.close()
+
+    assert len(stage.calls) == 1
+    stage_input = stage.calls[0]
+    assert stage_input.reply == "raw visible reply"
+    assert stage_input.enabled is True
+    assert stage_input.thinker_thought == "private thinker thought"
+    assert stage_input.last_assistant_text == "previous assistant reply"
+    assert stage_input.user_message == "current user message"
+    assert stage_input.session_count == 0
+    assert stage_input.bot_name == persona_runtime.identity_snapshot().name
+    assert reply == "stage-cleaned"
+
+
+@pytest.mark.asyncio
+async def test_tool_exhausted_terminal_delegates_visible_reply_to_guardrail_stage(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+    tmp_path,
+) -> None:
+    timeline = GroupTimeline()
+    timeline.add("100", role="user", content="previous user message", speaker="user(100)")
+    timeline.add("100", role="assistant", content="previous unrelated assistant text")
+    trace_store = BlockTraceStore(tmp_path / "trace-stage-tool-exhausted.db")
+    await trace_store.init()
+    client = await _client(persona_runtime, timeline, trace_store, guardrail_enabled=True)
+    stage = _RecordingVisibleReplyGuardrailStage()
+    cast(Any, client)._visible_reply_guardrail_stage = stage
+    tool_round_results = [
+        {
+            **_result(""),
+            "tool_uses": [
+                ToolUse(
+                    id=f"tool-{round_index}",
+                    name="unregistered_test_tool",
+                    input={"round": round_index},
+                )
+            ],
+        }
+        for round_index in range(MAX_TOOL_ROUNDS)
+    ]
+    provider_results = [
+        *tool_round_results,
+        {
+            **_result("raw tool-exhausted visible reply"),
+            "tool_uses": [
+                ToolUse(
+                    id="tool-final",
+                    name="unregistered_test_tool",
+                    input={"round": "final"},
+                )
+            ],
+        },
+    ]
+
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch(
+                "services.llm.client.call_api",
+                new_callable=AsyncMock,
+                side_effect=provider_results,
+            ) as mock_call_api,
+        ):
+            mock_think.return_value = SimpleNamespace(
+                action="reply",
+                topic_intent_label="闲聊",
+                retrieve_mode="skip",
+                rewritten_query="",
+                thought="private tool-exhausted thinker thought",
+                unknown_terms=[],
+                sticker=False,
+                tone="日常",
+                instruction_signal="none",
+                light_kind="",
+                reply_necessity="high",
+                usage={},
+            )
+            reply = await client.chat(
+                session_id="group_100",
+                group_id="100",
+                user_id="100",
+                user_content="current tool-exhausted user message",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+        await trace_store.close()
+
+    assert mock_call_api.await_count == MAX_TOOL_ROUNDS + 1
+    assert len(stage.calls) == 1
+    stage_input = stage.calls[0]
+    assert stage_input.reply == "raw tool-exhausted visible reply"
+    assert stage_input.enabled is True
+    assert stage_input.thinker_thought == "private tool-exhausted thinker thought"
+    assert stage_input.last_assistant_text == "previous unrelated assistant text"
+    assert stage_input.user_message == "current tool-exhausted user message"
+    assert stage_input.session_count == 0
+    assert stage_input.bot_name == persona_runtime.identity_snapshot().name
+    assert reply == "stage-cleaned"
 
 
 @pytest.mark.asyncio

@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
-"""Fail fast when legacy root-level plugin files are present."""
+"""Compatibility CLI for the shared repository plugin inventory gate."""
 
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-def _legacy_items(plugin_root: Path) -> list[Path]:
-    legacy: list[Path] = []
-    if not plugin_root.is_dir():
-        return legacy
+from scripts.check_plugin_manifests import plugin_inventory_violations  # noqa: E402
 
-    for item in sorted(plugin_root.iterdir()):
-        if item.is_file() and item.suffix == ".py" and not item.name.startswith("__"):
-            legacy.append(item)
-        if item.is_file() and item.suffix in {".toml", ".json"}:
-            stem = item.stem
-            if (plugin_root / stem / "plugin.py").is_file() or (plugin_root / stem / "plugin.json").is_file():
-                continue
-            if item.name in {"__init__.py", "__init__.json"}:
-                continue
-            legacy.append(item)
-    return legacy
+
+def _inventory_items(plugin_root: Path) -> list[Path]:
+    return [path for _violation, path in plugin_inventory_violations(plugin_root)]
 
 
 def main() -> int:
@@ -32,13 +25,13 @@ def main() -> int:
     args = parser.parse_args()
 
     plugin_root = Path(args.plugin_root)
-    legacy = _legacy_items(plugin_root)
-    if not legacy:
-        print(f"[plugin-layout] ok: {plugin_root} contains no legacy root-level plugin files")
+    violations = _inventory_items(plugin_root)
+    if not violations:
+        print(f"[plugin-layout] ok: {plugin_root} contains no inventory violations")
         return 0
 
-    print(f"[plugin-layout] legacy layout detected under {plugin_root}:")
-    for item in legacy:
+    print(f"[plugin-layout] inventory violations detected under {plugin_root}:")
+    for item in violations:
         print(f" - {item}")
     print(
         "[plugin-layout] migrate to plugins/<name>/plugin.py + plugin.json + "

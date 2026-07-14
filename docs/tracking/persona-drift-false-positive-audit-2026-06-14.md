@@ -1,6 +1,6 @@
 # persona_drift 误伤/漏拦审计 — 2026-06-14
 
-**状态**：审计完成，**未改代码**。观察项① 闭环为「发现确定性缺陷，待立项修复」。
+**状态**：审计完成 → **已修复（2026-06-14，代码已改，全量 pytest 2689 passed，待部署）**。三缺陷均落地，附带根治一个预先存在的 guardrail import-顺序 bug。修复详情见文末「修复落地」段与 maintenance-log 2026-06-14「persona_drift 三缺陷修复」条。
 
 ## 背景
 
@@ -44,3 +44,21 @@ E/F 簇全开后观察项① 要验「persona_drift 不误伤自我介绍」。p
 ## 风险评估
 
 当前**误伤实际影响低**（light_reply 短路兜底了高频场景），但**漏拦风险中**（`我是一个AI` 单句透传——若 emu 在主路径吐出纯 AI 声明会原样发群）。修复优先级：漏拦 > 剥错方向 > 误伤。
+
+## 修复落地（2026-06-14）
+
+按上述「建议修复路径」实施，并在实现中修正了建议#2 的一个会引入回归的盲点。
+
+**核心区分（实现层面新增）**：`_is_hard_declaration`——硬声明（AI/型号 `我是一个AI`/`我是Claude`、人设 `我的人设是`、本名关键词 `我的名字是`、自报真名 `我是{bot_name}`、WxS 成员）vs 软匹配（`DECLARATION_PATTERNS[0]` 的泛化 `我是X`）。**只有硬声明剥空才 fail-closed**；软匹配剥空仍透传原文——否则 `我是个吃货`/`我是来帮忙的` 会被误判成 drift 并替换成 fallback。建议#2 原文「剥空即 fallback」未区分这点，会误伤正常说话。
+
+**三缺陷修复**：
+
+- (b) 漏拦：`strip_declarations` 末尾改为 `if matched and not cleaned: if hard_matched: return "", matched`——硬声明剥空返回空串 → `passed=False` → `_guardrail_fallback`，不再透传。
+- (c) 剥错方向：循环内 `if changed and rewritten: if _is_hard_declaration(rewritten): 丢弃残留 + hard_matched=True`——`我是凤笑梦，我是一个AI` 剥名后残留 `我是一个AI` 仍是硬声明 → 丢弃 → fail-closed。
+- (a) 误伤：按用户裁定「自报真名算 drift」，保持剥名方向。
+
+**附带修复（import-顺序 bug，审计时未发现）**：加测试时暴露 guardrail 规则注册顺序依赖 import 到达顺序（循环 import），特定顺序下 schedule_overshare 抢先把含「真名+时间」整句剥掉、饿死 persona_drift。改为显式 `order`（`RULE_ORDER_*`）+ `apply` 稳定排序。详见 maintenance-log。
+
+**验证**：ruff 0 / pyright 0；全量 2689 passed（+9 新测试）。确定性矩阵复核 8 样本通过。
+
+**残留次要瑕疵**：`我是凤笑梦呀` 剥名后留 `呀`（`_rewrite_sentence` 标点尾问题，非三缺陷之一，线上走 light_reply 短路影响极低，未扩大范围处理）。

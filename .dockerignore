@@ -1,4 +1,12 @@
 .git
+.agents/
+.claude/
+.codegraph/
+.codex/
+.github/
+.githooks/
+.reasonix/
+.vscode/
 .venv
 .env
 .env.local
@@ -19,6 +27,11 @@ __pycache__
 .workspace/
 tmp/
 pytest-of-kragcola/
+]+
+research/
+tools/ipv6/
+tools/codex-vscode-goal-kit/
+docs/coursework/
 config/
 storage/
 storage.bind-mount-snapshot-*/

@@ -137,6 +137,19 @@ privacy_mask = true
 # privacy_mask = false
 
 # ---------------------------------------------------------------------------
+# 进阶话题块原始研究事件层（默认关闭）
+# ---------------------------------------------------------------------------
+[research_event_capture]
+enabled = false
+group_allowlist = []
+db_path = "storage/research_events.db"
+max_queue_size = 1024
+batch_size = 64
+flush_interval_seconds = 1.0
+# secret 本身只放环境变量，不写配置文件。
+pseudonymization_salt_env = "OMUBOT_RESEARCH_EVENT_PSEUDONYMIZATION_SECRET"
+
+# ---------------------------------------------------------------------------
 # NapCat HTTP API
 # ---------------------------------------------------------------------------
 [napcat]

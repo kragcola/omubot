@@ -19,6 +19,8 @@
     "context_retrieval",
     "prompt_injection"
   ],
+  "author": "Omubot",
+  "min_omubot_version": "",
   "config": {
     "defaults": "config.default.json",
     "schema": "config.schema.json",

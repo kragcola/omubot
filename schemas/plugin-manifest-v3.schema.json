@@ -1,0 +1,252 @@
+{
+  "$defs": {
+    "PluginConfigSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "defaults": {
+          "minLength": 1,
+          "title": "Defaults",
+          "type": "string"
+        },
+        "schema": {
+          "minLength": 1,
+          "title": "Schema",
+          "type": "string"
+        },
+        "apply_mode": {
+          "enum": [
+            "hot",
+            "read_only",
+            "restart_required"
+          ],
+          "title": "Apply Mode",
+          "type": "string"
+        },
+        "restart_required_fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Restart Required Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "defaults",
+        "schema",
+        "apply_mode",
+        "restart_required_fields"
+      ],
+      "title": "PluginConfigSpec",
+      "type": "object"
+    },
+    "PluginDisplayName": {
+      "additionalProperties": false,
+      "properties": {
+        "zh": {
+          "minLength": 1,
+          "title": "Zh",
+          "type": "string"
+        },
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        }
+      },
+      "required": [
+        "zh",
+        "en"
+      ],
+      "title": "PluginDisplayName",
+      "type": "object"
+    },
+    "PluginStoreSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "visibility": {
+          "enum": [
+            "internal",
+            "local",
+            "marketplace_ready"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        },
+        "marketplace_id": {
+          "title": "Marketplace Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "visibility",
+        "marketplace_id"
+      ],
+      "title": "PluginStoreSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Canonical typed contract for a manifest v3 payload.",
+  "properties": {
+    "manifest_version": {
+      "const": 3,
+      "title": "Manifest Version",
+      "type": "integer"
+    },
+    "name": {
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Name",
+      "type": "string"
+    },
+    "display_name": {
+      "$ref": "#/$defs/PluginDisplayName"
+    },
+    "description": {
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "version": {
+      "minLength": 1,
+      "pattern": "^(\\d+)\\.(\\d+)\\.(\\d+)(?:-[a-zA-Z0-9._]+)?(?:\\+[a-zA-Z0-9._]+)?$",
+      "title": "Version",
+      "type": "string"
+    },
+    "priority": {
+      "title": "Priority",
+      "type": "integer"
+    },
+    "tier": {
+      "enum": [
+        "system",
+        "user"
+      ],
+      "title": "Tier",
+      "type": "string"
+    },
+    "toggle_policy": {
+      "enum": [
+        "locked",
+        "runtime",
+        "restart_required"
+      ],
+      "title": "Toggle Policy",
+      "type": "string"
+    },
+    "category": {
+      "enum": [
+        "core",
+        "memory",
+        "expression",
+        "tool",
+        "pipeline",
+        "ops"
+      ],
+      "title": "Category",
+      "type": "string"
+    },
+    "permissions": {
+      "items": {
+        "enum": [
+          "message",
+          "prompt",
+          "reply",
+          "tick",
+          "tool",
+          "command",
+          "admin",
+          "storage",
+          "network",
+          "lifecycle"
+        ],
+        "type": "string"
+      },
+      "title": "Permissions",
+      "type": "array"
+    },
+    "capabilities": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "author": {
+      "minLength": 1,
+      "title": "Author",
+      "type": "string"
+    },
+    "min_omubot_version": {
+      "pattern": "^(?:$|\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9._]+)?(?:\\+[a-zA-Z0-9._]+)?)$",
+      "title": "Min Omubot Version",
+      "type": "string"
+    },
+    "config": {
+      "$ref": "#/$defs/PluginConfigSpec"
+    },
+    "store": {
+      "$ref": "#/$defs/PluginStoreSpec"
+    },
+    "dependencies": {
+      "additionalProperties": {
+        "pattern": "^(?:\\*|(?:(?:>=|<=|>|<|==|\\^|~)\\s*)?\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9._]+)?(?:\\+[a-zA-Z0-9._]+)?)$",
+        "type": "string"
+      },
+      "title": "Dependencies",
+      "type": "object"
+    },
+    "required_dependencies": {
+      "additionalProperties": {
+        "pattern": "^(?:\\*|(?:(?:>=|<=|>|<|==|\\^|~)\\s*)?\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9._]+)?(?:\\+[a-zA-Z0-9._]+)?)$",
+        "type": "string"
+      },
+      "title": "Required Dependencies",
+      "type": "object"
+    },
+    "optional_dependencies": {
+      "additionalProperties": {
+        "pattern": "^(?:\\*|(?:(?:>=|<=|>|<|==|\\^|~)\\s*)?\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9._]+)?(?:\\+[a-zA-Z0-9._]+)?)$",
+        "type": "string"
+      },
+      "title": "Optional Dependencies",
+      "type": "object"
+    },
+    "min_omu_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Min Omu Version"
+    },
+    "capability_only": {
+      "default": false,
+      "title": "Capability Only",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "manifest_version",
+    "name",
+    "display_name",
+    "description",
+    "version",
+    "priority",
+    "tier",
+    "toggle_policy",
+    "category",
+    "permissions",
+    "capabilities",
+    "author",
+    "min_omubot_version",
+    "config",
+    "store"
+  ],
+  "title": "PluginManifestV3",
+  "type": "object"
+}

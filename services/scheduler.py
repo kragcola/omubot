@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from loguru import logger
 
 from kernel.config import GroupConfig
+from kernel.reply_run import ReplyOrigin, ReplyOutcome, ReplyRun, ReplyStage
 from kernel.types import ResponseClass, TriggerContext
 from services.group.corpus_capture import CaptureRow, CorpusCapture
 from services.group.topic_block import TopicBlockTracker
@@ -25,6 +26,12 @@ from services.memory.timeline import GroupTimeline
 from services.runtime_clock import now_cst
 from services.scheduler_eot import EOTCache, EOTClassifier
 from services.scheduler_hawkes import HawkesCache, estimate_rho_from_times
+from services.scheduler_pipeline.outbound_delivery import (
+    DeliveryStatus,
+    HumanizationContext,
+    OutboundDeliveryRequest,
+    RuntimeOutboundDelivery,
+)
 from services.scheduler_rws import DEFAULT_RWS_WEIGHTS, RWSBandit, RWSExplanation, RWSFeatures, compute_rws
 from services.scheduler_rws.reward import PendingDecision, ReactionSignals, RWSRewardQueue
 from services.scheduler_rws.rws import dual_decision
@@ -40,6 +47,7 @@ if TYPE_CHECKING:
 
 _L = logger.bind(channel="scheduler")
 _CHAT_LOCK_LLM_TIMEOUT_S = 120.0
+_REPLY_RUN_METRIC_TIMEOUT_S = 1.0
 # Arbiter B (interruption) timeout layering. MUST stay above the inner arbiter
 # LLM timeout (arbiter.timeout_ms, config.json) which itself must cover the
 # deepseek-flash p90. Measured 2026-06-10: deepseek-v4-flash arbiter payload
@@ -69,43 +77,6 @@ class _MuteRecord:
     source: str
     since_unix: float
     until_unix: float | None = None
-
-
-def _action_failed_retcode(error: Exception) -> int | None:
-    retcode = getattr(error, "retcode", None)
-    if isinstance(retcode, int):
-        return retcode
-    payload = _action_failed_payload(error)
-    if isinstance(payload, dict):
-        for key in ("retcode", "code", "status"):
-            raw = payload.get(key)
-            if not isinstance(raw, (int, str)):
-                continue
-            try:
-                return int(raw)
-            except (TypeError, ValueError):
-                continue
-    info = getattr(error, "info", None)
-    if isinstance(info, dict):
-        for key in ("retcode", "code", "status"):
-            raw = info.get(key)
-            if not isinstance(raw, (int, str)):
-                continue
-            try:
-                return int(raw)
-            except (TypeError, ValueError):
-                continue
-    return None
-
-
-def _action_failed_payload(error: Exception) -> dict[str, Any]:
-    info = getattr(error, "info", None)
-    if not isinstance(info, dict):
-        return {}
-    nested = info.get("info")
-    if isinstance(nested, dict):
-        return nested
-    return info
 
 
 def _should_force_reply(trigger: TriggerContext | None) -> bool:
@@ -315,6 +286,7 @@ class GroupChatScheduler:
         group_inventory_getter: Callable[[], dict[str, Any] | None] | None = None,
         topic_block_config: Any = None,
         thinker_config: Any = None,
+        research_event_capture: Any = None,
     ) -> None:
         self._llm = llm
         self._timeline = timeline
@@ -353,6 +325,7 @@ class GroupChatScheduler:
         self._rws_reward_task: asyncio.Task[None] | None = None
         self._slots: dict[str, _GroupSlot] = {}
         self._bot: Bot | None = None
+        self._outbound_delivery: RuntimeOutboundDelivery | None = None
         self._muted_groups: set[str] = set()
         self._mute_records: dict[str, _MuteRecord] = {}
         self._bot_pair_guard = bot_pair_guard
@@ -366,6 +339,7 @@ class GroupChatScheduler:
         # B1 topic-block attribution (parallel-topic understanding).
         self._topic_block_config = topic_block_config
         self._thinker_config = thinker_config
+        self._research_event_capture = research_event_capture
         self._topic_tracker: TopicBlockTracker | None = None
         if bool(getattr(topic_block_config, "enabled", False)):
             backend = str(getattr(topic_block_config, "similarity_backend", "ngram") or "ngram")
@@ -394,6 +368,12 @@ class GroupChatScheduler:
 
     def set_bot(self, bot: Bot) -> None:
         self._bot = bot
+        self._outbound_delivery = RuntimeOutboundDelivery(
+            bot=bot,
+            humanizer=self._humanizer,
+            research_capture=self._research_event_capture,
+            pair_guard=self._bot_pair_guard,
+        )
         self._self_id = str(getattr(bot, "self_id", "") or "")
         if self._bot_pair_guard is not None:
             with contextlib.suppress(Exception):
@@ -1303,6 +1283,8 @@ class GroupChatScheduler:
             tasks.append(self._rws_reward_task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._corpus_capture is not None:
+            self._corpus_capture.close()
 
     # ------------------------------------------------------------------
     # Internal
@@ -2011,19 +1993,21 @@ class GroupChatScheduler:
         *,
         humanize: str = "normal",
         target_user_id: str = "",
+        sent_event: asyncio.Event | None = None,
     ) -> float:
         """Send a text message to a group with retry on failure."""
-        if not self._bot:
+        if not self._bot or not text:
             return 0.0
-        from nonebot.adapters.onebot.v11 import Message
-        from nonebot.adapters.onebot.v11.exception import ActionFailed
 
-        # Detect [CQ:reply,id=X] prefix for quote-reply targeting.
-        # OneBot v11 Message handles CQ codes natively — we just log it.
-        if text.startswith("[CQ:reply,id="):
-            import re
-            if m := re.match(r"\[CQ:reply,id=(-?\d+)\]", text):
-                _L.info("scheduler | group={} reply targets msg_id={}", group_id, m.group(1))
+        delivery = self._outbound_delivery
+        if delivery is None:
+            delivery = RuntimeOutboundDelivery(
+                bot=self._bot,
+                humanizer=self._humanizer,
+                research_capture=self._research_event_capture,
+                pair_guard=self._bot_pair_guard,
+            )
+            self._outbound_delivery = delivery
 
         delay = 2.0
         max_delay = 60.0
@@ -2031,12 +2015,21 @@ class GroupChatScheduler:
             if group_id in self._muted_groups:
                 _L.warning("scheduler | group={} muted, dropping message", group_id)
                 return 0.0
-            try:
-                t_send = time.monotonic()
-                if self._humanizer is not None and humanize != "skip":
-                    await self._humanizer.delay(text, **self._humanizer_runtime(group_id))
-                await self._bot.send_group_msg(group_id=int(group_id), message=Message(text))
-                elapsed = time.monotonic() - t_send
+            humanization = self._humanizer_runtime(group_id)
+            result = await delivery.deliver(
+                OutboundDeliveryRequest(
+                    group_id=group_id,
+                    text=text,
+                    humanize=humanize,
+                    target_user_id=target_user_id,
+                    actor_id=self._self_id,
+                    humanization=HumanizationContext(**humanization),
+                )
+            )
+            if result.status is DeliveryStatus.SENT:
+                if sent_event is not None:
+                    sent_event.set()
+                elapsed = result.elapsed_s
                 if elapsed >= 8.0:
                     _L.warning(
                         "scheduler send slow | group={} humanize={} len={} elapsed={:.1f}s",
@@ -2047,26 +2040,16 @@ class GroupChatScheduler:
                         "scheduler send ok | group={} humanize={} len={} elapsed={:.1f}s",
                         group_id, humanize, len(text), elapsed,
                     )
-                if self._bot_pair_guard is not None:
-                    try:
-                        recorded = self._bot_pair_guard.record_outbound(group_id, target_user_id)
-                    except Exception as exc:
-                        _L.debug(
-                            "scheduler pair guard outbound skipped | group={} target={} err={}",
-                            group_id,
-                            target_user_id,
-                            exc,
-                        )
-                    else:
-                        if recorded:
-                            await self._record_runtime_metric(
-                                metric_key="pair_guard_outbound_recorded",
-                                group_id=group_id,
-                                metadata={"target_user_id": target_user_id},
-                            )
+                if result.pair_guard_recorded:
+                    await self._record_runtime_metric(
+                        metric_key="pair_guard_outbound_recorded",
+                        group_id=group_id,
+                        metadata={"target_user_id": target_user_id},
+                    )
                 return elapsed
-            except ActionFailed as e:
-                retcode = _action_failed_retcode(e)
+
+            if result.status is DeliveryStatus.FAILED:
+                retcode = result.retcode
                 retcodes = {
                     int(code)
                     for code in (getattr(self._self_mute_config, "action_failed_retcodes", []) or [])
@@ -2086,31 +2069,47 @@ class GroupChatScheduler:
                     )
                 _L.warning(
                     "scheduler | group={} send failed: {} | retry in {}s",
-                    group_id, e.info.get("wording") or e.info.get("message", str(e)), delay,
+                    group_id, result.wording or "ActionFailed", delay,
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, max_delay)
+                continue
+            return 0.0
 
     async def _do_chat(self, group_id: str, *, trigger: TriggerContext | None = None) -> None:
         slot = self._slots.get(group_id)
+        reply_run: ReplyRun | None = None
         try:
             if slot is None:
                 return
             slot_ref = slot
             async with slot_ref.chat_lock:
                 monitor_task: asyncio.Task[None] | None = None
+                session_id = f"group_{group_id}"
+                initial_uid = slot.last_user_id
+                reply_run = ReplyRun.start(
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=initial_uid,
+                    origin=(
+                        ReplyOrigin.TRIGGERED
+                        if trigger is not None
+                        else ReplyOrigin.PROACTIVE
+                    ),
+                    trigger_mode=trigger.mode if trigger is not None else "",
+                )
                 for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
                     monitor_task = None
                     try:
+                        uid = slot.last_user_id
                         identity = self._persona_runtime.identity_snapshot()
-                        session_id = f"group_{group_id}"
-                        uid = slot.last_user_id if slot else ""
                         ctx = ToolContext(
                             bot=self._bot,
                             user_id=uid,
                             group_id=group_id,
                             session_id=session_id,
                         )
+                        ctx.extra["reply_run"] = reply_run
                         # C1: hand the unified receiver role to chat() so its
                         # necessity gate uses the SAME "被寻址" definition as the
                         # scheduler (addressed/ratified never get suppressed).
@@ -2133,6 +2132,12 @@ class GroupChatScheduler:
                         must_emit = bool(
                             trigger is not None
                             and getattr(getattr(trigger, "obligation", None), "level", "") == "must"
+                        )
+                        reply_run.record(
+                            ReplyStage.DECISION,
+                            attempt=attempt,
+                            force_reply=force_reply,
+                            must_emit=must_emit,
                         )
 
                         # @mention: prepend [CQ:reply] to the first streamed segment only.
@@ -2211,13 +2216,28 @@ class GroupChatScheduler:
                                 if _prefix:
                                     text = _prefix + text
                                 first_segment = False
-                            send_total_elapsed += await self._send_to_group(
+                            reply_run.record(
+                                ReplyStage.POSTPROCESSED,
+                                streaming=True,
+                                segment_index=sent_segments,
+                            )
+                            segment_sent = asyncio.Event()
+                            send_elapsed = await self._send_to_group(
                                 group_id,
                                 text,
                                 humanize="skip" if is_first else "normal",
                                 target_user_id=_target_user_id,
+                                sent_event=segment_sent,
                             )
+                            if not segment_sent.is_set():
+                                return False
+                            send_total_elapsed += send_elapsed
                             sent_segments += 1
+                            reply_run.record(
+                                ReplyStage.DELIVERED,
+                                streaming=True,
+                                segment_index=sent_segments - 1,
+                            )
                             _sent_texts.append(text)
                             # First visible segment is now out — past this point
                             # cancel-and-remerge must not retract it. Subsequent
@@ -2226,6 +2246,7 @@ class GroupChatScheduler:
                             return True
 
                         resolved = self._group_config.resolve(int(group_id))
+                        reply_run.record(ReplyStage.GENERATION_STARTED, attempt=attempt)
                         reply = await asyncio.wait_for(
                             self._llm.chat(
                                 session_id=session_id,
@@ -2242,6 +2263,7 @@ class GroupChatScheduler:
                             ),
                             timeout=_CHAT_LOCK_LLM_TIMEOUT_S,
                         )
+                        reply_run.record(ReplyStage.GENERATION_FINISHED, attempt=attempt)
                         latest_reply = self._latest_assistant_reply_after(group_id, generation_turn_baseline)
 
                         if reply:
@@ -2250,18 +2272,34 @@ class GroupChatScheduler:
                             if first_segment and reply_prefix:
                                 reply = reply_prefix + reply
                                 first_segment = False
-                            send_total_elapsed += await self._send_to_group(
+                            reply_run.record(
+                                ReplyStage.POSTPROCESSED,
+                                streaming=False,
+                                segment_index=sent_segments,
+                            )
+                            segment_sent = asyncio.Event()
+                            send_elapsed = await self._send_to_group(
                                 group_id,
                                 reply,
                                 humanize="skip" if is_first else "normal",
                                 target_user_id=uid,
+                                sent_event=segment_sent,
                             )
-                            sent_segments += 1
-                            slot_ref.first_segment_sent = True
-                            _L.info(
-                                "scheduler reply send complete | group={} segments={} send_total={:.1f}s",
-                                group_id, sent_segments, send_total_elapsed,
-                            )
+                            if segment_sent.is_set():
+                                send_total_elapsed += send_elapsed
+                                sent_segments += 1
+                                reply_run.record(
+                                    ReplyStage.DELIVERED,
+                                    streaming=False,
+                                    segment_index=sent_segments - 1,
+                                )
+                                slot_ref.first_segment_sent = True
+                                _L.info(
+                                    "scheduler reply send complete | group={} segments={} send_total={:.1f}s",
+                                    group_id, sent_segments, send_total_elapsed,
+                                )
+                            else:
+                                reply = None
                         if latest_reply:
                             slot_ref.last_reply_time = time.time()
                             slot_ref.last_reply_content = latest_reply
@@ -2287,10 +2325,16 @@ class GroupChatScheduler:
                         # forever. A new message meanwhile supersedes via notify.
                         if sent_segments == 0 and not latest_reply:
                             self._maybe_defer_addressed_wait(group_id, trigger)
+                        reply_run.finish(
+                            ReplyOutcome.COMPLETED
+                            if sent_segments > 0
+                            else ReplyOutcome.SKIPPED
+                        )
                         return
 
                     except RateLimitError:
                         if attempt >= RATE_LIMIT_MAX_RETRIES:
+                            reply_run.finish(ReplyOutcome.FAILED)
                             _L.error(
                                 "scheduler | group={} rate limit exhausted after {} retries",
                                 group_id, RATE_LIMIT_MAX_RETRIES,
@@ -2303,6 +2347,7 @@ class GroupChatScheduler:
                         )
                         await asyncio.sleep(delay)
                     except TimeoutError:
+                        reply_run.finish(ReplyOutcome.FAILED)
                         _L.warning(
                             "scheduler | group={} llm chat timed out after {:.1f}s",
                             group_id,
@@ -2316,6 +2361,8 @@ class GroupChatScheduler:
                                 await monitor_task
 
         except asyncio.CancelledError:
+            if reply_run is not None:
+                reply_run.finish(ReplyOutcome.CANCELLED)
             _L.debug("scheduler | group={} chat cancelled", group_id)
             # D2 cancel-path: a cancelled fire (shutdown / clear_pending) must
             # NOT spawn the next block — clear the queue so it cannot pollute a
@@ -2324,6 +2371,8 @@ class GroupChatScheduler:
             if slot:
                 slot.block_fire_queue = []
         except Exception:
+            if reply_run is not None:
+                reply_run.finish(ReplyOutcome.FAILED)
             _L.exception("scheduler | group={} chat error", group_id)
         finally:
             if slot:
@@ -2343,3 +2392,15 @@ class GroupChatScheduler:
                         self._fire(group_id)
                 elif slot.msg_count > 0:
                     self._fire(group_id)
+            if reply_run is not None and reply_run.outcome is not None:
+                try:
+                    await asyncio.wait_for(
+                        self._record_runtime_metric(
+                            metric_key="reply_run",
+                            group_id=group_id,
+                            metadata=reply_run.to_metric_metadata(),
+                        ),
+                        timeout=_REPLY_RUN_METRIC_TIMEOUT_S,
+                    )
+                except TimeoutError:
+                    _L.warning("scheduler reply_run metric timed out | group={}", group_id)

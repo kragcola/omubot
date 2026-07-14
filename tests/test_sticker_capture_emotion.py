@@ -141,7 +141,7 @@ async def test_auto_learn_paths_emit_emotion_tag(tmp_path: Path, monkeypatch) ->
         return {"type": "image_ref", "path": str(path), "media_type": "image/jpeg"}
 
     image_cache._process_and_save = fake_process  # type: ignore[method-assign]
-    with patch("plugins.history_loader.plugin.emit_emotion_tag", new_callable=AsyncMock) as history_emit:
+    with patch("services.history_backfill.emit_emotion_tag", new_callable=AsyncMock) as history_emit:
         await _extract_content(
             [{
                 "type": "image",

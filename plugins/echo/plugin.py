@@ -6,11 +6,10 @@ On 3rd occurrence: either echoes the message or randomly (5%) breaks the chain.
 
 from __future__ import annotations
 
-import json
 import random
 import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +18,7 @@ from pydantic import BaseModel
 
 from kernel.config import load_plugin_config
 from kernel.types import AmadeusPlugin, MessageContext, PluginContext
+from services.echo_key import build_echo_key as build_echo_key
 
 _ECHO_WINDOW_S = 300.0
 _ECHO_THRESHOLD = 3
@@ -38,39 +38,6 @@ class EchoConfig(BaseModel):
     break_text: str = "打断复读！"
     break_chance: float = 0.05
     ignore_command_messages: bool = True
-
-
-def build_echo_key(segments: Iterable[object]) -> str:
-    """Build a stable key from OneBot message segments for echo detection."""
-    parts: list[str] = []
-    for seg in segments:
-        t: str = getattr(seg, "type", "")
-        d: dict = getattr(seg, "data", {}) or {}
-        if t == "text":
-            parts.append(d.get("text", ""))
-        elif t == "image":
-            sub = str(d.get("sub_type", "0"))
-            file_hash = d.get("file", "")
-            parts.append(f"[image:{sub}:{file_hash}]")
-        elif t == "face":
-            parts.append(f"[face:{d.get('id', '')}]")
-        elif t == "at":
-            parts.append(f"[at:{d.get('qq', '')}]")
-        elif t == "json":
-            # Differentiate JSON cards by their prompt / desc so that
-            # multiple B站 mini-program forwards are not lumped together.
-            raw = d.get("data", "")
-            prompt = ""
-            if isinstance(raw, str) and raw:
-                try:
-                    obj = json.loads(raw)
-                    prompt = obj.get("prompt", "") or obj.get("desc", "")
-                except (json.JSONDecodeError, ValueError):
-                    pass
-            parts.append(f"[json:{prompt}]")
-        else:
-            parts.append(f"[{t}]")
-    return "".join(parts).strip()
 
 
 def _visible_text_for_humanizer(echo_key: str) -> str:
@@ -127,6 +94,10 @@ class EchoTracker:
             return None
 
         if now - state.first_seen > self._window_seconds or state.echoed:
+            state.count = 1
+            state.first_seen = now
+            state.echoed = False
+            state.interrupt_chain = 0
             return None
 
         state.count += 1
@@ -144,7 +115,7 @@ class EchoTracker:
 
 class EchoPlugin(AmadeusPlugin):
     name = "echo"
-    description = "群聊复读检测：5分钟内同消息3次触发复读，5%概率打断"
+    description = "群聊复读检测：5 分钟内同消息多次触发复读"
     version = "1.1.2"
     priority = 200
 

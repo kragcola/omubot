@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from kernel.config import load_plugin_config
 from kernel.types import AmadeusPlugin, PluginContext
-from services.tools.base import Tool
 from services.tools.datetime_tool import DateTimeTool
 
 
@@ -27,11 +28,13 @@ class DateTimePlugin(AmadeusPlugin):
     async def on_startup(self, ctx: PluginContext) -> None:
         self._config = load_plugin_config("plugins/datetime/config.default.json", DateTimeConfig)
         self._schedule_store = ctx.schedule_store
+        self._calendar_service = getattr(ctx, "calendar_service", None)
 
-    def register_tools(self) -> list[Tool]:
+    def register_tools(self) -> list[Any]:
         return [
             DateTimeTool(
                 schedule_store=self._schedule_store,
+                calendar_service=self._calendar_service,
                 timezone=self._config.timezone,
                 include_calendar_context=self._config.include_calendar_context,
                 include_schedule=self._config.include_schedule,

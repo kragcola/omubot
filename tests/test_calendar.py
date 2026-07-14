@@ -1,13 +1,34 @@
-"""Tests for calendar module — DayContext, holidays, birthdays, special days."""
+"""Tests for the canonical calendar-context service."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from plugins.schedule.calendar import get_day_context, set_self_name
+from plugins.calendar_context.service import CalendarContextService
 
 CST = ZoneInfo("Asia/Shanghai")
+DATA_DIR = Path(__file__).resolve().parents[1] / "plugins" / "calendar_context" / "data"
+SERVICE = CalendarContextService(
+    auto_fetch_missing_year=False,
+    auto_refresh_future_years=False,
+    official_source_enabled=False,
+    fallback_local_holiday_lib=False,
+)
+SERVICE.load_dataset(
+    birthdays_path=DATA_DIR / "birthdays.json",
+    special_days_path=DATA_DIR / "special_days.json",
+    builtin_years_dir=DATA_DIR / "years",
+)
+
+
+def get_day_context(value: datetime):
+    return SERVICE.get_day_context(value)
+
+
+def set_self_name(name: str) -> None:
+    SERVICE.set_self_names(name)
 
 
 def _dt(date_str: str) -> datetime:
@@ -99,16 +120,14 @@ class TestHolidayCoverage:
 
 class TestMakeupDays:
     def test_all_makeup_days_are_makeup(self) -> None:
-        from plugins.schedule.calendar import _MAKEUP_DAYS_2026
-
-        for d in _MAKEUP_DAYS_2026:
+        makeup_days_2026 = {day for day in SERVICE.makeup_days if day.startswith("2026-")}
+        for d in makeup_days_2026:
             ctx = get_day_context(_dt(d))
             assert ctx.is_makeup_day, f"{d} should be makeup_day, got {ctx.day_type}"
 
     def test_makeup_days_count(self) -> None:
-        from plugins.schedule.calendar import _MAKEUP_DAYS_2026
-
-        assert len(_MAKEUP_DAYS_2026) == 6
+        makeup_days_2026 = {day for day in SERVICE.makeup_days if day.startswith("2026-")}
+        assert len(makeup_days_2026) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +140,9 @@ class TestSpecialDays:
         ctx = get_day_context(_dt("2026-02-14"))
         assert ctx.special_day == "情人节"
 
-    def test_qixi(self) -> None:
-        ctx = get_day_context(_dt("2026-07-07"))
-        assert ctx.special_day == "七夕"
+    def test_mothers_day_rule(self) -> None:
+        ctx = get_day_context(_dt("2026-05-10"))
+        assert ctx.special_day == "母亲节"
 
     def test_christmas(self) -> None:
         ctx = get_day_context(_dt("2026-12-25"))
@@ -188,9 +207,7 @@ class TestBirthdays:
         assert len(ctx.birthdays) == 0
 
     def test_total_birthday_dates(self) -> None:
-        from plugins.schedule.calendar import _BIRTHDAYS_MMDD
-
-        total_characters = sum(len(v) for v in _BIRTHDAYS_MMDD.values())
+        total_characters = sum(len(v) for v in SERVICE.birthdays_mmdd.values())
         assert total_characters == 26, f"expected 26 characters, got {total_characters}"
 
 

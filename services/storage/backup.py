@@ -14,8 +14,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 from loguru import logger
+
+from services.storage.catalog import (
+    DEFAULT_DATABASE_CATALOG,
+    BackupProfile,
+    DatabaseSpec,
+)
+from services.storage.schema_contracts import verify_catalog_schema
 
 _L = logger.bind(channel="backup")
 
@@ -34,25 +42,39 @@ class BackupItem:
     restore_note: str = ""
 
 
+def _database_backup_profiles(profile: BackupProfile) -> list[str]:
+    if profile in {BackupProfile.CRITICAL_DAILY, BackupProfile.DAILY}:
+        return ["daily", "migration", "pre-change"]
+    if profile is BackupProfile.MIGRATION_ONLY:
+        return ["migration"]
+    if profile is BackupProfile.REBUILDABLE:
+        return ["migration"]
+    return []
+
+
+def _database_backup_items() -> list[BackupItem]:
+    return [
+        BackupItem(
+            spec.id,
+            spec.path,
+            "sqlite",
+            required=not spec.optional and not spec.rebuildable,
+            critical=spec.critical,
+            profiles=_database_backup_profiles(spec.backup_profile),
+            sensitive=spec.sensitive,
+            restore_note=(
+                "含敏感研究数据；仅在明确授权的迁移中携带"
+                if spec.sensitive
+                else "停止 bot → 替换 → 删除 .db-wal/.db-shm → 启动"
+            ),
+        )
+        for spec in DEFAULT_DATABASE_CATALOG.all()
+    ]
+
+
 BACKUP_REGISTRY: list[BackupItem] = [
     # --- SQLite databases ---
-    BackupItem("slang", "storage/slang.db", "sqlite", critical=True,
-               profiles=["daily", "migration", "pre-change"],
-               restore_note="停止 bot → 替换 → 删除 .db-wal/.db-shm → 启动"),
-    BackupItem("messages", "storage/messages.db", "sqlite", critical=True,
-               profiles=["daily", "migration", "pre-change"]),
-    BackupItem("usage", "storage/usage.db", "sqlite",
-               profiles=["daily", "migration", "pre-change"]),
-    BackupItem("style", "storage/style.db", "sqlite",
-               profiles=["daily", "migration", "pre-change"]),
-    BackupItem("memory_cards", "storage/memory_cards.db", "sqlite", critical=True,
-               profiles=["daily", "migration", "pre-change"]),
-    BackupItem("knowledge_graph", "storage/knowledge_graph.db", "sqlite",
-               profiles=["daily", "migration", "pre-change"]),
-    BackupItem("knowledge_index", "storage/knowledge_index.db", "sqlite",
-               profiles=["daily", "migration", "pre-change"]),
-    BackupItem("learning_normalizer", "storage/learning_normalizer.db", "sqlite",
-               profiles=["daily", "migration", "pre-change"]),
+    *_database_backup_items(),
     # --- Config ---
     BackupItem("config_json", "config/config.json", "file",
                required=False, profiles=["daily", "migration", "pre-change"],
@@ -153,6 +175,43 @@ def _backup_sqlite(src: Path, dst: Path, *, critical: bool = False) -> dict:
         "quick_check": qc,
         "integrity_check": ic,
     }
+
+
+def _database_metadata(src: Path, spec: DatabaseSpec) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "db_id": spec.id,
+        "owner": spec.owner,
+        "user_version": None,
+        "target_user_version": spec.target_user_version,
+        "schema_fingerprint": "",
+    }
+    if not src.exists():
+        return metadata
+    try:
+        with sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=2.0) as connection:
+            version_row = connection.execute("PRAGMA user_version").fetchone()
+            schema_rows = connection.execute(
+                """
+                SELECT type, name, tbl_name, COALESCE(sql, '')
+                FROM sqlite_master
+                WHERE name NOT LIKE 'sqlite_%'
+                ORDER BY type, name
+                """
+            ).fetchall()
+        schema_payload = json.dumps(schema_rows, ensure_ascii=True, separators=(",", ":"))
+        metadata["user_version"] = int(version_row[0]) if version_row else 0
+        metadata["schema_fingerprint"] = hashlib.sha256(schema_payload.encode()).hexdigest()
+    except (sqlite3.DatabaseError, sqlite3.OperationalError):
+        pass
+    return metadata
+
+
+def _sqlite_relative_backup_path(item: BackupItem) -> Path:
+    path = Path(item.path)
+    try:
+        return path.relative_to("storage")
+    except ValueError as exc:
+        raise ValueError(f"SQLite backup path must be under storage/: {item.path}") from exc
 
 
 def _backup_file(src: Path, dst: Path, *, required: bool = True) -> dict:
@@ -309,18 +368,31 @@ class BackupService:
 
             manifest_items = []
             for item in items:
+                result: dict[str, Any]
                 if item.item_type == "sqlite":
                     src = self._repo_root / item.path
-                    if src.exists():
+                    spec = DEFAULT_DATABASE_CATALOG.get(item.id)
+                    if not src.exists() and not item.required:
+                        result = {"status": "skipped", "reason": "source not found"}
+                    elif src.exists():
                         try:
                             conn = sqlite3.connect(str(src))
                             conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
                             conn.close()
                         except Exception:
                             pass
-                    result = _backup_sqlite(
-                        src, tmp_dir / "sqlite" / src.name, critical=item.critical,
-                    )
+                        result = _backup_sqlite(
+                            src,
+                            tmp_dir / "sqlite" / _sqlite_relative_backup_path(item),
+                            critical=item.critical,
+                        )
+                    else:
+                        result = _backup_sqlite(
+                            src,
+                            tmp_dir / "sqlite" / _sqlite_relative_backup_path(item),
+                            critical=item.critical,
+                        )
+                    result["database"] = _database_metadata(src, spec)
                 elif item.item_type == "file":
                     src = self._repo_root / item.path
                     result = _backup_file(src, tmp_dir / "files" / item.path,
@@ -345,7 +417,7 @@ class BackupService:
             trusted = not any_required_failed
 
             manifest = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "backup_id": f"{profile}-{ts}",
                 "created_at": datetime.now(UTC).astimezone().isoformat(),
                 "profile": profile,
@@ -479,6 +551,352 @@ class BackupService:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class RestorePlanItem:
+    item_id: str
+    item_type: str
+    source_path: str
+    backup_path: str
+    compatibility: str
+    allowed: bool
+    reason: str = ""
+    user_version: int | None = None
+    target_user_version: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RestorePlan:
+    manifest_schema_version: int
+    legacy_manifest: bool
+    items: tuple[RestorePlanItem, ...]
+
+    @property
+    def can_apply(self) -> bool:
+        return bool(self.items) and all(item.allowed for item in self.items)
+
+
+def build_restore_plan(
+    backup_dir: str | Path,
+    *,
+    item_id: str | None = None,
+    allow_unverified_schema: bool = False,
+) -> RestorePlan:
+    root = Path(backup_dir).resolve()
+    manifest_path = root / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"no manifest.json in {root}")
+    raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_manifest, dict):
+        raise ValueError("backup manifest must be a JSON object")
+    summary = raw_manifest.get("summary")
+    if not isinstance(summary, dict) or summary.get("trusted") is not True:
+        raise ValueError("backup manifest is not trusted")
+    try:
+        schema_version = int(raw_manifest.get("schema_version", 0) or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("backup manifest schema_version is invalid") from exc
+    raw_items = raw_manifest.get("items", [])
+    if not isinstance(raw_items, list):
+        raise ValueError("backup manifest items must be a list")
+    registry_required = {item.id: item.required for item in BACKUP_REGISTRY}
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        item_name = str(raw_item.get("id", "")) or "<unknown>"
+        status = str(raw_item.get("status", ""))
+        is_required = (
+            raw_item.get("required") is True
+            or registry_required.get(item_name, False)
+        )
+        if is_required and status in {"failed", "skipped"}:
+            raise ValueError(f"required backup item {item_name} is {status}")
+    selected = [
+        item
+        for item in raw_items
+        if isinstance(item, dict)
+        and (item_id is None or str(item.get("id", "")) == item_id)
+    ]
+    if item_id is not None and not selected:
+        raise KeyError(f"item {item_id!r} not found in manifest")
+    legacy_manifest = schema_version < 2
+    items = tuple(
+        _build_restore_plan_item(
+            root,
+            item,
+            manifest_schema_version=schema_version,
+            legacy_manifest=legacy_manifest,
+            allow_unverified_schema=allow_unverified_schema,
+        )
+        for item in selected
+    )
+    return RestorePlan(
+        manifest_schema_version=schema_version,
+        legacy_manifest=legacy_manifest,
+        items=items,
+    )
+
+
+def _blocked_restore_item(
+    item: dict[str, Any],
+    *,
+    backup_path: Path,
+    compatibility: str,
+    reason: str,
+    user_version: int | None = None,
+    target_user_version: int | None = None,
+) -> RestorePlanItem:
+    return RestorePlanItem(
+        item_id=str(item.get("id", "")),
+        item_type=str(item.get("type", "")),
+        source_path=str(item.get("source_path", "")),
+        backup_path=str(backup_path),
+        compatibility=compatibility,
+        allowed=False,
+        reason=reason,
+        user_version=user_version,
+        target_user_version=target_user_version,
+    )
+
+
+def _build_restore_plan_item(
+    backup_dir: Path,
+    item: dict[str, Any],
+    *,
+    manifest_schema_version: int,
+    legacy_manifest: bool,
+    allow_unverified_schema: bool,
+) -> RestorePlanItem:
+    item_id = str(item.get("id", ""))
+    item_type = str(item.get("type", ""))
+    source_path = str(item.get("source_path", ""))
+    if str(item.get("status", "")) in {"failed", "skipped"}:
+        return RestorePlanItem(
+            item_id=item_id,
+            item_type=item_type,
+            source_path=source_path,
+            backup_path="",
+            compatibility="skipped",
+            allowed=True,
+            reason="manifest item is not restorable",
+        )
+
+    if item_type != "sqlite":
+        backup_path = backup_dir / "files" / source_path
+        if not backup_path.exists():
+            return _blocked_restore_item(
+                item,
+                backup_path=backup_path,
+                compatibility="missing_backup",
+                reason="backup payload does not exist",
+            )
+        return RestorePlanItem(
+            item_id=item_id,
+            item_type=item_type,
+            source_path=source_path,
+            backup_path=str(backup_path),
+            compatibility="not_applicable",
+            allowed=True,
+        )
+
+    try:
+        spec = DEFAULT_DATABASE_CATALOG.get(item_id)
+    except KeyError:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_dir / "sqlite" / Path(source_path).name,
+            compatibility="unknown_database",
+            reason="database is not present in the current catalog",
+        )
+    if source_path != spec.path:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_dir / "sqlite" / Path(source_path).name,
+            compatibility="path_mismatch",
+            reason=f"manifest path does not match catalog path {spec.path}",
+            target_user_version=spec.target_user_version,
+        )
+    relative_path = Path(spec.path).relative_to("storage")
+    backup_path = backup_dir / "sqlite" / relative_path
+    if legacy_manifest and not backup_path.exists():
+        backup_path = backup_dir / "sqlite" / relative_path.name
+    if not backup_path.exists():
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="missing_backup",
+            reason="SQLite backup payload does not exist",
+            target_user_version=spec.target_user_version,
+        )
+
+    try:
+        uri = f"{backup_path.resolve().as_uri()}?mode=ro&immutable=1"
+        with sqlite3.connect(uri, uri=True, timeout=2.0) as connection:
+            quick_check = str(
+                connection.execute("PRAGMA quick_check").fetchone()[0]
+            )
+            actual_user_version = int(
+                connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            schema_matches = verify_catalog_schema(
+                item_id,
+                connection,
+                actual_user_version,
+            )
+    except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="invalid_database",
+            reason=f"SQLite backup cannot be inspected: {exc}",
+            target_user_version=spec.target_user_version,
+        )
+    if quick_check.lower() != "ok":
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="quick_check_failed",
+            reason=f"SQLite quick_check returned {quick_check}",
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+    if schema_matches is False:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="schema_mismatch",
+            reason="SQLite backup does not match the governed schema contract",
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+
+    expected_sha = str(item.get("sha256", "") or "")
+    if manifest_schema_version >= 2 and not expected_sha:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="metadata_missing",
+            reason="manifest v2 SQLite item has no sha256",
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+    if expected_sha and _sha256_file(backup_path) != expected_sha:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="checksum_mismatch",
+            reason="SQLite backup sha256 does not match manifest",
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+
+    if legacy_manifest:
+        allowed = allow_unverified_schema
+        return RestorePlanItem(
+            item_id=item_id,
+            item_type=item_type,
+            source_path=source_path,
+            backup_path=str(backup_path),
+            compatibility="legacy_override" if allowed else "legacy_unverified",
+            allowed=allowed,
+            reason=(
+                "legacy manifest schema was explicitly accepted"
+                if allowed
+                else "legacy manifest has no governed schema metadata"
+            ),
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+    if manifest_schema_version > 2:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="manifest_future",
+            reason="manifest schema is newer than this restore implementation",
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+
+    database = item.get("database")
+    if not isinstance(database, dict):
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="metadata_missing",
+            reason="manifest v2 SQLite item has no database metadata",
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+    database_metadata = cast(dict[str, Any], database)
+    actual_metadata = _database_metadata(backup_path, spec)
+    try:
+        recorded_user_version = int(database_metadata["user_version"])
+        recorded_target = int(database_metadata["target_user_version"])
+    except (TypeError, ValueError) as exc:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="metadata_mismatch",
+            reason=f"manifest database versions are invalid: {exc}",
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+    metadata_matches = (
+        str(database_metadata.get("db_id", "")) == spec.id
+        and str(database_metadata.get("owner", "")) == spec.owner
+        and recorded_user_version == actual_user_version
+        and str(database_metadata.get("schema_fingerprint", ""))
+        == str(actual_metadata.get("schema_fingerprint", ""))
+    )
+    if not metadata_matches:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="metadata_mismatch",
+            reason="manifest database metadata does not match backup payload",
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+    if recorded_target > spec.target_user_version:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="future_target",
+            reason=(
+                f"manifest target v{recorded_target} exceeds current target "
+                f"v{spec.target_user_version}"
+            ),
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+    if actual_user_version > spec.target_user_version:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="future_version",
+            reason=(
+                f"backup user_version v{actual_user_version} exceeds current target "
+                f"v{spec.target_user_version}"
+            ),
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+    compatibility = (
+        "compatible"
+        if actual_user_version == spec.target_user_version
+        else "upgrade_on_start"
+    )
+    return RestorePlanItem(
+        item_id=item_id,
+        item_type=item_type,
+        source_path=source_path,
+        backup_path=str(backup_path),
+        compatibility=compatibility,
+        allowed=True,
+        user_version=actual_user_version,
+        target_user_version=spec.target_user_version,
+    )
+
+
 def _cli_inspect(backup_dir: Path) -> None:
     import sys
     mf = backup_dir / "manifest.json"
@@ -518,6 +936,12 @@ def _cli_restore_plan(backup_dir: Path, *, item_id: str | None = None) -> None:
         if not items:
             print(f"ERROR: item '{item_id}' not found in manifest")
             sys.exit(1)
+    try:
+        restore_plan = build_restore_plan(backup_dir, item_id=item_id)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        print(f"ERROR: restore preflight failed: {exc}")
+        sys.exit(1)
+    plan_by_id = {item.item_id: item for item in restore_plan.items}
 
     print("=== RESTORE PLAN (read-only, no changes will be made) ===")
     print()
@@ -529,10 +953,18 @@ def _cli_restore_plan(backup_dir: Path, *, item_id: str | None = None) -> None:
         if item["status"] in ("failed", "skipped"):
             continue
         src_in_backup = item.get("source_path", "")
+        plan_item = plan_by_id.get(str(item.get("id", "")))
+        if plan_item is not None:
+            gate = "ALLOW" if plan_item.allowed else "BLOCK"
+            print(
+                f"  [{gate}] {plan_item.item_id}: "
+                f"{plan_item.compatibility} {plan_item.reason}".rstrip()
+            )
+            if not plan_item.allowed:
+                continue
         if item["type"] == "sqlite":
-            db_name = Path(src_in_backup).name
             print(f"  - Replace {src_in_backup}")
-            print(f"    from: {backup_dir}/sqlite/{db_name}")
+            print(f"    from: {plan_item.backup_path if plan_item else '--'}")
             print("    pre-restore backup of live file")
             print(f"    delete: {src_in_backup}-wal, {src_in_backup}-shm")
             print("    verify: PRAGMA quick_check on restored DB")
@@ -542,16 +974,43 @@ def _cli_restore_plan(backup_dir: Path, *, item_id: str | None = None) -> None:
     print()
     print("Post-restore:")
     print("  - Start the bot: docker start qq-bot")
+    if restore_plan.legacy_manifest and not restore_plan.can_apply:
+        print("  - Legacy manifest requires --allow-unverified-schema")
     print()
     print("To execute: add --apply flag")
 
 
-def _cli_restore(backup_dir: Path, *, item_id: str | None = None, force: bool = False) -> None:
+def _cli_restore(
+    backup_dir: Path,
+    *,
+    item_id: str | None = None,
+    force: bool = False,
+    allow_unverified_schema: bool = False,
+) -> None:
     import sys
     mf = backup_dir / "manifest.json"
     if not mf.exists():
         print(f"ERROR: no manifest.json in {backup_dir}")
         sys.exit(1)
+
+    try:
+        restore_plan = build_restore_plan(
+            backup_dir,
+            item_id=item_id,
+            allow_unverified_schema=allow_unverified_schema,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        print(f"ERROR: restore preflight failed: {exc}")
+        sys.exit(1)
+    blocked = [item for item in restore_plan.items if not item.allowed]
+    if blocked:
+        print("ERROR: restore blocked by schema/file preflight")
+        for item in blocked:
+            print(f"  - {item.item_id}: {item.compatibility}: {item.reason}")
+        if restore_plan.legacy_manifest:
+            print("Use --allow-unverified-schema only after manual schema verification")
+        sys.exit(2)
+    plan_by_id = {item.item_id: item for item in restore_plan.items}
 
     if not force:
         lock_path = Path("storage/backups/.bot-running")
@@ -581,8 +1040,9 @@ def _cli_restore(backup_dir: Path, *, item_id: str | None = None, force: bool = 
         live_path = repo_root / src_path
 
         if item["type"] == "sqlite":
-            db_name = Path(src_path).name
-            backup_file = backup_dir / "sqlite" / db_name
+            plan_item = plan_by_id[str(item.get("id", ""))]
+            backup_file = Path(plan_item.backup_path)
+            db_name = Path(src_path).relative_to("storage")
 
             if not backup_file.exists():
                 print(f"  SKIP {item['id']}: backup file not found")
@@ -598,9 +1058,12 @@ def _cli_restore(backup_dir: Path, *, item_id: str | None = None, force: bool = 
                     pass
 
                 # Pre-restore backup
-                shutil.copy2(live_path, pre_restore_dir / db_name)
+                pre_restore_path = pre_restore_dir / db_name
+                pre_restore_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(live_path, pre_restore_path)
 
             # Replace
+            live_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(backup_file, live_path)
 
             # Clean WAL/SHM
@@ -690,6 +1153,11 @@ def _cli_main() -> None:
     p_restore.add_argument("--apply", action="store_true", required=True)
     p_restore.add_argument("--force", action="store_true",
                            help="Allow restore while bot may be running")
+    p_restore.add_argument(
+        "--allow-unverified-schema",
+        action="store_true",
+        help="Allow a legacy manifest after manual schema verification",
+    )
 
     args = parser.parse_args()
     if not args.command:
@@ -749,7 +1217,12 @@ def _cli_main() -> None:
         _cli_restore_plan(Path(args.backup_dir), item_id=args.item)
 
     elif args.command == "restore":
-        _cli_restore(Path(args.backup_dir), item_id=args.item, force=args.force)
+        _cli_restore(
+            Path(args.backup_dir),
+            item_id=args.item,
+            force=args.force,
+            allow_unverified_schema=args.allow_unverified_schema,
+        )
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from kernel.manifest import check_version
+from kernel.manifest import check_version, load_plugin_manifest
 from services.version import VERSION
 
 
@@ -52,7 +52,18 @@ def _read_json_object(path: Path | None) -> tuple[dict[str, Any], str]:
     return data, ""
 
 
-def _read_manifest(path: Path | None) -> tuple[dict[str, Any], str]:
+def _read_manifest(
+    path: Path | None,
+    *,
+    expected_name: str | None = None,
+    strict: bool = False,
+) -> tuple[dict[str, Any], str]:
+    if strict and path is not None and path.is_file():
+        try:
+            manifest = load_plugin_manifest(path, expected_name=expected_name)
+        except ValueError as exc:
+            return {}, str(exc)
+        return manifest.model_dump(by_alias=True, exclude_none=True), ""
     data, error = _read_json_object(path)
     if error == "json object required":
         return {}, "manifest must be an object"
@@ -100,6 +111,31 @@ class PluginIndexService:
         entries: list[dict[str, Any]] = []
         for name in sorted(set(discovered) | set(loaded)):
             entries.append(self._build_entry(name=name, discovered=discovered.get(name), plugin=loaded.get(name)))
+
+        health_by_name: dict[str, dict[str, Any]] = {}
+        health_provider = getattr(bus, "plugin_health", None)
+        if callable(health_provider):
+            try:
+                raw_health = health_provider()
+                health_by_name = {
+                    str(item.get("name") or ""): item
+                    for item in raw_health
+                    if isinstance(item, dict)
+                } if isinstance(raw_health, list) else {}
+            except Exception:
+                health_by_name = {}
+        for entry in entries:
+            health = health_by_name.get(str(entry.get("name") or ""), {})
+            degraded = bool(health.get("optional_dependency_degraded", False))
+            errors = list(health.get("optional_dependency_errors", []) or [])
+            entry["optional_dependency_degraded"] = degraded
+            entry["optional_dependency_errors"] = errors
+            if degraded:
+                entry["warnings"] = [*list(entry.get("warnings") or []), *errors]
+                if entry.get("governance_status") == "healthy":
+                    entry["governance_status"] = "attention"
+                    entry["governance_label"] = "可选依赖降级"
+                    entry["action_hint"] = "恢复可选依赖后会自动清除降级状态。"
 
         governance_counts = Counter(item["governance_status"] for item in entries)
 
@@ -167,11 +203,17 @@ class PluginIndexService:
                 continue
             name = subdir.name
             directory_names.add(name)
+            manifest_data, _manifest_error = _read_manifest(
+                manifest_file,
+                expected_name=name,
+                strict=True,
+            )
+            capability_only = bool(manifest_data.get("capability_only"))
             discovered[name] = {
                 "name": name,
-                "kind": "directory" if plugin_file.exists() else "capability",
+                "kind": "capability" if capability_only or not plugin_file.exists() else "directory",
                 "package_path": subdir,
-                "entry_path": plugin_file if plugin_file.exists() else None,
+                "entry_path": None if capability_only else (plugin_file if plugin_file.exists() else None),
                 "manifest_path": manifest_file if manifest_file.exists() else None,
                 "signature_path": (subdir / "plugin.sig") if (subdir / "plugin.sig").exists() else None,
                 "config_default_path": (subdir / "config.default.json") if (subdir / "config.default.json").exists() else None,
@@ -270,10 +312,26 @@ class PluginIndexService:
                     manifest_path = candidate_manifest if candidate_manifest.is_file() else None
                     signature_path = candidate_signature if candidate_signature.is_file() else None
 
-        manifest_data, manifest_error = _read_manifest(manifest_path)
+        strict_manifest = kind in {"directory", "capability"}
+        manifest_data, manifest_error = _read_manifest(
+            manifest_path,
+            expected_name=name if strict_manifest else None,
+            strict=strict_manifest,
+        )
         manifest_status = "missing"
         if manifest_path is not None and manifest_path.is_file():
             manifest_status = "invalid" if manifest_error else "ok"
+        if manifest_status == "ok" and manifest_path is not None:
+            config_spec = _safe_dict(manifest_data.get("config"))
+            declared_defaults = str(config_spec.get("defaults") or "")
+            declared_schema = str(config_spec.get("schema") or "")
+            if declared_defaults and declared_schema:
+                config_default_path = (
+                    manifest_path.parent / declared_defaults
+                ).resolve()
+                config_schema_path = (
+                    manifest_path.parent / declared_schema
+                ).resolve()
 
         source_status = "missing"
         source_label = "未找到插件入口"
@@ -419,10 +477,31 @@ class PluginIndexService:
             governance_status = "blocked"
             governance_label = "旧格式已禁用"
             action_hint = "迁移为 plugins/<name>/plugin.py + plugin.json + config.default.json + config.schema.json 后再接入。"
-        elif kind == "capability":
+        elif kind == "capability" and manifest_status == "ok":
             governance_status = "healthy"
             governance_label = "系统能力声明"
             action_hint = ""
+
+        if manifest_status == "ok":
+            dependencies = _safe_dict(manifest_data.get("dependencies"))
+            required_dependencies = {
+                **dependencies,
+                **_safe_dict(manifest_data.get("required_dependencies")),
+            }
+            optional_dependencies = _safe_dict(
+                manifest_data.get("optional_dependencies")
+            )
+        else:
+            dependencies = _safe_dict(getattr(plugin, "dependencies", None))
+            required_dependencies = {
+                **dependencies,
+                **_safe_dict(getattr(plugin, "required_dependencies", None)),
+            }
+            optional_dependencies = _safe_dict(
+                getattr(plugin, "optional_dependencies", None)
+            )
+        for dependency_name in required_dependencies:
+            optional_dependencies.pop(dependency_name, None)
 
         return {
             "name": name,
@@ -436,6 +515,9 @@ class PluginIndexService:
             "toggle_policy": str(getattr(plugin, "toggle_policy", "") or manifest_data.get("toggle_policy") or "runtime"),
             "category": str(getattr(plugin, "category", "") or manifest_data.get("category") or "general"),
             "capabilities": list(getattr(plugin, "capabilities", None) or manifest_data.get("capabilities") or []),
+            "dependencies": dependencies,
+            "required_dependencies": required_dependencies,
+            "optional_dependencies": optional_dependencies,
             "store": _safe_dict(getattr(plugin, "store", None) or manifest_data.get("store") or {}),
             "source_status": source_status,
             "source_label": source_label,

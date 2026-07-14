@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from plugins.chat.plugin import ChatPlugin, _sanitize_debug_reply
+from plugins.debug_commands.plugin import DebugCommandPlugin, _sanitize_debug_reply
 
 
 def test_sanitize_debug_reply_removes_internal_workflow_terms() -> None:
@@ -26,7 +26,7 @@ def test_sanitize_debug_reply_returns_fallback_when_only_internal_tokens_remain(
 
 @pytest.mark.asyncio
 async def test_debug_pass_turn_reply_is_user_facing() -> None:
-    plugin = ChatPlugin()
+    plugin = DebugCommandPlugin()
     sent: list[str] = []
     bot = SimpleNamespace()
 

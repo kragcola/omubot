@@ -193,7 +193,7 @@ def _register_m1_irritation_frequency(
     if mood_engine is None:
         return False
     try:
-        from plugins.schedule.mood import register_m1_irritation_signal
+        from services.humanization.m1_irritation import register_m1_irritation_signal
 
         return register_m1_irritation_signal(
             mood_engine,

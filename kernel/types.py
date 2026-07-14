@@ -10,7 +10,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
+
+if TYPE_CHECKING:
+    from kernel.capabilities import PluginServiceCapabilities
 
 # ============================================================================
 # 多模态消息类型（从旧 memory/types.py 提升至内核）
@@ -187,10 +190,12 @@ class PluginContext:
     prompt_builder: Any = None
     thinker: Any = None
     calendar_service: Any = None
+    birthday_greeter: Any = None
 
     # 工具与调度 —— ToolRegistry / GroupChatScheduler
     tool_registry: Any = None
     scheduler: Any = None
+    research_event_capture: Any = None
 
     # 其他 —— UsageTracker / Humanizer / Identity
     usage_tracker: Any = None
@@ -227,10 +232,15 @@ class PluginContext:
     # per group so a fast later message can't overtake a slow image render and
     # land in the timeline (and trigger a reply) before the image is committed.
     group_ingest_locks: dict[str, Any] = field(default_factory=dict)  # group_id -> asyncio.Lock
+    outbound_group_access_guard: Any = None
     protocol_trace: Any = None
     protocol_connections: Any = None
     runtime_errors: Any = None
     backup_scheduler: Any = None
+    background_task_supervisor: Any = None
+    learning_extract_coordinator: Any = None
+    chat_runtime_commit: Any = None
+    connection_pipeline: Any = None
     mood_engine: Any = None
     dialogue_climate_m1_enabled: bool = False
     climate_engine: Any = None
@@ -258,6 +268,7 @@ class PluginContext:
     memory_consolidator_store: Any = None
     memory_consolidator_normalizer: Any = None
     memory_consolidator: Any = None
+    memory_consolidator_lifecycle: Any = None
     episode_store: Any = None
     episode_promoter: Any = None
     episode_graph_bridge: Any = None
@@ -269,6 +280,13 @@ class PluginContext:
 
     # Persona v2 — runtime singleton (owns prompt/identity for v2)
     persona_runtime: Any = None
+
+    @property
+    def service_capabilities(self) -> PluginServiceCapabilities:
+        """Return a typed, read-only view over legacy service fields."""
+        from kernel.capabilities import PluginServiceCapabilities
+
+        return PluginServiceCapabilities.from_legacy(self)
 
 
 @dataclass
@@ -431,6 +449,7 @@ PluginPermission = Literal[
     "admin",
     "storage",
     "network",
+    "lifecycle",
 ]
 
 PluginTier = Literal["system", "user"]
@@ -509,9 +528,9 @@ class Command:
             if sub.require_args:
                 line += " <参数>"
             line += f" — {sub.description}"
-            if sub.private_only:
+            if self.private_only or sub.private_only:
                 line += "（仅私聊）"
-            if sub.admin_only:
+            if self.admin_only or sub.admin_only:
                 line += "（仅管理员）"
             lines.append(line)
         return "\n".join(lines)
@@ -548,6 +567,8 @@ class AmadeusPlugin:
     priority: int = 100
     enabled: bool = True
     dependencies: dict[str, str] = {}  # noqa: RUF012 — overridden per-plugin, never mutated
+    required_dependencies: dict[str, str] = {}  # noqa: RUF012 — manifest v3 metadata
+    optional_dependencies: dict[str, str] = {}  # noqa: RUF012 — manifest v3 metadata
     author: str = "Omubot"  # 开发者签名，显示在 /plugins 列表中
     category: str = "general"
     permissions: list[PluginPermission] = []  # noqa: RUF012 — manifest v2 metadata

@@ -35,7 +35,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
                       └── Omubot 三层框架
                            ├── 内核层: PluginBus · 类型契约 · 插件发现
                            ├── 服务层: LLMClient · Timeline · CardStore · Scheduler
-                           └── 插件层: 15 个可开关插件
+                           └── 插件层: 19 个用户插件 + 4 个系统能力包
 ```
 
 - **LLM 后端**：DeepSeek API（`api.deepseek.com/anthropic`），Anthropic Messages 兼容端点
@@ -52,7 +52,7 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | 系统服务 | `services/` | LLM 调用、记忆、时间线、调度器 | 可互相 import，不 import 插件 |
 | 插件 | `plugins/` | 好感度、日程、表情包、梦境等 | 只 import 内核类型 + 系统服务 |
 
-### 19 个插件一览
+### 21 个运行时插件与 2 个 manifest-only 能力一览
 
 | 插件 | 优先级 | 形态 | 功能 |
 |------|--------|------|------|
@@ -62,21 +62,25 @@ QQ ←→ NapCat (WS) ←→ NoneBot2 → DeepSeek API (Anthropic 兼容)
 | WebFetchPlugin | 1 | 目录 | 网页内容抓取 |
 | HttpApiPlugin | 1 | 目录 | 通用 HTTP API 调用 |
 | GroupAdminPlugin | 1 | 目录 | 群管理（禁言、头衔、发消息） |
-| HistoryLoaderPlugin | 5 | 目录 / 系统级 | 启动时加载群历史消息 |
+| HistoryBackfill | - | manifest-only / 核心连接阶段 | PluginBus hooks 前加载群历史消息 |
+| ContextPlugin | 7 | 目录 / 系统级 | 统一 memory/doc/graph 上下文聚合 |
 | KnowledgePlugin | 8 | 目录 | 知识库检索与对话上下文注入 |
+| CalendarContextPlugin | -5 | 目录 | 节日、调休日、特殊日与生日上下文 |
 | AffectionPlugin | 10 | 目录 | 好感度系统：分数、昵称、态度调节 |
 | SchedulePlugin | 20 | 目录 | 模拟日程：每日 LLM 生成，结合真实日期 |
 | FoodPlugin | 25 | 目录 | 饮食/点餐相关指令 |
 | MemoPlugin | 30 | 目录 | 记忆卡片：7 类 3 作用域，检索门控 |
 | StickerPlugin | 40 | 目录 | 表情包库：收藏、检索、发送（依赖系统层 vision） |
 | SlangPlugin | 42 | 目录 | 群内黑话学习、审核、复核与注入 |
+| StylePlugin | 43 | 目录 | 表达样本学习与动态风格注入 |
 | DreamPlugin | 150 | 目录 | 梦境整合：定期整理记忆、清理表情包 |
 | BilibiliPlugin | 190 | 目录 | B站视频链接识别：标题/封面/简介注入 |
 | EchoPlugin | 200 | 目录 | 复读检测：5 分钟内同消息 3 次触发 |
 | ElementDetectorPlugin | 210 | 目录 | 特殊消息元素检测 |
 | DebugCommandPlugin | 300 | 目录 | 调试指令：/plugins、/version |
+| Vision | - | manifest-only / 系统能力 | 图片描述与角色识别能力声明 |
 
-`vision` 是系统服务能力包（`plugins/vision/plugin.json`），只在插件中心系统视图中只读展示，不作为可启停运行时插件。
+`history_loader` 与 `vision` 是 manifest-only 系统能力包，只在插件中心系统视图中只读展示，不作为可启停运行时插件。
 
 ## 配置要点
 
@@ -314,7 +318,8 @@ uv run pyright                   # 类型检查
 docker compose up -d             # 全部启动
 docker compose up napcat -d      # 仅启动 NapCat
 docker compose restart bot       # 重启 bot（config/ 变更）
-docker compose up bot -d --build # 重建 bot（代码/依赖变更）
+docker compose build bot         # 重建 bot 镜像（代码/依赖变更）
+docker compose up -d --no-deps --force-recreate bot
 docker compose restart napcat    # 重启 NapCat（断线重连，不要 down+up）
 docker compose logs bot --tail=50
 
@@ -352,7 +357,8 @@ docker compose restart bot    # Soul 文件通过 volume mount，restart 即可
 
 ```bash
 git pull
-docker compose up bot -d --build
+docker compose build bot
+docker compose up -d --no-deps --force-recreate bot
 ```
 
 ### 查看花了多少 token

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import aiohttp
 import pytest
 
 from kernel.config import GroupConfig, GroupOverride, ReplySegmentationConfig
@@ -98,6 +99,49 @@ async def _client(
         yield c
     finally:
         await c.close()
+
+
+async def test_constructor_closes_session_when_later_dependency_raises(
+    prompt: PromptBuilder,
+    short_term: ShortTermMemory,
+    tools: ToolRegistry,
+) -> None:
+    """A failed constructor must not leak its already-created HTTP session."""
+    real_client_session = aiohttp.ClientSession
+    created_sessions: list[aiohttp.ClientSession] = []
+
+    def create_session(*args: Any, **kwargs: Any) -> aiohttp.ClientSession:
+        session = real_client_session(*args, **kwargs)
+        created_sessions.append(session)
+        return session
+
+    try:
+        with (
+            patch("services.llm.client.aiohttp.ClientSession", side_effect=create_session),
+            patch(
+                "services.llm.client.AnchorReinjector",
+                side_effect=RuntimeError("anchor reinjector construction failed"),
+            ),
+            pytest.raises(RuntimeError, match="anchor reinjector construction failed"),
+        ):
+            LLMClient(
+                base_url="http://fake",
+                api_key="sk-fake",
+                model="test-model",
+                prompt_builder=prompt,
+                short_term=short_term,
+                tools=tools,
+                thinker_enabled=False,
+            )
+
+        assert len(created_sessions) == 1, "failure seam must run after session creation"
+        session = created_sessions[0]
+        assert session.closed
+        assert session.connector is None or session.connector.closed
+    finally:
+        for session in created_sessions:
+            if not session.closed:
+                await session.close()
 
 
 def _fill_messages(short_term: ShortTermMemory, sid: str, count: int = 8) -> None:

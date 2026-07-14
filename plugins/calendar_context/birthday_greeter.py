@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -78,7 +79,13 @@ class BirthdayGreeter:
             return True
         return False
 
-    async def check_and_greet(self, bot: Any, llm_client: Any = None) -> list[str]:
+    async def check_and_greet(
+        self,
+        bot: Any,
+        llm_client: Any = None,
+        *,
+        group_allowed: Callable[[str], bool] | None = None,
+    ) -> list[str]:
         from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
         self._load()
@@ -93,18 +100,37 @@ class BirthdayGreeter:
                 continue
             if qq in sent_today:
                 continue
-            groups = member.get("groups", [])
+            groups: list[str] = []
+            for raw_group_id in member.get("groups", []):
+                group_id = str(raw_group_id)
+                try:
+                    if group_allowed is not None and not group_allowed(group_id):
+                        continue
+                except Exception as exc:
+                    logger.warning(
+                        "birthday_greeter group gate failed group=%s: %s",
+                        group_id,
+                        exc,
+                    )
+                    continue
+                groups.append(group_id)
+            if not groups:
+                continue
             name = member.get("name", "")
             wish_text = await self._generate_wish(name, llm_client)
+            sent = False
             for group_id in groups:
                 try:
                     msg = Message()
                     msg += MessageSegment.at(int(qq))
                     msg += MessageSegment.text(f" {wish_text}")
                     await bot.send_group_msg(group_id=int(group_id), message=msg)
+                    sent = True
                     logger.info("birthday_greeter sent to qq=%s group=%s", qq, group_id)
                 except Exception as exc:
                     logger.warning("birthday_greeter send failed qq=%s group=%s: %s", qq, group_id, exc)
+            if not sent:
+                continue
             greeted.append(qq)
             sent_today.add(qq)
 

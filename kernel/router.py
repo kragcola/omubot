@@ -11,7 +11,8 @@ import hashlib
 import re
 import secrets
 import time
-from typing import Any, cast
+from datetime import UTC, datetime
+from typing import Any, Protocol, cast
 
 import aiohttp
 from loguru import logger as _base_logger
@@ -57,7 +58,6 @@ logger = _base_logger
 _log_msg_in = _base_logger.bind(channel="message_in")
 _log_msg_out = _base_logger.bind(channel="message_out")
 _log_system = _base_logger.bind(channel="system")
-_log_usage = _base_logger.bind(channel="usage")
 _log_debug = _base_logger.bind(channel="debug")
 _log_reply_workflow = _base_logger.bind(channel="reply_workflow")
 
@@ -163,8 +163,9 @@ def _extract_group_command_text(
                 return None
             text_parts.append(text)
             continue
-        if not text_parts or not "".join(text_parts).strip():
-            return None
+        # Images and other rich segments may appear before or after the text
+        # command. They remain available on the original event for handlers.
+        continue
 
     candidate = "".join(text_parts).strip()
     if not candidate.startswith("/"):
@@ -325,6 +326,62 @@ def _extract_topic_block_signals(
         "at_targets": tuple(at_targets),
         "at_self": at_self,
     }
+
+
+def _capture_research_group_event(ctx: PluginContext, bot: Bot, event: Any) -> None:
+    policy = getattr(getattr(ctx, "config", None), "research_event_capture", None)
+    group_id = str(getattr(event, "group_id", "") or "")
+    if policy is None or not policy.allows_group(group_id):
+        return
+    capture = getattr(ctx, "research_event_capture", None)
+    if capture is None:
+        return
+
+    message = getattr(event, "original_message", None) or getattr(event, "message", None)
+    at_targets: list[str] = []
+    has_image = False
+    try:
+        for segment in message or ():
+            if segment.type == "image":
+                has_image = True
+            if segment.type != "at":
+                continue
+            target = str(segment.data.get("qq", "") or "")
+            if target and target not in {"all", str(getattr(bot, "self_id", ""))}:
+                at_targets.append(target)
+    except Exception:
+        pass
+
+    try:
+        if message is not None and hasattr(message, "extract_plain_text"):
+            plain_text = str(message.extract_plain_text()).strip()
+        else:
+            plain_text = str(event.get_plaintext()).strip()
+    except Exception:
+        plain_text = str(getattr(event, "raw_message", "") or "").strip()
+    reply = getattr(event, "reply", None)
+    reply_id = getattr(reply, "message_id", None) if reply is not None else None
+    try:
+        event_time = datetime.fromtimestamp(float(event.time), tz=UTC)
+    except (AttributeError, TypeError, ValueError, OSError):
+        event_time = datetime.now(UTC)
+    try:
+        capture.capture_inbound(
+            group_id=group_id,
+            actor_id=str(getattr(event, "user_id", "") or ""),
+            message_id=int(event.message_id),
+            reply_to_message_id=int(reply_id) if reply_id is not None else None,
+            at_targets=tuple(at_targets),
+            text=plain_text or None,
+            content_type=(
+                "mixed"
+                if plain_text and has_image
+                else ("text" if plain_text else ("image" if has_image else "unknown"))
+            ),
+            event_time=event_time,
+        )
+    except Exception as exc:
+        _log_debug.debug("research event capture skipped | group={} err={}", group_id, exc)
 
 
 def _original_plaintext(event: MessageEvent) -> str:
@@ -497,6 +554,19 @@ def _optional_float(value: Any) -> float | None:
 
 
 def _semantic_gate_familiarity(ctx: PluginContext, user_id: str) -> float | None:
+    bus = getattr(ctx, "bus", None)
+    get_plugin = getattr(bus, "get_plugin", None)
+    if callable(get_plugin):
+        owner = get_plugin("affection")
+        affection_enabled = (
+            bool(getattr(owner, "enabled", False))
+            if owner is not None
+            else bool(getattr(ctx, "affection_enabled", False))
+        )
+        if not affection_enabled:
+            return None
+    elif not bool(getattr(ctx, "affection_enabled", False)):
+        return None
     value = _runtime_state_value(
         getattr(ctx, "runtime_state", None),
         AFFECTION_FAMILIARITY_SLOT,
@@ -1248,7 +1318,60 @@ async def _render_message(
 # ============================================================================
 
 
-def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
+def claim_router_install(driver: Any) -> None:
+    """Claim all Omubot router handlers before registering any callback."""
+    marker = "_omubot_router_handlers_installed"
+    if bool(getattr(driver, marker, False)):
+        raise RuntimeError("application routers already installed")
+    setattr(driver, marker, True)
+
+
+def install_lifecycle_handlers(driver: Any, runtime: Any) -> None:
+    """Register process lifecycle callbacks exactly once on a driver."""
+    marker = "_omubot_application_runtime_installed"
+    if bool(getattr(driver, marker, False)):
+        raise RuntimeError("application lifecycle already installed")
+    setattr(driver, marker, True)
+
+    @driver.on_startup
+    async def _startup() -> None:
+        await runtime.start()
+
+    @driver.on_shutdown
+    async def _shutdown() -> None:
+        await runtime.stop()
+
+
+class ConnectionPipeline(Protocol):
+    """Handle protocol connection events outside Router callback wrappers."""
+
+    async def on_connect(self, bot: Bot) -> None: ...
+
+    async def on_disconnect(self, bot: Bot) -> None: ...
+
+
+def install_connection_handlers(driver: Any, pipeline: ConnectionPipeline) -> None:
+    """Register thin connection callbacks that delegate without touching runtime state."""
+
+    @driver.on_bot_connect
+    async def _on_connect(bot: Bot) -> None:
+        await pipeline.on_connect(bot)
+
+    disconnect_hook = getattr(driver, "on_bot_disconnect", None)
+    if callable(disconnect_hook):
+
+        @disconnect_hook
+        async def _on_disconnect(bot: Bot) -> None:
+            await pipeline.on_disconnect(bot)
+
+
+def setup_routers(
+    bus: PluginBus,
+    ctx: PluginContext,
+    *,
+    runtime: Any | None = None,
+    connection_pipeline: ConnectionPipeline | None = None,
+) -> None:
     """Register NoneBot event handlers that bridge to PluginBus.
 
     Must be called before nonebot.run().  Registers:
@@ -1260,149 +1383,39 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
       - private_chat    → LLM chat
     """
     driver = get_driver()
+    claim_router_install(driver)
 
     # ---- lifecycle ----
 
-    @driver.on_startup
-    async def _startup() -> None:
-        await bus.fire_on_startup(ctx)
-        # Collect tools from all plugins and add to the shared registry
-        if hasattr(ctx, "tool_registry") and ctx.tool_registry is not None:
-            for tool in bus.collect_tools():
-                ctx.tool_registry.register(tool)
-        # Backup scheduler: daily backup loop + hourly quick_check probe.
-        backup_scheduler = getattr(ctx, "backup_scheduler", None)
-        if backup_scheduler is not None:
-            await backup_scheduler.start()
+    if runtime is not None:
+        install_lifecycle_handlers(driver, runtime)
+    else:
+        @driver.on_startup
+        async def _startup() -> None:
+            await bus.fire_on_startup(ctx)
+            # Collect tools from all plugins and add to the shared registry
+            if hasattr(ctx, "tool_registry") and ctx.tool_registry is not None:
+                for tool in bus.collect_tools():
+                    ctx.tool_registry.register(tool)
+            # Backup scheduler: daily backup loop + hourly quick_check probe.
+            backup_scheduler = getattr(ctx, "backup_scheduler", None)
+            if backup_scheduler is not None:
+                await backup_scheduler.start()
 
-    @driver.on_shutdown
-    async def _shutdown() -> None:
-        backup_scheduler = getattr(ctx, "backup_scheduler", None)
-        if backup_scheduler is not None:
-            await backup_scheduler.stop()
-        await bus.fire_on_shutdown(ctx)
+        @driver.on_shutdown
+        async def _shutdown() -> None:
+            backup_scheduler = getattr(ctx, "backup_scheduler", None)
+            if backup_scheduler is not None:
+                await backup_scheduler.stop()
+            await bus.fire_on_shutdown(ctx)
 
-    # ---- bot connect ----
+    # ---- bot connection lifecycle ----
 
-    @driver.on_bot_connect
-    async def _on_connect(bot: Bot) -> None:
-        ctx.bot = bot
-        protocol_connections = getattr(ctx, "protocol_connections", None)
-        if protocol_connections is not None and hasattr(protocol_connections, "record_connected"):
-            protocol_connections.record_connected(bot)
+    if connection_pipeline is None:
+        from services.routing import RuntimeConnectionPipeline
 
-        protocol_trace = getattr(ctx, "protocol_trace", None)
-        if (
-            protocol_trace is not None
-            and hasattr(protocol_trace, "wrap_bot")
-            and protocol_trace.wrap_bot(bot)
-        ):
-            _log_system.info("protocol trace wrapper installed | self_id={}", bot.self_id)
-
-        ctx.llm_client._bot_self_id = bot.self_id
-        ctx.state_board.bot_self_id = bot.self_id
-        ctx.persona_runtime.bind_bot_self_id(str(bot.self_id))
-        ctx.scheduler.set_bot(bot)
-        registry = getattr(ctx, "name_registry", None)
-        if isinstance(registry, NameVariationRegistry):
-            try:
-                preload_groups = await bot.get_group_list()
-            except Exception:
-                preload_groups = []
-            for item in preload_groups or ():
-                gid = str(item.get("group_id", "") or "").strip() if isinstance(item, dict) else ""
-                if not gid:
-                    continue
-                try:
-                    await registry.refresh(bot, gid)
-                except Exception:
-                    _log_debug.debug("name registry refresh skipped | group={}", gid)
-
-        # Track whether this is the first connect (vs reconnect)
-        is_first_connect = not getattr(ctx, "startup_triggered", False)
-        if is_first_connect:
-            ctx.startup_triggered = True
-
-        # Notify plugins AFTER startup_triggered is set (plugins check it for one-shot ops)
-        await bus.fire_on_bot_connect(ctx, bot)
-
-        if is_first_connect:
-            bus.start_tick_loop(ctx)
-
-        # Wire usage alert
-        admin_ids = list(ctx.admins.keys())
-        if admin_ids and ctx.config.llm.usage.enabled:
-
-            async def _alert_admins(msg: str) -> None:
-                for admin_id in admin_ids:
-                    try:
-                        await bot.send_private_msg(user_id=int(admin_id), message=msg)
-                    except Exception:
-                        _log_usage.warning("failed to send usage alert to admin {}", admin_id)
-
-            ctx.usage_tracker.set_alert(
-                alert_fn=_alert_admins,
-                cache_hit_warn=ctx.config.compact.cache_hit_warn,
-                slow_threshold_s=ctx.config.llm.usage.slow_threshold_s,
-                cache_alert_window_m=ctx.config.compact.cache_alert_window_m,
-                cache_alert_cooldown_m=ctx.config.compact.cache_alert_cooldown_m,
-            )
-
-        try:
-            group_list: list[dict[str, object]] = await bot.get_group_list()
-            group_inventory: dict[str, dict[str, object]] = {}
-            for item in group_list:
-                gid = str(item.get("group_id", "") or "").strip()
-                if not gid:
-                    continue
-                group_inventory[gid] = dict(item)
-            ctx.group_inventory = group_inventory
-            group_ids = list(group_inventory)
-            group_cfg = getattr(ctx.config, "group", None)
-            if group_cfg is not None and hasattr(group_cfg, "allows_learning_group"):
-                group_ids = [gid for gid in group_ids if group_cfg.allows_learning_group(gid)]
-        except Exception:
-            logger.exception("failed to get group list")
-            return
-        _log_system.info(
-            "group inventory refreshed | total={} learning={}",
-            len(getattr(ctx, "group_inventory", {}) or {}),
-            len(group_ids),
-        )
-
-        if not is_first_connect:
-            _log_system.info("reconnected, skipping first-connect setup")
-
-        # Check bot mute status in each group
-        muted_count = 0
-        for gid in group_ids:
-            try:
-                info: dict[str, object] = await bot.get_group_member_info(
-                    group_id=int(gid), user_id=int(bot.self_id),
-                )
-                raw = info.get("shut_up_timestamp") or 0
-                shut_until = int(str(raw))
-                if shut_until > time.time():
-                    ctx.scheduler.mute(gid, source="reconcile", until_unix=float(shut_until))
-                    muted_count += 1
-            except Exception:
-                _log_debug.debug("failed to query mute status | group={}", gid)
-        if muted_count:
-            logger.info("muted in {} group(s) at startup", muted_count)
-
-        logger.info("Bot 就绪，开始接收消息 ✓")
-
-    if hasattr(driver, "on_bot_disconnect"):
-
-        @driver.on_bot_disconnect  # type: ignore[attr-defined]
-        async def _on_disconnect(bot: Bot) -> None:
-            protocol_connections = getattr(ctx, "protocol_connections", None)
-            if protocol_connections is not None and hasattr(protocol_connections, "record_disconnected"):
-                protocol_connections.record_disconnected(bot)
-            current_bot = getattr(ctx, "bot", None)
-            if current_bot is bot or str(getattr(current_bot, "self_id", "")) == str(getattr(bot, "self_id", "")):
-                ctx.bot = None
-            _log_system.warning("bot disconnected | self_id={}", getattr(bot, "self_id", "unknown"))
+        connection_pipeline = RuntimeConnectionPipeline(ctx, bus)
+    install_connection_handlers(driver, connection_pipeline)
 
     # ---- group listener ----
 
@@ -1410,31 +1423,17 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
 
     @group_listener.handle()
     async def _collect_group_context(bot: Bot, event: GroupMessageEvent) -> None:
-        from plugins.echo import build_echo_key
         from services.admin_events import publish_group_message
+        from services.echo_key import build_echo_key
 
         if str(event.user_id) == bot.self_id:
             return
         resolved = ctx.config.group.resolve(event.group_id)
-        publish_group_message(
-            group_id=str(event.group_id),
-            user_id=str(event.user_id),
-            ts=time.time(),
-            presence_mode=resolved.presence_mode,
-        )
         if not ctx.config.group.allows_learning_group(event.group_id):
             return
         if event.user_id in resolved.blocked_users:
             return
         group_id = str(event.group_id)
-        registry = getattr(ctx, "name_registry", None)
-        if isinstance(registry, NameVariationRegistry):
-            registry.update_from_event(
-                group_id,
-                int(event.user_id),
-                getattr(event.sender, "nickname", "") or str(event.user_id),
-                getattr(event.sender, "card", "") or "",
-            )
         if await _maybe_drop_pair_guard(
             ctx,
             group_id=group_id,
@@ -1473,6 +1472,57 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     upstream_result.reason,
                 )
             return
+
+        # Command traffic is control-plane input, not ordinary conversation.
+        # Keep the fast path after access/presence/mute/bot-loop gates, but before
+        # research capture, admin activity, M1 sensors, plugin hooks, or timeline.
+        command_text = _extract_group_command_text(
+            msg,
+            bot.self_id,
+            getattr(ctx, "bot_nicknames", []),
+        )
+        if command_text:
+            if not allow_speaking:
+                return
+            dispatcher = getattr(ctx, "command_dispatcher", None)
+            if dispatcher is None:
+                _log_debug.warning("slash command dropped: dispatcher unavailable")
+                return
+            is_known = getattr(dispatcher, "is_known", None)
+            known_command = bool(is_known(command_text)) if callable(is_known) else True
+            consumed = await dispatcher.dispatch(
+                bot,
+                event,
+                command_text,
+                is_private=False,
+                user_id=str(event.user_id),
+                group_id=group_id,
+                plugin_ctx=ctx,
+            )
+            if consumed and known_command:
+                ctx.scheduler.clear_pending(
+                    group_id,
+                    cancel_running=command_text.startswith("/debug"),
+                )
+            # Any leading slash extracted for this bot is command-layer traffic.
+            # Fail closed even if a custom dispatcher unexpectedly declines it.
+            return
+
+        _capture_research_group_event(ctx, bot, event)
+        publish_group_message(
+            group_id=group_id,
+            user_id=str(event.user_id),
+            ts=time.time(),
+            presence_mode=resolved.presence_mode,
+        )
+        registry = getattr(ctx, "name_registry", None)
+        if isinstance(registry, NameVariationRegistry):
+            registry.update_from_event(
+                group_id,
+                int(event.user_id),
+                getattr(event.sender, "nickname", "") or str(event.user_id),
+                getattr(event.sender, "card", "") or "",
+            )
 
         is_addressed = event.is_tome()
         # is_tome() misses a sandwiched @ (e.g. [image][at:bot]这是谁) — the @ is
@@ -1625,29 +1675,6 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                     "nickname_only_call": False,
                 },
             )
-
-        # Check slash commands before timeline/scheduler.
-        # Cancel any pending debounce so a previous message's thinker doesn't
-        # fire while the user is interactively debugging.
-        command_text = _extract_group_command_text(
-            msg,
-            bot.self_id,
-            getattr(ctx, "bot_nicknames", []),
-        )
-        if (
-            command_text
-            and hasattr(ctx, "command_dispatcher")
-            and ctx.command_dispatcher is not None
-            and await ctx.command_dispatcher.dispatch(
-                bot, event, command_text,
-                is_private=False,
-                user_id=str(event.user_id),
-                group_id=group_id,
-                plugin_ctx=ctx,
-            )
-        ):
-            ctx.scheduler.clear_pending(group_id, cancel_running=command_text.startswith("/debug"))
-            return
 
         # Serialize render→timeline-commit per group so a slow image render can't
         # be overtaken by a faster later message that commits + fires a reply
@@ -2065,11 +2092,38 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
         if isinstance(event, GroupMessageEvent):
             return
 
-        from services.llm.client import RATE_LIMIT_BASE_DELAY, RATE_LIMIT_MAX_RETRIES, RateLimitError
-        from services.tools.context import ToolContext
-
         if ctx.allowed_private_users and event.user_id not in ctx.allowed_private_users:
             return
+
+        # Private slash traffic is also control-plane input. Consume known and
+        # unknown roots before media rendering, memory state, or any LLM call.
+        raw_text = event.get_plaintext().strip()
+        if raw_text.startswith("/"):
+            dispatcher = getattr(ctx, "command_dispatcher", None)
+            if dispatcher is not None:
+                command_bot: Any = bot
+                is_known = getattr(dispatcher, "is_known", None)
+                if callable(is_known) and not is_known(raw_text):
+                    class _PrivateUnknownCommandReply:
+                        async def send(self, _event: Any, message: Message) -> None:
+                            await private_chat.finish(message)
+
+                    command_bot = _PrivateUnknownCommandReply()
+                await dispatcher.dispatch(
+                    command_bot,
+                    event,
+                    raw_text,
+                    is_private=True,
+                    user_id=str(event.user_id),
+                    group_id=None,
+                    plugin_ctx=ctx,
+                )
+            else:
+                _log_debug.warning("private slash command dropped: dispatcher unavailable")
+            return
+
+        from services.llm.client import RATE_LIMIT_BASE_DELAY, RATE_LIMIT_MAX_RETRIES, RateLimitError
+        from services.tools.context import ToolContext
 
         reply_msg = getattr(event, "reply", None)
         user_content = await _render_message(
@@ -2097,22 +2151,6 @@ def setup_routers(bus: PluginBus, ctx: PluginContext) -> None:
                 user_content = "你好"
             else:
                 return
-
-        # Check slash commands before LLM processing
-        raw_text = event.get_plaintext().strip()
-        if (
-            raw_text
-            and hasattr(ctx, "command_dispatcher")
-            and ctx.command_dispatcher is not None
-            and await ctx.command_dispatcher.dispatch(
-                bot, event, raw_text,
-                is_private=True,
-                user_id=str(event.user_id),
-                group_id=None,
-                plugin_ctx=ctx,
-            )
-        ):
-            return
 
         sid = _session_id(event)
         identity = ctx.persona_runtime.identity_snapshot()

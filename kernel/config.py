@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from copy import deepcopy
 from dataclasses import dataclass
@@ -2132,6 +2133,52 @@ class CoalesceConfig(BaseModel):
         return max(0.1, float(value))
 
 
+class ResearchEventCaptureConfig(BaseModel):
+    """Opt-in raw group event capture policy."""
+
+    enabled: bool = False
+    group_allowlist: list[str] = Field(default_factory=list)
+    db_path: str = "storage/research_events.db"
+    max_queue_size: int = 1024
+    batch_size: int = 64
+    flush_interval_seconds: float = 1.0
+    pseudonymization_salt_env: str = "OMUBOT_RESEARCH_EVENT_PSEUDONYMIZATION_SECRET"
+
+    @field_validator("group_allowlist", mode="before")
+    @classmethod
+    def _normalize_group_allowlist(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise TypeError("group_allowlist must be a list")
+        return list(dict.fromkeys(
+            str(item).strip() for item in value if str(item).strip()
+        ))
+
+    @field_validator("max_queue_size", "batch_size")
+    @classmethod
+    def _clamp_positive_count(cls, value: int) -> int:
+        return max(1, int(value))
+
+    @field_validator("flush_interval_seconds")
+    @classmethod
+    def _clamp_positive_flush_interval(cls, value: float) -> float:
+        return max(0.05, float(value))
+
+    @field_validator("pseudonymization_salt_env")
+    @classmethod
+    def _validate_secret_env_name(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", text):
+            return "OMUBOT_RESEARCH_EVENT_PSEUDONYMIZATION_SECRET"
+        return text
+
+    def allows_group(self, group_id: str | int) -> bool:
+        if not self.enabled:
+            return False
+        return str(group_id) in self.group_allowlist
+
+
 class ArbiterConfig(BaseModel):
     """Concurrent LLM arbiter config for burst @mention handling."""
 
@@ -2347,6 +2394,9 @@ class BotConfig(BaseModel):
     self_mute: SelfMuteConfig = Field(default_factory=SelfMuteConfig)
     bot_pair_guard: BotPairGuardConfig = Field(default_factory=BotPairGuardConfig)
     coalesce: CoalesceConfig = Field(default_factory=CoalesceConfig)
+    research_event_capture: ResearchEventCaptureConfig = Field(
+        default_factory=ResearchEventCaptureConfig
+    )
     arbiter: ArbiterConfig = Field(default_factory=ArbiterConfig)
     instruction_gate: InstructionGateConfig = Field(default_factory=InstructionGateConfig)
 

@@ -10,7 +10,7 @@ QQ ←→ NapCat (WS/HTTP) ←→ NoneBot2
                               └── Plugins: 23 个本地包/能力包
 ```
 
-当前插件层包含 19 个用户运行时插件，以及 4 个系统锁定能力包：`chat`、`context`、`history_loader`、`vision`。系统级能力由 manifest v3 标记为 `tier=system`、`toggle_policy=locked`，Web 和 API 都不能关闭。
+当前插件层包含 19 个用户运行时插件，以及 4 个系统锁定能力包：`chat`、`context`、`history_loader`、`vision`。`history_loader` 与 `vision` 是 manifest-only 能力，`chat` 与 `context` 是锁定的 PluginBus 插件；四者在 Web/API 中都不可关闭。
 
 ## 运行拓扑
 
@@ -80,24 +80,25 @@ pmubot（可选） -> socket-proxy / watchtower / docker compose control plane
 
 ```text
 QQ 消息 → NapCat → NoneBot → router.py
-  ├── 访问策略 / presence_mode 解析
-  ├── CommandDispatcher.dispatch()        ← /debug, /version, /plugins 等
-  ├── _render_message()                   ← 图片描述 + 表情包解析 + 角色识别
-  ├── EchoPlugin.on_message()             ← 复读检测
-  ├── SlangPlugin.on_message()            ← 黑话命中与观察记录
-  ├── MessageLog / ConversationArchive    ← 原始消息与归档事件流
-  └── scheduler.notify()
-        ├── @bot / active group → 触发回复
-        └── 普通消息 → debounce/batch
-              └── thinker / reply_gate
-                    └── LLM.chat()
-                          ├── ContextPlugin.on_pre_prompt()  ← memory/doc/graph
-                          ├── SlangPlugin.on_pre_prompt()    ← 当前群黑话
-                          ├── StylePlugin.on_pre_prompt()    ← 表达习惯参考
-                          └── Tool loop
+  ├── bot-loop / access / presence / blocked / pair / mute 门禁
+  ├── slash 提取 → CommandDispatcher
+  │     └── 仅 active 且未 mute；已知、disabled-owner、未知 slash 均在命令层终止
+  ├── research / admin event / name capture
+  ├── silent_learn → silent-safe hooks + 纯文本 timeline → 停止
+  └── active
+        ├── M1 interaction signal
+        ├── PluginBus.on_message()         ← Echo、Food、Slang 等可消费 hook
+        ├── _render_message()              ← 图片描述 + 表情包解析 + 角色识别
+        ├── timeline / archive commit
+        └── reply gate / trigger → scheduler.notify()
+              └── thinker / reply workflow → LLM.chat()
+                    ├── Context/Slang/Style 等 on_pre_prompt
+                    └── Tool loop
 ```
 
 未获得主动发言权限的群会按 `presence_mode` 处理：`active` 可回复，`silent_learn` 只允许显式开启的学习能力读取，`off` 完全忽略群聊。
+
+连接顺序为：安装最终出站 guard 与 protocol trace、绑定运行服务 → name registry 预载 → HistoryBackfill 核心阶段 → PluginBus `on_bot_connect` → tick loop → 群清单与 mute reconcile。HistoryBackfill 不再是可切换插件实例。
 
 ## 消息流（私聊）
 

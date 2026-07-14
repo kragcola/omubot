@@ -68,7 +68,8 @@
 3. **`admin/static/assets/` 现有文件从 git 里移除** — `git rm -r --cached admin/static/assets/`
 4. **新增 [admin/frontend/.nvmrc](../admin/frontend/.nvmrc)** — 固定 Node 版本（20 LTS）
 5. **`package.json` 加 `engines.node`** — `">=20.0.0 <21"`
-6. **更新 `scripts/deploy.sh`** — 部署前跑 `pnpm build` 生成产物到 `admin/static/`
+6. **固化 bot-only 部署步骤** — 部署前跑前端 build 生成产物到 `admin/static/`，再执行
+   `docker compose build bot` 与 `docker compose up -d --no-deps --force-recreate bot`
 7. **更新 [AGENTS.md](../AGENTS.md) 或 [CLAUDE.md](../CLAUDE.md)** — 声明"构建产物不进 git"
 
 ### 3.2 验收
@@ -76,7 +77,7 @@
 - [ ] `git status` 不再因为构建产物刷屏
 - [ ] `admin/templates/` 为空或不存在
 - [ ] CI/本地构建产出物只在 `admin/static/` 本地存在
-- [ ] `deploy.sh` 可单机跑通
+- [ ] 前端 build + bot-only 两步部署可单机跑通，NapCat 身份与启动时间不变
 
 ### 3.3 回滚
 
@@ -266,7 +267,7 @@ Vite `build.rollupOptions.output.manualChunks` 把 `naive-ui`、`vue`+`pinia`+`v
 | 重构改坏了某个交互（尤其是抽屉/表单保存） | 每个 PR 必走第 6.4 节人工验收清单；合并前在 dev 环境点完主路径 |
 | themeOverrides 改完深色模式局部丢字 | 阶段 1 改完后，逐个视图截浅/深两张图对比；保留 `!important` 兜底 1-2 周 |
 | 3000+ 行视图拆子组件时 props 爆炸 | 子组件只接收必要数据 + emits，不传整个 store 引用；超过 8 个 props 的子组件重新拆 |
-| 构建产物不进 git 后部署机没 Node | `scripts/deploy.sh` 里做 Node 版本检查并提示安装；长期上线用 CI 打镜像 |
+| 构建产物不进 git 后部署机没 Node | bot-only 部署前显式检查 Node/npm；长期上线用 CI 打镜像 |
 | 长尾页面"顺手改"始终不落地 | 每月跑一次 7.1 的排查脚本，合规率放进 [maintenance-log.md](../maintenance-log.md) |
 
 ## 10. 进度跟踪

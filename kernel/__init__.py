@@ -30,8 +30,13 @@ from kernel.config import (
 )
 from kernel.manifest import (
     PluginManifest,
+    PluginManifestError,
+    PluginManifestV3,
     check_version,
+    load_plugin_manifest,
+    parse_plugin_manifest_data,
     parse_semver,
+    resolve_manifest_config_paths,
 )
 from kernel.types import (
     AdminRoute,
@@ -77,6 +82,8 @@ __all__ = [
     "PluginBus",
     "PluginContext",
     "PluginManifest",
+    "PluginManifestError",
+    "PluginManifestV3",
     "PromptBlock",
     "PromptContext",
     "QwenVLConfig",
@@ -92,5 +99,8 @@ __all__ = [
     "check_version",
     "load_config",
     "load_plugin_config",
+    "load_plugin_manifest",
+    "parse_plugin_manifest_data",
     "parse_semver",
+    "resolve_manifest_config_paths",
 ]

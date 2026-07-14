@@ -3,10 +3,6 @@
   "type": "object",
   "additionalProperties": true,
   "properties": {
-    "enabled": {
-      "type": "boolean",
-      "title": "启用食物推荐"
-    },
     "recent_max": {
       "type": "integer",
       "title": "短期避重数量",

@@ -179,10 +179,12 @@ bot 没有这些模块无法运行。不是插件，是框架的一部分。
 
 **实现的钩子：**
 - `on_pre_prompt`：追加日程 block + 心情 block
-- `on_tick`：每日凌晨重新生成日程
+- `ScheduleGenerator` 生命周期：连接后启动，按每日计划生成日程，关闭时停止
 - （不注册 LLM 工具）
 
 **配置：** `[schedule]` section，`enabled` 开关
+
+> **2026-07-14 owner 勘误：** 本节保留 2026-05-01 迁移历史，不代表当前运行所有权。现行唯一日历实现是 `plugins/calendar_context/service.py`；`CalendarContextPlugin` 发布/回收 `ctx.calendar_service` 并拥有 `BirthdayGreeter.on_tick`。Schedule 只消费该 service，由 `ScheduleGenerator` 在连接/关闭生命周期中生成日程；Dream 不拥有生日。`plugins/schedule/calendar.py` 仅为 canonical 数据的有界兼容 facade，不是生产 owner。
 
 ### 3.3 StickerPlugin（表情包系统）
 
@@ -235,15 +237,15 @@ bot 没有这些模块无法运行。不是插件，是框架的一部分。
 
 **配置：** `[vision]` section，`[vision.qwen]` sub-section
 
-### 3.7 HistoryLoaderPlugin（历史加载）
+### 3.7 HistoryBackfill（核心连接阶段）
 
 | 原位置 | 新位置 | 说明 |
 |--------|--------|------|
-| `src/memory/history_loader.py` | `omubot/plugins/history_loader/loader.py` | 启动时从 OneBot WebSocket 拉取群历史消息 |
+| `src/memory/history_loader.py` | `services/history_backfill.py` | 连接时从 OneBot WebSocket 拉取群历史消息；插件目录仅保留兼容导出 |
 
-**实现的钩子：**
-- `on_startup`：拉取历史消息并填充 GroupTimeline
-- （在 `_on_connect` 中触发，需提供 `on_bot_connect` 钩子或由核心调度）
+**核心阶段：**
+- `RuntimeConnectionPipeline` 在 PluginBus `on_bot_connect` hooks 前调用 `run_history_backfill()`
+- 运行状态由 connection pipeline 发布，不再作为可切换插件注册
 
 ---
 
@@ -383,7 +385,7 @@ Omubot/                          # 新项目根（重写目标）
 │   │   ├── vision/
 │   │   │   └── plugin.py        # VisionPlugin (priority=50)
 │   │   ├── history_loader/
-│   │   │   └── plugin.py        # HistoryLoaderPlugin (priority=5)
+│   │   │   └── plugin.py        # HistoryBackfill 兼容导出，无 Plugin 类
 │   │   ├── datetime/
 │   │   │   └── plugin.py        # DateTimePlugin (priority=1, register_tools only)
 │   │   ├── web_search/
@@ -464,7 +466,7 @@ Omubot/                          # 新项目根（重写目标）
 | `src/memory/types.py` | `omubot/types/messages.py` | Type |
 | `src/memory/short_term.py` | `omubot/services/short_term.py` | Service |
 | `src/memory/group_timeline.py` | `omubot/services/group_timeline.py` | Service |
-| `src/memory/history_loader.py` | `omubot/plugins/history_loader/plugin.py` | Plugin |
+| `src/memory/history_loader.py` | `services/history_backfill.py` | Service / connection stage |
 | `src/memory/message_log.py` | `omubot/services/message_log.py` | Service |
 | `src/memory/card_store.py` | `omubot/services/card_store.py` | Service |
 | `src/memory/memo_extractor.py` | `omubot/plugins/memo/extractor.py` | Plugin |

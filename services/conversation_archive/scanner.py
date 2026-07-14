@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from loguru import logger
 
@@ -38,8 +39,12 @@ async def read_scan_batch(
     """
     archive_reader = getattr(message_log, "read_scan_batch", None)
     if callable(archive_reader):
+        typed_reader = cast(
+            Callable[..., Awaitable[dict[str, Any]]],
+            archive_reader,
+        )
         try:
-            return await archive_reader(
+            return await typed_reader(
                 scanner_name=scanner_name,
                 group_id=str(group_id),
                 limit=int(limit),
@@ -92,26 +97,18 @@ async def finish_scan_batch(
     finisher = getattr(message_log, "finish_scan_batch", None)
     if not callable(finisher):
         return
-    try:
-        await finisher(
-            batch,
-            status=status,
-            scanned_count=scanned_count,
-            extracted_count=extracted_count,
-            filtered_count=filtered_count,
-            saved_count=saved_count,
-            error=error,
-            advance_cursor=advance_cursor,
-            meta=meta,
-        )
-    except Exception as exc:
-        _L.warning(
-            "conversation archive scan finish failed | scanner={} group={} status={} error={}",
-            batch.get("scanner_name"),
-            batch.get("group_id"),
-            status,
-            exc,
-        )
+    typed_finisher = cast(Callable[..., Awaitable[None]], finisher)
+    await typed_finisher(
+        batch,
+        status=status,
+        scanned_count=scanned_count,
+        extracted_count=extracted_count,
+        filtered_count=filtered_count,
+        saved_count=saved_count,
+        error=error,
+        advance_cursor=advance_cursor,
+        meta=meta,
+    )
 
 
 async def add_evidence_message_ref(
@@ -132,8 +129,12 @@ async def add_evidence_message_ref(
     if message_pk is not None:
         adder = getattr(message_log, "add_message_ref", None)
         if callable(adder):
+            typed_adder = cast(
+                Callable[..., Awaitable[str | None]],
+                adder,
+            )
             try:
-                return await adder(
+                return await typed_adder(
                     message_pk=message_pk,
                     ref_owner=ref_owner,
                     ref_type=ref_type,
@@ -157,8 +158,12 @@ async def add_evidence_message_ref(
     platform_adder = getattr(message_log, "add_message_ref_for_platform_message", None)
     if platform_message_id is None or not callable(platform_adder):
         return None
+    typed_platform_adder = cast(
+        Callable[..., Awaitable[str | None]],
+        platform_adder,
+    )
     try:
-        return await platform_adder(
+        return await typed_platform_adder(
             chat_type="group",
             chat_id=str(group_id),
             platform_message_id=platform_message_id,

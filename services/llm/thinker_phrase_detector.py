@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from services.llm.dedup_gate import normalize_text
 from services.llm.sentinel_registry import (
+    RULE_ORDER_THINKER_PHRASE,
     GuardrailContext,
     GuardrailHit,
     GuardrailResult,
@@ -99,4 +100,4 @@ def thinker_phrase_rule(text: str, ctx: GuardrailContext) -> GuardrailResult:
     )
 
 
-register_rule(thinker_phrase_rule)
+register_rule(thinker_phrase_rule, order=RULE_ORDER_THINKER_PHRASE)

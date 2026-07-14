@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "provenance": "synthetic",
+  "cases": [
+    {
+      "case_id": "full_decay_new_block_registered",
+      "config": {"max_blocks": 6},
+      "events": [
+        {"seq": 1, "time_offset_s": 0, "message_id": 101, "actor": "u1", "synthetic_text": "topic_alpha", "expect": {"block": "b1", "pool": "active", "activity_delta": 1, "indexed_reachable": true}},
+        {"seq": 2, "time_offset_s": 10000, "message_id": 102, "actor": "u2", "synthetic_text": "topic_zeta", "expect": {"block": "b2", "pool": "active", "activity_delta": 1, "indexed_reachable": true}}
+      ],
+      "expect_final": {"active": ["b2"], "reservoir": ["b1"]}
+    },
+    {
+      "case_id": "capacity_applies_current_arrival_first",
+      "config": {"max_blocks": 1},
+      "events": [
+        {"seq": 1, "time_offset_s": 0, "message_id": 201, "actor": "u1", "synthetic_text": "aaaaaa", "expect": {"block": "b1", "pool": "active", "activity_delta": 1, "indexed_reachable": true}},
+        {"seq": 2, "time_offset_s": 1, "message_id": 202, "actor": "u2", "synthetic_text": "zzzzzz", "expect": {"block": "b2", "pool": "active", "activity_delta": 1, "indexed_reachable": true}}
+      ],
+      "expect_final": {"active": ["b2"], "reservoir": ["b1"]}
+    },
+    {
+      "case_id": "reservoir_reply_revives_once",
+      "config": {"max_blocks": 2},
+      "events": [
+        {"seq": 1, "time_offset_s": 0, "message_id": 301, "actor": "u1", "synthetic_text": "topic_alpha", "expect": {"block": "b1", "pool": "active", "activity_delta": 1, "indexed_reachable": true}},
+        {"seq": 2, "time_offset_s": 10000, "message_id": 302, "actor": "u2", "synthetic_text": "reply_alpha", "reply_to": {"message_id": 301, "actor": "u1"}, "expect": {"block": "b1", "pool": "active", "activity_delta": 1, "indexed_reachable": true}}
+      ],
+      "expect_final": {"active": ["b1"], "reservoir": []}
+    },
+    {
+      "case_id": "mention_targets_existing_block",
+      "config": {"max_blocks": 4},
+      "events": [
+        {"seq": 1, "time_offset_s": 0, "message_id": 401, "actor": "u1", "synthetic_text": "aaaaaa", "expect": {"block": "b1", "pool": "active", "activity_delta": 1, "indexed_reachable": true}},
+        {"seq": 2, "time_offset_s": 1, "message_id": 402, "actor": "u2", "synthetic_text": "zzzzzz", "expect": {"block": "b2", "pool": "active", "activity_delta": 1, "indexed_reachable": true}},
+        {"seq": 3, "time_offset_s": 2, "message_id": 403, "actor": "u3", "synthetic_text": "mention_alpha", "mentions": ["u1"], "expect": {"block": "b1", "pool": "active", "activity_delta": 1, "indexed_reachable": true}}
+      ],
+      "expect_final": {"active": ["b1", "b2"], "reservoir": []}
+    },
+    {
+      "case_id": "l1_similarity_revives_reservoir",
+      "config": {"max_blocks": 2},
+      "events": [
+        {"seq": 1, "time_offset_s": 0, "message_id": 501, "actor": "u1", "synthetic_text": "old_friend_topic", "expect": {"block": "b1", "pool": "active", "activity_delta": 1, "indexed_reachable": true}},
+        {"seq": 2, "time_offset_s": 10000, "message_id": 502, "actor": "u2", "synthetic_text": "old_friend_topic", "expect": {"block": "b1", "pool": "active", "activity_delta": 1, "indexed_reachable": true}}
+      ],
+      "expect_final": {"active": ["b1"], "reservoir": []}
+    },
+    {
+      "case_id": "anchor_prefers_bot_involved_block",
+      "config": {"max_blocks": 4},
+      "events": [
+        {"seq": 1, "time_offset_s": 0, "message_id": 601, "actor": "u1", "synthetic_text": "aaaaaa", "at_self": true, "expect": {"block": "b1", "pool": "active", "activity_delta": 1, "indexed_reachable": true}},
+        {"seq": 2, "time_offset_s": 1, "message_id": 602, "actor": "u2", "synthetic_text": "zzzzzz", "expect": {"block": "b2", "pool": "active", "activity_delta": 1, "indexed_reachable": true}}
+      ],
+      "expect_final": {"active": ["b1", "b2"], "reservoir": [], "anchor": "b1"}
+    }
+  ]
+}

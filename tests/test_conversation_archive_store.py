@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from typing import Any
 
 import aiosqlite
 import pytest
 
 from services.conversation_archive import ConversationArchive, sync_business_message_refs
+from services.conversation_archive.scanner import finish_scan_batch as finish_scan_batch_compat
 
 
 @pytest.fixture
@@ -274,6 +277,223 @@ async def test_archive_scan_batch_bootstraps_recent_then_advances(
         scanner_version="v1",
     )
     assert [row["content_text"] for row in second["rows"]] == ["m5"]
+
+
+async def test_read_scan_batch_cancel_after_start_commit_closes_run_before_return(
+    archive: ConversationArchive,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await archive.record(
+        group_id="351",
+        role="user",
+        speaker="U(1)",
+        content_text="cancel window",
+        content_json=None,
+        message_id=351,
+        created_at=3510.0,
+    )
+    start_committed = asyncio.Event()
+    allow_start_return = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    real_start_scan_run = archive.start_scan_run
+    real_finish_scan_run = archive.finish_scan_run
+    committed_run_id: str | None = None
+
+    async def controlled_start_scan_run(*args: Any, **kwargs: Any) -> str:
+        nonlocal committed_run_id
+        committed_run_id = await real_start_scan_run(*args, **kwargs)
+        start_committed.set()
+        await allow_start_return.wait()
+        return committed_run_id
+
+    async def controlled_finish_scan_run(*args: Any, **kwargs: Any) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        await real_finish_scan_run(*args, **kwargs)
+
+    monkeypatch.setattr(archive, "start_scan_run", controlled_start_scan_run)
+    monkeypatch.setattr(archive, "finish_scan_run", controlled_finish_scan_run)
+    task = asyncio.create_task(
+        archive.read_scan_batch(
+            scanner_name="style_manual_extract",
+            group_id="351",
+            limit=10,
+            scanner_version="v1",
+        )
+    )
+
+    async with asyncio.timeout(1.0):
+        await start_committed.wait()
+        task.cancel("initial cancellation")
+        await asyncio.sleep(0)
+        allow_start_return.set()
+
+        cleanup_waiter = asyncio.create_task(cleanup_started.wait())
+        done, _pending = await asyncio.wait(
+            {task, cleanup_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cleanup_waiter not in done:
+            cleanup_waiter.cancel()
+            await asyncio.gather(cleanup_waiter, return_exceptions=True)
+
+        task.cancel("repeated cancellation")
+        await asyncio.sleep(0)
+        returned_before_cleanup = task.done()
+        allow_cleanup.set()
+        try:
+            await task
+        except asyncio.CancelledError as exc:
+            cancel_args = exc.args
+        else:
+            cancel_args = None
+
+        assert committed_run_id is not None
+        assert archive._db is not None
+        cursor = await archive._db.execute(
+            "SELECT status, finished_at FROM conversation_scan_runs WHERE run_id = ?",
+            (committed_run_id,),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        observed = {
+            "returned_before_cleanup": returned_before_cleanup,
+            "cleanup_started": cleanup_started.is_set(),
+            "status": row["status"],
+            "finished_at_set": row["finished_at"] is not None,
+            "cancel_args": cancel_args,
+        }
+        assert (
+            returned_before_cleanup is False
+            and cleanup_started.is_set()
+            and row["status"] != "running"
+            and row["finished_at"] is not None
+            and cancel_args == ("initial cancellation",)
+        ), observed
+
+
+async def test_finish_scan_batch_success_is_barrier_after_cursor_commit(
+    archive: ConversationArchive,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await archive.record(
+        group_id="352",
+        role="user",
+        speaker="U(1)",
+        content_text="finish window",
+        content_json=None,
+        message_id=352,
+        created_at=3520.0,
+    )
+    batch = await archive.read_scan_batch(
+        scanner_name="style_manual_extract",
+        group_id="352",
+        limit=10,
+        scanner_version="v1",
+    )
+    cursor_committed = asyncio.Event()
+    allow_cursor_return = asyncio.Event()
+    real_upsert_cursor = archive.upsert_cursor
+
+    async def controlled_upsert_cursor(*args: Any, **kwargs: Any) -> Any:
+        result = await real_upsert_cursor(*args, **kwargs)
+        cursor_committed.set()
+        await allow_cursor_return.wait()
+        return result
+
+    monkeypatch.setattr(archive, "upsert_cursor", controlled_upsert_cursor)
+    task = asyncio.create_task(
+        archive.finish_scan_batch(
+            batch,
+            status="success",
+            scanned_count=1,
+            extracted_count=1,
+            saved_count=1,
+        )
+    )
+
+    async with asyncio.timeout(1.0):
+        await cursor_committed.wait()
+        task.cancel("cancel after cursor commit")
+        task.cancel("repeated cancellation")
+        await asyncio.sleep(0)
+        finish_returned_before_cursor_return = task.done()
+        allow_cursor_return.set()
+        try:
+            result = await task
+        except asyncio.CancelledError as exc:
+            outcome: tuple[str, Any] = ("cancelled", exc.args)
+        else:
+            outcome = ("returned", result)
+
+        cursor = await archive.get_cursor(
+            scanner_name="style_manual_extract",
+            chat_type="group",
+            chat_id="352",
+        )
+        assert cursor is not None
+        assert archive._db is not None
+        run_cursor = await archive._db.execute(
+            "SELECT status, finished_at FROM conversation_scan_runs WHERE run_id = ?",
+            (batch["run_id"],),
+        )
+        run = await run_cursor.fetchone()
+        assert run is not None
+        observed = {
+            "finish_returned_before_cursor_return": (
+                finish_returned_before_cursor_return
+            ),
+            "outcome": outcome,
+            "cursor_last_message_pk": cursor["last_message_pk"],
+            "expected_last_message_pk": batch["to_message_pk"],
+            "run_status": run["status"],
+            "run_finished_at_set": run["finished_at"] is not None,
+            "remaining_cancellations": task.cancelling(),
+        }
+        assert (
+            finish_returned_before_cursor_return is False
+            and outcome == ("returned", None)
+            and cursor["last_message_pk"] == batch["to_message_pk"]
+            and run["status"] == "success"
+            and run["finished_at"] is not None
+            and task.cancelling() == 0
+        ), observed
+
+
+async def test_scanner_finish_wrapper_propagates_archive_commit_failure(
+    archive: ConversationArchive,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await archive.record(
+        group_id="353",
+        role="user",
+        speaker="U(1)",
+        content_text="commit failure",
+        content_json=None,
+        message_id=353,
+        created_at=3530.0,
+    )
+    batch = await archive.read_scan_batch(
+        scanner_name="style_manual_extract",
+        group_id="353",
+        limit=10,
+        scanner_version="v1",
+    )
+
+    async def fail_finish_scan_run(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(archive, "finish_scan_run", fail_finish_scan_run)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await finish_scan_batch_compat(
+            archive,
+            batch,
+            status="success",
+            scanned_count=1,
+        )
 
 
 async def test_archive_scan_batch_handles_sparse_global_message_pk(

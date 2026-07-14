@@ -84,6 +84,19 @@ _DOMAIN_KEY_TO_DOMAIN: dict[str, str] = {
 }
 
 
+async def _await_owned_task(
+    task: asyncio.Task[Any],
+) -> tuple[Any, asyncio.CancelledError | None]:
+    first_cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if first_cancellation is None:
+                first_cancellation = exc
+    return task.result(), first_cancellation
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     body = text.strip()
     if body.startswith("```"):
@@ -164,21 +177,45 @@ class MemoryConsolidator:
         """Run one dry-run pass; never raises — failures land in the run row."""
         if scope not in {"group", "user", "global"}:
             raise ValueError(f"invalid scope: {scope!r}")
-        run_id = await self._store.start_run(
-            triggered_by=triggered_by,
-            group_id=group_id,
-            scope=scope,  # type: ignore[arg-type]
-            meta={
-                "max_batches": int(max_batches),
-                "batch_size": int(batch_size),
-                "scanner_name": _SCANNER_NAME,
-                "scanner_version": _SCANNER_VERSION,
-            },
+        start_task = asyncio.create_task(
+            self._store.start_run(
+                triggered_by=triggered_by,
+                group_id=group_id,
+                scope=scope,  # type: ignore[arg-type]
+                meta={
+                    "max_batches": int(max_batches),
+                    "batch_size": int(batch_size),
+                    "scanner_name": _SCANNER_NAME,
+                    "scanner_version": _SCANNER_VERSION,
+                },
+            ),
+            name="memory-consolidator:start-run",
         )
+        run_id, start_cancellation = await _await_owned_task(start_task)
+        if start_cancellation is not None:
+            cleanup_task = asyncio.create_task(
+                self._store.finish_run(
+                    run_id,
+                    status="failed",
+                    error_text="cancelled before owner run handoff",
+                ),
+                name=f"memory-consolidator-start-cleanup:{run_id}",
+            )
+            try:
+                await _await_owned_task(cleanup_task)
+            except Exception as exc:
+                _L.warning(
+                    "consolidator start cleanup failed | run={} error={}",
+                    run_id,
+                    exc,
+                )
+            raise start_cancellation
         scanned_total = 0
         candidates_total = 0
         failure_text = ""
         completed = False
+        active_batch: dict[str, Any] | None = None
+        active_batch_scanned = 0
         try:
             for batch_idx in range(max(1, int(max_batches))):
                 batch = await _archive_read_scan_batch(
@@ -190,7 +227,9 @@ class MemoryConsolidator:
                     params_hash=_PARAMS_HASH,
                     required=True,
                 )
+                active_batch = batch
                 rows = list(batch.get("rows") or [])
+                active_batch_scanned = len(rows)
                 if not rows:
                     await _archive_finish_scan_batch(
                         self._archive,
@@ -201,6 +240,7 @@ class MemoryConsolidator:
                         saved_count=0,
                         advance_cursor=False,
                     )
+                    active_batch = None
                     break
                 scanned_total += len(rows)
                 try:
@@ -228,6 +268,7 @@ class MemoryConsolidator:
                         error=str(exc),
                         advance_cursor=False,
                     )
+                    active_batch = None
                     continue
                 candidates_total += candidates
                 await _archive_finish_scan_batch(
@@ -239,13 +280,14 @@ class MemoryConsolidator:
                     saved_count=candidates,
                     advance_cursor=True,
                 )
-            completed = True
+                active_batch = None
             await self._store.finish_run(
                 run_id,
                 status="done",
                 scanned_count=scanned_total,
                 candidates_count=candidates_total,
             )
+            completed = True
             return RunReport(
                 run_id=run_id,
                 scanned=scanned_total,
@@ -257,19 +299,42 @@ class MemoryConsolidator:
             raise
         finally:
             if not completed:
-                try:
-                    await asyncio.shield(
-                        self._store.finish_run(
+                async def cleanup_incomplete_run() -> None:
+                    try:
+                        if active_batch is not None:
+                            await _archive_finish_scan_batch(
+                                self._archive,
+                                active_batch,
+                                status="abandoned",
+                                scanned_count=active_batch_scanned,
+                                extracted_count=0,
+                                saved_count=0,
+                                error=failure_text or "cancelled",
+                                advance_cursor=False,
+                            )
+                    finally:
+                        await self._store.finish_run(
                             run_id,
                             status="failed",
                             scanned_count=scanned_total,
                             candidates_count=candidates_total,
                             error_text=failure_text or "cancelled",
                         )
-                    )
+
+                cleanup_task = asyncio.create_task(
+                    cleanup_incomplete_run(),
+                    name=f"memory-consolidator-cleanup:{run_id}",
+                )
+                try:
+                    while not cleanup_task.done():
+                        try:
+                            await asyncio.shield(cleanup_task)
+                        except asyncio.CancelledError:
+                            continue
+                    await cleanup_task
                 except Exception as exc:
                     _L.warning(
-                        "consolidator finish_run cleanup failed | run={} error={}",
+                        "consolidator cancellation cleanup failed | run={} error={}",
                         run_id,
                         exc,
                     )

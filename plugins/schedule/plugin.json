@@ -9,7 +9,7 @@
   "version": "1.1.5",
   "priority": 20,
   "tier": "user",
-  "toggle_policy": "runtime",
+  "toggle_policy": "restart_required",
   "category": "memory",
   "permissions": [
     "prompt",
@@ -21,6 +21,9 @@
     "mood",
     "schedule"
   ],
+  "required_dependencies": {
+    "calendar_context": ">=1.0.0"
+  },
   "min_omubot_version": "",
   "config": {
     "defaults": "config.default.json",

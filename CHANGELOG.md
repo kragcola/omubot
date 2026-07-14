@@ -5,6 +5,22 @@ All notable changes to Omubot are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- 新增数据库课程交付 wiki：`docs/wiki/Database-Coursework-2026.md`，记录选题、答辩主线、材料入口、精简数据库 Web、源码包范围和后续事项。
+- 新增数据库课程源码包清单：`docs/coursework/database-2026/source-package-manifest.md`。
+- 生成课程源码包：`docs/coursework/database-2026/dist/omubot-database-coursework-source-20260707.zip`，并保留同内容 `.tar.gz` 备份，用于后续提交准备。
+- 创建并推送 GitHub 私密仓库 `kragcola/omubot-database-coursework-2026`，作为数据库课程独立提交项目。
+
+### Changed
+
+- `docs/wiki/Home.md` 与 `docs/wiki/_Sidebar.md` 增加数据库课程交付入口。
+- 数据库课程源码包排除真实配置、运行数据库、NapCat 登录态、本机缓存、虚拟环境、`node_modules` 和构建产物。
+- 插件平台合同收敛为 strict ManifestV3：`dependencies` 仅作 required alias，新声明使用 `required_dependencies` / `optional_dependencies`；runtime、Index、Admin、配置与 CI 共用同一 parser/schema。
+- `sticker` manifest 与插件清单版本统一为 `1.2.0`；历史 `1.5.0` 版本表保留当时发布记录。
+
 ## [1.5.0] — 2026-05-24
 
 聚合 v1.2.5 至今（2026-05-05 → 2026-05-24）维护日志，覆盖此前未发版的 v1.3 / v1.4 区间。版本号每条「涉及插件修改」的维护日志条目对应 +0.0.1。
@@ -15,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Plugin 目录化**：插件从单文件 `.py` 全面迁移到 `plugins/<name>/` 目录 + `plugin.json`（manifest_version=3）+ `config.default.json` + `config.schema.json`，统一 `manifest / display_name / capabilities / permissions / restart_required_fields` 契约；新增 `plugin.sig` 签名预留与 marketplace_id 槽位
 - **PluginBus 生命周期 hooks**：`on_startup` / `on_shutdown` / `on_bot_connect` / `on_message` / `on_pre_prompt` / `on_post_reply` / `on_tick`，钩子级耗时与异常聚合到 admin 健康面板
-- **Kahn 拓扑排序 + 循环依赖回退**：插件加载顺序按 `provides → consumes` 拓扑展开，循环依赖时回退到 manifest priority
+- **Kahn 拓扑排序**：插件加载顺序按 required/optional dependency map 展开；`dependencies` 是 required 兼容字段，不依赖未实现的能力声明对
 - **PromptBlock**：`static / stable / dynamic` 三段式 prompt 注入；插件可注册 block 而非自己拼字符串
 - **LLMRequest spine**（Phase A→D）：所有 LLM 调用收敛到统一 `LLMRequest` 契约，含 per-task cache profile / 多 provider 路由 / SSE 流解析；阶段 D-now 把 main / compact / thinker / slang_review / style / episode 全部迁过去
 - **多层学习记忆 Phase C-E**：`MemoryConsolidator` dry-run + admin 队列；Episode 候选 → approved → enabled_for_prompt promote 桥；reflection 路径（style_feedback / expressions / slang_drift 三源）；EpisodeProvider 召回路径双写 BlockTraceBus；5 条 graph edge 双写（`term_used_in_group` / `style_applies_to_situation` / `user_corrected_bot_about` / `doc_supports_fact` / `episode_supports_profile`）

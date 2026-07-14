@@ -9,7 +9,7 @@
   "version": "0.1.6",
   "priority": 25,
   "tier": "user",
-  "toggle_policy": "runtime",
+  "toggle_policy": "restart_required",
   "category": "tool",
   "permissions": [
     "message",
@@ -20,17 +20,18 @@
   "capabilities": [
     "food_recommendation"
   ],
+  "optional_dependencies": {
+    "web_search": ">=0.1.0"
+  },
   "min_omubot_version": "",
   "config": {
     "defaults": "config.default.json",
     "schema": "config.schema.json",
     "apply_mode": "restart_required",
     "restart_required_fields": [
-      "enabled",
       "recent_max",
       "recent_ttl",
       "feedback_window",
-      "search_enabled",
       "food_library_max_items"
     ]
   },

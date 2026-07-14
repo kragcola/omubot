@@ -5,7 +5,7 @@ import time
 import pytest
 
 from kernel.types import PluginContext
-from plugins.dream.plugin import DreamPlugin
+from services.memory_consolidator import MemoryConsolidatorLifecycle
 from services.memory_consolidator.event_boundary import EventBoundaryDetector
 
 
@@ -64,7 +64,7 @@ async def test_event_boundary_mood_reversal_trigger_and_cooldown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dream_plugin_on_tick_runs_event_boundary_trigger(monkeypatch, tmp_path) -> None:
+async def test_memory_lifecycle_tick_runs_event_boundary_trigger(tmp_path) -> None:
     class _Consolidator:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
@@ -72,17 +72,6 @@ async def test_dream_plugin_on_tick_runs_event_boundary_trigger(monkeypatch, tmp
         async def run_once(self, **kwargs):
             self.calls.append(kwargs)
 
-    from services import learning_settings
-
-    monkeypatch.setattr(
-        learning_settings,
-        "load",
-        lambda _storage_dir: {"consolidator": {"auto_enabled": True, "interval_minutes": 360}},
-    )
-    monkeypatch.setenv("EBR_ENABLED", "true")
-
-    plugin = DreamPlugin()
-    plugin._last_consolidator_monotonic = time.monotonic()
     consolidator = _Consolidator()
     ctx = PluginContext(
         storage_dir=tmp_path,
@@ -90,8 +79,19 @@ async def test_dream_plugin_on_tick_runs_event_boundary_trigger(monkeypatch, tmp
         msg_log=_MessageLog(last_age_s=1900),
         mood_engine=_MoodEngine([0.0, 0.1]),
     )
+    lifecycle = MemoryConsolidatorLifecycle(
+        ctx=ctx,
+        settings_loader=lambda _storage_dir: {
+            "consolidator": {
+                "auto_enabled": True,
+                "interval_minutes": 360,
+            }
+        },
+        monotonic=lambda: 0.0,
+        event_boundary_enabled=lambda: True,
+    )
 
-    await plugin.on_tick(ctx)
+    await lifecycle.tick_once()
 
     assert consolidator.calls
     assert consolidator.calls[0]["triggered_by"] == "event_boundary:silence"

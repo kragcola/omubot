@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import inspect
 import json
-import secrets
 from datetime import datetime, timedelta, timezone
 from datetime import time as datetime_time
 from pathlib import Path
@@ -16,11 +14,14 @@ from urllib.parse import quote
 import aiosqlite
 from fastapi import APIRouter, Query, Request
 
-from admin.routes.api.style import run_style_manual_extract
 from services import learning_settings as _ls
 from services.learning_autopilot.base import AggressivenessConfig
 from services.learning_autopilot.runner import AutopilotRunner
-from services.style import StyleStore
+from services.learning_extract_coordinator import (
+    ExtractRunParams,
+    LearningExtractCoordinator,
+)
+from services.style import StyleStore, run_style_manual_extract
 
 TZ_SHANGHAI = timezone(timedelta(hours=8))
 EXTRACT_ALL_TIMEOUT_SECONDS = 120
@@ -46,9 +47,13 @@ NOUN_LABELS: dict[str, str] = {
     "graph_relation": "关系",
 }
 
-_extract_all_lock = asyncio.Lock()
-_extract_all_runs: dict[str, dict[str, Any]] = {}
-_extract_all_active_run_id: str | None = None
+_extract_all_coordinator = LearningExtractCoordinator(
+    nouns=EXTRACT_ALL_NOUNS,
+    run_limit=EXTRACT_ALL_RUN_LIMIT,
+)
+# Compatibility aliases for existing internal tests and diagnostics.
+_extract_all_lock = _extract_all_coordinator.lock
+_extract_all_runs = _extract_all_coordinator.runs
 
 _autopilot_runner_instance: AutopilotRunner | None = None
 
@@ -310,7 +315,7 @@ def create_learning_pipeline_router(*, ctx: Any = None) -> APIRouter:
 
     @router.get("/learning/extract-all/{run_id}")
     async def learning_extract_all_status(run_id: str) -> dict[str, Any]:
-        return _extract_run_status(run_id)
+        return _extract_run_status(run_id, ctx=ctx)
 
     @router.get("/learning/settings")
     async def learning_settings_get() -> dict[str, Any]:
@@ -628,311 +633,51 @@ async def _run_extract_all(
     timeout_seconds: float = EXTRACT_ALL_TIMEOUT_SECONDS,
     wait: bool = True,
 ) -> dict[str, Any]:
-    global _extract_all_active_run_id
-    if _extract_all_active_run_id or _extract_all_lock.locked():
-        payload = _extract_run_status(_extract_all_active_run_id or "")
-        payload.update({"ok": False, "error": "already_running"})
-        return payload
-
-    _prune_extract_runs()
-    run = _create_extract_run(
-        group_id=group_id,
+    params = ExtractRunParams(
         limit=limit,
         max_batches=max_batches,
         batch_size=batch_size,
         timeout_seconds=timeout_seconds,
     )
-    _extract_all_active_run_id = str(run["run_id"])
-
-    if wait:
-        return await _execute_extract_all_run(
-            str(run["run_id"]),
-            ctx=ctx,
-            group_id=group_id,
-            limit=limit,
-            max_batches=max_batches,
-            batch_size=batch_size,
-            timeout_seconds=timeout_seconds,
-        )
-
-    task = asyncio.create_task(_execute_extract_all_run(
-        str(run["run_id"]),
-        ctx=ctx,
+    return await _coordinator_for_ctx(ctx).run(
         group_id=group_id,
-        limit=limit,
-        max_batches=max_batches,
-        batch_size=batch_size,
-        timeout_seconds=timeout_seconds,
-    ))
-    task.add_done_callback(
-        lambda done: done.result()
-        if not done.cancelled() and done.exception() is None
+        params=params,
+        runners={
+            "slang": lambda: _run_slang_extract(
+                ctx,
+                group_id=group_id,
+                limit=limit,
+            ),
+            "style": lambda: _run_style_extract(
+                ctx,
+                group_id=group_id,
+                limit=limit,
+                max_batches=max_batches,
+            ),
+            "consolidator": lambda: _run_consolidator_extract(
+                ctx,
+                group_id=group_id,
+                max_batches=max_batches,
+                batch_size=batch_size,
+            ),
+        },
+        wait=wait,
+    )
+
+
+def _extract_run_status(run_id: str, *, ctx: Any = None) -> dict[str, Any]:
+    return _coordinator_for_ctx(ctx).status(run_id)
+
+
+def _coordinator_for_ctx(ctx: Any) -> LearningExtractCoordinator:
+    coordinator = (
+        getattr(ctx, "learning_extract_coordinator", None)
+        if ctx is not None
         else None
     )
-    return _extract_run_snapshot(run)
-
-
-async def _execute_extract_all_run(
-    run_id: str,
-    *,
-    ctx: Any,
-    group_id: str,
-    limit: int,
-    max_batches: int,
-    batch_size: int,
-    timeout_seconds: float,
-) -> dict[str, Any]:
-    global _extract_all_active_run_id
-    run = _extract_all_runs.get(run_id)
-    if run is None:
-        return _extract_run_not_found(run_id)
-
-    try:
-        async with _extract_all_lock:
-            _update_extract_run(run, status="running")
-            nouns = {
-                "slang": _run_slang_extract(ctx, group_id=group_id, limit=limit),
-                "style": _run_style_extract(
-                    ctx,
-                    group_id=group_id,
-                    limit=limit,
-                    max_batches=max_batches,
-                ),
-                "consolidator": _run_consolidator_extract(
-                    ctx,
-                    group_id=group_id,
-                    max_batches=max_batches,
-                    batch_size=batch_size,
-                ),
-            }
-            results = await asyncio.gather(
-                *(
-                    _run_extract_noun(
-                        run,
-                        noun,
-                        coro,
-                        timeout_seconds=timeout_seconds,
-                    )
-                    for noun, coro in nouns.items()
-                ),
-                return_exceptions=False,
-            )
-            run["results"] = dict(results)
-            _update_extract_run(
-                run,
-                status=_final_extract_status(run["results"]),
-                finished=True,
-            )
-    except Exception as exc:
-        _update_extract_run(run, status="failed", error=str(exc), finished=True)
-    finally:
-        if _extract_all_active_run_id == run_id:
-            _extract_all_active_run_id = None
-
-    return _extract_run_snapshot(run)
-
-
-async def _run_extract_noun(
-    run: dict[str, Any],
-    noun: str,
-    coro: Any,
-    *,
-    timeout_seconds: float,
-) -> tuple[str, dict[str, Any]]:
-    _update_extract_noun(run, noun, status="running")
-    result = await _run_with_timeout(noun, coro, timeout_seconds=timeout_seconds)
-    _update_extract_noun(
-        run,
-        noun,
-        status=_extract_noun_status(result),
-        result=result,
-    )
-    return noun, result
-
-
-def _create_extract_run(
-    *,
-    group_id: str,
-    limit: int,
-    max_batches: int,
-    batch_size: int,
-    timeout_seconds: float,
-) -> dict[str, Any]:
-    run_id = "learn_ext_" + secrets.token_hex(6)
-    now = _now_iso()
-    run: dict[str, Any] = {
-        "ok": True,
-        "run_id": run_id,
-        "status": "queued",
-        "error": "",
-        "started_at": now,
-        "updated_at": now,
-        "finished_at": "",
-        "group_id": group_id,
-        "params": {
-            "limit": limit,
-            "max_batches": max_batches,
-            "batch_size": batch_size,
-            "timeout_seconds": timeout_seconds,
-        },
-        "nouns": {
-            noun: {
-                "status": "pending",
-                "result": None,
-                "error": "",
-                "updated_at": now,
-            }
-            for noun in EXTRACT_ALL_NOUNS
-        },
-        "results": {},
-    }
-    _extract_all_runs[run_id] = run
-    _prune_extract_runs()
-    return run
-
-
-def _update_extract_run(
-    run: dict[str, Any],
-    *,
-    status: str,
-    error: str = "",
-    finished: bool = False,
-) -> None:
-    now = _now_iso()
-    run["status"] = status
-    run["updated_at"] = now
-    run["error"] = error
-    if finished:
-        run["finished_at"] = now
-
-
-def _update_extract_noun(
-    run: dict[str, Any],
-    noun: str,
-    *,
-    status: str,
-    result: dict[str, Any] | None = None,
-) -> None:
-    now = _now_iso()
-    noun_state = run["nouns"].setdefault(noun, {})
-    noun_state["status"] = status
-    noun_state["updated_at"] = now
-    if result is not None:
-        noun_state["result"] = result
-        noun_state["error"] = str(result.get("error") or "")
-    run["updated_at"] = now
-
-
-def _extract_run_status(run_id: str) -> dict[str, Any]:
-    run = _extract_all_runs.get(str(run_id or ""))
-    if run is None:
-        return _extract_run_not_found(run_id)
-    return _extract_run_snapshot(run)
-
-
-def _extract_run_not_found(run_id: str) -> dict[str, Any]:
-    return {
-        "ok": False,
-        "error": "not_found",
-        "run_id": run_id,
-        "status": "not_found",
-        "started_at": "",
-        "updated_at": "",
-        "finished_at": "",
-        "group_id": "",
-        "params": {},
-        "nouns": {},
-        "results": {},
-    }
-
-
-def _extract_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "ok": bool(run.get("ok", True)),
-        "run_id": str(run.get("run_id") or ""),
-        "status": str(run.get("status") or ""),
-        "error": str(run.get("error") or ""),
-        "started_at": str(run.get("started_at") or ""),
-        "updated_at": str(run.get("updated_at") or ""),
-        "finished_at": str(run.get("finished_at") or ""),
-        "group_id": str(run.get("group_id") or ""),
-        "params": dict(run.get("params") or {}),
-        "nouns": {
-            str(noun): {
-                "status": str(state.get("status") or ""),
-                "result": _copy_extract_result(state.get("result")),
-                "error": str(state.get("error") or ""),
-                "updated_at": str(state.get("updated_at") or ""),
-            }
-            for noun, state in dict(run.get("nouns") or {}).items()
-            if isinstance(state, dict)
-        },
-        "results": {
-            str(noun): _copy_extract_result(result)
-            for noun, result in dict(run.get("results") or {}).items()
-        },
-    }
-
-
-def _copy_extract_result(result: Any) -> dict[str, Any] | None:
-    if result is None:
-        return None
-    if isinstance(result, dict):
-        return dict(result)
-    return {"ok": True, "result": result}
-
-
-def _extract_noun_status(result: dict[str, Any]) -> str:
-    if result.get("skipped"):
-        return "skipped"
-    if result.get("error") == "timeout":
-        return "timeout"
-    if result.get("error") == "cancelled":
-        return "cancelled"
-    if result.get("ok") is False:
-        return "failed"
-    return "completed"
-
-
-def _final_extract_status(results: dict[str, dict[str, Any]]) -> str:
-    statuses = [_extract_noun_status(result) for result in results.values()]
-    failed = {"failed", "timeout", "cancelled"}
-    if statuses and all(status in failed for status in statuses):
-        return "failed"
-    if any(status in failed for status in statuses):
-        return "partial_failed"
-    return "completed"
-
-
-def _prune_extract_runs() -> None:
-    removable = [
-        run_id
-        for run_id in _extract_all_runs
-        if run_id != _extract_all_active_run_id
-    ]
-    while len(_extract_all_runs) > EXTRACT_ALL_RUN_LIMIT and removable:
-        _extract_all_runs.pop(removable.pop(0), None)
-
-
-def _now_iso() -> str:
-    return datetime.now(TZ_SHANGHAI).isoformat(timespec="seconds")
-
-
-async def _run_with_timeout(
-    noun: str,
-    coro: Any,
-    *,
-    timeout_seconds: float,
-) -> dict[str, Any]:
-    try:
-        result = await asyncio.wait_for(coro, timeout=timeout_seconds)
-        return _normalize_extract_result(noun, result)
-    except TimeoutError:
-        return {"ok": False, "error": "timeout", "noun": noun}
-    except asyncio.CancelledError:
-        return {"ok": False, "error": "cancelled", "noun": noun}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc), "noun": noun}
+    if isinstance(coordinator, LearningExtractCoordinator):
+        return coordinator
+    return _extract_all_coordinator
 
 
 async def _run_slang_extract(ctx: Any, *, group_id: str, limit: int) -> dict[str, Any]:
@@ -1041,15 +786,6 @@ async def _call_extract_runner(runner: Any, **kwargs: Any) -> dict[str, Any]:
     if inspect.isawaitable(result):
         result = await result
     return result if isinstance(result, dict) else {"ok": True, "result": result}
-
-
-def _normalize_extract_result(noun: str, result: Any) -> dict[str, Any]:
-    if not isinstance(result, dict):
-        return {"ok": True, "noun": noun, "result": result}
-    payload = dict(result)
-    payload.setdefault("ok", True)
-    payload.setdefault("noun", noun)
-    return payload
 
 
 def _new_stage_payload() -> dict[str, dict[str, Any]]:

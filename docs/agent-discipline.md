@@ -163,7 +163,8 @@ uv run pytest tests/test_slang_plugin.py tests/test_slang_store.py -q
 **规则**：
 
 - 只改前端 → `cd admin/frontend && npm run build` → 浏览器强刷即可，不需要 docker rebuild。
-- 改前端+后端 → `npm run build` 完再 `docker compose up bot -d --build`。
+- 改前端+后端 → `npm run build` 完再执行 `docker compose build bot` 与
+  `docker compose up -d --no-deps --force-recreate bot`。
 - 验证镜像内代码：`docker compose exec bot grep -c <symbol> <path>`，
   不能只看 host 文件。
 
@@ -188,8 +189,9 @@ slang 子组件化 + CachePipelinePanel 重写）就这么被静默回溯到 2 �
 
 **规则**：
 
-- 任何 deploy / build / merge 之前，必跑 `git stash list && git status -uno`，确认没有
-  未恢复 stash、没有未提交修改被遗漏。
+- 任何 deploy / build / merge 之前，必跑 `git stash list`、`git status -uno` 与
+  `git ls-files --others --exclude-standard`，确认没有未恢复 stash、没有 tracked 或
+  untracked 构建输入被遗漏；`-uno` 只能聚焦 tracked 状态，不能替代 untracked 审计。
 - `storage/*.db*` / `storage/*.bak*` / `*.db-shm` / `*.db-wal` 永不进 commit——靠 .gitignore
   物理护栏，不靠"我记得避开"。
 - 恢复 stash 后必须 `git diff` 抽查关键文件，确认 hunks 真的应用上了；不要相信 stash apply
@@ -201,6 +203,7 @@ slang 子组件化 + CachePipelinePanel 重写）就这么被静默回溯到 2 �
 # 1. 部署 / build / merge 前
 git stash list                        # 期望：empty 或解释清楚每条 stash 用途
 git status -uno                       # uno = 不显示 untracked，专看追踪文件改动
+git ls-files --others --exclude-standard  # 单独审核会进入构建上下文的 untracked 文件
 git diff --cached HEAD                # 确认 staged 改动是预期的
 
 # 2. stash apply / pop 后必抽查

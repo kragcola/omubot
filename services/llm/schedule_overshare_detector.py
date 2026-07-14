@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from services.llm.sentinel_registry import (
+    RULE_ORDER_SCHEDULE_OVERSHARE,
     GuardrailContext,
     GuardrailHit,
     GuardrailResult,
@@ -155,4 +156,4 @@ def schedule_overshare_rule(text: str, ctx: GuardrailContext) -> GuardrailResult
     )
 
 
-register_rule(schedule_overshare_rule)
+register_rule(schedule_overshare_rule, order=RULE_ORDER_SCHEDULE_OVERSHARE)

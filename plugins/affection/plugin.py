@@ -14,8 +14,8 @@ from kernel.types import (
     PluginContext,
     PromptContext,
     ReplyContext,
+    Tool,
 )
-from services.tools.base import Tool
 
 
 class AffectionConfig(BaseModel):

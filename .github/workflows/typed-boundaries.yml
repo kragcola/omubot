@@ -1,0 +1,37 @@
+name: Typed boundaries
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  pyright:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - name: Install locked dependencies
+        run: uv sync --frozen
+      - name: Check typed architecture boundaries
+        run: bash scripts/check-typed-boundaries.sh
+      - name: Validate plugin manifests
+        run: uv run python scripts/check_plugin_manifests.py
+      - name: Validate plugin lifecycle and capability health
+        run: |
+          uv run pytest \
+            tests/test_food_task_lifecycle_contract.py \
+            tests/test_memo_task_lifecycle_contract.py \
+            tests/test_plugin_manifest_lifecycle_health.py \
+            tests/test_schedule_generator.py \
+            tests/test_plugin_remediation_ownership_lifecycle.py \
+            tests/test_admin_api_learning_pipeline.py \
+            tests/test_application_composition.py \
+            tests/test_plugin_bus.py

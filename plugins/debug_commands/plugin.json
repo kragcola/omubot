@@ -5,17 +5,19 @@
     "zh": "调试指令",
     "en": "Debug Commands"
   },
-  "description": "调试指令增强：/plugins 查看已加载插件列表，/version 版本检查",
-  "version": "1.3.1",
+  "description": "调试与运维指令：运行态检查、权限、插件与版本信息",
+  "version": "1.4.0",
   "priority": 300,
   "tier": "user",
-  "toggle_policy": "runtime",
+  "toggle_policy": "restart_required",
   "category": "ops",
   "permissions": [
     "command"
   ],
   "capabilities": [
-    "debug_commands"
+    "debug_commands",
+    "runtime_debug",
+    "authority_admin"
   ],
   "min_omubot_version": "",
   "config": {

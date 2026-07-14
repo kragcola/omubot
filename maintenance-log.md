@@ -4,6 +4,226 @@
 
 ---
 
+## 2026-07-15 两轮插件审计 33 项、三轮 closure 补强与 Style tick 运行修复最终上线
+
+**变更类型**：插件完成审计 / 命令与工具事务 / owner 收敛 / health truth / cancellation commit barrier / CI 门禁 / bot-only 部署。对应 `docs/tracking/existing-plugin-remediation-completion-audit-2026-07-14.md`；最终结论为第一轮 16 项与第二轮 17 项共 `33 PROVEN / 0 WEAK / 0 MISSING`，三轮 closure review 及最终运行补丁复核均 `0 Critical / 0 Important`。
+
+**补强修复**：Command registry 升为 canonical token/subcommand/Unicode regex FSM fail-fast 与 `prepare/commit/snapshot/restore` 两阶段事务，覆盖 Python Unicode `\w/\d/\s`、`IGNORECASE` case-fold、unhashable registry、provider/tool replacement 和持久化失败回滚。有效管理员与 Tool ABI 收敛为 service/kernel 单一真值；Chat debug 指令迁到唯一 ops owner。Style extraction 下沉 service 并与 Slang/Admin 共用 `LearningExtractCoordinator`；archive scan read/start/finish、cursor commit、scanner wrapper 及 Memory owner 的 timeout/repeated-cancel/start-finish 窗口均 fail-closed，不留下 `running`。Manifest checker 同时拒绝 parity 漂移、orphan package `plugin.py` 与 root legacy plugin；optional dependency、Vision、Bus/Index/Admin/system health 同源。
+
+**运行期追加缺口与根因**：首轮补强 image `671078e6...` 的启动/source/Admin/零出站均正常，但延长观察后 Style 每个 tick 都触发 5 秒 hook timeout。根因是 Manifest 新增 `tick` 后，`StylePlugin.on_tick` 同步等待最长 120 秒提取，而 PluginBus 普通 hook 预算为 5 秒；旧测试只使用立即返回 mock。按 TDD 改为 Style 自有单后台 job，重复 tick 去重，成功后才推进节流时间，shutdown cancel+await；不放宽全局 Bus 预算。真实 coordinator 取消链验证 run 离开 `running` 且写 `finished_at`。
+
+**验证**：Style 11 passed；Style/Bus/coordinator/archive owner 聚合 126 passed；Ruff clean、scoped Pyright 0；typed boundary `44 targets / 0 errors`；23 manifests、strict layout、`git diff --check` 全绿。生产代码最终变更后 full pytest **3372 passed / 17 skipped / 161 warnings**；此前 Vue typecheck 与 Vite `4392 modules` build 保持有效（本轮未改前端）。
+
+**部署与运行验收**：仅重建/替换 bot。最终 image `e31c2a630cd355a9a7e259f471c21e9ebb2d31e1610965d5a8512d08a044184d`，tag `omubot-bot:plugin-closure-style-tick-final-20260715`，container `41a5346c32781409b5b0ece57315ec6887ddcc091527fd70655a2f4637b98360`，restart=0、OOM=false；build context 97.15 kB，镜像内 23 manifests/strict layout 通过，9 个关键 source 与宿主 SHA256 0 mismatch。Admin 为 23 entries 全 enabled、Index 23（21 loaded + 2 capability-only）、15 个递归命令/0 patterns；Style 首轮真实周期提取完成，hook max 5.47 ms、0 error/timeout；8 个常驻任务 running + `learning.extract` completed，0 failed/backoff；OneBot connected，Protocol Trace 30 ok / 0 failed / 0 pending、send/poke 0。health 10 ok / 2 warning / 0 error；两项 warning 只来自既有外部 QQ 图片 404 与 2 个 optional DB missing。
+
+**公开群负向窗口**：UTC `2026-07-14T18:59:25Z` 至 `19:02:25Z` 内，NapCat 收到 6 条 `silent_learn` 公开受限群自然入站：625618470=4、717096900=1、805836168=1。NapCat 群出站 0、`send_group_msg` 0、error 0；bot group inbound 同为 6、send/poke 0、ERROR/CRITICAL/Traceback 0、Style timeout 0。该证据只覆盖固定窗口，不外推为永久零出站。
+
+**回滚与交接**：精确上一版 image `671078e6...` 已标记 `omubot-bot:pre-style-tick-fix-20260715`，回滚只允许切换该 image 并 bot-only recreate。NapCat 始终保持 container `19f6cf13607c...`、image `cde89d766604...`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。本次完成范围及原未跟踪的 workflow/schema/checker/tests 已显式纳入本地交付提交；工作树仍保留角色包、coursework、QZone 立项、deep-delivery skill 冲突稿和本机产物，尚未 push，远端 CI 未激活。后续仍禁止 `git add -A`。
+
+---
+
+## 2026-07-14 现有插件 ManifestV3 平台合同上线与零出站验收收口
+
+**变更类型**：插件平台合同 / 配置真值 / 生命周期与 capability health / Admin 与 CI 门禁 / bot-only 部署。对应 tracker `docs/tracking/existing-plugin-manifest-remediation-2026-07-14.md`、迁移清单 `docs/migrations/existing-plugin-manifest-remediation-2026-07-14.md`；承接同日第二轮插件审计整改，不重复计算其 10 Important、4 Minor、3 Decision。
+
+**合同与审计修复**：ManifestV3 现由 strict typed model、canonical loader 与 checked-in JSON Schema 统一执行，覆盖 name/SemVer/min-version、目录与 runtime identity、required/optional dependency、config defaults/schema/path confinement、apply mode 与 nested restart field。Bus discovery 复用 pre-import typed snapshot，正式插件缺失/损坏/future manifest、duplicate runtime name、defaults/override/schema 校验失败均 fail-closed；Admin schema 丢失时不调用 hook、不写 override。旧 `kernel.manifest.PluginManifest` 收敛为 canonical alias。Food/Memo 后台 task 具备 owner、异常回收和 cancel+await；Vision 与 History capability 使用真实 runtime telemetry。仓库 23 份 manifest、Index、Bus、Admin、前端与本地 CI gate 共用同一合同，并引入 `jsonschema>=4.23.0` 执行配置 JSON Schema。
+
+**验证与复审**：plugin/lifecycle 聚合 214 passed，Admin 聚合 119 passed；scoped Ruff clean、Pyright 34 targets / 0 errors，Vue typecheck 通过、Vite 4392 modules build；manifest gate 23 validated。最终全量 **3256 passed / 17 skipped / 166 warnings**，warnings 为既有 aiohttp/NoneBot deprecation 与 retrieval aiosqlite thread 收尾。独立 review 首轮发现的 discovery 二读 TOCTOU、config schema 未执行、schema missing 被 Admin 吞错三项均先补 RED 再关闭；最终 review 与 deployment preflight 均无 Critical / Important。
+
+**构建、部署与回滚**：只执行 `docker compose build bot` 与 `docker compose up -d --no-deps --force-recreate bot`。build context 2.59 MB；新 image `93cef508a4d38ee4cb7cdf486212d24f3fa57972e2254b320a48d74459ef3e5d`、container `9507ed557b363121ae585ca1c902edd2249596c2d1e9db52fc48b9d28b247a57`、StartedAt `2026-07-14T10:26:46.509646721Z`、restart=0、OOMKilled=false；运行 source 与 host production manifest 0 mismatch，容器内 gate 23 validated。回滚 image `omubot-bot:pre-manifest-v3-20260714`=`c446ff2a2f67...`；配套旧 SPA 98 files 位于 `.workspace/rollback/pre-manifest-v3-20260714/admin-static`，tree `8fc04188...`。回滚必须先恢复该 host `admin/static` 快照，再切旧 image 并只重建 bot；不得只回 image 留下新 SPA。23-file production delta 位于同目录 `production-delta.tsv`，SHA-256 `af4be32f...`。
+
+**运行验收**：Admin SPA 200；插件 API 23 entries 全 enabled（PluginBus 21/21 + 2 capability-only），Index 23/23 manifest valid。History Backfill `success/runs=1/errors=0`；Vision `available=true/status=idle/calls=0/errors=0`；service health 10 ok / 2 warning / 0 error，后台任务 8/8 running。两项 warning 仅既有外部图片 404 与 2 个 optional DB missing。OneBot connected；Protocol Trace 验收快照 70 ok / 0 failed / 0 pending，send action 0。
+
+**公开群负向窗口**：固定窗 UTC `2026-07-14T10:26:54.456781Z` 至 `10:39:00Z`（12 分 05.5 秒）内，生产 NapCat 与 NoneBot 均记录 251 条群入站，来自 7 个明确配置为 `silent_learn` 且不在 active whitelist 的群：477640404=20、625618470=7、717096900=3、805836168=119、860324414=32、963085812=68、963737802=2。全局群出站 0、`send_group_msg` 0、NapCat error 0，bot ERROR/CRITICAL/Traceback 0。部署瞬间 UTC `10:26:49Z` 有一次反向 WebSocket `ECONNREFUSED` 及“5 秒后重试”两条 NapCat error；`10:26:54Z` 连接成功后固定窗清零，因此不把容器替换期间的预期重连伪报为零错误。该负证据只覆盖固定窗口，不外推为永久零出站。
+
+**范围与交接**：NapCat 全程保持 container `19f6cf13607c...`、image `cde89d766604...`、Created `2026-06-22T07:00:35.653702969Z`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。本轮没有数据库 schema/data migration。`.github/workflows/typed-boundaries.yml`、schema 与 checker 当前仍为 untracked build inputs；本地与运行镜像 gate 已通过，但远端 CI 尚未激活，后续提交时必须显式纳入，禁止用 `git add -A` 扫入其他脏文件。
+
+---
+
+## 2026-07-14 现有插件第二轮审计整改上线与运行验收收口
+
+**变更类型**：插件生命周期/命令/业务正确性整改与连接阶段迁移。对应 tracker `docs/tracking/existing-plugin-remediation-2026-07-13.md`、迁移清单 `docs/migrations/existing-plugin-remediation-2026-07-13.md`。
+
+**内容**：完成第二轮审计 10 Important、4 Minor、3 Decision 的实现切片。命令 registry/fast path/权限与 metadata 已原子刷新；Affection zero、Echo rollover、Food 否定/候选/recent/dislike、`/food search` 持久设置与 Web-only 候选约束、Bilibili ep/ss resolver/summary/trigger 已接线。Dream 仅保留 DreamAgent，生日归 `calendar_context`，memory consolidation 归独立 `MemoryConsolidatorLifecycle`；Calendar/Dream handle 与 Admin 状态一致。Schedule 已删除旧 Calendar 生产 fallback，缺 provider 时只做 neutral 日期降级，旧 `plugins.schedule.calendar` 仅代理 canonical 数据/类型；HistoryLoader 已迁 `services.history_backfill.run_history_backfill`，由 `RuntimeConnectionPipeline` 在 PluginBus hooks 前运行，其真实状态接入 service health 与 manifest-only plugin list/detail。最终出站 guard 同时检查静态 group policy 与动态 scheduler mute，Calendar birthday 与管理员任意目标群发送均不能绕过。
+
+**验证**：targeted 命令 158、业务 152+Food/Bangumi 补强 13+2、所有权/History/Application/Build 45+71 均通过；final-boundary 初始 13 个行为 RED 后 GREEN，Calendar/Schedule/Admin/connection 扩展 284 passed；remediation/blocked/off/silent_learn/mute 聚合 154 passed。最终 review 首轮 0 Critical / 2 Important / 2 Minor，package API/compat 双 service/普通生日 energy/capability-only 文档均经新增 3 RED 关闭；closure review 0/0/0、56 passed、static 0。修复后全量 **3207 passed / 17 skipped**。Vue typecheck 通过、Vite 4392 modules build；scoped Ruff/Pyright 0/0，生产旧 Calendar consumer与 kernel/services 反向 plugin import 为零，D3 stale claim 为零，D7 stash empty/diff clean/AppleDouble 0。全仓 Ruff 仍为 177 个既有错误（仅 coursework/research/IPv6），Pyright 为 353 errors / 1 warning 的既有基线；未新增本轮 scoped 债。
+
+**部署与运行验收**：旧 image `c2831e16c135...` 已标记 `omubot-bot:pre-plugin-remediation-20260714`；`dot_clean .` 后 `docker compose build bot` 18/18 完成，构建上下文 2.96 MB、镜像内 plugin layout 通过。仅执行 `docker compose up -d --no-deps --force-recreate bot`，新 image `c446ff2a2f67...`、container `24707fce7da8...`、StartedAt `2026-07-14T04:47:56.636289506Z`、restart=0、OOMKilled=false。Admin 200；History Backfill `success/runs=1/last_error=""`，service health=ok，插件 list/detail=healthy；OneBot connected，protocol trace 47 ok / 0 failed / 0 pending / 0 send；后台任务 8/8 running。整体 health 为 10 ok / 2 warning / 0 error，两项 warning 是既有外部图片 404 与 2 个 optional DB missing。
+
+**公开群负向窗口**：UTC `2026-07-14T04:48:04.5969963Z` 至 `04:56:09.590262000Z`（8 分 05 秒）内，NapCat 记录 74 条群入站，来自 5 个已配置 `silent_learn` 群和 1 个 whitelist 外群；全局群出站 0、`send_group_msg` 0、NapCat error 0，bot Traceback/ERROR/CRITICAL 0。历史日志可检出同一 NapCat 的真实“发送 -> 群聊”格式，排除日志规则漏搜；该证据只覆盖固定窗口，不外推为永久零出站。
+
+**范围与交接/回滚**：本条只收口第二轮 10I/4M/3D；第一轮 manifest 审计的共享 parser/schema、runtime version gate、剩余依赖/task owner、Vision probe 与 CI 合同仍独立开放。本轮没有数据库 schema/data migration。NapCat 始终保持 container `19f6cf13607c...`、image `cde89d766604...`、Created `2026-06-22T07:00:35.653702969Z`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。回滚仅需把 `omubot-bot:pre-plugin-remediation-20260714` 重标为 latest 并 bot-only recreate，禁止操作 NapCat。
+
+---
+
+## 2026-07-13 中期架构 M3-M6 实装、bot-only 上线与运行验收收口
+
+**变更类型**：中期架构 / SQLite 治理 / 后台任务生命周期 / Admin slice / 类型门禁 / 正式构建与 bot-only 部署。对应 tracker `docs/tracking/architecture-mid-term-completion-2026-07-13.md` 与迁移清单 `docs/migrations/architecture-mid-term-completion-2026-07-13.md`。M3-M6 已实装、独立复审、正式构建并替换 `qq-bot`；NapCat 全程未 restart/recreate/down。
+
+**M3 数据治理**：建立 21 库 `DatabaseCatalog`、显式连接/backup/retention profile、migration ledger + `PRAGMA user_version` 同事务和三库 governed adoption。schema adoption 从“表/索引名存在”升级为类型、PK、NOT NULL、默认值、UNIQUE、FK、索引列/unique/partial/WHERE 的语义合同；live 状态改用 WAL-aware `mode=ro`，容量统计主 DB/WAL/SHM/journal。optional missing 不再触发错误或紧急备份；future-version 在任何 journal/profile 写入前拒绝；Admin prune 只走有界 owner retention；restore 对 untrusted、required failed/skipped、伪 optional、选择性恢复和目标 schema 不匹配全部 fail-closed。生产 block_trace/usage/episodic v0 只读合同均为 true，M3 第三轮独立复审 `0 Critical / 0 Important / 0 Minor`。
+
+**M4/M5 生命周期与 Admin 抽取**：单一 `BackgroundTaskSupervisor` 统一 PluginBus、Backup、HealthGuard、Hawkes、Dream、Schedule 进程级 owner。`LearningExtractCoordinator` 的 wait=true/false 都登记稳定 `learning.extract`；连续 25 次完成后 coordinator history=20、Supervisor record=1，stop 会 cancel+await 且早于 PluginBus/store。BackupScheduler repeated/concurrent start 幂等，reload 在外部取消时先完成一致事务再传播。备份 API 从 `system.py` God Module 移到唯一 `backup.py` owner，7 个 method/path 无重复；route lock + shield 覆盖“读取当前 settings→merge→校验→reload→原子落盘”，取消和两个并发局部更新都保持 runtime/config 一致，旧 `POST /api/admin/backup` 合同保留。插件普通 toggle 精确保持 `{ok, plugin}`；restart-required pending 可显示/反向取消，缺 PluginStateStore fail-closed，ToolRegistry 只允许原子 replace-all。
+
+**M6 与前端**：分区类型门禁扩到 34 targets，0 errors / 0 warnings；PluginsView 显示 persistent target state 和待重启启用/停用。`vue-tsc --noEmit` 通过，Vite 临时 production build 4392 modules 通过。全仓 Ruff 仍有 177 项既有错误，仅在 coursework/research/IPv6 工具目录；本轮 M1-M6/Admin 边界 Ruff clean。
+
+**验证与复审**：M3-M6 聚焦聚合 307 passed；backup route 最终 9 passed；M4/M5 扩大回归 120 passed；全仓最终 **3108 passed / 17 skipped**；`git diff --check` clean。M4/M5 最终独立复审 `0/0/0`。测试期间旧重复 route 曾无视注入 `config_path` 写到真实 `config/config.json`；发现后以 trusted pre-change payload 做精确对比并恢复，GREEN 后再次断言真实 config 与备份完全相等，未把测试值带入部署。
+
+**构建、部署与回滚**：canonical 命令统一为 `docker compose build bot` 后 `docker compose up -d --no-deps --force-recreate bot`，不再依赖不存在的 `scripts/deploy.sh`；D7 同时检查 stash、tracked 和 untracked；`.dockerignore` 排除动态工具、研究语料、coursework、配置、运行库与 NapCat 输入，最终 build context 2.50 MB。source 596 files SHA256 `1d108a6b…`、frontend 98 files SHA256 `c21f8bd7…`、image-source 812 files SHA256 `a055880e…`；部署时 440 个生产文件与 98 个前端文件 host/image 全匹配。旧 image `91e8a36c6713…` 已标记 `omubot-bot:pre-midterm-m3m6-20260713`；新 image `c2831e16c135…` 标记 `omubot-bot:midterm-m3m6-20260713-1d108a6b`，运行 container `fe045dee4150…`、StartedAt `2026-07-13T09:33:11.554438591Z`、restart=0。上述 manifest 固化部署镜像快照；本条和 tracker 的部署后勘误会使当前宿主文档与 image-source manifest 出现预期差异，不代表运行代码或前端漂移。
+
+**生产数据库勘误与当前证据**：宿主 `storage/` 不是生产 Docker named volume；因此旧 `pre-change-20260713-140943` 只覆盖 host checkout，不能再称为生产备份，其三库行数也不能作为生产 pre-count。新容器启动后，真实 `/app/storage` 中 `block_trace`、`usage`、`episodic` 均为 v1、migration ledger `adopted=1`、semantic=true；验收时 domain counts 分别为 `prompt_block_traces=8085 / humanization_metrics=757 / runtime_metric_events=669317`、`llm_calls=56949`、`episodes/revisions/observations=0`（`episode_meta=1`）。adoption 的实现和测试证明只写 metadata，但部署前未捕获精确 live row counts 或 v0 named-volume 快照，故不能声称运行态迁移前后行数精确相等，也不存在可诚实宣称的生产数据 v0 回滚点。已立即补建真实 named-volume v1 安全备份 `pre-change-20260713-173655`（容器 `/app/storage/backups/pre-change/2026-07-13`，schema v2，20 ok / 1 optional skipped / 0 failed / trusted=true）；三库 quick_check=ok，当前代码 restore plan 全部 ALLOW，manifest 导出到 `.workspace/deploy/m3-m6-20260713/production-backup-manifest.json`。该备份只能恢复 post-adoption v1 安全点，不能回退 ledger/user_version。
+
+**运行验收**：`/api/admin/databases` 返回 19/21 ok、2 个 optional missing、0 error；Background Tasks 7/7 running、failed=0、backoff=0；OneBot `/get_status` online=true/good=true，Protocol health connected、106 ok / 0 failed / 0 pending；research capture healthy 且 drop/write/error=0；Backup settings/list 命中新路由并能看到真实生产备份。部署后固定窗口 `2026-07-13T09:33:11.554438591Z` 至 `09:46:20.962305000Z` 的 NapCat 日志共见群入站 182、群出站 0：7 个 silent 群有自然入站仍全部零出站，另外 3 群无流量；qq-bot 与 Admin trace 交叉验证全局 send action、guard block、发送失败均为 0，两条 error 仅为 bot recreate 时反向 WebSocket 短暂拒绝与 5 秒重试，不是发送错误。该负证据只覆盖固定验收窗，不外推为永久零出站。overall warning 仅来自 5 条既有运行 warning 与 2 个 optional DB missing。qq-bot 保持 container `fe045dee4150…`、restart=0；NapCat 保持 container `19f6cf13607c…`、Created `2026-06-22T07:00:35.653702969Z`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0、无 replace，确认未重建。
+
+**SQLite 勘误**：本日志下方“进阶话题块 Phase 1 首次生产行审计”当时使用 `mode=ro&immutable=1` 检查 live DB；该方法不保证纳入活跃 WAL，不能作为完整 live 状态证据。中期 M3 已改用 `mode=ro` 复核并更新 `AGENTS.md`/`CLAUDE.md`：`immutable=1` 仅限明确离线、不再变化且无需 WAL replay 的静态备份 payload。
+
+---
+
+## 2026-07-13 进阶话题块 Phase 1 首次生产行审计 + 运行期指标闭环上线
+
+**变更类型**：研究采集运行验收 / Admin 只读可观测 / qq-bot 部署。对应 tracker `docs/tracking/advanced-topic-block-prelaunch-2026-07-12.md`。不修改 raw schema、TopicBlock 参数、group policy、人格/prompt 或 Phase 2 assignment 预留。
+
+**生产数据审计（2026-07-13 勘误）**：当时对运行容器 `/app/storage/research_events.db` 先查 schema/`PRAGMA table_info`，再以 `immutable=1` + query-only 审计；该方式不保证纳入活跃 WAL，因此下列 13 行统计只代表当时可见的静态主库快照，不再作为完整 live 状态证据。中期 M3 后续已用 `mode=ro` 做 WAL-aware 复核并固化新规则。当时记录的主库 12,288 B、WAL 4,152 B、SHM 32,768 B，mode `0600`、`user_version=1`、`quick_check=ok`；静态快照中 13 行（`inbound=4 / outbound=9`），均为 `source=live`，来自开发测试群 `993065015` 的两个旧 run；`984198159` 为 0。Phase 2 的 `topic_assignment`、assignment evidence、utterance membership/边表仍不存在，未误记为完成。
+
+**缺口与修复**：原 `ResearchEventCapture.metrics_snapshot()` 只在 shutdown finalizer 打印，运行中无法执行 dropped/error/pending 上线门禁。新增鉴权只读 `GET /api/admin/research-events/status`，每次请求动态读取 ctx capture，公开 received/enqueued/persisted/duplicate/dropped_queue_full/write_error/pending/error；区分 disabled、配置开但初始化缺失的 unavailable、snapshot error 和 degraded。只有 drop/write/store error 降级，pending/duplicate 不误报；snapshot 异常固定返回且不泄漏内部文本，不读 SQLite、不改变 capture 生命周期。
+
+**验证**：API 契约 RED 8 failed（目标路由 404）后 GREEN 10 passed；research+admin 60 passed、全 research suites 50 passed；targeted Ruff clean、Pyright 0、diff check clean。独立复审无 Critical/Important，两个 Minor（动态 ctx 与全局 auth 测试）已补并通过。运行态未登录 401、登录后 200 healthy，八项 metrics 全 0；protocol trace 29 ok / 0 failed / 0 pending / group send 0，NapCat 发送日志同样为 0。
+
+**部署与回滚**：新 image `91e8a36c6713`、qq-bot container `5b9a72cec6ac`、restart=0；启动日志确认 capture armed、Application complete、OneBot connected、outbound guard/protocol trace installed。NapCat 保持原 container `19f6cf13607c`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。回滚 tag `omubot-bot:pre-research-metrics-20260713` 指向旧 image `8578838d6c6c`；仅重标 latest 后 `docker compose up -d --no-deps --force-recreate bot`，不得操作 NapCat。
+
+---
+
+## 2026-07-13 中期架构 Phase 2：Typed Pipeline Stages 上线
+
+**变更类型**：中期架构 / Router-Scheduler-LLMClient 削薄 / 取消与连接代际修复 / qq-bot 部署。对应 tracker `docs/tracking/architecture-mid-term-phase2-pipeline-stages-2026-07-13.md` 与迁移清单 `docs/migrations/architecture-mid-term-phase2-pipeline-stages-2026-07-13.md`。不修改 research schema、TopicBlock 参数、群策略、人格/prompt、DatabaseCatalog、TaskSupervisor 或 Admin 拆分。
+
+**内容**：① 新增 `RuntimeConnectionPipeline`，Composition Root 构造并注入，Router 的 connect/disconnect decorator 仅做 protocol dispatch；first-connect、inventory/mute reconcile、usage alert、name registry 与 owner cleanup 移出 Router。② 新增 typed `RuntimeOutboundDelivery`，单次 humanizer + OneBot transport + research/pair-guard side effect 下沉；Scheduler 继续拥有 mute、retry/backoff、`sent_event`、pair metric 与 ReplyRun terminal。③ 新增 `VisibleReplyGuardrailStage`，normal terminal 与 tool-exhausted terminal 共用 typed adapter；persona drift 保持在前、humanization rewrite 在后，provider/tool loop、usage 与 overshare successful-commit owner 不变。
+
+**复审修复**：首轮独立只读复审无 Critical，发现并关闭 4 个 Important：first-connect hook 取消后 startup claim 污染、迟到的同 self_id 旧 disconnect 清新 owner、rate-limit retry 冻结旧 user_id、ReplyRun metric 阻塞 slot cleanup。四项均先有具体 RED 后转 GREEN；新测试 Pyright 从 9 errors 修到 0。保留两个非阻断 Minor：低层 Router installer 混用时 exactly-once guard 不统一（正式 Composition Root 路径有总 guard）；非标准 OneBot message_id/CQ id 畸形输入缺专门兼容测试。用户要求重建的补充 final reviewer 因持续 429/target missing 未返回，未伪记为成功；首轮 findings 的关闭由定向测试、静态检查和全量回归逐项证明。
+
+**验证**：Router/application 21 passed；Scheduler delivery/research/privacy/mute/pair 38 passed；Phase 2 扩大回归 353 passed；复审修复核心 29 passed；最终全量 **2951 passed / 17 skipped**（Phase 1 为 2926 / 17）。Phase 2 production+tests targeted Ruff clean、targeted Pyright 0、`git diff --check` clean。全仓 Ruff 的 177 项既有错误仍集中在无关 coursework/research/IPv6 脏文件，本轮未扩大修改。
+
+**部署与运行验收**：从 Phase 1 image `0f10a0e34f97` 创建停止态 staging，仅覆盖 9 个 Phase 2 production 文件；9/9 SHA256、py_compile、import smoke 通过。新 image `8578838d6c6c`、qq-bot container `a4785cf15cb3`、restart=0，entrypoint `/app/.venv/bin/python bot.py`。启动日志确认 Application complete、OneBot connected、research capture armed、outbound guard/protocol trace installed、两个 active 测试群历史加载；Admin `/admin/`=200；运行容器 9/9 SHA 与宿主一致。部署观察窗收到公开群 2 条 `silent_learn` 自然入站，公开群 LLM chat=0、scheduler send=0、Traceback/ERROR=0。
+
+**NapCat 与回滚**：NapCat 始终保持 container `19f6cf13607c`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未执行 restart/recreate/down。回滚 tag `omubot-bot:pre-midterm-phase2-20260713` 指向 Phase 1 image `0f10a0e34f97`；回滚只需把该 tag 重标为 `omubot-bot:latest` 后 `docker compose up -d --no-deps --force-recreate bot`，不得操作 NapCat。
+
+---
+
+## 2026-07-13 中期架构 Phase 1：Composition Root 与 ChatRuntime 生命周期所有权上线
+
+**变更类型**：中期架构 / 进程装配 / Chat 生命周期 / 资源泄漏加固 / qq-bot 部署。对应 tracker `docs/tracking/architecture-mid-term-phase1-composition-root-2026-07-12.md` 与迁移清单 `docs/migrations/architecture-mid-term-phase1-composition-root-2026-07-12.md`。不修改 research schema、TopicBlock 参数、公开群策略或 NapCat。
+
+**内容**：新增 `bootstrap/application.py` 与 `bootstrap/chat_runtime.py`，把 `bot.py` 收敛为 host/CLI + build/install 壳，把 ChatPlugin 约 793 行跨域构造迁入显式 runtime assembly。ApplicationRuntime 负责顺序启动、逆序补偿、错误隔离、共享 shielded stop 与 start/stop 串行；ToolRegistry 原子合并插件工具；Router lifecycle 统一由 runtime 接管；Admin router 延迟到完整 startup 后安装，避免闭包捕获 `None` 服务。ChatRuntime 建立 ctx publish rollback、全局 rollback/commit action、borrowed/owned resource 区分、依赖顺序关闭与 ContextPlugin takeover 保留。
+
+**复审修复**：独立 process/chat 复审累计发现并关闭 8 个 Important：进程 partial-start cleanup、Backup task partial leak、stop cancel ownership、legacy/runtime Router 混装、Application start/stop 并发竞态、LLM constructor session 泄漏、CharacterRegistry/RecognitionCache init 局部连接泄漏、ResearchCapture recorder/store 关闭未隔离。另关闭 Affection GroupMemoryConfig/runtime-state 漏接线、ScheduleGenerator 双 stop owner、commit action 断点重放等 Minor。D1 同模式扫描确认 Chat-owned 其他 SQLite store 都会在连接成功后立即让 assembly 可见；Character 两处为局部连接晚赋值的特例。
+
+**验证**：全部行为切片先有具体 assertion RED 再转 GREEN；最终扩大定向 393 passed；全量 **2926 passed / 17 skipped**（Phase 0 基线 2871 / 17）；targeted Ruff clean、targeted Pyright 0、py_compile 与 `git diff --check` 通过。最终两线复审无 Critical/Important。已知非阻断 Minor：`kernel/router.py` 的 `runtime=None` legacy lifecycle 仍保留旧契约但生产无调用；shutdown 后 `ctx.research_event_capture` 短暂指向已关闭实例。
+
+**部署与运行验收**：为避免脏工作区无关改动进入镜像，从原 image `5bd0e04205cf` 建停止态 staging，仅覆盖 14 个 Phase 1 生产文件，逐文件 SHA256、py_compile、import smoke 通过。第一次 commit 继承 staging 的 `sleep infinity` command，第二次尝试清空 entrypoint 仍被 Docker 保留 `/bin/sh`；两次均在运行检查中立即识别，未触碰 NapCat。最终切换为显式等价入口 `/app/.venv/bin/python bot.py`，image `0f10a0e34f97`、qq-bot container `e315d8be05ea`、restart=0。启动日志确认 Application complete、OneBot connected、research capture armed、outbound guard/protocol trace installed；Admin login=200，Usage API 返回 `by_model/summary/timeseries/top_groups/top_users`，不再出现 tracker unavailable。部署窗口收到公开群 9 条自然消息，全部 `silent_learn`；`send_group_msg=0`、scheduler send=0、Traceback/ERROR=0。
+
+**NapCat 与回滚**：NapCat 始终保持 container `19f6cf13607c`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未执行 restart/recreate/down。回滚标签 `omubot-bot:pre-midterm-phase1-20260712` 指向旧 image `5bd0e04205cf`；回滚只重新标记该 image 并 force-recreate `bot`，不得操作 NapCat。
+
+---
+
+## 2026-07-12 中期架构 Phase 0：TopicBlock 正确性与匿名回放基线上线
+
+**变更类型**：中期架构前置 / TopicBlock 正确性 / 测试回放 / qq-bot 部署。对应 tracker `docs/tracking/architecture-mid-term-phase0-2026-07-12.md` 与迁移清单 `docs/migrations/architecture-mid-term-phase0-2026-07-12.md`。
+
+**内容**：关闭三个已实证的纯内存状态错误：① `observe()` 不再向全冷却后已脱离 `self._blocks` 的旧 dict 写新块；② 当前 arrival 先完整 `_apply()`，再按最终 activity 做 `max_blocks` 容量治理；③ reservoir revive 只迁移池归属，activity 由 `_apply()` 单一计数。未调整 L1 权重、衰减、候选阈值、研究 schema、配置或群策略。
+
+**回放门禁**：新增 6 cases / 13 events 的版本化纯合成 TopicBlock fixture 与测试域 runner，覆盖 B1/B2/B3、reply、@、L1 冷块召回、reservoir 和 bot-involved anchor。runner 输出不回显正文、不读写生产 DB；fixture 只允许固定合成词、短 actor/message alias 和 `provenance=synthetic`。本基线仅证明确定性与状态不变量，不能替代真实双标注 graph-F/F1、错并错拆率或阈值校准。
+
+**验证与复审**：B1/B2/B3 均先 RED 后 GREEN；TopicBlock 27 passed，topic/replay/scheduler/arbiter/research 相关 134 passed，全量 2871 passed / 17 skipped；targeted Ruff passed、Pyright 0、JSON/diff check passed。独立复审首轮发现 runner 前置 `_active()` 导致 B1 假绿及隐私门禁过宽，修复后无 Critical/Important，剩余 Minor 全部关闭。全仓 Ruff 仍有 177 个既有错误，集中于本次外的课程/research/IPv6 文件，未扩大修改。
+
+**部署与回滚**：从当前已验证镜像创建停止态 staging，仅覆盖 `services/group/topic_block.py`；host/staging/runtime SHA256 均为 `74f3bc3325a70ff864d16dc197f12664438bcde8a320cd9112764b78036d8277`。新 image `5bd0e04205cf`、qq-bot `9f7a27bee21c`、restart=0；OneBot、research capture、outbound guard、protocol trace 与三状态 runtime smoke 均正常。部署后至少 6 条公开群文本均标记 `silent_learn`，窗口内 send/scheduler/Traceback/ERROR=0。NapCat 保持 `19f6cf13607c`、原 Created/StartedAt、restart=0。回滚镜像为 `omubot-bot:pre-midterm-phase0-20260712`（旧 image `b94a17dfc08a`），回滚只替换 qq-bot，不操作 NapCat。
+
+---
+
+## 2026-07-12 架构短期五项加固完成并上线
+
+**变更类型**：架构加固 / 插件治理 / 回复可观测 / 有效配置 / qq-bot 部署。对应审计 `docs/audits/omubot-architecture-and-peer-audit-2026-07-12.md`、执行 tracker `docs/tracking/architecture-short-term-hardening-2026-07-12.md` 与迁移清单 `docs/migrations/architecture-short-term-hardening-2026-07-12.md`。五项短期工作已全部落地，不修改话题块研究 schema、人格、学习或群聊决策。
+
+**内容**：① PluginBus hook 与 ToolRegistry 建立硬 deadline、外层取消传播、内部 TimeoutError 区分、timeout health；required/optional dependency 对缺失、禁用、版本、循环与 provider startup failure fail-closed。生命周期默认不强制 deadline，插件可显式配置。② 10 个有后台任务/初始化资源的插件改为 `restart_required`；runtime 插件在 boot-disabled 时做禁用态预初始化，Admin 工具表完整验证后原子替换，任何工具/持久化失败恢复全部插件 enabled 与 health 依赖闭包。③ 新增 metadata-only `ReplyRun`，覆盖 triggered/proactive 的 input/decision/generation/postprocess/delivery/terminal，只有 OneBot 真正成功发送才记 DELIVERED，不记录用户/回复正文、thought 或 secret。④ `PluginContext.service_capabilities` 动态只读映射 Conversation/Runtime/Persona，不增加 dataclass 字段。⑤ 新增只读 `GET /api/admin/config/effective`，解释 default/main/env/group policy/plugin default+override 与 restart/apply mode；secret 只返回 present/mask。
+
+**复审修复**：独立复审发现并关闭 6 个 Important：boot-disabled runtime 假热启、muted/no-bot 假 DELIVERED、partial startup 后 shutdown 被跳过、LLM main profile 派生来源误报、duplicate tool 导致半清空 registry、toggle 回滚未恢复 required dependent。7 个专门 RED 全部转 GREEN；最终复审无 Critical/Important。
+
+**验证（D1/D2/D4）**：S1 targeted 93 passed；五项相关回归 262 passed；最终全量 **2865 passed / 17 skipped**；Ruff passed；targeted Pyright 0；`git diff --check` passed；10 个 restart_required manifest 合法。镜像内 20 个白名单文件与宿主 SHA256 逐一一致，架构 imports smoke 通过。运行态 EffectiveConfig login/GET/POST=`200/200/405`，666 entries、6 secret 均无 value；插件 startup/dependency failure=0。
+
+**部署与群出站边界**：只替换 `qq-bot`，新 image `b94a17dfc08a`、container `50b3e58a0e7a`、restart=0；OneBot 已连接，research capture 与 outbound guard 已安装。`group-policy.json` 保持 whitelist，仅 2 个开发测试群；上线后抽样收到 3 个非白名单公开群消息，均记录为 `silent_learn`，发送/出站计数 0。NapCat 仍为 `19f6cf13607c`，Created/StartedAt/restart=0 完全不变。
+
+**构建异常与回滚**：Docker Desktop BuildKit 存在 `lease does not exist`，legacy builder 又被失效的 `host.docker.internal:8890` 代理阻断；为避免重启 Docker 触碰 NapCat，本次从已运行基线镜像创建停止态 staging，仅覆盖 20 个架构白名单文件，经 SHA256/import 验证后 commit 上线。旧镜像已标记 `omubot-bot:pre-arch-hardening-20260712`；回滚时将该 tag 重新标为 latest 后 `docker compose up --no-deps -d --force-recreate bot`，不得操作 NapCat。BuildKit lease/宿主代理应在未来可安全停止 NapCat 的维护窗单独修复，不影响本次运行代码。
+
+---
+
+## 2026-07-12 Omubot 架构与同类 Bot 对比审计留档
+
+**变更类型**：docs / architecture audit。新增 [docs/audits/omubot-architecture-and-peer-audit-2026-07-12.md](docs/audits/omubot-architecture-and-peer-audit-2026-07-12.md)，作为当前架构判断基线；旧 2026-05-07 三层架构审计保留为历史参考。本轮只写文档，未修改代码、配置或运行态，未重启任何容器，未触碰 NapCat。
+
+**审计结论**：Omubot 已是以群聊社会智能、长期人格和深度可观测为核心差异化的模块化单体；主要结构债集中在 `LLMClient`、`GroupChatScheduler`、`kernel.router`、`ChatPlugin` 四个中心模块持续膨胀，94 字段 `PluginContext` 的可变 Service Locator、插件启停/依赖/超时契约不完整、有效配置多真相源，以及 SQLite/后台任务治理分散。用户裁定开发阶段暂不把网络暴露、鉴权和密钥治理纳入本轮中短期架构排序。
+
+**短期必须项（1-4 周）**：① 插件 hook 与工具执行单次硬超时、取消测试、required/optional dependency；② 修正插件 toggle 的资源生命周期语义，不能把局部 hook 开关冒充完整热停启；③ 建立 `ReplyRun` 与固定回复阶段；④ 冻结 `PluginContext`，新能力改走类型化领域入口；⑤ 建立 `EffectiveConfigSnapshot`，让 Admin、诊断和状态文档读取同一有效配置事实。
+
+**中期应该项（1-3 月）**：提取独立 Composition Root；按阶段削薄 Router/Scheduler/LLMClient；建立 `DatabaseCatalog`、schema migration 与 retention/backup profile；建立后台任务 Supervisor；按触达拆 Admin God modules；对新架构边界启用 Pyright 0 error 门禁。
+
+**明确后置**：微服务化重写、切 PostgreSQL、远程插件市场、跨平台主线、为架构整洁强行引入向量数据库、替换 NoneBot2。当前主 tracker 仍是进阶话题块 Phase 1 运行监控，本次审计未改 `docs/tracking/ACTIVE.md`，后续若启动任一架构改造必须单独立项并建立迁移清单与回归矩阵。
+
+---
+
+## 2026-07-12 进阶话题块 Phase 1 原始研究事件层上线 + 全局群出站硬门禁
+
+**变更类型**：生产前优化 / 研究采集底座 / 群出站安全边界。2026-07-12 已直接上线两个开发测试群（984198159、993065015）；只重建 `qq-bot`，未重启或 recreate NapCat。旧 `TopicBlockTracker`、legacy `topic_corpus.db`、presence、coalesce 与 scheduler 话题归属算法保持不变。
+
+**背景**：对 2026-06-25 至 2026-07-12 运行窗口审计确认：281,048 条原始群事件中，280,751 条在 `silent_learn` 上游返回；legacy corpus 仅 279 条且 `ai=0`，并有 coalesce 逐条时间/边丢失与跨重启 `bN` 复用。故不能直接用旧库做情感动力学结论。
+
+**内容**：
+- 新增 `services/group/research_event_store.py`：schema v1 的 `research_message_event`、event UID 幂等、run ID、平台/摄入时间、方向、actor/source、reply/@ 边、content type；DB `0600`，WAL/NORMAL，单 writer 有界队列与 `append_many` 单事务批写。
+- `kernel/router.py` 在 self-message 排除后、presence/blocked/pair-guard/coalesce 前逐原始事件非阻塞采集，保留 image-only 与平台 `event.time`。
+- `services/scheduler.py` 仅在 OneBot 成功发送后采集主 LLM 文本；失败重试只记成功一次，无 message ID 也生成不碰撞 UID；CQ reply/@ 转结构化边，研究正文不保留原 QQ/CQ 传输码。
+- `kernel/config.py` / `config/config.json` / `config.example.toml` 新增独立 `research_event_capture`：默认关、空 allowlist、secret 仅从 `OMUBOT_RESEARCH_EVENT_PSEUDONYMIZATION_SECRET` 读取。Capture 自身也 fail-closed 校验非空 allowlist。
+- `plugins/chat/plugin.py` 管理 fail-open 初始化、drain/close 与指标日志；`services/storage/backup.py` 将研究库登记为 `sensitive=true`、仅显式 migration 携带；scheduler shutdown 同时补关 legacy `CorpusCapture`。
+- 上线前只读审计发现两个 router 外绕过：生日 greeter 可按持久化群号后台直发，管理员 `send_group_msg` 工具可指定任意群。新增 `services/group/outbound_access_guard.py`，在 OneBot `bot.call_api` 公共边界按最终 `GroupConfig.allows_active_group()` fail-closed，覆盖 typed API、插件直发、scheduler、后台 tick、工具与未来 send queue；缺失/畸形 group ID 同样拒绝。
+- 首次运行验收发现 NoneBot Bot 的动态 `__getattr__` 会把未知 marker 名解析成 API callable，导致新 guard 与旧 protocol trace 均误判“已包装”。立即停止 `qq-bot`，新增动态 Bot RED 回归，用 `vars(bot)` + wrapped-id 根修两处后再部署；未触碰 NapCat。
+
+**隐私与范围**：event/group/actor/@ 标识均用部署本地 256-bit secret 的 HMAC 稳定伪名；原文仍属于敏感研究数据。Phase 1 只采集 scheduler 主 LLM 文本出站，echo/工具/贴纸/生日等直接发送路径尚未进入研究出站观察，但全部受全局群出站门禁约束；history loader 暂未接入，不能声称历史全量覆盖。
+
+**验证（D1/D2/D4）**：39 个 research tests；全局出站守卫 36 tests；最终合并回归 408 passed；Ruff passed；targeted Pyright 0 errors。临时 DB smoke：2 rows、persisted=2、duplicate=1、pending=0、mode `0600`、`PRAGMA quick_check=ok`、`user_version=1`。运行日志确认 research capture armed、outbound guard installed、protocol trace installed、OneBot connected；生产 DB `0600`、schema v1、quick_check=ok。公开 silent 群 38 条入站期间 reply channel=0、scheduler send=0、Traceback=0。NapCat 的 container ID / Created / StartedAt / restart count 部署前后完全一致。当前两个 active 开发群在启动窗口没有自然新消息，生产研究库暂为 0 行；测试 NapCat 均待二维码登录，未为制造样本而重登。
+
+**回滚 / 下一步**：采集回滚只需 `research_event_capture.enabled=false` 后重启 `qq-bot`；研究 DB 可保留只读审计，删除数据是单独治理动作。出站守卫若需代码回滚，必须先停止 bot 或继续保留 whitelist router 门禁，再恢复 `bot.py` / `kernel/router.py` / guard 文件并只重建 bot。下一步等开发群首批自然流量后复核 inbound/outbound 行与 received/persisted/duplicate/dropped/error/pending；不得 recreate NapCat。Phase 2 再增加 versioned `topic_assignment`、stable `block_uuid`、reason/score/margin 与 `utterance_membership`。
+
+---
+
+## 2026-07-07 数据库课程材料提交到 GitHub 私密仓库
+
+**变更类型**：外部提交 / 课程交付。创建独立 GitHub 私密仓库并推送数据库大作业材料；未改生产代码、未改运行配置、未重启任何服务，未触碰 NapCat。
+
+**内容**：在隔离 staging 仓库 `.workspace/database-coursework-github` 中提交课程材料，创建私密仓库 `kragcola/omubot-database-coursework-2026` 并推送 `main` 分支。仓库地址：`https://github.com/kragcola/omubot-database-coursework-2026`。
+
+**提交内容**：课程材料目录 `docs/coursework/database-2026/`、Word 报告、HTML 幻灯片、PPTX 备份、精简数据库运营前端、源码 zip/tar.gz 与 `.sha256`、课程 wiki、课程 tracker、CHANGELOG 摘要和独立 README。未提交完整 Omubot 主仓库、真实配置、运行数据库、NapCat 登录态或本机缓存。
+
+**验证（D4）**：本地 staging 初始材料提交 `4b0af0c Prepare database coursework submission`，26 个文件，约 4.6MB；`shasum -a 256 -c` 校验源码包通过；staging 禁止路径扫描未发现 `storage/`、`napcat/`、`.venv/`、`.cache/`、`.workspace/`、`node_modules/`、`__pycache__/`、真实 `config/config.json` 或 `config/.env`。`gh repo view` 确认远端 visibility 为 `PRIVATE`、default branch 为 `main`；远端 tree 审计通过；`git ls-remote` 确认初始远端 `main` 为 `4b0af0c76fc829f936189ecafd2b2867f680270d`。后续 git push 因 GitHub TLS 连接临时失败，已改用 GitHub Contents API 同步 CHANGELOG / wiki / tracker 说明文件；API 同步后远端 `main` 为 `aec8beff9c0c1a2a2492095a7d3e37e455af31a3`。
+
+**交接与回滚**：后续课程源码提交优先使用该私密仓库。若需撤回外部提交，可在 GitHub 删除私密仓库或 force-push 清空；本地 staging 位于 `.workspace/database-coursework-github`，不影响主 Omubot 工作树。
+
+---
+
+## 2026-07-07 数据库课程 wiki / 更新日志 / 源码包准备
+
+**变更类型**：课程交付文档与源码包准备。未改生产代码、未改运行配置、未重启任何服务，未触碰 NapCat。
+
+**内容**：
+- 新增 [docs/wiki/Database-Coursework-2026.md](docs/wiki/Database-Coursework-2026.md)，记录数据库课程选题、答辩主线、材料入口、精简数据库 Web、源码包和后续事项。
+- 更新 [docs/wiki/Home.md](docs/wiki/Home.md) 与 [docs/wiki/_Sidebar.md](docs/wiki/_Sidebar.md)，加入“数据库课程交付 2026”入口。
+- 更新 [CHANGELOG.md](CHANGELOG.md) 的 `Unreleased` 区段，记录课程 wiki 与源码包准备。
+- 新增 [docs/coursework/database-2026/source-package-manifest.md](docs/coursework/database-2026/source-package-manifest.md)，说明源码包包含内容、排除规则和校验值。
+- 生成课程源码主包 `docs/coursework/database-2026/dist/omubot-database-coursework-source-20260707.zip`，并生成同内容 tar.gz 备份与 `.sha256` 校验文件。
+
+**源码包范围**：包含课程材料、报告/PPT 产物、精简数据库运营前端、wiki、课程 tracker、核心后端源码、插件源码、Admin 前端源码、测试、项目元数据和启动模板；排除真实配置、运行数据库、NapCat 登录态、缓存、虚拟环境、`node_modules`、构建产物和本机临时目录。
+
+**验证（D4）**：`zip` 与 `tar.gz` 均生成成功，条目数均为 956；`unzip -tq` 检查 zip 无压缩结构错误；tar 可完整列目录；路径审计未发现根目录 `storage/`、`napcat/`、`.venv/`、`.cache/`、`.workspace/`、`node_modules/`、`__pycache__/`、真实 `config/config.json` 或 `config/.env`。SHA256：zip `80d824463cb9bab4cce637ad05b8dc4146f7ecce418a630671bddd0278d204e1`；tar.gz `2f6d6fd0eb9e8376cedacdfde6daf98dfc5e13a36e471dd54b99434597839541`。
+
+**交接与回滚**：后续提交源码优先使用 zip 主包。若需回滚本次文档，恢复 `docs/wiki/Home.md`、`docs/wiki/_Sidebar.md`、`CHANGELOG.md`、`docs/tracking/database-coursework-2026.md` 和本条维护日志，并删除新增 wiki / manifest / 三个源码包文件即可；不涉及运行态回滚。
+
+---
+
 ## 2026-06-17 话题块研究语料采集（显性标注、可回退、默认关，未部署）
 
 **变更类型**：新功能（研究用旁路采集），1 新源文件 + 1 新测试 + scheduler 接线 + config 字段。**休眠态：`topic_block.corpus_capture_enabled` 默认关，零行为变更。** 用途：为 Affective Divergence 研究（[research/affective-divergence/](research/affective-divergence/)）P2 提供中文真实对话的人/AI 平行语料——omubot 本身即活语料源（群友=human，emu=ai）。
@@ -709,7 +929,7 @@
 
 **内容（三块产出）**：
 
-1. **headroom 审计**：[docs/tracking/headroom-eval-omubot-audit-2026-06-08.md](docs/tracking/headroom-eval-omubot-audit-2026-06-08.md) — 第一档 `learn` dry-run（Claude 侧超时 0 产出 / Codex 侧 12 条建议），挖出两条真增量环境技巧（SQLite 只读 `mode=ro&immutable=1`、macOS 沙盒下 `pgrep` 失效用 `lsof`）。压缩工序实测（5 类真实负载）：结构化 JSON 无损省 70%（SmartCrusher 真本事），但**pytest/日志类有损危险**（会采样删掉 FAILED 行、谎报测试结果）。结论：不值得整套接入；真增量只有两条环境技巧，手动吸收进 CLAUDE.md/AGENTS.md 即可。
+1. **headroom 审计**：[docs/tracking/headroom-eval-omubot-audit-2026-06-08.md](docs/tracking/headroom-eval-omubot-audit-2026-06-08.md) — 第一档 `learn` dry-run（Claude 侧超时 0 产出 / Codex 侧 12 条建议），当时吸收 SQLite `mode=ro&immutable=1` 与 macOS 沙盒下 `pgrep` 失效用 `lsof` 两条技巧。**2026-07-13 勘误**：前者只适用于明确离线、不再变化且无需 WAL replay 的静态备份 payload；live/WAL-aware 检查必须用 `mode=ro`。压缩工序实测（5 类真实负载）：结构化 JSON 无损省 70%（SmartCrusher 真本事），但**pytest/日志类有损危险**（会采样删掉 FAILED 行、谎报测试结果）。结论：不值得整套接入；保留经勘误后的环境技巧即可。
 
 2. **Claude Code 省 token**：[docs/tracking/claude-code-token-savings-2026-06-08.md](docs/tracking/claude-code-token-savings-2026-06-08.md) — 从本机 2.1.168 二进制逐函数确认：`ENABLE_TOOL_SEARCH` 未设 + `ANTHROPIC_BASE_URL` 非官方 host → 工具 deferral 关闭，每会话每轮把全部工具定义一次性塞进 context（膨胀几十 K）。**已改 `~/.claude/settings.json`**，加 `ENABLE_TOOL_SEARCH: "true"`。**待重启新会话生效 + 实测中转是否支持 tool_reference**（三步：让 agent 调 Read / Bash / 一个 MCP 工具，都正常=中转支持、留着；有调不出=改回 `false` 秒级回滚）。
 

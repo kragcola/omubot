@@ -1,10 +1,12 @@
 import asyncio
+import inspect
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
@@ -15,8 +17,284 @@ from admin.routes.api.learning_pipeline import (
     _run_extract_all,
     _run_style_extract,
 )
+from kernel.background_tasks import BackgroundTaskSupervisor, TaskKind
+from services.learning_extract_coordinator import (
+    ExtractRunParams,
+    LearningExtractCoordinator,
+)
 
 TZ_SHANGHAI = timezone(timedelta(hours=8))
+
+
+async def test_extract_coordinator_owns_partial_failure_status() -> None:
+    coordinator = LearningExtractCoordinator()
+
+    async def ok() -> dict[str, object]:
+        return {"ok": True, "run_id": "ok-run"}
+
+    async def fail() -> dict[str, object]:
+        raise RuntimeError("style failed")
+
+    payload = await coordinator.run(
+        group_id="100",
+        params=ExtractRunParams(timeout_seconds=1),
+        runners={
+            "slang": ok,
+            "style": fail,
+            "consolidator": ok,
+        },
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "partial_failed"
+    assert payload["nouns"]["slang"]["status"] == "completed"
+    assert payload["nouns"]["style"]["status"] == "failed"
+    assert coordinator.status(payload["run_id"]) == payload
+
+
+async def test_extract_coordinator_runs_one_noun_without_fake_skipped_results() -> None:
+    coordinator = LearningExtractCoordinator()
+
+    async def style() -> dict[str, object]:
+        return {"ok": True, "saved": 3}
+
+    payload = await coordinator.run_noun(
+        noun="style",
+        group_id="100",
+        params=ExtractRunParams(timeout_seconds=1),
+        runner=style,
+    )
+
+    assert payload["status"] == "completed"
+    assert set(payload["nouns"]) == {"style"}
+    assert set(payload["results"]) == {"style"}
+    assert payload["results"]["style"]["saved"] == 3
+
+
+async def test_extract_coordinator_preserves_cancelled_noun_status() -> None:
+    coordinator = LearningExtractCoordinator()
+
+    async def ok() -> dict[str, object]:
+        return {"ok": True}
+
+    async def cancelled() -> dict[str, object]:
+        raise asyncio.CancelledError
+
+    payload = await coordinator.run(
+        group_id="",
+        params=ExtractRunParams(timeout_seconds=1),
+        runners={
+            "slang": ok,
+            "style": cancelled,
+            "consolidator": ok,
+        },
+    )
+
+    assert payload["status"] == "partial_failed"
+    assert payload["nouns"]["style"]["status"] == "cancelled"
+    assert payload["results"]["style"] == {
+        "ok": False,
+        "error": "cancelled",
+        "noun": "style",
+    }
+    assert not coordinator.lock.locked()
+
+
+async def test_extract_coordinator_external_cancel_finishes_run_and_releases_owner() -> None:
+    coordinator = LearningExtractCoordinator()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow() -> dict[str, object]:
+        started.set()
+        await release.wait()
+        return {"ok": True}
+
+    task = asyncio.create_task(
+        coordinator.run(
+            group_id="cancelled-group",
+            params=ExtractRunParams(timeout_seconds=10),
+            runners={
+                "slang": slow,
+                "style": slow,
+                "consolidator": slow,
+            },
+        )
+    )
+    await started.wait()
+    run_id = next(iter(coordinator.runs))
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("coordinator cancellation must propagate")
+
+    cancelled = coordinator.status(run_id)
+    assert cancelled["status"] == "failed"
+    assert cancelled["error"] == "cancelled"
+    assert cancelled["finished_at"]
+    assert all(noun["status"] == "cancelled" for noun in cancelled["nouns"].values())
+    assert not coordinator.lock.locked()
+
+    async def ok() -> dict[str, object]:
+        return {"ok": True}
+
+    followup = await coordinator.run(
+        group_id="followup-group",
+        params=ExtractRunParams(timeout_seconds=1),
+        runners={
+            "slang": ok,
+            "style": ok,
+            "consolidator": ok,
+        },
+    )
+    assert followup["status"] == "completed"
+
+
+async def test_extract_coordinator_stop_cancels_and_awaits_async_run() -> None:
+    coordinator = LearningExtractCoordinator()
+    stop = getattr(coordinator, "stop", None)
+    assert callable(stop), "coordinator must expose a lifecycle stop boundary"
+    started = asyncio.Event()
+
+    async def slow() -> dict[str, object]:
+        started.set()
+        await asyncio.Event().wait()
+        return {"ok": True}
+
+    queued = await coordinator.run(
+        group_id="shutdown-group",
+        params=ExtractRunParams(timeout_seconds=30),
+        runners={
+            "slang": slow,
+            "style": slow,
+            "consolidator": slow,
+        },
+        wait=False,
+    )
+    await started.wait()
+
+    await coordinator.stop()
+
+    final = coordinator.status(queued["run_id"])
+    assert final["status"] == "failed"
+    assert final["error"] == "cancelled"
+    assert final["finished_at"]
+    assert coordinator._tasks == {}
+    assert not coordinator.lock.locked()
+
+
+async def test_extract_coordinator_stop_also_cancels_waiting_run() -> None:
+    coordinator = LearningExtractCoordinator()
+    started = asyncio.Event()
+
+    async def slow() -> dict[str, object]:
+        started.set()
+        await asyncio.Event().wait()
+        return {"ok": True}
+
+    run_task = asyncio.create_task(
+        coordinator.run(
+            group_id="waiting-shutdown-group",
+            params=ExtractRunParams(timeout_seconds=30),
+            runners={
+                "slang": slow,
+                "style": slow,
+                "consolidator": slow,
+            },
+            wait=True,
+        )
+    )
+    await started.wait()
+    run_id = next(iter(coordinator.runs))
+
+    await coordinator.stop()
+
+    assert run_task.done() is True
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+    final = coordinator.status(run_id)
+    assert final["status"] == "failed"
+    assert final["error"] == "cancelled"
+    assert final["finished_at"]
+    assert coordinator._tasks == {}
+    assert not coordinator.lock.locked()
+
+
+async def test_extract_coordinator_registers_async_run_with_supervisor() -> None:
+    assert (
+        "task_supervisor"
+        in inspect.signature(
+            LearningExtractCoordinator,
+        ).parameters
+    )
+    supervisor = BackgroundTaskSupervisor()
+    coordinator = LearningExtractCoordinator(task_supervisor=supervisor)
+    started = asyncio.Event()
+
+    async def slow() -> dict[str, object]:
+        started.set()
+        await asyncio.Event().wait()
+        return {"ok": True}
+
+    await coordinator.run(
+        group_id="observable-group",
+        params=ExtractRunParams(timeout_seconds=30),
+        runners={
+            "slang": slow,
+            "style": slow,
+            "consolidator": slow,
+        },
+        wait=False,
+    )
+    await started.wait()
+
+    task = next(item for item in supervisor.snapshot() if item.name == "learning.extract")
+    assert task.owner == "admin.learning_extract"
+    assert task.kind is TaskKind.HEAVY
+    assert task.state == "running"
+
+    await coordinator.stop()
+
+    stopped = next(item for item in supervisor.snapshot() if item.name == task.name)
+    assert stopped.done is True
+    assert stopped.cancelled is True
+
+
+async def test_extract_coordinator_bounds_supervisor_records_across_run_history() -> None:
+    supervisor = BackgroundTaskSupervisor()
+    coordinator = LearningExtractCoordinator(
+        run_limit=20,
+        task_supervisor=supervisor,
+    )
+
+    async def ok() -> dict[str, object]:
+        return {"ok": True}
+
+    try:
+        for index in range(25):
+            result = await coordinator.run(
+                group_id=str(index),
+                params=ExtractRunParams(timeout_seconds=1),
+                runners={
+                    "slang": ok,
+                    "style": ok,
+                    "consolidator": ok,
+                },
+                wait=True,
+            )
+            assert result["status"] == "completed"
+
+        snapshots = supervisor.snapshot()
+        assert len(coordinator.runs) == 20
+        assert [item.name for item in snapshots] == ["learning.extract"]
+        assert snapshots[0].state == "completed"
+    finally:
+        await coordinator.stop()
+        await supervisor.stop()
 
 
 def _client(storage_dir: Path) -> TestClient:
@@ -53,9 +331,7 @@ def test_learning_pipeline_counts_schema_and_memory_scalars(tmp_path: Path) -> N
             "fact",
             "graph_relation",
         }
-        assert stage["total"] == sum(
-            value for value in stage["by_noun"].values() if value is not None
-        )
+        assert stage["total"] == sum(value for value in stage["by_noun"].values() if value is not None)
 
     assert stages["candidate"]["by_noun"]["slang"] == 2
     assert stages["review"]["by_noun"]["slang"] == 1
@@ -316,17 +592,41 @@ async def test_learning_extract_all_async_run_can_be_polled() -> None:
     assert all(noun["status"] == "completed" for noun in finished["nouns"].values())
 
 
-def test_learning_extract_all_status_endpoint() -> None:
-    async def ok(**kwargs):
-        return {"ok": True, "run_id": f"{kwargs.get('group_id') or 'global'}-run"}
+async def test_learning_extract_all_uses_context_owned_coordinator() -> None:
+    coordinator = LearningExtractCoordinator()
 
-    client = _client_for_ctx(SimpleNamespace(
+    async def ok(**kwargs):
+        del kwargs
+        return {"ok": True}
+
+    ctx = SimpleNamespace(
+        learning_extract_coordinator=coordinator,
         learning_extract_runners={
             "slang": ok,
             "style": ok,
             "consolidator": ok,
         },
-    ))
+    )
+
+    payload = await _run_extract_all(ctx=ctx, group_id="owned-group")
+
+    assert payload["run_id"] in coordinator.runs
+    assert coordinator.status(payload["run_id"])["status"] == "completed"
+
+
+def test_learning_extract_all_status_endpoint() -> None:
+    async def ok(**kwargs):
+        return {"ok": True, "run_id": f"{kwargs.get('group_id') or 'global'}-run"}
+
+    client = _client_for_ctx(
+        SimpleNamespace(
+            learning_extract_runners={
+                "slang": ok,
+                "style": ok,
+                "consolidator": ok,
+            },
+        )
+    )
 
     resp = client.post("/api/admin/learning/extract-all", json={"group_id": "100"})
 
@@ -560,17 +860,21 @@ def _seed_consolidator(path: Path) -> None:
             )"""
         )
         fact_payload = json.dumps({"subject": "A", "predicate": "是", "object": "B"})
-        graph_payload = json.dumps({
-            "subject_node": "A",
-            "predicate": "关联",
-            "object_node": "B",
-        })
+        graph_payload = json.dumps(
+            {
+                "subject_node": "A",
+                "predicate": "关联",
+                "object_node": "B",
+            }
+        )
         approved_fact_payload = json.dumps({"subject": "C", "predicate": "是", "object": "D"})
-        rejected_graph_payload = json.dumps({
-            "subject_node": "E",
-            "predicate": "关联",
-            "object_node": "F",
-        })
+        rejected_graph_payload = json.dumps(
+            {
+                "subject_node": "E",
+                "predicate": "关联",
+                "object_node": "F",
+            }
+        )
         slang_payload = json.dumps({"term": "新梗", "meaning": "新意思"})
         db.executemany(
             """INSERT INTO consolidator_candidates

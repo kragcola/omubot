@@ -9,7 +9,7 @@
   "version": "0.1.17",
   "priority": 42,
   "tier": "user",
-  "toggle_policy": "runtime",
+  "toggle_policy": "restart_required",
   "category": "expression",
   "permissions": [
     "message",
@@ -27,7 +27,7 @@
   "config": {
     "defaults": "config.default.json",
     "schema": "config.schema.json",
-    "apply_mode": "hot",
+    "apply_mode": "read_only",
     "restart_required_fields": []
   },
   "store": {

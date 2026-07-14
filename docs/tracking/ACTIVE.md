@@ -4,28 +4,36 @@
 
 ## Current
 
-- mode: task
-- tracker: docs/tracking/character-pack-batch-fill-2026-06-06.md
-- objective: Character pack gap filling / 人物角色识别训练包缺口补齐。
-- status: active
-- next_step: `zh_virtual_singers` 已清零；继续补 `bangdream` 10 个 `chibi` 缺口，或 `ja_virtual_singers` 的 `lily:expression`、`haru:chibi`。优先找官方/授权、单角色、同页强绑定来源；不得重跑已记录负例。
-- last_verified: 2026-06-09 23:48 日V猫村いろは AHS press VOCALOID4 插图右侧 SD 裁剪 chibi 小批上线，`ja_virtual_singers` 34 人 / 302 图；猫村从 `chibi` 缺口变为无缺口。sidecar `/health` ok，4 packs / 136 characters；新增 PNG crop SHA256 `0837299bfc3a30f9f13d27e5a47c7c29f8e34f289c6b03da67cba334d345c011`，`/identify` diff `0.04974418133497238`，`/identify-multi` 1 条命中 `nekomura_iroha`，全 136 top8 collision top1 `nekomura_iroha`、top2 `dongfang_zhizi`，margin `0.1687510535120964`；NapCat Created 仍 `2026-05-28T10:56:06.736616338Z running 0`。
-- rollback: 本轮日V回滚可恢复 `config/character_packs/backups/ja_virtual_singers.charpack.bak-20260609-234739-pre-iroha-chibi-active` 到 `config/character_packs/ja_virtual_singers.charpack` 后执行 `docker compose restart ccip-sidecar`。更早日V MAYU 回滚为 `ja_virtual_singers.charpack.bak-20260609-224212-pre-mayu-atpress-chibi-active`；更早日V猫村 expression 回滚为 `ja_virtual_singers.charpack.bak-20260609-211700-pre-iroha-expression-active`；更早中V回滚为 `zh_virtual_singers.charpack.bak-20260609-200302-pre-dongfang-bilibili-expression-active`。角色包任务只允许重启 `ccip-sidecar`，不得 recreate NapCat。
+- mode: none
+- tracker: none
+- objective: none
+- status: complete
+- checkpoint: 插件两轮 33 项完成矩阵、三轮 closure review、D1 同根项及运行期 Style tick 预算缺口全部关闭；最终 full 3372 passed / 17 skipped / 161 warnings，Ruff/Pyright/typed/manifests/layout/frontend 与最终运行固定窗全绿。
+- completed_at: 2026-07-15 CST
+- next_step: none
+- last_completed: `docs/tracking/existing-plugin-remediation-completion-audit-2026-07-14.md`
+- deployment: bot image `e31c2a630cd...`（tag `omubot-bot:plugin-closure-style-tick-final-20260715`）/ container `41a5346c3278...` / restart=0 / OOM=false。
+- rollback: 精确上一版 `omubot-bot:pre-style-tick-fix-20260715`=`671078e6bf6c...`；只允许 bot-only recreate；NapCat `19f6cf...` 不得 restart/recreate/down。
 
 ## Recovery Order
 
 1. Read `.workspace/agent-session-state.md` if present.
 2. Read this file.
-3. Read the tracker above.
+3. If `tracker` is not `none`, read the tracker above.
 4. Run `git status --short`.
 5. Continue from `next_step`.
 
 ## Notes
 
+- 全局 OneBot 群出站守卫已部署：最终 `GroupConfig.allows_active_group()` fail-closed，覆盖插件直发、生日 tick、管理员工具、scheduler，以及所有经已包装 OneBot `bot.call_api` 的发送路径；2026-07-14 固定窗已验证公开受限群只收不发。
 - Worktree contains unrelated Living Persona/admin/runtime dirty files; never use `git add -A`.
 - Pytest baseline on this host uses `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-}`.
 
 ## Pending (separate line — not the Current task)
+
+- **进阶话题块 Phase 2（未启动）**：Phase 1 首批生产 raw rows 与运行期 metrics 已闭环，中期架构 M3-M6 也已收口；仍等待用户显式启动，不改写 raw event。
+
+- **Character pack gap filling / 人物角色识别训练包缺口补齐**：原 tracker `docs/tracking/character-pack-batch-fill-2026-06-06.md` 的状态信息保留；当前剩 BangDream 10 个 `chibi`、日V `lily:expression` 与 `haru:chibi`，等待用户在它与话题块 Phase 2 之间选择优先级。
 
 - **Dialogue Climate M3/M4 全量已落地（2026-06-16，休眠默认关，待部署）**：承接 A-M2。M3（commit `f547344`）= ClimateEngine 升 per-(group,user) + clear_stale + `sensors.py`(6 sensor) + `m2_metrics.py`(ClimateMetricsRecorder→m2_climate.db) + 运行态接线 + on_post_reply 反馈。M4（本轮 commit）= `policy.py` ClimatePolicy 纯函数 + schedule 注入"对话气候"block + 让位 M1 tension block。三 flag `m2_enabled`/`m3_sensors_enabled`/`m4_policy_enabled` 默认关，零行为变更。全量 2743 passed。偏离 plan 处（provider-bus 让位/adapter 消费/MessageSensor 馈入/block 合并/tension M1 退役）如实记录在 [Part A §10.2/§10.4](living-persona-partA-dialogue-climate.md)，留增量。上线需 shadow→active。**M4 commit 待提交、未部署**。
 
