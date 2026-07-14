@@ -12,6 +12,7 @@
 - completed_at: 2026-07-15 CST
 - next_step: none
 - last_completed: `docs/tracking/existing-plugin-remediation-completion-audit-2026-07-14.md`
+- implementation_commit: `715445a`（本地 `main`，尚未 push）
 - deployment: bot image `e31c2a630cd...`（tag `omubot-bot:plugin-closure-style-tick-final-20260715`）/ container `41a5346c3278...` / restart=0 / OOM=false。
 - rollback: 精确上一版 `omubot-bot:pre-style-tick-fix-20260715`=`671078e6bf6c...`；只允许 bot-only recreate；NapCat `19f6cf...` 不得 restart/recreate/down。
 
@@ -26,10 +27,19 @@
 ## Notes
 
 - 全局 OneBot 群出站守卫已部署：最终 `GroupConfig.allows_active_group()` fail-closed，覆盖插件直发、生日 tick、管理员工具、scheduler，以及所有经已包装 OneBot `bot.call_api` 的发送路径；2026-07-14 固定窗已验证公开受限群只收不发。
-- Worktree contains unrelated Living Persona/admin/runtime dirty files; never use `git add -A`.
+- Worktree retains character-pack tracker notes, conflicting deep-delivery skill drafts, local coursework/tool outputs, NapCat data and temp artifacts; never use `git add -A`.
 - Pytest baseline on this host uses `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-}`.
 
-## Pending (separate line — not the Current task)
+## Pending (authoritative; not the Current task)
+
+- **进阶话题块 Phase 2（未启动）**：Phase 1 raw research event layer 已部署且当前 capture health 为 healthy；新容器本轮 metrics 为 0/0/0。Phase 2 仍需实现 versioned `topic_assignment`、stable `block_uuid`、assignment evidence 与 `utterance_membership`，不得改写 raw event。
+- **Character pack gap filling（active）**：sidecar healthy，4 packs / 136 characters；剩 BangDream 10 个 `chibi`、`lily:expression`、`haru:chibi`。无技术阻塞，主要约束是可信单角色来源不足。
+- **Dialogue Climate 后续增量（实现已部署并 active）**：A-M2/M3/M4 已分别提交于 `30f0f23` / `f547344` / `f5ac299`，当前 schedule effective config 的 `m1/m2/m3/m4` 四 flag 均为 true。仍未做 provider-bus 让位、affection+climate 单 block 合并、Humanizer/Thinker adapter、MessageSensor classifier 运行馈入、baseline durable persistence、M1 tension 完全退役。
+- **QZone Journal（仅立项）**：可行性已实证，仓库只有 charter，无 `plugins/qzone_journal` 实现。基础版与进阶版均未启动。
+- **关闭中的两项 LLM 行为开关**：`schedule_overshare.enabled=false`（正则误伤需重做边界）与 `addressee_hint.enabled=false`（缺置信阈值/歧义门）。
+- **低优先级已知瑕疵**：persona drift 对 `我是凤笑梦呀` 清理后可能残留 `呀`，主路径影响低。
+
+## Historical Pending Snapshot (superseded; do not use for status)
 
 - **进阶话题块 Phase 2（未启动）**：Phase 1 首批生产 raw rows 与运行期 metrics 已闭环，中期架构 M3-M6 也已收口；仍等待用户显式启动，不改写 raw event。
 
