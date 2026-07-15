@@ -8,11 +8,11 @@
 
 - mode: task
 - phase: Phase 2 / derived assignment layer
-- status: verified_pending_deploy
+- status: complete
 - started_at: 2026-07-15
-- current_step: 实现、独立复审、全量回归与生产离线快照已通过；准备精确提交与 bot-only 部署
-- deployment: pending
-- implementation_commit: pending
+- current_step: complete
+- deployment: bot-only complete；image `780b912296b4...` / container `6366e0945aa2...`
+- implementation_commit: `60ad68a`
 
 ## Recovered Evidence
 
@@ -68,8 +68,8 @@
 - [x] assignment、block identity、membership 和 completed run 元数据按一个事务提交；中途异常全部回滚。
 - [x] runner 只读 raw；派生失败不影响 Phase 1 raw capture。
 - [x] 定向测试、topic/research 回归、Ruff、targeted Pyright、全量 pytest 通过。
-- [ ] 部署仅 rebuild/recreate `qq-bot`；NapCat 不 restart/recreate/down。
-- [ ] 生产 raw 仍为 `user_version=1`、102 条既有 raw event 全部保留；独立派生库产生对应可审计 assignment/membership。
+- [x] 部署仅 rebuild/recreate `qq-bot`；NapCat 不 restart/recreate/down。
+- [x] 生产 raw 仍为 `user_version=1`、102 条既有 raw event 全部保留；独立派生库产生对应可审计 assignment/membership。
 
 ## Assumption Ledger
 
@@ -104,6 +104,17 @@
 2. 独立派生库可保留审计；确需回退时删除或恢复 `research_topic_assignments.db`，不触碰 raw DB。
 3. Phase 1 的 `research_event_capture.enabled`、allowlist、secret 和运行态 metrics 均不因 Phase 2 改变。
 
+## Deployment Evidence
+
+- 实现提交 `60ad68a`；`docker compose build bot` strict plugin layout 通过，build context 270.31 kB。
+- 仅 `docker compose up -d --no-deps --force-recreate bot`；新 image `780b912296b404fa4e8dac4b0a1047cd0665d5c15baba1bf241402645b172ace`，tag `omubot-bot:topic-phase2-20260715-60ad68a`，container `6366e0945aa2231b0dd0ca14c091c8428b04aa6b24bb934057af262d1160ce6c`，restart=0、OOM=false。
+- host/image runner、store、CLI 三文件 SHA256 完全一致；Application startup complete、Admin HTTP 200、OneBot connected、outbound guard/protocol trace installed。
+- 容器内 live 首跑 102 assignments + 102 memberships，二跑 duplicate/0 insert；derived `user_version=1`、quick_check=ok、mode=0600、196608 bytes、22 blocks、4 类孤儿为 0。
+- raw 后置仍 `user_version=1`、quick_check=ok、102 rows、14 columns；Phase 2 未改 raw schema/data。
+- UTC `2026-07-15T00:24:37Z` 至 `00:25:55Z` 部署窗口未见 bot/NapCat 发送记录。NapCat 只在 bot 替换期间记录两条预期的反向 WebSocket `ECONNREFUSED`/5 秒重试，随后于 `00:24:45Z` 连接成功。
+- NapCat 全程保持 container `19f6cf13607c...`、image `cde89d766604...`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。
+- 回滚 image：`omubot-bot:pre-topic-phase2-20260715`=`b3a40ac03839...`；只允许切换旧 image 并 bot-only recreate。若仅回退 Phase 2 数据，停止 CLI 或移除独立 derived DB 即可，raw 不动。
+
 ## Test Ledger
 
 | ID | Command | Actual Result | Conclusion | Date |
@@ -123,4 +134,4 @@
 
 ## Next Step
 
-精确提交 Phase 2 文件；随后只 rebuild/recreate `qq-bot`，在新容器内对 live raw 固定 cutoff 运行 CLI，验证 derived DB、raw 不变量、bot 状态与 NapCat 未变化。
+none

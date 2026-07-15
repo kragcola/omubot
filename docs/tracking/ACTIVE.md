@@ -4,17 +4,17 @@
 
 ## Current
 
-- mode: task
-- tracker: `docs/tracking/topic-block-phase2-derived-assignments-2026-07-15.md`
-- objective: 在 Phase 1 append-only raw research event 上实现 versioned topic assignment、stable block UUID、assignment evidence 与 utterance membership，绝不改写 raw event。
-- status: verified_pending_deploy
-- checkpoint: Phase 2 独立 derived schema/store/runner/CLI 已实现；reviewer 0 blocker，full pytest 3401 passed / 17 skipped，生产离线快照 102 assignments/memberships、二跑 duplicate、4 类孤儿为 0。算法版本 `topic-block-l0l3-v1-4d15cafcdf72`。
-- started_at: 2026-07-15
-- next_step: 精确提交 Phase 2 文件；bot-only rebuild/recreate 后在容器内对 live raw 固定 cutoff 运行 CLI，绝不操作 NapCat。
-- last_completed: `docs/tracking/food-plugin-durable-tutorial-audit-2026-07-15.md`
-- implementation_commit: pending
-- deployment: pending；只允许 bot-only rebuild/recreate。
-- rollback: 停止 Phase 2 CLI 或移除独立派生 DB；Phase 1 无配置/运行时改动，NapCat 不得 restart/recreate/down。
+- mode: none
+- tracker: none
+- objective: none
+- status: complete
+- checkpoint: Phase 2 独立 derived schema/store/runner/CLI 已提交并 bot-only 上线；live raw 102 rows 保持不变，derived 102 assignments/memberships、二跑 duplicate、4 类孤儿为 0，reviewer 0 blocker，full pytest 3401 passed / 17 skipped。
+- completed_at: 2026-07-15 08:26 CST
+- next_step: none
+- last_completed: `docs/tracking/topic-block-phase2-derived-assignments-2026-07-15.md`
+- implementation_commit: `60ad68a`（本地 `main`，尚未 push）
+- deployment: image `780b912296b4...` / container `6366e0945aa2...` / restart=0 / OOM=false；NapCat 未变化。
+- rollback: `omubot-bot:pre-topic-phase2-20260715`=`b3a40ac03839...`；只允许 bot-only recreate。数据层可停止 CLI 或移除独立 derived DB，raw 不动。
 
 ## Recovery Order
 

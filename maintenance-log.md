@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-07-15 进阶话题块 Phase 2 版本化派生层上线
+
+**变更类型**：话题归属研究派生层 / SQLite 合同 / 离线可重跑 CLI / bot-only 部署。对应 tracker `docs/tracking/topic-block-phase2-derived-assignments-2026-07-15.md`、迁移清单 `docs/migrations/topic-block-phase2-derived-assignments-2026-07-15.md`，实现提交 `60ad68a`。
+
+**实现与合同**：保持 Phase 1 `research_events.db user_version=1` 永久只读，新增独立 `research_topic_assignments.db user_version=1`，保存 run、stable block UUID、versioned assignment evidence 与 utterance membership。`TopicBlockTracker` 增加 additive evidence API，旧 `observe()` 合同与在线归属顺序不变。runner 使用确定性 UUIDv5、timezone-aware cutoff、因果 message ID 索引和显式 algorithm fingerprint；同 snapshot 幂等、不同版本并存、语义冲突 fail-closed。restore preflight 同验业务 schema 与 migration ledger；projection rollback shield cancellation；CLI 默认路径锚定仓库根目录，raw/derived 同路径或 inode 在打开连接前拒绝。
+
+**审计与同模式扫描**：reviewer 首轮复现未来 message ID 覆盖、ISO cutoff 文本比较、raw/derived alias、cwd-relative CLI、cutoff provenance 冲突、catalog client 缺失、restore ledger 缺口、复合 PK fixture、双重取消 rollback 和完成时间提前；均先补 RED 再关闭。D1 扫描覆盖所有 `research_events` 直接 client、MigrationRunner rollback 模式、governed restore contract 与工具默认路径。最终独立 review `0 Critical / 0 Important / 0 deployment blocker`，复核 160 passed。
+
+**验证**：相关跨模块 105 passed；全量 **3401 passed / 17 skipped / 174 warnings**；scoped Ruff clean、targeted Pyright 0、`git diff --check` clean。全仓 Ruff 仍被用户现有 coursework/research/IPv6 的 177 项既有问题阻断，本轮未改。固定 cutoff `2026-07-14T16:12:00.740197+00:00` 的 input digest 为 `sha256:c88a986...`；离线与容器内结果一致：102 assignments、102 memberships、22 blocks，62 linear / 22 new block / 18 reply edge，10 个多成员 utterance，4 类孤儿为 0，二跑 duplicate/0 insert。
+
+**部署与运行验收**：仅执行 bot build/recreate。新 image `780b912296b4...`（tag `omubot-bot:topic-phase2-20260715-60ad68a`）、container `6366e0945aa2...`、restart=0、OOM=false；strict plugin layout、host/image SHA、Application startup、Admin 200、OneBot connected 与 outbound guard 均通过。生产 derived `0600`、196608 bytes、v1、quick_check=ok；raw 后置仍 v1、quick_check=ok、102 rows、14 columns。UTC `00:24:37Z` 至 `00:25:55Z` 无发送记录；仅 bot 替换期间有预期反向 WebSocket 拒绝与 5 秒重试，随后连接成功。
+
+**回滚与边界**：旧 image `b3a40ac03839...` 已标记 `omubot-bot:pre-topic-phase2-20260715`；回滚只切旧 image 并 bot-only recreate。Phase 2 不接 bootstrap、scheduler、ingress 或回复决策；停止 CLI 或移除独立 derived DB 即可回退数据层，raw 不动。NapCat 全程保持 container `19f6cf13607c...`、image `cde89d766604...`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。
+
+---
+
 ## 2026-07-15 Food 一次性教程持久化与 feedback 状态 owner 修复上线
 
 **变更类型**：插件持久化正确性 / 并发 claim / 短期状态回收 / bot-only 部署。对应 `docs/tracking/food-plugin-durable-tutorial-audit-2026-07-15.md`，实现提交 `232de5a`。
