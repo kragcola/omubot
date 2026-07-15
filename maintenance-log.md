@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-07-15 图片人物指代、边缘角色识别与引用图像素链路修复上线
+
+**变更类型**：视觉人物识别正确性 / 当前请求 grounding / 引用图片多模态透传 / Thinker 与 RAG 隔离 / bot-only 部署。对应 tracker `docs/tracking/visual-reference-grounding-2026-07-15.md`，实现提交 `52361bb`。
+
+**生产根因与修复**：群 `993065015` 的已纠正样本中，sticker `stk_01db713d` 实为普瑞塞斯，sidecar 却以 `difference=0.1712939143 <= threshold=0.1784751143` 边缘命中藤都子，原链路直接渲染成“可信识别”，bot 因而回答藤都子；另一个无图“这是谁”样本把四分钟前草薙宁宁历史当成本轮图片。人类可见身份现要求比 sidecar 候选阈值多 `0.03` 安全余量，边缘 matched 只输出不具名的“未能可信识别”；群聊与私聊的显式视觉人物请求只保留当前 pending/current content，强制 `retrieve_mode=skip` 并清 rewritten query，历史文本、摘要、图片像素和 RAG 都不能竞争当前指代。无图“这是谁/图里是谁”fail-closed 要求补图；无图“他/她是谁”保留正常文本指代。
+
+**引用图与证据边界**：引用图片缓存成功后，`image_ref` 现在与引用描述一起进入最终主模型；即使 CCIP/Qwen 描述失败，已缓存像素仍保留。含文字的富引用也会解析图片，不再只因 `extract_plain_text()` 非空而跳过视觉段。原始 GroupTimeline、ShortTermMemory、MessageLog、图片缓存、研究与学习证据均不改写，grounding 只存在于请求期模型消息。识别日志补出 character ID、difference 与 threshold，后续可以直接恢复边缘命中证据。
+
+**同模式扫描、测试与复审**：扫描确认人物名进入 prompt 的生产出口只有 `render_visual_evidence`，图片多模态主链只有 router/client，无第二个旁路。TDD 分四轮锁定 grounding、历史像素、引用图失败保留、边缘误判和 finalized 历史隔离；独立 review 复现 multi-pending、命名人物+无关图、private omission 三个 Important，均 RED→GREEN，最终 `0 Critical / 0 Important`。最终 expanded `173 passed / 5 skipped`，full **3519 passed / 17 skipped / 172 warnings**；scoped Ruff clean、Pyright 0 errors/0 warnings、diff-check clean。新增 thread warnings 是全仓既有 aiosqlite fixture 清理债，本任务未触碰。
+
+**部署与运行验收**：旧 image `f5aa4c590b1f...` 标记为 `omubot-bot:pre-visual-grounding-20260715-52361bb`；新 image `85807a7af4f2...` 标记为 `omubot-bot:visual-grounding-20260715-52361bb`，container `9862c1298f51...`、restart=0、OOM=false。镜像 `GIT_COMMIT=52361bbbb4a9eac94ca8d5656a2d606c458daf52`，三个生产文件 host/image SHA 全相等；Application complete、OneBot connected、outbound guard/protocol trace installed、Admin 200。容器内语义 smoke 确认藤都子边缘样本不再含姓名，无图“这是谁”消息列表仅当前请求且不含历史宁宁。
+
+**公开群负向窗口与回滚**：UTC `2026-07-15T05:46:56Z` 至 `05:49:43Z` 内，bot 与 NapCat 均记录 33 条群入站，bot 明确记录 26 条 `silent_learn`；双方群发送、`send_group_msg`、ERROR/CRITICAL/Traceback 均为 0。完整回滚只切上述 pre-change image 并 recreate `qq-bot`，无 schema/数据回滚。NapCat 始终保持 container `19f6cf13607c...`、image `cde89d766604...`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。
+
+---
+
 ## 2026-07-15 谐音理解辅助、群黑话优先与原文不变量上线
 
 **变更类型**：LLM 输入理解辅助 / Thinker + PromptProviderBus 动态提示 / 保守谐音规则 / prompt budget 原子块 / bot-only 部署。对应 tracker `docs/tracking/homophone-understanding-2026-07-15.md`，实现提交 `c959054`。

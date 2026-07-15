@@ -4,16 +4,16 @@
 
 ## Current
 
-- mode: bug
-- tracker: `docs/tracking/visual-reference-grounding-2026-07-15.md`
-- objective: 修复“这是谁”中边缘角色误识别压过图片本体、历史视觉污染当前指代，并补齐引用图片像素链路。
-- status: in_progress
-- checkpoint: 两类实现均完成；review 3I 已 RED→GREEN，最终 0C/0I；expanded 173 passed、final full 3519 passed，Ruff/Pyright/diff-check clean。
-- next_step: 精确提交，bot-only build/recreate，验证运行语义与公开 silent 群零出站。
-- last_completed: `docs/tracking/homophone-understanding-2026-07-15.md`
-- implementation_commit: none
-- deployment: 尚未部署；当前仍为 image `f5aa4c590b1f...` / container `aadfe15b6bc6...` / runtime commit `c9590543aa90698cf679a542a280ada31aaa3433`。
-- rollback: 回退本任务提交后只 rebuild/recreate bot；不碰 NapCat，无 schema。
+- mode: none
+- tracker: none
+- objective: 无当前任务。
+- status: idle
+- checkpoint: 图片人物指代修复已上线；边缘 CCIP 命中不再声明具体身份，视觉请求隔离当前图片并禁 RAG，无图“这是谁”不继承历史，引用图像素进入主模型。
+- next_step: 无；后续只按真实误识别样本调整人类可见身份安全余量。
+- last_completed: `docs/tracking/visual-reference-grounding-2026-07-15.md`
+- implementation_commit: `52361bb`
+- deployment: image `85807a7af4f2...` / container `9862c1298f51...` / runtime commit `52361bbbb4a9eac94ca8d5656a2d606c458daf52` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
+- rollback: 切 `omubot-bot:pre-visual-grounding-20260715-52361bb` 后只 recreate bot；无 schema 或持久数据变更。
 
 ## Recovery Order
 

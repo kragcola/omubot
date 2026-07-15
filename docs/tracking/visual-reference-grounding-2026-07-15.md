@@ -1,11 +1,11 @@
 # 图片人物指代错误修复
 
-> 状态：in_progress
+> 状态：done
 > mode: bug
 > 最后更新：2026-07-15 CST
-> 当前下一步：精确提交、bot-only 部署与公开 silent 群负向验证。
+> 当前下一步：无；后续只按真实误识别样本调整人类可见身份安全余量。
 > 阻塞：无。
-> 回滚入口：回退本任务代码提交后只 rebuild/recreate bot；不碰 NapCat。
+> 回滚入口：切 `omubot-bot:pre-visual-grounding-20260715-52361bb` 后只 recreate bot；不碰 NapCat。
 
 ## Resume Capsule
 
@@ -28,7 +28,7 @@
 - [x] sidecar matched 若距离接近硬阈值，必须降级为“未能可信识别”，不得把候选角色名暴露给回答模型。
 - [x] 视觉人物请求只保留当前 pending 请求批次并强制 `retrieve_mode=skip`，历史文本/摘要/像素/RAG 均不得竞争当前指代。
 - [x] 视觉证据不足或冲突时表达不确定，不用旧上下文补全人物身份。
-- [ ] 公开 silent 群保持零出站。
+- [x] 公开 silent 群保持零出站。
 
 ## Evidence
 
@@ -53,14 +53,14 @@
 - [x] RED/GREEN：引用图片 `image_ref` 透传，描述失败仍保留像素
 - [x] RED/GREEN：边缘 CCIP matched 降级，不渲染候选姓名
 - [x] focused/full pytest、Ruff、Pyright、独立 review
-- [ ] 精确提交、bot-only 部署、运行态与 silent 群验证
+- [x] 精确提交、bot-only 部署、运行态与 silent 群验证
 
 ## Files Touched
 
 | File | Change | Status |
 | --- | --- | --- |
-| `docs/tracking/ACTIVE.md` | 指向本 bug | in_progress |
-| `docs/tracking/visual-reference-grounding-2026-07-15.md` | 证据、合同、验证与回滚台账 | in_progress |
+| `docs/tracking/ACTIVE.md` | 指向本 bug并在完成后归零 | done |
+| `docs/tracking/visual-reference-grounding-2026-07-15.md` | 证据、合同、验证与回滚台账 | done |
 | `kernel/router.py` | 引用图片像素透传；识别日志补 difference/threshold | done |
 | `services/media/visual_evidence.py` | 人类可见身份增加 0.03 安全余量；边缘命中隐藏候选姓名 | done |
 | `services/llm/client.py` | 当前视觉指代约束、上下文隔离、禁 RAG | done |
@@ -84,3 +84,14 @@
 | Final full | 3519 passed / 17 skipped / 172 warnings；额外 thread warnings 为既有 aiosqlite fixture 清理债 |
 | Independent review | 初轮 3 Important 均 RED→GREEN；语义裁定后最终 0 Critical / 0 Important |
 | Same-pattern scan | 人物名进入 prompt 仅 `render_visual_evidence`；图片块主链仅 router/client，无第二个旁路 |
+| Commit | `52361bbbb4a9eac94ca8d5656a2d606c458daf52` |
+| Image integrity | 3 个生产文件 host/image SHA 全相等 |
+| Runtime semantic | 边缘藤都子样本隐藏姓名；无图“这是谁”只剩当前请求，历史宁宁不进入模型 |
+| Runtime health | Application complete；OneBot connected；outbound guard/protocol trace installed；Admin 200 |
+| Silent outbound window | UTC 05:46:56-05:49:43，33 group inbound / 26 explicit silent_learn；bot/NapCat group send 0，errors 0 |
+| Deployment | image `85807a7af4f2...` / container `9862c1298f51...` / restart=0 / OOM=false |
+| NapCat invariant | `19f6cf13607c...` / StartedAt `2026-07-09T22:51:47.963549084Z` / restart=0，未操作 |
+
+## Handoff
+
+已完成并上线。实现 commit `52361bb`；运行 image `85807a7af4f2...`、container `9862c1298f51...`；rollback tag `omubot-bot:pre-visual-grounding-20260715-52361bb`。无 schema 或持久数据变更。
