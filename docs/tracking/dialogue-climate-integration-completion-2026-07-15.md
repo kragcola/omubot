@@ -25,7 +25,7 @@
 | Plan | done | 六切片与 D3 清单已执行 | 无 |
 | Implementation | done | provider/classifier/adapters/store/M1 retirement/persona + review fixes 完成 | 无 |
 | Verification | done | full pytest 3446；Ruff/Pyright/JSON/diff clean；最终 review 0 Critical / 0 Important；运行态验收通过 | 无 |
-| Handoff | done | commit `b947adc`；image `0c2fc70de1a7...`；container `2a156463f5a6...` | 无 |
+| Handoff | done | commit `b947adc`；image `ac8e60066ccb...`；container `c1c767dd5601...` | 无 |
 
 ## Next Session Starts Here
 
@@ -85,9 +85,9 @@
 | task static | task Python files Ruff + Pyright | clean / 0 errors |
 | config/diff | 3 schedule JSON + tracked/untracked diff check | clean |
 | warning diagnostic | full pytest 将 `PytestUnhandledThreadExceptionWarning` 升格为 error | 暴露 command/retrieval/router B-cluster 既有 fixture 连接清理债；本任务 focused 范围已清零，不扩大全仓范围 |
-| deployment | bot-only build/recreate | image `0c2fc70de1a7...`；container `2a156463f5a6...`；restart=0 / OOM=false |
+| deployment | bot-only build/recreate | image `ac8e60066ccb...`；container `c1c767dd5601...`；restart=0 / OOM=false；runtime commit 为真实 `b947adc0b4db66c418e7220d6a61f8cb3472b101` |
 | runtime store/config | production override + read-only SQLite + temp smoke | m2/m3/m4=true；无 m1 field；baseline v1/fingerprint/quick_check/load/flush 正常 |
-| silent window | UTC `02:54:13–02:56:58` | 15 bot silent inbound / 22 NapCat group inbound；group outbound/send/error=0 |
+| silent window | final container UTC `03:02:51–03:04:25` | 2 bot silent inbound / 6 NapCat group inbound；group outbound/send/error=0 |
 | M1 retirement | production DB before/after | 31 rows、max ts `2026-07-13T16:26:27.452091+00:00`、mtime 不变 |
 | NapCat red line | before/after inspect | container/image/StartedAt/restart/OOM 完全不变 |
 
@@ -110,4 +110,4 @@
 
 ## Handoff
 
-任务 complete。实现提交 `b947adc`，部署 image `0c2fc70de1a7...` / container `2a156463f5a6...`，rollback `omubot-bot:pre-dialogue-climate-20260715-b947adc`；后续无需重做本轮架构审计。
+任务 complete。实现提交 `b947adc`，部署 image `ac8e60066ccb...` / container `c1c767dd5601...`，rollback `omubot-bot:pre-dialogue-climate-20260715-b947adc`；后续无需重做本轮架构审计。

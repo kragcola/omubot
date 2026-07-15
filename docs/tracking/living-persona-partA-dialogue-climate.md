@@ -233,7 +233,7 @@ Sensor 适配层、on_post_reply 反馈回路、ClimatePolicy 合成、PromptAda
 - **动力学修正**：energy/valence/openness 的 transient + slow baseline 作为连续时间二元系统解析推进，24h one-step 与 hourly partition 仅有约 `2.2e-16` 浮点差；避免读取频率改变 durable persona baseline，baseline 速率单位保持 per-day。
 - **M1 完全退役**：删除 MoodEngine M1 state/guidance/recorder 与运行配置面；mention/poke、schedule event replan、Dream/StoryArc 均读取 ClimateEngine。历史 `m1_metrics.db`、只读 CLI/catalog 记录保留，不再有运行写入。
 - **低优先级缺陷**：persona drift 的 bot-name 后缀现覆盖 `呀/哦/啦/呢` 与 `~ / ～ / ……`，声明-only 回复稳定 fail-closed，不再残留尾字。
-- **验证与部署**：reviewer 两轮 Important 均 RED→GREEN，最终 stable snapshot `0 Critical / 0 Important`；本地 full pytest `3446 passed / 17 skipped`，任务文件 Ruff clean、Pyright 0、schedule JSON 与 tracked/untracked diff-check clean。实现提交 `b947adc`，bot-only image `0c2fc70de1a7...` / container `2a156463f5a6...`；OneBot、provider/config、baseline v1/load/flush、M1 停写及公开 silent 群零出站均验收，NapCat 身份不变。完整证据见本轮 tracker 与维护日志。
+- **验证与部署**：reviewer 两轮 Important 均 RED→GREEN，最终 stable snapshot `0 Critical / 0 Important`；本地 full pytest `3446 passed / 17 skipped`，任务文件 Ruff clean、Pyright 0、schedule JSON 与 tracked/untracked diff-check clean。实现提交 `b947adc`，bot-only image `ac8e60066ccb...` / container `c1c767dd5601...`；runtime commit 精确匹配 `b947adc0b4db66c418e7220d6a61f8cb3472b101`，OneBot、provider/config、baseline v1/load/flush、M1 停写及公开 silent 群零出站均验收，NapCat 身份不变。完整证据见本轮 tracker 与维护日志。
 
 ---
 

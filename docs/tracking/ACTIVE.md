@@ -12,7 +12,7 @@
 - next_step: 无；按 Pending 中的权威列表选择下一项。
 - last_completed: `docs/tracking/dialogue-climate-integration-completion-2026-07-15.md`
 - implementation_commit: `b947adc`
-- deployment: image `0c2fc70de1a7...` / container `2a156463f5a6...` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
+- deployment: image `ac8e60066ccb...` / container `c1c767dd5601...` / restart=0 / OOM=false；runtime commit `b947adc0b4db66c418e7220d6a61f8cb3472b101`，NapCat 身份与 StartedAt 不变。
 - rollback: 关闭 `dialogue_climate.m4_policy_enabled` 快速熄火，或切 `omubot-bot:pre-dialogue-climate-20260715-b947adc` 后只 recreate bot；持久化数据不删除。
 
 ## Recovery Order
