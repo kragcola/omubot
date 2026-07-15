@@ -4,9 +4,9 @@
 
 ---
 
-## 2026-07-15 富消息上下文补全完成，待 bot-only 部署
+## 2026-07-15 富消息上下文补全上线
 
-**变更类型**：OneBot 入站富消息 / active-private 嵌套引用 / history backfill / silent timeline / 资源预算。对应 tracker `docs/tracking/rich-message-context-completion-2026-07-15.md`。
+**变更类型**：OneBot 入站富消息 / active-private 嵌套引用 / history backfill / silent timeline / 资源预算 / bot-only 部署。对应 tracker `docs/tracking/rich-message-context-completion-2026-07-15.md`，实现提交 `d51a7d4`。
 
 **根因与真实协议**：NoneBot adapter 只把最外层 `reply{id}` 自动 `get_msg` 一次并写入 `event.reply`，父消息内下一层 `reply.data.id` 保留为 string；旧 router 只消费一层 text/image/json，祖父 text/image/JSON/forward 全丢。History 直接读取 raw group history，绕过 adapter reply 预处理且只支持 text/face/image；silent/muted-active 在 rich renderer 前返回，只写 `semantic_plain_text`。NapCat 真实 text/JSON/image/reply→forward 链只读实验确认 `get_msg` 参数需 int、cycle key 宜 string，forward 必须 embedded `content` 优先。
 
@@ -14,7 +14,9 @@
 
 **同模式扫描与验证**：扫描 router group active/private、suppressed early-return、history connection stage、Bilibili JSON interceptor、既有 nested forward 与 visual-query quote cleaner；没有第二条需递归的实时 reply renderer，插件 `msg_ctx.content` 在 silent hook 前后保持原语义。TDD 核心首轮 8 RED；两轮独立 review 再复现并关闭 13 个 RED（quote closure、segment-aware semantic restore、refetch cache/timeout、history per-message budget、malformed node、image/forward callback budget 与 cache-ref preservation），最终 review `0 Critical / 0 Important`。Expanded 164 passed，scoped Ruff clean、Pyright 0、diff-check clean；正式 full **3580 passed / 17 skipped / 183 warnings**，warning 为既有 aiohttp/NoneBot deprecation 与 aiosqlite fixture 线程收尾。
 
-**真实语义回放、部署与回滚**：宿主当前实现经 NapCat HTTP 只读回放四类真实链：text/JSON/image 各只续取祖父 ID 一次并形成两层 quote，embedded forward 额外 API=0，目标摘要全部存在；全程未向 QQ 发送消息。代码提交后只允许 build/recreate `qq-bot`，禁止 restart/recreate/down NapCat；部署后补记 image/container/runtime commit、容器内同链回放与公开 silent 群零出站窗口。无 schema/data migration，回滚只需切部署前 bot image 并 recreate bot。
+**部署与运行验收**：旧 image `a1792c614fec...` 已标记 `omubot-bot:pre-rich-context-20260715-d51a7d4`；新 image `56f51b2ce8d5...`（tag `omubot-bot:rich-context-20260715-d51a7d4`）、container `0f7f47c3ffae...`、restart=0、OOM=false，运行 `GIT_COMMIT=d51a7d41bed5b031659e09dcfd148c10e6cd4e0a`。三个生产文件 host/image SHA 全相等，strict plugin layout、Application startup、OneBot connected、outbound guard/protocol trace、history 24+30 条与 Admin 200 均通过。容器内 NapCat HTTP 只读回放四类真实链：text/JSON/image 各只续取祖父 ID 一次并形成两层 balanced quote，embedded forward 额外 API=0，目标摘要全部存在。自然流量还命中公开 silent 群真实嵌套 reply `1859087016`：运行日志含 immediate quote、深层未展开 marker、闭合 tag 与当前正文；live `messages.db` 以 `mode=ro` 验证同一 row 的 `content_text/content_json` 完整存在。
+
+**公开群负向窗口与回滚**：UTC `2026-07-15T08:22:54Z` 至 `08:27:26Z`，bot 与 NapCat 均记录 43 条群入站，bot 侧 43 条全部走 `silent_learn`；双方群发送=0、poke=0、ERROR/CRITICAL/Traceback=0。bot recreate 期间 NapCat 有预期 WebSocket 断开/ECONNREFUSED 重试与一条旧客户端引用获取失败，均发生在窗口前；连接成功后的固定窗清零。NapCat 全程保持 container `19f6cf13607c...`、image `cde89d766604...`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。无 schema/data migration；回滚只切上述 pre-rich-context image 并 recreate bot。
 
 ---
 

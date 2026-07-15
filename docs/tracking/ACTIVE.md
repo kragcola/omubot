@@ -4,16 +4,16 @@
 
 ## Current
 
-- mode: task-bug
-- tracker: `docs/tracking/rich-message-context-completion-2026-07-15.md`
-- objective: 补齐嵌套引用回复、history backfill 与 silent_learn 的富消息上下文。
-- status: in_progress
-- checkpoint: 已确认三条入站边界分别丢 nested reply、reply/json/forward、silent rich content；保持 silent 零网络/零出站为硬合同。
-- next_step: 冻结真实协议形态，写 RED 后逐切片实现共享无副作用 renderer 与 active-only enrichment。
-- last_completed: `docs/tracking/nested-chat-records-2026-07-15.md`
-- implementation_commit: `2027858`
-- deployment: image `a1792c614fec...` / container `bd58abf979f3...` / runtime commit `2027858a98636d80e9caa3464218af23bb9dc99e` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
-- rollback: 切 `omubot-bot:pre-nested-forward-20260715-2027858` 后只 recreate bot；无 schema 或持久数据变更。
+- mode: none
+- tracker: none
+- objective: none
+- status: complete
+- checkpoint: 富消息上下文补全已提交、bot-only 上线并通过真实链/自然 silent reply/MessageLog/零出站验证。
+- next_step: none
+- last_completed: `docs/tracking/rich-message-context-completion-2026-07-15.md`
+- implementation_commit: `d51a7d4`
+- deployment: image `56f51b2ce8d5...` / container `0f7f47c3ffae...` / runtime commit `d51a7d41bed5b031659e09dcfd148c10e6cd4e0a` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
+- rollback: 切 `omubot-bot:pre-rich-context-20260715-d51a7d4` 后只 recreate bot；无 schema 或持久数据变更。
 
 ## Recovery Order
 
