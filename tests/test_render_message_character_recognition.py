@@ -242,7 +242,7 @@ async def test_render_message_surfaces_partial_multi_character_identity(tmp_path
                     character_name="初音未来",
                     relation="known",
                     context_label="Project SEKAI / Virtual Singer",
-                    difference=0.162,
+                    difference=0.120,
                     threshold=0.178,
                     detection_count=4,
                 ),
@@ -446,6 +446,86 @@ async def test_quoted_reply_image_uses_normalized_image_cache_bytes(tmp_path: Pa
     assert recognizer.seen_payloads == [normalized_payload]
     assert recognizer.seen_media_types == ["image/png"]
     assert "凤笑梦" in text
+    assert isinstance(rendered, list)
+    assert any(
+        block.get("type") == "image_ref"
+        and block.get("path") == str(tmp_path / "quoted.png")
+        and block.get("media_type") == "image/png"
+        for block in rendered
+    )
+
+
+@pytest.mark.asyncio
+async def test_quoted_reply_keeps_image_ref_when_description_pipeline_fails(tmp_path: Path) -> None:
+    image_cache = _FakeQuotedImageCache(tmp_path / "quoted.png", b"normalized-cache-image")
+    quoted = Message(
+        [MessageSegment("image", {"url": "http://example.invalid/q.png", "file": "quoted-file.png"})]
+    )
+    reply = _Reply(quoted, message_id=2468, sender=_Sender("99999", "群友"))
+
+    class _BrokenRecognizer:
+        async def identify(self, image_data: bytes, *, media_type: str = "image/jpeg"):
+            del image_data, media_type
+            raise RuntimeError("recognizer unavailable")
+
+    rendered = await _render_message(
+        Message([MessageSegment.text("这是谁")]),
+        reply=reply,
+        session=cast(aiohttp.ClientSession, _FakeSession()),
+        self_id="384801062",
+        vision_client=_FakeVisionClient(),
+        character_recognizer=_BrokenRecognizer(),
+        image_cache=image_cache,
+        vision_enabled=True,
+    )
+
+    assert isinstance(rendered, list)
+    assert any(
+        block.get("type") == "image_ref"
+        and block.get("path") == str(tmp_path / "quoted.png")
+        for block in rendered
+    )
+
+
+@pytest.mark.asyncio
+async def test_borderline_character_hit_is_not_rendered_as_trusted_identity(tmp_path: Path) -> None:
+    """Regression: stk_01db713d was Purisesu but CCIP barely matched Fuji Miyako."""
+    image_path = tmp_path / "purisesu.jpg"
+    image_path.write_bytes(b"fake-purisesu-image")
+
+    class _BorderlineRecognizer:
+        async def identify(self, image_data: bytes, *, media_type: str = "image/jpeg"):
+            del image_data, media_type
+            return [CharacterRecognition(
+                matched=True,
+                character_id="fuji_miyako",
+                character_name="藤 都子",
+                relation="known",
+                context_label="BanG Dream! / 夢限大みゅーたいぷ",
+                difference=0.17129391431808472,
+                threshold=0.17847511429108218,
+                detection_count=1,
+            )]
+
+    rendered = await _render_message(
+        Message([
+            MessageSegment("image", {"url": "http://example.invalid/p.jpg", "file": "p.jpg"}),
+            MessageSegment.text("这是谁"),
+        ]),
+        session=cast(aiohttp.ClientSession, object()),
+        vision_client=_FakeVisionClient(),
+        character_recognizer=_BorderlineRecognizer(),
+        vision_enabled=True,
+        image_cache=_FakeImageCache(image_path),
+    )
+
+    text = rendered if isinstance(rendered, str) else "".join(
+        block.get("text", "") for block in rendered if isinstance(block, dict)
+    )
+    assert "未能可信识别具体角色" in text
+    assert "识别结果接近阈值" in text
+    assert "藤 都子" not in text
+    assert "开心地跳起来" in text
 
 
 @pytest.mark.asyncio
@@ -466,7 +546,7 @@ async def test_quoted_reply_visual_evidence_is_not_truncated_to_generic_preview_
                     character_name="初音未来",
                     relation="known",
                     context_label="Project SEKAI / Virtual Singer",
-                    difference=0.162,
+                    difference=0.120,
                     threshold=0.178,
                     detection_count=4,
                 ),

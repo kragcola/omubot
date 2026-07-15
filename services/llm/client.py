@@ -67,7 +67,7 @@ from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
 from services.memory.message_log import MessageLog
 from services.memory.short_term import ChatMessage, ShortTermMemory
-from services.memory.timeline import GroupTimeline
+from services.memory.timeline import GroupTimeline, TimelineMessage
 from services.memory.types import Content
 from services.name_registry import NameVariationRegistry
 from services.persona import IdentitySnapshot
@@ -101,6 +101,26 @@ _CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
 _CQ_BROKEN_RE = re.compile(r"\[CQ:[^\]]*\]", re.DOTALL)
 _CQ_KV_FIX_RE = re.compile(r",(\w+):")
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply\b[^\]]*\]", re.IGNORECASE)
+_BARE_VISUAL_DEICTIC_QUERY_RE = re.compile(
+    r"^\s*(?:请问|问下|看看)?\s*"
+    r"(?:这|这个|这位|这人|这张图|这个图|图里|图片里|照片里|画面里)"
+    r"\s*(?:的(?:人|角色))?\s*(?:是)?\s*谁"
+    r"\s*[啊呀呢吧嘛吗。.！!？?~～]*\s*$",
+)
+_CURRENT_VISUAL_IDENTITY_QUERY_RE = re.compile(
+    r"^\s*(?:请问|问下|看看)?\s*(?:"
+    r"(?:这|这个|这位|这人|他|她|它)\s*(?:是)?\s*谁"
+    r"|(?:这|这个)?\s*(?:是)?\s*(?:哪个|什么)\s*(?:人|角色)"
+    r"|(?:这|这个)\s*(?:人|角色)\s*(?:是)?\s*谁"
+    r"|(?:图|图片|照片|画面)(?:中|里|上)?\s*(?:的)?\s*(?:人|角色)?\s*(?:是)?\s*谁"
+    r"|谁"
+    r")\s*[啊呀呢吧嘛吗。.！!？?~～]*\s*$",
+)
+_QUOTED_MESSAGE_BLOCK_RE = re.compile(
+    r"\[QUOTED_MSG\b[^\]]*\].*?\[/QUOTED_MSG\]",
+    re.DOTALL,
+)
+_VISUAL_PREVIEW_RE = re.compile(r"«(?:动画表情|图片)\d*(?::[^»]*)?»")
 _QUOTE_ANCHOR_RE = re.compile(
     r"<quote\b[^>]*\bmsg_id\s*=\s*(?P<quote>['\"])(?P<msg_id>\d+)(?P=quote)[^>]*/?>",
     re.IGNORECASE,
@@ -615,6 +635,119 @@ def content_text(content: Content) -> str:
     if isinstance(content, str):
         return content
     return " ".join(b["text"] for b in content if b["type"] == "text")
+
+
+def _pending_has_current_visual(pending: list[TimelineMessage]) -> bool:
+    """Return whether the current unflushed request batch carries visual evidence."""
+    for msg in pending:
+        if msg.get("trigger_reason"):
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "image_ref"
+            for block in content
+        ):
+            return True
+        text = content_text(content).strip()
+        if "«图片" in text or "[图片:" in text or "[图片]" in text:
+            return True
+    return False
+
+
+def _content_has_visual(content: Content) -> bool:
+    if isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "image_ref"
+        for block in content
+    ):
+        return True
+    text = content_text(content).strip()
+    return "«图片" in text or "[图片:" in text or "[图片]" in text
+
+
+def _pending_visual_query_text(pending: list[TimelineMessage]) -> str:
+    for msg in reversed(pending):
+        if msg.get("trigger_reason"):
+            continue
+        text = content_text(msg.get("content", "")).strip()
+        if text:
+            return text
+    return ""
+
+
+def _clean_visual_query_text(text: str) -> str:
+    text = _QUOTED_MESSAGE_BLOCK_RE.sub(" ", text)
+    text = _VISUAL_PREVIEW_RE.sub(" ", text)
+    return " ".join(text.split())
+
+
+def _visual_identity_mode(*, query_text: str, has_visual: bool) -> str:
+    clean_query = _clean_visual_query_text(query_text)
+    if not clean_query:
+        return ""
+    if has_visual and _CURRENT_VISUAL_IDENTITY_QUERY_RE.fullmatch(clean_query):
+        return "current"
+    if not has_visual and _BARE_VISUAL_DEICTIC_QUERY_RE.fullmatch(clean_query):
+        return "missing"
+    return ""
+
+
+def _prepend_request_instruction(content: Content, instruction: str) -> Content:
+    marker = f"«当前视觉指代约束: {instruction}»"
+    if isinstance(content, str):
+        return f"{marker}\n{content}"
+    return [{"type": "text", "text": marker}, *content]
+
+
+def _visual_identity_request_mode(pending: list[TimelineMessage]) -> str:
+    return _visual_identity_mode(
+        query_text=_pending_visual_query_text(pending),
+        has_visual=_pending_has_current_visual(pending),
+    )
+
+
+def _ground_visual_content(content: Content, mode: str) -> Content:
+    if mode == "current":
+        return _prepend_request_instruction(
+            content,
+            "人物指代只绑定本轮待处理消息中的图片或引用图片；优先依据本轮图片像素与本轮视觉识别结果，"
+            "历史人物名不能覆盖本轮视觉证据；标记为低置信候选或未能可信识别时，低置信候选不得当作人物答案；"
+            "证据不足或冲突时明确说不确定，不要从历史猜人。",
+        )
+    if mode == "missing":
+        return _prepend_request_instruction(
+            content,
+            "本轮待处理消息没有图片或引用图片；不得沿用历史图片或历史人物作为“这”的对象，"
+            "应请对方补发或引用图片，不要猜人物身份。",
+        )
+    return content
+
+
+def _apply_visual_reference_grounding(
+    pending: list[TimelineMessage],
+    merged_content: Content,
+) -> Content:
+    """Bind image-identity questions to the current pending request, not history.
+
+    This annotation is request-local: it is added after timeline merging and is
+    never persisted into the raw message log or finalized conversation turns.
+    """
+    mode = _visual_identity_request_mode(pending)
+    return _ground_visual_content(merged_content, mode)
+
+
+def _scope_visual_identity_context(
+    messages: list[dict[str, Any]],
+    pending: list[TimelineMessage],
+) -> list[dict[str, Any]]:
+    """Isolate a visual-identity request from finalized conversation history.
+
+    The current unflushed batch already contains the direct/quoted image and its
+    visual description. Removing finalized turns also blocks stale text, image
+    pixels, and summaries from competing with the current visual referent.
+    """
+    if not _visual_identity_request_mode(pending):
+        return messages
+    return messages[-1:]
 
 
 def _group_id_from_session(session_id: str) -> str:
@@ -4468,7 +4601,12 @@ class LLMClient:
         pending = self._timeline.get_pending(group_id)
         if pending:
             from services.memory.timeline import merge_user_contents
-            messages.append({"role": "user", "content": merge_user_contents(pending)})
+            merged_content = merge_user_contents(pending)
+            messages.append({
+                "role": "user",
+                "content": _apply_visual_reference_grounding(pending, merged_content),
+            })
+            messages = _scope_visual_identity_context(messages, pending)
 
         # Place cache breakpoint at the position recorded by the previous API call
         cached_idx = self._timeline.get_cached_msg_index(group_id)
@@ -4676,6 +4814,7 @@ class LLMClient:
         _, _, _, main_model, main_api_format = self._profile_for_task("main")
         deepseek_native_main = main_api_format == "deepseek" and is_deepseek_v4_model(main_model)
         compact_ratio = self._compact_ratio_for_main()
+        visual_identity_mode = ""
 
         if is_group:
             assert group_id is not None
@@ -4688,6 +4827,8 @@ class LLMClient:
                     int(self._max_context_tokens * compact_ratio),
                 )
                 await self._compact_group(group_id, identity)
+            pending_for_request = self._timeline.get_pending(group_id)
+            visual_identity_mode = _visual_identity_request_mode(pending_for_request)
             messages = self._build_group_messages(group_id)
             # Append user_content as a transient user message so directives
             # like "respond to this video" reach the LLM in group context.
@@ -4696,6 +4837,10 @@ class LLMClient:
         else:
             # Private: use ShortTermMemory
             self._short_term.add(session_id, "user", user_content)
+            visual_identity_mode = _visual_identity_mode(
+                query_text=content_text(user_content),
+                has_visual=_content_has_visual(user_content),
+            )
             # Persist to SQLite so /debug works after restart
             if self._message_log is not None:
                 text_preview = (
@@ -4712,6 +4857,11 @@ class LLMClient:
                 )
                 await self._compact(session_id)
             messages = self._build_private_messages(session_id)
+            if visual_identity_mode:
+                messages = [{
+                    "role": "user",
+                    "content": _ground_visual_content(user_content, visual_identity_mode),
+                }]
         anchor_injection = self._maybe_inject_anchor_message(
             messages=messages,
             session_id=session_id,
@@ -4775,7 +4925,7 @@ class LLMClient:
         # ------------------------------------------------------------------
         thinker_decision: object | None = None
         thinker_action = ""
-        thinker_retrieve_mode = "hybrid"
+        thinker_retrieve_mode = "skip" if visual_identity_mode else "hybrid"
         thinker_rewritten_query = ""
         thinker_topic_intent_label = "闲聊"
         thinker_turn_id = ""
@@ -4879,6 +5029,11 @@ class LLMClient:
             thinker_topic_intent_label = getattr(thinker_decision, "topic_intent_label", "闲聊")
             thinker_retrieve_mode = getattr(thinker_decision, "retrieve_mode", "hybrid")
             thinker_rewritten_query = getattr(thinker_decision, "rewritten_query", "")
+            if visual_identity_mode:
+                thinker_retrieve_mode = "skip"
+                thinker_rewritten_query = ""
+                thinker_decision.retrieve_mode = "skip"
+                thinker_decision.rewritten_query = ""
             thinker_instruction_signal = getattr(thinker_decision, "instruction_signal", "none")
             thinker_turn_id = f"{session_id}:{int(time.monotonic() * 1000)}"
             write_clock_state(

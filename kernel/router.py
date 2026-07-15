@@ -1049,8 +1049,16 @@ async def _describe_image_data(
         matched = [r for r in results if r.matched and r.character_name]
         if matched:
             _log_debug.debug(
-                "character recognition HIT | count={} ids={}",
-                len(matched), [r.character_id for r in matched],
+                "character recognition HIT | count={} matches={}",
+                len(matched),
+                [
+                    {
+                        "id": r.character_id,
+                        "difference": r.difference,
+                        "threshold": r.threshold,
+                    }
+                    for r in matched
+                ],
             )
             # Phase 3: self/friend → transient mood nudge (first self/friend wins).
             if mood_engine is not None:
@@ -1116,6 +1124,7 @@ async def _render_message(
         desc_cache = {}
 
     text_parts: list[str] = []
+    quoted_images: list[ImageRefBlock] = []
     image_count = 0
 
     if reply is not None:
@@ -1127,7 +1136,8 @@ async def _render_message(
             is_reply_to_bot = self_id and uid == self_id
             cap = _REPLY_PREVIEW_MAX_SELF if is_reply_to_bot else _REPLY_PREVIEW_MAX
             original = reply_msg.extract_plain_text().strip()
-            if not original:
+            has_rich_reply = any(seg.type in {"image", "json"} for seg in reply_msg)
+            if not original or has_rich_reply:
                 reply_message_id = getattr(reply, "message_id", None)
                 refetched_url: str | None = None
                 refetch_done = False
@@ -1157,6 +1167,7 @@ async def _render_message(
                                                 file_id = f"quoted_{hashlib.sha256(img_data).hexdigest()[:24]}"
                                             ref = await image_cache.save_bytes(img_data, file_id=file_id)
                                             if ref is not None:
+                                                quoted_images.append(ref)
                                                 from pathlib import Path
 
                                                 try:
@@ -1303,12 +1314,13 @@ async def _render_message(
 
     text = "".join(text_parts).strip()
 
-    if not images:
+    if not images and not quoted_images:
         return text
 
     blocks: list[ContentBlock] = []
     if text:
         blocks.append(TextBlock(type="text", text=text))
+    blocks.extend(quoted_images)
     blocks.extend(ref for ref, _ in images)
     return blocks
 

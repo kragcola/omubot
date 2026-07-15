@@ -20,6 +20,7 @@ from services.llm.prompt_builder import PromptBuilder
 from services.llm.thinker import ThinkDecision, write_clock_state, write_thinker_decision_state
 from services.memory.card_store import CardStore
 from services.memory.short_term import ShortTermMemory
+from services.memory.timeline import GroupTimeline
 from services.persona import IdentitySnapshot, PersonaRuntime
 from services.system_module import Scope
 from services.tools.registry import ToolRegistry
@@ -36,10 +37,11 @@ _MAIN_RESULT = {
 
 class _Bus:
     def __init__(self) -> None:
+        self.prompt_calls: list[object] = []
         self.thinker_calls: list[object] = []
 
     async def fire_on_pre_prompt(self, prompt_ctx) -> None:
-        return None
+        self.prompt_calls.append(prompt_ctx)
 
     async def fire_on_post_reply(self, reply_ctx) -> None:
         return None
@@ -78,6 +80,7 @@ async def _client(
     mood_getter=None,
     slang_store_getter: Callable[[], Any] | None = None,
     thinker_provider_enabled: bool = False,
+    group_timeline: GroupTimeline | None = None,
 ) -> LLMClient:
     return LLMClient(
         base_url="http://fake",
@@ -93,6 +96,7 @@ async def _client(
         mood_getter=mood_getter,
         slang_store_getter=slang_store_getter,
         thinker_provider_enabled=thinker_provider_enabled,
+        group_timeline=group_timeline,
     )
 
 
@@ -283,6 +287,131 @@ async def test_llm_client_writes_thinker_state_and_keeps_hook(
     assert len(clock_rows) == 1
     assert clock_rows[0]["value"] == clock_features
     assert clock_rows[0]["scope"]["turn_id"] == thinker_rows[0]["scope"]["turn_id"]
+
+
+@pytest.mark.asyncio
+async def test_visual_identity_question_forces_retrieval_skip(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
+    timeline = GroupTimeline()
+    timeline.add(
+        "100",
+        role="user",
+        speaker="Alice(1)",
+        content=[
+            {"type": "text", "text": "这是谁«图片1: 未能可信识别具体角色»"},
+            {"type": "image_ref", "path": "/tmp/current.jpg", "media_type": "image/jpeg"},
+        ],
+    )
+    plugin_bus = _Bus()
+    runtime_state = create_humanization_state_bus()
+    client = await _client(
+        persona_runtime,
+        runtime_state=runtime_state,
+        bus=plugin_bus,
+        group_timeline=timeline,
+    )
+    client._card_store = cast(CardStore, _FakeCardStore())
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = SimpleNamespace(
+                action="reply",
+                topic_intent_label="询问",
+                retrieve_mode="hybrid",
+                rewritten_query="图片里的人是谁",
+                thought="看图识人",
+                unknown_terms=[],
+                sticker=False,
+                tone="认真",
+                instruction_signal="none",
+                usage={},
+            )
+            result = await client.chat(
+                session_id="group_100",
+                user_id="1",
+                user_content="",
+                identity=identity_snapshot,
+                group_id="100",
+                force_reply=True,
+            )
+    finally:
+        await client.close()
+
+    assert result == "reply text"
+    assert len(plugin_bus.prompt_calls) == 1
+    prompt_ctx = plugin_bus.prompt_calls[0]
+    assert getattr(prompt_ctx, "retrieve_mode", "") == "skip"
+    assert getattr(prompt_ctx, "rewritten_query", "missing") == ""
+    snapshot = runtime_state.snapshot_all_for_trace()
+    thinker_values = [
+        row["value"]
+        for row in snapshot.values()
+        if row["slot_id"] == THINKER_LAST_DECISION_SLOT
+    ]
+    assert thinker_values[-1]["retrieve_mode"] == "skip"
+    assert thinker_values[-1]["rewritten_query"] == ""
+
+
+@pytest.mark.asyncio
+async def test_private_bare_visual_question_drops_historical_image_context(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
+    short_term = ShortTermMemory()
+    short_term.add(
+        "private_100",
+        "user",
+        [
+            {"type": "text", "text": "«图片1: 草薙宁宁»"},
+            {"type": "image_ref", "path": "/tmp/nene.jpg", "media_type": "image/jpeg"},
+        ],
+    )
+    short_term.add("private_100", "assistant", "这是草薙宁宁。")
+    plugin_bus = _Bus()
+    client = await _client(
+        persona_runtime,
+        short_term=short_term,
+        bus=plugin_bus,
+    )
+    client._card_store = cast(CardStore, _FakeCardStore())
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = SimpleNamespace(
+                action="reply",
+                topic_intent_label="询问",
+                retrieve_mode="hybrid",
+                rewritten_query="草薙宁宁是谁",
+                thought="根据历史回答",
+                unknown_terms=[],
+                sticker=False,
+                tone="认真",
+                instruction_signal="none",
+                usage={},
+            )
+            result = await client.chat(
+                session_id="private_100",
+                user_id="100",
+                user_content="这是谁",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+
+    assert result == "reply text"
+    recent_messages = mock_think.await_args.kwargs["recent_messages"]
+    rendered_recent = str(recent_messages)
+    assert "本轮待处理消息没有图片或引用图片" in rendered_recent
+    assert "草薙宁宁" not in rendered_recent
+    assert "/tmp/nene.jpg" not in rendered_recent
+    assert len(plugin_bus.prompt_calls) == 1
+    assert getattr(plugin_bus.prompt_calls[0], "retrieve_mode", "") == "skip"
 
 
 @pytest.mark.asyncio

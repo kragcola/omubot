@@ -12,6 +12,11 @@ from dataclasses import dataclass
 
 from services.media.character_recognizer import CharacterRecognition
 
+# The sidecar threshold is a nearest-neighbour candidate boundary. Human-facing
+# identity assertions need a stricter margin: production false positives were
+# observed at 0.155 and 0.171 with a 0.178 sidecar threshold.
+_IDENTITY_ASSERTION_SAFETY_MARGIN = 0.03
+
 
 @dataclass(frozen=True)
 class StickerEvidence:
@@ -41,6 +46,15 @@ class VisualEvidence:
         return tuple(r for r in self.recognitions if r.matched and r.character_name)
 
     @property
+    def trusted_matched(self) -> tuple[CharacterRecognition, ...]:
+        return tuple(r for r in self.matched if _is_trusted_identity(r))
+
+    @property
+    def borderline_matched(self) -> tuple[CharacterRecognition, ...]:
+        trusted = self.trusted_matched
+        return tuple(r for r in self.matched if r not in trusted)
+
+    @property
     def unmatched(self) -> tuple[CharacterRecognition, ...]:
         return tuple(r for r in self.recognitions if not (r.matched and r.character_name))
 
@@ -54,7 +68,7 @@ class VisualEvidence:
 
 def render_visual_evidence(evidence: VisualEvidence) -> str | None:
     """Render structured evidence into the compact image preview used in prompts."""
-    matched = evidence.matched
+    matched = evidence.trusted_matched
     body = _primary_body(evidence, has_character_match=bool(matched))
 
     if matched:
@@ -71,6 +85,11 @@ def render_visual_evidence(evidence: VisualEvidence) -> str | None:
             return f"{summary}：{body}" if body else summary
         return f"{labels}：{body}" if body else f"{labels}表情包"
 
+    if evidence.borderline_matched:
+        count = evidence.detection_count or len(evidence.borderline_matched)
+        summary = f"检测到{count}个角色/头像；识别结果接近阈值，未能可信识别具体角色"
+        return f"{summary}：{body}" if body else summary
+
     if evidence.recognitions:
         count = evidence.detection_count or len(evidence.recognitions)
         summary = f"检测到{count}个角色/头像；未能可信识别具体角色"
@@ -86,6 +105,15 @@ def render_visual_evidence(evidence: VisualEvidence) -> str | None:
     if evidence.sticker is not None and evidence.sticker.description:
         return evidence.sticker.description
     return None
+
+
+def _is_trusted_identity(recognition: CharacterRecognition) -> bool:
+    if not recognition.matched or not recognition.character_name:
+        return False
+    if recognition.difference is None or recognition.threshold is None:
+        return True
+    trusted_limit = max(0.0, recognition.threshold - _IDENTITY_ASSERTION_SAFETY_MARGIN)
+    return recognition.difference <= trusted_limit
 
 
 def _primary_body(evidence: VisualEvidence, *, has_character_match: bool) -> str | None:
