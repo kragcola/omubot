@@ -23,7 +23,10 @@ from services.storage.catalog import (
     BackupProfile,
     DatabaseSpec,
 )
-from services.storage.schema_contracts import verify_catalog_schema
+from services.storage.schema_contracts import (
+    verify_catalog_migration_ledger,
+    verify_catalog_schema,
+)
 
 _L = logger.bind(channel="backup")
 
@@ -742,6 +745,11 @@ def _build_restore_plan_item(
                 connection,
                 actual_user_version,
             )
+            ledger_matches = verify_catalog_migration_ledger(
+                item_id,
+                connection,
+                actual_user_version,
+            )
     except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
         return _blocked_restore_item(
             item,
@@ -765,6 +773,15 @@ def _build_restore_plan_item(
             backup_path=backup_path,
             compatibility="schema_mismatch",
             reason="SQLite backup does not match the governed schema contract",
+            user_version=actual_user_version,
+            target_user_version=spec.target_user_version,
+        )
+    if ledger_matches is False:
+        return _blocked_restore_item(
+            item,
+            backup_path=backup_path,
+            compatibility="schema_mismatch",
+            reason="SQLite backup migration ledger does not match the governed contract",
             user_version=actual_user_version,
             target_user_version=spec.target_user_version,
         )

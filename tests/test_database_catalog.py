@@ -23,6 +23,7 @@ EXPECTED_DATABASES = {
     "memory_cards": "storage/memory_cards.db",
     "messages": "storage/messages.db",
     "research_events": "storage/research_events.db",
+    "research_topic_assignments": "storage/research_topic_assignments.db",
     "scheduler_replay": "storage/scheduler_replay.db",
     "slang": "storage/slang.db",
     "stickers": "storage/stickers/stickers.db",
@@ -123,6 +124,10 @@ def test_shared_database_can_declare_one_owner_and_multiple_clients() -> None:
     assert catalog.get("shared").clients == ("services.writer", "services.reader")
     assert len(default_catalog.get("messages").clients) >= 2
     assert len(default_catalog.get("character_recognition").clients) >= 2
+    assert default_catalog.get("research_events").clients == (
+        "services.group.research_event_store",
+        "services.group.topic_assignment_runner",
+    )
 
 
 def test_profiles_are_enum_values_and_raw_profile_strings_are_invalid() -> None:

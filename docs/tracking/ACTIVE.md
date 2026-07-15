@@ -4,17 +4,17 @@
 
 ## Current
 
-- mode: none
-- tracker: none
-- objective: none
-- status: complete
-- checkpoint: FoodPlugin 一次性教程改为 CardStore durable UNIQUE claim，跨重启/跨实例 at-most-once；旧历史静默迁移、store fail-closed、send cancel/error、feedback 回收与跨群 owner 均闭环。最终 review 0/0/0，full 3383 passed / 17 skipped。
-- completed_at: 2026-07-15 06:38 CST
-- next_step: none
+- mode: task
+- tracker: `docs/tracking/topic-block-phase2-derived-assignments-2026-07-15.md`
+- objective: 在 Phase 1 append-only raw research event 上实现 versioned topic assignment、stable block UUID、assignment evidence 与 utterance membership，绝不改写 raw event。
+- status: verified_pending_deploy
+- checkpoint: Phase 2 独立 derived schema/store/runner/CLI 已实现；reviewer 0 blocker，full pytest 3401 passed / 17 skipped，生产离线快照 102 assignments/memberships、二跑 duplicate、4 类孤儿为 0。算法版本 `topic-block-l0l3-v1-4d15cafcdf72`。
+- started_at: 2026-07-15
+- next_step: 精确提交 Phase 2 文件；bot-only rebuild/recreate 后在容器内对 live raw 固定 cutoff 运行 CLI，绝不操作 NapCat。
 - last_completed: `docs/tracking/food-plugin-durable-tutorial-audit-2026-07-15.md`
-- implementation_commit: `232de5a`（本地 `main`，尚未 push）
-- deployment: bot image `b3a40ac03839...`（tag `omubot-bot:food-tutorial-durable-20260715`）/ container `e9c44251c4de...` / restart=0 / OOM=false。
-- rollback: `omubot-bot:pre-food-tutorial-fix-20260715`=`e31c2a630cd3...`；只允许 bot-only recreate；NapCat `19f6cf...` 不得 restart/recreate/down。
+- implementation_commit: pending
+- deployment: pending；只允许 bot-only rebuild/recreate。
+- rollback: 停止 Phase 2 CLI 或移除独立派生 DB；Phase 1 无配置/运行时改动，NapCat 不得 restart/recreate/down。
 
 ## Recovery Order
 
@@ -32,7 +32,6 @@
 
 ## Pending (authoritative; not the Current task)
 
-- **进阶话题块 Phase 2（未启动）**：Phase 1 raw research event layer 已部署且当前 capture health 为 healthy；新容器本轮 metrics 为 0/0/0。Phase 2 仍需实现 versioned `topic_assignment`、stable `block_uuid`、assignment evidence 与 `utterance_membership`，不得改写 raw event。
 - **Character pack gap filling（active）**：sidecar healthy，4 packs / 136 characters；剩 BangDream 10 个 `chibi`、`lily:expression`、`haru:chibi`。无技术阻塞，主要约束是可信单角色来源不足。
 - **Dialogue Climate 后续增量（实现已部署并 active）**：A-M2/M3/M4 已分别提交于 `30f0f23` / `f547344` / `f5ac299`，当前 schedule effective config 的 `m1/m2/m3/m4` 四 flag 均为 true。仍未做 provider-bus 让位、affection+climate 单 block 合并、Humanizer/Thinker adapter、MessageSensor classifier 运行馈入、baseline durable persistence、M1 tension 完全退役。
 - **QZone Journal（仅立项）**：可行性已实证，仓库只有 charter，无 `plugins/qzone_journal` 实现。基础版与进阶版均未启动。

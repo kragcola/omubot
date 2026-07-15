@@ -41,6 +41,22 @@ _ACTIVITY_FLOOR = 0.5
 _RESERVOIR_MAX = 12
 
 
+def topic_block_algorithm_contract() -> dict[str, object]:
+    """Stable fingerprint inputs for offline versioned assignment runs."""
+    return {
+        "revision": "l0-l3-edge-model-v1",
+        "l1_weights": {
+            "speaker": _L1_W_SPK,
+            "time": _L1_W_TIME,
+            "similarity": _L1_W_SIM,
+            "floor": _L1_SCORE_FLOOR,
+        },
+        "reply_edge_guardrail": "strong_prior_with_sender_consistency",
+        "candidate_pool": "active_plus_reservoir",
+        "tie_break": "last_candidate_on_greater_or_equal",
+    }
+
+
 @dataclass
 class TopicBlock:
     """One concurrent conversation thread within a group."""
@@ -70,6 +86,29 @@ class TopicBlock:
         if self.participants:
             return max(self.participants, key=lambda qq: self.participants[qq])
         return ""
+
+
+@dataclass(frozen=True, slots=True)
+class TopicAttributionDecision:
+    """One attribution result plus evidence for offline research projection."""
+
+    block: TopicBlock
+    reason: str
+    score: float | None
+    runner_up_margin: float | None
+    reply_predecessor_message_id: int | None
+    candidate_count: int
+    reply_edge_rejected: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _AttributionCandidate:
+    block: TopicBlock | None
+    reason: str
+    score: float | None = None
+    runner_up_margin: float | None = None
+    candidate_count: int = 0
+    reply_edge_rejected: bool = False
 
 
 class TopicBlockTracker:
@@ -211,12 +250,41 @@ class TopicBlockTracker:
         now: float | None = None,
     ) -> TopicBlock:
         """Attribute one message to a topic block (strongest signal first)."""
+        return self.observe_with_evidence(
+            group_id,
+            message_id=message_id,
+            speaker=speaker,
+            text=text,
+            reply_to_sender_id=reply_to_sender_id,
+            reply_to_message_id=reply_to_message_id,
+            reply_to_self=reply_to_self,
+            at_targets=at_targets,
+            at_self=at_self,
+            now=now,
+        ).block
+
+    def observe_with_evidence(
+        self,
+        group_id: str,
+        *,
+        message_id: int | None,
+        speaker: str,
+        text: str,
+        reply_to_sender_id: str = "",
+        reply_to_message_id: int | None = None,
+        reply_to_self: bool = False,
+        at_targets: tuple[str, ...] = (),
+        at_self: bool = False,
+        now: float | None = None,
+    ) -> TopicAttributionDecision:
+        """Attribute one message and expose the evidence without changing policy."""
         now = time.monotonic() if now is None else now
         active = self._active(group_id, now)
-        target = self._attribute(
+        candidate = self._attribute_with_evidence(
             group_id, active, speaker, text,
             reply_to_sender_id, reply_to_message_id, reply_to_self, at_targets, now,
         )
+        target = candidate.block
         if target is None:
             target = TopicBlock(block_id=self._next_block_id())
             self._blocks.setdefault(group_id, {})[target.block_id] = target
@@ -229,7 +297,15 @@ class TopicBlockTracker:
             _, coldest = min(active_now.items(), key=lambda kv: kv[1].activity)
             self._move_to_reservoir(group_id, coldest)
             active_now = self._blocks.get(group_id, {})
-        return target
+        return TopicAttributionDecision(
+            block=target,
+            reason=candidate.reason,
+            score=candidate.score,
+            runner_up_margin=candidate.runner_up_margin,
+            reply_predecessor_message_id=reply_to_message_id,
+            candidate_count=candidate.candidate_count,
+            reply_edge_rejected=candidate.reply_edge_rejected,
+        )
 
     def _attribute(
         self,
@@ -244,6 +320,33 @@ class TopicBlockTracker:
         now: float,
     ) -> TopicBlock | None:
         """Find the block this message belongs to, or None to open a new one."""
+        return self._attribute_with_evidence(
+            group_id,
+            active,
+            speaker,
+            text,
+            reply_to_sender_id,
+            reply_to_message_id,
+            reply_to_self,
+            at_targets,
+            now,
+        ).block
+
+    def _attribute_with_evidence(
+        self,
+        group_id: str,
+        active: list[TopicBlock],
+        speaker: str,
+        text: str,
+        reply_to_sender_id: str,
+        reply_to_message_id: int | None,
+        reply_to_self: bool,
+        at_targets: tuple[str, ...],
+        now: float,
+    ) -> _AttributionCandidate:
+        """Find the target block while preserving the current attribution order."""
+        candidate_count = len(active) + len(self._reservoir.get(group_id, {}))
+        reply_edge_rejected = False
         # L0-4: reply-to a specific message → O(1) reverse lookup (edge model).
         if reply_to_message_id is not None:
             group_idx = self._msg_to_block.get(group_id, {})
@@ -252,10 +355,14 @@ class TopicBlockTracker:
                 b_active = next((b for b in active if b.block_id == found_block_id), None)
                 if b_active is not None:
                     if reply_to_sender_id and reply_to_sender_id not in b_active.participants:
-                        pass  # guardrail 2: inconsistent edge → fall through
+                        reply_edge_rejected = True  # guardrail 2: inconsistent edge → fall through
                     else:
                         b_active.anchor_speaker = reply_to_sender_id or b_active.anchor_speaker
-                        return b_active
+                        return _AttributionCandidate(
+                            block=b_active,
+                            reason="reply_message_active",
+                            candidate_count=candidate_count,
+                        )
                 else:
                     all_blocks: dict[str, TopicBlock] = {}
                     all_blocks.update(self._blocks.get(group_id, {}))
@@ -263,37 +370,75 @@ class TopicBlockTracker:
                     b = all_blocks.get(found_block_id)
                     if b is not None and reply_to_sender_id and reply_to_sender_id in b.participants:
                         b.anchor_speaker = reply_to_sender_id
-                        return b
+                        return _AttributionCandidate(
+                            block=b,
+                            reason="reply_message_reservoir",
+                            candidate_count=candidate_count,
+                        )
         # 1. reply-to bot → the bot block.
         if reply_to_self:
             for b in active:
                 if b.bot_involved:
-                    return b
+                    return _AttributionCandidate(
+                        block=b,
+                        reason="reply_to_self",
+                        candidate_count=candidate_count,
+                        reply_edge_rejected=reply_edge_rejected,
+                    )
         # 2. reply-to a known speaker → their block.
         if reply_to_sender_id:
             for b in active:
                 if reply_to_sender_id in b.participants:
-                    return b
+                    return _AttributionCandidate(
+                        block=b,
+                        reason="reply_speaker",
+                        candidate_count=candidate_count,
+                        reply_edge_rejected=reply_edge_rejected,
+                    )
         # 3. @-mention → target block.
         if at_targets:
             for b in active:
                 if (now - b.last_active) <= self._attrib_recent_s and any(
                     t in b.participants for t in at_targets
                 ):
-                    return b
+                    return _AttributionCandidate(
+                        block=b,
+                        reason="at_target",
+                        candidate_count=candidate_count,
+                        reply_edge_rejected=reply_edge_rejected,
+                    )
         # 4-5. L1 linear scoring over active ∪ reservoir (guardrail 1).
         best: TopicBlock | None = None
         best_score = _L1_SCORE_FLOOR
         candidates = active + list(self._reservoir.get(group_id, {}).values())
+        scored: list[tuple[TopicBlock, float]] = []
         for b in candidates:
             spk_c = 1.0 if speaker and speaker in b.participants else 0.0
             age = max(0.0, now - b.last_active)
             recency = max(0.0, 1.0 - age / self._attrib_recent_s)
             sim = self._similarity.similarity(text, self._block_text(b)) if self._block_text(b) else 0.0
             score = _L1_W_SPK * spk_c + _L1_W_TIME * recency + _L1_W_SIM * sim
+            scored.append((b, score))
             if score >= best_score:
                 best, best_score = b, score
-        return best
+        if best is None:
+            top_score = max((score for _, score in scored), default=None)
+            return _AttributionCandidate(
+                block=None,
+                reason="new_block",
+                score=top_score,
+                runner_up_margin=_score_margin(scored, selected=None),
+                candidate_count=len(candidates),
+                reply_edge_rejected=reply_edge_rejected,
+            )
+        return _AttributionCandidate(
+            block=best,
+            reason="linear_score",
+            score=best_score,
+            runner_up_margin=_score_margin(scored, selected=best),
+            candidate_count=len(candidates),
+            reply_edge_rejected=reply_edge_rejected,
+        )
 
     def _apply(
         self,
@@ -365,3 +510,21 @@ class TopicBlockTracker:
         self._blocks.pop(group_id, None)
         self._reservoir.pop(group_id, None)
         self._msg_to_block.pop(group_id, None)
+
+
+def _score_margin(
+    scored: list[tuple[TopicBlock, float]],
+    *,
+    selected: TopicBlock | None,
+) -> float | None:
+    if not scored:
+        return None
+    if selected is None:
+        values = sorted((score for _, score in scored), reverse=True)
+        return values[0] - values[1] if len(values) > 1 else None
+    selected_score = next(score for block, score in scored if block is selected)
+    runner_up = max(
+        (score for block, score in scored if block is not selected),
+        default=_L1_SCORE_FLOOR,
+    )
+    return selected_score - runner_up

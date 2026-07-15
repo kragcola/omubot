@@ -29,9 +29,10 @@ def test_database_status_endpoint_exposes_read_only_catalog_snapshot(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["summary"]["total"] == 21
+    catalog_count = len(DEFAULT_DATABASE_CATALOG.all())
+    assert payload["summary"]["total"] == catalog_count
     assert payload["summary"]["ok_count"] == 1
-    assert payload["summary"]["missing_count"] == 20
+    assert payload["summary"]["missing_count"] == catalog_count - 1
     by_id = {item["db_id"]: item for item in payload["items"]}
     usage = by_id["usage"]
     assert usage["owner"] == DEFAULT_DATABASE_CATALOG.get("usage").owner
@@ -55,4 +56,4 @@ def test_database_status_router_is_mounted_under_admin_prefix(tmp_path: Path) ->
     response = TestClient(app).get("/api/admin/databases")
 
     assert response.status_code == 200
-    assert response.json()["summary"]["total"] == 21
+    assert response.json()["summary"]["total"] == len(DEFAULT_DATABASE_CATALOG.all())

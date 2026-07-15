@@ -54,11 +54,19 @@ class IndexContract:
 
 
 @dataclass(frozen=True, slots=True)
+class MigrationLedgerContract:
+    version: int
+    name: str
+    checksum: str
+
+
+@dataclass(frozen=True, slots=True)
 class SchemaContract:
     db_id: str
     target_user_version: int
     tables: tuple[TableContract, ...]
     indexes: tuple[IndexContract, ...]
+    migration_ledger: tuple[MigrationLedgerContract, ...] = ()
 
 
 def _column(
@@ -341,12 +349,146 @@ EPISODIC_V1_CONTRACT = SchemaContract(
     ),
 )
 
+
+RESEARCH_TOPIC_ASSIGNMENTS_V1_MIGRATION_NAME = "topic_assignment_baseline_v1"
+RESEARCH_TOPIC_ASSIGNMENTS_V1_MIGRATION_CHECKSUM = (
+    "sha256:a54260933061fdc77bcabe066100400ef261f023cb51008118319fcbf9b09ec0"
+)
+
+
+RESEARCH_TOPIC_ASSIGNMENTS_V1_CONTRACT = SchemaContract(
+    db_id="research_topic_assignments",
+    target_user_version=1,
+    tables=(
+        TableContract(
+            "assignment_run",
+            (
+                _column("run_uuid", "TEXT", primary_key=1),
+                _column("algorithm_version", "TEXT", not_null=True),
+                _column("algorithm_config_hash", "TEXT", not_null=True),
+                _column("input_digest", "TEXT", not_null=True),
+                _column("input_cutoff", "TEXT", not_null=True, default_sql="''"),
+                _column("started_at", "TEXT", not_null=True),
+                _column("completed_at", "TEXT", not_null=True),
+                _column("status", "TEXT", not_null=True),
+                _column("event_count", "INTEGER", not_null=True),
+                _column("assignment_count", "INTEGER", not_null=True),
+            ),
+            unique_constraints=(
+                ("run_uuid", "algorithm_version"),
+                ("algorithm_version", "input_digest"),
+            ),
+        ),
+        TableContract(
+            "topic_block_identity",
+            (
+                _column("block_uuid", "TEXT", primary_key=1),
+                _column("algorithm_version", "TEXT", not_null=True),
+                _column("group_id", "TEXT", not_null=True),
+                _column("seed_event_uid", "TEXT", not_null=True),
+                _column("created_at", "TEXT", not_null=True),
+            ),
+            unique_constraints=(
+                ("block_uuid", "algorithm_version"),
+                ("algorithm_version", "group_id", "seed_event_uid"),
+            ),
+        ),
+        TableContract(
+            "topic_assignment",
+            (
+                _column("event_uid", "TEXT", not_null=True, primary_key=1),
+                _column("algorithm_version", "TEXT", not_null=True, primary_key=2),
+                _column("run_uuid", "TEXT", not_null=True),
+                _column("block_uuid", "TEXT", not_null=True),
+                _column("assigned_at", "TEXT", not_null=True),
+                _column("reason", "TEXT", not_null=True),
+                _column("score", "REAL"),
+                _column("runner_up_margin", "REAL"),
+                _column("reply_predecessor_event_uid", "TEXT"),
+                _column("evidence_json", "TEXT", not_null=True, default_sql="'{}'"),
+            ),
+            foreign_keys=(
+                ForeignKeyContract(
+                    columns=("run_uuid", "algorithm_version"),
+                    referenced_table="assignment_run",
+                    referenced_columns=("run_uuid", "algorithm_version"),
+                ),
+                ForeignKeyContract(
+                    columns=("block_uuid", "algorithm_version"),
+                    referenced_table="topic_block_identity",
+                    referenced_columns=("block_uuid", "algorithm_version"),
+                ),
+            ),
+        ),
+        TableContract(
+            "utterance_membership",
+            (
+                _column("event_uid", "TEXT", not_null=True, primary_key=1),
+                _column("algorithm_version", "TEXT", not_null=True, primary_key=2),
+                _column("run_uuid", "TEXT", not_null=True),
+                _column("utterance_uuid", "TEXT", not_null=True),
+                _column("ordinal", "INTEGER", not_null=True),
+                _column("assigned_at", "TEXT", not_null=True),
+                _column("reason", "TEXT", not_null=True),
+            ),
+            unique_constraints=(("utterance_uuid", "algorithm_version", "ordinal"),),
+            foreign_keys=(
+                ForeignKeyContract(
+                    columns=("run_uuid", "algorithm_version"),
+                    referenced_table="assignment_run",
+                    referenced_columns=("run_uuid", "algorithm_version"),
+                ),
+                ForeignKeyContract(
+                    columns=("event_uid", "algorithm_version"),
+                    referenced_table="topic_assignment",
+                    referenced_columns=("event_uid", "algorithm_version"),
+                ),
+            ),
+        ),
+    ),
+    indexes=(
+        IndexContract(
+            "idx_assignment_run_version",
+            "assignment_run",
+            ("algorithm_version", "completed_at"),
+        ),
+        IndexContract(
+            "idx_topic_block_group",
+            "topic_block_identity",
+            ("algorithm_version", "group_id"),
+        ),
+        IndexContract(
+            "idx_topic_assignment_block",
+            "topic_assignment",
+            ("algorithm_version", "block_uuid"),
+        ),
+        IndexContract(
+            "idx_topic_assignment_run",
+            "topic_assignment",
+            ("run_uuid",),
+        ),
+        IndexContract(
+            "idx_utterance_membership_uuid",
+            "utterance_membership",
+            ("algorithm_version", "utterance_uuid", "ordinal"),
+        ),
+    ),
+    migration_ledger=(
+        MigrationLedgerContract(
+            version=1,
+            name=RESEARCH_TOPIC_ASSIGNMENTS_V1_MIGRATION_NAME,
+            checksum=RESEARCH_TOPIC_ASSIGNMENTS_V1_MIGRATION_CHECKSUM,
+        ),
+    ),
+)
+
 _CONTRACTS = {
     contract.db_id: contract
     for contract in (
         BLOCK_TRACE_V1_CONTRACT,
         USAGE_V1_CONTRACT,
         EPISODIC_V1_CONTRACT,
+        RESEARCH_TOPIC_ASSIGNMENTS_V1_CONTRACT,
     )
 }
 
@@ -419,6 +561,35 @@ def verify_catalog_schema(
         ):
             return False
     return True
+
+
+def verify_catalog_migration_ledger(
+    db_id: str,
+    connection: sqlite3.Connection,
+    user_version: int,
+) -> bool | None:
+    """Verify applied migration identities needed to reopen a current database."""
+    contract = get_schema_contract(db_id)
+    if contract is None or not contract.migration_ledger or user_version == 0:
+        return None
+    expected = {
+        item.version: (item.name, item.checksum)
+        for item in contract.migration_ledger
+        if item.version <= user_version
+    }
+    try:
+        rows = connection.execute(
+            """
+            SELECT version, name, checksum
+            FROM _omubot_schema_migrations
+            WHERE db_id = ? AND version <= ?
+            """,
+            (db_id, user_version),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return False
+    actual = {int(row[0]): (str(row[1]), str(row[2])) for row in rows}
+    return actual == expected
 
 
 async def verify_catalog_schema_async(

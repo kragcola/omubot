@@ -97,6 +97,10 @@ def test_backup_registry_includes_known_databases():
     assert research.required is False
     assert research.sensitive is True
     assert research.profiles == ["migration"]
+    derived = next(item for item in sqlite_items if item.id == "research_topic_assignments")
+    assert derived.required is False
+    assert derived.sensitive is True
+    assert derived.profiles == ["migration"]
 
 
 def _write_sqlite_restore_fixture(
@@ -122,9 +126,17 @@ def _write_sqlite_restore_fixture(
         else:
             for table in contract.tables:
                 definitions: list[str] = []
+                primary_key_columns = tuple(
+                    column.name
+                    for column in sorted(
+                        table.columns,
+                        key=lambda item: item.primary_key_position or len(table.columns) + 1,
+                    )
+                    if column.primary_key_position
+                )
                 for column in table.columns:
                     parts = [f'"{column.name}"', column.declared_type]
-                    if column.primary_key_position:
+                    if len(primary_key_columns) == 1 and column.primary_key_position:
                         parts.append("PRIMARY KEY")
                         if "autoincrement" in table.required_sql_fragments:
                             parts.append("AUTOINCREMENT")
@@ -133,6 +145,11 @@ def _write_sqlite_restore_fixture(
                     if column.default_sql is not None:
                         parts.extend(("DEFAULT", column.default_sql))
                     definitions.append(" ".join(parts))
+                if len(primary_key_columns) > 1:
+                    columns = ", ".join(
+                        f'"{column}"' for column in primary_key_columns
+                    )
+                    definitions.append(f"PRIMARY KEY ({columns})")
                 for unique_columns in table.unique_constraints:
                     columns = ", ".join(f'"{column}"' for column in unique_columns)
                     clause = f"UNIQUE ({columns})"
@@ -198,6 +215,68 @@ def test_restore_plan_accepts_current_database_version(tmp_path: Path) -> None:
     assert plan.items[0].compatibility == "compatible"
     assert plan.items[0].user_version == 1
     assert plan.items[0].target_user_version == 1
+
+
+def test_restore_plan_blocks_phase2_current_schema_without_migration_ledger(
+    tmp_path: Path,
+) -> None:
+    db_id = "research_topic_assignments"
+    backup_dir = _write_sqlite_restore_fixture(
+        tmp_path,
+        db_id=db_id,
+        user_version=1,
+    )
+    spec = DEFAULT_DATABASE_CATALOG.get(db_id)
+    backup_path = backup_dir / "sqlite" / Path(spec.path).relative_to("storage")
+    with sqlite3.connect(backup_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE _omubot_schema_migrations (
+                db_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                applied_at TEXT NOT NULL,
+                adopted INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (db_id, version)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO _omubot_schema_migrations
+                (db_id, version, name, checksum, applied_at, adopted)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                db_id,
+                1,
+                "topic_assignment_baseline_v1",
+                "sha256:a54260933061fdc77bcabe066100400ef261f023cb51008118319fcbf9b09ec0",
+                "2026-07-15T08:00:00+00:00",
+                0,
+            ),
+        )
+
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["items"][0]["sha256"] = _sha256_file(backup_path)
+    manifest["items"][0]["database"] = _database_metadata(backup_path, spec)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert build_restore_plan(backup_dir).can_apply is True
+
+    with sqlite3.connect(backup_path) as connection:
+        connection.execute("DROP TABLE _omubot_schema_migrations")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["items"][0]["sha256"] = _sha256_file(backup_path)
+    manifest["items"][0]["database"] = _database_metadata(backup_path, spec)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    plan = build_restore_plan(backup_dir)
+
+    assert plan.can_apply is False
+    assert plan.items[0].compatibility == "schema_mismatch"
+    assert "migration ledger" in plan.items[0].reason
 
 
 def test_restore_plan_allows_legacy_version_for_upgrade_on_start(

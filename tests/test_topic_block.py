@@ -471,3 +471,32 @@ def test_guardrail_1_candidate_pool_includes_reservoir() -> None:
                     now=10_001.0)
     # Should revive block A (high similarity), not open a new one.
     assert 1 in blk.message_ids
+
+
+def test_observe_with_evidence_reports_reply_predecessor_without_changing_block() -> None:
+    tracker = TopicBlockTracker()
+    first = tracker.observe(
+        "g",
+        message_id=1,
+        speaker="u1",
+        text="alpha topic",
+        now=1.0,
+    )
+
+    observe_with_evidence = getattr(tracker, "observe_with_evidence", None)
+    assert callable(observe_with_evidence), "Phase 2 requires additive attribution evidence API"
+    decision = observe_with_evidence(
+        "g",
+        message_id=2,
+        speaker="u2",
+        text="reply",
+        reply_to_sender_id="u1",
+        reply_to_message_id=1,
+        now=2.0,
+    )
+
+    assert decision.block is first
+    assert decision.reason == "reply_message_active"
+    assert decision.reply_predecessor_message_id == 1
+    assert decision.score is None
+    assert decision.runner_up_margin is None

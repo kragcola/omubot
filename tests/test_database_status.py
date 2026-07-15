@@ -25,7 +25,7 @@ def test_status_snapshot_covers_exact_catalog_with_profiles(tmp_path: Path) -> N
     usage = by_id["usage"]
 
     assert set(by_id) == {spec.id for spec in DEFAULT_DATABASE_CATALOG.all()}
-    assert snapshot.to_dict()["summary"]["total"] == 21
+    assert snapshot.to_dict()["summary"]["total"] == len(DEFAULT_DATABASE_CATALOG.all())
     assert usage.exists is True
     assert usage.status == "ok"
     assert usage.user_version == 1
@@ -38,6 +38,9 @@ def test_status_snapshot_covers_exact_catalog_with_profiles(tmp_path: Path) -> N
     assert usage.size_bytes > 0
     assert by_id["research_events"].exists is False
     assert by_id["research_events"].status == "missing"
+    assert by_id["research_topic_assignments"].exists is False
+    assert by_id["research_topic_assignments"].backup_profile == "rebuildable"
+    assert by_id["research_topic_assignments"].retention_profile == "rebuildable"
 
 
 def test_status_inspection_does_not_mutate_legacy_database(tmp_path: Path) -> None:
