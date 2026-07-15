@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-07-15 富消息上下文补全完成，待 bot-only 部署
+
+**变更类型**：OneBot 入站富消息 / active-private 嵌套引用 / history backfill / silent timeline / 资源预算。对应 tracker `docs/tracking/rich-message-context-completion-2026-07-15.md`。
+
+**根因与真实协议**：NoneBot adapter 只把最外层 `reply{id}` 自动 `get_msg` 一次并写入 `event.reply`，父消息内下一层 `reply.data.id` 保留为 string；旧 router 只消费一层 text/image/json，祖父 text/image/JSON/forward 全丢。History 直接读取 raw group history，绕过 adapter reply 预处理且只支持 text/face/image；silent/muted-active 在 rich renderer 前返回，只写 `semantic_plain_text`。NapCat 真实 text/JSON/image/reply→forward 链只读实验确认 `get_msg` 参数需 int、cycle key 宜 string，forward 必须 embedded `content` 优先。
+
+**实现与边界**：新增无隐藏 runtime owner 的 `services/onebot_segments.py`，统一 text/face/@/image summary/file/JSON/reply/embedded-forward，并以显式 callback 注入 active-only `get_msg/get_forward_msg/image enrichment`。硬预算为 depth 4、node 100、segment 1000、text 2000、fetch 8、resolver 3 秒、quoted image 15 秒和 image 5；visited/cache/cycle/timeout/普通异常均局部降级，取消传播，quote opening+closing 原子预留。Active/private 不重复获取 adapter parent，只从其祖父 ID 续取；引用像素仍走 cache→sticker→character→VL，cache 成功即保留 `image_ref`，后续识别超时只降级描述。History 每批先建本地 message-ID 索引，窗口外 reply 与 ID-only forward 只留 marker，不新增 OneBot API；整条消息共用一份预算，启动入口明确 `vision_client=None`，direct image cache/贴纸匹配/学习保持。Silent/muted-active 只渲染 adapter 已给 reply 与本条 embedded 结构，不注入 resolver；nickname prefix 只加回首个 text segment，rich 顺序不变；off 群仍在访问门提前返回。原 event、timeline/message-log schema、研究库和持久数据均未改写。
+
+**同模式扫描与验证**：扫描 router group active/private、suppressed early-return、history connection stage、Bilibili JSON interceptor、既有 nested forward 与 visual-query quote cleaner；没有第二条需递归的实时 reply renderer，插件 `msg_ctx.content` 在 silent hook 前后保持原语义。TDD 核心首轮 8 RED；两轮独立 review 再复现并关闭 13 个 RED（quote closure、segment-aware semantic restore、refetch cache/timeout、history per-message budget、malformed node、image/forward callback budget 与 cache-ref preservation），最终 review `0 Critical / 0 Important`。Expanded 164 passed，scoped Ruff clean、Pyright 0、diff-check clean；正式 full **3580 passed / 17 skipped / 183 warnings**，warning 为既有 aiohttp/NoneBot deprecation 与 aiosqlite fixture 线程收尾。
+
+**真实语义回放、部署与回滚**：宿主当前实现经 NapCat HTTP 只读回放四类真实链：text/JSON/image 各只续取祖父 ID 一次并形成两层 quote，embedded forward 额外 API=0，目标摘要全部存在；全程未向 QQ 发送消息。代码提交后只允许 build/recreate `qq-bot`，禁止 restart/recreate/down NapCat；部署后补记 image/container/runtime commit、容器内同链回放与公开 silent 群零出站窗口。无 schema/data migration，回滚只需切部署前 bot image 并 recreate bot。
+
+---
+
 ## 2026-07-15 QQ 嵌套聊天记录有界展开修复上线
 
 **变更类型**：OneBot 合并转发解析 / 嵌套聊天记录 / 输入资源预算 / bot-only 部署。对应 tracker `docs/tracking/nested-chat-records-2026-07-15.md`，实现提交 `2027858`。

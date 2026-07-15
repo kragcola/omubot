@@ -13,7 +13,6 @@ import aiohttp
 from loguru import logger
 from nonebot.adapters.onebot.v11.bot import Bot
 
-from kernel.qq_face import face_to_text
 from kernel.types import PluginContext
 from services.media.image_cache import ImageCache
 from services.media.sticker_capture import (
@@ -25,6 +24,7 @@ from services.media.sticker_capture import (
 from services.media.sticker_store import StickerStore
 from services.memory.timeline import GroupTimeline
 from services.memory.types import Content, ContentBlock, ImageRefBlock, TextBlock
+from services.onebot_segments import MessageResolver, render_onebot_segments
 
 _L = logger.bind(channel="system")
 
@@ -103,6 +103,14 @@ async def _load_one_group(
     t0 = time.perf_counter()
     loaded = 0
     self_count = 0
+    history_by_id = {
+        str(item.get("message_id")): item
+        for item in messages
+        if item.get("message_id") is not None
+    }
+
+    async def resolve_local_reply(message_id: str) -> object | None:
+        return history_by_id.get(str(message_id))
 
     for msg in messages:
         sender: dict[str, Any] = msg.get("sender", {})
@@ -115,14 +123,26 @@ async def _load_one_group(
         if _contains_debug_command(raw_segs):
             continue
 
-        content = await _extract_content(
-            raw_segs,
-            session,
-            image_cache,
-            sticker_store,
-            vision_client=vision_client,
-            learn_new_stickers=learn_new_stickers,
-        )
+        try:
+            content = await _extract_content(
+                raw_segs,
+                session,
+                image_cache,
+                sticker_store,
+                vision_client=vision_client,
+                learn_new_stickers=learn_new_stickers,
+                reply_resolver=resolve_local_reply,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _L.warning(
+                "history message render failed | group={} message_id={}",
+                group_id,
+                msg.get("message_id"),
+                exc_info=True,
+            )
+            continue
         if not content:
             continue
 
@@ -152,24 +172,17 @@ async def _extract_content(
     *,
     vision_client: Any | None = None,
     learn_new_stickers: bool = False,
+    reply_resolver: MessageResolver | None = None,
 ) -> Content:
-    """Extract text, face, and image segments into a Content value."""
-    text_parts: list[str] = []
+    """Extract bounded rich segments and direct images into a Content value."""
+    structured_segments: list[object] = []
     image_tasks: list[tuple[dict[str, Any], asyncio.Task[ImageRefBlock | None]]] = []
 
     for seg in segments:
         seg_type = seg.get("type", "")
         seg_data: dict[str, Any] = seg.get("data", {})
 
-        if seg_type == "text":
-            text_parts.append(seg_data.get("text", ""))
-        elif seg_type == "face":
-            face_id = seg_data.get("id", "")
-            try:
-                text_parts.append(face_to_text(int(face_id)))
-            except (ValueError, TypeError):
-                text_parts.append("«表情»")
-        elif seg_type == "image" and image_cache is not None:
+        if seg_type == "image" and image_cache is not None:
             url = seg_data.get("url", "")
             file_id = seg_data.get("file", "")
             if url and file_id:
@@ -181,9 +194,17 @@ async def _extract_content(
                     )
                 )
             else:
-                text_parts.append("«图片»")
+                structured_segments.append({
+                    "type": "text",
+                    "data": {"text": "«图片»"},
+                })
         elif seg_type == "image":
-            text_parts.append("«图片»")
+            structured_segments.append({
+                "type": "text",
+                "data": {"text": "«图片»"},
+            })
+        else:
+            structured_segments.append(seg)
 
     images: list[ImageRefBlock] = []
     if image_tasks:
@@ -191,7 +212,10 @@ async def _extract_content(
         results = await asyncio.gather(*(task for _seg, task in image_tasks), return_exceptions=True)
         for (seg, _task), r in zip(image_tasks, results, strict=False):
             if isinstance(r, BaseException) or r is None:
-                text_parts.append("«图片»")
+                structured_segments.append({
+                    "type": "text",
+                    "data": {"text": "«图片»"},
+                })
             else:
                 if sticker_store is not None and image_cache is not None:
                     cached_path = Path(r["path"])
@@ -267,7 +291,11 @@ async def _extract_content(
             len(image_tasks), len(images), elapsed_ms,
         )
 
-    text = "".join(text_parts).strip()
+    rendered = await render_onebot_segments(
+        structured_segments,
+        reply_resolver=reply_resolver,
+    )
+    text = rendered.text.strip()
 
     if not images:
         return text
@@ -329,7 +357,9 @@ async def run_history_backfill(
         bot_self_id=str(bot.self_id),
         image_cache=ctx.image_cache if getattr(ctx, "vision_enabled", False) else None,
         sticker_store=ctx.sticker_store,
-        vision_client=getattr(ctx, "vision_client", None),
+        # Startup history must not invoke the visual model. New stickers keep
+        # their fallback usage hint and can be enriched after startup.
+        vision_client=None,
         learn_new_stickers=learn_sticker_groups,
         counts=counts,
     )

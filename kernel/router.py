@@ -11,6 +11,7 @@ import hashlib
 import re
 import secrets
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
@@ -48,6 +49,7 @@ from services.humanization.qq_interactions import (
 )
 from services.media.visual_evidence import StickerEvidence, VisualEvidence, render_visual_evidence
 from services.name_registry import NameVariationRegistry
+from services.onebot_segments import RichRenderLimits, render_onebot_segments
 from services.private_conversation import (
     get_private_conversation_actor,
     log_private_transition,
@@ -1289,102 +1291,110 @@ async def _render_message(
     image_count = 0
 
     if reply is not None:
-        sender = getattr(reply, "sender", None)
         reply_msg = getattr(reply, "message", None)
-        if sender and reply_msg:
-            uid = str(getattr(sender, "user_id", "") or "")
-            nick = getattr(sender, "nickname", "") or uid
-            is_reply_to_bot = self_id and uid == self_id
-            cap = _REPLY_PREVIEW_MAX_SELF if is_reply_to_bot else _REPLY_PREVIEW_MAX
-            original = reply_msg.extract_plain_text().strip()
-            has_rich_reply = any(seg.type in {"image", "json"} for seg in reply_msg)
-            if not original or has_rich_reply:
-                reply_message_id = getattr(reply, "message_id", None)
-                refetched_url: str | None = None
-                refetch_done = False
-                seg_descs: list[str] = []
-                for seg in reply_msg:
-                    if seg.type == "image":
-                        url = seg.data.get("url", "")
-                        # Quoted-message image segments often carry a stale/empty
-                        # url; re-fetch the original via get_msg to recover it.
-                        if not url and bot is not None and reply_message_id is not None:
-                            if not refetch_done:
-                                refetched_url = await _refetch_reply_image_url(bot, reply_message_id)
-                                refetch_done = True
-                            if refetched_url:
-                                url = refetched_url
-                        desc: str | None = None
-                        if url and session is not None:
-                            try:
-                                async with session.get(url) as img_resp:
-                                    if img_resp.status == 200:
-                                        img_data = await img_resp.read()
-                                        media_type = "image/jpeg"
-                                        if image_cache is not None:
-                                            file_id = str(seg.data.get("file", "") or "").strip()
-                                            file_id = file_id.split(".")[0] if "." in file_id else file_id
-                                            if not file_id:
-                                                file_id = f"quoted_{hashlib.sha256(img_data).hexdigest()[:24]}"
-                                            ref = await image_cache.save_bytes(img_data, file_id=file_id)
-                                            if ref is not None:
-                                                quoted_images.append(ref)
-                                                from pathlib import Path
+        sender = getattr(reply, "sender", None)
+        if reply_msg and sender:
+            refetched_reply_urls: dict[int, str | None] = {}
 
-                                                try:
-                                                    img_data = Path(ref["path"]).read_bytes()
-                                                    media_type = str(ref.get("media_type", media_type))
-                                                except Exception:
-                                                    _log_debug.debug(
-                                                        "quoted cached image read failed | file_id={}",
-                                                        file_id,
-                                                    )
-                                        # Full pipeline: sticker → CCIP/AnimeTrace → VL.
-                                        desc = await _describe_image_data(
-                                            img_data,
-                                            media_type=media_type,
-                                            vision_client=vision_client,
-                                            character_recognizer=character_recognizer,
-                                            sticker_store=sticker_store,
-                                            desc_cache=desc_cache,
-                                            mood_engine=mood_engine,
-                                            mood_group_id=mood_group_id,
-                                            mood_session_id=mood_session_id,
-                                        )
-                            except Exception:
-                                _log_debug.debug("quoted image fetch/describe failed | url={}", url[:80])
-                        if desc:
-                            seg_descs.append(f"[图片: {desc}]")
-                        else:
-                            s = seg.data.get("summary", "").strip("[]") or "图片"
-                            seg_descs.append(f"[{s}]")
-                    elif seg.type == "face":
-                        seg_descs.append("[表情]")
-                    elif seg.type == "text":
-                        t = seg.data.get("text", "").strip()
-                        if t:
-                            seg_descs.append(t)
-                    elif seg.type == "json":
-                        # QQ mini-program card (B站视频等): extract_plain_text is
-                        # empty, so a quoted video would otherwise render as an
-                        # empty [QUOTED_MSG] shell — the bot then has nothing to
-                        # respond to and drifts to other topics (F-γ, §19). Pull
-                        # the card's title/desc so the quote carries real content.
-                        from services.json_card import extract_json_card_text
-                        card = extract_json_card_text(str(seg.data.get("data", "") or ""))
-                        if card:
-                            seg_descs.append(f"[卡片: {card}]")
-                original = "".join(seg_descs)
-                if "[图片:" in original:
-                    cap = max(cap, _REPLY_PREVIEW_MAX_VISUAL)
-            if len(original) > cap:
-                original = original[:cap] + "…"
-            sender_name = "我" if is_reply_to_bot else nick
-            text_parts.append(
-                f"[QUOTED_MSG sender_id={uid} sender_name={sender_name}]\n"
-                f"{original}\n"
-                "[/QUOTED_MSG] "
+            async def resolve_reply(message_id: str) -> object | None:
+                if bot is None:
+                    return None
+                return await bot.get_msg(message_id=int(message_id))
+
+            async def render_forward(forward_id: str) -> str:
+                if bot is None:
+                    return f"«合并转发消息 #{forward_id}（未展开）»"
+                return await _render_forward_msg(forward_id, bot)
+
+            async def render_quoted_image(
+                data: Mapping[str, Any],
+                source_message_id: int | None,
+            ) -> tuple[str, ImageRefBlock | None]:
+                summary = str(data.get("summary", "") or "").strip("[]") or "图片"
+                url = str(data.get("url", "") or "")
+                if not url and bot is not None and source_message_id is not None:
+                    if source_message_id not in refetched_reply_urls:
+                        try:
+                            refetched_reply_urls[source_message_id] = await asyncio.wait_for(
+                                _refetch_reply_image_url(bot, source_message_id),
+                                timeout=reply_limits.resolve_timeout_s,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            refetched_reply_urls[source_message_id] = None
+                    url = refetched_reply_urls[source_message_id] or ""
+                if not url or session is None or not vision_enabled:
+                    return f"[{summary}]", None
+
+                image_ref: ImageRefBlock | None = None
+                try:
+                    async with session.get(url) as img_resp:
+                        if img_resp.status != 200:
+                            return f"[{summary}]", None
+                        img_data = await img_resp.read()
+                        media_type = "image/jpeg"
+                        if image_cache is not None:
+                            file_id = str(data.get("file", "") or "").strip()
+                            file_id = file_id.split(".")[0] if "." in file_id else file_id
+                            if not file_id:
+                                file_id = f"quoted_{hashlib.sha256(img_data).hexdigest()[:24]}"
+                            image_ref = await image_cache.save_bytes(img_data, file_id=file_id)
+                            if image_ref is not None:
+                                quoted_images.append(image_ref)
+                                from pathlib import Path
+
+                                try:
+                                    img_data = Path(image_ref["path"]).read_bytes()
+                                    media_type = str(image_ref.get("media_type", media_type))
+                                except Exception:
+                                    _log_debug.debug(
+                                        "quoted cached image read failed | file_id={}",
+                                        file_id,
+                                    )
+                        desc = await _describe_image_data(
+                            img_data,
+                            media_type=media_type,
+                            vision_client=vision_client,
+                            character_recognizer=character_recognizer,
+                            sticker_store=sticker_store,
+                            desc_cache=desc_cache,
+                            mood_engine=mood_engine,
+                            mood_group_id=mood_group_id,
+                            mood_session_id=mood_session_id,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    _log_debug.debug("quoted image fetch/describe failed | url={}", url[:80])
+                    return f"[{summary}]", None
+                return (f"[图片: {desc}]" if desc else f"[{summary}]"), None
+
+            uid = str(getattr(sender, "user_id", "") or "")
+            is_reply_to_bot = bool(self_id and uid == self_id)
+            cap = _REPLY_PREVIEW_MAX_SELF if is_reply_to_bot else _REPLY_PREVIEW_MAX
+            has_rich_reply = any(
+                getattr(seg, "type", "") in {"reply", "image", "json", "forward"}
+                for seg in reply_msg
             )
+            if has_rich_reply:
+                cap = max(cap, _REPLY_PREVIEW_MAX_VISUAL)
+            reply_limits = RichRenderLimits(
+                max_chars=cap + 160,
+                image_timeout_s=15.0,
+                max_images=max_images_per_message,
+            )
+            rendered_reply = await render_onebot_segments(
+                (),
+                reply=reply,
+                self_id=self_id,
+                reply_resolver=resolve_reply if bot is not None else None,
+                forward_renderer=render_forward if bot is not None else None,
+                image_renderer=render_quoted_image,
+                limits=reply_limits,
+            )
+            text_parts.append(rendered_reply.text)
+            quoted_images.extend(rendered_reply.images)
 
     image_tasks: list[tuple[asyncio.Task[ImageRefBlock | None], str]] = []
 
@@ -1753,14 +1763,51 @@ def setup_routers(
         # full interceptor chain below.
         if not allow_speaking:
             await bus.fire_on_message(msg_ctx, silent_mode=True)
-            if semantic_plain_text:
-                preview = semantic_plain_text if len(semantic_plain_text) <= 120 else semantic_plain_text[:120] + "…"
+            rendered_plain_text = msg.extract_plain_text().strip()
+            silent_semantic_text = semantic_plain_text
+            if addressing.evidence == "nickname_original":
+                silent_semantic_text = addressing.original_text.strip() or silent_semantic_text
+            silent_segments: list[object] = list(msg)
+            if silent_semantic_text and silent_semantic_text != rendered_plain_text:
+                restored_prefix = (
+                    silent_semantic_text[:-len(rendered_plain_text)]
+                    if rendered_plain_text and silent_semantic_text.endswith(rendered_plain_text)
+                    else silent_semantic_text if not rendered_plain_text else ""
+                )
+                if restored_prefix:
+                    silent_segments = []
+                    semantic_inserted = False
+                    for segment in msg:
+                        if segment.type == "text" and not semantic_inserted:
+                            data = dict(segment.data)
+                            data["text"] = restored_prefix + str(data.get("text", "") or "")
+                            silent_segments.append({"type": "text", "data": data})
+                            semantic_inserted = True
+                            continue
+                        silent_segments.append(segment)
+                else:
+                    semantic_inserted = any(segment.type == "text" for segment in msg)
+                if not semantic_inserted:
+                    silent_segments.insert(0, {
+                        "type": "text",
+                        "data": {"text": silent_semantic_text},
+                    })
+            rendered_silent = await render_onebot_segments(
+                silent_segments,
+                reply=event.reply,
+                self_id=str(bot.self_id),
+            )
+            silent_content = rendered_silent.text.strip()
+            if silent_semantic_text and not silent_content:
+                silent_content = silent_semantic_text
+            if silent_content:
+                preview = silent_content if len(silent_content) <= 120 else silent_content[:120] + "…"
                 _log_msg_in.info("group={} silent_learn {}({}) | {}", group_id, nickname, event.user_id, preview)
                 ctx.timeline.add(
                     group_id,
                     role="user",
                     speaker=f"{nickname}({event.user_id})",
-                    content=semantic_plain_text,
+                    content=silent_content,
                     message_id=event.message_id,
                 )
             return

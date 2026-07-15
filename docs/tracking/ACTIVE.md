@@ -4,12 +4,12 @@
 
 ## Current
 
-- mode: none
-- tracker: none
-- objective: 无当前任务。
-- status: idle
-- checkpoint: QQ 嵌套聊天记录已上线有界展开；烤群真实 A→B→C 容器回放为 33 sender lines + 1 image，仅调用顶层 A。
-- next_step: 无；history backfill / silent_learn rich timeline 不展开 forward 是已记录的独立残留。
+- mode: task-bug
+- tracker: `docs/tracking/rich-message-context-completion-2026-07-15.md`
+- objective: 补齐嵌套引用回复、history backfill 与 silent_learn 的富消息上下文。
+- status: in_progress
+- checkpoint: 已确认三条入站边界分别丢 nested reply、reply/json/forward、silent rich content；保持 silent 零网络/零出站为硬合同。
+- next_step: 冻结真实协议形态，写 RED 后逐切片实现共享无副作用 renderer 与 active-only enrichment。
 - last_completed: `docs/tracking/nested-chat-records-2026-07-15.md`
 - implementation_commit: `2027858`
 - deployment: image `a1792c614fec...` / container `bd58abf979f3...` / runtime commit `2027858a98636d80e9caa3464218af23bb9dc99e` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
