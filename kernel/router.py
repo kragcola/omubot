@@ -23,6 +23,7 @@ from nonebot.adapters.onebot.v11 import (
     Bot,
     GroupBanNoticeEvent,
     GroupMessageEvent,
+    GroupRecallNoticeEvent,
     Message,
     MessageEvent,
     NoticeEvent,
@@ -73,6 +74,31 @@ _DIRECTED_FOLLOWUP_RE = re.compile(
     r"|^(带上?我(吗|嘛|么)?|算我一个|我也想(来|去|参加|一起|加入|玩))[。.!！?？~～\s]*$"
 )
 _DIRECTED_FOLLOWUP_WINDOW_S = 180.0
+
+
+async def _invalidate_social_narrative_recall(
+    ctx: PluginContext,
+    event: NoticeEvent,
+) -> None:
+    """Invalidate factual projections only for a real group recall notice."""
+    if not isinstance(event, GroupRecallNoticeEvent):
+        return
+    store = getattr(ctx, "social_narrative_store", None)
+    invalidate = getattr(store, "invalidate_evidence", None)
+    if not callable(invalidate):
+        return
+    try:
+        await cast(Any, invalidate)(
+            group_id=str(event.group_id),
+            evidence_message_id=event.message_id,
+        )
+    except Exception as exc:
+        _log_system.warning(
+            "social narrative recall invalidation failed | group={} message={} err={}",
+            event.group_id,
+            event.message_id,
+            exc,
+        )
 _U13_TRACE_KEY_PREFIX = "u13_double_haiku"
 
 
@@ -2258,6 +2284,18 @@ def setup_routers(
                 event=event,
                 self_id=str(bot.self_id),
             )
+
+    # ---- factual evidence invalidation on group recall ----
+
+    social_narrative_recall = on_notice(priority=1, block=False)
+
+    @social_narrative_recall.handle()
+    async def _handle_social_narrative_recall(
+        bot: Bot,
+        event: NoticeEvent,
+    ) -> None:
+        del bot
+        await _invalidate_social_narrative_recall(ctx, event)
 
     # ---- QQ inbound interaction notices ----
 

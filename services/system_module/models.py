@@ -17,7 +17,13 @@ ModuleGroup = Literal[
     "observer",
     "self",
 ]
-SlotTTL = Literal["per_turn", "per_session", "per_user", "persistent"]
+SlotTTL = Literal[
+    "per_turn",
+    "per_session",
+    "per_session_user",
+    "per_user",
+    "persistent",
+]
 SlotPrivacy = Literal["public", "group", "user_only", "admin_only"]
 DisabledBehaviorValue = Literal["fail", "degrade", "skip"]
 IssueLevel = Literal["error", "warn", "info"]
@@ -41,6 +47,8 @@ class Scope:
             return (self.session_id, self.group_id or "", self.user_id, self.turn_id)
         if ttl == "per_session":
             return (self.session_id, "", "", "")
+        if ttl == "per_session_user":
+            return (self.session_id, self.group_id or "", self.user_id, "")
         if ttl == "per_user":
             return ("", "", self.user_id, "")
         return ("persistent", "", "", "")
@@ -67,7 +75,11 @@ class StateSlotDefinition:
         return cls(
             id=str(payload.get("id", "")).strip(),
             schema=str(payload.get("schema", "")).strip(),
-            ttl=_literal(payload.get("ttl"), {"per_turn", "per_session", "per_user", "persistent"}, "per_turn"),
+            ttl=_literal(
+                payload.get("ttl"),
+                {"per_turn", "per_session", "per_session_user", "per_user", "persistent"},
+                "per_turn",
+            ),
             privacy=_literal(payload.get("privacy"), {"public", "group", "user_only", "admin_only"}, "public"),
         )
 
@@ -149,8 +161,12 @@ class ModuleContract:
     def from_dict(cls, payload: dict[str, Any]) -> ModuleContract:
         module_id = str(payload.get("id", "")).strip()
         group = _group_from_module_id(module_id, str(payload.get("group", "")).strip())
-        persona_bindings = payload.get("persona_bindings") if isinstance(payload.get("persona_bindings"), dict) else {}
-        state_owns_raw = payload.get("state_owns") if isinstance(payload.get("state_owns"), list) else []
+        raw_persona_bindings = payload.get("persona_bindings")
+        persona_bindings: dict[str, Any] = (
+            raw_persona_bindings if isinstance(raw_persona_bindings, dict) else {}
+        )
+        raw_state_owns = payload.get("state_owns")
+        state_owns_raw: list[Any] = raw_state_owns if isinstance(raw_state_owns, list) else []
         return cls(
             id=module_id,
             group=group,

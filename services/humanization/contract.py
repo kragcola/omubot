@@ -39,12 +39,16 @@ HUMANIZATION_CONTRACT = ModuleContract(
         _slot(REGISTER_RECENT_USED_SLOT, "omubot.state.humanization_register_recent_used.v1", ttl="per_session"),
         _slot(STICKER_RECENT_USED_SLOT, "omubot.state.humanization_sticker_recent_used.v1", ttl="per_session"),
         _slot(AFFECTION_FAMILIARITY_SLOT, "omubot.state.humanization_affection_familiarity.v1", ttl="per_user"),
-        _slot(AFFECTION_STAGE_SLOT, "omubot.state.humanization_affection_stage.v1", ttl="per_user"),
+        _slot(
+            AFFECTION_STAGE_SLOT,
+            "omubot.state.humanization_affection_stage.v1",
+            ttl="per_session_user",
+        ),
         _slot(MOOD_CURRENT_SLOT, "omubot.state.humanization_mood_current.v1", ttl="per_session"),
         _slot(
             CLIMATE_CURRENT_SLOT,
             "omubot.state.humanization_dialogue_climate_current.v1",
-            ttl="per_session",
+            ttl="per_session_user",
         ),
         _slot(WILLINGNESS_STAGE_SLOT, "omubot.state.memory_relationship_willingness_stage.v1", ttl="per_session"),
         _slot(THINKER_LAST_DECISION_SLOT, "omubot.state.humanization_thinker_decision.v1", ttl="per_turn"),

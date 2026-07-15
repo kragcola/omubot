@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from services.humanization import AFFECTION_STAGE_SLOT, create_humanization_state_bus
+from services.persona import affection_classifier as affection_classifier_module
 from services.persona.affection_classifier import (
     AffectionClassifier,
     AffectionDecision,
@@ -125,3 +126,55 @@ async def test_affection_classifier_cancel_path_does_not_dirty_write(tmp_path: P
 
     assert bus.get(AFFECTION_STAGE_SLOT, scope=Scope(user_id="1001")) is None
     assert store.load_recent("1001") is None
+
+
+async def test_affection_stage_slot_isolates_users_in_same_session() -> None:
+    bus = create_humanization_state_bus()
+    classifier = AffectionClassifier()
+    first_scope = Scope(session_id="group_100", group_id="100", user_id="u1")
+    second_scope = Scope(session_id="group_100", group_id="100", user_id="u2")
+
+    await classifier.classify_and_write(
+        "u1",
+        AffectionSignals(interaction_count=0),
+        bus=bus,
+        scope=first_scope,
+        group_id="100",
+    )
+    await classifier.classify_and_write(
+        "u2",
+        AffectionSignals(interaction_count=100, register_consistency=0.8),
+        bus=bus,
+        scope=second_scope,
+        group_id="100",
+    )
+
+    first = bus.get(AFFECTION_STAGE_SLOT, scope=first_scope)
+    second = bus.get(AFFECTION_STAGE_SLOT, scope=second_scope)
+    assert first is not None and first.value["stage"] == "stranger"
+    assert second is not None and second.value["stage"] == "close"
+
+
+@pytest.mark.parametrize(
+    ("score", "interactions", "expected"),
+    [
+        (0.0, 0, "stranger"),
+        (8.0, 10, "acquaint"),
+        (40.0, 50, "familiar"),
+        (80.0, 120, "close"),
+    ],
+)
+def test_affection_stage_converges_on_canonical_profile(
+    score: float,
+    interactions: int,
+    expected: str,
+) -> None:
+    profile = type(
+        "Profile",
+        (),
+        {"score": score, "total_interactions": interactions},
+    )()
+    resolver = getattr(affection_classifier_module, "stage_from_affection_profile", None)
+
+    assert callable(resolver), "affection stage must converge on the canonical profile"
+    assert resolver(profile) == expected

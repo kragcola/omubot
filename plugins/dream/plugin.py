@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -54,6 +56,56 @@ _CST = ZoneInfo("Asia/Shanghai")
 _REFLECTION_CARD_LIMIT = 3
 _REFLECTION_MESSAGE_LIMIT = 12
 _REFLECTION_CONTEXT_MAX_CHARS = 2400
+_DREAM_COMPLETED_DATE_LIMIT = 32
+_dream_run_locks: dict[str, asyncio.Lock] = {}
+
+
+class _DreamRunLedger:
+    """Small durable ledger used to make the daily Dream cycle restart-safe."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def is_completed(self, date_str: str) -> bool:
+        return date_str in self._load_completed_dates()
+
+    def mark_completed(self, date_str: str) -> None:
+        completed = self._load_completed_dates()
+        if date_str not in completed:
+            completed.append(date_str)
+        payload = {"completed_dates": completed[-_DREAM_COMPLETED_DATE_LIMIT:]}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(f".{self.path.name}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def _load_completed_dates(self) -> list[str]:
+        if not self.path.exists():
+            return []
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        values = payload.get("completed_dates") if isinstance(payload, dict) else None
+        if not isinstance(values, list):
+            return []
+        return [str(value) for value in values if str(value).strip()]
+
+
+def _dream_run_ledger_for_store(store: CardStore) -> _DreamRunLedger:
+    db_path = str(getattr(store, "_db_path", "") or "").strip()
+    if db_path:
+        return _DreamRunLedger(Path(db_path).with_name("dream_run_state.json"))
+    return _DreamRunLedger(Path("storage/dream_run_state.json"))
+
+
+def _dream_run_lock(path: Path) -> asyncio.Lock:
+    key = str(path.expanduser().resolve())
+    lock = _dream_run_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _dream_run_locks[key] = lock
+    return lock
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +139,7 @@ def _build_life_reflection_context(
     group_id: str,
     recent_messages: list[dict[str, Any]],
     tension_metrics: dict[str, float],
+    social_context: str = "",
 ) -> str:
     lines = ["【今天过得怎样：reflection 输入】"]
     if schedule is not None:
@@ -148,6 +201,8 @@ def _build_life_reflection_context(
     ]
     if numeric_metrics:
         lines.append("- 互动张力指标：" + "；".join(numeric_metrics))
+    if social_context.strip():
+        lines.append(_truncate_reflection_text(social_context, 1200))
     lines.append("- 输出 1-3 条经历洞察卡；不要把私聊内容写进群叙事；不要虚构真人线下行为。")
     context = "\n".join(line for line in lines if line.strip())
     return _truncate_reflection_text(context, _REFLECTION_CONTEXT_MAX_CHARS)
@@ -227,15 +282,55 @@ def _parse_life_reflection_result(text: str) -> LifeReflectionDraft | None:
     ) if cards else None
 
 
+def _bind_life_reflection_scope(
+    draft: LifeReflectionDraft,
+    selected_group_id: str,
+) -> LifeReflectionDraft:
+    """Bind model output to the reflection input's actual scope boundary."""
+    group_id = str(selected_group_id or "").strip()
+    has_group = bool(group_id and group_id != "global")
+    cards: list[LifeReflectionCardDraft] = []
+    for card in draft.cards:
+        if card.scope == "global":
+            scope = "global"
+            scope_id = "global"
+        elif card.scope == "group" and has_group:
+            scope = "group"
+            scope_id = group_id
+        else:
+            continue
+        cards.append(LifeReflectionCardDraft(
+            category=card.category,
+            scope=scope,
+            scope_id=scope_id,
+            content=card.content,
+            confidence=card.confidence,
+        ))
+    return LifeReflectionDraft(
+        cards=cards,
+        last_event_summary=draft.last_event_summary,
+        open_threads=list(draft.open_threads),
+        next_day_seed=draft.next_day_seed,
+    )
+
+
 def _apply_life_reflection_to_arc(arc: Any, draft: LifeReflectionDraft) -> None:
     today = datetime.now(_CST).strftime("%Y-%m-%d")
     if draft.last_event_summary:
         last_events = [dict(item) for item in list(getattr(arc, "last_events", []) or []) if isinstance(item, dict)]
-        last_events.append({
+        reflection_event = {
             "date": today,
             "source": "dream_reflection",
             "summary": draft.last_event_summary,
-        })
+        }
+        replaced = False
+        for index, event in enumerate(last_events):
+            if event.get("date") == today and event.get("source") == "dream_reflection":
+                last_events[index] = reflection_event
+                replaced = True
+                break
+        if not replaced:
+            last_events.append(reflection_event)
         arc.last_events = last_events[-6:]
 
     if draft.open_threads:
@@ -448,6 +543,8 @@ class DreamAgent:
         story_arc_store: Any | None = None,
         message_log: Any | None = None,
         climate_engine: Any | None = None,
+        social_narrative_store: Any | None = None,
+        reflection_allowed_group_ids: set[str] | list[str] | tuple[str, ...] | None = None,
         task_supervisor: BackgroundTaskSupervisor | None = None,
     ) -> None:
         self._store = store
@@ -464,10 +561,18 @@ class DreamAgent:
         self._story_arc_store = story_arc_store
         self._message_log = message_log
         self._climate_engine = climate_engine
+        self._social_narrative_store = social_narrative_store
+        self._reflection_allowed_group_ids = {
+            str(group_id).strip()
+            for group_id in (reflection_allowed_group_ids or ())
+            if str(group_id).strip()
+        }
         self._running: bool = False
         self._loop_task: asyncio.Task[None] | None = None
         self._task_supervisor = task_supervisor
         self._api_call: ApiCaller | None = None
+        self._run_ledger = _dream_run_ledger_for_store(store)
+        self._daily_lock = _dream_run_lock(self._run_ledger.path)
 
     def start(self, api_call: ApiCaller) -> None:
         """Start the independent background dream loop."""
@@ -593,6 +698,16 @@ class DreamAgent:
         return done
 
     async def _run(self, api_call: ApiCaller) -> None:
+        """Run at most once per CST natural day, including across restarts."""
+        today = datetime.now(_CST).strftime("%Y-%m-%d")
+        async with self._daily_lock:
+            if self._run_ledger.is_completed(today):
+                dream_logger.info("dream already completed | date={}", today)
+                return
+            if await self._run_once(api_call):
+                self._run_ledger.mark_completed(today)
+
+    async def _run_once(self, api_call: ApiCaller) -> bool:
         """Run the dream agent with a tool loop for card consolidation."""
         self._running = True
         t0 = time.time()
@@ -724,10 +839,14 @@ class DreamAgent:
                 self._on_memo_change()
             if reflection_writes > 0 and self._on_memo_change:
                 self._on_memo_change()
+        except asyncio.CancelledError:
+            raise
         except Exception:
             dream_logger.exception("dream failed")
+            return False
         finally:
             self._running = False
+        return True
 
     async def _run_life_reflection(self, api_call: ApiCaller) -> int:
         if not self._life_reflection_enabled:
@@ -738,15 +857,23 @@ class DreamAgent:
             return 0
         group_id = self._select_reflection_group_id(arc)
         recent_messages = await self._load_reflection_messages(group_id)
+        social_context = await self._load_social_reflection_context(group_id)
         context = _build_life_reflection_context(
             schedule=schedule,
             arc=arc,
             group_id=group_id,
             recent_messages=recent_messages,
             tension_metrics=self._reflection_tension_metrics(group_id),
+            social_context=social_context,
         )
         if not context:
             return 0
+
+        scope_rule = (
+            f"group 卡只允许写入本次实际选中的 group/{group_id}，不得输出其他群号；"
+            if group_id and group_id != "global"
+            else "本次没有配置群上下文，只允许输出 global/global 卡，不得输出 group 卡；"
+        )
 
         system = [{
             "type": "text",
@@ -760,6 +887,7 @@ class DreamAgent:
                 "\"open_threads\":[\"...\"],\"next_day_seed\":\"...\"}。"
                 "红线：不要虚构真人线下行为；私聊内容不得进入群叙事；"
                 "fiction 伙伴可作为虚构角色关系反思。"
+                f"作用域约束：global 卡必须固定为 global/global；{scope_rule}"
             ),
         }]
         messages = [{"role": "user", "content": context}]
@@ -767,6 +895,16 @@ class DreamAgent:
         draft = _parse_life_reflection_result(result.get("text", ""))
         if draft is None:
             dream_logger.warning("life reflection skipped | invalid JSON")
+            return 0
+        draft = _bind_life_reflection_scope(draft, group_id)
+        if not draft.cards:
+            dream_logger.warning("life reflection skipped | no cards within selected scope")
+            return 0
+        if social_context.strip():
+            dream_logger.info(
+                "life reflection factual context kept read-only | group={}",
+                group_id,
+            )
             return 0
         return await self._commit_life_reflection(draft, arc)
 
@@ -798,11 +936,29 @@ class DreamAgent:
             return None
 
     def _select_reflection_group_id(self, arc: Any | None) -> str:
-        if arc is not None:
-            value = getattr(arc, "variables", {}).get("reflection_group_id")
-            if value:
-                return str(value)
-        return "global"
+        if arc is None:
+            return "global"
+        value = str(
+            getattr(arc, "variables", {}).get("reflection_group_id")
+            or ""
+        ).strip()
+        if not (
+            value
+            and value.isdecimal()
+            and int(value) > 0
+            and value in self._reflection_allowed_group_ids
+        ):
+            return "global"
+        # When a social reflection provider is wired, Arc group selection must
+        # also pass that provider's fail-closed eligibility gate (intersected
+        # allowlist + mounted store). Raw stores without eligibility cannot
+        # authorize factual group selection.
+        provider = self._social_narrative_store
+        if provider is not None:
+            eligible = getattr(provider, "is_group_reflection_eligible", None)
+            if not callable(eligible) or not bool(eligible(value)):
+                return "global"
+        return value
 
     async def _load_reflection_messages(self, group_id: str) -> list[dict[str, Any]]:
         msg_log = self._message_log
@@ -829,30 +985,140 @@ class DreamAgent:
         except Exception:
             return {}
 
+    async def _load_social_reflection_context(self, group_id: str) -> str:
+        if not group_id or group_id == "global":
+            return ""
+        provider = self._social_narrative_store
+        eligible = getattr(provider, "is_group_reflection_eligible", None)
+        if not callable(eligible):
+            return ""
+        try:
+            if not bool(eligible(group_id)):
+                return ""
+        except Exception:
+            return ""
+        build = getattr(provider, "build_group_reflection_context", None)
+        if not callable(build):
+            return ""
+        try:
+            return str(await cast(Any, build)(group_id=group_id, limit=12) or "")
+        except Exception as exc:
+            dream_logger.warning(
+                "life reflection social context failed | group={} err={}",
+                group_id,
+                exc,
+            )
+            return ""
+
     async def _commit_life_reflection(self, draft: LifeReflectionDraft, arc: Any | None) -> int:
         writes = 0
-        for card in draft.cards[:_REFLECTION_CARD_LIMIT]:
-            await self._store.add_card(
-                NewCard(
-                    category=card.category,
-                    scope=card.scope,
-                    scope_id=card.scope_id,
-                    content=card.content,
-                    confidence=card.confidence,
-                    source="dream_reflection",
-                    priority=6,
-                ),
-                captured_by="dream_reflection",
-            )
-            writes += 1
-        if arc is not None:
-            _apply_life_reflection_to_arc(arc, draft)
-            store = self._story_arc_store
-            if store is not None:
-                store.save(arc)
+        today = datetime.now(_CST).strftime("%Y-%m-%d")
+        planned_source_ids = [
+            self._reflection_source_message_id(today, card)
+            for card in draft.cards[:_REFLECTION_CARD_LIMIT]
+        ]
+        new_source_ids: list[str] = []
+        try:
+            for card, source_msg_id in zip(
+                draft.cards[:_REFLECTION_CARD_LIMIT],
+                planned_source_ids,
+                strict=True,
+            ):
+                if await self._reflection_card_exists(source_msg_id):
+                    continue
+                new_source_ids.append(source_msg_id)
+                await self._store.add_card(
+                    NewCard(
+                        category=card.category,
+                        scope=card.scope,
+                        scope_id=card.scope_id,
+                        content=card.content,
+                        confidence=card.confidence,
+                        source="dream_reflection",
+                        priority=6,
+                    ),
+                    source_msg_id=source_msg_id,
+                    captured_at=today,
+                    captured_by="dream_reflection",
+                )
+                writes += 1
+
+            if arc is not None:
+                store = self._story_arc_store
+                update = getattr(store, "update", None)
+                if callable(update):
+                    update(
+                        arc.arc_id,
+                        lambda latest: _apply_life_reflection_to_arc(latest, draft),
+                    )
+                else:
+                    _apply_life_reflection_to_arc(arc, draft)
+                    if store is not None:
+                        store.save(arc)
+        except BaseException:
+            try:
+                await asyncio.shield(
+                    self._rollback_life_reflection_cards(new_source_ids)
+                )
+            except BaseException as rollback_exc:
+                dream_logger.error(
+                    "life reflection card rollback failed | err={}",
+                    rollback_exc,
+                )
+            raise
         if writes:
             dream_logger.info("life reflection completed | cards={}", writes)
         return writes
+
+    @staticmethod
+    def _reflection_source_message_id(
+        today: str,
+        card: LifeReflectionCardDraft,
+    ) -> str:
+        payload = "\x1f".join((
+            today,
+            card.scope,
+            card.scope_id,
+            card.category,
+            card.content,
+        ))
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+        return f"dream-reflection:{today}:{digest}"
+
+    async def _rollback_life_reflection_cards(
+        self,
+        source_msg_ids: list[str],
+    ) -> None:
+        source_ids = set(source_msg_ids)
+        if not source_ids:
+            return
+        list_cards = getattr(self._store, "list_cards", None)
+        expire_card = getattr(self._store, "expire_card", None)
+        if not callable(list_cards) or not callable(expire_card):
+            return
+        cards = await cast(Any, list_cards)(status="active", limit=100_000)
+        for card in cards:
+            if (
+                getattr(card, "source", None) == "dream_reflection"
+                and getattr(card, "source_msg_id", None) in source_ids
+            ):
+                await cast(Any, expire_card)(card.card_id)
+
+    async def _reflection_card_exists(
+        self,
+        source_msg_id: str,
+    ) -> bool:
+        list_cards: Any = getattr(self._store, "list_cards", None)
+        if not callable(list_cards):
+            return False
+        for status in ("active", "superseded"):
+            cards = await cast(Any, list_cards)(
+                status=status,
+                limit=100_000,
+            )
+            if any(getattr(card, "source_msg_id", None) == source_msg_id for card in cards):
+                return True
+        return False
 
     async def _execute_tool(self, name: str, inp: dict[str, Any]) -> str:
         """Execute a dream tool call and return the result string."""
@@ -1002,6 +1268,15 @@ class DreamPlugin(AmadeusPlugin):
             story_arc_store=getattr(ctx, "story_arc_store", None),
             message_log=getattr(ctx, "msg_log", None),
             climate_engine=getattr(ctx, "climate_engine", None),
+            social_narrative_store=getattr(
+                ctx,
+                "social_narrative_reflection_provider",
+                None,
+            ),
+            reflection_allowed_group_ids={
+                str(group_id)
+                for group_id in getattr(ctx, "allowed_groups", set())
+            },
             task_supervisor=getattr(ctx, "background_task_supervisor", None),
         )
         ctx.dream = self._dream_agent

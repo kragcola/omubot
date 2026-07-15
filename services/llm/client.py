@@ -1648,7 +1648,18 @@ class LLMClient:
         value = self._runtime_state_value(AFFECTION_STAGE_SLOT, scope)
         raw = value.get("stage") if isinstance(value, dict) else getattr(value, "stage", None)
         stage = str(raw or "").strip().lower()
-        return stage if stage in {"stranger", "acquaint", "familiar", "close", "withdraw"} else "acquaint"
+        if stage in {"stranger", "acquaint", "familiar", "close", "withdraw"}:
+            return stage
+        if not self._plugin_capability_enabled("affection"):
+            return "acquaint"
+        try:
+            from services.persona.affection_classifier import stage_from_affection_profile
+
+            store = getattr(self._affection_engine, "_store", None)
+            profile = store.get(scope.user_id) if store is not None and scope.user_id else None
+            return stage_from_affection_profile(profile)
+        except Exception:
+            return "acquaint"
 
     def _latest_assistant_text(self, *, session_id: str, group_id: str | None, is_group: bool) -> str:
         if is_group and group_id is not None and self._timeline is not None:
@@ -3387,6 +3398,7 @@ class LLMClient:
         group_id: str | None,
         user_id: str,
         user_content: Content,
+        source_message_id: int | None,
         reply_content: str,
         elapsed_ms: float,
         thinker_action: str,
@@ -3402,6 +3414,7 @@ class LLMClient:
                 group_id=group_id,
                 user_id=user_id,
                 user_msg=content_text(user_content),
+                source_message_id=source_message_id,
                 reply_content=reply_content,
                 tool_calls=[dict(item) for item in tool_calls],
                 elapsed_ms=elapsed_ms,
@@ -3756,6 +3769,7 @@ class LLMClient:
         is_group: bool,
         force_reply: bool,
         user_content: Content,
+        source_message_id: int | None,
         thinker_action: str,
         thinker_thought: str,
         tool_call_records: list[dict[str, Any]],
@@ -3967,6 +3981,7 @@ class LLMClient:
             group_id=group_id,
             user_id=user_id,
             user_content=user_content,
+            source_message_id=source_message_id,
             reply_content=full_reply,
             elapsed_ms=elapsed * 1000,
             thinker_action=thinker_action,
@@ -4801,6 +4816,11 @@ class LLMClient:
         must_emit: bool = False,
     ) -> str | None:
         force_reply = bool(force_reply or must_emit)
+        source_message_id = (
+            getattr(trigger, "target_message_id", None)
+            if trigger is not None
+            else None
+        )
         content_preview = user_content[:80] if isinstance(user_content, str) else str(user_content)[:80]
         _log_msg_in.info(
             "chat | session={} user={} identity={} text={!r}",
@@ -4831,8 +4851,19 @@ class LLMClient:
             visual_identity_mode = _visual_identity_request_mode(pending_for_request)
             messages = self._build_group_messages(group_id)
             # Append user_content as a transient user message so directives
-            # like "respond to this video" reach the LLM in group context.
-            if user_content:
+            # like "respond to this video" reach the LLM in group context. A
+            # message already identified in pending is evidence, not a second
+            # transient turn, so do not duplicate it in the provider payload.
+            source_is_pending = bool(
+                source_message_id is not None
+                and any(
+                    row.get("role") == "user"
+                    and not row.get("trigger_reason")
+                    and row.get("message_id") == source_message_id
+                    for row in pending_for_request
+                )
+            )
+            if user_content and not source_is_pending:
                 messages.append({"role": "user", "content": user_content})
         else:
             # Private: use ShortTermMemory
@@ -5435,6 +5466,7 @@ class LLMClient:
                     is_group=is_group,
                     force_reply=force_reply,
                     user_content=user_content,
+                    source_message_id=source_message_id,
                     thinker_action=thinker_action,
                     thinker_thought=thinker_thought,
                     tool_call_records=tool_call_records,
@@ -5583,6 +5615,7 @@ class LLMClient:
                         group_id=group_id,
                         user_id=user_id,
                         user_content=user_content,
+                        source_message_id=source_message_id,
                         reply_content=full_reply,
                         elapsed_ms=total_elapsed * 1000,
                         thinker_action=thinker_action,
@@ -5893,6 +5926,7 @@ class LLMClient:
                     group_id=group_id,
                     user_id=user_id,
                     user_content=user_content,
+                    source_message_id=source_message_id,
                     reply_content=full_reply,
                     elapsed_ms=total_elapsed * 1000,
                     thinker_action=thinker_action,
@@ -6237,6 +6271,7 @@ class LLMClient:
             group_id=group_id,
             user_id=user_id,
             user_content=user_content,
+            source_message_id=source_message_id,
             reply_content=full_reply,
             elapsed_ms=elapsed * 1000,
             thinker_action=thinker_action,

@@ -76,7 +76,7 @@ storage/plugins/config/<name>.json
 
 系统级运行时插件会被锁定；manifest-only 系统能力不注册 PluginBus 实例。当前系统能力包为 `chat`、`context`、`history_loader`、`vision`，其中后两者只读展示。插件中心默认隐藏系统能力，需要通过“显示系统插件”高级入口查看。
 
-## 当前本地包清单（23 个）
+## 当前本地包清单（24 个）
 
 | 插件包 | 版本 | 层级 | 启停策略 | 类别 | 功能 |
 | --- | --- | --- | --- | --- | --- |
@@ -89,6 +89,7 @@ storage/plugins/config/<name>.json
 | `calendar_context` | 1.0.0 | user | restart_required | memory | 唯一 CalendarContextService，并拥有 BirthdayGreeter tick |
 | `affection` | 1.1.2 | user | runtime | memory | 好感度系统：分数、昵称、态度调节 |
 | `schedule` | 1.1.5 | user | restart_required | memory | 拥有 ScheduleGenerator；消费 calendar_service，不拥有日历或生日 tick |
+| `social_narrative` | 0.1.0 | user | restart_required | memory | 基于群聊消息证据记录并注入 factual 共同经历；默认 enabled=false、allowed_group_ids=[] fail-closed；禁止虚构线下行为、禁止私聊证据进群、禁止 fiction/factual 混写 |
 | `slang` | 0.1.17 | user | restart_required | expression | 群内黑话：候选、审核、AI 复核、backlog、漂移治理 |
 | `style` | 1.0.0 | user | restart_required | expression | 表达学习：表达样本、动态风格档案、Prompt 注入 |
 | `sticker` | 1.2.0 | user | restart_required | expression | 表情包：保存、发送、管理与 OCR / 轻量语义检索 |
@@ -98,19 +99,20 @@ storage/plugins/config/<name>.json
 | `datetime` | 1.1.1 | user | runtime | tool | 时间日期查询工具 |
 | `http_api` | 1.1.1 | user | runtime | tool | 通用 HTTP API 调用 |
 | `group_admin` | 1.1.1 | user | runtime | tool | 群管理工具（禁言、头衔、发消息） |
-| `food` | 0.1.6 | user | restart_required | tool | 饮食/点餐相关指令；search_enabled 支持字段级热更新 |
+| `food` | 0.1.7 | user | restart_required | tool | 饮食/点餐相关指令；search_enabled 支持字段级热更新 |
 | `bilibili` | 1.1.4 | user | runtime | tool | B 站链接解析与封面摘要 |
 | `element_detector` | 1.1.3 | user | runtime | pipeline | 特殊消息元素检测 |
 | `dream` | 1.1.3 | user | restart_required | ops | 仅拥有 DreamAgent tick 与 typed ctx.dream handle |
-| `debug_commands` | 1.3.1 | user | restart_required | ops | `/plugins`、`/version` 等调试指令 |
+| `debug_commands` | 1.4.0 | user | restart_required | ops | `/plugins`、`/version` 等调试指令 |
 
 说明：
 
-- “23 个”指本地 `plugins/*/plugin.json` 包/能力包数量。
-- PluginBus 当前加载 21 个插件，其中 19 个用户插件按各自 runtime/restart 策略管理。
+- “24 个”指本地 `plugins/*/plugin.json` 包/能力包数量。
+- PluginBus 当前加载 22 个插件，其中 20 个用户插件按各自 runtime/restart 策略管理。
 - `history_loader` 与 `vision` 是 manifest-only 能力；`chat` 与 `context` 是锁定的运行时插件，四者都不进入普通启停流。
 - `runtime` 会在当前进程刷新 hook、tool 与 command；`restart_required` 只持久化目标状态，重启 Bot 后应用；`locked`/manifest-only 不进入普通启停事务。
 - `calendar_context` 是日期、节假日与生日上下文的唯一 owner；`schedule` 通过 required dependency 消费该 service。provider 缺失、禁用或版本不兼容时 Schedule fail-closed，不读取旧数据表。
+- `social_narrative` 为 user / restart_required / memory：只把有消息证据（source message id/time）的群聊共同经历记为 factual；禁止私聊证据进入群作用域、禁止 fiction 抬升为 factual；默认 `enabled=false` 且 `allowed_group_ids=[]`，未显式启用并加白名单前 fail-closed。
 - `dream` 不再拥有生日或记忆整合；`MemoryConsolidatorLifecycle` 是 Application component。`history_loader` 没有 PluginBus instance，其状态由连接 pipeline 暴露。
 
 ## 本地插件索引与治理

@@ -18,6 +18,7 @@ from services.humanization import (
     create_humanization_state_bus,
 )
 from services.llm.arbiter import ArbiterClient
+from services.memory.timeline import GroupTimeline
 from services.system_module import Scope
 from services.tools.registry import ToolRegistry
 
@@ -72,14 +73,20 @@ class _Timeline:
         return [time.time() - 120.0, time.time() - 30.0][index]
 
 
-def _message(text: str = "这事认真点说", *, group_id: str = "100") -> MessageContext:
+def _message(
+    text: str = "这事认真点说",
+    *,
+    group_id: str = "100",
+    user_id: str = "u1",
+    nickname: str = "alice",
+) -> MessageContext:
     return MessageContext(
         session_id=f"group_{group_id}",
         group_id=group_id,
-        user_id="u1",
+        user_id=user_id,
         content=text,
         raw_message={},
-        nickname="alice",
+        nickname=nickname,
     )
 
 
@@ -279,6 +286,55 @@ async def test_chat_plugin_feeds_message_classifier_decision_to_climate_hub() ->
     assert hub.inputs[0].user_id == "u1"
     assert hub.inputs[0].message_label == "cold"
     assert hub.inputs[0].message_confidence == pytest.approx(0.74)
+
+
+@pytest.mark.asyncio
+async def test_chat_plugin_mood_classifier_does_not_attribute_other_users_to_current_user() -> None:
+    from services.humanization import MoodClassifier
+
+    plugin = ChatPlugin()
+    hub = _ClimateSensorHub()
+    plugin._ctx = _plugin_ctx(
+        register_classifier=False,
+        classifier=None,
+        runtime_state=create_humanization_state_bus(),
+        climate_mood_classifier=MoodClassifier(),
+        climate_sensor_hub=hub,
+    )
+    timeline = GroupTimeline()
+    for message_id, text in enumerate(
+        ("嗯", "行", "哦", "随便", "不了", "算了", "没事", "不用", "再说", "不知道", "就这"),
+        start=1,
+    ):
+        timeline.add(
+            "100",
+            role="user",
+            speaker="bob(2002)",
+            content=text,
+            message_id=message_id,
+        )
+        timeline.add("100", role="assistant", content="知道了。")
+    timeline.add(
+        "100",
+        role="user",
+        speaker="alice(1001)",
+        content="之前这个真的很好玩啊，我们继续看看呢",
+        message_id=99,
+    )
+    timeline.add("100", role="assistant", content="好呀。")
+    plugin._ctx.timeline = timeline
+
+    merged_current_turn = list(timeline.get_turns("100"))[-2]
+    assert "«msg:99» alice(1001):" in str(merged_current_turn["content"])
+
+    await plugin.on_message(_message(
+        "这个真的很好玩啊，我们继续看看呢",
+        user_id="1001",
+    ))
+
+    assert len(hub.inputs) == 1
+    assert hub.inputs[0].user_id == "1001"
+    assert hub.inputs[0].message_label == "high"
 
 
 @pytest.mark.asyncio

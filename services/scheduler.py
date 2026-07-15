@@ -16,7 +16,7 @@ from loguru import logger
 
 from kernel.config import GroupConfig
 from kernel.reply_run import ReplyOrigin, ReplyOutcome, ReplyRun, ReplyStage
-from kernel.types import ResponseClass, TriggerContext
+from kernel.types import Content, ResponseClass, TriggerContext
 from services.group.corpus_capture import CaptureRow, CorpusCapture
 from services.group.topic_block import TopicBlockTracker
 from services.humanization import CLIMATE_CURRENT_SLOT, CLOCK_CURRENT_SLOT, REGISTER_LABEL_SLOT
@@ -1438,6 +1438,23 @@ class GroupChatScheduler:
             )
         return results
 
+    def _source_user_content(
+        self,
+        group_id: str,
+        trigger: TriggerContext | None,
+    ) -> Content:
+        """Return only the pending user message identified by the reply evidence."""
+        target_message_id = trigger.target_message_id if trigger is not None else None
+        if target_message_id is None:
+            return ""
+        for row in reversed(self._timeline.get_pending(group_id)):
+            if row.get("role") != "user" or row.get("trigger_reason"):
+                continue
+            if row.get("message_id") != target_message_id:
+                continue
+            return cast(Content, row.get("content", ""))
+        return ""
+
     def _arbiter_enabled(self, group_id: str) -> bool:
         config = self._arbiter_config
         if config is None or not bool(getattr(config, "enabled", False)):
@@ -2117,7 +2134,11 @@ class GroupChatScheduler:
             async with slot_ref.chat_lock:
                 monitor_task: asyncio.Task[None] | None = None
                 session_id = f"group_{group_id}"
-                initial_uid = slot.last_user_id
+                initial_uid = (
+                    trigger.target_user_id
+                    if trigger is not None and trigger.target_user_id
+                    else slot.last_user_id
+                )
                 reply_run = ReplyRun.start(
                     session_id=session_id,
                     group_id=group_id,
@@ -2132,7 +2153,11 @@ class GroupChatScheduler:
                 for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
                     monitor_task = None
                     try:
-                        uid = slot.last_user_id
+                        uid = (
+                            trigger.target_user_id
+                            if trigger is not None and trigger.target_user_id
+                            else slot.last_user_id
+                        )
                         identity = self._persona_runtime.identity_snapshot()
                         ctx = ToolContext(
                             bot=self._bot,
@@ -2290,7 +2315,7 @@ class GroupChatScheduler:
                             self._llm.chat(
                                 session_id=session_id,
                                 user_id=uid,
-                                user_content="",
+                                user_content=self._source_user_content(group_id, trigger),
                                 identity=identity,
                                 group_id=group_id,
                                 ctx=ctx,

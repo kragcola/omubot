@@ -70,3 +70,26 @@ async def test_climate_provider_rejects_stale_snapshot_for_another_user() -> Non
     )
 
     assert blocks == []
+
+
+@pytest.mark.asyncio
+async def test_climate_provider_keeps_two_users_in_same_session_isolated() -> None:
+    module = _module()
+    assert module is not None, "ClimateProvider module must exist"
+    bus = create_humanization_state_bus()
+    for user_id, relationship_text in (("u1", "和 u1 关系不错。"), ("u2", "和 u2 还在熟悉。")):
+        snapshot = module.build_climate_turn_snapshot(
+            state=ClimateState(familiarity=0.8),
+            group_id="100",
+            user_id=user_id,
+            relationship_text=relationship_text,
+        )
+        module.write_climate_turn_snapshot(bus, snapshot, session_id="group_100")
+
+    first = await module.ClimateProvider().provide(_query(runtime_state=bus, user_id="u1"))
+    second = await module.ClimateProvider().provide(_query(runtime_state=bus, user_id="u2"))
+
+    assert len(first) == 1
+    assert "u1" in first[0].text
+    assert len(second) == 1
+    assert "u2" in second[0].text

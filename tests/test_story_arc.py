@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, cast
 
 import pytest
 
+from plugins.schedule import story_arc as story_arc_module
 from plugins.schedule.plugin import ScheduleConfig
 from plugins.schedule.story_arc import (
     FictionPartnerProfile,
@@ -68,7 +71,7 @@ async def test_story_arc_store_round_trip_preserves_fields(tmp_path) -> None:
     assert loaded.to_dict()["arc_id"] == "stage_play_competition_week"
     assert loaded.to_dict()["partner_states"]["天马司"]["availability"] == "normal"
     assert loaded.to_dict()["last_events"][0]["summary"] == "第一次整排进度慢"
-    assert store.load_active() == arc
+    assert store.load_active(on_date="2026-06-10") == arc
     assert store.list_arc_ids() == ["stage_play_competition_week"]
 
 
@@ -81,6 +84,7 @@ def test_story_arc_from_dict_allows_partner_states_placeholder() -> None:
     assert arc.partner_states == {}
     assert set(arc.to_dict()) == {
         "arc_id",
+        "revision",
         "title",
         "scope",
         "starts_on",
@@ -106,6 +110,170 @@ async def test_story_arc_store_rejects_malformed_json(tmp_path) -> None:
 
     assert store.load("bad") is None
     assert store.load("../bad") is None
+
+
+@pytest.mark.asyncio
+async def test_story_arc_store_rejects_stale_snapshot_overwrite(tmp_path) -> None:
+    store = StoryArcStore(tmp_path / "story_arcs")
+    await store.startup()
+    store.save(StoryArc(arc_id="shared_arc", variables={"counter": 0}))
+    first = store.load("shared_arc")
+    stale = store.load("shared_arc")
+    assert first is not None and stale is not None
+
+    first.variables["first_writer"] = True
+    store.save(first)
+    stale.variables["stale_writer"] = True
+
+    with pytest.raises(RuntimeError, match="revision"):
+        store.save(stale)
+
+    loaded = store.load("shared_arc")
+    assert loaded is not None
+    assert loaded.variables == {"counter": 0, "first_writer": True}
+
+
+@pytest.mark.asyncio
+async def test_story_arc_store_update_serializes_concurrent_writers(tmp_path) -> None:
+    root = tmp_path / "story_arcs"
+    store = StoryArcStore(root)
+    await store.startup()
+    store.save(StoryArc(arc_id="shared_arc", variables={"counter": 0}))
+
+    def increment() -> None:
+        writer = StoryArcStore(root)
+
+        def mutate(arc: StoryArc) -> None:
+            arc.variables["counter"] = int(arc.variables.get("counter", 0)) + 1
+
+        writer.update("shared_arc", mutate)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(increment) for _ in range(24)]
+        for future in futures:
+            future.result()
+
+    loaded = store.load("shared_arc")
+    assert loaded is not None
+    assert loaded.variables["counter"] == 24
+    assert loaded.revision == 25
+
+
+@pytest.mark.asyncio
+async def test_story_arc_store_clean_seed_requires_explicit_fiction_factory(tmp_path) -> None:
+    calls: list[str] = []
+
+    def seed_factory(on_date: str) -> StoryArc:
+        calls.append(on_date)
+        return StoryArc(
+            arc_id="first_fiction_arc",
+            title="显式测试虚构弧",
+            scope="fiction",
+            starts_on=on_date,
+            stage="planning",
+        )
+
+    store = StoryArcStore(tmp_path / "story_arcs", seed_factory=seed_factory)
+    await store.startup()
+
+    first = store.ensure_seeded("2026-06-10")
+    reused = store.ensure_seeded("2026-06-10")
+
+    assert first is not None and reused is not None
+    assert first.arc_id == "first_fiction_arc"
+    assert reused.arc_id == "first_fiction_arc"
+    assert calls == ["2026-06-10"]
+    assert store.list_arc_ids() == ["first_fiction_arc"]
+
+
+@pytest.mark.asyncio
+async def test_default_runtime_store_seeds_a_bounded_fiction_arc(tmp_path) -> None:
+    factory = getattr(story_arc_module, "create_default_story_arc_store", None)
+    assert callable(factory), "runtime must wire an explicit default fiction seed factory"
+
+    store = cast(Any, factory)(tmp_path / "story_arcs")
+    await store.startup()
+    seeded = store.ensure_seeded("2026-07-15")
+
+    assert seeded is not None
+    assert seeded.scope == "fiction"
+    assert seeded.starts_on == "2026-07-15"
+    assert seeded.ends_on == "2026-07-21"
+    assert seeded.stage == "planning"
+    assert seeded.goals
+    assert seeded.active_conflicts
+    assert store.load_active(on_date="2026-07-15") is not None
+
+
+@pytest.mark.asyncio
+async def test_story_arc_store_rejects_non_fiction_seed_factory(tmp_path) -> None:
+    store = StoryArcStore(
+        tmp_path / "story_arcs",
+        seed_factory=lambda on_date: StoryArc(
+            arc_id="real_person_arc",
+            scope="factual",
+            starts_on=on_date,
+        ),
+    )
+    await store.startup()
+
+    with pytest.raises(ValueError, match="fiction"):
+        store.ensure_seeded("2026-06-10")
+
+    assert store.list_arc_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_story_arc_store_filters_future_and_archives_expired_or_terminal(tmp_path) -> None:
+    store = StoryArcStore(tmp_path / "storage" / "living_persona" / "story_arcs")
+    await store.startup()
+    store.save(StoryArc(
+        arc_id="expired_arc",
+        starts_on="2026-06-01",
+        ends_on="2026-06-09",
+        stage="active",
+    ))
+    store.save(StoryArc(
+        arc_id="terminal_arc",
+        starts_on="2026-06-01",
+        ends_on="2026-06-20",
+        stage="completed",
+    ))
+    store.save(StoryArc(
+        arc_id="future_arc",
+        starts_on="2026-06-11",
+        ends_on="2026-06-20",
+        stage="planning",
+    ))
+    store.save(StoryArc(
+        arc_id="active_arc",
+        starts_on="2026-06-01",
+        ends_on="2026-06-20",
+        stage="active",
+    ))
+
+    active = store.load_active(on_date="2026-06-10")
+
+    assert active is not None
+    assert active.arc_id == "active_arc"
+    assert store.list_arc_ids() == ["active_arc", "future_arc"]
+    assert store.list_archived_arc_ids() == ["expired_arc", "terminal_arc"]
+
+
+@pytest.mark.asyncio
+async def test_story_arc_store_future_only_returns_none_without_archiving(tmp_path) -> None:
+    store = StoryArcStore(tmp_path / "story_arcs")
+    await store.startup()
+    store.save(StoryArc(
+        arc_id="future_arc",
+        starts_on="2026-06-11",
+        ends_on="2026-06-20",
+        stage="planning",
+    ))
+
+    assert store.load_active(on_date="2026-06-10") is None
+    assert store.list_arc_ids() == ["future_arc"]
+    assert store.list_archived_arc_ids() == []
 
 
 def test_story_arc_config_default_off_and_override() -> None:

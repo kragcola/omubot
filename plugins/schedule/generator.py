@@ -8,7 +8,7 @@ import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -269,7 +269,7 @@ class ScheduleGenerator:
             reflection_text = await self._build_reflection_insight_context()
             if reflection_text:
                 user_parts.extend(["", reflection_text])
-        active_arc = self._load_active_story_arc()
+        active_arc = self._load_active_story_arc(today_str)
         if active_arc is not None:
             arc_text = _render_story_arc_context(active_arc)
             if arc_text:
@@ -341,44 +341,86 @@ class ScheduleGenerator:
                 break
         return filtered
 
-    def _load_active_story_arc(self) -> StoryArc | None:
+    def _load_active_story_arc(self, on_date: str | None = None) -> StoryArc | None:
         if not self._story_arc_enabled or self._story_arc_store is None:
             return None
+        load_active: Any = self._story_arc_store.load_active
+        arc: StoryArc | None
         try:
-            arc = self._story_arc_store.load_active()
+            try:
+                arc = load_active(on_date=on_date)
+            except TypeError:
+                arc = load_active()
         except Exception as exc:
             _L.warning("active story arc lookup failed | error={}", exc)
             return None
         if arc is None:
+            ensure_seeded: Any = getattr(self._story_arc_store, "ensure_seeded", None)
+            if callable(ensure_seeded) and on_date:
+                try:
+                    arc = cast(StoryArc | None, cast(Any, ensure_seeded)(on_date))
+                except Exception as exc:
+                    _L.warning("story arc seed factory failed | date={} error={}", on_date, exc)
+                    return None
+        if arc is None:
             return None
-        self._sync_fiction_partner_states(arc)
-        return arc
+        return self._sync_fiction_partner_states(arc)
 
-    def _sync_fiction_partner_states(self, arc: StoryArc) -> None:
+    def _sync_fiction_partner_states(self, arc: StoryArc) -> StoryArc:
         if self._partner_state_store is None or not self._fiction_partner_profiles:
-            return
+            return arc
         try:
             states = self._partner_state_store.ensure_cards(self._fiction_partner_profiles)
         except Exception as exc:
             _L.warning("fiction partner state sync failed | arc_id={} error={}", arc.arc_id, exc)
-            return
-        for state in states:
-            arc.partner_states[state.entity_id] = state.to_arc_state()
+            return arc
+        state_updates = {state.entity_id: state.to_arc_state() for state in states}
+
+        def apply(latest: StoryArc) -> None:
+            latest.partner_states.update(state_updates)
+
+        update: Any = getattr(self._story_arc_store, "update", None)
+        if callable(update):
+            try:
+                return cast(StoryArc, cast(Any, update)(arc.arc_id, apply))
+            except Exception as exc:
+                _L.warning("story arc partner state update failed | arc_id={} error={}", arc.arc_id, exc)
+                return arc
+        apply(arc)
         try:
             if self._story_arc_store is not None:
                 self._story_arc_store.save(arc)
         except Exception as exc:
             _L.warning("story arc partner state save failed | arc_id={} error={}", arc.arc_id, exc)
+        return arc
 
     def _update_story_arc_after_schedule(self, arc: StoryArc | None, schedule: Schedule) -> None:
         if arc is None or not self._story_arc_enabled or self._story_arc_store is None:
             return
-        update_story_arc_after_schedule(arc, schedule)
-        self._save_partner_states_from_arc(arc)
-        try:
-            self._story_arc_store.save(arc)
-        except Exception as exc:
-            _L.warning("story arc schedule update save failed | arc_id={} error={}", arc.arc_id, exc)
+        changed = False
+
+        def apply(latest: StoryArc) -> None:
+            nonlocal changed
+            changed = update_story_arc_after_schedule(latest, schedule)
+
+        committed: StoryArc | None = None
+        update: Any = getattr(self._story_arc_store, "update", None)
+        if callable(update):
+            try:
+                committed = cast(StoryArc, cast(Any, update)(arc.arc_id, apply))
+            except Exception as exc:
+                _L.warning("story arc schedule update failed | arc_id={} error={}", arc.arc_id, exc)
+                return
+        else:
+            apply(arc)
+            try:
+                self._story_arc_store.save(arc)
+                committed = arc
+            except Exception as exc:
+                _L.warning("story arc schedule update save failed | arc_id={} error={}", arc.arc_id, exc)
+                return
+        if changed and committed is not None:
+            self._save_partner_states_from_arc(committed)
 
     def _save_partner_states_from_arc(self, arc: StoryArc) -> None:
         if self._partner_state_store is None:
@@ -534,11 +576,29 @@ def _render_story_arc_context(arc: StoryArc | None) -> str:
     return text[: _STORY_ARC_CONTEXT_MAX_CHARS - 1].rstrip() + "…"
 
 
-def update_story_arc_after_schedule(arc: StoryArc, schedule: Schedule) -> None:
+def update_story_arc_after_schedule(arc: StoryArc, schedule: Schedule) -> bool:
     summary = _summarize_generated_schedule(schedule)
+    generated_dates = set(_list_str(arc.event_budget.get("generated_schedule_dates")))
+    if schedule.date in generated_dates:
+        return False
+    for event in arc.last_events:
+        if str(event.get("date", "") or "") != schedule.date:
+            continue
+        same_schedule = (
+            event.get("source") == "schedule_generator"
+            or (
+                str(event.get("theme", "") or "") == schedule.theme
+                and str(event.get("summary", "") or "") == summary
+            )
+        )
+        if same_schedule:
+            generated_dates.add(schedule.date)
+            arc.event_budget["generated_schedule_dates"] = sorted(generated_dates)[-32:]
+            return False
     if summary:
         arc.last_events.append({
             "date": schedule.date,
+            "source": "schedule_generator",
             "theme": schedule.theme,
             "summary": summary,
         })
@@ -547,6 +607,9 @@ def update_story_arc_after_schedule(arc: StoryArc, schedule: Schedule) -> None:
     _update_arc_variables(arc)
     _update_arc_partner_states(arc, schedule, summary)
     _decay_replan_constraints(arc)
+    generated_dates.add(schedule.date)
+    arc.event_budget["generated_schedule_dates"] = sorted(generated_dates)[-32:]
+    return True
 
 
 def _summarize_generated_schedule(schedule: Schedule) -> str:

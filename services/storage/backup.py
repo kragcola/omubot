@@ -106,6 +106,30 @@ BACKUP_REGISTRY: list[BackupItem] = [
     # --- Storage state ---
     BackupItem("groups", "storage/groups", "directory",
                required=False, profiles=["daily", "migration"]),
+    BackupItem(
+        "living_persona_story_arcs",
+        "storage/living_persona/story_arcs",
+        "directory",
+        required=False,
+        profiles=["daily", "migration", "pre-change"],
+        restore_note="Living Persona fiction StoryArc active/archive ledgers",
+    ),
+    BackupItem(
+        "living_persona_partner_states",
+        "storage/living_persona/partner_states",
+        "directory",
+        required=False,
+        profiles=["daily", "migration", "pre-change"],
+        restore_note="Living Persona fiction partner state ledgers",
+    ),
+    BackupItem(
+        "dream_run_state",
+        "storage/dream_run_state.json",
+        "file",
+        required=False,
+        profiles=["daily", "migration", "pre-change"],
+        restore_note="Dream natural-day completion ledger; restore with memory_cards.db",
+    ),
     # --- File assets ---
     BackupItem("stickers", "storage/stickers", "directory",
                required=False, profiles=["migration"]),

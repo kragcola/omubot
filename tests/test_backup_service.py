@@ -103,6 +103,51 @@ def test_backup_registry_includes_known_databases():
     assert derived.profiles == ["migration"]
 
 
+def test_backup_registry_includes_living_persona_json_ledgers() -> None:
+    items = {item.id: item for item in BACKUP_REGISTRY}
+
+    assert items["living_persona_story_arcs"].path == (
+        "storage/living_persona/story_arcs"
+    )
+    assert items["living_persona_story_arcs"].item_type == "directory"
+    assert items["living_persona_partner_states"].path == (
+        "storage/living_persona/partner_states"
+    )
+    assert items["living_persona_partner_states"].item_type == "directory"
+    assert items["dream_run_state"].path == "storage/dream_run_state.json"
+    assert items["dream_run_state"].item_type == "file"
+    for item_id in (
+        "living_persona_story_arcs",
+        "living_persona_partner_states",
+        "dream_run_state",
+    ):
+        assert items[item_id].profiles == ["daily", "migration", "pre-change"]
+        assert items[item_id].required is False
+
+
+def test_daily_backup_copies_living_persona_json_ledgers(backup_env) -> None:
+    repo_root, storage = backup_env
+    story_dir = storage / "living_persona" / "story_arcs"
+    partner_dir = storage / "living_persona" / "partner_states"
+    story_dir.mkdir(parents=True)
+    partner_dir.mkdir(parents=True)
+    (story_dir / "weekly.json").write_text(json.dumps({"scope": "fiction"}))
+    (partner_dir / "friend.json").write_text(json.dumps({"kind": "fiction"}))
+    (storage / "dream_run_state.json").write_text(
+        json.dumps({"completed_dates": ["2026-07-15"]}),
+    )
+
+    manifest = BackupService(storage_dir=storage, repo_root=repo_root).create(
+        profile="daily",
+        host_mode=False,
+    )
+    backup_path = repo_root / manifest["backup_path"] / "files" / "storage"
+
+    assert (backup_path / "living_persona" / "story_arcs" / "weekly.json").exists()
+    assert (backup_path / "living_persona" / "partner_states" / "friend.json").exists()
+    assert (backup_path / "dream_run_state.json").exists()
+
+
 def _write_sqlite_restore_fixture(
     tmp_path: Path,
     *,

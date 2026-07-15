@@ -15,7 +15,7 @@ from plugins.schedule.mood import (
     MoodEngine,
 )
 from plugins.schedule.plugin import SchedulePlugin
-from plugins.schedule.story_arc import StoryArc
+from plugins.schedule.story_arc import StoryArc, StoryArcStore
 from plugins.schedule.types import MoodProfile, Schedule, TimeSlot
 from services.block_trace.climate_provider import (
     build_climate_turn_snapshot,
@@ -476,6 +476,7 @@ class TestEventReplanPromptGuidance:
             story_arc_store=story_store,
             event_replan_enabled=True,
             climate_engine=climate_engine,
+            climate_m4_enabled=True,
         )
         prompt_ctx = self._prompt_ctx()
 
@@ -498,6 +499,56 @@ class TestEventReplanPromptGuidance:
         assert story_store.arc.last_events[-1]["source"] == "event_replan"
         assert "Dialogue Climate tension" in story_store.arc.last_events[-1]["reason"]
         assert climate_engine.resolve_calls >= 1
+
+    @pytest.mark.asyncio
+    async def test_event_replan_updates_latest_arc_without_splitting_schedule_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        monkeypatch.setattr("plugins.schedule.plugin.datetime", FixedPromptDateTime)
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        climate_engine = _CountingClimateEngine(0.14)
+        schedule_store = _SavingScheduleStore(_make_replan_schedule())
+        story_store = StoryArcStore(tmp_path / "story_arcs")
+        await story_store.startup()
+        story_store.save(self._arc())
+
+        original_load_active = story_store.load_active
+        injected = False
+
+        def load_active_with_concurrent_writer():
+            nonlocal injected
+            stale = original_load_active(on_date="2026-06-08")
+            if not injected:
+                injected = True
+                story_store.update(
+                    "stage_play_competition_week",
+                    lambda latest: latest.variables.__setitem__(
+                        "external_writer", "preserved",
+                    ),
+                )
+            return stale
+
+        monkeypatch.setattr(story_store, "load_active", load_active_with_concurrent_writer)
+        plugin = await TestDialogueClimatePromptGuidance._started_plugin(
+            engine,
+            schedule_store=schedule_store,
+            story_arc_store=story_store,
+            event_replan_enabled=True,
+            climate_engine=climate_engine,
+            climate_m4_enabled=True,
+        )
+
+        await plugin.on_pre_prompt(self._prompt_ctx())
+
+        committed = story_store.load("stage_play_competition_week")
+        assert committed is not None
+        assert committed.variables["external_writer"] == "preserved"
+        assert committed.stage == "setback_replan"
+        assert committed.event_budget["setback_count"] == 1
+        assert len(schedule_store.saved) == 1
+        assert "天马司轻微扭伤" in schedule_store.current.slots[1].description
 
     @pytest.mark.asyncio
     async def test_event_replan_pressure_triggers_without_climate_state(
@@ -540,6 +591,7 @@ class TestEventReplanPromptGuidance:
             story_arc_store=story_store,
             event_replan_enabled=True,
             climate_engine=climate_engine,
+            climate_m4_enabled=True,
         )
 
         await plugin.on_pre_prompt(self._prompt_ctx())

@@ -1220,17 +1220,28 @@ class TestErrorIsolation:
         bus.register(plugin)
 
         consumed = asyncio.run(bus.fire_on_message(_msg_ctx()))
+        asyncio.run(bus.fire_on_thinker_decision(_thinker_ctx()))
+        asyncio.run(bus.fire_on_post_reply(_reply_ctx()))
         asyncio.run(bus.fire_on_tick(_plugin_ctx()))
 
         assert consumed is False
         assert plugin.tick_calls == 0
         assert bus.collect_tools() == []
         [health] = bus.plugin_health()
-        assert health["permission_denials"] >= 2
+        assert health["permission_denials"] == 4
+        assert health["permission_denials_by_hook"] == {
+            "reply": {
+                "on_thinker_decision": 1,
+                "on_post_reply": 1,
+            },
+            "tick": {"on_tick": 1},
+            "tool": {"register_tools": 1},
+        }
         assert health["state"] == "permission_limited"
         assert health["display_label"] == "按权限运行"
         assert health["display_type"] == "info"
         assert health["last_permission_denied"] == "tool"
+        assert health["last_permission_denied_hook"] == "register_tools"
 
     def test_hook_budget_records_slow_calls(self) -> None:
         bus = PluginBus()

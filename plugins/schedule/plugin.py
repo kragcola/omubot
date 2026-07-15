@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 from datetime import datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -309,7 +310,11 @@ class SchedulePlugin(AmadeusPlugin):
 
         tension = 0.0
         engine = self._climate_engine
-        if engine is not None and bool(getattr(engine, "enabled", False)):
+        if (
+            self._m4_policy_enabled
+            and engine is not None
+            and bool(getattr(engine, "enabled", False))
+        ):
             try:
                 tension = float(
                     engine.resolve(
@@ -321,30 +326,89 @@ class SchedulePlugin(AmadeusPlugin):
                 _L.warning("event replan climate tension lookup failed | err={}", exc)
                 tension = 0.0
 
+        original_schedule = copy.deepcopy(schedule)
+        candidate_schedule = copy.deepcopy(schedule)
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        update = getattr(self._story_arc_store, "update", None)
+        if callable(update):
+            applied: dict[str, Any] | None = None
+            schedule_saved = False
+
+            def mutate(latest: StoryArc) -> None:
+                nonlocal applied, schedule_saved
+                applied = _apply_event_replan_if_needed(
+                    candidate_schedule,
+                    latest,
+                    tension=tension,
+                    now=now,
+                )
+                if applied:
+                    schedule_store = cast(Any, self._schedule_store)
+                    schedule_store.save(candidate_schedule)
+                    schedule_saved = True
+
+            try:
+                committed_arc = cast(StoryArc, update(arc.arc_id, mutate))
+            except Exception as exc:
+                if schedule_saved:
+                    self._restore_event_replan_schedule(original_schedule)
+                _L.warning(
+                    "event replan commit failed | arc_id={} err={}",
+                    arc.arc_id,
+                    exc,
+                )
+                return _render_active_event_replan_guidance(arc)
+            if applied:
+                return _render_event_replan_guidance(committed_arc, applied)
+            return _render_active_event_replan_guidance(committed_arc)
+
+        candidate_arc = copy.deepcopy(arc)
         applied = _apply_event_replan_if_needed(
-            schedule,
-            arc,
+            candidate_schedule,
+            candidate_arc,
             tension=tension,
-            now=datetime.now(ZoneInfo("Asia/Shanghai")),
+            now=now,
         )
         if applied:
-            self._save_event_replan(schedule, arc)
-            return _render_event_replan_guidance(arc, applied)
+            if not self._save_event_replan(
+                candidate_schedule,
+                candidate_arc,
+                original_schedule=original_schedule,
+            ):
+                return _render_active_event_replan_guidance(arc)
+            return _render_event_replan_guidance(candidate_arc, applied)
         return _render_active_event_replan_guidance(arc)
 
-    def _save_event_replan(self, schedule: Schedule, arc: StoryArc) -> None:
+    def _save_event_replan(
+        self,
+        schedule: Schedule,
+        arc: StoryArc,
+        *,
+        original_schedule: Schedule,
+    ) -> bool:
         if self._schedule_store is None or self._story_arc_store is None:
-            return
+            return False
         try:
             schedule_store = self._schedule_store
             schedule_store.save(schedule)
         except Exception as exc:
             _L.warning("event replan schedule save failed | err={}", exc)
+            return False
         try:
             story_arc_store = self._story_arc_store
             story_arc_store.save(arc)
         except Exception as exc:
+            self._restore_event_replan_schedule(original_schedule)
             _L.warning("event replan story arc save failed | arc_id={} err={}", arc.arc_id, exc)
+            return False
+        return True
+
+    def _restore_event_replan_schedule(self, schedule: Schedule) -> None:
+        try:
+            schedule_store = cast(Any, self._schedule_store)
+            schedule_store.save(schedule)
+        except Exception as exc:
+            _L.error("event replan schedule rollback failed | err={}", exc)
 
 
 def _apply_event_replan_if_needed(

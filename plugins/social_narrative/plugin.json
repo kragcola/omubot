@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "social_narrative",
+  "display_name": {
+    "zh": "共同经历",
+    "en": "Social Narrative"
+  },
+  "description": "基于群聊消息证据记录并注入 factual 共同经历",
+  "version": "0.1.0",
+  "priority": 44,
+  "tier": "user",
+  "toggle_policy": "restart_required",
+  "category": "memory",
+  "permissions": [
+    "prompt",
+    "reply",
+    "storage"
+  ],
+  "capabilities": [
+    "factual_shared_experience",
+    "evidence_backed_prompt"
+  ],
+  "author": "Omubot",
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "allowed_group_ids"
+    ]
+  },
+  "store": {
+    "visibility": "internal",
+    "marketplace_id": ""
+  }
+}
+

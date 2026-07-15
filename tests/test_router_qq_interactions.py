@@ -409,6 +409,55 @@ def test_climate_poke_frequency_aggregates_without_double_writing_mood() -> None
     assert [data.burst_continuation for data in hub.inputs] == [False, True, True]
 
 
+def test_m3_shadow_with_m4_off_keeps_legacy_mood_signal() -> None:
+    from bootstrap import chat_runtime
+
+    bridge_type = getattr(chat_runtime, "DialogueClimateSensorHubBridge", None)
+    assert bridge_type is not None, "bootstrap must expose the M3/M4 ownership bridge"
+    mood = _MoodEngine()
+    climate = _ClimateHub()
+    ctx = _ctx(
+        mood_engine=mood,
+        climate_hub=bridge_type(climate, owns_behavior=False),
+    )
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    dispatch_qq_interaction_signal(ctx, signal, now=100.0)
+
+    assert len(climate.inputs) == 1
+    assert len(mood.signals) == 1
+    assert mood.signals[0]["tension_d"] > 0
+
+
+def test_m3_with_m4_on_keeps_climate_as_sole_behavior_owner() -> None:
+    from bootstrap.chat_runtime import DialogueClimateSensorHubBridge
+
+    mood = _MoodEngine()
+    climate = _ClimateHub()
+    ctx = _ctx(
+        mood_engine=mood,
+        climate_hub=DialogueClimateSensorHubBridge(climate, owns_behavior=True),
+    )
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    dispatch_qq_interaction_signal(ctx, signal, now=100.0)
+
+    assert len(climate.inputs) == 1
+    assert mood.signals == []
+
+
 def test_distinct_pokes_feed_only_marginal_burst_increment() -> None:
     hub = _ClimateHub()
     ctx = _ctx(mood_engine=_MoodEngine(), climate_hub=hub)

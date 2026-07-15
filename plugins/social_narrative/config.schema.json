@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用共同经历",
+      "description": "默认关闭；仅对明确列入 allowed_group_ids 的群生效。"
+    },
+    "allowed_group_ids": {
+      "type": "array",
+      "title": "允许记录共同经历的群",
+      "description": "默认空数组并保持 fail-closed；只记录带 source_message_id 的群聊回复证据。",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  }
+}

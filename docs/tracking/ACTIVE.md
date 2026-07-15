@@ -4,16 +4,16 @@
 
 ## Current
 
-- mode: none
-- tracker: none
-- objective: none
-- status: complete
-- checkpoint: 富消息上下文补全已提交、bot-only 上线并通过真实链/自然 silent reply/MessageLog/零出站验证。
-- next_step: none
+- mode: task-bug
+- tracker: `docs/tracking/living-persona-repair-partc-2026-07-15.md`
+- objective: 按审计顺序修复 Living Persona 全链，随后实装 Part C 真人 Social Narrative 并部署。
+- status: active
+- checkpoint: 代码/review/验证完成（0 Critical / 0 open Important；full pytest 3686 passed / 17 skipped / 202 warnings / 0 failed）；implementation commit 待落盘，随后部署。
+- next_step: named-volume 备份 → 生产污染迁移（209 invalid Dream scopes → expired，15 global/global 保留，过期 StoryArc 归档）→ bot-only 部署（build+recreate bot only；永不 touch NapCat）。部署后在 post-deploy docs checkpoint 记录精确 implementation SHA。
 - last_completed: `docs/tracking/rich-message-context-completion-2026-07-15.md`
-- implementation_commit: `d51a7d4`
-- deployment: image `56f51b2ce8d5...` / container `0f7f47c3ffae...` / runtime commit `d51a7d41bed5b031659e09dcfd148c10e6cd4e0a` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
-- rollback: 切 `omubot-bot:pre-rich-context-20260715-d51a7d4` 后只 recreate bot；无 schema 或持久数据变更。
+- implementation_commit: pending（精确 SHA 在 post-commit / post-deploy docs checkpoint 记录 — 勿编造）
+- deployment: 当前生产仍为 runtime commit `d51a7d41bed5b031659e09dcfd148c10e6cd4e0a`；本任务尚未部署。
+- rollback: 关 `social_narrative` / Living Persona flags；用变更前 bot image recreate bot；NapCat 不 restart/recreate。
 
 ## Recovery Order
 

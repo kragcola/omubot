@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 def _service(
@@ -109,6 +109,7 @@ async def collect_service_health(
         _check_sqlite(ctx=ctx, storage_dir=storage_dir),
         _check_backup_freshness(storage_dir=storage_dir),
         _check_backup_disk_usage(storage_dir=storage_dir),
+        await _check_social_narrative(ctx=ctx),
         await _check_memory(ctx=ctx),
         await _check_slang(ctx=ctx, storage_dir=storage_dir),
     ]
@@ -141,6 +142,7 @@ def _service_action(service_id: str) -> str:
         "napcat": "确认 NapCat 登录态、连接状态与最近错误，再决定是否重启协议层。",
         "protocol_trace": "检查 OneBot 请求失败和 pending 堆积，确认协议端能力是否正常。",
         "sqlite": "先创建备份，再检查数据库文件、磁盘空间与 quick_check 结果。",
+        "social_narrative": "核对共同经历插件 allowlist 与运行时 store 挂载状态。",
         "memory": "确认记忆库、短期会话和语义回退是否符合预期。",
         "slang": "检查黑话 store 初始化与抽取链路，必要时在低峰期恢复。",
     }
@@ -150,13 +152,17 @@ def _service_action(service_id: str) -> str:
 def _alert_thresholds() -> dict[str, str]:
     return {
         "llm": "仅当默认 profile 缺失关键字段或无法解析时升级为顶部告警",
-        "plugin_bus": "errors >= 1，或 throttled_plugins >= 1，或 slow_calls >= 3，或 permission_denials >= 5",
+        "plugin_bus": (
+            "errors >= 1，或 throttled_plugins >= 1，或 slow_calls >= 3，"
+            "或 permission_contract_denials >= 5"
+        ),
         "runtime_errors": "critical >= 1，或 errors >= 1，或 warnings >= 3",
         "background_tasks": "failed >= 1，或 backoff >= 1",
         "history_backfill": "failed 立即升级为 error；idle/running 不产生 warning",
         "napcat": "未连接即升级为顶部告警",
         "protocol_trace": "failed >= 3，或 pending >= 5",
         "sqlite": "任意数据库 quick_check 失败，或缺失库 >= 2",
+        "social_narrative": "仅启用且 allowlist 非空，但 store 或 stats 不可用时标记 warning",
         "memory": "semantic errors >= 2 且 queries >= 5，或记忆主链路本身异常",
         "slang": "仅当查询失败或显式 error 时升级为顶部告警",
     }
@@ -205,7 +211,9 @@ def _decide_alert(service: dict[str, Any]) -> dict[str, Any] | None:
         errors = int(meta.get("errors", 0) or 0)
         throttled_plugins = int(meta.get("throttled_plugins", 0) or 0)
         slow_calls = int(meta.get("slow_calls", 0) or 0)
-        permission_denials = int(meta.get("permission_denials", 0) or 0)
+        permission_denials = int(
+            meta.get("permission_contract_denials", meta.get("permission_denials", 0)) or 0
+        )
         if errors >= 1 or throttled_plugins >= 1 or slow_calls >= 3 or permission_denials >= 5:
             return _build_alert_entry(service, severity="warning")
         return None
@@ -389,6 +397,8 @@ def _check_plugin_bus(*, ctx: Any = None) -> dict[str, Any]:
     errors = sum(int(item.get("errors", 0) or 0) for item in health)
     slow_calls = sum(int(item.get("slow_calls", 0) or 0) for item in health)
     permission_denials = sum(int(item.get("permission_denials", 0) or 0) for item in health)
+    permission_contract_denials = _permission_contract_denials(plugins, health)
+    permission_skips = max(0, permission_denials - permission_contract_denials)
     throttled_plugins = sum(1 for item in health if str(item.get("state", "")) == "throttled")
     suppressed_calls = sum(int(item.get("suppressed_calls", 0) or 0) for item in health)
     optional_dependency_degraded = sum(
@@ -427,6 +437,9 @@ def _check_plugin_bus(*, ctx: Any = None) -> dict[str, Any]:
     elif slow_calls:
         status = "warning"
         detail = f"{slow_calls} 次 Hook 超出预算"
+    elif permission_contract_denials >= 5:
+        status = "warning"
+        detail = f"{permission_contract_denials} 次插件权限契约拒绝，建议核对 manifest 权限"
     else:
         status = "ok"
         detail = "插件总线运行正常"
@@ -444,11 +457,61 @@ def _check_plugin_bus(*, ctx: Any = None) -> dict[str, Any]:
             "throttled_plugins": throttled_plugins,
             "slow_calls": slow_calls,
             "permission_denials": permission_denials,
+            "permission_contract_denials": permission_contract_denials,
+            "permission_skips": permission_skips,
             "suppressed_calls": suppressed_calls,
             "optional_dependency_degraded": optional_dependency_degraded,
             "command_registry": command_registry,
         },
     )
+
+
+_PERMISSION_SURFACE_METHODS: dict[str, tuple[str, ...]] = {
+    "message": ("on_message",),
+    "prompt": ("on_pre_prompt",),
+    "reply": ("on_thinker_decision", "on_post_reply"),
+    "tick": ("on_tick",),
+    "tool": ("register_tools",),
+    "command": ("register_commands",),
+    "admin": ("register_admin_routes",),
+}
+
+
+def _permission_contract_denials(
+    plugins: list[Any],
+    health: list[dict[str, Any]],
+) -> int:
+    """Exclude expected permission skips for surfaces a plugin never implements."""
+    try:
+        from kernel.types import AmadeusPlugin
+    except Exception:
+        return 0
+    plugins_by_name = {
+        str(getattr(plugin, "name", "") or ""): plugin
+        for plugin in plugins
+    }
+    total = 0
+    for item in health:
+        plugin = plugins_by_name.get(str(item.get("name", "") or ""))
+        permissions = set(getattr(plugin, "permissions", ()) or ()) if plugin is not None else set()
+        if plugin is None or not permissions:
+            continue
+        raw_buckets = item.get("permission_denials_by_hook")
+        if not isinstance(raw_buckets, dict):
+            continue
+        for permission, raw_hook_counts in raw_buckets.items():
+            permission_name = str(permission)
+            if permission_name in permissions or not isinstance(raw_hook_counts, dict):
+                continue
+            contract_methods = set(_PERMISSION_SURFACE_METHODS.get(permission_name, ()))
+            for hook, count in raw_hook_counts.items():
+                hook_name = str(hook)
+                if hook_name not in contract_methods:
+                    continue
+                if getattr(type(plugin), hook_name, None) is getattr(AmadeusPlugin, hook_name, None):
+                    continue
+                total += int(count or 0)
+    return total
 
 
 def _check_runtime_errors(*, ctx: Any = None) -> dict[str, Any]:
@@ -786,6 +849,88 @@ def _check_backup_disk_usage(*, storage_dir: Path) -> dict[str, Any]:
         "free_bytes": free,
         "backup_bytes": used_by_backup,
     })
+
+
+async def _check_social_narrative(*, ctx: Any = None) -> dict[str, Any]:
+    bus = getattr(ctx, "bus", None) if ctx is not None else None
+    plugin = None
+    get_plugin = getattr(bus, "get_plugin", None)
+    if callable(get_plugin):
+        try:
+            plugin = get_plugin("social_narrative")
+        except Exception:
+            plugin = None
+
+    configured_enabled = bool(getattr(plugin, "_enabled", False)) if plugin is not None else False
+    runtime_enabled = bool(getattr(plugin, "enabled", True)) if plugin is not None else False
+    enabled = configured_enabled and runtime_enabled
+
+    raw_groups = getattr(plugin, "_allowed_group_ids", ()) if plugin is not None else ()
+    if isinstance(raw_groups, str):
+        group_values = (raw_groups,)
+    elif isinstance(raw_groups, (list, tuple, set, frozenset)):
+        group_values = raw_groups
+    else:
+        group_values = ()
+    allowed_group_ids = sorted({
+        str(group_id).strip()
+        for group_id in group_values
+        if str(group_id).strip()
+    })
+
+    store = getattr(ctx, "social_narrative_store", None) if ctx is not None else None
+    if store is None and plugin is not None:
+        store = getattr(plugin, "_store", None)
+
+    stats = {
+        "entities": 0,
+        "active_experiences": 0,
+        "invalidated_experiences": 0,
+    }
+    stats_available = store is not None
+    if store is not None:
+        stats_provider = getattr(store, "stats", None)
+        if callable(stats_provider):
+            try:
+                raw_stats = await cast(Any, stats_provider)()
+                if not isinstance(raw_stats, dict):
+                    stats_available = False
+                else:
+                    for key in stats:
+                        stats[key] = max(0, int(raw_stats.get(key, 0) or 0))
+            except Exception:
+                stats_available = False
+        else:
+            stats_available = False
+
+    if not enabled:
+        status = "ok"
+        detail = "共同经历默认关闭，当前保持 fail-closed"
+    elif not allowed_group_ids:
+        status = "ok"
+        detail = "共同经历已启用但 allowlist 为空，当前保持 fail-closed"
+    elif store is None:
+        status = "warning"
+        detail = "共同经历已启用且存在允许群，但运行时 store 未挂载"
+    elif not stats_available:
+        status = "warning"
+        detail = "共同经历 store 已挂载，但 stats 不可用"
+    else:
+        status = "ok"
+        detail = "共同经历 factual 证据 store 可查询"
+
+    return _service(
+        "social_narrative",
+        "Social Narrative",
+        status,
+        detail,
+        metric=f"{stats['active_experiences']} active / {stats['entities']} entities",
+        meta={
+            "enabled": enabled,
+            "allowed_group_ids": allowed_group_ids,
+            **stats,
+        },
+    )
 
 
 async def _check_memory(*, ctx: Any = None) -> dict[str, Any]:

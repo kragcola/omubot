@@ -39,6 +39,7 @@ EXPECTED_PLUGIN_ORDER = [
     "sticker",
     "slang",
     "style",
+    "social_narrative",
     "dream",
     "bilibili",
     "echo",
@@ -122,7 +123,7 @@ def test_build_application_wires_one_unstarted_process_assembly(
     assert ctx.plugin_state_store is assembly.plugin_state_store
     assert ctx.plugin_config_store is assembly.plugin_config_store
     assert [plugin.name for plugin in assembly.bus.plugins] == EXPECTED_PLUGIN_ORDER
-    assert len(assembly.bus.plugins) == 21
+    assert len(assembly.bus.plugins) == 22
     assert assembly.bus.started is False
     assert ctx.bot_start_time == 1234.5
     assert ctx.outbound_group_access_guard is not None

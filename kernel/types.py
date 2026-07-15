@@ -172,6 +172,8 @@ class PluginContext:
 
     # 记忆 —— CardStore / RetrievalGate / StateBoard / MemoExtractor / GroupMemoryConfig
     card_store: Any = None
+    social_narrative_store: Any = None
+    social_narrative_reflection_provider: Any = None
     retrieval: Any = None
     context_service: Any = None
     context_prompt_owner: str = ""
@@ -418,6 +420,7 @@ class ReplyContext:
     elapsed_ms: float = 0.0  # 本轮 LLM 调用耗时
     thinker_action: str = ""  # thinker 决策: "reply" / "wait"
     thinker_thought: str = ""  # thinker 内心想法
+    source_message_id: int | None = None  # 本轮回复所依据的 QQ message_id；无可追溯触发时为 None
 
 
 @dataclass

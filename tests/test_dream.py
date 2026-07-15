@@ -1,12 +1,18 @@
 import asyncio
+import inspect
 import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
-from plugins.dream import DreamAgent, DreamConfig, dream_pre_check
-from plugins.schedule.story_arc import StoryArc
+from kernel.types import PluginContext
+from plugins.dream import DreamAgent, DreamConfig, DreamPlugin, dream_pre_check
+from plugins.dream.plugin import LifeReflectionCardDraft, LifeReflectionDraft
+from plugins.schedule.story_arc import StoryArc, StoryArcStore
 from plugins.schedule.types import Schedule, TimeSlot
+from plugins.social_narrative.plugin import SocialNarrativeConfig, SocialNarrativePlugin
 from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
 
@@ -204,6 +210,57 @@ async def test_dream_run_clears_running_flag(store: CardStore) -> None:
     assert agent._running is False
 
 
+async def test_dream_runs_once_per_natural_day_across_restart(store: CardStore) -> None:
+    calls = 0
+
+    async def mock_api_call(
+        system: list, messages: list, tools: list | None = None, max_tokens: int = 1024,
+    ) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"text": "无需处理", "tool_uses": []}
+
+    first = DreamAgent(store=store, max_rounds=1)
+    restarted = DreamAgent(store=store, max_rounds=1)
+
+    await first._run(mock_api_call)
+    await restarted._run(mock_api_call)
+
+    assert calls == 1
+
+
+async def test_dream_cancelled_run_is_retryable_same_day(store: CardStore) -> None:
+    entered = asyncio.Event()
+
+    async def blocked_api_call(
+        system: list, messages: list, tools: list | None = None, max_tokens: int = 1024,
+    ) -> dict:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    first = DreamAgent(store=store, max_rounds=1)
+    task = asyncio.create_task(first._run(blocked_api_call))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    retry_calls = 0
+
+    async def retry_api_call(
+        system: list, messages: list, tools: list | None = None, max_tokens: int = 1024,
+    ) -> dict:
+        nonlocal retry_calls
+        retry_calls += 1
+        return {"text": "无需处理", "tool_uses": []}
+
+    restarted = DreamAgent(store=store, max_rounds=1)
+    await restarted._run(retry_api_call)
+
+    assert retry_calls == 1
+
+
 async def test_dream_execute_tool_errors(store: CardStore) -> None:
     """Tool execution handles missing params and unknown tools gracefully."""
     agent = DreamAgent(store=store)
@@ -384,6 +441,39 @@ class _FakeClimateEngine:
         }
 
 
+class _FakeSocialNarrativeStore:
+    def __init__(self, *, eligible_groups: set[str] | None = None) -> None:
+        self.group_context_calls: list[tuple[str, int]] = []
+        self._eligible_groups = {
+            str(group_id).strip()
+            for group_id in (eligible_groups if eligible_groups is not None else {"200"})
+            if str(group_id).strip()
+        }
+
+    def is_group_reflection_eligible(self, group_id: str | None) -> bool:
+        normalized = str(group_id or "").strip()
+        return (
+            bool(normalized)
+            and normalized.isdecimal()
+            and int(normalized) > 0
+            and normalized in self._eligible_groups
+        )
+
+    async def build_group_reflection_context(
+        self,
+        *,
+        group_id: str,
+        limit: int = 12,
+    ) -> str:
+        if not self.is_group_reflection_eligible(group_id):
+            return ""
+        self.group_context_calls.append((group_id, limit))
+        return (
+            "【严格群事实】group=200；entity_kind=factual；证据=7001；"
+            "共同经历：一起理顺了排练节奏；不得补写真人线下行为"
+        )
+
+
 def _reflection_schedule() -> Schedule:
     return Schedule(
         date="2026-06-09",
@@ -423,6 +513,120 @@ def test_life_reflection_config_defaults_off() -> None:
     cfg = DreamConfig.model_validate({})
 
     assert cfg.life_reflection_enabled is False
+
+
+async def test_dream_plugin_wires_context_social_narrative_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import kernel.config
+    import plugins.dream.plugin as dream_module
+
+    social_store = object()
+    reflection_provider = object()
+    captured: dict[str, object] = {}
+
+    class _CaptureAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        kernel.config,
+        "load_plugin_config",
+        lambda *_args, **_kwargs: DreamConfig(enabled=True),
+    )
+    monkeypatch.setattr(dream_module, "setup_dream_logger", lambda _path: None)
+    monkeypatch.setattr(dream_module, "DreamAgent", _CaptureAgent)
+    ctx = PluginContext(
+        config=SimpleNamespace(log=SimpleNamespace(dir=str(tmp_path))),
+        card_store=object(),
+        sticker_store=None,
+        prompt_builder=SimpleNamespace(invalidate=lambda: None),
+        runtime_state=None,
+        social_narrative_store=social_store,
+        social_narrative_reflection_provider=reflection_provider,
+        allowed_groups={200},
+    )
+
+    await DreamPlugin().on_startup(ctx)
+
+    assert captured.get("social_narrative_store") is reflection_provider, (
+        "DreamPlugin must pass only the gated reflection provider into DreamAgent"
+    )
+    assert captured.get("reflection_allowed_group_ids") == {"200"}
+
+
+async def test_dream_group_reflection_injects_strict_group_factual_context(
+    store: CardStore,
+) -> None:
+    social_store = _FakeSocialNarrativeStore()
+    agent = DreamAgent(
+        store=store,
+        life_reflection_enabled=True,
+        schedule_store=_FakeScheduleStore(_reflection_schedule()),
+        story_arc_store=_FakeStoryArcStore(_reflection_arc()),
+        reflection_allowed_group_ids={"200"},
+    )
+    agent._social_narrative_store = social_store  # type: ignore[attr-defined]
+    reflection_requests: list[str] = []
+
+    async def mock_api_call(
+        system: list,
+        messages: list,
+        tools: list | None = None,
+        max_tokens: int = 1024,
+    ) -> dict:
+        del system, tools, max_tokens
+        reflection_requests.append(str(messages[0]["content"]))
+        return {"text": "not-json", "tool_uses": []}
+
+    assert await agent._run_life_reflection(mock_api_call) == 0
+    assert social_store.group_context_calls == [("200", 12)]
+    assert len(reflection_requests) == 1
+    assert "【严格群事实】group=200" in reflection_requests[0]
+    assert "证据=7001" in reflection_requests[0]
+    assert "不得补写真人线下行为" in reflection_requests[0]
+
+
+async def test_dream_global_reflection_does_not_query_or_inject_group_facts(
+    store: CardStore,
+) -> None:
+    arc = _reflection_arc()
+    arc.variables.pop("reflection_group_id")
+    social_store = _FakeSocialNarrativeStore()
+    agent = DreamAgent(
+        store=store,
+        life_reflection_enabled=True,
+        schedule_store=_FakeScheduleStore(_reflection_schedule()),
+        story_arc_store=_FakeStoryArcStore(arc),
+    )
+    agent._social_narrative_store = social_store  # type: ignore[attr-defined]
+    reflection_requests: list[str] = []
+
+    async def mock_api_call(
+        system: list,
+        messages: list,
+        tools: list | None = None,
+        max_tokens: int = 1024,
+    ) -> dict:
+        del system, tools, max_tokens
+        reflection_requests.append(str(messages[0]["content"]))
+        return {"text": "not-json", "tool_uses": []}
+
+    assert await agent._run_life_reflection(mock_api_call) == 0
+    assert social_store.group_context_calls == []
+    assert len(reflection_requests) == 1
+    assert "【严格群事实】" not in reflection_requests[0]
+    assert "共同经历：一起理顺了排练节奏" not in reflection_requests[0]
+
+
+def test_social_narrative_facts_remain_out_of_schedule_and_story_arc_prompts() -> None:
+    import inspect
+
+    from plugins.schedule.generator import ScheduleGenerator, _render_story_arc_context
+
+    assert "social_narrative" not in inspect.getsource(ScheduleGenerator)
+    assert "social_narrative" not in inspect.getsource(_render_story_arc_context)
 
 
 async def test_dream_life_reflection_flag_off_preserves_existing_loop(store: CardStore) -> None:
@@ -475,6 +679,7 @@ async def test_dream_life_reflection_writes_cards_and_updates_arc(store: CardSto
         story_arc_store=story_store,
         message_log=message_log,
         climate_engine=climate_engine,
+        reflection_allowed_group_ids={"200"},
         on_memo_change=lambda: nonlocal_increment("invalidated"),
     )
 
@@ -562,6 +767,327 @@ async def test_dream_life_reflection_invalid_json_does_not_write(store: CardStor
     assert story_store.saved == []
     assert arc.open_threads == ["是否周六追加排练"]
     assert arc.next_day_seed == "在复习和排练之间做取舍"
+
+
+async def test_dream_life_reflection_binds_scope_to_selected_group(store: CardStore) -> None:
+    arc = _reflection_arc()
+    agent = DreamAgent(
+        store=store,
+        life_reflection_enabled=True,
+        schedule_store=_FakeScheduleStore(_reflection_schedule()),
+        story_arc_store=_FakeStoryArcStore(arc),
+        reflection_allowed_group_ids={"200"},
+    )
+
+    async def mock_api_call(
+        system: list, messages: list, tools: list | None = None, max_tokens: int = 1024,
+    ) -> dict:
+        return {
+            "text": json.dumps({
+                "cards": [
+                    {
+                        "scope": "group",
+                        "scope_id": "999",
+                        "category": "event",
+                        "content": "经历洞察：只属于实际选中群的片段。",
+                    },
+                    {
+                        "scope": "global",
+                        "scope_id": "999",
+                        "category": "status",
+                        "content": "经历洞察：全局片段。",
+                    },
+                ],
+            }, ensure_ascii=False),
+            "tool_uses": [],
+        }
+
+    assert await agent._run_life_reflection(mock_api_call) == 2
+
+    cards = await store.search_cards("经历洞察", limit=10)
+    assert {(card.scope, card.scope_id) for card in cards} == {
+        ("group", "200"),
+        ("global", "global"),
+    }
+
+
+async def test_dream_life_reflection_without_group_rejects_group_scope(store: CardStore) -> None:
+    arc = _reflection_arc()
+    arc.variables.pop("reflection_group_id")
+    agent = DreamAgent(
+        store=store,
+        life_reflection_enabled=True,
+        schedule_store=_FakeScheduleStore(_reflection_schedule()),
+        story_arc_store=_FakeStoryArcStore(arc),
+    )
+
+    async def mock_api_call(
+        system: list, messages: list, tools: list | None = None, max_tokens: int = 1024,
+    ) -> dict:
+        assert "group_id" not in messages[0]["content"]
+        return {
+            "text": json.dumps({
+                "cards": [
+                    {
+                        "scope": "group",
+                        "scope_id": "999",
+                        "category": "event",
+                        "content": "经历洞察：这条伪造群卡必须丢弃。",
+                    },
+                    {
+                        "scope": "global",
+                        "scope_id": "anything",
+                        "category": "status",
+                        "content": "经历洞察：只保留全局卡。",
+                    },
+                ],
+            }, ensure_ascii=False),
+            "tool_uses": [],
+        }
+
+    assert await agent._run_life_reflection(mock_api_call) == 1
+
+    cards = await store.search_cards("经历洞察", limit=10)
+    assert [(card.scope, card.scope_id, card.content) for card in cards] == [
+        ("global", "global", "经历洞察：只保留全局卡。"),
+    ]
+
+
+async def test_dream_life_reflection_rejects_group_outside_real_allowlist(
+    store: CardStore,
+) -> None:
+    arc = _reflection_arc()
+    arc.variables["reflection_group_id"] = "wxs"
+    raw_social_store = _FakeSocialNarrativeStore()
+    gate = SocialNarrativePlugin(SocialNarrativeConfig(
+        enabled=True,
+        allowed_group_ids=["200"],
+    ))
+    gate_ctx = PluginContext(social_narrative_store=raw_social_store)
+    await gate.on_startup(gate_ctx)
+    agent_kwargs: dict[str, Any] = {
+        "store": store,
+        "life_reflection_enabled": True,
+        "schedule_store": _FakeScheduleStore(_reflection_schedule()),
+        "story_arc_store": _FakeStoryArcStore(arc),
+        "social_narrative_store": gate,
+    }
+    signature = inspect.signature(DreamAgent)
+    for parameter_name in ("allowed_group_ids", "reflection_allowed_group_ids"):
+        if parameter_name in signature.parameters:
+            agent_kwargs[parameter_name] = ["200"]
+    agent = cast(Any, DreamAgent)(**agent_kwargs)
+
+    async def mock_api_call(
+        system: list,
+        messages: list,
+        tools: list | None = None,
+        max_tokens: int = 1024,
+    ) -> dict:
+        del system, messages, tools, max_tokens
+        return {
+            "text": json.dumps({
+                "cards": [{
+                    "scope": "group",
+                    "scope_id": "wxs",
+                    "category": "event",
+                    "content": "经历洞察：未授权群不得落卡。",
+                }],
+            }, ensure_ascii=False),
+            "tool_uses": [],
+        }
+
+    try:
+        writes = await agent._run_life_reflection(mock_api_call)
+    finally:
+        await gate.on_shutdown(gate_ctx)
+
+    cards = await store.search_cards("未授权群不得落卡", limit=10)
+    outcome = {
+        "writes": writes,
+        "scopes": [(card.scope, card.scope_id) for card in cards],
+    }
+    assert raw_social_store.group_context_calls == []
+    assert outcome in (
+        {"writes": 0, "scopes": []},
+        {"writes": 1, "scopes": [("global", "global")]},
+    )
+
+
+async def test_dream_life_reflection_partial_commit_retry_does_not_duplicate(
+    store: CardStore,
+    monkeypatch,
+) -> None:
+    draft = LifeReflectionDraft(cards=[
+        LifeReflectionCardDraft(
+            category="event",
+            scope="global",
+            scope_id="global",
+            content="经历洞察：第一条。",
+        ),
+        LifeReflectionCardDraft(
+            category="status",
+            scope="global",
+            scope_id="global",
+            content="经历洞察：第二条。",
+        ),
+    ])
+    agent = DreamAgent(store=store)
+    original_add = store.add_card
+    calls = 0
+
+    async def flaky_add(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated second-card failure")
+        return await original_add(*args, **kwargs)
+
+    monkeypatch.setattr(store, "add_card", flaky_add)
+    with pytest.raises(RuntimeError, match="second-card failure"):
+        await agent._commit_life_reflection(draft, None)
+
+    monkeypatch.setattr(store, "add_card", original_add)
+    assert await agent._commit_life_reflection(draft, None) == 2
+
+    cards = await store.search_cards("经历洞察", limit=10)
+    assert sorted(card.content for card in cards) == [
+        "经历洞察：第一条。",
+        "经历洞察：第二条。",
+    ]
+
+
+async def test_dream_life_reflection_partial_commit_retry_keeps_changed_draft_cards(
+    store: CardStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_draft = LifeReflectionDraft(cards=[
+        LifeReflectionCardDraft(
+            category="event",
+            scope="global",
+            scope_id="global",
+            content="经历洞察：换稿回归 A。",
+        ),
+        LifeReflectionCardDraft(
+            category="status",
+            scope="global",
+            scope_id="global",
+            content="经历洞察：换稿回归 B。",
+        ),
+    ])
+    retry_draft = LifeReflectionDraft(cards=[
+        LifeReflectionCardDraft(
+            category="event",
+            scope="global",
+            scope_id="global",
+            content="经历洞察：换稿回归 X。",
+        ),
+        LifeReflectionCardDraft(
+            category="status",
+            scope="global",
+            scope_id="global",
+            content="经历洞察：换稿回归 Y。",
+        ),
+    ])
+    agent = DreamAgent(store=store)
+    original_add = store.add_card
+    calls = 0
+
+    async def fail_second_add(*args: Any, **kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated changed-draft second-card failure")
+        return await original_add(*args, **kwargs)
+
+    monkeypatch.setattr(store, "add_card", fail_second_add)
+    with pytest.raises(RuntimeError, match="changed-draft second-card failure"):
+        await agent._commit_life_reflection(first_draft, None)
+
+    monkeypatch.setattr(store, "add_card", original_add)
+    await agent._commit_life_reflection(retry_draft, None)
+    same_retry_writes = await agent._commit_life_reflection(retry_draft, None)
+
+    cards = await store.search_cards("换稿回归", limit=10)
+    contents = [card.content for card in cards]
+    assert {
+        "has_x": "经历洞察：换稿回归 X。" in contents,
+        "has_y": "经历洞察：换稿回归 Y。" in contents,
+        "x_count": contents.count("经历洞察：换稿回归 X。"),
+        "y_count": contents.count("经历洞察：换稿回归 Y。"),
+        "same_retry_writes": same_retry_writes,
+    } == {
+        "has_x": True,
+        "has_y": True,
+        "x_count": 1,
+        "y_count": 1,
+        "same_retry_writes": 0,
+    }
+
+
+async def test_dream_life_reflection_arc_update_preserves_concurrent_writer(
+    store: CardStore,
+    tmp_path,
+) -> None:
+    story_store = StoryArcStore(tmp_path / "story_arcs")
+    await story_store.startup()
+    story_store.save(_reflection_arc())
+    stale = story_store.load("stage_play_competition_week")
+    assert stale is not None
+
+    def external_update(arc: StoryArc) -> None:
+        arc.variables["external_writer"] = "preserved"
+
+    story_store.update("stage_play_competition_week", external_update)
+    draft = LifeReflectionDraft(
+        cards=[LifeReflectionCardDraft(
+            category="event",
+            scope="global",
+            scope_id="global",
+            content="经历洞察：并发更新后仍可提交。",
+        )],
+        last_event_summary="Dream 提交没有覆盖其他 writer。",
+        open_threads=["继续观察并发写入"],
+        next_day_seed="保留双方更新后继续。",
+    )
+    agent = DreamAgent(store=store, story_arc_store=story_store)
+
+    assert await agent._commit_life_reflection(draft, stale) == 1
+
+    loaded = story_store.load("stage_play_competition_week")
+    assert loaded is not None
+    assert loaded.variables["external_writer"] == "preserved"
+    assert loaded.last_events[-1]["source"] == "dream_reflection"
+    assert loaded.next_day_seed == "保留双方更新后继续。"
+
+
+async def test_dream_life_reflection_retry_does_not_duplicate_arc_event(
+    store: CardStore,
+    tmp_path,
+) -> None:
+    story_store = StoryArcStore(tmp_path / "story_arcs")
+    await story_store.startup()
+    story_store.save(_reflection_arc())
+    stale = story_store.load("stage_play_competition_week")
+    assert stale is not None
+    draft = LifeReflectionDraft(
+        cards=[LifeReflectionCardDraft(
+            category="event",
+            scope="global",
+            scope_id="global",
+            content="经历洞察：同日重试只写一次。",
+        )],
+        last_event_summary="同日 Dream event 只保留一次。",
+    )
+    agent = DreamAgent(store=store, story_arc_store=story_store)
+
+    assert await agent._commit_life_reflection(draft, stale) == 1
+    assert await agent._commit_life_reflection(draft, stale) == 0
+
+    loaded = story_store.load("stage_play_competition_week")
+    assert loaded is not None
+    events = [event for event in loaded.last_events if event.get("source") == "dream_reflection"]
+    assert len(events) == 1
 
 
 async def test_dream_life_reflection_cancel_path_leaves_external_state_clean(store: CardStore) -> None:

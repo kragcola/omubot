@@ -24,7 +24,12 @@ from plugins.schedule.generator import (
 )
 from plugins.schedule.plugin import DialogueClimateConfig, ScheduleConfig
 from plugins.schedule.store import ScheduleStore
-from plugins.schedule.story_arc import FictionPartnerProfile, FictionPartnerState, StoryArc
+from plugins.schedule.story_arc import (
+    FictionPartnerProfile,
+    FictionPartnerState,
+    StoryArc,
+    StoryArcStore,
+)
 from plugins.schedule.types import Schedule, TimeSlot
 
 
@@ -681,6 +686,125 @@ class TestStoryArcSchedule:
         assert arc.variables["rehearsal_progress"] == 0.43
         assert arc.variables["team_morale"] == 0.62
         assert arc.event_budget["generated_days"] == 1
+
+    def test_story_arc_update_after_schedule_is_idempotent_per_date(self):
+        arc = StoryArc(
+            arc_id="stage_play_competition_week",
+            active_conflicts=["排练时间不足"],
+            variables={"deadline_days_left": 6},
+        )
+        schedule = Schedule(
+            date="2026-06-08",
+            theme="舞台剧复盘日",
+            day_narrative="把排练问题拆小后继续推进。",
+            generated_at="2026-06-08T02:00:00+08:00",
+            slots=[],
+        )
+
+        update_story_arc_after_schedule(arc, schedule)
+        update_story_arc_after_schedule(arc, schedule)
+
+        assert len(arc.last_events) == 1
+        assert arc.last_events[0]["source"] == "schedule_generator"
+        assert arc.variables["deadline_days_left"] == 5
+        assert arc.event_budget["generated_days"] == 1
+
+    async def test_story_arc_generator_update_preserves_concurrent_writer(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(generator_module, "datetime", FixedDateTime)
+        story_store = StoryArcStore(tmp_path / "story_arcs")
+        await story_store.startup()
+        story_store.save(StoryArc(
+            arc_id="shared_arc",
+            starts_on="2026-06-01",
+            ends_on="2026-06-20",
+            active_conflicts=["排练时间不足"],
+            variables={"deadline_days_left": 6},
+        ))
+        generator = ScheduleGenerator(
+            store=ScheduleStore(storage_dir=str(tmp_path / "schedule")),
+            story_arc_enabled=True,
+            story_arc_store=story_store,
+        )
+        stale = generator._load_active_story_arc("2026-06-08")
+        assert stale is not None
+
+        def external_update(arc: StoryArc) -> None:
+            arc.variables["external_writer"] = "preserved"
+
+        story_store.update("shared_arc", external_update)
+        schedule = Schedule(
+            date="2026-06-08",
+            theme="并发推进日",
+            day_narrative="在其他更新之后继续推进日程。",
+            generated_at="2026-06-08T02:00:00+08:00",
+            slots=[],
+        )
+
+        generator._update_story_arc_after_schedule(stale, schedule)
+
+        loaded = story_store.load("shared_arc")
+        assert loaded is not None
+        assert loaded.variables["external_writer"] == "preserved"
+        assert loaded.variables["deadline_days_left"] == 5
+        assert loaded.last_events[-1]["date"] == "2026-06-08"
+
+    async def test_story_arc_generator_seeds_clean_store_via_explicit_factory(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(generator_module, "datetime", FixedDateTime)
+        seed_calls: list[str] = []
+
+        def seed_factory(on_date: str) -> StoryArc:
+            seed_calls.append(on_date)
+            return StoryArc(
+                arc_id="first_fiction_arc",
+                title="显式工厂提供的虚构首弧",
+                scope="fiction",
+                starts_on=on_date,
+                ends_on="2026-06-20",
+                goals=["完成虚构舞台准备"],
+                active_conflicts=["排练时间不足"],
+            )
+
+        story_store = StoryArcStore(tmp_path / "story_arcs", seed_factory=seed_factory)
+        await story_store.startup()
+        schedule_dir = tmp_path / "schedule"
+        schedule_dir.mkdir()
+        schedule_store = ScheduleStore(storage_dir=str(schedule_dir))
+        generator = ScheduleGenerator(
+            store=schedule_store,
+            identity_name="凤晓梦",
+            story_arc_enabled=True,
+            story_arc_store=story_store,
+        )
+        captured_user = ""
+
+        async def api_call(system, messages, tools=None, max_tokens=None):
+            nonlocal captured_user
+            captured_user = messages[0]["content"]
+            return {
+                "text": json.dumps({
+                    "date": "2026-06-08",
+                    "theme": "首弧启动日",
+                    "day_narrative": "从明确提供的虚构设定开始推进。",
+                    "slots": [],
+                }),
+            }
+
+        await generator._generate(api_call)
+
+        loaded = story_store.load_active(on_date="2026-06-08")
+        assert loaded is not None
+        assert loaded.arc_id == "first_fiction_arc"
+        assert seed_calls == ["2026-06-08"]
+        assert "显式工厂提供的虚构首弧" in captured_user
+        assert loaded.last_events[-1]["date"] == "2026-06-08"
 
     def test_story_arc_update_after_schedule_decays_replan_constraints(self):
         arc = StoryArc(

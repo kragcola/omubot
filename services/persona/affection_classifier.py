@@ -131,6 +131,27 @@ class AffectionClassifier:
         return decision
 
 
+def stage_from_affection_profile(profile: Any) -> AffectionStage:
+    """Map the canonical AffectionEngine profile onto sticker relationship stages."""
+    if profile is None:
+        return "acquaint"
+    try:
+        score = max(0.0, min(100.0, float(getattr(profile, "score", 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        score = 0.0
+    try:
+        interactions = max(0, int(getattr(profile, "total_interactions", 0) or 0))
+    except (TypeError, ValueError):
+        interactions = 0
+    if score <= 0.0 and interactions <= 0:
+        return "stranger"
+    if score >= 60.0 or interactions >= 100:
+        return "close"
+    if score >= 20.0 or interactions >= 30:
+        return "familiar"
+    return "acquaint"
+
+
 def _classify_stage(signals: AffectionSignals) -> tuple[AffectionStage, float, str]:
     delay = max(0.0, signals.reply_delay_s)
     consistency = max(0.0, min(1.0, signals.register_consistency))

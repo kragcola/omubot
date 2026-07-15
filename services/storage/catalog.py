@@ -208,7 +208,13 @@ DEFAULT_DATABASE_CATALOG = DatabaseCatalog(
             "services.dialogue_climate.m2_metrics",
             optional=True,
         ),
-        _spec("memory_cards", "storage/memory_cards.db", "services.memory.card_store", critical=True),
+        _spec(
+            "memory_cards",
+            "storage/memory_cards.db",
+            "services.memory.card_store",
+            clients=("services.memory.card_store", "services.social_narrative"),
+            critical=True,
+        ),
         _spec(
             "messages",
             "storage/messages.db",

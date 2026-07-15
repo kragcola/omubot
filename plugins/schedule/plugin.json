@@ -13,6 +13,7 @@
   "category": "memory",
   "permissions": [
     "prompt",
+    "reply",
     "tick",
     "storage",
     "network"

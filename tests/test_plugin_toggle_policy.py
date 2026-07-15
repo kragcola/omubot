@@ -382,6 +382,7 @@ def test_plugin_manifest_toggle_policy_matches_resource_lifecycle() -> None:
         "memo",
         "schedule",
         "slang",
+        "social_narrative",
         "sticker",
         "style",
     }

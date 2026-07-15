@@ -27,6 +27,7 @@ EXPECTED_PLUGIN_ORDER = [
     "sticker",
     "slang",
     "style",
+    "social_narrative",
     "dream",
     "bilibili",
     "echo",
@@ -60,7 +61,7 @@ def test_build_plugin_bus_preserves_exact_unstarted_plugin_order() -> None:
 
     names = [plugin.name for plugin in bus.plugins]
     assert names == EXPECTED_PLUGIN_ORDER
-    assert len(names) == 21
+    assert len(names) == 22
     assert len(set(names)) == len(names)
     assert bus.started is False
 

@@ -460,6 +460,17 @@ class PluginBus:
                 "startup_failed": base.get("startup_failed", False),
                 "permission_denials": base.get("permission_denials", 0),
                 "last_permission_denied": base.get("last_permission_denied", ""),
+                "last_permission_denied_hook": base.get("last_permission_denied_hook", ""),
+                "permission_denials_by_hook": {
+                    str(permission): {
+                        str(hook): int(count or 0)
+                        for hook, count in hooks.items()
+                    }
+                    for permission, hooks in (
+                        base.get("permission_denials_by_hook", {}) or {}
+                    ).items()
+                    if isinstance(hooks, dict)
+                },
                 "suppressed_calls": base.get("suppressed_calls", 0),
                 "last_suppressed_hook": base.get("last_suppressed_hook", ""),
                 "last_suppressed_at": base.get("last_suppressed_at", 0.0),
@@ -561,7 +572,7 @@ class PluginBus:
         """按依赖顺序通知所有插件 bot 已连接。"""
         order = self._resolve_dependencies()
         for p in order:
-            if not self._has_permission(p, "lifecycle"):
+            if not self._has_permission(p, "lifecycle", surface="on_bot_connect"):
                 continue
             await self._safe_call(p, p.on_bot_connect(ctx, bot), "on_bot_connect")
         _L.info("bot connect notified | count={}", len(order))
@@ -578,7 +589,7 @@ class PluginBus:
         以防新插件忘记声明而破坏静默。
         """
         for p in self._plugins:
-            if not self._has_permission(p, "message"):
+            if not self._has_permission(p, "message", surface="on_message"):
                 continue
             if silent_mode and not getattr(p, "silent_safe", False):
                 continue
@@ -591,7 +602,7 @@ class PluginBus:
     async def fire_on_thinker_decision(self, ctx: ThinkerContext) -> None:
         """通知所有插件 thinker 决策结果。"""
         for p in self._plugins:
-            if not self._has_permission(p, "reply"):
+            if not self._has_permission(p, "reply", surface="on_thinker_decision"):
                 continue
             await self._safe_call(p, p.on_thinker_decision(ctx), "on_thinker_decision")
 
@@ -601,14 +612,14 @@ class PluginBus:
         各插件通过 ctx.add_block() 追加内容，调用方读取 ctx.blocks 使用。
         """
         for p in self._plugins:
-            if not self._has_permission(p, "prompt"):
+            if not self._has_permission(p, "prompt", surface="on_pre_prompt"):
                 continue
             await self._safe_call(p, p.on_pre_prompt(ctx), "on_pre_prompt")
 
     async def fire_on_post_reply(self, ctx: ReplyContext) -> None:
         """按优先级调用 on_post_reply。各插件独立执行副作用。"""
         for p in self._plugins:
-            if not self._has_permission(p, "reply"):
+            if not self._has_permission(p, "reply", surface="on_post_reply"):
                 continue
             await self._safe_call(p, p.on_post_reply(ctx), "on_post_reply")
 
@@ -624,7 +635,7 @@ class PluginBus:
         for p in self._plugins:
             if not p.enabled:
                 continue
-            if not self._has_permission(p, "tool"):
+            if not self._has_permission(p, "tool", surface="register_tools"):
                 continue
             try:
                 plugin_tools = p.register_tools()
@@ -646,7 +657,7 @@ class PluginBus:
         for p in self._plugins:
             if not p.enabled:
                 continue
-            if not self._has_permission(p, "command"):
+            if not self._has_permission(p, "command", surface="register_commands"):
                 continue
             try:
                 bindings.extend((p, command) for command in p.register_commands())
@@ -667,7 +678,7 @@ class PluginBus:
         for p in self._plugins:
             if not p.enabled:
                 continue
-            if not self._has_permission(p, "admin"):
+            if not self._has_permission(p, "admin", surface="register_admin_routes"):
                 continue
             try:
                 routes.extend(p.register_admin_routes())
@@ -680,7 +691,7 @@ class PluginBus:
     async def fire_on_tick(self, ctx: PluginContext) -> None:
         """按优先级调用 on_tick。"""
         for p in self._plugins:
-            if not self._has_permission(p, "tick"):
+            if not self._has_permission(p, "tick", surface="on_tick"):
                 continue
             await self._safe_call(p, p.on_tick(ctx), "on_tick")
 
@@ -1472,6 +1483,8 @@ class PluginBus:
             "startup_failed": False,
             "permission_denials": 0,
             "last_permission_denied": "",
+            "last_permission_denied_hook": "",
+            "permission_denials_by_hook": {},
             "suppressed_calls": 0,
             "last_suppressed_hook": "",
             "last_suppressed_at": 0.0,
@@ -1487,7 +1500,13 @@ class PluginBus:
             "hooks": {},
         })
 
-    def _has_permission(self, plugin: AmadeusPlugin, permission: str) -> bool:
+    def _has_permission(
+        self,
+        plugin: AmadeusPlugin,
+        permission: str,
+        *,
+        surface: str,
+    ) -> bool:
         """Check manifest v2 permissions while keeping legacy plugins compatible."""
         if not plugin.enabled:
             return True
@@ -1502,10 +1521,20 @@ class PluginBus:
         health = self._ensure_health(plugin.name)
         health["permission_denials"] = int(health.get("permission_denials", 0)) + 1
         health["last_permission_denied"] = permission
+        health["last_permission_denied_hook"] = surface
+        raw_buckets = health.get("permission_denials_by_hook")
+        buckets: dict[str, dict[str, int]] = raw_buckets if isinstance(raw_buckets, dict) else {}
+        raw_permission_bucket = buckets.get(permission)
+        permission_bucket: dict[str, int] = (
+            raw_permission_bucket if isinstance(raw_permission_bucket, dict) else {}
+        )
+        permission_bucket[surface] = int(permission_bucket.get(surface, 0)) + 1
+        buckets[permission] = permission_bucket
+        health["permission_denials_by_hook"] = buckets
         self._refresh_health_state(health, plugin.enabled)
         _L.debug(
-            "plugin permission denied | plugin={} permission={}",
-            plugin.name, permission,
+            "plugin permission denied | plugin={} permission={} surface={}",
+            plugin.name, permission, surface,
         )
         return False
 

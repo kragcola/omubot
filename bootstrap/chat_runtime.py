@@ -44,6 +44,43 @@ def resolve_effective_plugin_enabled(
     return bool(config_enabled)
 
 
+def load_initial_persona_or_raise(persona_runtime: Any, persona_id: str) -> None:
+    """Load the startup persona and abort assembly when no usable bundle exists."""
+    normalized_id = str(persona_id or "default")
+    try:
+        loaded = bool(persona_runtime.load(normalized_id))
+    except Exception as exc:
+        raise RuntimeError(
+            f"initial persona load failed: persona_id={normalized_id}"
+        ) from exc
+    if loaded:
+        return
+    reason = str(getattr(persona_runtime, "last_error", "") or "load_failed")
+    raise RuntimeError(
+        f"initial persona load failed: persona_id={normalized_id} reason={reason}"
+    )
+
+
+class DialogueClimateSensorHubBridge:
+    """Keep M3 shadow collection separate from M4 behavior ownership."""
+
+    def __init__(self, hub: Any, *, owns_behavior: bool) -> None:
+        self._hub = hub
+        self._owns_behavior = bool(owns_behavior)
+        self._engine = getattr(hub, "_engine", None)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(getattr(self._hub, "enabled", False))
+
+    def collect(self, data: Any, *, now_ts: float | None = None) -> int:
+        if now_ts is None:
+            registered = int(self._hub.collect(data) or 0)
+        else:
+            registered = int(self._hub.collect(data, now_ts=now_ts) or 0)
+        return registered if self._owns_behavior else 0
+
+
 def load_and_wire_group_memory_config(
     ctx: Any,
     *,
@@ -253,6 +290,7 @@ def create_chat_runtime_assembly(ctx: Any, builder: Builder) -> ChatRuntimeAssem
         "msg_log",
         "usage_tracker",
         "block_trace_store",
+        "social_narrative_store",
         "card_store",
         "memory_consolidator_store",
         "memory_consolidator_normalizer",
@@ -363,6 +401,7 @@ def create_chat_runtime_assembly(ctx: Any, builder: Builder) -> ChatRuntimeAssem
         ("message_log", lambda: close_attr("msg_log")),
         ("usage_tracker", lambda: close_attr("usage_tracker")),
         ("block_trace_store", lambda: close_attr("block_trace_store")),
+        ("social_narrative_store", lambda: close_attr("social_narrative_store")),
         ("card_store", lambda: close_attr("card_store")),
         ("memory_consolidator_store", lambda: close_attr("memory_consolidator_store")),
         ("memory_consolidator_normalizer", lambda: close_attr("memory_consolidator_normalizer")),
@@ -564,11 +603,15 @@ async def build_chat_runtime(
     # ---- card store ----
     from plugins.memo import MemoConfig
     from services.memory.card_store import CardStore
+    from services.social_narrative import SocialNarrativeStore
 
     memo_cfg = load_plugin_config("plugins/memo/config.default.json", MemoConfig)
     card_store = CardStore(db_path="storage/memory_cards.db")
     ctx.card_store = card_store
     await card_store.init(migrate_from_md=memo_cfg.dir)
+    social_narrative_store = SocialNarrativeStore(db_path="storage/memory_cards.db")
+    ctx.social_narrative_store = social_narrative_store
+    await social_narrative_store.init()
 
     # ---- short term memory ----
     from services.memory.short_term import ShortTermMemory
@@ -586,19 +629,7 @@ async def build_chat_runtime(
     )
     if persona_v2_cfg is not None:
         persona_id = getattr(persona_v2_cfg, "persona_id", "default")
-        try:
-            if not persona_runtime.load(persona_id):
-                logger.bind(channel="persona_runtime").warning(
-                    "PersonaRuntime startup load failed | persona_id={} reason={}",
-                    persona_id,
-                    persona_runtime.last_error,
-                )
-        except Exception as exc:
-            logger.bind(channel="persona_runtime").warning(
-                "PersonaRuntime startup raised | persona_id={} err={}",
-                persona_id,
-                exc,
-            )
+        load_initial_persona_or_raise(persona_runtime, persona_id)
     ctx.persona_runtime = persona_runtime
     ctx.identity = persona_runtime.identity_snapshot()
 
@@ -620,7 +651,7 @@ async def build_chat_runtime(
             MoodEngine,
             ScheduleGenerator,
             ScheduleStore,
-            StoryArcStore,
+            create_default_story_arc_store,
         )
 
         schedule_persona_brief = callbacks.build_schedule_persona_brief(persona_runtime, ctx.identity)
@@ -630,7 +661,7 @@ async def build_chat_runtime(
         story_arc_store = None
         partner_state_store = None
         if schedule_cfg.story_arc_enabled:
-            story_arc_store = StoryArcStore()
+            story_arc_store = create_default_story_arc_store()
             await story_arc_store.startup()
             partner_state_store = FictionPartnerStateStore()
             await partner_state_store.startup()
@@ -652,12 +683,16 @@ async def build_chat_runtime(
                 ctx.climate_baseline_store = ClimateBaselineStore()
                 await ctx.climate_baseline_store.start()
                 ctx.climate_engine.set_baseline_store(ctx.climate_baseline_store)
-                ctx.climate_sensor_hub = SensorHub(
+                sensor_hub = SensorHub(
                     ctx.climate_engine,
                     m3_sensors_enabled=schedule_cfg.dialogue_climate.m3_sensors_enabled,
                 )
                 ctx.dialogue_climate_m4_enabled = bool(
                     schedule_cfg.dialogue_climate.m4_policy_enabled
+                )
+                ctx.climate_sensor_hub = DialogueClimateSensorHubBridge(
+                    sensor_hub,
+                    owns_behavior=ctx.dialogue_climate_m4_enabled,
                 )
                 if schedule_cfg.dialogue_climate.m3_sensors_enabled:
                     from services.dialogue_climate import ClimateMetricsRecorder

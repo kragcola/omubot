@@ -193,26 +193,57 @@ def _mood_classifier_window(
         for offset, turn in enumerate(turns):
             if not isinstance(turn, dict):
                 continue
-            text = _message_content_text(turn.get("content"))
-            if not text:
+            if str(turn.get("role") or "user").strip().lower() == "assistant":
                 continue
-            row: dict[str, Any] = {
-                "role": str(turn.get("role") or "user"),
-                "content_text": text,
-            }
+            texts = _timeline_user_texts(turn, user_id=str(msg_ctx.user_id))
+            if not texts:
+                continue
+            created_at: float | None = None
             get_turn_time = getattr(timeline, "get_turn_time", None)
             if callable(get_turn_time):
                 with contextlib.suppress(Exception):
-                    row["created_at"] = float(
+                    created_at = float(
                         cast(Any, get_turn_time)(str(msg_ctx.group_id), start + offset)
                     )
-            rows.append(row)
+            for text in texts:
+                row: dict[str, Any] = {
+                    "role": "user",
+                    "content_text": text,
+                }
+                if created_at is not None:
+                    row["created_at"] = created_at
+                rows.append(row)
     rows.append({
         "role": "user",
         "content_text": current_text,
         "created_at": time.time(),
     })
     return rows[-12:]
+
+
+_TIMELINE_SPEAKER_LINE_RE = re.compile(r"^.*\(([^()]+)\):\s*(.*)$")
+
+
+def _timeline_user_texts(turn: dict[str, Any], *, user_id: str) -> list[str]:
+    """Return only history rows whose speaker can be proven to be this user."""
+    for key in ("speaker_id", "user_id", "sender_id"):
+        speaker_id = str(turn.get(key) or "").strip()
+        if speaker_id:
+            if speaker_id != user_id:
+                return []
+            text = _message_content_text(turn.get("content"))
+            return [text] if text else []
+
+    text = _message_content_text(turn.get("content"))
+    matched: list[str] = []
+    for line in text.splitlines():
+        match = _TIMELINE_SPEAKER_LINE_RE.match(line.strip())
+        if match is None or match.group(1).strip() != user_id:
+            continue
+        content = match.group(2).strip()
+        if content:
+            matched.append(content)
+    return matched
 
 
 def _timeline_reply_delay_s(ctx: PluginContext, group_id: str) -> float:

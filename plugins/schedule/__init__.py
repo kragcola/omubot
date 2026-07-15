@@ -14,6 +14,7 @@ from plugins.schedule.story_arc import (
     StoryArc,
     StoryArcEventCandidate,
     StoryArcStore,
+    create_default_story_arc_store,
 )
 from plugins.schedule.types import MoodProfile, Schedule, TimeSlot
 
@@ -35,5 +36,6 @@ __all__ = [
     "StoryArcEventCandidate",
     "StoryArcStore",
     "TimeSlot",
+    "create_default_story_arc_store",
     "get_day_context",
 ]
