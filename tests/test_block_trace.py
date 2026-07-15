@@ -196,6 +196,7 @@ def _make_candidate(
     candidate_id: str | None = None,
     evidence_refs: tuple[str, ...] = (),
     hit_reason: str | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> PromptBlockCandidate:
     return PromptBlockCandidate(
         candidate_id=candidate_id or f"pbc_{source}",
@@ -211,7 +212,7 @@ def _make_candidate(
         hit_reason=hit_reason or f"{source}_test",
         char_count=len(text),
         evidence_refs=evidence_refs,
-        metadata={"source": source},
+        metadata={"source": source, **(metadata or {})},
     )
 
 
@@ -254,6 +255,33 @@ async def test_budget_manager_trim(store: BlockTraceStore) -> None:
     assert len(result[0].text) == 100
     assert len(result[1].text) == 50
     assert accepted[0].source == "s1"
+
+
+async def test_budget_manager_rejects_atomic_candidate_instead_of_trimming(
+    store: BlockTraceStore,
+) -> None:
+    import asyncio
+
+    mgr = PromptBudgetManager(store, max_dynamic_chars=150)
+    candidates = [
+        _make_candidate(text="a" * 100, label="hi-pri", priority=10, source="s1"),
+        _make_candidate(
+            text="b" * 100,
+            label="atomic",
+            priority=20,
+            source="s2",
+            candidate_id="pbc_atomic",
+            metadata={"atomic": True},
+        ),
+    ]
+
+    blocks, _accepted = mgr.process(candidates, request_id="req_atomic_reject")
+    await asyncio.sleep(0.1)
+    traces = await store.list_for_request("req_atomic_reject")
+    decisions = {trace.candidate_id: trace.decision for trace in traces}
+
+    assert [(block.source, len(block.text)) for block in blocks] == [("s1", 100)]
+    assert decisions["pbc_atomic"] == "rejected"
 
 
 async def test_budget_manager_reject(store: BlockTraceStore) -> None:

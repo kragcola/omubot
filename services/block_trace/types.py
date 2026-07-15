@@ -10,7 +10,7 @@ BudgetDecision = Literal["accepted", "trimmed", "rejected", "shadow_only"]
 PromptLayer = Literal["core", "stable", "dynamic", "tail", "tool_hint"]
 
 PromptSource = Literal[
-    "slang", "style", "memory", "knowledge", "graph",
+    "homophone", "slang", "style", "memory", "knowledge", "graph",
     "episode", "declarative_fact", "context", "schedule",
     "affection", "sticker", "food", "system",
 ]

@@ -664,6 +664,7 @@ async def think(
     user_id: str = "",
     group_id: str | None = None,
     slang_hint: str = "",
+    homophone_hint: str = "",
     trigger_mode: str = "",
 ) -> ThinkDecision:
     """Call the thinker LLM to decide the next action.
@@ -708,6 +709,8 @@ async def think(
         dynamic_blocks.append(affection_text)
     if slang_hint:
         dynamic_blocks.append(slang_hint)
+    if homophone_hint:
+        dynamic_blocks.append(homophone_hint)
     if trigger_mode == "closing":
         dynamic_blocks.append(
             "【收尾提示】系统检测到对方这条消息是在向你道别/收尾（晚安、睡了、先这样之类）。"

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -70,10 +71,12 @@ def _prompt(persona_runtime: PersonaRuntime) -> PromptBuilder:
 async def _client(
     persona_runtime: PersonaRuntime,
     *,
+    short_term: ShortTermMemory | None = None,
     runtime_state=None,
     bus=None,
     clock_context_getter=None,
     mood_getter=None,
+    slang_store_getter: Callable[[], Any] | None = None,
     thinker_provider_enabled: bool = False,
 ) -> LLMClient:
     return LLMClient(
@@ -81,15 +84,49 @@ async def _client(
         api_key="sk-fake",
         model="test-model",
         prompt_builder=_prompt(persona_runtime),
-        short_term=ShortTermMemory(),
+        short_term=short_term if short_term is not None else ShortTermMemory(),
         tools=ToolRegistry(),
         thinker_enabled=True,
         runtime_state=runtime_state,
         bus=bus,
         clock_context_getter=clock_context_getter,
         mood_getter=mood_getter,
+        slang_store_getter=slang_store_getter,
         thinker_provider_enabled=thinker_provider_enabled,
     )
+
+
+class _FakeThinkerSlangStore:
+    def __init__(self, *, conflict_group_id: str) -> None:
+        self.conflict_group_id = conflict_group_id
+        self.find_calls: list[dict[str, object]] = []
+        self.injectable_calls: list[dict[str, object]] = []
+
+    async def find_matching_terms(
+        self,
+        *,
+        group_id: str,
+        text: str,
+        include_candidates: bool,
+    ) -> list[SimpleNamespace]:
+        self.find_calls.append({
+            "group_id": group_id,
+            "text": text,
+            "include_candidates": include_candidates,
+        })
+        if group_id != self.conflict_group_id:
+            return []
+        return [
+            SimpleNamespace(
+                term="群内说法",
+                aliases=["窝讨厌泥"],
+                status="approved",
+            )
+        ]
+
+    async def get_injectable_terms(self, **kwargs: object) -> list[object]:
+        self.injectable_calls.append(dict(kwargs))
+        return []
 
 
 def test_write_thinker_decision_state_happy_path() -> None:
@@ -284,6 +321,139 @@ async def test_llm_client_passes_runtime_state_and_turn_id_to_providers(
     assert provider_bus.qctx is not None
     assert provider_bus.qctx.runtime_state is runtime_state
     assert provider_bus.qctx.turn_id
+
+
+@pytest.mark.parametrize(
+    ("user_content", "expected_original", "expected_candidate"),
+    [
+        ("窝讨厌泥", "窝讨厌泥", "我讨厌你"),
+        ("今天天气很好", "", ""),
+    ],
+)
+@pytest.mark.asyncio
+async def test_llm_client_passes_homophone_hint_to_thinker(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+    user_content: str,
+    expected_original: str,
+    expected_candidate: str,
+) -> None:
+    client = await _client(persona_runtime, bus=_Bus())
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = _think_ns()
+            await client.chat(
+                session_id="private_100",
+                user_id="100",
+                user_content=user_content,
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+
+    await_args = mock_think.await_args
+    assert await_args is not None
+    assert "homophone_hint" in await_args.kwargs
+    hint = await_args.kwargs["homophone_hint"]
+    if expected_original:
+        assert hint
+        assert expected_original in hint
+        assert expected_candidate in hint
+    else:
+        assert hint == ""
+
+
+@pytest.mark.parametrize(
+    ("group_id", "expect_hint"),
+    [
+        ("100", False),
+        ("200", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_llm_client_scopes_homophone_hint_suppression_to_group_slang(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+    group_id: str,
+    expect_hint: bool,
+) -> None:
+    store = _FakeThinkerSlangStore(conflict_group_id="100")
+    client = await _client(
+        persona_runtime,
+        bus=_Bus(),
+        slang_store_getter=lambda: store,
+    )
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = _think_ns()
+            await client.chat(
+                session_id=f"group_{group_id}",
+                user_id="100",
+                user_content="窝讨厌泥",
+                identity=identity_snapshot,
+                group_id=group_id,
+            )
+    finally:
+        await client.close()
+
+    await_args = mock_think.await_args
+    assert await_args is not None
+    hint = await_args.kwargs["homophone_hint"]
+    if expect_hint:
+        assert hint
+        assert "窝讨厌泥" in hint
+        assert "我讨厌你" in hint
+    else:
+        assert hint == ""
+    assert store.find_calls == [{
+        "group_id": group_id,
+        "text": "窝讨厌泥",
+        "include_candidates": False,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_llm_client_keeps_private_user_text_verbatim_with_homophone_hint(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
+    short_term = ShortTermMemory()
+    client = await _client(
+        persona_runtime,
+        short_term=short_term,
+        bus=_Bus(),
+    )
+    try:
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = _think_ns()
+            await client.chat(
+                session_id="private_100",
+                user_id="100",
+                user_content="窝讨厌泥",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+
+    stored_messages = short_term.get("private_100")
+    assert stored_messages[0]["role"] == "user"
+    assert stored_messages[0]["content"] == "窝讨厌泥"
+    assert stored_messages[0]["content"] != "我讨厌你"
+    await_args = mock_think.await_args
+    assert await_args is not None
+    hint = await_args.kwargs["homophone_hint"]
+    assert hint
+    assert "窝讨厌泥" in hint
+    assert "我讨厌你" in hint
 
 
 @pytest.mark.asyncio

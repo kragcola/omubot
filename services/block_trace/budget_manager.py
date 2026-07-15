@@ -98,6 +98,12 @@ class PromptBudgetManager:
                     accepted_decisions.append(accepted_decision)
                     observation_decisions.append(accepted_decision)
                     used += char_count
+                elif remaining > 0 and bool(candidate.metadata.get("atomic", False)):
+                    decision = "rejected"
+                    reason = (
+                        f"rejected: atomic block needs {char_count} chars, "
+                        f"only {remaining} remain"
+                    )
                 elif remaining > 0:
                     decision = "trimmed"
                     trimmed = _candidate_to_prompt_block(

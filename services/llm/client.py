@@ -4825,6 +4825,19 @@ class LLMClient:
             else:
                 mood_text = self._build_thinker_mood_text(group_id=group_id, session_id=session_id)
                 affection_text = self._build_thinker_affection_text(user_id)
+            from services.homophone import (
+                filter_approved_slang_conflicts,
+                format_homophone_hint,
+                interpret_homophones,
+            )
+
+            homophone_interpretation = interpret_homophones(conversation_text)
+            homophone_interpretation = await filter_approved_slang_conflicts(
+                homophone_interpretation,
+                group_id=group_id,
+                store_getter=self._slang_store_getter,
+            )
+            homophone_hint = format_homophone_hint(homophone_interpretation)
             slang_hint = await self._build_thinker_slang_hint(group_id, conversation_text)
             async with SpeculativeExecutor() as speculative:
                 if self._slang_lookup_enabled(group_id):
@@ -4848,6 +4861,7 @@ class LLMClient:
                     user_id=user_id,
                     group_id=group_id,
                     slang_hint=slang_hint,
+                    homophone_hint=homophone_hint,
                     trigger_mode=str(getattr(trigger, "mode", "") or ""),
                 )
                 resolved_terms, unresolved_terms = await self._resolve_slang_results(

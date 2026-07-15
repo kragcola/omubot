@@ -3,6 +3,7 @@
 from services.block_trace.budget_manager import PromptBudgetManager
 from services.block_trace.catchphrase_provider import CatchphraseProvider
 from services.block_trace.episode_provider import EpisodeProvider
+from services.block_trace.homophone_provider import HomophoneProvider
 from services.block_trace.providers import ContextProvider, QueryContext
 from services.block_trace.register_provider import RegisterProvider
 from services.block_trace.slang_provider import SlangProvider
@@ -34,6 +35,7 @@ __all__ = [
     "CatchphraseProvider",
     "ContextProvider",
     "EpisodeProvider",
+    "HomophoneProvider",
     "PromptBlockCandidate",
     "PromptBlockTrace",
     "PromptBudgetManager",

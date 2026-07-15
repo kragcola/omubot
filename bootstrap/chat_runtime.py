@@ -1098,6 +1098,7 @@ async def build_chat_runtime(
     from services.block_trace.catchphrase_provider import CatchphraseProvider
     from services.block_trace.climate_provider import ClimateProvider
     from services.block_trace.episode_provider import EpisodeProvider
+    from services.block_trace.homophone_provider import HomophoneProvider
     from services.block_trace.provider_bus import PromptProviderBus
     from services.block_trace.register_provider import RegisterProvider
     from services.block_trace.slang_provider import SlangProvider
@@ -1143,6 +1144,9 @@ async def build_chat_runtime(
     provider_bus.register(SlangProvider(
         store_getter=lambda: getattr(ctx, "slang_store", None),
         group_config=config.group,
+    ))
+    provider_bus.register(HomophoneProvider(
+        slang_store_getter=lambda: getattr(ctx, "slang_store", None),
     ))
     provider_bus.register(StyleProvider(
         store_getter=lambda: getattr(ctx, "style_store", None),

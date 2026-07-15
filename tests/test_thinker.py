@@ -226,6 +226,28 @@ async def test_think_with_slang_hint_includes_hint_in_dynamic_blocks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_think_with_homophone_hint_includes_hint_in_dynamic_blocks() -> None:
+    captured_request: list[LLMRequest] = []
+
+    async def mock_api_call(req: LLMRequest) -> dict:
+        captured_request.append(req)
+        return {
+            "content": [{"type": "text", "text": '{"action":"reply","thought":"test","sticker":false,"tone":"日常"}'}],
+            "usage": {"input_tokens": 10, "output_tokens": 10},
+        }
+
+    hint = "[谐音理解提示] 高置信候选：窝讨厌泥 -> 我讨厌你"
+    await think(
+        api_call=mock_api_call,
+        recent_messages=[{"role": "user", "content": "窝讨厌泥"}],
+        homophone_hint=hint,
+    )
+
+    assert len(captured_request) == 1
+    assert hint in captured_request[0].dynamic_blocks
+
+
+@pytest.mark.asyncio
 async def test_think_with_time_text_prepends_runtime_clock_block() -> None:
     captured_request: list[LLMRequest] = []
 
@@ -268,6 +290,29 @@ async def test_think_without_slang_hint_has_no_extra_dynamic_block() -> None:
     for block in captured_request[0].dynamic_blocks:
         text = block if isinstance(block, str) else block.get("text", "")
         assert "黑话命中" not in text
+
+
+@pytest.mark.asyncio
+async def test_think_with_empty_homophone_hint_has_no_extra_dynamic_block() -> None:
+    captured_request: list[LLMRequest] = []
+
+    async def mock_api_call(req: LLMRequest) -> dict:
+        captured_request.append(req)
+        return {
+            "content": [{"type": "text", "text": '{"action":"reply","thought":"test","sticker":false,"tone":"日常"}'}],
+            "usage": {"input_tokens": 10, "output_tokens": 10},
+        }
+
+    await think(
+        api_call=mock_api_call,
+        recent_messages=[{"role": "user", "content": "hello"}],
+        homophone_hint="",
+    )
+
+    assert len(captured_request) == 1
+    for block in captured_request[0].dynamic_blocks:
+        text = block if isinstance(block, str) else block.get("text", "")
+        assert "谐音理解提示" not in text
 
 
 def test_thinker_system_prompt_clears_deepseek_cache_threshold() -> None:
