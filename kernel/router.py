@@ -11,6 +11,7 @@ import hashlib
 import re
 import secrets
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
@@ -875,79 +876,239 @@ def _last_assistant_replied_to_user(
     return False
 
 
-async def _render_forward_msg(forward_id: str, bot: Bot) -> str:
-    try:
-        result = await bot.call_api("get_forward_msg", message_id=forward_id)
-    except Exception:
-        logger.warning("get_forward_msg API failed | id={}", forward_id)
-        return "«合并转发消息（无法获取内容）»"
+_FORWARD_MAX_DEPTH = 3
+_FORWARD_MAX_NODES = 100
+_FORWARD_MAX_SEGMENTS = 1000
+_FORWARD_MAX_CHARS = 2000
+_FORWARD_HEADER = "«合并转发消息»\n"
+_FORWARD_TRUNCATED = "«嵌套转发（内容已截断）»"
+_FORWARD_CYCLE = "«嵌套转发（循环或重复，已跳过）»"
+_FORWARD_UNAVAILABLE = "«嵌套转发（无法获取内容）»"
+_FORWARD_EMPTY = "«嵌套转发（空）»"
 
-    messages: list[dict[str, object]] = []
-    if isinstance(result, dict):
-        data = result.get("data", result)
-        messages = data.get("messages", result.get("messages", []))
-    if isinstance(messages, str):
-        return f"«合并转发消息: {messages[:200]}»"
+
+class _ForwardApiBot(Protocol):
+    async def call_api(self, api: str, **data: Any) -> Any: ...
+
+
+@dataclass(slots=True)
+class _ForwardRenderState:
+    visited_ids: set[str] = field(default_factory=set)
+    lines: list[str] = field(default_factory=list)
+    node_count: int = 0
+    segment_count: int = 0
+    body_chars: int = 0
+    stopped: bool = False
+
+
+def _append_forward_line(state: _ForwardRenderState, line: str) -> None:
+    line = line.rstrip()
+    if not line or state.stopped:
+        return
+    separator_len = 1 if state.lines else 0
+    body_limit = _FORWARD_MAX_CHARS - len(_FORWARD_HEADER)
+    if state.body_chars + separator_len + len(line) <= body_limit:
+        state.lines.append(line)
+        state.body_chars += separator_len + len(line)
+        return
+    _truncate_forward_output(state, pending_line=line)
+
+
+def _truncate_forward_output(state: _ForwardRenderState, *, pending_line: str = "") -> None:
+    if state.stopped:
+        return
+    body_limit = _FORWARD_MAX_CHARS - len(_FORWARD_HEADER)
+    current = "\n".join(state.lines)
+    prefix_limit = max(0, body_limit - len(_FORWARD_TRUNCATED) - 1)
+    if pending_line and len(current) < prefix_limit:
+        separator = "\n" if current else ""
+        remaining = max(0, prefix_limit - len(current) - len(separator))
+        current = f"{current}{separator}{pending_line[:remaining]}"
+    prefix = current[:prefix_limit].rstrip()
+    body = f"{prefix}\n{_FORWARD_TRUNCATED}" if prefix else _FORWARD_TRUNCATED
+    state.lines = body.splitlines()
+    state.body_chars = len(body)
+    state.stopped = True
+
+
+def _forward_messages(result: object) -> object:
+    if not isinstance(result, dict):
+        return None
+    data = result.get("data", result)
+    if isinstance(data, dict):
+        return data.get("messages", result.get("messages", []))
+    return result.get("messages", [])
+
+
+def _render_forward_segment_summary(seg_type: str, data: object) -> str:
+    payload = data if isinstance(data, dict) else {}
+    if seg_type == "text":
+        return str(payload.get("text", ""))
+    if seg_type == "image":
+        url = str(payload.get("url", ""))
+        fname = str(payload.get("file", ""))
+        if url:
+            return f"«图片: {url[:80]}»"
+        if fname:
+            return f"«图片: {fname}»"
+        return "«图片（无描述）»"
+    if seg_type == "face":
+        return "«表情»"
+    if seg_type == "at":
+        return f"@{payload.get('qq', '')}"
+    if seg_type == "file":
+        return f"«文件: {payload.get('name', '未知文件')}»"
+    return f"«{seg_type or '未知'}»"
+
+
+async def _render_nested_forward(
+    data: object,
+    bot: _ForwardApiBot,
+    state: _ForwardRenderState,
+    *,
+    depth: int,
+) -> None:
+    if state.stopped:
+        return
+    if depth >= _FORWARD_MAX_DEPTH:
+        _truncate_forward_output(state)
+        return
+
+    payload = data if isinstance(data, dict) else {}
+    nested_id = str(payload.get("id", "") or "")
+    if nested_id and nested_id in state.visited_ids:
+        _append_forward_line(state, _FORWARD_CYCLE)
+        return
+    if nested_id:
+        state.visited_ids.add(nested_id)
+
+    if "content" in payload:
+        messages = payload.get("content")
+    elif nested_id:
+        try:
+            result = await bot.call_api("get_forward_msg", message_id=nested_id)
+        except Exception:
+            logger.warning("nested get_forward_msg API failed | id={}", nested_id)
+            _append_forward_line(state, _FORWARD_UNAVAILABLE)
+            return
+        messages = _forward_messages(result)
+    else:
+        _append_forward_line(state, _FORWARD_UNAVAILABLE)
+        return
+
     if not isinstance(messages, list) or not messages:
-        return "«合并转发消息（空）»"
+        _append_forward_line(state, _FORWARD_EMPTY)
+        return
+    await _render_forward_nodes(messages, bot, state, depth=depth + 1)
 
-    lines: list[str] = []
-    for m in messages:
-        if not isinstance(m, dict):
+
+async def _render_forward_nodes(
+    messages: list[object],
+    bot: _ForwardApiBot,
+    state: _ForwardRenderState,
+    *,
+    depth: int,
+) -> None:
+    for message in messages:
+        if state.stopped:
+            return
+        if state.node_count >= _FORWARD_MAX_NODES:
+            _truncate_forward_output(state)
+            return
+        if not isinstance(message, dict):
             continue
-        sender = m.get("sender", {})
+        state.node_count += 1
+
+        sender = message.get("sender", {})
         if isinstance(sender, dict):
             uid = str(sender.get("user_id", ""))
             nick = str(sender.get("nickname", uid))
             label = f"{nick}({uid})"
         else:
             label = "未知"
+        prefix = "  " * depth
 
-        content = m.get("message", m.get("content", ""))
-        if isinstance(content, list):
-            parts: list[str] = []
-            for seg in content:
-                if isinstance(seg, dict):
-                    if seg.get("type") == "text":
-                        parts.append(str(seg.get("data", {}).get("text", "")))
-                    elif seg.get("type") == "image":
-                        url = str(seg.get("data", {}).get("url", ""))
-                        fname = str(seg.get("data", {}).get("file", ""))
-                        if url:
-                            parts.append(f"«图片: {url[:80]}»")
-                        elif fname:
-                            parts.append(f"«图片: {fname}»")
-                        else:
-                            parts.append("«图片（无描述）»")
-                    elif seg.get("type") == "face":
-                        parts.append("«表情»")
-                    elif seg.get("type") == "at":
-                        qq = str(seg.get("data", {}).get("qq", ""))
-                        parts.append(f"@{qq}")
-                    elif seg.get("type") == "forward":
-                        parts.append("«嵌套转发»")
-                    elif seg.get("type") == "file":
-                        fname = str(seg.get("data", {}).get("name", "未知文件"))
-                        parts.append(f"«文件: {fname}»")
-                    else:
-                        parts.append(f"«{seg.get('type', '未知')}»")
+        content = message.get("message", message.get("content", ""))
+        if not isinstance(content, list):
+            text = content.strip() if isinstance(content, str) else str(content)
+            if text:
+                _append_forward_line(state, f"{prefix}{label}: {text}")
+            continue
+
+        parts: list[str] = []
+        part_chars = 0
+        for segment in content:
+            if state.stopped:
+                return
+            if state.segment_count >= _FORWARD_MAX_SEGMENTS:
+                _truncate_forward_output(state)
+                return
+            state.segment_count += 1
+            if not isinstance(segment, dict):
+                continue
+            seg_type = str(segment.get("type", ""))
+            if seg_type != "forward":
+                summary = _render_forward_segment_summary(seg_type, segment.get("data", {}))
+                if not summary or (not parts and not summary.strip()):
+                    continue
+                body_limit = _FORWARD_MAX_CHARS - len(_FORWARD_HEADER)
+                separator_len = 1 if state.lines else 0
+                line_overhead = len(prefix) + len(label) + 2
+                part_limit = max(0, body_limit - state.body_chars - separator_len - line_overhead)
+                if part_chars + len(summary) > part_limit:
+                    remaining = max(0, part_limit - part_chars)
+                    if remaining:
+                        parts.append(summary[:remaining])
+                    preview = "".join(parts)
+                    _truncate_forward_output(state, pending_line=f"{prefix}{label}: {preview}")
+                    return
+                parts.append(summary)
+                part_chars += len(summary)
+                continue
+
             text = "".join(parts).strip()
-        elif isinstance(content, str):
-            text = content.strip()
-        else:
-            text = str(content)
+            if text:
+                _append_forward_line(state, f"{prefix}{label}: {text}")
+            parts.clear()
+            part_chars = 0
+            await _render_nested_forward(segment.get("data", {}), bot, state, depth=depth)
 
+        text = "".join(parts).strip()
         if text:
-            lines.append(f"{label}: {text}")
+            _append_forward_line(state, f"{prefix}{label}: {text}")
 
-    if not lines:
+
+async def _render_forward_msg(forward_id: str, bot: _ForwardApiBot) -> str:
+    normalized_id = str(forward_id)
+    try:
+        result = await bot.call_api("get_forward_msg", message_id=normalized_id)
+    except Exception:
+        logger.warning("get_forward_msg API failed | id={}", normalized_id)
+        return "«合并转发消息（无法获取内容）»"
+
+    messages = _forward_messages(result)
+    if isinstance(messages, str):
+        rendered = f"«合并转发消息: {messages[:200]}»"
+        return rendered[:_FORWARD_MAX_CHARS]
+    if not isinstance(messages, list) or not messages:
+        return "«合并转发消息（空）»"
+
+    state = _ForwardRenderState(visited_ids={normalized_id})
+    await _render_forward_nodes(messages, bot, state, depth=0)
+    if not state.lines:
         return "«合并转发消息（无文本内容）»"
 
-    body = "\n".join(lines)
-    if len(body) > 2000:
-        body = body[:2000] + "…"
-    logger.info("forward_msg rendered | id={} msgs={} chars={}", forward_id, len(lines), len(body))
-    return f"«合并转发消息»\n{body}"
+    body = "\n".join(state.lines)
+    logger.info(
+        "forward_msg rendered | id={} nodes={} segments={} lines={} chars={} truncated={}",
+        normalized_id,
+        state.node_count,
+        state.segment_count,
+        len(state.lines),
+        len(body),
+        state.stopped,
+    )
+    return f"{_FORWARD_HEADER}{body}"
 
 
 def _group_ingest_lock(ctx: PluginContext, group_id: str) -> asyncio.Lock:
