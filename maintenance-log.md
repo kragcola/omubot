@@ -4,7 +4,28 @@
 
 ---
 
+## 2026-07-15 Living Persona 全链修复与 Part C Social Narrative 上线
+
+**变更类型**：Living Persona reliability 修复 + Part C 真人 Social Narrative 插件/服务 + 生产 Dream 污染 scope 迁移 + bot-only 部署 + 文档收口。对应 tracker `docs/tracking/living-persona-repair-partc-2026-07-15.md`、迁移清单 `docs/migrations/living-persona-partc-2026-07-15.md`，实现提交 `98887a548eb574f5ab0d068b1529ad06e53f88aa`。
+
+**为何做**：审计确认 Dream 同日重启放大、伪 scope 写卡、StoryArc 过期仍推进、Climate post-reply 权限断链、persona 带病启动、Part C 未实装，以及生产 `memory_cards.db` 中大量无证据伪 scope 反射卡。代码侧已在实现 commit 落地；本条目记录生产备份、迁移 apply、bot-only 上线与公开 silent 观察证据。本 docs-closure 仅写文档，不改 runtime / 生产卷 / 代码。
+
+**同模式扫描与 count-gate 纠正（D1）**：实现期已扫 Dream cancel-path、Climate reply 权限、persona fail-fast/hot-reload hold-old、backup catalog clients、social evidence 边界、private→group 排除。部署期首次 safe-abort/count reconciliation 纠正了「15/209」误读：冻结矩阵是历史 scope **总量**——total **224**；valid `global/global` **15**（**4 active + 11 superseded**）；invalid **209**（**56 active + 29 expired + 124 superseded**）；N=56、M=4、`quick_check=ok`。**仅 56 张 invalid active 进入 apply**，不是 209 行全部改写，也不是「15/209 active」。
+
+**备份与 remediation**：apply 使用 trusted 备份 `pre-change-20260715-201745`（path `/app/storage/backups/pre-change/2026-07-15-201745`，created `2026-07-15T20:18:15.407203+08:00`，`schema_version=2`，`complete=true`，`trusted=true`，memory_cards SHA256 `081c43e0a408f2ada0c7b323445ab0078f156025d88848c7973cdf19404aee3a`，`quick_check=ok`，restore plan `can_apply=true` / `compatibility=upgrade_on_start`）。额外 safe-abort 备份 `pre-change-20260715-200450` 仅作恢复旁证，未用于 apply。apply：`expired_count=56`；`invalid_active` 56→0；候选全部变 expired；invalid 非候选 status 不变；224 行保持 identity/content/scope；无 delete、无 reassignment。独立 post-deploy 比对：backup SHA 一致、restore plan 仍可用、224 语义行相等、live invalid 仍 209 且 `invalid_active=0`。**冻结 apply 数字是 migration 真值**；正常 post-start Dream 曾抽样新增 2 张 valid（live 226/17），后续 valid 计数还会演化，不得当作迁移漂移。
+
+**bot-only 部署**：旧 container `0f7f47c3ffae…` / image `sha256:56f51b2ce8d5…` / runtime `d51a7d41…` 标记为 `omubot-bot:pre-living-persona-98887a5-20260715`。新 container `4199a39340f0…` / image `sha256:01c68ae819b2…` / StartedAt `2026-07-15T12:20:22.459948294Z` / `GIT_COMMIT` exact `98887a548…` / restart=0 / OOM=false / running。`docker compose build bot` 因 Buildx refs EPERM 失败；成功镜像构建为 `DOCKER_BUILDKIT=1 docker build --build-arg GIT_COMMIT=98887a548eb574f5ab0d068b1529ad06e53f88aa -t omubot-bot:latest .`，随后 `docker compose up -d --no-deps --force-recreate bot` 成功（非 compose build 成功）。
+
+**Social Narrative 与 StoryArc**：生产 `/app/storage/plugins/config/social_narrative.json` 为 `schema_version=1`、`enabled=true`、allowlist **仅** `984198159` 与 `993065015`。Admin services health：`social_narrative` ok，观察时 0 active / 0 entities（空健康 store）。StoryArc active ledger 空；archive 含 `stage_play_competition_week.json`；无 seed。
+
+**启动 / 健康 / 公开 silent 观察**：banner exact commit；Application startup complete；OneBot `384801062` connected；group outbound access guard installed；Bot ready；`/admin/` 200；认证 Admin health 可达；自启动无 ERROR/CRITICAL/Traceback。被动窗 UTC `2026-07-15T12:25:18Z`–`12:28:18Z`（180s）：92 行日志、46 `message.group`、46 `silent_learn`；公开入站群 `805836168`/`860324414`/`477640404`/`953023811`/`963085812`；窗口内无授权群入站；bot send/poke=0；成功非授权出站=0；窗内错误无；**无 QQ 探针**。本收口 packet **不改仓库行为**，仅记录已提交实现之上的生产证据。
+
+**NapCat 不变与回滚**：NapCat container `19f6cf13607c…` / image `sha256:cde89d766604…` / StartedAt `2026-07-09T22:51:47.963549084Z` / restart=0 / OOM=false / running；全程未 stop/restart/recreate/exec/改配置。回滚：关 `social_narrative`/相关 flags → 切 tag `omubot-bot:pre-living-persona-98887a5-20260715` 仅 recreate bot；数据可保留 expired 审计或按备份 `pre-change-20260715-201745` restore plan 恢复 memory_cards。
+
+---
+
 ## 2026-07-15 富消息上下文补全上线
+
 
 **变更类型**：OneBot 入站富消息 / active-private 嵌套引用 / history backfill / silent timeline / 资源预算 / bot-only 部署。对应 tracker `docs/tracking/rich-message-context-completion-2026-07-15.md`，实现提交 `d51a7d4`。
 

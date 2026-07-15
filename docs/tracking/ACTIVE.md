@@ -4,16 +4,14 @@
 
 ## Current
 
-- mode: task-bug
-- tracker: `docs/tracking/living-persona-repair-partc-2026-07-15.md`
-- objective: 按审计顺序修复 Living Persona 全链，随后实装 Part C 真人 Social Narrative 并部署。
-- status: active
-- checkpoint: 代码/review/验证完成（0 Critical / 0 open Important；full pytest 3686 passed / 17 skipped / 202 warnings / 0 failed）；implementation commit 待落盘，随后部署。
-- next_step: named-volume 备份 → 生产污染迁移（209 invalid Dream scopes → expired，15 global/global 保留，过期 StoryArc 归档）→ bot-only 部署（build+recreate bot only；永不 touch NapCat）。部署后在 post-deploy docs checkpoint 记录精确 implementation SHA。
-- last_completed: `docs/tracking/rich-message-context-completion-2026-07-15.md`
-- implementation_commit: pending（精确 SHA 在 post-commit / post-deploy docs checkpoint 记录 — 勿编造）
-- deployment: 当前生产仍为 runtime commit `d51a7d41bed5b031659e09dcfd148c10e6cd4e0a`；本任务尚未部署。
-- rollback: 关 `social_narrative` / Living Persona flags；用变更前 bot image recreate bot；NapCat 不 restart/recreate。
+- mode: none
+- tracker: none
+- objective: none
+- status: idle
+- checkpoint: Living Persona reliability + Part C Social Narrative 已部署并文档收口；implementation `98887a548eb574f5ab0d068b1529ad06e53f88aa`；生产 bot container `4199a39340f0…` / image `sha256:01c68ae8…` / runtime 同 commit；restart=0 OOM=false；Social Narrative 仅 `984198159`/`993065015`；公开 silent 群 180s 零出站；NapCat 未变。
+- next_step: none
+- last_completed: `docs/tracking/living-persona-repair-partc-2026-07-15.md`（部署 2026-07-15）
+- rollback: tag `omubot-bot:pre-living-persona-98887a5-20260715` → image `sha256:56f51b2c…`（旧 container `0f7f47c3…` / runtime `d51a7d41…`）；备份 `pre-change-20260715-201745`；仅 recreate bot；永不 touch NapCat。
 
 ## Recovery Order
 
