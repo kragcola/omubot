@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-07-15 QQ 嵌套聊天记录有界展开修复上线
+
+**变更类型**：OneBot 合并转发解析 / 嵌套聊天记录 / 输入资源预算 / bot-only 部署。对应 tracker `docs/tracking/nested-chat-records-2026-07-15.md`，实现提交 `2027858`。
+
+**真实根因与协议证据**：烤群 `993065015` 的真实消息 `2078207657` 为 A→B→C 三层聊天记录。NapCat 4.15.0 只允许顶层 A `7662630301810237144` 通过 `get_forward_msg` 获取；B/C ID 单独读取均返回“内层消息，无法获取”，但完整 B/C nodes 已分别内嵌在上一层 `forward.data.content`。旧 `kernel/router.py::_render_forward_msg` 把该 segment 直接替换成 `«嵌套转发»`，生产日志因此只向模型提供 24 字占位。三种自建发送探针均已撤回；自定义 forward segment 会被 NapCat 丢弃，引用 inner message 也得到空 node，故最终以群内真实样本冻结协议。
+
+**实现与边界**：renderer 现优先递归已有 `forward.data.content`，只有 content 字段缺失才按 ID API fallback；重复/循环 ID 输出局部占位且不重复调用，内层异常只降级当前 segment，父文本和兄弟 node 继续保留。硬预算为嵌套深度 3、总 node 100、总 segment 1000、最终输出 2000 字；达到任一上限均保留前缀并给出“内容已截断”。一层 text/image/face/@/file 摘要保持，取消/`BaseException` 不被吞。原始 event、timeline、message log、研究库和 schema 均未改写。
+
+**测试、同模式扫描与复审**：TDD 首轮 9 failed / 1 passed，review 后又以 RED 关闭字符预算后仍扫描 segment、非 dict segment 绕过计数和领先纯空白误截断；最终 focused 13 passed，全量 **3532 passed / 17 skipped / 170 warnings**，任务 Ruff clean、任务 Pyright 0、diff-check clean。全仓 Ruff/Pyright 仍被用户现有 coursework/research/IPv6 与旧测试基线阻断，本任务未改。两轮独立 review 与两轮增量 closure 最终 `0 Critical / 0 Important`。同模式扫描确认实时 renderer 只有 router；Bilibili 插件仅收集顶层 forward ID，history backfill 与 silent_learn rich timeline 仍不展开 forward，作为独立离线/静默残留如实保留。
+
+**部署与语义验收**：旧 image `85807a7af4f2...` 标记为 `omubot-bot:pre-nested-forward-20260715-2027858`；新 image `a1792c614fec...`、container `bd58abf979f3...`、restart=0、OOM=false，运行 `GIT_COMMIT=2027858a98636d80e9caa3464218af23bb9dc99e`。宿主/镜像 `kernel/router.py` SHA256 同为 `ffd8cb0cc716...`，strict plugin layout、Application startup、OneBot connected、outbound guard/protocol trace 与 Admin 200 均通过。容器内只读回放真实 A→B→C 只调用 A 一次，展开 35 nodes / 35 segments 为 33 条 sender 行 + 1 个图片摘要，983 字，无旧占位、失败或截断。
+
+**公开群负向窗口与回滚**：UTC `2026-07-15T06:39:27Z` 至 `06:41:57Z`，bot 记录 20 条群入站、其中 15 条明确 `silent_learn`；bot 群发送=0、poke=0、ERROR/CRITICAL/Traceback=0，NapCat 记录 21 条群入站、群出站=0。NapCat 唯一 error 是 bot recreate 瞬间反向 WebSocket `ECONNREFUSED`，随后正常连接。NapCat 全程保持 container `19f6cf13607c...`、image `cde89d766604...`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。回滚只切上述 pre-change image 并 recreate bot，无数据或 schema 回滚。
+
+---
+
 ## 2026-07-15 图片人物指代、边缘角色识别与引用图像素链路修复上线
 
 **变更类型**：视觉人物识别正确性 / 当前请求 grounding / 引用图片多模态透传 / Thinker 与 RAG 隔离 / bot-only 部署。对应 tracker `docs/tracking/visual-reference-grounding-2026-07-15.md`，实现提交 `52361bb`。

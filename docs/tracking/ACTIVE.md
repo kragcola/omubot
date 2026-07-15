@@ -8,12 +8,12 @@
 - tracker: none
 - objective: 无当前任务。
 - status: idle
-- checkpoint: 图片人物指代修复已上线；边缘 CCIP 命中不再声明具体身份，视觉请求隔离当前图片并禁 RAG，无图“这是谁”不继承历史，引用图像素进入主模型。
-- next_step: 无；后续只按真实误识别样本调整人类可见身份安全余量。
-- last_completed: `docs/tracking/visual-reference-grounding-2026-07-15.md`
-- implementation_commit: `52361bb`
-- deployment: image `85807a7af4f2...` / container `9862c1298f51...` / runtime commit `52361bbbb4a9eac94ca8d5656a2d606c458daf52` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
-- rollback: 切 `omubot-bot:pre-visual-grounding-20260715-52361bb` 后只 recreate bot；无 schema 或持久数据变更。
+- checkpoint: QQ 嵌套聊天记录已上线有界展开；烤群真实 A→B→C 容器回放为 33 sender lines + 1 image，仅调用顶层 A。
+- next_step: 无；history backfill / silent_learn rich timeline 不展开 forward 是已记录的独立残留。
+- last_completed: `docs/tracking/nested-chat-records-2026-07-15.md`
+- implementation_commit: `2027858`
+- deployment: image `a1792c614fec...` / container `bd58abf979f3...` / runtime commit `2027858a98636d80e9caa3464218af23bb9dc99e` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
+- rollback: 切 `omubot-bot:pre-nested-forward-20260715-2027858` 后只 recreate bot；无 schema 或持久数据变更。
 
 ## Recovery Order
 
