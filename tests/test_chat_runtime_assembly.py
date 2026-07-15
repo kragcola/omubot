@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bootstrap.chat_runtime import ChatRuntimeAssembly
+from bootstrap.chat_runtime import ChatRuntimeAssembly, create_chat_runtime_assembly
 
 
 def _assert_single_shutdown_error(actual: BaseException, expected: BaseException) -> None:
@@ -154,3 +154,31 @@ async def test_normal_close_preserves_context_service_replaced_after_chat_startu
 
     assert calls == ["chat.close"]
     assert ctx.context_service is context_plugin_service
+
+
+@pytest.mark.asyncio
+async def test_production_assembly_closes_producer_before_climate_baseline_store() -> None:
+    calls: list[str] = []
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def close(self) -> None:
+            calls.append(f"{self.name}.close")
+
+    ctx = SimpleNamespace(
+        climate_baseline_store=None,
+        climate_engine=None,
+        message_coalescer=None,
+    )
+
+    async def builder(_assembly: ChatRuntimeAssembly) -> None:
+        ctx.message_coalescer = Resource("producer")
+        ctx.climate_baseline_store = Resource("baseline")
+
+    assembly = create_chat_runtime_assembly(ctx, builder)
+    await assembly.start()
+    await assembly.close()
+
+    assert calls == ["producer.close", "baseline.close"]

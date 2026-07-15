@@ -7,13 +7,13 @@ six-dimension ``ClimateState`` + on-read ``ClimateDynamics`` / ``ClimateEngine``
 sensors in.
 """
 
+from services.dialogue_climate.baseline_store import ClimateBaselineStore
 from services.dialogue_climate.dynamics import (
     DECAY_RATES,
     ClimateDynamics,
     ClimateDynamicsConfig,
     ClimateEngine,
 )
-from services.dialogue_climate.m1_metrics import M1MetricsRecorder
 from services.dialogue_climate.m2_metrics import ClimateMetricsRecorder
 from services.dialogue_climate.policy import PolicyOutput, synthesize
 from services.dialogue_climate.state import (
@@ -25,14 +25,13 @@ from services.dialogue_climate.state import (
 __all__ = [
     "CLIMATE_DIMENSIONS",
     "DECAY_RATES",
+    "ClimateBaselineStore",
     "ClimateDynamics",
     "ClimateDynamicsConfig",
     "ClimateEngine",
     "ClimateMetricsRecorder",
     "ClimateSignal",
     "ClimateState",
-    "M1MetricsRecorder",
     "PolicyOutput",
     "synthesize",
 ]
-

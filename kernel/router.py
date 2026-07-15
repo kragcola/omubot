@@ -43,7 +43,7 @@ from services.humanization.qq_interactions import (
     QQInteractionSignal,
     dispatch_qq_interaction_signal,
     parse_qq_interaction_signal,
-    register_m1_mention_irritation,
+    register_climate_mention_irritation,
 )
 from services.media.visual_evidence import StickerEvidence, VisualEvidence, render_visual_evidence
 from services.name_registry import NameVariationRegistry
@@ -505,7 +505,7 @@ def _resolve_addressing_context(
 _M1_MENTION_EVIDENCE = frozenset({"at_self", "nickname_original"})
 
 
-def _addressing_triggers_m1_mention(addressing: AddressingContext) -> bool:
+def _addressing_triggers_climate_mention(addressing: AddressingContext) -> bool:
     return addressing.target == "self" and addressing.evidence in _M1_MENTION_EVIDENCE
 
 
@@ -1592,16 +1592,17 @@ def setup_routers(
                 )
             return
 
-        # M1 irritation treats a text-nickname vocative ("emu。", "笑梦") as an
+        # Dialogue Climate irritation treats a text-nickname vocative ("emu。", "笑梦") as an
         # explicit mention, same as a protocol @.  The reply-obligation path
         # already equates the two (is_addressed / addressing.evidence), so the
         # tension sensor must too — otherwise the dominant real-world form of
         # "being repeatedly cue'd" (nickname spam) never moves tension.
-        if _addressing_triggers_m1_mention(addressing):
-            register_m1_mention_irritation(
+        if _addressing_triggers_climate_mention(addressing):
+            register_climate_mention_irritation(
                 ctx,
                 group_id=group_id,
                 actor_user_id=str(event.user_id),
+                message_id=event.message_id,
             )
 
         if await bus.fire_on_message(msg_ctx):

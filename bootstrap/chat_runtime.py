@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import os
 import time
@@ -247,6 +248,7 @@ def create_chat_runtime_assembly(ctx: Any, builder: Builder) -> ChatRuntimeAssem
         "humanization_health_guard",
         "research_event_capture",
         "llm_client",
+        "climate_baseline_store",
         "knowledge_graph",
         "msg_log",
         "usage_tracker",
@@ -262,9 +264,6 @@ def create_chat_runtime_assembly(ctx: Any, builder: Builder) -> ChatRuntimeAssem
     )
     original_resources = {field: getattr(ctx, field, _MISSING) for field in resource_fields}
     original_nested = {
-        ("mood_engine", "_m1_recorder"): getattr(
-            getattr(ctx, "mood_engine", None), "_m1_recorder", _MISSING
-        ),
         ("climate_engine", "_recorder"): getattr(
             getattr(ctx, "climate_engine", None), "_recorder", _MISSING
         ),
@@ -358,8 +357,8 @@ def create_chat_runtime_assembly(ctx: Any, builder: Builder) -> ChatRuntimeAssem
         ("humanization_health_guard", lambda: close_attr("humanization_health_guard", "stop")),
         ("research_event_capture", close_research_capture),
         ("llm_client", lambda: close_attr("llm_client")),
-        ("dialogue_climate_m1_recorder", lambda: close_nested("mood_engine", "_m1_recorder")),
         ("dialogue_climate_m2_recorder", lambda: close_nested("climate_engine", "_recorder")),
+        ("dialogue_climate_baseline_store", lambda: close_attr("climate_baseline_store")),
         ("knowledge_graph", lambda: close_attr("knowledge_graph")),
         ("message_log", lambda: close_attr("msg_log")),
         ("usage_tracker", lambda: close_attr("usage_tracker")),
@@ -612,9 +611,6 @@ async def build_chat_runtime(
         "schedule",
         config_enabled=schedule_cfg.enabled,
     )
-    ctx.dialogue_climate_m1_enabled = bool(
-        schedule_enabled and schedule_cfg.dialogue_climate.m1_enabled
-    )
     ctx.schedule_event_replan_enabled = bool(
         schedule_enabled and schedule_cfg.event_replan_enabled
     )
@@ -645,21 +641,17 @@ async def build_chat_runtime(
             refresh_minutes=schedule_cfg.mood_refresh_minutes,
             calendar_service=getattr(ctx, "calendar_service", None),
         )
-        if schedule_cfg.dialogue_climate.m1_enabled:
-            try:
-                from services.dialogue_climate import M1MetricsRecorder
-
-                ctx.mood_engine.set_m1_recorder(M1MetricsRecorder())
-            except Exception as exc:
-                _L.warning("m1 metrics recorder wiring failed | err={}", exc)
         # Dialogue Climate M2/M3: full-dimension ClimateEngine + Sensor hub.
         # Dormant unless m2_enabled; sensors fed only when m3_sensors_enabled.
         if schedule_cfg.dialogue_climate.m2_enabled:
             try:
-                from services.dialogue_climate import ClimateEngine
+                from services.dialogue_climate import ClimateBaselineStore, ClimateEngine
                 from services.dialogue_climate.sensors import SensorHub
 
                 ctx.climate_engine = ClimateEngine(m2_enabled=True)
+                ctx.climate_baseline_store = ClimateBaselineStore()
+                await ctx.climate_baseline_store.start()
+                ctx.climate_engine.set_baseline_store(ctx.climate_baseline_store)
                 ctx.climate_sensor_hub = SensorHub(
                     ctx.climate_engine,
                     m3_sensors_enabled=schedule_cfg.dialogue_climate.m3_sensors_enabled,
@@ -700,6 +692,7 @@ async def build_chat_runtime(
         ctx.story_arc_store = None
         ctx.partner_state_store = None
         ctx.schedule_event_replan_enabled = False
+        ctx.climate_baseline_store = None
     ctx.schedule_enabled = schedule_enabled
 
     # ---- affection system ----
@@ -948,6 +941,77 @@ async def build_chat_runtime(
         day_context = get_day_context(now) if callable(get_day_context) else None
         return slot_features(now=now, schedule=schedule, day_context=day_context)
 
+    def runtime_climate_context_getter(
+        *,
+        session_id: str,
+        group_id: str | int | None,
+        user_id: str | int | None,
+        privacy_mask: bool,
+    ) -> Any:
+        engine = getattr(ctx, "climate_engine", None)
+        if (
+            not bool(getattr(ctx, "dialogue_climate_m4_enabled", False))
+            or engine is None
+            or not bool(getattr(engine, "enabled", False))
+        ):
+            return None
+        with contextlib.suppress(Exception):
+            engine.clear_stale()
+        hub = getattr(ctx, "climate_sensor_hub", None)
+        if hub is not None and bool(getattr(hub, "enabled", False)):
+            try:
+                from datetime import datetime
+
+                from services.dialogue_climate.sensors import SensorInput
+
+                profile = runtime_mood_getter(group_id=group_id, session_id=session_id)
+                familiarity = None
+                affection_engine = getattr(ctx, "affection_engine", None)
+                if affection_engine is not None and getattr(ctx, "affection_enabled", False):
+                    familiarity_getter = getattr(affection_engine, "familiarity_score", None)
+                    if callable(familiarity_getter):
+                        familiarity = float(cast(Any, familiarity_getter)(str(user_id or "")))
+                now = datetime.now()
+                calendar_service = getattr(ctx, "calendar_service", None)
+                day_getter = getattr(calendar_service, "get_day_context", None)
+                day_context = day_getter(now) if callable(day_getter) else None
+                hub.collect(SensorInput(
+                    group_id=str(group_id or ""),
+                    user_id=str(user_id or ""),
+                    mood_energy=getattr(profile, "energy", None) if profile else None,
+                    mood_valence=getattr(profile, "valence", None) if profile else None,
+                    mood_openness=getattr(profile, "openness", None) if profile else None,
+                    mood_tension=getattr(profile, "tension", None) if profile else None,
+                    hour=now.hour,
+                    familiarity=familiarity,
+                    is_holiday=bool(getattr(day_context, "is_holiday", False)),
+                    has_self_birthday=bool(getattr(day_context, "is_self_birthday", False)),
+                ))
+            except Exception as exc:
+                _L.debug("climate runtime sensor feed failed | err={}", exc)
+        relationship_text = ""
+        affection_engine = getattr(ctx, "affection_engine", None)
+        if affection_engine is not None and getattr(ctx, "affection_enabled", False):
+            try:
+                pool_ids = None
+                if group_id is not None and getattr(ctx, "group_memory_config", None) is not None:
+                    pool_ids = ctx.group_memory_config.resolve_group_pools(str(group_id))
+                relationship_text = affection_engine.build_affection_block(
+                    str(user_id or ""),
+                    in_group=bool(group_id is not None and privacy_mask),
+                    pool_ids=pool_ids,
+                )
+            except Exception as exc:
+                _L.debug("climate relationship context failed | user={} err={}", user_id, exc)
+        from services.block_trace.climate_provider import build_climate_turn_snapshot
+
+        return build_climate_turn_snapshot(
+            state=engine.resolve(group_id=group_id, user_id=user_id),
+            group_id=group_id,
+            user_id=user_id,
+            relationship_text=relationship_text,
+        )
+
     # Issue 15 — instruction authority gate (additive, default-off).
     instruction_gate = None
     authority_store = None
@@ -1023,10 +1087,16 @@ async def build_chat_runtime(
     )
     assembly.publish("llm_client", llm)
     llm.set_task_profile_names(task_profile_names)
+    llm.set_climate_context_getter(
+        runtime_climate_context_getter
+        if bool(getattr(ctx, "dialogue_climate_m4_enabled", False))
+        else None
+    )
 
     # ---- prompt provider bus (active mode — providers are sole injection path) ----
     from plugins.style.plugin import StyleConfig as _StyleConfig
     from services.block_trace.catchphrase_provider import CatchphraseProvider
+    from services.block_trace.climate_provider import ClimateProvider
     from services.block_trace.episode_provider import EpisodeProvider
     from services.block_trace.provider_bus import PromptProviderBus
     from services.block_trace.register_provider import RegisterProvider
@@ -1045,6 +1115,8 @@ async def build_chat_runtime(
     provider_bus = PromptProviderBus(trace_store)
     provider_bus.mode = "active"
     humanization_groups = callbacks.humanization_runtime_groups(config)
+    if bool(getattr(ctx, "dialogue_climate_m4_enabled", False)):
+        provider_bus.register(ClimateProvider())
     if config.humanization.context_providers:
         provider_bus.register(callbacks.wrap_scoped_humanization_provider(
             RegisterProvider(),

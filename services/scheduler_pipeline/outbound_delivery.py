@@ -59,6 +59,8 @@ class HumanizationContext:
     register: Any = None
     slot: Any = None
     mood: Any = None
+    climate: Any = None
+    thinking_elapsed_s: float | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -119,13 +121,17 @@ class RuntimeOutboundDelivery:
         started_at = time.monotonic()
         if self._humanizer is not None and request.humanize != "skip":
             context = request.humanization
-            await self._humanizer.delay(
-                request.text,
-                group_id=context.group_id,
-                register=context.register,
-                slot=context.slot,
-                mood=context.mood,
-            )
+            delay_kwargs = {
+                "group_id": context.group_id,
+                "register": context.register,
+                "slot": context.slot,
+                "mood": context.mood,
+            }
+            if context.climate is not None:
+                delay_kwargs["climate"] = context.climate
+            if context.thinking_elapsed_s is not None:
+                delay_kwargs["thinking_elapsed_s"] = context.thinking_elapsed_s
+            await self._humanizer.delay(request.text, **delay_kwargs)
 
         try:
             response = await self._bot.send_group_msg(

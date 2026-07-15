@@ -55,6 +55,26 @@ def test_engine_with_recorder_persists_on_register(tmp_path):
     rec.close()
 
 
+def test_engine_recorder_persists_observation_target(tmp_path):
+    rec = ClimateMetricsRecorder(db_path=str(tmp_path / "m2.db"))
+    eng = ClimateEngine(m2_enabled=True)
+    eng.set_recorder(rec)
+
+    eng.register_signal(
+        dim="energy",
+        target=0.8,
+        source="schedule",
+        group_id="g1",
+        user_id="u1",
+        now_ts=0.0,
+    )
+
+    rows = rec.rows()
+    assert rows[0]["signal_delta"] == 0.0
+    assert rows[0]["signal_target"] == 0.8
+    rec.close()
+
+
 def test_engine_disabled_does_not_record(tmp_path):
     rec = ClimateMetricsRecorder(db_path=str(tmp_path / "m2.db"))
     eng = ClimateEngine(m2_enabled=False)

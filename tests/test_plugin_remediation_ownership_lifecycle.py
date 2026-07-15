@@ -19,6 +19,7 @@ from bootstrap import chat_runtime as chat_runtime_module
 from kernel import config as kernel_config
 from kernel.bus import PluginBus
 from kernel.router import _semantic_gate_familiarity
+from plugins.affection.models import AffectionProfile
 from plugins.affection.plugin import AffectionPlugin
 from plugins.calendar_context.plugin import CalendarContextPlugin
 from plugins.calendar_context.service import BirthdayEntry, DayContext
@@ -101,6 +102,27 @@ def test_llm_direct_consumers_follow_effective_plugin_state() -> None:
     assert client._build_provider_mood_fit_target(group_id="g1", session_id="group_g1") is None
 
 
+def test_thinker_affection_text_uses_current_group_nicknames_model() -> None:
+    bus = PluginBus()
+    bus.register(AffectionPlugin())
+    profile = AffectionProfile(
+        user_id="u1",
+        score=60.0,
+        total_interactions=5,
+        group_nicknames={"group_100": "小明"},
+    )
+    client = object.__new__(LLMClient)
+    client._bus = bus
+    client._affection_engine = SimpleNamespace(
+        _store=SimpleNamespace(get=lambda user_id: profile if user_id == "u1" else None),
+    )
+
+    text = client._build_thinker_affection_text("u1")
+
+    assert "称呼：小明" in text
+    assert "score=60" in text
+
+
 def test_effective_plugin_state_resolver_prefers_bus_state_over_config() -> None:
     """Persisted/bus disabled state must win over an enabled plugin config file."""
 
@@ -154,7 +176,6 @@ async def test_schedule_ignores_retained_affection_engine_after_runtime_disable(
         schedule_store=None,
         schedule_gen=None,
         timeline=None,
-        dialogue_climate_m1_enabled=False,
         schedule_event_replan_enabled=False,
         climate_sensor_hub=None,
         climate_engine=None,
@@ -203,7 +224,6 @@ async def test_schedule_plugin_owns_generator_start_and_stop() -> None:
         mood_engine=None,
         timeline=None,
         llm_client=SimpleNamespace(_call=AsyncMock()),
-        dialogue_climate_m1_enabled=False,
         dialogue_climate_m4_enabled=False,
         schedule_event_replan_enabled=False,
         story_arc_store=None,
@@ -352,7 +372,7 @@ async def test_dream_tick_does_not_run_birthday_greeter(
         lambda _storage_dir: {"consolidator": {"auto_enabled": False}},
     )
     plugin = DreamPlugin()
-    plugin._bot = SimpleNamespace()
+    cast(Any, plugin)._bot = SimpleNamespace()
     ctx = SimpleNamespace(
         birthday_greeter=greeter,
         llm_client=SimpleNamespace(),
@@ -385,7 +405,7 @@ async def test_dream_tick_does_not_run_memory_consolidator(
     monkeypatch.setenv("EBR_ENABLED", "false")
     monkeypatch.setattr(dream_plugin_module.time, "monotonic", lambda: 100.0)
     plugin = DreamPlugin()
-    plugin._last_consolidator_monotonic = 0.0
+    cast(Any, plugin)._last_consolidator_monotonic = 0.0
     ctx = SimpleNamespace(
         birthday_greeter=None,
         storage_dir="storage",

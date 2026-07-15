@@ -56,6 +56,7 @@ class Humanizer:
         register: object | None = None,
         slot: object | None = None,
         mood: object | None = None,
+        climate: object | None = None,
         thinking_elapsed_s: float | None = None,
     ) -> None:
         """Sleep for a random interval, longer for longer messages."""
@@ -68,6 +69,7 @@ class Humanizer:
             register=register,
             slot=slot,
             mood=mood,
+            climate=climate,
         )
         if _thinking_elapsed(thinking_elapsed_s) >= THINKING_FALLBACK:
             total = min(total, _THINKING_FALLBACK_DELAY)
@@ -86,14 +88,19 @@ class Humanizer:
         register: object | None = None,
         slot: object | None = None,
         mood: object | None = None,
+        climate: object | None = None,
     ) -> float:
         _ = group_id
+        if climate is not None:
+            return _climate_delay_factor(climate)
         register_label = _register_label(register)
         if register_label == "playful":
-            return 0.7 * _mood_factor(mood)
-        if register_label == "quiet" and _energy(slot) < 0.3 and _energy(mood) < 0.4:
-            return 1.5 * _mood_factor(mood)
-        return _mood_factor(mood)
+            runtime_factor = 0.7 * _mood_factor(mood)
+        elif register_label == "quiet" and _energy(slot) < 0.3 and _energy(mood) < 0.4:
+            runtime_factor = 1.5 * _mood_factor(mood)
+        else:
+            runtime_factor = _mood_factor(mood)
+        return runtime_factor
 
 
 def _register_label(register: object | None) -> str:
@@ -132,6 +139,20 @@ def _mood_label(value: object | None) -> str:
     if isinstance(value, dict):
         return str(value.get("label") or value.get("mood") or "").strip().lower()
     return str(getattr(value, "label", "") or getattr(value, "mood", "")).strip().lower()
+
+
+def _climate_delay_factor(value: object | None) -> float:
+    if value is None:
+        return 1.0
+    raw = (
+        value.get("delay_multiplier", 1.0)
+        if isinstance(value, dict)
+        else getattr(value, "delay_multiplier", 1.0)
+    )
+    try:
+        return max(0.5, min(1.5, float(raw)))
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def _has_emoji(text: str) -> bool:

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS m2_climate_events (
     user_id       TEXT    NOT NULL DEFAULT '',
     signal_dim    TEXT    NOT NULL DEFAULT '',
     signal_delta  REAL    NOT NULL DEFAULT 0.0,
+    signal_target REAL,
     signal_source TEXT    NOT NULL DEFAULT '',
     energy        REAL    NOT NULL DEFAULT 0.5,
     valence       REAL    NOT NULL DEFAULT 0.5,
@@ -55,9 +56,9 @@ _CREATE_INDEXES = (
 
 _INSERT = """
 INSERT INTO m2_climate_events
-    (ts, monotonic_ts, group_id, user_id, signal_dim, signal_delta, signal_source,
+    (ts, monotonic_ts, group_id, user_id, signal_dim, signal_delta, signal_target, signal_source,
      energy, valence, openness, tension, trust, familiarity)
-VALUES (:ts, :monotonic_ts, :group_id, :user_id, :signal_dim, :signal_delta, :signal_source,
+VALUES (:ts, :monotonic_ts, :group_id, :user_id, :signal_dim, :signal_delta, :signal_target, :signal_source,
         :energy, :valence, :openness, :tension, :trust, :familiarity)
 """
 
@@ -80,6 +81,12 @@ class ClimateMetricsRecorder:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(_CREATE_TABLE)
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(m2_climate_events)").fetchall()
+            }
+            if "signal_target" not in columns:
+                conn.execute("ALTER TABLE m2_climate_events ADD COLUMN signal_target REAL")
             for idx in _CREATE_INDEXES:
                 conn.execute(idx)
             conn.commit()
@@ -102,6 +109,7 @@ class ClimateMetricsRecorder:
         user_id: str | int | None,
         signal_dim: str,
         signal_delta: float,
+        signal_target: float | None = None,
         signal_source: str,
         state: Any,
         monotonic_ts: float | None = None,
@@ -122,6 +130,9 @@ class ClimateMetricsRecorder:
                     "user_id": str(user_id or ""),
                     "signal_dim": str(signal_dim or ""),
                     "signal_delta": float(signal_delta),
+                    "signal_target": (
+                        None if signal_target is None else float(signal_target)
+                    ),
                     "signal_source": str(signal_source or ""),
                     "energy": float(getattr(state, "energy", 0.5)),
                     "valence": float(getattr(state, "valence", 0.5)),
@@ -187,4 +198,3 @@ def summarize_climate_events(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 
 __all__ = ["ClimateMetricsRecorder", "summarize_climate_events"]
-

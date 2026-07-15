@@ -23,7 +23,7 @@ import pytest
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
 from kernel.router import (
-    _addressing_triggers_m1_mention,
+    _addressing_triggers_climate_mention,
     _group_ingest_lock,
     _is_nickname_only_call,
     _message_ats_self,
@@ -257,16 +257,16 @@ def _addressing_for(
     )
 
 
-def test_m1_mention_fires_on_protocol_at() -> None:
+def test_climate_mention_fires_on_protocol_at() -> None:
     msg = Message([_seg_at(SELF_ID), MessageSegment.text("在吗")])
     addressing = _addressing_for(
         original=msg, stripped=msg, msg=msg, is_addressed=True
     )
     assert addressing.evidence == "at_self"
-    assert _addressing_triggers_m1_mention(addressing) is True
+    assert _addressing_triggers_climate_mention(addressing) is True
 
 
-def test_m1_mention_fires_on_nickname_vocative() -> None:
+def test_climate_mention_fires_on_nickname_vocative() -> None:
     # NoneBot strips the matched nickname prefix → downstream sees just "。".
     addressing = _addressing_for(
         original=Message([MessageSegment.text("emu。")]),
@@ -274,10 +274,10 @@ def test_m1_mention_fires_on_nickname_vocative() -> None:
         is_addressed=True,
     )
     assert addressing.evidence == "nickname_original"
-    assert _addressing_triggers_m1_mention(addressing) is True
+    assert _addressing_triggers_climate_mention(addressing) is True
 
 
-def test_m1_mention_ignores_midsentence_character_mention() -> None:
+def test_climate_mention_ignores_midsentence_character_mention() -> None:
     # Talking *about* the character ("看凤笑梦表情包") is not a vocative: the
     # nickname is not a head-of-message prefix, so addressing falls through to
     # "none" and must not move tension.
@@ -286,10 +286,10 @@ def test_m1_mention_ignores_midsentence_character_mention() -> None:
         original=text, stripped=text, msg=text, is_addressed=False
     )
     assert addressing.evidence == "none"
-    assert _addressing_triggers_m1_mention(addressing) is False
+    assert _addressing_triggers_climate_mention(addressing) is False
 
 
-def test_m1_mention_ignores_reply_to_self() -> None:
+def test_climate_mention_ignores_reply_to_self() -> None:
     # Replying to the bot is a real interaction but weaker than a deliberate
     # mention; keep it out of the irritation sensor (only @ / nickname count).
     text = Message([MessageSegment.text("好的")])
@@ -298,4 +298,4 @@ def test_m1_mention_ignores_reply_to_self() -> None:
         original=text, stripped=text, msg=text, is_addressed=False, reply=reply
     )
     assert addressing.evidence == "reply_to_self"
-    assert _addressing_triggers_m1_mention(addressing) is False
+    assert _addressing_triggers_climate_mention(addressing) is False

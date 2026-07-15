@@ -447,7 +447,7 @@ class DreamAgent:
         schedule_store: Any | None = None,
         story_arc_store: Any | None = None,
         message_log: Any | None = None,
-        mood_engine: Any | None = None,
+        climate_engine: Any | None = None,
         task_supervisor: BackgroundTaskSupervisor | None = None,
     ) -> None:
         self._store = store
@@ -463,7 +463,7 @@ class DreamAgent:
         self._schedule_store = schedule_store
         self._story_arc_store = story_arc_store
         self._message_log = message_log
-        self._mood_engine = mood_engine
+        self._climate_engine = climate_engine
         self._running: bool = False
         self._loop_task: asyncio.Task[None] | None = None
         self._task_supervisor = task_supervisor
@@ -819,13 +819,13 @@ class DreamAgent:
         return [dict(row) for row in rows if isinstance(row, dict)]
 
     def _reflection_tension_metrics(self, group_id: str) -> dict[str, float]:
-        if self._mood_engine is None or not group_id or group_id == "global":
+        if self._climate_engine is None or not group_id or group_id == "global":
             return {}
-        metrics = getattr(self._mood_engine, "m1_tension_metrics", None)
+        metrics = getattr(self._climate_engine, "group_summary", None)
         if metrics is None:
             return {}
         try:
-            return dict(metrics(group_id=group_id, session_id=f"group_{group_id}"))
+            return dict(metrics(group_id))
         except Exception:
             return {}
 
@@ -1001,7 +1001,7 @@ class DreamPlugin(AmadeusPlugin):
             schedule_store=getattr(ctx, "schedule_store", None),
             story_arc_store=getattr(ctx, "story_arc_store", None),
             message_log=getattr(ctx, "msg_log", None),
-            mood_engine=getattr(ctx, "mood_engine", None),
+            climate_engine=getattr(ctx, "climate_engine", None),
             task_supervisor=getattr(ctx, "background_task_supervisor", None),
         )
         ctx.dream = self._dream_agent

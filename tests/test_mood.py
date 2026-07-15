@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import random
 from datetime import datetime
 from types import SimpleNamespace
@@ -11,16 +10,22 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from kernel.types import Identity, PromptContext
+from kernel.types import Identity, PromptContext, ReplyContext
 from plugins.schedule.mood import (
     MoodEngine,
-    compute_m1_irritation_tension_delta,
-    register_m1_irritation_signal,
-    resolve_m1_tension_on_read,
 )
 from plugins.schedule.plugin import SchedulePlugin
 from plugins.schedule.story_arc import StoryArc
 from plugins.schedule.types import MoodProfile, Schedule, TimeSlot
+from services.block_trace.climate_provider import (
+    build_climate_turn_snapshot,
+    write_climate_turn_snapshot,
+)
+from services.dialogue_climate.dynamics import ClimateEngine
+from services.dialogue_climate.m2_metrics import ClimateMetricsRecorder
+from services.dialogue_climate.sensors import SensorHub
+from services.dialogue_climate.state import ClimateState
+from services.humanization import create_humanization_state_bus
 
 CST = ZoneInfo("Asia/Shanghai")
 
@@ -107,20 +112,16 @@ class _FakeStoryArcStore:
         self.arc = arc
 
 
-class _CountingMoodEngine(MoodEngine):
-    def __init__(self) -> None:
-        super().__init__(anomaly_chance=0.0, refresh_minutes=60)
+class _CountingClimateEngine:
+    enabled = True
+
+    def __init__(self, tension: float) -> None:
+        self.tension = tension
         self.resolve_calls = 0
 
-    def resolve_m1_tension(
-        self,
-        *,
-        group_id: str | int | None = None,
-        session_id: str = "",
-        now_ts: float | None = None,
-    ) -> float:
+    def resolve(self, **_kwargs: Any) -> SimpleNamespace:
         self.resolve_calls += 1
-        return super().resolve_m1_tension(group_id=group_id, session_id=session_id, now_ts=now_ts)
+        return SimpleNamespace(tension=self.tension)
 
 
 class TestMoodEngineLookup:
@@ -297,228 +298,7 @@ class TestClamp:
         assert p.tension == 0.0
 
 
-class _MoodSignalSink:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def register_interaction_signal(self, **kwargs: Any) -> None:
-        self.calls.append(dict(kwargs))
-
-
-class TestDialogueClimateM1DormantHelpers:
-    def test_m1_irritation_delta_default_off(self):
-        assert compute_m1_irritation_tension_delta(mention_count=10, poke_count=10) == 0.0
-
-    def test_m1_irritation_delta_enabled_is_bounded(self):
-        delta = compute_m1_irritation_tension_delta(
-            mention_count=2,
-            poke_count=1,
-            m1_enabled=True,
-        )
-        assert math.isclose(delta, 0.12)
-        assert compute_m1_irritation_tension_delta(poke_count=20, m1_enabled=True) == 0.2
-
-    def test_m1_signal_default_off_does_not_touch_mood_engine(self):
-        sink = _MoodSignalSink()
-
-        changed = register_m1_irritation_signal(
-            sink,
-            mention_count=3,
-            poke_count=3,
-            group_id="g1",
-            session_id="group_g1",
-        )
-
-        assert changed is False
-        assert sink.calls == []
-
-    def test_m1_signal_enabled_uses_existing_interaction_channel(self):
-        sink = _MoodSignalSink()
-
-        changed = register_m1_irritation_signal(
-            sink,
-            mention_count=1,
-            poke_count=2,
-            group_id="g1",
-            session_id="group_g1",
-            m1_enabled=True,
-        )
-
-        assert changed is True
-        assert len(sink.calls) == 1
-        assert sink.calls[0]["group_id"] == "g1"
-        assert sink.calls[0]["session_id"] == "group_g1"
-        assert sink.calls[0]["tension_d"] > 0
-        assert "valence_d" not in sink.calls[0]
-        assert "openness_d" not in sink.calls[0]
-
-    def test_m1_tension_on_read_decays_toward_baseline(self):
-        resolved = resolve_m1_tension_on_read(
-            tension=0.8,
-            baseline=0.2,
-            last_ts=1000.0,
-            now_ts=1600.0,
-            tau_s=600.0,
-        )
-
-        assert math.isclose(resolved, 0.2 + 0.6 / math.e, rel_tol=1e-9)
-
-    def test_m1_interaction_opt_in_records_per_group_on_read_tension(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
-        now = 1000.0
-        monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: now)
-
-        engine.register_interaction_signal(
-            tension_d=0.2,
-            group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
-        )
-
-        assert math.isclose(
-            engine.resolve_m1_tension(
-                group_id="g1",
-                session_id="group_g1",
-                now_ts=1000.0,
-            ),
-            0.2,
-            rel_tol=1e-9,
-        )
-        assert engine.resolve_m1_tension(group_id="g2", session_id="group_g2", now_ts=1000.0) == 0.0
-        assert math.isclose(
-            engine.resolve_m1_tension(
-                group_id="g1",
-                session_id="group_g1",
-                now_ts=1600.0,
-            ),
-            0.2 / math.e,
-            rel_tol=1e-9,
-        )
-
-    def test_m1_interaction_without_opt_in_keeps_old_nudge_only(self):
-        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
-
-        engine.register_interaction_signal(tension_d=0.2, group_id="g1", session_id="group_g1")
-
-        assert engine.resolve_m1_tension(group_id="g1", session_id="group_g1", now_ts=1000.0) == 0.0
-        v_nudge, o_nudge, t_nudge = engine._active_nudge(
-            engine._cache_key(group_id="g1", session_id="group_g1")
-        )
-        assert v_nudge == 0.0
-        assert o_nudge == 0.0
-        assert t_nudge > 0.0
-
-    def test_m1_guidance_triggers_above_threshold_and_reports_metrics(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
-        now = 1000.0
-        monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: now)
-
-        engine.register_interaction_signal(
-            tension_d=0.14,
-            group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
-        )
-        guidance = engine.build_m1_tension_guidance(
-            group_id="g1",
-            session_id="group_g1",
-            m1_enabled=True,
-        )
-        metrics = engine.m1_tension_metrics(group_id="g1", session_id="group_g1")
-
-        assert "更短更冷淡" in guidance
-        assert metrics["injection_count"] == 1.0
-        assert metrics["prompt_trigger_count"] == 1.0
-        assert metrics["prompt_trigger_rate"] == 1.0
-        assert math.isclose(metrics["half_life_s"], math.log(2.0) * 600.0)
-
-    def test_m1_guidance_default_off_returns_empty(self):
-        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
-        engine.register_interaction_signal(
-            tension_d=0.2,
-            group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
-        )
-
-        assert engine.build_m1_tension_guidance(
-            group_id="g1",
-            session_id="group_g1",
-            m1_enabled=False,
-        ) == ""
-
-    def test_m1_recorder_captures_inject_and_trigger(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        captured: list[tuple[str, dict[str, Any]]] = []
-
-        class _StubRecorder:
-            def record_inject(self, **kw: Any) -> None:
-                captured.append(("inject", kw))
-
-            def record_trigger(self, **kw: Any) -> None:
-                captured.append(("trigger", kw))
-
-        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
-        engine.set_m1_recorder(_StubRecorder())
-        now = 1000.0
-        monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: now)
-
-        engine.register_interaction_signal(
-            tension_d=0.14,
-            group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
-        )
-        engine.build_m1_tension_guidance(
-            group_id="g1", session_id="group_g1", m1_enabled=True
-        )
-
-        kinds = [k for k, _ in captured]
-        assert kinds == ["inject", "trigger"]
-        inject_kw = captured[0][1]
-        assert inject_kw["tension_after"] > inject_kw["tension_before"]
-        assert inject_kw["delta"] == 0.14
-        trigger_kw = captured[1][1]
-        assert trigger_kw["tension_after"] >= trigger_kw["threshold"]
-
-    def test_m1_recorder_failure_never_breaks_path(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        class _BoomRecorder:
-            def record_inject(self, **kw: Any) -> None:
-                raise RuntimeError("boom")
-
-            def record_trigger(self, **kw: Any) -> None:
-                raise RuntimeError("boom")
-
-        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
-        engine.set_m1_recorder(_BoomRecorder())
-        now = 1000.0
-        monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: now)
-
-        # A throwing recorder must not propagate into the live path.
-        engine.register_interaction_signal(
-            tension_d=0.14,
-            group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
-        )
-        guidance = engine.build_m1_tension_guidance(
-            group_id="g1", session_id="group_g1", m1_enabled=True
-        )
-        assert "更短更冷淡" in guidance
-
-
-class TestDialogueClimateM1PromptGuidance:
+class TestDialogueClimatePromptGuidance:
     @staticmethod
     def _prompt_ctx() -> PromptContext:
         return PromptContext(
@@ -532,10 +312,14 @@ class TestDialogueClimateM1PromptGuidance:
     async def _started_plugin(
         engine: MoodEngine,
         *,
-        m1_enabled: bool,
         schedule_store: Any | None = None,
         story_arc_store: Any | None = None,
         event_replan_enabled: bool = False,
+        climate_engine: Any | None = None,
+        climate_sensor_hub: Any | None = None,
+        climate_m4_enabled: bool = False,
+        provider_bus: Any | None = None,
+        runtime_state: Any | None = None,
     ) -> SchedulePlugin:
         plugin = SchedulePlugin()
         startup_ctx: Any = SimpleNamespace(
@@ -543,85 +327,73 @@ class TestDialogueClimateM1PromptGuidance:
             schedule_store=schedule_store or SimpleNamespace(current=_make_schedule()),
             schedule_gen=None,
             timeline=SimpleNamespace(recent_interaction_count=lambda group_id, *, window_s=60.0: 0),
-            dialogue_climate_m1_enabled=m1_enabled,
             schedule_event_replan_enabled=event_replan_enabled,
             story_arc_store=story_arc_store,
+            climate_engine=climate_engine,
+            climate_sensor_hub=climate_sensor_hub,
+            dialogue_climate_m4_enabled=climate_m4_enabled,
+            provider_bus=provider_bus,
+            runtime_state=runtime_state,
         )
         await plugin.on_startup(cast(Any, startup_ctx))
         return plugin
 
     @pytest.mark.asyncio
-    async def test_schedule_plugin_m1_disabled_keeps_prompt_baseline(
+    async def test_schedule_plugin_yields_affect_guidance_to_valid_climate_provider_snapshot(
         self,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
-        now = 1000.0
-        monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: now)
-        engine.register_interaction_signal(
-            tension_d=0.2,
+        runtime_state = create_humanization_state_bus()
+        snapshot = build_climate_turn_snapshot(
+            state=ClimateState(tension=0.7),
             group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
+            user_id="u1",
+            relationship_text="【与当前用户的关系】\n关系不错。",
         )
-        plugin = await self._started_plugin(engine, m1_enabled=False)
+        write_climate_turn_snapshot(
+            runtime_state,
+            snapshot,
+            session_id="group_g1",
+        )
+        provider_bus = SimpleNamespace(has_provider=lambda name: name == "climate")
+        climate_engine = SimpleNamespace(enabled=True)
+        plugin = await self._started_plugin(
+            MoodEngine(anomaly_chance=0.0, refresh_minutes=60),
+            climate_engine=climate_engine,
+            climate_m4_enabled=True,
+            provider_bus=provider_bus,
+            runtime_state=runtime_state,
+        )
         prompt_ctx = self._prompt_ctx()
 
         await plugin.on_pre_prompt(prompt_ctx)
 
         assert [block.label for block in prompt_ctx.blocks] == ["当前时间"]
-        assert "更短更冷淡" not in "\n".join(block.text for block in prompt_ctx.blocks)
+        assert "【你当前的心情基调】" not in prompt_ctx.blocks[0].text
+        assert "【心情对说话的影响】" not in prompt_ctx.blocks[0].text
 
     @pytest.mark.asyncio
-    async def test_schedule_plugin_m1_enabled_adds_behavior_guidance_above_threshold(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
-        now = 1000.0
-        monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: now)
-        engine.register_interaction_signal(
-            tension_d=0.14,
-            group_id="g1",
+    async def test_schedule_post_reply_feedback_records_climate_signal(self, tmp_path) -> None:
+        climate_engine = ClimateEngine(m2_enabled=True)
+        recorder = ClimateMetricsRecorder(str(tmp_path / "m2.db"))
+        climate_engine.set_recorder(recorder)
+        hub = SensorHub(climate_engine, m3_sensors_enabled=True)
+        plugin = await self._started_plugin(
+            MoodEngine(anomaly_chance=0.0, refresh_minutes=60),
+            climate_engine=climate_engine,
+            climate_sensor_hub=hub,
+        )
+
+        await plugin.on_post_reply(ReplyContext(
             session_id="group_g1",
-            m1_tension_enabled=True,
-        )
-        plugin = await self._started_plugin(engine, m1_enabled=True)
-        prompt_ctx = self._prompt_ctx()
-
-        await plugin.on_pre_prompt(prompt_ctx)
-
-        assert [block.label for block in prompt_ctx.blocks] == ["当前时间", "对话气氛"]
-        assert prompt_ctx.blocks[1].source == "schedule.m1"
-        assert "更短更冷淡" in prompt_ctx.blocks[1].text
-        assert "标签" in prompt_ctx.blocks[1].text
-
-    @pytest.mark.asyncio
-    async def test_schedule_plugin_m1_guidance_recovers_after_on_read_decay(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
-        now = 1000.0
-        monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: now)
-        engine.register_interaction_signal(
-            tension_d=0.14,
             group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
-        )
-        now = 2200.0
-        plugin = await self._started_plugin(engine, m1_enabled=True)
-        prompt_ctx = self._prompt_ctx()
+            user_id="u1",
+            reply_content="收到。",
+        ))
 
-        await plugin.on_pre_prompt(prompt_ctx)
-
-        assert [block.label for block in prompt_ctx.blocks] == ["当前时间"]
-        assert math.isclose(
-            engine.resolve_m1_tension(group_id="g1", session_id="group_g1", now_ts=2200.0),
-            0.14 / (math.e**2),
-            rel_tol=1e-9,
-        )
+        state = climate_engine.resolve(group_id="g1", user_id="u1")
+        assert state.openness > 0.5
+        assert [row["signal_source"] for row in recorder.rows()] == ["post_reply"]
+        recorder.close()
 
 
 class TestEventReplanPromptGuidance:
@@ -665,27 +437,22 @@ class TestEventReplanPromptGuidance:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr("plugins.schedule.plugin.datetime", FixedPromptDateTime)
-        engine = _CountingMoodEngine()
-        engine.register_interaction_signal(
-            tension_d=0.2,
-            group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
-        )
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        climate_engine = _CountingClimateEngine(0.2)
         schedule_store = _SavingScheduleStore(_make_replan_schedule())
         story_store = _FakeStoryArcStore(self._arc(pressure=True))
-        plugin = await TestDialogueClimateM1PromptGuidance._started_plugin(
+        plugin = await TestDialogueClimatePromptGuidance._started_plugin(
             engine,
-            m1_enabled=True,
             schedule_store=schedule_store,
             story_arc_store=story_store,
             event_replan_enabled=False,
+            climate_engine=climate_engine,
         )
         prompt_ctx = self._prompt_ctx()
 
         await plugin.on_pre_prompt(prompt_ctx)
 
-        assert [block.label for block in prompt_ctx.blocks] == ["当前时间", "对话气氛"]
+        assert [block.label for block in prompt_ctx.blocks] == ["当前时间"]
         assert "剧情约束" not in [block.label for block in prompt_ctx.blocks]
         assert schedule_store.saved == []
         assert story_store.load_active_calls == 0
@@ -693,34 +460,29 @@ class TestEventReplanPromptGuidance:
         assert "轻微扭伤" not in schedule_store.current.slots[1].description
 
     @pytest.mark.asyncio
-    async def test_event_replan_high_m1_tension_overrides_slots_and_updates_arc(
+    async def test_event_replan_high_climate_tension_overrides_slots_and_updates_arc(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr("plugins.schedule.plugin.datetime", FixedPromptDateTime)
         monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: 1000.0)
-        engine = _CountingMoodEngine()
-        engine.register_interaction_signal(
-            tension_d=0.14,
-            group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
-        )
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        climate_engine = _CountingClimateEngine(0.14)
         schedule_store = _SavingScheduleStore(_make_replan_schedule())
         story_store = _FakeStoryArcStore(self._arc())
-        plugin = await TestDialogueClimateM1PromptGuidance._started_plugin(
+        plugin = await TestDialogueClimatePromptGuidance._started_plugin(
             engine,
-            m1_enabled=True,
             schedule_store=schedule_store,
             story_arc_store=story_store,
             event_replan_enabled=True,
+            climate_engine=climate_engine,
         )
         prompt_ctx = self._prompt_ctx()
 
         await plugin.on_pre_prompt(prompt_ctx)
 
         labels = [block.label for block in prompt_ctx.blocks]
-        assert labels == ["当前时间", "剧情约束", "对话气氛"]
+        assert labels == ["当前时间", "剧情约束"]
         assert prompt_ctx.blocks[1].source == "schedule.event_replan"
         assert "这周怎么了" in prompt_ctx.blocks[1].text
         assert "临时降难度" in prompt_ctx.blocks[1].text
@@ -734,21 +496,20 @@ class TestEventReplanPromptGuidance:
         assert "partner_minor_setback_replan" in story_store.arc.event_budget["triggered_once"]
         assert story_store.arc.event_budget["active_replan_constraints"][0]["remaining_days"] == 3
         assert story_store.arc.last_events[-1]["source"] == "event_replan"
-        assert "M1 tension" in story_store.arc.last_events[-1]["reason"]
-        assert engine.resolve_calls >= 1
+        assert "Dialogue Climate tension" in story_store.arc.last_events[-1]["reason"]
+        assert climate_engine.resolve_calls >= 1
 
     @pytest.mark.asyncio
-    async def test_event_replan_pressure_triggers_without_reading_m1_when_disabled(
+    async def test_event_replan_pressure_triggers_without_climate_state(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr("plugins.schedule.plugin.datetime", FixedPromptDateTime)
-        engine = _CountingMoodEngine()
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
         schedule_store = _SavingScheduleStore(_make_replan_schedule())
         story_store = _FakeStoryArcStore(self._arc(pressure=True))
-        plugin = await TestDialogueClimateM1PromptGuidance._started_plugin(
+        plugin = await TestDialogueClimatePromptGuidance._started_plugin(
             engine,
-            m1_enabled=False,
             schedule_store=schedule_store,
             story_arc_store=story_store,
             event_replan_enabled=True,
@@ -758,7 +519,6 @@ class TestEventReplanPromptGuidance:
         await plugin.on_pre_prompt(prompt_ctx)
 
         assert [block.label for block in prompt_ctx.blocks] == ["当前时间", "剧情约束"]
-        assert engine.resolve_calls == 0
         assert story_store.arc is not None
         assert story_store.arc.event_budget["setback_count"] == 1
         assert "deadline/exam pressure" in story_store.arc.last_events[-1]["reason"]
@@ -770,21 +530,16 @@ class TestEventReplanPromptGuidance:
     ) -> None:
         monkeypatch.setattr("plugins.schedule.plugin.datetime", FixedPromptDateTime)
         monkeypatch.setattr("plugins.schedule.mood.time.monotonic", lambda: 1000.0)
-        engine = _CountingMoodEngine()
-        engine.register_interaction_signal(
-            tension_d=0.14,
-            group_id="g1",
-            session_id="group_g1",
-            m1_tension_enabled=True,
-        )
+        engine = MoodEngine(anomaly_chance=0.0, refresh_minutes=60)
+        climate_engine = _CountingClimateEngine(0.14)
         schedule_store = _SavingScheduleStore(_make_replan_schedule())
         story_store = _FakeStoryArcStore(self._arc())
-        plugin = await TestDialogueClimateM1PromptGuidance._started_plugin(
+        plugin = await TestDialogueClimatePromptGuidance._started_plugin(
             engine,
-            m1_enabled=True,
             schedule_store=schedule_store,
             story_arc_store=story_store,
             event_replan_enabled=True,
+            climate_engine=climate_engine,
         )
 
         await plugin.on_pre_prompt(self._prompt_ctx())

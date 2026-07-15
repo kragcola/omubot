@@ -7,6 +7,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from kernel.config import GroupConfig
+from services.block_trace.climate_provider import (
+    build_climate_turn_snapshot,
+    write_climate_turn_snapshot,
+)
+from services.dialogue_climate.state import ClimateState
 from services.humanization import (
     CLOCK_CURRENT_SLOT,
     REGISTER_LABEL_SLOT,
@@ -115,6 +120,28 @@ async def test_scheduler_degrades_without_runtime_state() -> None:
             "mood": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_passes_matching_climate_policy_to_humanizer() -> None:
+    bus = create_humanization_state_bus()
+    snapshot = build_climate_turn_snapshot(
+        state=ClimateState(tension=0.7),
+        group_id="100",
+        user_id="u1",
+    )
+    write_climate_turn_snapshot(bus, snapshot, session_id="group_100")
+    humanizer = _HumanizerSpy()
+    scheduler = _scheduler(humanizer=humanizer, runtime_state=bus)
+
+    await scheduler._send_to_group(
+        "100",
+        "我会短一点。",
+        target_user_id="u1",
+    )
+
+    assert humanizer.calls[0]["climate"]["reply_bias"] == "short"
+    assert humanizer.calls[0]["climate"]["delay_multiplier"] == pytest.approx(0.85)
 
 
 @pytest.mark.asyncio

@@ -56,10 +56,7 @@ def main() -> None:
     console.print(table)
 
     if s["injection_count"] == 0:
-        console.print(
-            "[yellow]No M1 events recorded yet — is m1_enabled on, "
-            "and has any @/poke burst happened?[/yellow]"
-        )
+        console.print("[yellow]No historical M1 events are present in this database.[/yellow]")
     elif s["decay_sample_count"] == 0:
         console.print(
             "[yellow]No decay samples yet — need ≥2 injections on the same "

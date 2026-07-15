@@ -56,12 +56,15 @@ class ClimateSignal:
     """
 
     dim: str
-    delta: float
+    delta: float = 0.0
+    target: float | None = None
     source: str = ""
     ts: float = 0.0
 
     def is_valid(self) -> bool:
-        return self.dim in CLIMATE_DIMENSIONS and bool(self.delta)
+        return self.dim in CLIMATE_DIMENSIONS and (
+            self.target is not None or bool(self.delta)
+        )
 
 
 @dataclass
@@ -162,4 +165,3 @@ __all__ = [
     "ClimateState",
     "clamp01",
 ]
-

@@ -7,10 +7,11 @@ the chat-scoped resources it builds; domain owners retain their own lifecycle.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -173,6 +174,47 @@ def _register_classifier_window(ctx: PluginContext, msg_ctx: MessageContext, cur
     return rows[-5:]
 
 
+def _mood_classifier_window(
+    ctx: PluginContext,
+    msg_ctx: MessageContext,
+    current_text: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    timeline = getattr(ctx, "timeline", None)
+    if timeline is not None and msg_ctx.group_id is not None:
+        try:
+            all_turns = list(timeline.get_turns(str(msg_ctx.group_id)))
+            turns = all_turns[-11:]
+        except Exception as exc:
+            _L.debug("mood classifier timeline read failed | group={} err={}", msg_ctx.group_id, exc)
+            all_turns = []
+            turns = []
+        start = max(0, len(all_turns) - len(turns))
+        for offset, turn in enumerate(turns):
+            if not isinstance(turn, dict):
+                continue
+            text = _message_content_text(turn.get("content"))
+            if not text:
+                continue
+            row: dict[str, Any] = {
+                "role": str(turn.get("role") or "user"),
+                "content_text": text,
+            }
+            get_turn_time = getattr(timeline, "get_turn_time", None)
+            if callable(get_turn_time):
+                with contextlib.suppress(Exception):
+                    row["created_at"] = float(
+                        cast(Any, get_turn_time)(str(msg_ctx.group_id), start + offset)
+                    )
+            rows.append(row)
+    rows.append({
+        "role": "user",
+        "content_text": current_text,
+        "created_at": time.time(),
+    })
+    return rows[-12:]
+
+
 def _timeline_reply_delay_s(ctx: PluginContext, group_id: str) -> float:
     timeline = getattr(ctx, "timeline", None)
     if timeline is None:
@@ -301,6 +343,14 @@ class ChatPlugin(AmadeusPlugin):
             _L.info("humanization register classifier enabled")
         else:
             ctx.humanization_register_classifier = None
+        climate_hub = getattr(ctx, "climate_sensor_hub", None)
+        if climate_hub is not None and bool(getattr(climate_hub, "enabled", False)):
+            from services.humanization import MoodClassifier
+
+            ctx.dialogue_climate_mood_classifier = MoodClassifier()
+            _L.info("dialogue climate mood classifier enabled")
+        else:
+            ctx.dialogue_climate_mood_classifier = None
 
     def _build_arbiter_client(self, config: BotConfig, llm: Any, usage_tracker: Any) -> ArbiterClient | None:
         arbiter_config = getattr(config, "arbiter", None)
@@ -345,6 +395,39 @@ class ChatPlugin(AmadeusPlugin):
             group_id=ctx.group_id,
             user_id=ctx.user_id,
         )
+        climate_classifier = getattr(plugin_ctx, "dialogue_climate_mood_classifier", None)
+        climate_hub = getattr(plugin_ctx, "climate_sensor_hub", None)
+        if (
+            climate_classifier is not None
+            and climate_hub is not None
+            and bool(getattr(climate_hub, "enabled", False))
+        ):
+            try:
+                from services.dialogue_climate.sensors import SensorInput
+
+                mood_decision = await climate_classifier.classify(
+                    _mood_classifier_window(plugin_ctx, ctx, current_text),
+                )
+                climate_hub.collect(SensorInput(
+                    group_id=str(ctx.group_id),
+                    user_id=str(ctx.user_id),
+                    event_id=(
+                        f"message:{ctx.group_id}:{ctx.message_id}"
+                        if ctx.message_id is not None
+                        else ""
+                    ),
+                    message_label=str(getattr(mood_decision, "label", "") or ""),
+                    message_confidence=float(getattr(mood_decision, "confidence", 0.0) or 0.0),
+                ))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _L.debug(
+                    "dialogue climate mood classifier failed | session={} user={} err={}",
+                    ctx.session_id,
+                    ctx.user_id,
+                    exc,
+                )
         register_decision = None
         classifier = getattr(plugin_ctx, "humanization_register_classifier", None)
         if (

@@ -34,6 +34,7 @@ def test_humanization_contract_owns_expected_slots_and_context_accepts_bus() -> 
     assert bus.owners[STICKER_RECENT_USED_SLOT] == HUMANIZATION_MODULE_ID
     assert bus.owners[MOOD_CURRENT_SLOT] == HUMANIZATION_MODULE_ID
     assert bus.owners[LAST_METRICS_SLOT] == HUMANIZATION_MODULE_ID
+    assert bus.owners["humanization.dialogue_climate.current"] == HUMANIZATION_MODULE_ID
     assert ctx.runtime_state is bus
     assert ctx.humanization_contract is HUMANIZATION_CONTRACT
 

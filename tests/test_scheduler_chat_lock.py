@@ -9,6 +9,12 @@ import pytest
 
 from kernel.config import GroupConfig
 from kernel.types import TriggerContext
+from services.block_trace.climate_provider import (
+    build_climate_turn_snapshot,
+    write_climate_turn_snapshot,
+)
+from services.dialogue_climate.state import ClimateState
+from services.humanization import create_humanization_state_bus
 from services.llm.client import RateLimitError
 from services.memory.timeline import GroupTimeline
 from services.persona import IdentitySnapshot
@@ -61,6 +67,20 @@ class _EmittingLLM:
         return None
 
 
+class _ReturningLLM:
+    async def chat(self, **kwargs: Any) -> str | None:  # type: ignore[override]
+        del kwargs
+        return "hello"
+
+
+class _HumanizerSpy:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def delay(self, text: str, **kwargs: Any) -> None:
+        self.calls.append({"text": text, **kwargs})
+
+
 class _MetricStore:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
@@ -95,18 +115,36 @@ class _BlockingMetricStore:
         return "metric-1"
 
 
-def _scheduler(llm: Any) -> GroupChatScheduler:
+def _scheduler(
+    llm: Any,
+    *,
+    humanizer: Any = None,
+    runtime_state: Any = None,
+) -> GroupChatScheduler:
     scheduler = GroupChatScheduler(
         llm=llm,
         timeline=GroupTimeline(),
         persona_runtime=_Runtime(),  # type: ignore[arg-type]
         group_config=GroupConfig(talk_value=1.0, planner_smooth=0.0),
+        humanizer=humanizer,
+        runtime_state=runtime_state,
     )
     scheduler.set_bot(cast(Any, SimpleNamespace(self_id="1", send_group_msg=AsyncMock())))
     slot = _GroupSlot()
     slot.last_user_id = "u1"
     scheduler._slots["100"] = slot
     return scheduler
+
+
+def _climate_runtime_state() -> Any:
+    bus = create_humanization_state_bus()
+    snapshot = build_climate_turn_snapshot(
+        state=ClimateState(tension=0.7),
+        group_id="100",
+        user_id="u1",
+    )
+    write_climate_turn_snapshot(bus, snapshot, session_id="group_100")
+    return bus
 
 
 @pytest.mark.asyncio
@@ -284,4 +322,22 @@ async def test_muted_segment_without_send_is_not_marked_delivered() -> None:
     run = llm.contexts[0].extra["reply_run"]
     assert run.delivered_segments == 0
     assert run.outcome != "completed"
+    await scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("llm", [_EmittingLLM(), _ReturningLLM()])
+async def test_do_chat_first_or_only_segment_consumes_climate_humanizer_policy(llm: Any) -> None:
+    humanizer = _HumanizerSpy()
+    scheduler = _scheduler(
+        llm,
+        humanizer=humanizer,
+        runtime_state=_climate_runtime_state(),
+    )
+
+    await scheduler._do_chat("100")
+
+    assert len(humanizer.calls) == 1
+    assert humanizer.calls[0]["climate"]["delay_multiplier"] == pytest.approx(0.85)
+    assert humanizer.calls[0]["thinking_elapsed_s"] >= 0.0
     await scheduler.close()

@@ -39,6 +39,26 @@ class _SlowLLM:
         return {"text": '{"label":"playful","confidence":1.0}'}
 
 
+class _ClimateMoodClassifier:
+    def __init__(self) -> None:
+        self.windows: list[list[dict[str, Any]]] = []
+
+    async def classify(self, messages: list[dict[str, Any]]) -> SimpleNamespace:
+        self.windows.append(messages)
+        return SimpleNamespace(label="cold", confidence=0.74)
+
+
+class _ClimateSensorHub:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.inputs: list[Any] = []
+
+    def collect(self, data: Any) -> int:
+        self.inputs.append(data)
+        return 2
+
+
 class _Timeline:
     def get_turns(self, group_id: str) -> list[dict[str, Any]]:
         assert group_id == "100"
@@ -72,8 +92,10 @@ def _plugin_ctx(
     episode_store: object | None = None,
     card_store: object | None = None,
     mood_engine: object | None = None,
+    climate_mood_classifier: object | None = None,
+    climate_sensor_hub: object | None = None,
 ) -> PluginContext:
-    return PluginContext(
+    ctx = PluginContext(
         config=BotConfig.model_validate({
             "humanization": {
                 "register_classifier": register_classifier,
@@ -86,7 +108,10 @@ def _plugin_ctx(
         episode_store=episode_store,
         card_store=card_store,
         mood_engine=mood_engine,
+        climate_sensor_hub=climate_sensor_hub,
     )
+    ctx.dialogue_climate_mood_classifier = climate_mood_classifier
+    return ctx
 
 
 def test_chat_plugin_wires_register_classifier_when_flag_enabled() -> None:
@@ -229,6 +254,31 @@ async def test_chat_plugin_register_classifier_writes_state_and_does_not_consume
     assert snapshot.value["label"] == "serious"
     assert snapshot.value["window_size"] == 3
     assert len(llm.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_plugin_feeds_message_classifier_decision_to_climate_hub() -> None:
+    plugin = ChatPlugin()
+    classifier = _ClimateMoodClassifier()
+    hub = _ClimateSensorHub()
+    plugin._ctx = _plugin_ctx(
+        register_classifier=False,
+        classifier=None,
+        runtime_state=create_humanization_state_bus(),
+        climate_mood_classifier=classifier,
+        climate_sensor_hub=hub,
+    )
+
+    consumed = await plugin.on_message(_message("嗯"))
+
+    assert consumed is False
+    assert len(classifier.windows) == 1
+    assert classifier.windows[0][-1]["content_text"] == "嗯"
+    assert len(hub.inputs) == 1
+    assert hub.inputs[0].group_id == "100"
+    assert hub.inputs[0].user_id == "u1"
+    assert hub.inputs[0].message_label == "cold"
+    assert hub.inputs[0].message_confidence == pytest.approx(0.74)
 
 
 @pytest.mark.asyncio

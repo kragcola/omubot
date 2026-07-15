@@ -131,10 +131,10 @@ class EchoPlugin(AmadeusPlugin):
         self._scheduler = ctx.scheduler
         self._timeline = ctx.timeline
 
-    def _get_humanizer_runtime(self, group_id: str) -> dict[str, Any]:
+    def _get_humanizer_runtime(self, group_id: str, user_id: str) -> dict[str, Any]:
         runtime_getter = getattr(self._scheduler, "_humanizer_runtime", None)
         if callable(runtime_getter):
-            runtime = runtime_getter(group_id)
+            runtime = runtime_getter(group_id, user_id=user_id)
             return dict(runtime) if isinstance(runtime, dict) else {}
         mood_getter = getattr(self._scheduler, "_get_current_mood", None)
         mood = mood_getter(group_id) if callable(mood_getter) else None
@@ -184,7 +184,10 @@ class EchoPlugin(AmadeusPlugin):
 
         if echo_reply.startswith("打断"):
             visible = _visible_text_for_humanizer(echo_reply)
-            await self._humanizer.delay(visible, **self._get_humanizer_runtime(group_id))
+            await self._humanizer.delay(
+                visible,
+                **self._get_humanizer_runtime(group_id, ctx.user_id),
+            )
             await ctx.bot.send_group_msg(group_id=int(group_id), message=Message(echo_reply))
         else:
             # Repeat the ORIGINAL (pre-strip) segments so a nickname vocative
@@ -193,7 +196,10 @@ class EchoPlugin(AmadeusPlugin):
             # original (e.g. non-group adapters or older callers).
             segments = ctx.raw_message.get("echo_segments") or ctx.raw_message.get("segments")
             visible = _visible_text_for_humanizer(echo_key)
-            await self._humanizer.delay(visible, **self._get_humanizer_runtime(group_id))
+            await self._humanizer.delay(
+                visible,
+                **self._get_humanizer_runtime(group_id, ctx.user_id),
+            )
             await ctx.bot.send_group_msg(group_id=int(group_id), message=segments)
 
         self._timeline.add(

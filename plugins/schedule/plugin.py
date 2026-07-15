@@ -20,10 +20,8 @@ from plugins.schedule.types import Schedule
 
 
 class DialogueClimateConfig(BaseModel):
-    """Dialogue Climate flags. M1 (tension) is live; M2 (full ClimateState) is
-    dormant behind ``m2_enabled`` until M3 wires sensors in."""
+    """Dialogue Climate runtime flags."""
 
-    m1_enabled: bool = False
     m2_enabled: bool = False
     m3_sensors_enabled: bool = False
     m4_policy_enabled: bool = False
@@ -59,7 +57,6 @@ class SchedulePlugin(AmadeusPlugin):
         self._schedule_gen = None
         self._timeline = None
         self._schedule_started = False
-        self._dialogue_climate_m1_enabled = False
         self._event_replan_enabled = False
         self._climate_sensor_hub = None
         self._climate_engine = None
@@ -69,15 +66,18 @@ class SchedulePlugin(AmadeusPlugin):
         self._bus: Any = None
         self._calendar_service = None
         self._story_arc_store = None
+        self._provider_bus: Any = None
+        self._runtime_state: Any = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
         self._mood_engine = ctx.mood_engine
         self._schedule_store = ctx.schedule_store
         self._schedule_gen = ctx.schedule_gen
         self._timeline = ctx.timeline
-        self._dialogue_climate_m1_enabled = bool(getattr(ctx, "dialogue_climate_m1_enabled", False))
         self._event_replan_enabled = bool(getattr(ctx, "schedule_event_replan_enabled", False))
         self._story_arc_store = getattr(ctx, "story_arc_store", None)
+        self._provider_bus = getattr(ctx, "provider_bus", None)
+        self._runtime_state = getattr(ctx, "runtime_state", None)
         self._climate_sensor_hub = getattr(ctx, "climate_sensor_hub", None)
         self._climate_engine = getattr(ctx, "climate_engine", None)
         self._m4_policy_enabled = bool(getattr(ctx, "dialogue_climate_m4_enabled", False))
@@ -116,11 +116,13 @@ class SchedulePlugin(AmadeusPlugin):
         recent_count = 0
         if ctx.group_id is not None and self._timeline is not None:
             recent_count = self._timeline.recent_interaction_count(str(ctx.group_id), window_s=60.0)
+        climate_provider_ready = self._climate_provider_ready(ctx)
         text = self._mood_engine.build_mood_block(
             self._schedule_store.current,
             recent_interaction_count=recent_count,
             group_id=ctx.group_id,
             session_id=ctx.session_id,
+            include_mood_guidance=not climate_provider_ready,
         )
         if text:
             profile = self._mood_engine.cached_profile(group_id=ctx.group_id, session_id=ctx.session_id)
@@ -131,7 +133,8 @@ class SchedulePlugin(AmadeusPlugin):
                     f" anomaly={profile.anomaly_reason!r}" if profile.anomaly_reason else "",
                 )
             ctx.add_block(text=text, label="当前时间", position="dynamic", priority=10, source="schedule")
-        self._feed_climate_sensors(ctx)
+        if not climate_provider_ready:
+            self._feed_climate_sensors(ctx)
         if self._event_replan_enabled:
             replan_guidance = self._build_event_replan_guidance(ctx)
             if replan_guidance:
@@ -142,27 +145,7 @@ class SchedulePlugin(AmadeusPlugin):
                     priority=11,
                     source="schedule.event_replan",
                 )
-        # M4: when ClimatePolicy is active it owns the affect→prompt block and
-        # supersedes the M1 tension block (climate now owns tension). Otherwise
-        # fall back to the M1 guidance block (live path, unchanged).
-        if self._maybe_inject_climate_block(ctx):
-            return
-        guidance_builder = getattr(self._mood_engine, "build_m1_tension_guidance", None)
-        if self._dialogue_climate_m1_enabled and callable(guidance_builder):
-            guidance_value = guidance_builder(
-                group_id=ctx.group_id,
-                session_id=ctx.session_id,
-                m1_enabled=True,
-            )
-            guidance = guidance_value if isinstance(guidance_value, str) else ""
-            if guidance:
-                ctx.add_block(
-                    text=guidance,
-                    label="对话气氛",
-                    position="dynamic",
-                    priority=12,
-                    source="schedule.m1",
-                )
+        self._maybe_inject_climate_block(ctx)
 
     async def on_post_reply(self, ctx: ReplyContext) -> None:
         """M3 feedback loop: a reply to this user happened → small climate nudge.
@@ -196,6 +179,8 @@ class SchedulePlugin(AmadeusPlugin):
         """
         if not self._m4_policy_enabled:
             return False
+        if self._climate_provider_ready(ctx):
+            return True
         engine = self._climate_engine
         if engine is None or not getattr(engine, "enabled", False):
             return False
@@ -215,6 +200,23 @@ class SchedulePlugin(AmadeusPlugin):
             return True  # climate owns the affect block this turn (supersedes M1)
         except Exception as exc:  # never break the prompt path
             _L.debug("climate policy block failed | err={}", exc)
+            return False
+
+    def _climate_provider_ready(self, ctx: PromptContext) -> bool:
+        provider_bus = self._provider_bus
+        has_provider = getattr(provider_bus, "has_provider", None)
+        if not callable(has_provider) or not bool(has_provider("climate")):
+            return False
+        try:
+            from services.block_trace.climate_provider import has_climate_prompt_candidate
+
+            return has_climate_prompt_candidate(
+                self._runtime_state,
+                session_id=ctx.session_id,
+                group_id=ctx.group_id,
+                user_id=ctx.user_id,
+            )
+        except Exception:
             return False
 
     def _feed_climate_sensors(self, ctx: PromptContext) -> None:
@@ -242,6 +244,7 @@ class SchedulePlugin(AmadeusPlugin):
                 mood_energy=getattr(profile, "energy", None) if profile else None,
                 mood_valence=getattr(profile, "valence", None) if profile else None,
                 mood_openness=getattr(profile, "openness", None) if profile else None,
+                mood_tension=getattr(profile, "tension", None) if profile else None,
                 hour=now.hour,
                 familiarity=familiarity,
                 is_holiday=is_holiday,
@@ -305,16 +308,18 @@ class SchedulePlugin(AmadeusPlugin):
             return ""
 
         tension = 0.0
-        if self._dialogue_climate_m1_enabled:
-            resolver = getattr(self._mood_engine, "resolve_m1_tension", None)
-            if callable(resolver):
-                try:
-                    resolved = resolver(group_id=ctx.group_id, session_id=ctx.session_id)
-                    if isinstance(resolved, str | int | float):
-                        tension = float(resolved)
-                except Exception as exc:
-                    _L.warning("event replan tension lookup failed | err={}", exc)
-                    tension = 0.0
+        engine = self._climate_engine
+        if engine is not None and bool(getattr(engine, "enabled", False)):
+            try:
+                tension = float(
+                    engine.resolve(
+                        group_id=ctx.group_id,
+                        user_id=ctx.user_id,
+                    ).tension
+                )
+            except Exception as exc:
+                _L.warning("event replan climate tension lookup failed | err={}", exc)
+                tension = 0.0
 
         applied = _apply_event_replan_if_needed(
             schedule,
@@ -369,7 +374,7 @@ def _apply_event_replan_if_needed(
 
     partner_name = _select_fiction_partner_name(arc)
     reason = (
-        f"M1 tension={tension:.2f}，互动张力升高"
+        f"Dialogue Climate tension={tension:.2f}，互动张力升高"
         if tension >= 0.12
         else f"deadline/exam pressure={pressure:.2f}"
     )

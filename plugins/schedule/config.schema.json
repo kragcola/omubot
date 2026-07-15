@@ -34,10 +34,6 @@
       "title": "对话气候",
       "additionalProperties": true,
       "properties": {
-        "m1_enabled": {
-          "type": "boolean",
-          "title": "启用 A-M1 tension 单维闭环"
-        },
         "m2_enabled": {
           "type": "boolean",
           "title": "启用 A-M2 全维 ClimateState 引擎（休眠，待 M3 接 sensor）"
@@ -48,7 +44,7 @@
         },
         "m4_policy_enabled": {
           "type": "boolean",
-          "title": "启用 A-M4 ClimatePolicy（ClimateState 注入 prompt + 让位 M1 block）"
+          "title": "启用 A-M4 ClimatePolicy（ClimateState 注入 prompt）"
         }
       }
     },

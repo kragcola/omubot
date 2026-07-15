@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +18,9 @@ _POKE_INBOUND_HISTORY: dict[tuple[str, str], list[float]] = {}
 _POKE_INBOUND_MUTED_UNTIL: dict[tuple[str, str], float] = {}
 _INTERACTION_FREQUENCY_HISTORY_LIMIT = 16
 _MENTION_INBOUND_HISTORY: dict[tuple[str, str], list[float]] = {}
+_MAX_PROCESSED_EVENT_IDS = 4096
+_PROCESSED_EVENT_IDS: dict[str, None] = {}
+_POKE_EVENT_NONCE_ATTR = "_omubot_poke_event_nonce"
 
 
 @dataclass(frozen=True)
@@ -25,6 +29,7 @@ class QQInteractionSignal:
     group_id: str
     actor_user_id: str
     target_user_id: str = ""
+    event_id: str = ""
     raw_message_id: int | None = None
     emoji_code: str = ""
     is_tome: bool = False
@@ -34,6 +39,7 @@ class QQInteractionSignal:
 class PokeInboundRate:
     muted: bool = False
     poke_count: int = 0
+    burst_continuation: bool = False
 
 
 def _optional_int(value: Any) -> int | None:
@@ -66,15 +72,31 @@ def _reaction_emoji_code(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _poke_event_nonce(event: PokeNotifyEvent) -> str:
+    existing = str(getattr(event, _POKE_EVENT_NONCE_ATTR, "") or "").strip()
+    if existing:
+        return existing
+    nonce = secrets.token_hex(8)
+    setattr(event, _POKE_EVENT_NONCE_ATTR, nonce)
+    return nonce
+
+
 def parse_qq_interaction_signal(event: NoticeEvent, *, self_id: str) -> QQInteractionSignal | None:
     if isinstance(event, PokeNotifyEvent):
         if event.group_id is None or str(event.user_id) == str(self_id):
             return None
+        event_time = _optional_int(getattr(event, "time", None))
         return QQInteractionSignal(
             kind="poke",
             group_id=str(event.group_id),
             actor_user_id=str(event.user_id),
             target_user_id=str(event.target_id),
+            event_id=(
+                f"poke:{event.group_id}:{event.user_id}:{event.target_id}:"
+                f"{event_time}:{_poke_event_nonce(event)}"
+                if event_time is not None
+                else ""
+            ),
             is_tome=event.is_tome(),
         )
 
@@ -104,10 +126,19 @@ def reset_qq_interaction_rate_guard() -> None:
     _POKE_INBOUND_HISTORY.clear()
     _POKE_INBOUND_MUTED_UNTIL.clear()
     _MENTION_INBOUND_HISTORY.clear()
+    _PROCESSED_EVENT_IDS.clear()
 
 
-def _dialogue_climate_m1_enabled(ctx: PluginContext) -> bool:
-    return bool(getattr(ctx, "dialogue_climate_m1_enabled", False))
+def _claim_event_id(event_id: str) -> bool:
+    value = str(event_id or "").strip()
+    if not value:
+        return True
+    if value in _PROCESSED_EVENT_IDS:
+        return False
+    _PROCESSED_EVENT_IDS[value] = None
+    while len(_PROCESSED_EVENT_IDS) > _MAX_PROCESSED_EVENT_IDS:
+        _PROCESSED_EVENT_IDS.pop(next(iter(_PROCESSED_EVENT_IDS)))
+    return True
 
 
 def _frequency_key(group_id: str, actor_user_id: str) -> tuple[str, str]:
@@ -180,34 +211,6 @@ def _current_poke_frequency(
     return len(history)
 
 
-def _register_m1_irritation_frequency(
-    ctx: PluginContext,
-    *,
-    group_id: str,
-    mention_count: int,
-    poke_count: int,
-) -> bool:
-    if not _dialogue_climate_m1_enabled(ctx):
-        return False
-    mood_engine = getattr(ctx, "mood_engine", None)
-    if mood_engine is None:
-        return False
-    try:
-        from services.humanization.m1_irritation import register_m1_irritation_signal
-
-        return register_m1_irritation_signal(
-            mood_engine,
-            mention_count=mention_count,
-            poke_count=poke_count,
-            group_id=group_id,
-            session_id=f"group_{group_id}",
-            m1_enabled=True,
-        )
-    except Exception as exc:
-        logger.debug("qq interaction m1 irritation skipped | err={}", exc)
-        return False
-
-
 def _feed_climate_irritation(
     ctx: PluginContext,
     *,
@@ -215,67 +218,77 @@ def _feed_climate_irritation(
     actor_user_id: str,
     mention_count: int,
     poke_count: int,
-) -> None:
-    """M3 (F2): feed @/poke irritation into the ClimateEngine tension dimension.
-
-    Per-(group, actor) keyed via the SensorHub's IrritationSensor. Runs in
-    parallel with the M1 path during the transition (the closed-form law is
-    identical, see the migration-equivalence test); M1 stays the live consumer
-    until M4 reads ClimateEngine tension. No-op unless the hub is wired + enabled.
-    Best-effort — never raise into the interaction path.
-    """
+    burst_continuation: bool = False,
+    event_id: str = "",
+) -> bool:
+    """Feed @/poke irritation to the sole tension owner, ClimateEngine."""
     hub = getattr(ctx, "climate_sensor_hub", None)
     if hub is None or not getattr(hub, "enabled", False):
-        return
+        return False
     try:
         from services.dialogue_climate.sensors import SensorInput
 
-        hub.collect(
+        return bool(hub.collect(
             SensorInput(
                 group_id=str(group_id or ""),
                 user_id=str(actor_user_id or ""),
+                event_id=str(event_id or ""),
                 mention_count=int(mention_count or 0),
                 poke_count=int(poke_count or 0),
+                burst_continuation=bool(burst_continuation),
             )
-        )
+        ))
     except Exception as exc:
         logger.debug("climate irritation feed skipped | err={}", exc)
+        return False
 
 
-def register_m1_mention_irritation(
+def register_climate_mention_irritation(
     ctx: PluginContext,
     *,
     group_id: str,
     actor_user_id: str,
     now: float | None = None,
+    message_id: int | None = None,
 ) -> bool:
-    """Record an explicit @bot mention into the M1 irritation frequency sensor."""
+    """Record an explicit @bot mention into the Climate irritation sensor."""
     current_time = time.time() if now is None else now
-    if not _dialogue_climate_m1_enabled(ctx):
+    hub = getattr(ctx, "climate_sensor_hub", None)
+    if hub is None or not getattr(hub, "enabled", False):
         return False
-    mention_count = _record_mention_frequency(
+    event_id = (
+        f"mention:{group_id}:{message_id}"
+        if message_id is not None
+        else ""
+    )
+    if not _claim_event_id(event_id):
+        return False
+    prior_mentions = _current_mention_frequency(
         group_id=group_id,
         actor_user_id=actor_user_id,
         now=current_time,
     )
-    poke_count = _current_poke_frequency(
+    prior_pokes = _current_poke_frequency(
         group_id=group_id,
         actor_user_id=actor_user_id,
         now=current_time,
     )
-    _feed_climate_irritation(
+    changed = _feed_climate_irritation(
         ctx,
         group_id=group_id,
         actor_user_id=actor_user_id,
-        mention_count=mention_count,
-        poke_count=poke_count,
+        mention_count=1,
+        poke_count=0,
+        burst_continuation=bool(prior_mentions or prior_pokes),
+        event_id=event_id,
     )
-    return _register_m1_irritation_frequency(
-        ctx,
-        group_id=group_id,
-        mention_count=mention_count,
-        poke_count=poke_count,
-    )
+    if changed:
+        _record_mention_frequency(
+            group_id=group_id,
+            actor_user_id=actor_user_id,
+            now=current_time,
+        )
+    return changed
 
 
 def _record_poke_inbound_rate(signal: QQInteractionSignal, *, now: float) -> PokeInboundRate:
@@ -284,7 +297,11 @@ def _record_poke_inbound_rate(signal: QQInteractionSignal, *, now: float) -> Pok
     key = (signal.group_id, signal.actor_user_id)
     muted_until = _POKE_INBOUND_MUTED_UNTIL.get(key, 0.0)
     if muted_until > now:
-        return PokeInboundRate(muted=True, poke_count=_POKE_INBOUND_THRESHOLD)
+        return PokeInboundRate(
+            muted=True,
+            poke_count=_POKE_INBOUND_THRESHOLD,
+            burst_continuation=True,
+        )
     elif muted_until:
         _POKE_INBOUND_MUTED_UNTIL.pop(key, None)
 
@@ -293,14 +310,23 @@ def _record_poke_inbound_rate(signal: QQInteractionSignal, *, now: float) -> Pok
         now=now,
         window_s=_POKE_INBOUND_WINDOW_S,
     )
+    burst_continuation = bool(history)
     history.append(now)
     poke_count = len(history)
     if poke_count >= _POKE_INBOUND_THRESHOLD:
         _POKE_INBOUND_HISTORY[key] = []
         _POKE_INBOUND_MUTED_UNTIL[key] = now + _POKE_INBOUND_MUTE_S
-        return PokeInboundRate(muted=True, poke_count=poke_count)
+        return PokeInboundRate(
+            muted=True,
+            poke_count=poke_count,
+            burst_continuation=burst_continuation,
+        )
     _POKE_INBOUND_HISTORY[key] = history
-    return PokeInboundRate(muted=False, poke_count=poke_count)
+    return PokeInboundRate(
+        muted=False,
+        poke_count=poke_count,
+        burst_continuation=burst_continuation,
+    )
 
 
 def _qq_interaction_enabled(ctx: PluginContext, signal: QQInteractionSignal) -> bool:
@@ -336,7 +362,7 @@ def _apply_mood_nudge(
     signal: QQInteractionSignal,
     *,
     now: float,
-    poke_count: int = 0,
+    poke_burst_continuation: bool = False,
 ) -> None:
     """Feed an inbound to-me interaction into the mood engine as a transient nudge.
 
@@ -360,19 +386,21 @@ def _apply_mood_nudge(
         else:  # neutral
             return
     elif signal.kind == "poke":
-        if _dialogue_climate_m1_enabled(ctx):
-            mention_count = _current_mention_frequency(
-                group_id=signal.group_id,
-                actor_user_id=signal.actor_user_id,
-                now=now,
-            )
-            if _register_m1_irritation_frequency(
-                ctx,
-                group_id=signal.group_id,
-                mention_count=mention_count,
-                poke_count=max(0, int(poke_count or 0)),
-            ):
-                return
+        mention_count = _current_mention_frequency(
+            group_id=signal.group_id,
+            actor_user_id=signal.actor_user_id,
+            now=now,
+        )
+        if _feed_climate_irritation(
+            ctx,
+            group_id=signal.group_id,
+            actor_user_id=signal.actor_user_id,
+            mention_count=0,
+            poke_count=1,
+            burst_continuation=bool(mention_count or poke_burst_continuation),
+            event_id=signal.event_id,
+        ):
+            return
         tension_d = _POKE_TENSION
     else:
         return
@@ -418,12 +446,20 @@ def dispatch_qq_interaction_signal(
 
     current_time = time.time() if now is None else now
 
+    if not _claim_event_id(signal.event_id):
+        return False
+
     # Mood nudge fires for any authorized to-me interaction, including pokes
     # that get rate-muted below: being poke-spammed is exactly when tension
     # should rise even though we suppress the reply. The 0.2 cap bounds it.
     poke_rate = _record_poke_inbound_rate(signal, now=current_time)
 
-    _apply_mood_nudge(ctx, signal, now=current_time, poke_count=poke_rate.poke_count)
+    _apply_mood_nudge(
+        ctx,
+        signal,
+        now=current_time,
+        poke_burst_continuation=poke_rate.burst_continuation,
+    )
 
     if poke_rate.muted:
         logger.info(

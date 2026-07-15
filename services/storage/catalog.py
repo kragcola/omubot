@@ -191,6 +191,12 @@ DEFAULT_DATABASE_CATALOG = DatabaseCatalog(
             connection=ConnectionProfile.DELETE_FULL,
         ),
         _spec(
+            "living_persona_climate_baselines",
+            "storage/living_persona/climate_baselines.db",
+            "services.dialogue_climate.baseline_store",
+            optional=True,
+        ),
+        _spec(
             "living_persona_m1_metrics",
             "storage/living_persona/m1_metrics.db",
             "services.dialogue_climate.m1_metrics",

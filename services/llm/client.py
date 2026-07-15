@@ -1282,6 +1282,7 @@ class LLMClient:
             if str(group_id).strip()
         )
         self._provider_bus: object | None = None
+        self._climate_context_getter: Callable[..., Any] | None = None
         self._task_profiles = task_profiles or {}
         self._task_profile_names = {
             task: str(getattr(profile, "name", "") or task)
@@ -2246,6 +2247,46 @@ class LLMClient:
 
     def set_provider_bus(self, bus: object | None) -> None:
         self._provider_bus = bus
+
+    def set_climate_context_getter(self, getter: Callable[..., Any] | None) -> None:
+        self._climate_context_getter = getter
+
+    def _publish_climate_turn_snapshot(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None,
+        user_id: str,
+        privacy_mask: bool,
+    ) -> Any | None:
+        getter = self._climate_context_getter
+        if getter is None:
+            return None
+        try:
+            snapshot = getter(
+                session_id=session_id,
+                group_id=group_id,
+                user_id=user_id,
+                privacy_mask=privacy_mask,
+            )
+            if snapshot is None:
+                return None
+            from services.block_trace.climate_provider import write_climate_turn_snapshot
+
+            write_climate_turn_snapshot(
+                self._runtime_state,
+                snapshot,
+                session_id=session_id,
+            )
+            return snapshot
+        except Exception as exc:
+            _log_thinking.debug(
+                "dialogue climate snapshot failed | session={} user={} err={}",
+                session_id,
+                user_id,
+                exc,
+            )
+            return None
 
     async def _call(
         self,
@@ -4546,7 +4587,20 @@ class LLMClient:
             profile = store.get(user_id)
             if profile is None or profile.total_interactions == 0:
                 return ""
-            nickname = profile.custom_nickname or profile.group_nickname or ""
+            nickname = str(getattr(profile, "custom_nickname", "") or "")
+            if not nickname:
+                group_nicknames = getattr(profile, "group_nicknames", {})
+                if isinstance(group_nicknames, dict):
+                    nickname = next(
+                        (
+                            str(value)
+                            for _key, value in sorted(group_nicknames.items())
+                            if str(value).strip()
+                        ),
+                        "",
+                    )
+                else:
+                    nickname = str(getattr(profile, "group_nickname", "") or "")
             tag = f"（称呼：{nickname}）" if nickname else ""
             return (
                 f"【与当前用户的关系】tier={profile.tier} "
@@ -4708,6 +4762,14 @@ class LLMClient:
                 )
                 return None
 
+        climate_snapshot = self._publish_climate_turn_snapshot(
+            session_id=session_id,
+            group_id=group_id,
+            user_id=user_id,
+            privacy_mask=privacy_mask,
+        )
+        climate_text = str(getattr(climate_snapshot, "prompt_text", "") or "")
+
         # ------------------------------------------------------------------
         # Pre-reply thinker: decide whether to speak before building full prompt
         # ------------------------------------------------------------------
@@ -4757,8 +4819,12 @@ class LLMClient:
             recent_for_thinker = [m for m in recent_for_thinker if m.get("content")]
             clock_features = self._build_thinker_clock_features(group_id=group_id, session_id=session_id)
             time_text = build_thinker_time_text(clock_features)
-            mood_text = self._build_thinker_mood_text(group_id=group_id, session_id=session_id)
-            affection_text = self._build_thinker_affection_text(user_id)
+            if climate_text:
+                mood_text = ""
+                affection_text = ""
+            else:
+                mood_text = self._build_thinker_mood_text(group_id=group_id, session_id=session_id)
+                affection_text = self._build_thinker_affection_text(user_id)
             slang_hint = await self._build_thinker_slang_hint(group_id, conversation_text)
             async with SpeculativeExecutor() as speculative:
                 if self._slang_lookup_enabled(group_id):
@@ -4776,6 +4842,7 @@ class LLMClient:
                     max_tokens=self._thinker_max_tokens,
                     mood_text=mood_text,
                     affection_text=affection_text,
+                    climate_text=climate_text,
                     time_text=time_text,
                     identity_name=identity.name,
                     user_id=user_id,
@@ -4951,7 +5018,7 @@ class LLMClient:
                 light_kind=light_kind,
                 thinker_action=thinker_action,
                 conversation_text=conversation_text,
-                mood_text=mood_text,
+                mood_text=climate_text or mood_text,
                 user_id=user_id,
                 group_id=group_id,
                 identity_name=identity.name,

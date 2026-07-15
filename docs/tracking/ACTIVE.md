@@ -4,17 +4,16 @@
 
 ## Current
 
-- mode: none
-- tracker: none
-- objective: none
-- status: complete
-- checkpoint: Phase 2 独立 derived schema/store/runner/CLI 已提交并 bot-only 上线；live raw 102 rows 保持不变，derived 102 assignments/memberships、二跑 duplicate、4 类孤儿为 0，reviewer 0 blocker，full pytest 3401 passed / 17 skipped。
-- completed_at: 2026-07-15 08:26 CST
-- next_step: none
+- mode: task-bug
+- tracker: `docs/tracking/dialogue-climate-integration-completion-2026-07-15.md`
+- objective: 完成 Dialogue Climate provider/prompt/adapter/classifier/durable-state 整合、彻底退役 legacy M1 tension，并修复 persona drift 尾字残留。
+- status: active
+- checkpoint: Dialogue Climate provider/classifier/adapters/durable baseline/M1 retirement 与 persona 尾字已实现；两轮 review Important 全部关闭，最终 review 0/0；full pytest 3446 passed，Ruff/Pyright/JSON/diff clean。
+- next_step: 精确提交实现；创建 rollback tag 后 bot-only build/recreate，完成运行态与 silent 群/NapCat 验收；取得真实证据后回填 maintenance-log 并关闭 ACTIVE。
 - last_completed: `docs/tracking/topic-block-phase2-derived-assignments-2026-07-15.md`
-- implementation_commit: `60ad68a`（本地 `main`，尚未 push）
-- deployment: image `780b912296b4...` / container `6366e0945aa2...` / restart=0 / OOM=false；NapCat 未变化。
-- rollback: `omubot-bot:pre-topic-phase2-20260715`=`b3a40ac03839...`；只允许 bot-only recreate。数据层可停止 CLI 或移除独立 derived DB，raw 不动。
+- implementation_commit: pending
+- deployment: 当前基线 image `780b912296b4...` / container `6366e0945aa2...` / restart=0 / OOM=false；本任务只允许 bot-only rebuild/recreate，NapCat 不得变化。
+- rollback: 关闭 `dialogue_climate.m4_policy_enabled` 可熄火新 prompt/adapter 消费；部署前创建 bot image rollback tag，持久化数据不删除。
 
 ## Recovery Order
 
@@ -33,10 +32,8 @@
 ## Pending (authoritative; not the Current task)
 
 - **Character pack gap filling（active）**：sidecar healthy，4 packs / 136 characters；剩 BangDream 10 个 `chibi`、`lily:expression`、`haru:chibi`。无技术阻塞，主要约束是可信单角色来源不足。
-- **Dialogue Climate 后续增量（实现已部署并 active）**：A-M2/M3/M4 已分别提交于 `30f0f23` / `f547344` / `f5ac299`，当前 schedule effective config 的 `m1/m2/m3/m4` 四 flag 均为 true。仍未做 provider-bus 让位、affection+climate 单 block 合并、Humanizer/Thinker adapter、MessageSensor classifier 运行馈入、baseline durable persistence、M1 tension 完全退役。
 - **QZone Journal（仅立项）**：可行性已实证，仓库只有 charter，无 `plugins/qzone_journal` 实现。基础版与进阶版均未启动。
 - **关闭中的两项 LLM 行为开关**：`schedule_overshare.enabled=false`（正则误伤需重做边界）与 `addressee_hint.enabled=false`（缺置信阈值/歧义门）。
-- **低优先级已知瑕疵**：persona drift 对 `我是凤笑梦呀` 清理后可能残留 `呀`，主路径影响低。
 
 ## Historical Pending Snapshot (superseded; do not use for status)
 

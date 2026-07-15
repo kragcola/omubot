@@ -658,6 +658,7 @@ async def think(
     max_tokens: int = 256,
     mood_text: str = "",
     affection_text: str = "",
+    climate_text: str = "",
     time_text: str = "",
     identity_name: str = "Bot",
     user_id: str = "",
@@ -674,6 +675,8 @@ async def think(
         max_tokens: Max tokens for the thinker call.
         mood_text: Current mood + schedule context (from MoodEngine).
         affection_text: Per-user relationship context (from AffectionEngine).
+        climate_text: Unified relationship + climate policy context. When set,
+            callers should leave mood_text/affection_text empty.
         time_text: Current date/slot context (from runtime_clock).
         identity_name: The bot's name from its identity config.
         user_id: User id for usage attribution.
@@ -697,6 +700,8 @@ async def think(
     dynamic_blocks: list[str | dict[str, Any]] = []
     if time_text:
         dynamic_blocks.append(time_text)
+    if climate_text:
+        dynamic_blocks.append(climate_text)
     if mood_text:
         dynamic_blocks.append(mood_text)
     if affection_text:

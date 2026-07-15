@@ -143,6 +143,18 @@ def test_drift_baseline_moves_toward_current_and_neutral():
     assert 0.5 < drifted.baseline_energy < 1.0
 
 
+def test_default_baseline_drift_rate_is_per_day_not_per_hour():
+    dyn = ClimateDynamics(ClimateDynamicsConfig(
+        baseline_drift_rate=1.0,
+        baseline_regression_rate=0.0,
+    ))
+    state = ClimateState(energy=1.0, baseline_energy=0.5, last_update_ts=0.0)
+
+    drifted = dyn.drift_baseline(state, now_ts=_HOUR)
+
+    assert 0.5 < drifted.baseline_energy < 0.53
+
+
 # -- ClimateEngine: disabled path = zero behaviour change --------------------
 
 
@@ -176,6 +188,64 @@ def test_engine_enabled_records_per_group_user_on_read_decay():
     assert other_group == ClimateState.neutral()
 
 
+def test_engine_long_idle_decay_does_not_promote_transient_peak_to_baseline():
+    eng = ClimateEngine(m2_enabled=True)
+    eng.register_signal(
+        dim="energy",
+        delta=0.5,
+        group_id="g1",
+        user_id="u1",
+        now_ts=0.0,
+    )
+
+    resolved = eng.resolve(
+        group_id="g1",
+        user_id="u1",
+        now_ts=30 * 86400.0,
+    )
+
+    assert resolved.energy < 0.501
+    assert resolved.baseline_energy < 0.501
+    assert math.isclose(
+        resolved.energy,
+        resolved.baseline_energy,
+        abs_tol=1e-6,
+    )
+
+
+def test_engine_baseline_advance_is_partition_invariant():
+    config = ClimateDynamicsConfig(
+        baseline_drift_rate=1.0,
+        baseline_regression_rate=0.0,
+    )
+    one_step = ClimateEngine(m2_enabled=True, config=config)
+    partitioned = ClimateEngine(m2_enabled=True, config=config)
+    for engine in (one_step, partitioned):
+        engine.register_signal(
+            dim="energy",
+            delta=0.5,
+            group_id="g1",
+            user_id="u1",
+            now_ts=0.0,
+        )
+
+    one = one_step.resolve(
+        group_id="g1",
+        user_id="u1",
+        now_ts=24 * _HOUR,
+    )
+    many = ClimateState.neutral()
+    for hour in range(1, 25):
+        many = partitioned.resolve(
+            group_id="g1",
+            user_id="u1",
+            now_ts=hour * _HOUR,
+        )
+
+    assert math.isclose(many.energy, one.energy, abs_tol=1e-12)
+    assert math.isclose(many.baseline_energy, one.baseline_energy, abs_tol=1e-12)
+
+
 def test_engine_per_user_states_isolated_within_group():
     eng = ClimateEngine(m2_enabled=True)
     eng.register_signal(dim="familiarity", delta=0.8, group_id="g1", user_id="u1", now_ts=0.0)
@@ -203,28 +273,14 @@ def test_engine_clear_stale_disabled_is_noop():
     assert eng.clear_stale() == 0
 
 
-# -- tension migration groundwork (F2): M1 → ClimateEngine closed-form equivalence
+def test_engine_group_summary_aggregates_per_user_tension():
+    eng = ClimateEngine(m2_enabled=True)
+    eng.register_signal(dim="tension", delta=0.5, group_id="g1", user_id="u1", now_ts=0.0)
+    eng.register_signal(dim="tension", delta=0.2, group_id="g1", user_id="u2", now_ts=0.0)
 
+    summary = eng.group_summary("g1", now_ts=0.0)
 
-def test_tension_migration_closed_form_equivalence_with_m1():
-    """ClimateDynamics tension resolution == M1 resolve_m1_tension_on_read.
-
-    Both decay toward 0 as ``v·exp(-Δt/τ)``. M1 uses τ in seconds; ClimateDynamics
-    uses per-hour λ (= 3600/τ). Given matching constants the two must agree to
-    floating point, proving the tension migration (F2) is a pure owner swap, not
-    a behaviour change in the decay law. The *tuned* time constant differs (M1
-    τ=600s vs M2 ~5217s) — that is a deliberate calibration decision recorded in
-    the M3 plan, separate from the law's correctness asserted here.
-    """
-    from plugins.schedule.mood import resolve_m1_tension_on_read
-
-    tau_s = 600.0
-    lam_per_hour = 3600.0 / tau_s
-    cfg = ClimateDynamicsConfig(decay_rates={**DECAY_RATES, "tension": lam_per_hour})
-    dyn = ClimateDynamics(cfg)
-    for dt in (0.0, 60.0, 300.0, 600.0, 1800.0):
-        m1 = resolve_m1_tension_on_read(0.8, 0.0, 0.0, dt, tau_s=tau_s)
-        state = ClimateState(tension=0.8, last_update_ts=0.0)
-        m2 = dyn.resolve(state, now_ts=dt).tension
-        assert abs(m1 - m2) < 1e-9
-
+    assert summary["state_count"] == 2.0
+    assert summary["current_tension"] == 0.1
+    assert summary["mean_tension"] == 0.07
+    assert eng.group_summary("g2", now_ts=0.0) == {}

@@ -12,11 +12,8 @@ M3-2 adds Interaction (per-user familiarity), Calendar (calendar_context rich
 day context) and Message (revived MoodClassifier). The ``SensorInput`` fields
 for those are present but optional so the contract stays stable across waves.
 
-Per F2 the tension dimension's sole owner is the ClimateEngine: IrritationSensor
-here emits the same bounded delta the M1 path used (``compute_m1_irritation_
-tension_delta``), so cutting the flow from M1's ``_m1_tension_state`` to this
-sensor is an owner swap on an identical closed-form law (see the migration
-equivalence test in ``tests/test_climate_dynamics.py``).
+The tension dimension's sole owner is the ClimateEngine. IrritationSensor emits
+a bounded event delta for mention/poke bursts; no parallel tension state exists.
 """
 
 from __future__ import annotations
@@ -33,8 +30,7 @@ _CIRCADIAN_LATE_NIGHT_ENERGY = -0.2
 _CIRCADIAN_POST_LUNCH_ENERGY = -0.05
 _CIRCADIAN_POST_LUNCH_TENSION = -0.05
 
-# Irritation deltas (mirrors plugins/schedule/mood.py M1 constants so the F2
-# owner swap preserves magnitude).
+# Irritation event deltas.
 _IRRITATION_MENTION = 0.03
 _IRRITATION_POKE = 0.04
 _IRRITATION_BURST_BONUS = 0.01
@@ -51,6 +47,7 @@ class SensorInput:
 
     group_id: str = ""
     user_id: str = ""
+    event_id: str = ""
 
     # ScheduleSensor: MoodEngine profile dims.
     mood_energy: float | None = None
@@ -61,6 +58,7 @@ class SensorInput:
     # IrritationSensor: burst counts (already aggregated by qq_interactions).
     mention_count: int = 0
     poke_count: int = 0
+    burst_continuation: bool = False
 
     # CircadianSensor: local hour [0, 24).
     hour: int | None = None
@@ -89,7 +87,7 @@ class Sensor(ABC):
 
 
 class ScheduleSensor(Sensor):
-    """MoodEngine 4-dim profile → climate signals (delta from neutral)."""
+    """MoodEngine 4-dim profile → climate observation targets."""
 
     name = "schedule"
 
@@ -97,17 +95,19 @@ class ScheduleSensor(Sensor):
         out: list[ClimateSignal] = []
         pairs = (
             ("energy", data.mood_energy),
-            ("valence", data.mood_valence),
+            (
+                "valence",
+                None
+                if data.mood_valence is None
+                else (float(data.mood_valence) + 1.0) / 2.0,
+            ),
             ("openness", data.mood_openness),
             ("tension", data.mood_tension),
         )
         for dim, value in pairs:
             if value is None:
                 continue
-            target = 0.0 if dim == "tension" else NEUTRAL
-            delta = float(value) - target
-            if delta:
-                out.append(ClimateSignal(dim=dim, delta=delta, source=self.name))
+            out.append(ClimateSignal(dim=dim, target=float(value), source=self.name))
         return out
 
 
@@ -125,7 +125,10 @@ class IrritationSensor(Sensor):
         delta = (
             mentions * _IRRITATION_MENTION
             + pokes * _IRRITATION_POKE
-            + max(0, total - 1) * _IRRITATION_BURST_BONUS
+            + (
+                max(0, total - 1)
+                + int(bool(data.burst_continuation))
+            ) * _IRRITATION_BURST_BONUS
         )
         delta = max(0.0, min(_IRRITATION_CAP, delta))
         if not delta:
@@ -134,7 +137,7 @@ class IrritationSensor(Sensor):
 
 
 class CircadianSensor(Sensor):
-    """Local hour → energy/tension corrections (mirrors mood.py late-night/lunch)."""
+    """Local hour → bounded observation targets."""
 
     name = "circadian"
 
@@ -144,10 +147,22 @@ class CircadianSensor(Sensor):
         hour = int(data.hour) % 24
         out: list[ClimateSignal] = []
         if hour >= 23 or hour < 5:
-            out.append(ClimateSignal(dim="energy", delta=_CIRCADIAN_LATE_NIGHT_ENERGY, source=self.name))
+            out.append(ClimateSignal(
+                dim="energy",
+                target=NEUTRAL + _CIRCADIAN_LATE_NIGHT_ENERGY,
+                source=self.name,
+            ))
         elif 12 <= hour < 14:
-            out.append(ClimateSignal(dim="energy", delta=_CIRCADIAN_POST_LUNCH_ENERGY, source=self.name))
-            out.append(ClimateSignal(dim="tension", delta=_CIRCADIAN_POST_LUNCH_TENSION, source=self.name))
+            out.append(ClimateSignal(
+                dim="energy",
+                target=NEUTRAL + _CIRCADIAN_POST_LUNCH_ENERGY,
+                source=self.name,
+            ))
+            out.append(ClimateSignal(
+                dim="tension",
+                target=max(0.0, _CIRCADIAN_POST_LUNCH_TENSION),
+                source=self.name,
+            ))
         return out
 
 
@@ -155,8 +170,8 @@ class InteractionSensor(Sensor):
     """Per-user familiarity (AffectionEngine) → trust/familiarity signals.
 
     F1: ClimateEngine is keyed per-(group, user), so the per-user familiarity
-    slot lands directly. Emits the *delta from the resting target* so repeated
-    senses converge rather than ratchet (familiarity target 0, trust NEUTRAL).
+        slot lands directly. Emits observation targets so repeated senses converge
+        rather than ratchet.
     """
 
     name = "interaction"
@@ -165,14 +180,14 @@ class InteractionSensor(Sensor):
         if data.familiarity is None:
             return []
         fam = max(0.0, min(1.0, float(data.familiarity)))
-        out: list[ClimateSignal] = []
-        if fam:
-            out.append(ClimateSignal(dim="familiarity", delta=fam, source=self.name))
-            # Trust tracks familiarity but more conservatively (half weight toward NEUTRAL+).
-            trust_delta = (fam * 0.5) - 0.0
-            if trust_delta:
-                out.append(ClimateSignal(dim="trust", delta=trust_delta, source=self.name))
-        return out
+        return [
+            ClimateSignal(dim="familiarity", target=fam, source=self.name),
+            ClimateSignal(
+                dim="trust",
+                target=NEUTRAL + fam * 0.5,
+                source=self.name,
+            ),
+        ]
 
 
 class CalendarSensor(Sensor):
@@ -188,10 +203,10 @@ class CalendarSensor(Sensor):
     def sense(self, data: SensorInput) -> list[ClimateSignal]:
         out: list[ClimateSignal] = []
         if data.has_self_birthday:
-            out.append(ClimateSignal(dim="valence", delta=0.3, source=self.name))
-            out.append(ClimateSignal(dim="energy", delta=0.2, source=self.name))
+            out.append(ClimateSignal(dim="valence", target=0.8, source=self.name))
+            out.append(ClimateSignal(dim="energy", target=0.7, source=self.name))
         elif data.is_holiday:
-            out.append(ClimateSignal(dim="valence", delta=0.15, source=self.name))
+            out.append(ClimateSignal(dim="valence", target=0.65, source=self.name))
         return out
 
 
@@ -229,10 +244,13 @@ class MessageSensor(Sensor):
 class SensorHub:
     """Orchestrates sensors → ClimateEngine. Gated by ``m3_sensors_enabled``."""
 
+    _MAX_SEEN_EVENT_IDS = 4096
+
     def __init__(self, engine: Any, *, m3_sensors_enabled: bool = False, sensors: list[Sensor] | None = None) -> None:
         self._engine = engine
         self._enabled = bool(m3_sensors_enabled)
         self._sensors = sensors if sensors is not None else default_sensors()
+        self._seen_event_ids: dict[str, None] = {}
 
     @property
     def enabled(self) -> bool:
@@ -245,6 +263,9 @@ class SensorHub:
         """
         if not self._enabled or self._engine is None:
             return 0
+        event_id = str(data.event_id or "").strip()
+        if event_id and event_id in self._seen_event_ids:
+            return 0
         registered = 0
         for sensor in self._sensors:
             try:
@@ -255,12 +276,17 @@ class SensorHub:
                 if self._engine.register_signal(
                     dim=sig.dim,
                     delta=sig.delta,
+                    target=sig.target,
                     source=sig.source,
                     group_id=data.group_id,
                     user_id=data.user_id,
                     now_ts=now_ts,
                 ):
                     registered += 1
+        if event_id:
+            self._seen_event_ids[event_id] = None
+            while len(self._seen_event_ids) > self._MAX_SEEN_EVENT_IDS:
+                self._seen_event_ids.pop(next(iter(self._seen_event_ids)))
         return registered
 
 
@@ -288,4 +314,3 @@ __all__ = [
     "SensorInput",
     "default_sensors",
 ]
-

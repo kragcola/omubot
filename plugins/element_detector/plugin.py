@@ -98,10 +98,10 @@ class ElementDetectorPlugin(AmadeusPlugin):
         self._llm_client = ctx.llm_client
         self._identity = ctx.identity
 
-    def _get_humanizer_runtime(self, group_id: str) -> dict[str, Any]:
+    def _get_humanizer_runtime(self, group_id: str, user_id: str) -> dict[str, Any]:
         runtime_getter = getattr(self._scheduler, "_humanizer_runtime", None)
         if callable(runtime_getter):
-            runtime = runtime_getter(group_id)
+            runtime = runtime_getter(group_id, user_id=user_id)
             return dict(runtime) if isinstance(runtime, dict) else {}
         mood_getter = getattr(self._scheduler, "_get_current_mood", None)
         mood = mood_getter(group_id) if callable(mood_getter) else None
@@ -158,7 +158,10 @@ class ElementDetectorPlugin(AmadeusPlugin):
                 logger.exception("element llm call failed")
             if not reply_text:
                 reply_text = "确实 (｡･ω･｡)"
-            await self._humanizer.delay(reply_text, **self._get_humanizer_runtime(group_id))
+            await self._humanizer.delay(
+                reply_text,
+                **self._get_humanizer_runtime(group_id, ctx.user_id),
+            )
             await ctx.bot.send_group_msg(group_id=int(group_id), message=reply_text)
             self._timeline.add(
                 group_id, role="assistant", speaker="", content=reply_text, message_id=0,
@@ -169,7 +172,10 @@ class ElementDetectorPlugin(AmadeusPlugin):
             )
         else:
             reply_text = match.reply_template
-            await self._humanizer.delay(reply_text, **self._get_humanizer_runtime(group_id))
+            await self._humanizer.delay(
+                reply_text,
+                **self._get_humanizer_runtime(group_id, ctx.user_id),
+            )
             await ctx.bot.send_group_msg(group_id=int(group_id), message=reply_text)
             self._timeline.add(
                 group_id, role="assistant", speaker="", content=reply_text, message_id=0,

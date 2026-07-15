@@ -255,10 +255,11 @@ class TestPersonaDrivenScheduleFlag:
         cfg = ScheduleConfig.model_validate({})
         assert cfg.persona_driven_enabled is False
 
-    def test_config_defaults_dialogue_climate_m1_off(self):
+    def test_config_defaults_dialogue_climate_runtime_off(self):
         cfg = ScheduleConfig.model_validate({})
         assert isinstance(cfg.dialogue_climate, DialogueClimateConfig)
-        assert cfg.dialogue_climate.m1_enabled is False
+        assert cfg.dialogue_climate.m2_enabled is False
+        assert cfg.dialogue_climate.m4_policy_enabled is False
 
     def test_config_defaults_event_replan_off(self):
         cfg = ScheduleConfig.model_validate({})
@@ -268,9 +269,9 @@ class TestPersonaDrivenScheduleFlag:
         cfg = ScheduleConfig.model_validate({"event_replan_enabled": True})
         assert cfg.event_replan_enabled is True
 
-    def test_config_accepts_dialogue_climate_m1_override(self):
+    def test_config_ignores_retired_dialogue_climate_m1_override(self):
         cfg = ScheduleConfig.model_validate({"dialogue_climate": {"m1_enabled": True}})
-        assert cfg.dialogue_climate.m1_enabled is True
+        assert not hasattr(cfg.dialogue_climate, "m1_enabled")
 
     async def test_flag_off_keeps_generate_prompt_identical(self, tmp_path, monkeypatch):
         default_call = await _capture_generate_call(tmp_path, monkeypatch)

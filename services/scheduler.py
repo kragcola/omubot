@@ -19,7 +19,7 @@ from kernel.reply_run import ReplyOrigin, ReplyOutcome, ReplyRun, ReplyStage
 from kernel.types import ResponseClass, TriggerContext
 from services.group.corpus_capture import CaptureRow, CorpusCapture
 from services.group.topic_block import TopicBlockTracker
-from services.humanization import CLOCK_CURRENT_SLOT, REGISTER_LABEL_SLOT
+from services.humanization import CLIMATE_CURRENT_SLOT, CLOCK_CURRENT_SLOT, REGISTER_LABEL_SLOT
 from services.llm.arbiter import ArbiterClient, InterruptionResult, PendingMessage
 from services.llm.client import RATE_LIMIT_BASE_DELAY, RATE_LIMIT_MAX_RETRIES, RateLimitError
 from services.memory.timeline import GroupTimeline
@@ -1365,13 +1365,39 @@ class GroupChatScheduler:
             "energy": getattr(slot, "energy", 1.0),
         }
 
-    def _humanizer_runtime(self, group_id: str) -> dict[str, Any]:
-        return {
+    def _current_climate_policy(self, group_id: str, *, user_id: str = "") -> dict[str, Any] | None:
+        resolved_user = str(user_id or "")
+        if not resolved_user:
+            slot = self._slots.get(group_id)
+            resolved_user = str(slot.last_user_id if slot else "")
+        value = self._runtime_state_value(
+            CLIMATE_CURRENT_SLOT,
+            Scope(
+                session_id=f"group_{group_id}",
+                group_id=group_id,
+                user_id=resolved_user,
+            ),
+        )
+        if not isinstance(value, dict):
+            return None
+        if str(value.get("group_id", "")) != str(group_id):
+            return None
+        if str(value.get("user_id", "")) != resolved_user:
+            return None
+        policy = value.get("policy")
+        return dict(policy) if isinstance(policy, dict) else None
+
+    def _humanizer_runtime(self, group_id: str, *, user_id: str = "") -> dict[str, Any]:
+        runtime = {
             "group_id": group_id,
             "register": self._current_register(group_id),
             "slot": self._current_slot_payload(group_id),
             "mood": self._get_current_mood(group_id),
         }
+        climate = self._current_climate_policy(group_id, user_id=user_id)
+        if climate is not None:
+            runtime["climate"] = climate
+        return runtime
 
     def _active_groups(self) -> list[str]:
         groups = set(self._slots)
@@ -1993,6 +2019,7 @@ class GroupChatScheduler:
         *,
         humanize: str = "normal",
         target_user_id: str = "",
+        thinking_elapsed_s: float | None = None,
         sent_event: asyncio.Event | None = None,
     ) -> float:
         """Send a text message to a group with retry on failure."""
@@ -2015,7 +2042,11 @@ class GroupChatScheduler:
             if group_id in self._muted_groups:
                 _L.warning("scheduler | group={} muted, dropping message", group_id)
                 return 0.0
-            humanization = self._humanizer_runtime(group_id)
+            humanization = self._humanizer_runtime(
+                group_id,
+                user_id=target_user_id,
+            )
+            humanization["thinking_elapsed_s"] = thinking_elapsed_s
             result = await delivery.deliver(
                 OutboundDeliveryRequest(
                     group_id=group_id,
@@ -2181,6 +2212,8 @@ class GroupChatScheduler:
                             )
                             monitor_task.add_done_callback(lambda _: None)
 
+                        generation_started_at = time.monotonic()
+
                         async def on_segment(
                             text: str,
                             _prefix: str = reply_prefix,
@@ -2188,6 +2221,7 @@ class GroupChatScheduler:
                             _baseline: int = generation_pending_baseline,
                             _sent_texts: list[str] = sent_texts,
                             _gate: _EmissionGate | None = gate,
+                            _generation_started_at: float = generation_started_at,
                         ) -> bool:
                             nonlocal first_segment, sent_segments, send_total_elapsed
 
@@ -2225,8 +2259,13 @@ class GroupChatScheduler:
                             send_elapsed = await self._send_to_group(
                                 group_id,
                                 text,
-                                humanize="skip" if is_first else "normal",
+                                humanize="normal",
                                 target_user_id=_target_user_id,
+                                thinking_elapsed_s=(
+                                    time.monotonic() - _generation_started_at
+                                    if is_first
+                                    else None
+                                ),
                                 sent_event=segment_sent,
                             )
                             if not segment_sent.is_set():
@@ -2281,8 +2320,13 @@ class GroupChatScheduler:
                             send_elapsed = await self._send_to_group(
                                 group_id,
                                 reply,
-                                humanize="skip" if is_first else "normal",
+                                humanize="normal",
                                 target_user_id=uid,
+                                thinking_elapsed_s=(
+                                    time.monotonic() - generation_started_at
+                                    if is_first
+                                    else None
+                                ),
                                 sent_event=segment_sent,
                             )
                             if segment_sent.is_set():

@@ -8,6 +8,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from kernel.types import PromptBlock
+from services.block_trace.climate_provider import (
+    build_climate_turn_snapshot,
+    read_climate_turn_snapshot,
+)
+from services.dialogue_climate.state import ClimateState
 from services.humanization import CLOCK_CURRENT_SLOT, THINKER_LAST_DECISION_SLOT, create_humanization_state_bus
 from services.llm.client import LLMClient
 from services.llm.prompt_builder import PromptBuilder
@@ -279,6 +284,62 @@ async def test_llm_client_passes_runtime_state_and_turn_id_to_providers(
     assert provider_bus.qctx is not None
     assert provider_bus.qctx.runtime_state is runtime_state
     assert provider_bus.qctx.turn_id
+
+
+@pytest.mark.asyncio
+async def test_llm_client_publishes_one_climate_snapshot_before_thinker(
+    persona_runtime: PersonaRuntime, identity_snapshot: IdentitySnapshot
+) -> None:
+    runtime_state = create_humanization_state_bus()
+    client = await _client(persona_runtime, runtime_state=runtime_state, bus=_Bus())
+    try:
+        assert hasattr(client, "set_climate_context_getter")
+        client.set_climate_context_getter(
+            lambda **_: build_climate_turn_snapshot(
+                state=ClimateState(tension=0.7, familiarity=0.8),
+                group_id="100",
+                user_id="u1",
+                relationship_text="【与当前用户的关系】\n关系不错。",
+            )
+        )
+        with (
+            patch("services.llm.thinker.think", new_callable=AsyncMock) as mock_think,
+            patch("services.llm.client.call_api", new_callable=AsyncMock, return_value=_MAIN_RESULT),
+        ):
+            mock_think.return_value = SimpleNamespace(
+                action="reply",
+                topic_intent_label="闲聊",
+                retrieve_mode="skip",
+                rewritten_query="",
+                thought="简短接话",
+                sticker=False,
+                tone="日常",
+                usage={},
+            )
+            await client.chat(
+                session_id="group_100",
+                user_id="u1",
+                user_content="hello",
+                identity=identity_snapshot,
+                group_id="100",
+            )
+    finally:
+        await client.close()
+
+    await_args = mock_think.await_args
+    assert await_args is not None
+    call = await_args.kwargs
+    assert "关系不错" in call["climate_text"]
+    assert "回复短一些" in call["climate_text"]
+    assert call["mood_text"] == ""
+    assert call["affection_text"] == ""
+    snapshot = read_climate_turn_snapshot(
+        runtime_state,
+        session_id="group_100",
+        group_id="100",
+        user_id="u1",
+    )
+    assert snapshot["policy"]["reply_bias"] == "short"
 
 
 @pytest.mark.asyncio

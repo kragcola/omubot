@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -41,6 +42,29 @@ async def test_humanizer_reads_dict_mood_label(monkeypatch: pytest.MonkeyPatch) 
     humanizer = Humanizer(enabled=True, min_delay=1.0, max_delay=1.0, char_delay=0.0)
 
     await humanizer.delay("abcd", mood={"label": "high", "energy": 1.0})
+
+    assert sleeps == [0.85]
+
+
+async def test_humanizer_applies_climate_delay_multiplier(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert "climate" in inspect.signature(Humanizer.delay).parameters
+    sleeps = await _capture_delay(monkeypatch)
+    humanizer = Humanizer(enabled=True, min_delay=1.0, max_delay=1.0, char_delay=0.0)
+
+    await humanizer.delay("abcd", climate={"delay_multiplier": 0.85})
+
+    assert sleeps == [0.85]
+
+
+async def test_climate_policy_owns_delay_over_legacy_mood(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps = await _capture_delay(monkeypatch)
+    humanizer = Humanizer(enabled=True, min_delay=1.0, max_delay=1.0, char_delay=0.0)
+
+    await humanizer.delay(
+        "abcd",
+        mood="cold",
+        climate={"delay_multiplier": 0.85},
+    )
 
     assert sleeps == [0.85]
 

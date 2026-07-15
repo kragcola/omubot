@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -14,17 +15,20 @@ _JPEG_DATA = b"\xff\xd8\xff\xe0" + b"\x00" * 64 + b"dream-sticker-test"
 
 
 @pytest.fixture
-async def store(tmp_path) -> CardStore:
+async def store(tmp_path) -> AsyncIterator[CardStore]:
     db_path = str(tmp_path / "test_dream_cards.db")
     s = CardStore(db_path=db_path)
     await s.init()
     await s.add_card(NewCard(category="fact", scope="user", scope_id="100", content="用户A｜test"))
     await s.add_card(NewCard(category="fact", scope="group", scope_id="200", content="群B｜test"))
-    return s
+    try:
+        yield s
+    finally:
+        await s.close()
 
 
 @pytest.fixture
-async def pending_store(tmp_path) -> CardStore:
+async def pending_store(tmp_path) -> AsyncIterator[CardStore]:
     db_path = str(tmp_path / "test_dream_pending.db")
     s = CardStore(db_path=db_path)
     await s.init()
@@ -37,7 +41,10 @@ async def pending_store(tmp_path) -> CardStore:
                              content="@100(测试): 学生", source="migration", confidence=0.6))
     await s.add_card(NewCard(category="fact", scope="group", scope_id="200",
                              content="讨论了期末考试", source="migration", confidence=0.6))
-    return s
+    try:
+        yield s
+    finally:
+        await s.close()
 
 
 def test_pre_check_returns_list(store: CardStore) -> None:
@@ -364,15 +371,15 @@ class _FakeMessageLog:
         return self.rows[-limit:]
 
 
-class _FakeMoodEngine:
+class _FakeClimateEngine:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[str] = []
 
-    def m1_tension_metrics(self, *, group_id: str, session_id: str = "") -> dict[str, float]:
-        self.calls.append((group_id, session_id))
+    def group_summary(self, group_id: str) -> dict[str, float]:
+        self.calls.append(group_id)
         return {
-            "injection_count": 4.0,
-            "prompt_trigger_rate": 0.25,
+            "state_count": 4.0,
+            "mean_tension": 0.12,
             "current_tension": 0.18,
         }
 
@@ -458,7 +465,7 @@ async def test_dream_life_reflection_writes_cards_and_updates_arc(store: CardSto
         {"role": "user", "speaker": "100", "content_text": "今天排练有点累，但至少知道哪里要改。"},
         {"role": "assistant", "speaker": "bot", "content_text": "那就把动作难度先拆小。"},
     ])
-    mood_engine = _FakeMoodEngine()
+    climate_engine = _FakeClimateEngine()
     invalidated = 0
     agent = DreamAgent(
         store=store,
@@ -467,7 +474,7 @@ async def test_dream_life_reflection_writes_cards_and_updates_arc(store: CardSto
         schedule_store=schedule_store,
         story_arc_store=story_store,
         message_log=message_log,
-        mood_engine=mood_engine,
+        climate_engine=climate_engine,
         on_memo_change=lambda: nonlocal_increment("invalidated"),
     )
 
@@ -523,7 +530,7 @@ async def test_dream_life_reflection_writes_cards_and_updates_arc(store: CardSto
     assert arc.next_day_seed == "明天先复习再排练，减少临场焦虑。"
     assert schedule_store.load_calls and schedule_store.load_calls[-1][1] is False
     assert message_log.query_calls == [("200", 12)]
-    assert mood_engine.calls == [("200", "group_200")]
+    assert climate_engine.calls == ["200"]
     assert len(api_calls) == 2
     assert api_calls[0][0] is not None
     assert api_calls[0][1] == 2048

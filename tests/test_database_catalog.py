@@ -18,6 +18,7 @@ EXPECTED_DATABASES = {
     "knowledge_graph": "storage/knowledge_graph.db",
     "knowledge_index": "storage/knowledge_index.db",
     "learning_normalizer": "storage/learning_normalizer.db",
+    "living_persona_climate_baselines": "storage/living_persona/climate_baselines.db",
     "living_persona_m1_metrics": "storage/living_persona/m1_metrics.db",
     "living_persona_m2_climate": "storage/living_persona/m2_climate.db",
     "memory_cards": "storage/memory_cards.db",

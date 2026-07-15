@@ -83,7 +83,11 @@ def _rewrite_sentence(sentence: str, *, bot_name: str) -> tuple[str, bool]:
         rewritten = _MODEL_PREFIX_RE.sub("", rewritten, count=1).strip(" ，,。！？!?")
         changed = True
     if bot_name:
-        name_pattern = re.compile(rf"^我(?:是|叫){re.escape(bot_name)}[，,、:：]?", re.IGNORECASE)
+        name_pattern = re.compile(
+            rf"^我(?:是|叫){re.escape(bot_name)}[呀哦啦呢]?"
+            rf"(?=$|[，,、:：。！？!?~～…])[，,、:：。！？!?~～…]*",
+            re.IGNORECASE,
+        )
         if name_pattern.search(rewritten):
             rewritten = name_pattern.sub("", rewritten, count=1).strip()
             changed = True

@@ -39,10 +39,14 @@ class AffectionPlugin(AmadeusPlugin):
         super().__init__()
         self._engine = None
         self._group_memory_config = None
+        self._provider_bus = None
+        self._runtime_state = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
         self._engine = ctx.affection_engine
         self._group_memory_config = ctx.group_memory_config
+        self._provider_bus = getattr(ctx, "provider_bus", None)
+        self._runtime_state = getattr(ctx, "runtime_state", None)
 
     def register_tools(self) -> list[Tool]:
         if self._engine is None:
@@ -53,6 +57,20 @@ class AffectionPlugin(AmadeusPlugin):
     async def on_pre_prompt(self, ctx: PromptContext) -> None:
         if self._engine is None:
             return
+        has_provider = getattr(self._provider_bus, "has_provider", None)
+        if callable(has_provider) and bool(has_provider("climate")):
+            try:
+                from services.block_trace.climate_provider import has_climate_prompt_candidate
+
+                if has_climate_prompt_candidate(
+                    self._runtime_state,
+                    session_id=ctx.session_id,
+                    group_id=ctx.group_id,
+                    user_id=ctx.user_id,
+                ):
+                    return
+            except Exception:
+                pass
         in_group = ctx.group_id is not None and ctx.privacy_mask
         pool_ids: list[str] | None = None
         if in_group and ctx.group_id and self._group_memory_config is not None:

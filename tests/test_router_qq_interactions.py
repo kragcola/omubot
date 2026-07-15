@@ -7,11 +7,12 @@ import pytest
 from nonebot.adapters.onebot.v11 import NoticeEvent, PokeNotifyEvent
 
 from kernel.types import PluginContext, TriggerContext
+from services.dialogue_climate.sensors import SensorInput
 from services.humanization.qq_interactions import (
     QQInteractionSignal,
     dispatch_qq_interaction_signal,
     parse_qq_interaction_signal,
-    register_m1_mention_irritation,
+    register_climate_mention_irritation,
     reset_qq_interaction_rate_guard,
 )
 
@@ -81,10 +82,8 @@ class _MoodEngine:
         tension_d: float = 0.0,
         group_id: str | int | None = None,
         session_id: str = "",
-        m1_tension_enabled: bool = False,
     ) -> None:
         del group_id
-        del m1_tension_enabled
         self.signals.append({
             "valence_d": valence_d,
             "openness_d": openness_d,
@@ -93,12 +92,23 @@ class _MoodEngine:
         self.sessions.append(session_id)
 
 
+class _ClimateHub:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.inputs: list[SensorInput] = []
+
+    def collect(self, data: SensorInput) -> int:
+        self.inputs.append(data)
+        return 1
+
+
 def _ctx(
     *,
     poke_enabled: bool = True,
     reaction_enabled: bool = True,
     mood_engine: object | None = None,
-    m1_enabled: bool = False,
+    climate_hub: object | None = None,
 ) -> PluginContext:
     ctx = SimpleNamespace(
         config=SimpleNamespace(
@@ -113,7 +123,7 @@ def _ctx(
         timeline=_Timeline(),
         scheduler=_Scheduler(),
         mood_engine=mood_engine,
-        dialogue_climate_m1_enabled=m1_enabled,
+        climate_sensor_hub=climate_hub,
     )
     return cast(PluginContext, ctx)
 
@@ -136,13 +146,58 @@ def test_parse_poke_notice_to_bot() -> None:
 
     signal = parse_qq_interaction_signal(event, self_id="42")
 
-    assert signal == QQInteractionSignal(
-        kind="poke",
-        group_id="123456",
-        actor_user_id="10001",
-        target_user_id="42",
-        is_tome=True,
+    assert signal is not None
+    assert signal.kind == "poke"
+    assert signal.group_id == "123456"
+    assert signal.actor_user_id == "10001"
+    assert signal.target_user_id == "42"
+    assert signal.is_tome is True
+    assert signal.event_id.startswith("poke:123456:10001:42:1:")
+
+
+def test_parse_same_poke_event_instance_keeps_nonce() -> None:
+    event = PokeNotifyEvent(
+        time=1,
+        self_id=42,
+        post_type="notice",
+        notice_type="notify",
+        sub_type="poke",
+        user_id=10001,
+        target_id=42,
+        group_id=123456,
     )
+
+    first = parse_qq_interaction_signal(event, self_id="42")
+    second = parse_qq_interaction_signal(event, self_id="42")
+
+    assert first is not None
+    assert second is not None
+    assert first.event_id == second.event_id
+
+
+def test_poke_event_nonce_does_not_depend_on_reusable_object_id(monkeypatch) -> None:
+    import services.humanization.qq_interactions as qq_interactions
+
+    monkeypatch.setattr(qq_interactions, "id", lambda _event: 1, raising=False)
+    events = [
+        PokeNotifyEvent(
+            time=1,
+            self_id=42,
+            post_type="notice",
+            notice_type="notify",
+            sub_type="poke",
+            user_id=10001,
+            target_id=42,
+            group_id=123456,
+        )
+        for _ in range(2)
+    ]
+
+    signals = [parse_qq_interaction_signal(event, self_id="42") for event in events]
+
+    assert signals[0] is not None
+    assert signals[1] is not None
+    assert signals[0].event_id != signals[1].event_id
 
 
 def test_parse_napcat_raw_reaction_notice() -> None:
@@ -248,6 +303,54 @@ def test_poke_rate_guard_mutes_fifth_poke_for_same_user() -> None:
     assert len(ctx.scheduler.calls) == 4
 
 
+def test_replayed_poke_notice_is_deduplicated_before_rate_mutation() -> None:
+    hub = _ClimateHub()
+    ctx = _ctx(mood_engine=_MoodEngine(), climate_hub=hub)
+    event = PokeNotifyEvent(
+        time=100,
+        self_id=42,
+        post_type="notice",
+        notice_type="notify",
+        sub_type="poke",
+        user_id=10001,
+        target_id=42,
+        group_id=123456,
+    )
+    signal = parse_qq_interaction_signal(event, self_id="42")
+    assert signal is not None
+
+    first = dispatch_qq_interaction_signal(ctx, signal, now=100.0)
+    replay = dispatch_qq_interaction_signal(ctx, signal, now=100.0)
+
+    assert first is True
+    assert replay is False
+    assert len(hub.inputs) == 1
+    assert len(ctx.scheduler.calls) == 1
+
+
+def test_distinct_poke_notices_in_same_second_are_both_accepted() -> None:
+    hub = _ClimateHub()
+    ctx = _ctx(mood_engine=_MoodEngine(), climate_hub=hub)
+
+    for _ in range(2):
+        event = PokeNotifyEvent(
+            time=100,
+            self_id=42,
+            post_type="notice",
+            notice_type="notify",
+            sub_type="poke",
+            user_id=10001,
+            target_id=42,
+            group_id=123456,
+        )
+        signal = parse_qq_interaction_signal(event, self_id="42")
+        assert signal is not None
+        assert dispatch_qq_interaction_signal(ctx, signal, now=100.0) is True
+
+    assert len(hub.inputs) == 2
+    assert len(ctx.scheduler.calls) == 2
+
+
 def test_dispatch_poke_nudges_tension() -> None:
     mood = _MoodEngine()
     ctx = _ctx(mood_engine=mood)
@@ -268,9 +371,9 @@ def test_dispatch_poke_nudges_tension() -> None:
     assert mood.sessions[0] == "group_123456"
 
 
-def test_m1_disabled_keeps_poke_on_part0_static_nudge() -> None:
+def test_poke_without_climate_hub_keeps_part0_static_nudge() -> None:
     mood = _MoodEngine()
-    ctx = _ctx(mood_engine=mood, m1_enabled=False)
+    ctx = _ctx(mood_engine=mood)
     signal = QQInteractionSignal(
         kind="poke",
         group_id="123456",
@@ -286,9 +389,10 @@ def test_m1_disabled_keeps_poke_on_part0_static_nudge() -> None:
     assert all(s["valence_d"] == 0.0 for s in mood.signals)
 
 
-def test_m1_enabled_poke_frequency_aggregates_before_nudge() -> None:
+def test_climate_poke_frequency_aggregates_without_double_writing_mood() -> None:
     mood = _MoodEngine()
-    ctx = _ctx(mood_engine=mood, m1_enabled=True)
+    hub = _ClimateHub()
+    ctx = _ctx(mood_engine=mood, climate_hub=hub)
     signal = QQInteractionSignal(
         kind="poke",
         group_id="123456",
@@ -300,14 +404,38 @@ def test_m1_enabled_poke_frequency_aggregates_before_nudge() -> None:
     for offset in range(3):
         dispatch_qq_interaction_signal(ctx, signal, now=100.0 + offset)
 
-    assert [s["tension_d"] for s in mood.signals] == pytest.approx([0.04, 0.09, 0.14])
-    assert all(s["valence_d"] == 0.0 for s in mood.signals)
-    assert mood.sessions == ["group_123456", "group_123456", "group_123456"]
+    assert mood.signals == []
+    assert [data.poke_count for data in hub.inputs] == [1, 1, 1]
+    assert [data.burst_continuation for data in hub.inputs] == [False, True, True]
 
 
-def test_m1_enabled_rate_muted_poke_still_aggregates_frequency() -> None:
+def test_distinct_pokes_feed_only_marginal_burst_increment() -> None:
+    hub = _ClimateHub()
+    ctx = _ctx(mood_engine=_MoodEngine(), climate_hub=hub)
+
+    for event_time in (100, 101, 102):
+        event = PokeNotifyEvent(
+            time=event_time,
+            self_id=42,
+            post_type="notice",
+            notice_type="notify",
+            sub_type="poke",
+            user_id=10001,
+            target_id=42,
+            group_id=123456,
+        )
+        signal = parse_qq_interaction_signal(event, self_id="42")
+        assert signal is not None
+        dispatch_qq_interaction_signal(ctx, signal, now=float(event_time))
+
+    assert [data.poke_count for data in hub.inputs] == [1, 1, 1]
+    assert [data.burst_continuation for data in hub.inputs] == [False, True, True]
+
+
+def test_rate_muted_poke_still_feeds_climate_frequency() -> None:
     mood = _MoodEngine()
-    ctx = _ctx(mood_engine=mood, m1_enabled=True)
+    hub = _ClimateHub()
+    ctx = _ctx(mood_engine=mood, climate_hub=hub)
     signal = QQInteractionSignal(
         kind="poke",
         group_id="123456",
@@ -319,15 +447,24 @@ def test_m1_enabled_rate_muted_poke_still_aggregates_frequency() -> None:
     for offset in range(6):
         dispatch_qq_interaction_signal(ctx, signal, now=100.0 + offset)
 
-    assert [s["tension_d"] for s in mood.signals] == pytest.approx([0.04, 0.09, 0.14, 0.19, 0.2, 0.2])
+    assert mood.signals == []
+    assert [data.poke_count for data in hub.inputs] == [1, 1, 1, 1, 1, 1]
+    assert [data.burst_continuation for data in hub.inputs] == [
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+    ]
     assert len(ctx.scheduler.calls) == 4
 
 
-def test_m1_disabled_mention_frequency_does_not_touch_mood() -> None:
+def test_climate_mention_without_hub_is_noop() -> None:
     mood = _MoodEngine()
-    ctx = _ctx(mood_engine=mood, m1_enabled=False)
+    ctx = _ctx(mood_engine=mood)
 
-    changed = register_m1_mention_irritation(
+    changed = register_climate_mention_irritation(
         ctx,
         group_id="123456",
         actor_user_id="10001",
@@ -338,12 +475,13 @@ def test_m1_disabled_mention_frequency_does_not_touch_mood() -> None:
     assert mood.signals == []
 
 
-def test_m1_enabled_mention_frequency_aggregates_before_nudge() -> None:
+def test_climate_mention_frequency_aggregates_in_sensor_hub() -> None:
     mood = _MoodEngine()
-    ctx = _ctx(mood_engine=mood, m1_enabled=True)
+    hub = _ClimateHub()
+    ctx = _ctx(mood_engine=mood, climate_hub=hub)
 
     changed = [
-        register_m1_mention_irritation(
+        register_climate_mention_irritation(
             ctx,
             group_id="123456",
             actor_user_id="10001",
@@ -353,13 +491,32 @@ def test_m1_enabled_mention_frequency_aggregates_before_nudge() -> None:
     ]
 
     assert changed == [True, True, True]
-    assert [s["tension_d"] for s in mood.signals] == pytest.approx([0.03, 0.07, 0.11])
-    assert all(s["valence_d"] == 0.0 for s in mood.signals)
+    assert mood.signals == []
+    assert [data.mention_count for data in hub.inputs] == [1, 1, 1]
+    assert [data.burst_continuation for data in hub.inputs] == [False, True, True]
 
 
-def test_m1_enabled_mention_and_poke_share_frequency_context() -> None:
+def test_climate_mention_replay_is_deduplicated_before_frequency_mutation() -> None:
+    hub = _ClimateHub()
+    ctx = _ctx(climate_hub=hub)
+
+    for message_id in (10, 10, 11):
+        register_climate_mention_irritation(
+            ctx,
+            group_id="123456",
+            actor_user_id="10001",
+            message_id=message_id,
+            now=100.0 + message_id,
+        )
+
+    assert [data.mention_count for data in hub.inputs] == [1, 1]
+    assert [data.burst_continuation for data in hub.inputs] == [False, True]
+
+
+def test_climate_mention_and_poke_share_frequency_context() -> None:
     mood = _MoodEngine()
-    ctx = _ctx(mood_engine=mood, m1_enabled=True)
+    hub = _ClimateHub()
+    ctx = _ctx(mood_engine=mood, climate_hub=hub)
     signal = QQInteractionSignal(
         kind="poke",
         group_id="123456",
@@ -368,7 +525,7 @@ def test_m1_enabled_mention_and_poke_share_frequency_context() -> None:
         is_tome=True,
     )
 
-    assert register_m1_mention_irritation(
+    assert register_climate_mention_irritation(
         ctx,
         group_id="123456",
         actor_user_id="10001",
@@ -376,15 +533,24 @@ def test_m1_enabled_mention_and_poke_share_frequency_context() -> None:
     ) is True
     dispatch_qq_interaction_signal(ctx, signal, now=101.0)
     dispatch_qq_interaction_signal(ctx, signal, now=102.0)
-    assert register_m1_mention_irritation(
+    assert register_climate_mention_irritation(
         ctx,
         group_id="123456",
         actor_user_id="10001",
         now=103.0,
     ) is True
 
-    assert [s["tension_d"] for s in mood.signals] == pytest.approx([0.03, 0.08, 0.13, 0.17])
-    assert all(s["valence_d"] == 0.0 for s in mood.signals)
+    assert mood.signals == []
+    assert [
+        (data.mention_count, data.poke_count)
+        for data in hub.inputs
+    ] == [(1, 0), (0, 1), (0, 1), (1, 0)]
+    assert [data.burst_continuation for data in hub.inputs] == [
+        False,
+        True,
+        True,
+        True,
+    ]
 
 
 def test_dispatch_positive_reaction_nudges_valence() -> None:

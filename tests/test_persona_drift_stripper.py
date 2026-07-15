@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from services.llm.persona_drift_stripper import persona_drift_rule, strip_declarations
 from services.llm.sentinel_registry import GuardrailContext
 
@@ -42,6 +44,32 @@ def test_strip_declarations_fails_closed_on_lone_name_claim() -> None:
 
     assert cleaned == ""
     assert matched == ["我是凤笑梦"]
+
+
+def test_strip_declarations_fails_closed_on_lone_name_claim_with_particle() -> None:
+    cleaned, matched = strip_declarations("我是凤笑梦呀", bot_name="凤笑梦")
+
+    assert cleaned == ""
+    assert matched == ["我是凤笑梦呀"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "我是凤笑梦呀～",
+        "我是凤笑梦哦",
+        "我是凤笑梦啦！",
+        "我是凤笑梦呢……",
+        "我是凤笑梦呀~",
+    ),
+)
+def test_strip_declarations_fails_closed_on_name_particle_and_trailing_punctuation(
+    text: str,
+) -> None:
+    cleaned, matched = strip_declarations(text, bot_name="凤笑梦")
+
+    assert cleaned == ""
+    assert matched == [text]
 
 
 def test_strip_declarations_fails_closed_on_lone_ai_declaration() -> None:
@@ -117,4 +145,3 @@ def test_persona_drift_rule_respects_enabled_flag_and_bot_name() -> None:
     assert result.passed is True
     assert result.text == "今天天气真好。"
     assert [hit.name for hit in result.hits] == ["persona_drift"]
-

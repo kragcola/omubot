@@ -25,6 +25,7 @@ class _SchedulerStub:
     def __init__(self, runtime: dict[str, object]) -> None:
         self.runtime = runtime
         self.cancelled: list[str] = []
+        self.runtime_requests: list[tuple[str, str]] = []
 
     def cancel_debounce(self, group_id: str) -> None:
         self.cancelled.append(group_id)
@@ -32,7 +33,8 @@ class _SchedulerStub:
     def is_muted(self, group_id: str) -> bool:
         return False
 
-    def _humanizer_runtime(self, group_id: str) -> dict[str, object]:
+    def _humanizer_runtime(self, group_id: str, *, user_id: str = "") -> dict[str, object]:
+        self.runtime_requests.append((group_id, user_id))
         return {"group_id": group_id, **self.runtime}
 
 
@@ -111,6 +113,7 @@ async def test_echo_plugin_uses_visible_text_and_scheduler_runtime() -> None:
         "slot": {"energy": 0.4},
         "mood": {"label": "playful", "energy": 0.6},
     }]
+    assert plugin._scheduler.runtime_requests == [("100", "u1")]
     bot.send_group_msg.assert_awaited_once_with(group_id=100, message=segments)
 
 
@@ -226,4 +229,5 @@ async def test_element_detector_passes_runtime_for_llm_reply() -> None:
         "slot": {"energy": 0.5},
         "mood": {"label": "playful"},
     }]
+    assert plugin._scheduler.runtime_requests == [("100", "u1")]
     bot.send_group_msg.assert_awaited_once_with(group_id=100, message="来啦")

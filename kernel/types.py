@@ -203,6 +203,7 @@ class PluginContext:
     runtime_state: Any = None
     humanization_contract: Any = None
     humanization_register_classifier: Any = None
+    dialogue_climate_mood_classifier: Any = None
     identity: Any = None  # IdentitySnapshot（由 PersonaRuntime 提供）
 
     # PluginBus 引用（供 LLMClient 等需要触发钩子的服务使用）
@@ -242,9 +243,9 @@ class PluginContext:
     chat_runtime_commit: Any = None
     connection_pipeline: Any = None
     mood_engine: Any = None
-    dialogue_climate_m1_enabled: bool = False
     climate_engine: Any = None
     climate_sensor_hub: Any = None
+    climate_baseline_store: Any = None
     dialogue_climate_m4_enabled: bool = False
     schedule_event_replan_enabled: bool = False
     affection_engine: Any = None

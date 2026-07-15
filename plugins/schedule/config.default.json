@@ -9,7 +9,6 @@
     "story_arc_enabled": false,
     "event_replan_enabled": false,
     "dialogue_climate": {
-      "m1_enabled": false,
       "m2_enabled": false,
       "m3_sensors_enabled": false,
       "m4_policy_enabled": false
