@@ -4,9 +4,9 @@
 
 ---
 
-## 2026-07-15 谐音理解辅助、群黑话优先与原文不变量实现
+## 2026-07-15 谐音理解辅助、群黑话优先与原文不变量上线
 
-**变更类型**：LLM 输入理解辅助 / Thinker + PromptProviderBus 动态提示 / 保守谐音规则 / prompt budget 原子块。对应 tracker `docs/tracking/homophone-understanding-2026-07-15.md`；实现提交与部署信息待本条后续补记。
+**变更类型**：LLM 输入理解辅助 / Thinker + PromptProviderBus 动态提示 / 保守谐音规则 / prompt budget 原子块 / bot-only 部署。对应 tracker `docs/tracking/homophone-understanding-2026-07-15.md`，实现提交 `c959054`。
 
 **实现与边界**：新增无状态 `services/homophone` 解释器，以人工审核整短语和受限态度模板识别高置信谐音，例如 `窝讨厌泥 -> 我讨厌你`、`窝不讨厌泥 -> 我不讨厌你`。解释结果包含原文、候选、rule/span/confidence；Thinker 与主回复模型只消费标为“仅作理解、不确定时忽略”的请求期 dynamic hint。Router、`conversation_text`、ShortTermMemory、GroupTimeline、MessageLog、memory/research/learning evidence 均不改写；私聊测试实证存储仍逐字为 `窝讨厌泥`。URL、引号、代码、CQ 与元语言按 span 保护，不会吞掉同消息其他正常片段。
 
@@ -14,7 +14,9 @@
 
 **验证与复审**：TDD 从首轮 13 failed、第二轮 9 failed、review 修复 9 failed、普通词系统性 5 failed 和动作续接 4 failed 逐层转绿；最终 focused 118 passed，扩大 LLM/ProviderBus/bootstrap/typed-boundary 回归 224 passed。scoped Ruff clean、Pyright 0 errors/0 warnings、diff-check clean；正式全量 **3507 passed / 17 skipped / 168 warnings**。独立 review 初轮 `0 Critical / 4 Important / 1 Minor`，carrier span、slang unavailable、partial conflict 和普通词/召回边界全部 RED→GREEN，最终 closure `0 Critical / 0 Important`。保留 Minor：非强制群聊以 recent+pending 为理解上下文，旧谐音可能在最近三轮重复提示；提示不声明当前用户事实且不持久化，当前接受该上下文行为。
 
-**同模式扫描、回滚与部署**：扫描确认现有 SlangProvider/OOV lookup、learning normalizer、classifier/arbiter/topic attribution 均不应承担通用谐音改写；唯一生产接入为 Thinker 动态 hint 与主 PromptProviderBus。功能无 schema、无持久状态；代码回滚为移除 `HomophoneProvider` 注册与 Thinker hint 构造，budget `atomic` 分支可独立回退。当前尚未提交/部署；上线只允许 bot build + `--no-deps --force-recreate bot`，禁止操作 NapCat。
+**同模式扫描与运行验收**：扫描确认现有 SlangProvider/OOV lookup、learning normalizer、classifier/arbiter/topic attribution 均不应承担通用谐音改写；唯一生产接入为 Thinker 动态 hint 与主 PromptProviderBus。首次 build 在部署前门禁发现 `GIT_COMMIT=unknown`，未上线；随后显式传真实 `c9590543aa90698cf679a542a280ada31aaa3433` 重建。最终 image `f5aa4c590b1f...`（tag `omubot-bot:homophone-20260715-c959054`）、container `aadfe15b6bc6...`、restart=0、OOM=false；启动日志、container env 与 git HEAD 一致。6 个关键源码 host/image SHA 全相等，strict plugin layout、Application startup、OneBot connected、Admin 200。live-image Provider smoke 产出 1 个含原文/候选的完整块，普通词负例不命中；Thinker smoke 确认同一 hint 实际进入 `dynamic_blocks`。
+
+**公开群负向窗口、回滚与边界**：UTC `2026-07-15T04:32:58Z` 至 `04:35:25Z`（2 分 27 秒）内，bot 与 NapCat 均记录 78 条群入站，其中 bot 明确记录 55 条 `silent_learn`；bot send/poke=0、ERROR/CRITICAL/Traceback/hook-timeout=0，NapCat `发送 -> 群聊`/`send_group_msg`=0。NapCat 的 2 条 warning/error 均来自启动首条旧客户端引用消息查询失败，不是出站或本功能错误。功能无 schema、无持久状态；快速代码回滚为移除 Provider/Thinker 接线，完整运行回滚为切 `omubot-bot:pre-homophone-20260715-c959054` 后只 recreate bot。NapCat 始终保持 container `19f6cf13607c...`、image `cde89d766604...`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。
 
 ---
 

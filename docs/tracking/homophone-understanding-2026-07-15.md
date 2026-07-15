@@ -1,21 +1,21 @@
 # 谐音理解辅助上线
 
-> 状态：verifying
+> 状态：done
 > mode: task
 > 最后更新：2026-07-15 CST
-> 当前下一步：精确提交实现与验证文档，随后 bot-only build/recreate 和运行验收。
+> 当前下一步：无；后续仅按真实日志扩充人工审核规则，不做自动拼音枚举。
 > 阻塞：无。
-> 验证证据：待补。
+> 验证证据：review 0C/0I；3507 full passed；image/runtime smoke 与 2m27s 零群出站窗口通过。
 > 回滚入口：移除 HomophoneProvider 注册及 Thinker hint 构造；原始消息与存储合同从未改变。
 
 ## Resume Capsule
 
 - objective: 让 Thinker 与主回复模型理解用户的高置信谐音表达，例如 `窝讨厌泥` 可能表达 `我讨厌你`。
-- next_step: git hygiene + 精确 add/commit；构建前记录旧 bot/NapCat 身份与 rollback tag。
+- next_step: 无。
 - current_files: `services/homophone/`、`services/block_trace/`、`services/llm/client.py`、`bootstrap/chat_runtime.py`、对应 tests。
 - last_verified: 现有 `SlangProvider` 只消费已审核群黑话；Thinker 已支持动态 `slang_hint`；主模型已有 active PromptProviderBus。
 - do_not_redo: 不引入全局文本替换，不改 `conversation_text`、timeline、message log、memory、research DB 或学习归一化证据。
-- rollback: 删除新增 provider 注册与 Thinker hint 调用即可熄火；新增模块无持久状态、无 schema 迁移。
+- rollback: 切 `omubot-bot:pre-homophone-20260715-c959054` 后只 recreate bot；不碰 NapCat。
 
 ## Section Progress
 
@@ -24,8 +24,8 @@
 | Context | done | 只读链路审计完成；确认 ProviderBus 是唯一主生成注入边界 | 不再重查 ingest/timeline |
 | Plan | done | 整短语白名单、最长匹配、载体保护、slang 冲突抑制 | 按 RED 逐层实现 |
 | Implementation | done | 解释器、slang guard、Thinker、ProviderBus、atomic budget、bootstrap 已接线 | 独立复审 |
-| Verification | in_progress | 118 focused、224 expanded、3507 full；Ruff/Pyright clean；review 0C/0I | runtime |
-| Handoff | pending |  | 更新维护日志、ACTIVE 与部署证据 |
+| Verification | done | 118 focused、224 expanded、3507 full；Ruff/Pyright clean；review 0C/0I；runtime pass | 无 |
+| Handoff | done | commit/image/container/rollback/window 已记录 | ACTIVE 归零 |
 
 ## Next Session Starts Here
 
@@ -43,8 +43,8 @@
 - [x] 新增并注册主模型 HomophoneProvider
 - [x] focused/full pytest、Ruff、Pyright、diff-check
 - [x] 独立 code review
-- [~] 精确提交、bot-only rebuild/recreate
-- [ ] 运行态 prompt/静默群零出站验证
+- [x] 精确提交、bot-only rebuild/recreate
+- [x] 运行态 prompt/静默群零出站验证
 
 ## Decisions
 
@@ -88,6 +88,13 @@
 | Final focused | 解释器/provider/Thinker/budget/wiring/runtime | 118 passed / 22 warnings |
 | Final expanded | LLMClient/ProviderBus/bootstrap/typed boundary | 224 passed / 62 warnings |
 | Final full | 最后一次代码变更后 `uv run pytest -q` | 3507 passed / 17 skipped / 168 warnings |
+| Commit | `c9590543aa90698cf679a542a280ada31aaa3433` | pass |
+| Image integrity | 6 个关键 source host/image SHA | 0 mismatch |
+| Runtime semantic | live-image Provider + Thinker mock request | candidate 完整；hint in dynamic blocks；普通词不命中 |
+| Runtime health | Application complete / OneBot connected / Admin 200 | pass |
+| Silent outbound window | UTC 04:32:58-04:35:25，78 group inbound / 55 silent_learn | bot/NapCat group outbound 0 |
+| Deployment | image `f5aa4c590b1f...` / container `aadfe15b6bc6...` | restart=0 / OOM=false |
+| NapCat invariant | `19f6cf13607c...` / StartedAt `2026-07-09T22:51:47.963549084Z` | unchanged / restart=0 |
 
 ## Test Ledger
 
@@ -107,4 +114,4 @@
 
 ## Handoff
 
-实现期间持续维护；完成后写清 commit、image、container、NapCat 身份与固定观察窗。
+已完成。实现 commit `c959054`；部署 image `f5aa4c590b1f...`、container `aadfe15b6bc6...`；rollback tag `omubot-bot:pre-homophone-20260715-c959054`；NapCat 未操作。

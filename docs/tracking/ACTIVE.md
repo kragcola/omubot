@@ -4,16 +4,16 @@
 
 ## Current
 
-- mode: task
-- tracker: `docs/tracking/homophone-understanding-2026-07-15.md`
-- objective: 为 Thinker 与主回复模型增加保守的谐音理解辅助，示例 `窝讨厌泥` -> `我讨厌你`，不改写任何原始证据。
-- status: verifying complete / ready to commit and deploy
-- checkpoint: 解释器、Thinker、HomophoneProvider、群 slang 优先与 atomic budget 已实现；review 0C/0I，final full pytest 3507 passed。
-- next_step: 精确提交后仅 build/recreate bot；验证运行 hint、原文不变和公开 silent 群零出站。
-- last_completed: `docs/tracking/dialogue-climate-integration-completion-2026-07-15.md`
-- implementation_commit: pending
-- deployment: pending；当前运行基线仍为 image `ac8e60066ccb...` / container `c1c767dd5601...` / runtime commit `b947adc0b4db66c418e7220d6a61f8cb3472b101`。
-- rollback: 删除 HomophoneProvider 注册及 Thinker hint 构造；本功能无持久化数据或 schema。
+- mode: none
+- tracker: none
+- objective: 无当前任务。
+- status: idle
+- checkpoint: 谐音理解辅助已实现并上线；原文不改写，群 approved slang 同 surface 优先，review 0C/0I，full pytest 3507 passed，公开群固定窗零出站。
+- next_step: 无；后续仅按真实日志扩充人工审核规则。
+- last_completed: `docs/tracking/homophone-understanding-2026-07-15.md`
+- implementation_commit: `c959054`
+- deployment: image `f5aa4c590b1f...` / container `aadfe15b6bc6...` / runtime commit `c9590543aa90698cf679a542a280ada31aaa3433` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
+- rollback: 切 `omubot-bot:pre-homophone-20260715-c959054` 后只 recreate bot；无持久化数据或 schema。
 
 ## Recovery Order
 
