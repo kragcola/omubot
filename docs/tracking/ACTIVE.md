@@ -4,16 +4,16 @@
 
 ## Current
 
-- mode: task-bug
-- tracker: `docs/tracking/dialogue-climate-integration-completion-2026-07-15.md`
-- objective: 完成 Dialogue Climate provider/prompt/adapter/classifier/durable-state 整合、彻底退役 legacy M1 tension，并修复 persona drift 尾字残留。
-- status: active
-- checkpoint: Dialogue Climate provider/classifier/adapters/durable baseline/M1 retirement 与 persona 尾字已实现；两轮 review Important 全部关闭，最终 review 0/0；full pytest 3446 passed，Ruff/Pyright/JSON/diff clean。
-- next_step: 精确提交实现；创建 rollback tag 后 bot-only build/recreate，完成运行态与 silent 群/NapCat 验收；取得真实证据后回填 maintenance-log 并关闭 ACTIVE。
-- last_completed: `docs/tracking/topic-block-phase2-derived-assignments-2026-07-15.md`
-- implementation_commit: pending
-- deployment: 当前基线 image `780b912296b4...` / container `6366e0945aa2...` / restart=0 / OOM=false；本任务只允许 bot-only rebuild/recreate，NapCat 不得变化。
-- rollback: 关闭 `dialogue_climate.m4_policy_enabled` 可熄火新 prompt/adapter 消费；部署前创建 bot image rollback tag，持久化数据不删除。
+- mode: none
+- tracker: none
+- objective: 无当前任务。
+- status: idle
+- checkpoint: Dialogue Climate 后续整合与低优先级缺陷已完成；最终 review 0 Critical / 0 Important，full pytest 3446 passed，bot-only 部署与公开 silent 群零出站验收通过。
+- next_step: 无；按 Pending 中的权威列表选择下一项。
+- last_completed: `docs/tracking/dialogue-climate-integration-completion-2026-07-15.md`
+- implementation_commit: `b947adc`
+- deployment: image `0c2fc70de1a7...` / container `2a156463f5a6...` / restart=0 / OOM=false；NapCat 身份与 StartedAt 不变。
+- rollback: 关闭 `dialogue_climate.m4_policy_enabled` 快速熄火，或切 `omubot-bot:pre-dialogue-climate-20260715-b947adc` 后只 recreate bot；持久化数据不删除。
 
 ## Recovery Order
 

@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-07-15 Dialogue Climate 后续整合、M1 退役与低优先级缺陷收口上线
+
+**变更类型**：Living Persona / Dialogue Climate runtime owner 收敛 / durable baseline / Humanizer 与 Thinker adapter / legacy M1 tension 退役 / bot-only 部署。对应 tracker `docs/tracking/dialogue-climate-integration-completion-2026-07-15.md`、迁移清单 `docs/migrations/dialogue-climate-runtime-completion-2026-07-15.md`，实现提交 `b947adc`。
+
+**实现与 owner**：`ClimateProvider` 成为唯一关系+气候 prompt candidate，schedule/affection 仅在 provider 实际产出时让位；每轮在 Thinker 前发布同一 `(session,group,user)` snapshot，Thinker 消费 `reply_bias`，Humanizer 由 climate `delay_multiplier` 单独拥有倍率并接入 generation elapsed，首段/单段不再绕过。Chat 生产路径把 `MoodClassifier` label/confidence 直接喂 SensorHub，不污染 `MOOD_CURRENT_SLOT`；Echo/ElementDetector 传递当前 user。ClimateEngine 成为 tension 唯一 owner，Dream、schedule replan 与 mention/poke 均迁入，legacy M1 state/recorder/config 删除，历史 `m1_metrics.db` 与只读 CLI/catalog 保留。
+
+**durable 与复审修复**：新增 `climate_baselines.db user_version=1`，只保存 energy/valence/openness 慢 baseline，持久 revision CAS 不依赖 wall clock；single-flight start/close/schema worker、cancel requeue、late-stage gate、future/fingerprint/finite-range 校验均有交错测试。连续时间 2x2 系统使 24h one-step 与 hourly partition 仅差约 `2.2e-16`。两轮 review 的 12 个 Important 均 RED→GREEN，最终独立复审 `0 Critical / 0 Important`、139 focused passed。另关闭 long-think 后重复等待、同秒 poke object-id reuse、persona `呀/哦/啦/呢` 与 `~ / ～ / ……` 尾字残留，以及 `tests/test_dream.py` CardStore fixture 未关闭造成的线程 warning。
+
+**验证**：主线 integrated focused 344 passed（本任务范围把 `PytestUnhandledThreadExceptionWarning` 升格为 error）；正式 full pytest **3446 passed / 17 skipped / 179 warnings**；任务 Ruff clean、Pyright 0、三份 schedule JSON 与 tracked/untracked diff-check clean。全量 warning-error 诊断仍会暴露 command/retrieval/router B-cluster 的既有 aiosqlite fixture 清理债，本轮未扩大全仓测试清债范围。OneBot/NapCat poke payload没有稳定 notice ID，因此当前保证为“同一解析事件对象重放幂等 + 不同到达对象分别处理”；跨反序列化 replay 与同秒完全相同的合法 poke 无法同时严格区分。
+
+**部署与运行验收**：旧 image `780b912296b4...` 标记为 `omubot-bot:pre-dialogue-climate-20260715-b947adc`；新 image `0c2fc70de1a7...` 标记为 `omubot-bot:dialogue-climate-20260715-b947adc`，bot container `2a156463f5a6...`、restart=0、OOM=false。启动日志确认 commit `b947adcae51...`、Application complete、OneBot connected、outbound guard/protocol trace、climate classifier enabled；生产 schedule override 实测 m2/m3/m4 全 true 且 model 无 `m1_enabled`。4 个关键源码 host/image SHA 一致；baseline DB v1、fingerprint、quick_check 正常，临时 runtime smoke 完成 start/stage/flush/load，生产库因窗口无 active 群消息保持 0 行。
+
+**公开群负向窗口与 M1 停写**：UTC `2026-07-15T02:54:13Z` 至 `02:56:58Z` 内，bot 记录 15 条 `silent_learn` 自然入站（805836168=9、860324414=4、963085812=2），NapCat 记录 22 条群入站；bot send/poke=0、ERROR/CRITICAL/Traceback=0，NapCat 群出站=0、`send_group_msg`=0、error=0。历史 M1 库保持 31 行、max ts `2026-07-13T16:26:27.452091+00:00`、mtime 不变；M2 库保持 913 行，窗口没有 active 群自然消息，故不伪称取得新的 message/post_reply 生产样本。
+
+**回滚与边界**：快速熄火为关闭 `dialogue_climate.m4_policy_enabled`，完整回滚为切回上述 pre-change image 并只 recreate `qq-bot`；不删除 baseline/metrics 数据。NapCat 全程保持 container `19f6cf13607c...`、image `cde89d766604...`、StartedAt `2026-07-09T22:51:47.963549084Z`、restart=0，未 restart/recreate/down。工作树继续保留 deep-delivery、character-pack、coursework、Reasonix、NapCat 数据与本机产物，提交未纳入。
+
+---
+
 ## 2026-07-15 进阶话题块 Phase 2 版本化派生层上线
 
 **变更类型**：话题归属研究派生层 / SQLite 合同 / 离线可重跑 CLI / bot-only 部署。对应 tracker `docs/tracking/topic-block-phase2-derived-assignments-2026-07-15.md`、迁移清单 `docs/migrations/topic-block-phase2-derived-assignments-2026-07-15.md`，实现提交 `60ad68a`。

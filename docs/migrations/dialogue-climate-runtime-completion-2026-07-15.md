@@ -1,6 +1,6 @@
 # Dialogue Climate Runtime Completion Migration Checklist
 
-> 状态：implementation complete，deployment pending，2026-07-15。
+> 状态：complete and deployed，2026-07-15。
 > 范围：把已部署 M2/M3/M4 的临时接线迁到单一 provider/policy/state owner，并彻底退役 legacy M1 tension。
 
 ## Prompt And Policy
@@ -41,8 +41,8 @@
 - [x] 配置面移除 legacy `m1_enabled`，现有生产 m2/m3/m4 配置保持兼容；回滚依赖旧 image/config 备份，不删除历史 DB。
 - [x] focused tests 覆盖 classifier、provider merge、Thinker、Humanizer、store restore/flush/cancel、M1 absence。
 - [x] Ruff、Pyright、full pytest 通过；两轮 reviewer Important 均关闭，最终独立 review 为 0 Critical / 0 Important。
-- [ ] build 前检查 stash、tracked dirty、untracked inputs，精确 stage，禁止 `git add -A`。
-- [ ] 标记 pre-change bot image，执行 `docker compose build bot` + `docker compose up -d --no-deps --force-recreate bot`。
-- [ ] 验证 bot startup/OneBot、climate provider/store 状态、公开 silent 群固定窗零成功出站。
-- [ ] 验证 NapCat container/image/StartedAt/restart_count 均未变化。
-- [ ] 记录 rollback image 与代码回退入口；不删除已有 metrics 数据。
+- [x] build 前检查 stash、tracked dirty、untracked inputs，精确 stage，禁止 `git add -A`。
+- [x] 标记 pre-change bot image，执行 `docker compose build bot` + `docker compose up -d --no-deps --force-recreate bot`。
+- [x] 验证 bot startup/OneBot、climate provider/store 状态、公开 silent 群固定窗零成功出站。
+- [x] 验证 NapCat container/image/StartedAt/restart_count 均未变化。
+- [x] 记录 rollback image 与代码回退入口；不删除已有 metrics 数据。

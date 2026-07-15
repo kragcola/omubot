@@ -224,7 +224,7 @@ Sensor 适配层、on_post_reply 反馈回路、ClimatePolicy 合成、PromptAda
 - **边界负证据**：M3 提交时 grep 确认 reply 路径无 ClimateState 消费者；M4 后唯一消费者是 schedule on_pre_prompt 的 `_maybe_inject_climate_block`，且 `m4_policy_enabled` 默认关。
 - **回滚**：三 flag 默认关零行为变更；M4 关时走旧 M1 block（双跑过渡保留）；删 climate 文件 + 移除 config 字段或 `git checkout`。
 
-### 10.4 后续整合已实现（2026-07-15，待本轮部署验收）
+### 10.4 后续整合已实现并部署（2026-07-15）
 
 - **单一 snapshot/provider**：新增 `CLIMATE_CURRENT_SLOT` 与 `ClimateProvider`。LLM 每轮在 Thinker 前发布一次按 `(session, group, user)` 校验的 snapshot，关系文本先按 `privacy_mask` 构建，再由 provider 输出唯一“关系上下文 + 本轮气候方向”candidate；schedule/affection 仅在该 candidate 实际存在时让位，关 `m4_policy_enabled` 仍可回旧 fallback。
 - **adapter 真消费**：Thinker 从同一 snapshot 消费 `reply_bias`；Humanizer 按当前 `user_id` 读取同一 snapshot，climate 存在时由 `delay_multiplier` 单独拥有延迟倍率，避免再与 legacy mood 重复相乘。真实 streaming 首段与 non-streaming 单段均不再绕过 Humanizer。
@@ -233,7 +233,7 @@ Sensor 适配层、on_post_reply 反馈回路、ClimatePolicy 合成、PromptAda
 - **动力学修正**：energy/valence/openness 的 transient + slow baseline 作为连续时间二元系统解析推进，24h one-step 与 hourly partition 仅有约 `2.2e-16` 浮点差；避免读取频率改变 durable persona baseline，baseline 速率单位保持 per-day。
 - **M1 完全退役**：删除 MoodEngine M1 state/guidance/recorder 与运行配置面；mention/poke、schedule event replan、Dream/StoryArc 均读取 ClimateEngine。历史 `m1_metrics.db`、只读 CLI/catalog 记录保留，不再有运行写入。
 - **低优先级缺陷**：persona drift 的 bot-name 后缀现覆盖 `呀/哦/啦/呢` 与 `~ / ～ / ……`，声明-only 回复稳定 fail-closed，不再残留尾字。
-- **验证**：reviewer 两轮 Important 均 RED→GREEN，最终 stable snapshot `0 Critical / 0 Important`；本地 full pytest `3446 passed / 17 skipped`，任务文件 Ruff clean、Pyright 0、schedule JSON 与 tracked/untracked diff-check clean。部署与运行态证据在本轮 tracker/维护日志补齐。
+- **验证与部署**：reviewer 两轮 Important 均 RED→GREEN，最终 stable snapshot `0 Critical / 0 Important`；本地 full pytest `3446 passed / 17 skipped`，任务文件 Ruff clean、Pyright 0、schedule JSON 与 tracked/untracked diff-check clean。实现提交 `b947adc`，bot-only image `0c2fc70de1a7...` / container `2a156463f5a6...`；OneBot、provider/config、baseline v1/load/flush、M1 停写及公开 silent 群零出站均验收，NapCat 身份不变。完整证据见本轮 tracker 与维护日志。
 
 ---
 
