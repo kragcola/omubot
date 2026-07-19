@@ -7,10 +7,10 @@
 - mode: none
 - tracker: none
 - objective: none
-- status: 2026-07-20 机器重启后的最小 Docker 恢复已完成；当前无 active task。
+- status: Docker 最低内存任务完成；当前无 active task。
 - next_step: none
-- last_completed: 仅恢复原 `napcat`、`ccip-sidecar`、`qq-bot` 三容器；runtime/Style/Worldbook/QZone lock 与内存验收通过，其余辅助/测试容器保持停止。
-- rollback: `omubot-bot:rollback-9aa7e39a-20260719` + trusted backup `pre-change-20260719-232315`；NapCat 禁止重建。
+- last_completed: Docker Desktop `5120→3072 MiB`，只运行 `napcat + qq-bot`；VM约 2.23 GiB，Bot health p95 0.73 ms，host swap 0。
+- rollback: `.workspace/docker-settings-store.pre-3072-20260720.json`（5120 MiB）+ `docker desktop restart`。
 
 ## Recovery Order
 
