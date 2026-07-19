@@ -1,0 +1,364 @@
+{
+  "schema_version": 1,
+  "storylets": [
+    {
+      "storylet_id": "daily.rehearsal_warmup",
+      "title": "日常排练热身",
+      "text": "虚构一周开场：在乐园侧舞台做基础走位与发声热身，节奏轻松，先把身体与情绪暖起来。",
+      "conditions": {
+        "min_step": 0,
+        "var_lte": {
+          "exam_pressure": 0.55
+        }
+      },
+      "saliency": 1.4,
+      "severity": "daily",
+      "once": false,
+      "cooldown_steps": 3,
+      "delay_steps": 0,
+      "cost": {
+        "variable_deltas": {
+          "energy": -0.05
+        }
+      },
+      "consequence": {
+        "open_threads": [
+          "记下今天走位不稳的两处"
+        ],
+        "variable_deltas": {
+          "rehearsal_progress": 0.08
+        },
+        "life_updates": [
+          {
+            "key": "activity",
+            "value": "舞台热身走位",
+            "ttl_hours": 12
+          }
+        ]
+      },
+      "recovery_steps": 0,
+      "required_evidence": [
+        "arc:living_story_v1.main"
+      ],
+      "scope": "fiction",
+      "priority": 120,
+      "target_arc_id": "living_story_v1.main"
+    },
+    {
+      "storylet_id": "daily.study_session",
+      "title": "功课与复习块",
+      "text": "虚构侧线推进：抽出一段安静时间复习学园功课，笔记堆高，但舞台的回声仍在脑后。",
+      "conditions": {
+        "min_step": 1,
+        "var_lte": {
+          "setback_flag": 0.5
+        }
+      },
+      "saliency": 1.5,
+      "severity": "daily",
+      "once": false,
+      "cooldown_steps": 2,
+      "delay_steps": 0,
+      "cost": {
+        "variable_deltas": {
+          "energy": -0.04,
+          "study_load": 0.1
+        }
+      },
+      "consequence": {
+        "open_threads": [
+          "还差一章练习题没收尾"
+        ],
+        "variable_deltas": {
+          "study_progress": 0.1,
+          "exam_pressure": 0.12
+        }
+      },
+      "recovery_steps": 0,
+      "required_evidence": [
+        "arc:living_story_v1.side_study"
+      ],
+      "scope": "fiction",
+      "priority": 125,
+      "target_arc_id": "living_story_v1.side_study"
+    },
+    {
+      "storylet_id": "tension.exam_vs_stage",
+      "title": "考试与舞台的拉扯",
+      "text": "虚构张力：下周小测与排练档期撞在一起，时间被撕成两半，必须决定今晚先守哪一头。",
+      "conditions": {
+        "min_step": 2,
+        "var_gte": {
+          "stage_pressure": 0.1
+        }
+      },
+      "saliency": 2.2,
+      "severity": "tension",
+      "once": false,
+      "cooldown_steps": 4,
+      "delay_steps": 0,
+      "cost": {
+        "variable_deltas": {
+          "energy": -0.08,
+          "focus_split": 0.2
+        }
+      },
+      "consequence": {
+        "open_threads": [
+          "需要一张可执行的考试-排练时间表"
+        ],
+        "variable_deltas": {
+          "exam_pressure": 0.15,
+          "stage_pressure": 0.15
+        }
+      },
+      "recovery_steps": 0,
+      "required_evidence": [
+        "arc:living_story_v1.main",
+        "arc:living_story_v1.side_study"
+      ],
+      "scope": "fiction",
+      "priority": 150,
+      "target_arc_id": "living_story_v1.main"
+    },
+    {
+      "storylet_id": "setback.prop_failure",
+      "title": "道具故障受挫",
+      "text": "虚构重大受挫：关键道具在联排中失灵，段落被迫中断；今晚无法硬撑完整走台，必须止损并重排。",
+      "conditions": {
+        "min_step": 3,
+        "var_gte": {
+          "stage_pressure": 0.2
+        }
+      },
+      "saliency": 3.5,
+      "severity": "major",
+      "once": true,
+      "cooldown_steps": 0,
+      "delay_steps": 0,
+      "cost": {
+        "variable_deltas": {
+          "energy": -0.2
+        }
+      },
+      "consequence": {
+        "open_threads": [
+          "修好或替换失灵道具",
+          "重排受影响的段落"
+        ],
+        "variable_deltas": {
+          "rehearsal_progress": -0.15,
+          "setback_flag": 1.0
+        },
+        "life_updates": [
+          {
+            "key": "activity",
+            "value": "联排中断，止损重排中",
+            "ttl_hours": 48
+          },
+          {
+            "key": "mood",
+            "value": "急促但可控",
+            "ttl_hours": 36
+          }
+        ],
+        "partner_updates": [
+          {
+            "entity_id": "tsukasa",
+            "mood": "concerned",
+            "note": "props failed mid-rehearsal",
+            "availability": "limited"
+          }
+        ],
+        "stage": "setback"
+      },
+      "recovery_steps": 2,
+      "required_evidence": [
+        "arc:living_story_v1.main"
+      ],
+      "scope": "fiction",
+      "priority": 200,
+      "target_arc_id": "living_story_v1.main"
+    },
+    {
+      "storylet_id": "tension.replan_cost",
+      "title": "重排代价",
+      "text": "虚构后果：为了消化道具故障，砍掉一段花活并压缩休息；重排换来可完成性，也欠下精力债。",
+      "conditions": {
+        "min_step": 4,
+        "var_gte": {
+          "setback_flag": 0.5
+        }
+      },
+      "saliency": 2.6,
+      "severity": "tension",
+      "once": true,
+      "cooldown_steps": 0,
+      "delay_steps": 0,
+      "cost": {
+        "variable_deltas": {
+          "energy": -0.1,
+          "spare_time": -0.2
+        }
+      },
+      "consequence": {
+        "open_threads": [
+          "验收简化后的走台是否仍够亮"
+        ],
+        "variable_deltas": {
+          "rehearsal_progress": 0.05,
+          "replan_debt": 0.25
+        }
+      },
+      "recovery_steps": 0,
+      "required_evidence": [
+        "arc:living_story_v1.main"
+      ],
+      "scope": "fiction",
+      "priority": 170,
+      "target_arc_id": "living_story_v1.main"
+    },
+    {
+      "storylet_id": "recovery.after_setback",
+      "title": "受挫后的回稳",
+      "text": "虚构恢复：小步重练核心段落，确认道具替代方案可用；情绪从急促回到可控的明亮。",
+      "conditions": {
+        "min_step": 5,
+        "var_gte": {
+          "setback_flag": 0.5
+        }
+      },
+      "saliency": 2.8,
+      "severity": "recovery",
+      "once": true,
+      "cooldown_steps": 0,
+      "delay_steps": 0,
+      "cost": {},
+      "consequence": {
+        "stage": "recovery",
+        "open_threads": [
+          "把回稳后的节奏写进次日种子"
+        ],
+        "variable_deltas": {
+          "rehearsal_progress": 0.12,
+          "energy": 0.1,
+          "recovery_flag": 1.0,
+          "setback_flag": -1.0
+        },
+        "life_updates": [
+          {
+            "key": "activity",
+            "value": "小步重练核心段落",
+            "ttl_hours": 24
+          },
+          {
+            "key": "mood",
+            "value": "回稳明亮",
+            "ttl_hours": 48
+          }
+        ],
+        "partner_updates": [
+          {
+            "entity_id": "tsukasa",
+            "mood": "supportive",
+            "note": "recovery underway",
+            "availability": "normal"
+          }
+        ],
+        "resolve_threads": [
+          "修好或替换失灵道具"
+        ]
+      },
+      "recovery_steps": 0,
+      "required_evidence": [
+        "arc:living_story_v1.main"
+      ],
+      "scope": "fiction",
+      "priority": 180,
+      "target_arc_id": "living_story_v1.main"
+    },
+    {
+      "storylet_id": "ambient.partner_independent",
+      "title": "伙伴的独立推进",
+      "text": "虚构环境线：伙伴在自己的练习/事务上独立推进，不依赖凤笑梦当场陪伴；提醒世界继续转动。",
+      "conditions": {
+        "min_step": 1,
+        "var_lte": {
+          "recovery_flag": 0.5
+        }
+      },
+      "saliency": 1.1,
+      "severity": "daily",
+      "once": false,
+      "cooldown_steps": 2,
+      "delay_steps": 0,
+      "cost": {},
+      "consequence": {
+        "open_threads": [
+          "下次碰面时同步彼此进度"
+        ],
+        "variable_deltas": {
+          "partner_momentum": 0.1
+        },
+        "partner_updates": [
+          {
+            "entity_id": "nene",
+            "mood": "busy",
+            "note": "independent practice progress",
+            "availability": "busy"
+          }
+        ],
+        "life_updates": [
+          {
+            "key": "open_constraint",
+            "value": "伙伴各自推进，稍后同步",
+            "ttl_hours": 24
+          }
+        ]
+      },
+      "recovery_steps": 0,
+      "required_evidence": [
+        "arc:living_story_v1.ambient_park"
+      ],
+      "scope": "fiction",
+      "priority": 90,
+      "target_arc_id": "living_story_v1.ambient_park"
+    },
+    {
+      "storylet_id": "closure.week_aftermath",
+      "title": "一周收束余波",
+      "text": "虚构收束：这一周留下“考试还欠一点、舞台已回稳、伙伴各自推进”的余波；不假装一切完美，但线索可移交下一周。",
+      "conditions": {
+        "min_step": 6,
+        "var_gte": {
+          "recovery_flag": 0.5
+        }
+      },
+      "saliency": 3.0,
+      "severity": "daily",
+      "once": true,
+      "cooldown_steps": 0,
+      "delay_steps": 0,
+      "cost": {},
+      "consequence": {
+        "stage": "active",
+        "open_threads": [
+          "把未完成的功课与舞台备忘写进下周种子"
+        ],
+        "variable_deltas": {
+          "week_closure": 1.0,
+          "exam_pressure": -0.1
+        }
+      },
+      "recovery_steps": 0,
+      "required_evidence": [
+        "arc:living_story_v1.main",
+        "arc:living_story_v1.side_study",
+        "arc:living_story_v1.ambient_park"
+      ],
+      "scope": "fiction",
+      "priority": 190,
+      "target_arc_id": "living_story_v1.main"
+    }
+  ]
+}

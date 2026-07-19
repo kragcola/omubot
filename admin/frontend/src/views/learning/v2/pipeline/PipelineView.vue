@@ -95,7 +95,11 @@ async function performItemAction(item: LearningItem, action: string) {
     else if (action === 'restore') url = `/api/admin/style/expressions/${exprId}/status`
   } else if (noun === 'episode') {
     const epId = id.replace(/^episode-/, '')
-    if (action === 'approve') url = `/api/admin/episodes/${epId}/approve`
+    if (action === 'approve') {
+      url = console.activeStage.value === 'review'
+        ? `/api/admin/episodes/${epId}/enable`
+        : `/api/admin/episodes/${epId}/approve`
+    }
     else if (action === 'reject') url = `/api/admin/episodes/${epId}/disable`
     else if (action === 'archive') url = `/api/admin/episodes/${epId}/disable`
     else if (action === 'restore') url = `/api/admin/episodes/${epId}/restore`

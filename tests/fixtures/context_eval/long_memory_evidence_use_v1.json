@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "description": "Synthetic Omubot capability dimensions for LongMemEval-V2 premise/temporal/evidence-use and MemTrace current/earlier/trajectory style checks. NOT official LongMemEval-V2, LoCoMo, MemTrace data or any public leaderboard. Scores structured TemporalTrace fields only (never answer generation).",
+  "cases": [
+    {
+      "id": "e1-ordinary-current-after-supersede",
+      "query": "现在住在哪里",
+      "current_message": "现在住在哪里",
+      "rewritten_query": "现在住在哪里",
+      "session_id": "evidence-use-user-a-s1",
+      "user_id": "u_a",
+      "group_id": null,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "上海"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "杭州"
+        }
+      ],
+      "max_duplicate_hits": 0,
+      "notes": "E1: ordinary active-only after 杭州→上海 supersede; no trace expectation."
+    },
+    {
+      "id": "e2-premise-conflict-evidence-use",
+      "query": "现在住在哪里",
+      "current_message": "我不是还住杭州吗",
+      "rewritten_query": "现在住在哪里",
+      "session_id": "evidence-use-user-a-s2",
+      "user_id": "u_a",
+      "group_id": null,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "上海"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "杭州"
+        }
+      ],
+      "trace": {
+        "expected_present": true,
+        "reason": "premise_conflict",
+        "required_current_contains": ["上海"],
+        "forbidden_current_contains": ["杭州"],
+        "required_earlier_contains": ["杭州"],
+        "forbidden_earlier_contains": [],
+        "required_trajectory_contains": ["杭州", "上海"],
+        "forbidden_trajectory_contains": [],
+        "required_text_contains": ["当前", "更早", "轨迹"],
+        "forbidden_text_contains": [],
+        "required_evidence_ref_prefixes": ["card:", "message:"],
+        "forbidden_evidence_ref_prefixes": [],
+        "max_knowledge_points": 2,
+        "max_trace_chars": 600
+      },
+      "max_duplicate_hits": 0,
+      "notes": "E2: premise conflict — ordinary active-only 上海; structured current/earlier/trajectory + typed refs."
+    },
+    {
+      "id": "e3-historical-intent-earlier-trajectory",
+      "query": "现在住在哪里",
+      "current_message": "我以前住在哪里",
+      "rewritten_query": "现在住在哪里",
+      "session_id": "evidence-use-user-a-s3",
+      "user_id": "u_a",
+      "group_id": null,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "上海"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "杭州"
+        }
+      ],
+      "trace": {
+        "expected_present": true,
+        "reason": "historical_intent",
+        "required_earlier_contains": ["杭州"],
+        "required_trajectory_contains": ["杭州", "上海"],
+        "required_current_contains": ["上海"],
+        "required_evidence_ref_prefixes": ["card:", "message:"],
+        "max_knowledge_points": 2,
+        "max_trace_chars": 600
+      },
+      "max_duplicate_hits": 0,
+      "notes": "E3: historical intent — ordinary remains active-only; trace exposes earlier/trajectory. Authorization is current_message; query only drives ordinary retrieval."
+    },
+    {
+      "id": "e4-rewrite-only-historical-no-authorization",
+      "query": "现在住在哪里",
+      "current_message": "现在住在哪里",
+      "rewritten_query": "我以前住在哪里",
+      "session_id": "evidence-use-user-a-s4",
+      "user_id": "u_a",
+      "group_id": null,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "上海"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "杭州"
+        }
+      ],
+      "trace": {
+        "expected_present": false
+      },
+      "max_duplicate_hits": 0,
+      "notes": "E4: historical marker only in rewritten_query; current_message lacks authorization → trace absent."
+    },
+    {
+      "id": "e5-cross-group-no-evidence-leak",
+      "query": "团建地点定在哪里",
+      "current_message": "团建地点以前定在哪里",
+      "rewritten_query": "团建地点定在哪里",
+      "session_id": "evidence-use-group-alpha-s1",
+      "user_id": "u_a",
+      "group_id": "g_alpha",
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "阿尔法群团建地点定在东湖"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "贝塔群"
+        },
+        {
+          "contains": "西山"
+        }
+      ],
+      "trace": {
+        "expected_present": false,
+        "forbidden_text_contains": ["贝塔", "西山"],
+        "forbidden_earlier_contains": ["贝塔", "西山"],
+        "forbidden_current_contains": ["贝塔", "西山"],
+        "forbidden_trajectory_contains": ["贝塔", "西山"]
+      },
+      "max_duplicate_hits": 0,
+      "notes": "E5: cross-group isolation — no beta evidence in ordinary hits or trace fields."
+    },
+    {
+      "id": "e6-no-evidence-zero-hits-trace-absent",
+      "query": "量子章鱼的股票代码是什么",
+      "current_message": "量子章鱼的股票代码以前是什么",
+      "rewritten_query": "量子章鱼的股票代码是什么",
+      "user_id": "u_a",
+      "group_id": "g_alpha",
+      "max_hit_count": 0,
+      "max_pack_chars": 0,
+      "required_hits": [],
+      "forbidden_hits": [
+        {
+          "type": "memory_card"
+        }
+      ],
+      "trace": {
+        "expected_present": false
+      },
+      "max_duplicate_hits": 0,
+      "notes": "E6: no-evidence — zero ordinary hits and trace absent."
+    }
+  ]
+}

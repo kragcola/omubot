@@ -75,3 +75,34 @@ async def test_chat_repairs_persona_drift_before_visible_guardrails(
 
     assert call_count == 2
     assert _normalize_reply(reply) == "别这么正式啦我直接说重点"
+
+
+@pytest.mark.asyncio
+async def test_real_chat_rejects_punctuation_only_persona_repair(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
+    client = await _client(persona_runtime)
+    call_count = 0
+
+    async def _fake_call_api(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _result("我是凤笑梦，WxS 的成员，现在向你说明设定。")
+        return _result("……")
+
+    try:
+        with patch("services.llm.client.call_api", new=_fake_call_api):
+            reply = await client.chat(
+                session_id="private_100",
+                user_id="100",
+                user_content="hello",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+
+    assert call_count == 2
+    assert reply
+    assert reply.strip() not in {"...", "…", "……", "!!!", "？？"}

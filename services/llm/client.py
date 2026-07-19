@@ -11,7 +11,7 @@ import json
 import re
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, cast
@@ -65,7 +65,7 @@ from services.llm.usage import UsageTracker
 from services.media.image_cache import ImageCache
 from services.media.sticker_store import StickerStore
 from services.memory.card_store import CardStore, NewCard
-from services.memory.message_log import MessageLog
+from services.memory.message_log import MessageLogPort
 from services.memory.short_term import ChatMessage, ShortTermMemory
 from services.memory.timeline import GroupTimeline, TimelineMessage
 from services.memory.types import Content
@@ -710,8 +710,7 @@ def _ground_visual_content(content: Content, mode: str) -> Content:
         return _prepend_request_instruction(
             content,
             "人物指代只绑定本轮待处理消息中的图片或引用图片；优先依据本轮图片像素与本轮视觉识别结果，"
-            "历史人物名不能覆盖本轮视觉证据；标记为低置信候选或未能可信识别时，低置信候选不得当作人物答案；"
-            "证据不足或冲突时明确说不确定，不要从历史猜人。",
+            "历史人物名不能覆盖本轮视觉证据；未能可信识别或证据不足时明确说不确定，不要把不确定的候选当人物答案，不要从历史猜人。",
         )
     if mode == "missing":
         return _prepend_request_instruction(
@@ -785,6 +784,29 @@ def _latest_pending_message(timeline: GroupTimeline | None, group_id: str | None
             text = content_text(msg.get("content", "")).strip()
             if text:
                 return text
+    return ""
+
+
+def resolve_current_human_message(
+    user_content_text: str | None,
+    *,
+    is_group: bool,
+    timeline: GroupTimeline | None = None,
+    group_id: str | None = None,
+) -> str:
+    """Compute the single current human message used for gates and PromptContext.
+
+    Preference order:
+    1. ``user_content`` plain text (private chat / direct content)
+    2. latest pending human message when group and (1) is empty
+    """
+    text = (user_content_text or "").strip() if isinstance(user_content_text, str) else (
+        str(user_content_text or "").strip()
+    )
+    if text:
+        return text
+    if is_group:
+        return _latest_pending_message(timeline, group_id)
     return ""
 
 
@@ -1286,6 +1308,135 @@ async def _build_debug_block(
     return "\n".join(lines)
 
 
+
+def _is_blank_or_punctuation_only_reply(text: str) -> bool:
+    """Reject blank, ellipsis-only, and punctuation-only visible replies.
+
+    Legitimate emoji / symbol-only reactions (😂, 👍, …) must remain valid.
+    Uses Unicode punctuation categories plus explicit ellipsis/control ornaments.
+    """
+    from services.llm.segmentation import _is_punctuation_only_segment
+
+    return _is_punctuation_only_segment(text)
+
+
+# Internal diagnostic phrases/forms that must never reach final visible reply
+# when the request carried visual side-channel evidence. Not a global ban on
+# ordinary confidence discussions in non-visual contexts.
+_VISUAL_DIAGNOSTIC_REPLY_MARKERS: tuple[str, ...] = (
+    "置信阈值",
+    "低置信候选",
+    "置信度",
+    "threshold=",
+    "distance=",
+    "difference=",
+    "candidate_score",
+)
+_VISUAL_DIAGNOSTIC_NUMERIC_RE = re.compile(
+    r"(?:threshold|distance|difference|confidence)\s*[:=]\s*0\.\d+",
+    re.IGNORECASE,
+)
+
+
+def _strip_visual_diagnostic_phrases(text: str) -> str:
+    """Remove known internal visual diagnostic phrases from a visible reply."""
+    cleaned = text
+    for marker in _VISUAL_DIAGNOSTIC_REPLY_MARKERS:
+        cleaned = cleaned.replace(marker, "")
+    cleaned = _VISUAL_DIAGNOSTIC_NUMERIC_RE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _messages_have_visual_sidechannel(messages: list[dict[str, Any]] | None) -> bool:
+    if not messages:
+        return False
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "image_ref":
+                continue
+            if block.get("provenance") == "visual_system":
+                return True
+            if block.get("image_sha256") or block.get("visual_summary") or block.get("visual_identity"):
+                return True
+    return False
+
+
+def _content_has_visual_sidechannel(content: Content | None) -> bool:
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "image_ref":
+            continue
+        if block.get("provenance") == "visual_system":
+            return True
+        if block.get("image_sha256") or block.get("visual_summary") or block.get("visual_identity"):
+            return True
+    return False
+
+
+def _privacy_safe_visual_sidechannels(content: Content | None) -> list[dict[str, Any]]:
+    """Copy only bounded visual metadata into plugin-facing ReplyContext."""
+    from services.media.visual_evidence import collect_image_ref_sidechannels
+
+    safe: list[dict[str, Any]] = []
+    for ref in collect_image_ref_sidechannels(content):
+        identities = ref.get("visual_identity")
+        if isinstance(identities, list):
+            safe_identities = [
+                str(item).strip()[:80]
+                for item in identities[:8]
+                if str(item).strip()
+            ]
+        else:
+            safe_identities = []
+        safe.append(
+            {
+                "image_sha256": str(ref.get("image_sha256") or "").strip().lower(),
+                "image_sha256_short": str(
+                    ref.get("image_sha256_short") or ""
+                ).strip()[:16],
+                "visual_intent": str(ref.get("visual_intent") or "").strip()[:32],
+                "visual_observation": str(
+                    ref.get("visual_observation") or ""
+                ).strip()[:2000],
+                "visual_identity": safe_identities,
+                "visual_ocr": str(ref.get("visual_ocr") or "").strip()[:1000],
+                "visual_summary": str(
+                    ref.get("visual_summary") or ""
+                ).strip()[:2000],
+                "provenance": "visual_system",
+            }
+        )
+    return safe
+
+
+def _inject_visual_evidence_system_block(
+    system_blocks: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    *,
+    user_text: str = "",
+) -> list[dict[str, Any]]:
+    """Collect image_ref side-channels and append request-local evidence block."""
+    from services.media.visual_evidence import (
+        collect_image_ref_sidechannels,
+        format_visual_evidence_system_block,
+    )
+
+    refs: list[dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        refs.extend(collect_image_ref_sidechannels(content))
+    block_text = format_visual_evidence_system_block(refs, user_text=user_text)
+    if not block_text:
+        return system_blocks
+    return [*system_blocks, {"type": "text", "text": block_text}]
+
+
 class LLMClient:
     def __init__(
         self,
@@ -1301,7 +1452,7 @@ class LLMClient:
         compress_ratio: float = 0.5,
         max_compact_failures: int = 3,
         group_timeline: GroupTimeline | None = None,
-        message_log: MessageLog | None = None,
+        message_log: MessageLogPort | None = None,
         card_store: CardStore | None = None,
         bot_self_id: str = "",
         on_compact: Callable[[], None] | None = None,
@@ -1672,6 +1823,40 @@ class LLMClient:
                 return content_text(message["content"])
         return ""
 
+    def _latest_assistant_history(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None,
+        is_group: bool,
+        limit: int = 12,
+    ) -> tuple[str, ...]:
+        """Bounded assistant-only outbound texts for multi-turn phrase dedup.
+
+        User turns and quoted user text are never included.
+        """
+        limit = max(1, min(int(limit or 12), 32))
+        texts: list[str] = []
+        if is_group and group_id is not None and self._timeline is not None:
+            for turn in reversed(list(self._timeline.get_turns(group_id))):
+                if str(turn.get("role", "")) != "assistant":
+                    continue
+                body = content_text(turn.get("content", "")).strip()
+                if body:
+                    texts.append(body)
+                if len(texts) >= limit:
+                    break
+            return tuple(reversed(texts))
+        for message in reversed(self._short_term.get(session_id)):
+            if message.get("role") != "assistant":
+                continue
+            body = content_text(message.get("content", "")).strip()
+            if body:
+                texts.append(body)
+            if len(texts) >= limit:
+                break
+        return tuple(reversed(texts))
+
     def _build_addressee_hint(
         self,
         *,
@@ -1838,7 +2023,10 @@ class LLMClient:
         return _loader
 
     def _sticker_store(self) -> StickerStore | None:
-        registry = getattr(self._tools, "_tools", {})
+        tools = getattr(self, "_tools", None)
+        if tools is None:
+            return None
+        registry = getattr(tools, "_tools", {})
         if isinstance(registry, dict):
             tool = registry.get("send_sticker")
             store = getattr(tool, "_store", None)
@@ -2316,6 +2504,7 @@ class LLMClient:
         user_message: str,
         session_count: int,
         bot_name: str,
+        assistant_history: Sequence[str] | tuple[str, ...] | list[str] | None = None,
     ) -> tuple[str, tuple[GuardrailHit, ...], dict[str, Any], bool]:
         if not reply.strip() or not enabled:
             return reply, (), {}, False
@@ -2327,6 +2516,7 @@ class LLMClient:
             session_count=session_count,
             bot_name=bot_name,
             config=self._sentinel_guardrail_config,
+            assistant_history=assistant_history,
         )
         metadata = self._guardrail_metrics_metadata(result.hits)
         if result.metadata:
@@ -2378,6 +2568,12 @@ class LLMClient:
                     is_group=is_group,
                 ),
                 bot_name=self._prompt.persona_runtime.identity_snapshot().name,
+                assistant_history=self._latest_assistant_history(
+                    session_id=session_id,
+                    group_id=group_id,
+                    is_group=is_group,
+                    limit=12,
+                ),
             )
         )
         return (
@@ -3404,6 +3600,7 @@ class LLMClient:
         thinker_action: str,
         thinker_thought: str,
         tool_calls: list[dict[str, Any]],
+        trigger_mode: str = "",
     ) -> None:
         if self._bus is None or not reply_content.strip():
             return
@@ -3420,6 +3617,8 @@ class LLMClient:
                 elapsed_ms=elapsed_ms,
                 thinker_action=thinker_action,
                 thinker_thought=thinker_thought,
+                visual_evidence=_privacy_safe_visual_sidechannels(user_content),
+                trigger_mode=str(trigger_mode or ""),
             )
         )
 
@@ -3442,7 +3641,7 @@ class LLMClient:
                 cleaned = ""
 
         normalized = cleaned.strip()
-        if normalized in ("", "...", "☆", "~"):
+        if _is_blank_or_punctuation_only_reply(normalized):
             if has_visible_tool_output:
                 _log_msg_out.info("reply_suppressed_empty | session={} reason=tool_visible", session_id)
                 return "", "suppressed"
@@ -3774,6 +3973,7 @@ class LLMClient:
         thinker_thought: str,
         tool_call_records: list[dict[str, Any]],
         started_at: float,
+        trigger_mode: str,
     ) -> str | None:
         if not self._plan_then_utter_enabled(
             humanization,
@@ -3987,6 +4187,7 @@ class LLMClient:
             thinker_action=thinker_action,
             thinker_thought=thinker_thought,
             tool_calls=tool_call_records,
+            trigger_mode=trigger_mode,
         )
         await self._maybe_extend(
             last_reply=full_reply,
@@ -4821,6 +5022,7 @@ class LLMClient:
             if trigger is not None
             else None
         )
+        trigger_mode = str(getattr(trigger, "mode", "") or "")
         content_preview = user_content[:80] if isinstance(user_content, str) else str(user_content)[:80]
         _log_msg_in.info(
             "chat | session={} user={} identity={} text={!r}",
@@ -4914,6 +5116,15 @@ class LLMClient:
                 conversation_text = " ".join(part for part in (recent_text, pending_text) if part)
         else:
             conversation_text = content_text(user_content) if user_content else ""
+
+        # Single current-human-message value for instruction gate + PromptContext
+        # (and temporal-trace authorization). Computed once; never via locals().get.
+        current_human_message = resolve_current_human_message(
+            content_text(user_content) if user_content else "",
+            is_group=is_group,
+            timeline=self._timeline,
+            group_id=group_id,
+        )
 
         trigger_extra = getattr(trigger, "extra", {}) if trigger is not None else {}
         # Nickname-only call ("emu。" / "姆。"): NoneBot stripped the nickname, so
@@ -5195,9 +5406,6 @@ class LLMClient:
             # the legacy `deny_direct_emit` mode short-circuits with a hardcoded
             # line. Peer bots are skipped entirely (防线1). Severity scans only
             # the current message (防线2), not the aggregated buffer.
-            current_msg = content_text(user_content) if user_content else ""
-            if not current_msg and is_group:
-                current_msg = _latest_pending_message(self._timeline, group_id)
             instruction_hint = await self._apply_instruction_gate(
                 user_message=conversation_text,
                 user_id=user_id,
@@ -5205,7 +5413,7 @@ class LLMClient:
                 trigger=trigger,
                 thinker_instruction_signal=thinker_instruction_signal,
                 on_segment=on_segment,
-                current_message=current_msg or conversation_text,
+                current_message=current_human_message or conversation_text,
             )
             if instruction_hint is None:
                 return None  # DENY (legacy direct mode): refusal already emitted
@@ -5274,6 +5482,8 @@ class LLMClient:
                     plugin_stable.append({"type": "text", "text": group_profile_text})
                 if self._bus is not None:
                     from kernel.types import PromptContext
+                    # Prefer the true current human turn for temporal-trace
+                    # authorization (not the aggregated conversation_text buffer).
                     prompt_ctx = PromptContext(
                         session_id=session_id,
                         group_id=group_id,
@@ -5284,6 +5494,7 @@ class LLMClient:
                         privacy_mask=privacy_mask,
                         retrieve_mode=thinker_retrieve_mode,
                         rewritten_query=thinker_rewritten_query,
+                        current_message=current_human_message or "",
                     )
                     bus = cast(Any, self._bus)
                     await bus.fire_on_pre_prompt(prompt_ctx)
@@ -5412,6 +5623,19 @@ class LLMClient:
         if getattr(trigger, "mode", "") == "correction":
             system_blocks = [*system_blocks, {"type": "text", "text": _CORRECTION_TRIGGER_INSTRUCTION}]
 
+        # Collect structured visual side-channels from image_ref blocks into a
+        # request-local system/dynamic evidence block BEFORE image-ref resolution
+        # (resolution drops metadata when converting to base64 image blocks).
+        _user_text_for_visual = content_text(user_content) if user_content else ""
+        system_blocks = _inject_visual_evidence_system_block(
+            system_blocks,
+            messages,
+            user_text=_user_text_for_visual,
+        )
+        _visual_sidechannel_active = _messages_have_visual_sidechannel(messages) or (
+            _content_has_visual_sidechannel(user_content) if user_content else False
+        )
+
         messages, image_tag_map = await resolve_image_refs(messages, self._image_cache)
 
         tool_defs = self._build_tool_defs(group_profile, force_reply=force_reply)
@@ -5471,6 +5695,7 @@ class LLMClient:
                     thinker_thought=thinker_thought,
                     tool_call_records=tool_call_records,
                     started_at=t0,
+                    trigger_mode=trigger_mode,
                 )
                 if plan_reply is not None:
                     return plan_reply
@@ -5621,6 +5846,7 @@ class LLMClient:
                         thinker_action=thinker_action,
                         thinker_thought=thinker_thought,
                         tool_calls=tool_call_records,
+                        trigger_mode=trigger_mode,
                     )
                     await self._maybe_extend(
                         last_reply=full_reply,
@@ -5745,6 +5971,42 @@ class LLMClient:
                     acc_reasoning_replay += rewrite_reasoning_replay
                     if rewrite.metadata.get("rewrite_applied"):
                         text = reply
+
+                reply, _reply_state = self._finalize_visible_reply(
+                    reply=reply,
+                    session_id=session_id,
+                    force_reply=force_reply or companion_hint is not None,
+                    has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
+                    is_group=is_group,
+                )
+                if _visual_sidechannel_active and reply:
+                    cleaned_diag = _strip_visual_diagnostic_phrases(reply)
+                    if cleaned_diag != reply:
+                        reply, _reply_state = self._finalize_visible_reply(
+                            reply=cleaned_diag,
+                            session_id=session_id,
+                            force_reply=force_reply or companion_hint is not None,
+                            has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
+                            is_group=is_group,
+                        )
+                if not reply:
+                    if is_group and group_id is not None and self._timeline is not None:
+                        self._timeline.set_input_tokens(group_id, result["input_tokens"])
+                    else:
+                        self._short_term.set_input_tokens(session_id, result["input_tokens"])
+                    self._record_usage(
+                        call_type="proactive" if is_group else "chat",
+                        user_id=user_id, group_id=group_id,
+                        model=main_model,
+                        provider_kind=str(result.get("provider_kind", main_api_format)),
+                        input_tokens=acc_input, cache_read_tokens=acc_cache_read,
+                        cache_create_tokens=acc_cache_create, output_tokens=acc_output,
+                        prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                        prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                        reasoning_replay_tokens=acc_reasoning_replay,
+                        tool_rounds=round_i, elapsed_s=acc_llm_elapsed,
+                    )
+                    return None
 
                 if not quote_reply_enabled:
                     reply = _strip_cq_reply_codes(reply)
@@ -5932,6 +6194,7 @@ class LLMClient:
                     thinker_action=thinker_action,
                     thinker_thought=thinker_thought,
                     tool_calls=tool_call_records,
+                    trigger_mode=trigger_mode,
                 )
                 await self._maybe_extend(
                     last_reply=full_reply,
@@ -6154,6 +6417,41 @@ class LLMClient:
             acc_prompt_cache_hit += rewrite_cache_hit
             acc_prompt_cache_miss += rewrite_cache_miss
             acc_reasoning_replay += rewrite_reasoning_replay
+        reply, _reply_state = self._finalize_visible_reply(
+            reply=reply,
+            session_id=session_id,
+            force_reply=force_reply or companion_hint is not None,
+            has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
+            is_group=is_group,
+        )
+        if _visual_sidechannel_active and reply:
+            cleaned_diag = _strip_visual_diagnostic_phrases(reply)
+            if cleaned_diag != reply:
+                reply, _reply_state = self._finalize_visible_reply(
+                    reply=cleaned_diag,
+                    session_id=session_id,
+                    force_reply=force_reply or companion_hint is not None,
+                    has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
+                    is_group=is_group,
+                )
+        if not reply:
+            if is_group and group_id is not None and self._timeline is not None:
+                self._timeline.set_input_tokens(group_id, result["input_tokens"])
+            else:
+                self._short_term.set_input_tokens(session_id, result["input_tokens"])
+            self._record_usage(
+                call_type="proactive" if is_group else "chat",
+                user_id=user_id, group_id=group_id,
+                model=main_model,
+                provider_kind=str(result.get("provider_kind", main_api_format)),
+                input_tokens=acc_input, cache_read_tokens=acc_cache_read,
+                cache_create_tokens=acc_cache_create, output_tokens=acc_output,
+                prompt_cache_hit_tokens=acc_prompt_cache_hit,
+                prompt_cache_miss_tokens=acc_prompt_cache_miss,
+                reasoning_replay_tokens=acc_reasoning_replay,
+                tool_rounds=MAX_TOOL_ROUNDS, elapsed_s=acc_llm_elapsed,
+            )
+            return None
         if not quote_reply_enabled:
             reply = _strip_cq_reply_codes(reply)
         reply = _apply_quote_reply_anchor(reply, quote_msg_id)
@@ -6277,6 +6575,7 @@ class LLMClient:
             thinker_action=thinker_action,
             thinker_thought=thinker_thought,
             tool_calls=tool_call_records,
+            trigger_mode=trigger_mode,
         )
         await self._maybe_extend(
             last_reply=full_reply,

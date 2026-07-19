@@ -81,6 +81,7 @@ LLM_PIPELINES: tuple[LLMPipeline, ...] = (
             "scheduler_eot",
             "scheduler_replay_judge",
             "birthday_wish",
+            "qzone_journal_compose",
         ),
     ),
     LLMPipeline(

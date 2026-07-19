@@ -107,6 +107,12 @@ _RUNTIME_METRIC_KEYS = (
     "anchor_reinject_count",
     "slang_lookup_resolved",
     "slang_lookup_unresolved",
+    "qzone_draft_created",
+    "qzone_draft_rejected",
+    "qzone_selection_decision",
+    "qzone_publish_dry_run",
+    "qzone_publish_succeeded",
+    "qzone_publish_unknown",
 )
 
 
@@ -280,9 +286,17 @@ def _score_payload(score: Any) -> tuple[float, dict[str, Any], list[str], dict[s
 
 
 class BlockTraceStore:
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        joint_dual_path_telemetry_enabled: bool = True,
+    ) -> None:
         self._db_path = str(db_path)
         self._db: aiosqlite.Connection | None = None
+        self._joint_dual_path_telemetry_enabled = bool(
+            joint_dual_path_telemetry_enabled
+        )
 
     def _conn(self) -> aiosqlite.Connection:
         if self._db is None:
@@ -361,6 +375,70 @@ class BlockTraceStore:
             (limit,),
         )
         return [_row_to_trace(r) for r in await cursor.fetchall()]
+
+    async def joint_dual_path_snapshot(self, limit: int = 50) -> dict[str, Any]:
+        """Read-only joint dual-path memory telemetry (jdt_v1).
+
+        One bounded SELECT over the latest relevant request_ids; secret-free
+        closed payload. Kill-switch skips all SQL.
+        """
+        from services.block_trace.joint_telemetry import (
+            CLOSED_DECISIONS,
+            RELEVANT_SOURCES,
+            aggregate_joint_snapshot,
+            clamp_limit,
+            disabled_snapshot,
+            group_rows_by_request,
+        )
+
+        if not self._joint_dual_path_telemetry_enabled:
+            return disabled_snapshot()
+
+        safe_limit = clamp_limit(limit)
+        sources = tuple(sorted(RELEVANT_SOURCES))
+        decisions = tuple(CLOSED_DECISIONS)
+        source_placeholders = ",".join("?" * len(sources))
+        decision_placeholders = ",".join("?" * len(decisions))
+        # Latest relevant request_ids first (by max created_at), then all
+        # relevant-family rows for those requests. Unrelated-only requests
+        # never enter the CTE.
+        sql = f"""
+            WITH latest_requests AS (
+                SELECT request_id, MAX(created_at) AS max_created
+                FROM prompt_block_traces
+                WHERE request_id <> ''
+                  AND source IN ({source_placeholders})
+                  AND decision IN ({decision_placeholders})
+                GROUP BY request_id
+                ORDER BY max_created DESC
+                LIMIT ?
+            )
+            SELECT p.request_id, p.source, p.decision, p.created_at
+            FROM prompt_block_traces AS p
+            INNER JOIN latest_requests AS lr
+                ON p.request_id = lr.request_id
+            WHERE p.source IN ({source_placeholders})
+              AND p.decision IN ({decision_placeholders})
+            ORDER BY lr.max_created DESC, p.request_id ASC, p.created_at ASC
+        """
+        params = (*sources, *decisions, safe_limit, *sources, *decisions)
+        cursor = await self._conn().execute(sql, params)
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            await cursor.close()
+
+        projected: list[dict[str, Any]] = []
+        for row in rows:
+            projected.append(
+                {
+                    "request_id": row["request_id"],
+                    "source": row["source"],
+                    "decision": row["decision"],
+                }
+            )
+        groups = group_rows_by_request(projected)
+        return aggregate_joint_snapshot(request_groups=groups, enabled=True)
 
     async def record_humanization_metrics(
         self,

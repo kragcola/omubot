@@ -76,20 +76,21 @@ storage/plugins/config/<name>.json
 
 系统级运行时插件会被锁定；manifest-only 系统能力不注册 PluginBus 实例。当前系统能力包为 `chat`、`context`、`history_loader`、`vision`，其中后两者只读展示。插件中心默认隐藏系统能力，需要通过“显示系统插件”高级入口查看。
 
-## 当前本地包清单（24 个）
+## 当前本地包清单（25 个）
 
 | 插件包 | 版本 | 层级 | 启停策略 | 类别 | 功能 |
 | --- | --- | --- | --- | --- | --- |
 | `chat` | 1.1.25 | system | locked | core | 核心聊天：消息路由、LLM 调用、tool loop |
-| `context` | 0.1.9 | system | locked | core | 统一上下文：memory/doc/graph 检索与动态 Prompt 打包 |
+| `context` | 0.1.14 | system | locked | core | 本地未部署：统一上下文 + TemporalTrace、query-aware plan、card eligibility、pack/evidence-use gates；首发必须 staged rollout |
 | `history_loader` | 1.2.0 | system | locked | core | manifest-only；核心连接阶段加载群历史，状态来自 RuntimeConnectionPipeline |
 | `vision` | 1.1.2 | system | locked | core | 图片描述能力；角色识别链路通过该系统能力接线 |
-| `memo` | 1.1.5 | user | restart_required | memory | 记忆卡片：7 类 3 作用域，检索门控与工具 |
+| `memo` | 1.1.6 | user | restart_required | memory | 本地未部署：记忆卡片 + conflict-aware write policy/observations；首发默认走 dark profile |
 | `knowledge` | 0.1.5 | user | restart_required | memory | 文档知识库：Markdown 扫描、持久索引、检索调试 |
 | `calendar_context` | 1.0.0 | user | restart_required | memory | 唯一 CalendarContextService，并拥有 BirthdayGreeter tick |
 | `affection` | 1.1.2 | user | runtime | memory | 好感度系统：分数、昵称、态度调节 |
 | `schedule` | 1.1.5 | user | restart_required | memory | 拥有 ScheduleGenerator；消费 calendar_service，不拥有日历或生日 tick |
 | `social_narrative` | 0.1.0 | user | restart_required | memory | 基于群聊消息证据记录并注入 factual 共同经历；默认 enabled=false、allowed_group_ids=[] fail-closed；禁止虚构线下行为、禁止私聊证据进群、禁止 fiction/factual 混写 |
+| `qzone_journal` | 0.8.1 | user | restart_required | expression | 本地预发布、未部署；append-only revision lineage + tip CAS/action boundary；真实发布仍被 fixture/profile/canary 三门阻塞 |
 | `slang` | 0.1.17 | user | restart_required | expression | 群内黑话：候选、审核、AI 复核、backlog、漂移治理 |
 | `style` | 1.0.0 | user | restart_required | expression | 表达学习：表达样本、动态风格档案、Prompt 注入 |
 | `sticker` | 1.2.0 | user | restart_required | expression | 表情包：保存、发送、管理与 OCR / 轻量语义检索 |
@@ -107,12 +108,14 @@ storage/plugins/config/<name>.json
 
 说明：
 
-- “24 个”指本地 `plugins/*/plugin.json` 包/能力包数量。
-- PluginBus 当前加载 22 个插件，其中 20 个用户插件按各自 runtime/restart 策略管理。
+- “25 个”指本地 `plugins/*/plugin.json` 包/能力包数量。
+- 当前已部署 PluginBus 仍加载 22 个插件，其中 20 个用户插件按各自 runtime/restart 策略管理；表中的 `context` 0.1.14、`memo` 1.1.6 与 `qzone_journal` 0.8.1 均是本地工作树版本，尚未部署。
 - `history_loader` 与 `vision` 是 manifest-only 能力；`chat` 与 `context` 是锁定的运行时插件，四者都不进入普通启停流。
 - `runtime` 会在当前进程刷新 hook、tool 与 command；`restart_required` 只持久化目标状态，重启 Bot 后应用；`locked`/manifest-only 不进入普通启停事务。
 - `calendar_context` 是日期、节假日与生日上下文的唯一 owner；`schedule` 通过 required dependency 消费该 service。provider 缺失、禁用或版本不兼容时 Schedule fail-closed，不读取旧数据表。
 - `social_narrative` 为 user / restart_required / memory：只把有消息证据（source message id/time）的群聊共同经历记为 factual；禁止私聊证据进入群作用域、禁止 fiction 抬升为 factual；默认 `enabled=false` 且 `allowed_group_ids=[]`，未显式启用并加白名单前 fail-closed。
+- `qzone_journal` 为 user / restart_required / expression：默认 disabled + dry-run + manual-review；advanced 只消费 fiction StoryArc/partner 状态，不接 Part C factual 真人；`/admin/qzone-journal` 只提供审核、dry-run 与 unknown 人工处置，不提供 live publish；内置 wire profile 永远保持 unvalidated，当前未部署。
+- 记忆系统本地多切片不可直接按默认值一次性首发；未来如获部署授权，必须从 `docs/runbooks/memory-system-staged-rollout-v1.md` 的 Stage 0 dark profile 开始，结构切片异常使用旧 bot image 回滚，永不 recreate NapCat。
 - `dream` 不再拥有生日或记忆整合；`MemoryConsolidatorLifecycle` 是 Application component。`history_loader` 没有 PluginBus instance，其状态由连接 pipeline 暴露。
 
 ## 本地插件索引与治理

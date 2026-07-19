@@ -480,6 +480,54 @@ def _natural_split_overlong(
     ]
 
 
+
+def _is_emoji_or_symbol_reaction(ch: str) -> bool:
+    """True for legitimate emoji / pictograph reactions (must not be dropped)."""
+    import unicodedata
+
+    if not ch or ch.isspace():
+        return False
+    # Decorative ornaments we still treat as empty (not reactions)
+    if ch in {"☆", "★", "✨", "✧", "⭐", "~", "～", "·", "•", "●", "○"}:
+        return False
+    cat = unicodedata.category(ch)
+    if cat in {"So", "Sk"}:
+        return True
+    code = ord(ch)
+    if 0x1F000 <= code <= 0x1FAFF:
+        return True
+    if 0x2600 <= code <= 0x27BF and ch not in {"☆", "★", "✨", "✧", "⭐"}:
+        return True
+    return code in {0x200D, 0xFE0F, 0x20E3}
+
+
+def _is_punctuation_or_control_ornament(ch: str) -> bool:
+    """Unicode punctuation / format ornaments (ellipsis, control, pure punct)."""
+    import unicodedata
+
+    if not ch or ch.isspace():
+        return True
+    if ch in {"☆", "★", "✨", "✧", "⭐", "~", "～", "·", "•", "●", "○", "…"}:
+        return True
+    cat = unicodedata.category(ch)
+    return cat.startswith("P") or cat in {"Cc", "Cf", "Zl", "Zp"}
+
+
+def _is_punctuation_only_segment(segment: str) -> bool:
+    """True when a segment is blank/ellipsis/punctuation-only (keep emoji reactions)."""
+    body = "".join(ch for ch in segment if not ch.isspace())
+    if not body:
+        return True
+    # Legitimate emoji/symbol-only reactions are visible content.
+    if any(_is_emoji_or_symbol_reaction(ch) for ch in body):
+        return False
+    # Alnum / CJK content → keep
+    if any(ch.isalnum() or "\u4e00" <= ch <= "\u9fff" for ch in body):
+        return False
+    # Otherwise punctuation/control-only
+    return all(_is_punctuation_or_control_ornament(ch) for ch in body)
+
+
 def natural_split(
     text: str,
     *,
@@ -506,7 +554,7 @@ def natural_split(
         line_segments = _natural_merge_segments(line_segments, split_strength=split_strength, rng=rng)
         segments.extend(line_segments)
     segments = [_natural_cleanup_trailing_punctuation(segment, rng) for segment in segments]
-    segments = [segment for segment in segments if segment]
+    segments = [segment for segment in segments if segment and not _is_punctuation_only_segment(segment)]
 
     expanded: list[str] = []
     for segment in segments:
@@ -520,6 +568,7 @@ def natural_split(
             )
         )
     expanded = [segment for segment in expanded if segment]
+    expanded = [segment for segment in expanded if not _is_punctuation_only_segment(segment)]
     return _natural_apply_sentence_limit(expanded, max_sentence_num)
 
 

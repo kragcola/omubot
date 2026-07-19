@@ -172,6 +172,8 @@ class PluginContext:
 
     # 记忆 —— CardStore / RetrievalGate / StateBoard / MemoExtractor / GroupMemoryConfig
     card_store: Any = None
+    visual_identity_store: Any = None  # VisualIdentityStore (services.memory.visual_identity)
+    entity_alias_store: Any = None  # EntityAliasStore (services.memory.entity_alias_store)
     social_narrative_store: Any = None
     social_narrative_reflection_provider: Any = None
     retrieval: Any = None
@@ -267,6 +269,9 @@ class PluginContext:
     bot_pair_guard: Any = None
     message_coalescer: Any = None
     provider_bus: Any = None
+    worldbook_config: Any = None
+    worldbook_runtime: Any = None
+    worldbook_dream_bridge: Any = None
     scheduler_hawkes_refresher: Any = None
     memory_consolidator_store: Any = None
     memory_consolidator_normalizer: Any = None
@@ -386,6 +391,7 @@ class PromptContext:
     privacy_mask: bool = True
     retrieve_mode: str = "hybrid"  # thinker 决策的检索模式: "skip" / "doc" / "fact" / "hybrid"
     rewritten_query: str = ""  # thinker 重写后的检索 query；空字符串时 fallback 到 conversation_text
+    current_message: str = ""  # latest human message; temporal-trace intent authority
 
     # 插件追加的 blocks（可变列表）
     blocks: list[PromptBlock] = field(default_factory=list)
@@ -421,6 +427,10 @@ class ReplyContext:
     thinker_action: str = ""  # thinker 决策: "reply" / "wait"
     thinker_thought: str = ""  # thinker 内心想法
     source_message_id: int | None = None  # 本轮回复所依据的 QQ message_id；无可追溯触发时为 None
+    # Current request's sanitized image side-channel only. Never carries local
+    # paths, base64 payloads, or image bytes into plugin hooks.
+    visual_evidence: list[dict[str, Any]] = field(default_factory=list)
+    trigger_mode: str = ""
 
 
 @dataclass

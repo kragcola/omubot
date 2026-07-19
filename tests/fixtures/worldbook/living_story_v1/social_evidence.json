@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "current_scope": {
+    "group_id": "fixture-group-living-story",
+    "user_id": "fixture-user-living-story"
+  },
+  "items": [
+    {
+      "experience_id": "social.accept.current",
+      "group_id": "fixture-group-living-story",
+      "user_id": "fixture-user-living-story",
+      "evidence_message_id": "msg-accept-001",
+      "evidence_time": "2026-07-02T12:00:00+08:00",
+      "summary": "虚构公开群聊：讨论本周联排时间表（非真实成员）。",
+      "privacy": "group",
+      "confidence": "high",
+      "expect": "accepted"
+    },
+    {
+      "experience_id": "social.reject.cross_group",
+      "group_id": "fixture-group-other",
+      "user_id": "fixture-user-living-story",
+      "evidence_message_id": "msg-xgroup-001",
+      "evidence_time": "2026-07-02T12:05:00+08:00",
+      "summary": "跨群证据应被拒绝。",
+      "privacy": "group",
+      "confidence": "high",
+      "expect": "rejected:cross_group"
+    },
+    {
+      "experience_id": "social.reject.cross_user",
+      "group_id": "fixture-group-living-story",
+      "user_id": "fixture-user-other",
+      "evidence_message_id": "msg-xuser-001",
+      "evidence_time": "2026-07-02T12:10:00+08:00",
+      "summary": "跨用户证据应被拒绝。",
+      "privacy": "group",
+      "confidence": "high",
+      "expect": "rejected:cross_user"
+    },
+    {
+      "experience_id": "social.reject.private",
+      "group_id": "fixture-group-living-story",
+      "user_id": "fixture-user-living-story",
+      "evidence_message_id": "msg-private-001",
+      "evidence_time": "2026-07-02T12:15:00+08:00",
+      "summary": "隐私 private 的共同经历不得投影到群聊。",
+      "privacy": "private",
+      "confidence": "high",
+      "expect": "rejected:privacy"
+    },
+    {
+      "experience_id": "social.reject.missing_evidence",
+      "group_id": "fixture-group-living-story",
+      "user_id": "fixture-user-living-story",
+      "evidence_message_id": "",
+      "evidence_time": "2026-07-02T12:20:00+08:00",
+      "summary": "缺少 evidence_message_id 应 fail-closed。",
+      "privacy": "group",
+      "confidence": "high",
+      "expect": "rejected:missing_evidence"
+    },
+    {
+      "experience_id": "social.reject.missing_summary",
+      "group_id": "fixture-group-living-story",
+      "user_id": "fixture-user-living-story",
+      "evidence_message_id": "msg-empty-summary",
+      "evidence_time": "2026-07-02T12:25:00+08:00",
+      "summary": "",
+      "privacy": "group",
+      "confidence": "high",
+      "expect": "rejected:missing_evidence"
+    }
+  ]
+}

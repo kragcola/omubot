@@ -41,18 +41,26 @@ class AffectionPlugin(AmadeusPlugin):
         self._group_memory_config = None
         self._provider_bus = None
         self._runtime_state = None
+        self._entity_alias_store = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
         self._engine = ctx.affection_engine
         self._group_memory_config = ctx.group_memory_config
         self._provider_bus = getattr(ctx, "provider_bus", None)
         self._runtime_state = getattr(ctx, "runtime_state", None)
+        self._entity_alias_store = getattr(ctx, "entity_alias_store", None)
 
     def register_tools(self) -> list[Tool]:
         if self._engine is None:
             return []
         from services.tools.affection_tools import SetNicknameTool
-        return [SetNicknameTool(self._engine)]
+        return [
+            SetNicknameTool(
+                self._engine,
+                entity_alias_store=self._entity_alias_store,
+            )
+        ]
+
 
     async def on_pre_prompt(self, ctx: PromptContext) -> None:
         if self._engine is None:

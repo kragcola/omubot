@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "origin": "synthetic",
+  "note": "SYNTHETIC TEMPLATE ONLY — not a real QZone CGI capture. Safe for offline mechanics tests; never live-release evidence.",
+  "request_fingerprint": {
+    "method": "POST",
+    "scheme": "https",
+    "host": "user.qzone.qq.com",
+    "path": "/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6",
+    "query_field_names": ["g_tk"],
+    "form_field_names": ["con", "feedversion", "format", "hostuin", "ugc_right", "ver"],
+    "header_names": ["Cookie", "Origin", "Referer"],
+    "follow_redirects": false
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": "{\"code\":0,\"tid\":\"syntheticTid001\"}"
+  },
+  "expected": {
+    "status": "published",
+    "remote_id": "syntheticTid001"
+  }
+}

@@ -2,6 +2,8 @@
 
 > 状态：active
 > mode: task
+> 运行态恢复：2026-07-10 07:04 CST Docker Desktop 自动恢复原 `qq-bot` 容器 `8b6fc96151f6`，`restart_count=0`；NapCat 原容器仍为 `19f6cf13607c`，两者均未重建。sidecar healthy（4 packs / 136 characters）；OneBot WebSocket 已连接并完成实时收发，无需再执行 `docker compose start bot`。
+> 系统升级：completed。`macOS Sequoia 15.7.7 (24G720)` 于 06:36 安装完成；版本/安装历史、Normal boot、SIP、外置 APFS 读写与 Docker Engine 28.1.1 均验证通过，Tahoe 未安装。升级后 Computer Use 对 VS Code 的一次只读复测仍报 `Sky Computer Use native pipe startup failed`，CUAService `IPC` 路径仍不存在；ChatGPT 仍为 26.707.30751 (5018)，不再重复重试。
 > 最后更新：2026-06-09 23:48 日V猫村いろは AHS press VOCALOID4 插图右侧 SD 裁剪 chibi 小批上线；日V剩 2 个 form
 > 当前下一步：继续剩余缺口补源；`zh_virtual_singers` 当前无缺口。下一步转向 BangDream 10 个 `chibi` 与日V `lily:expression`、`haru:chibi`。BangDream 仍需换强绑定来源策略，不要重收 2026-06-06 商品向、2026-06-07 correct-band/nonchibi-filter 误桶图，Our Notes nav 头像也不是 chibi；日V 不要用 Lily 正比插画/真人图、猫村 AHS 正比/包装/横幅当后续缺口来源、KAMITSUBAKI/FINDME 包装/专辑/背面/误撞 HARU plush 清表。MAYU AtPress 只批准 `3_3.jpg` 的 strap sitting crop，不要重试其它特典 crop。东方栀子官方下载生态、官方站、B 站管理空间本轮已收口：不要再重跑 Google Drive root / Era / Render 公开目录、官方站立绘/KV/logo/备案图、VCPedia Pixiv 图、同人梗图、五维介质非白名单表情或已拒绝 Bilibili 图；`official_expression_bilibili_space_62351857_era_shine_face` 已清 expression。
 > 阻塞：无

@@ -8,19 +8,58 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any
+import re
+from typing import Any, Literal
 
 import aiohttp
 from loguru import logger
 
+ImageIntent = Literal["react", "describe", "identify", "ocr"]
+
+# Structured internal evidence prompt — not chatty product/usage prose the model
+# might echo as user-facing description. Fields guide VL extraction only.
 _STICKER_DESCRIBE_PROMPT = (
-    "请用一句简短的中文描述这张图片/表情包：它展示了什么内容、传达了什么样的情绪或态度、"
-    "适合在什么聊天场景中使用。描述要像真人随手发的表情包说明，不要用学术语言。"
-    "如果是表情包/梗图，重点抓住它的'用法'——什么情况下发这个。"
-    "如果是普通图片，简要描述画面内容即可。"
-    "如果图片上有文字（梗图配字、艺术字等），请在最后单独用固定格式附上：图上文字：xxx（把图上的文字原样写出）；"
-    "如果图上没有任何文字，则省略这一句，不要写'图上文字'。"
+    "请对这张图片/表情包做结构化视觉证据抽取（内部侧信道，不是给用户看的产品说明）。"
+    "用一句简短中文覆盖：对象、动作、情绪/态度；有文字时附 OCR。"
+    "格式示例：对象=…；动作=…；情绪=…；OCR=…（无文字则省略 OCR）。"
+    "不要写聊天场景建议，不要写「适合在什么场景使用」，不要写成可直接转发的表情包文案。"
+    "如果图上有文字，在句末用固定格式附上：图上文字：xxx（原样写出）；"
+    "若无文字则不要写「图上文字」。"
 )
+
+_IDENTIFY_RE = re.compile(
+    r"(这是谁|谁啊|谁呀|哪个角色|什么角色|哪个人|认一下|识别|是不是.{0,8}(？|\?|$))",
+    re.IGNORECASE,
+)
+_OCR_RE = re.compile(
+    r"(写了什么|上面写|图上文字|文字是|读一下|OCR|翻译|念一下|看下字)",
+    re.IGNORECASE,
+)
+_DESCRIBE_RE = re.compile(
+    r"(图里是什么|这是什么|什么图|描述|看看这|这张图|画面|讲讲这|解释一下这)",
+    re.IGNORECASE,
+)
+
+
+def classify_image_intent(user_text: str) -> ImageIntent:
+    """Route image-related user intent without defaulting to description prose.
+
+    Empty / pure-reaction text → react (acknowledge / sticker path, no forced
+    describe monologue). Explicit identity / OCR / describe cues win in that
+    priority order.
+    """
+    text = str(user_text or "").strip()
+    if not text:
+        return "react"
+    if _OCR_RE.search(text):
+        return "ocr"
+    if _IDENTIFY_RE.search(text):
+        return "identify"
+    if _DESCRIBE_RE.search(text):
+        return "describe"
+    # Short reaction / emoji / laugh → react; longer free text still react unless
+    # describe cues fired above (non-description intents must not force prose).
+    return "react"
 
 
 class VisionClient:

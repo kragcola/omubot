@@ -243,7 +243,7 @@ def test_plugin_manifest_ci_gate_validates_repository_manifests() -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "validated 24 plugin manifests" in result.stdout
+    assert "validated 26 plugin manifests" in result.stdout
 
 
 def test_plugin_manifest_ci_gate_rejects_class_description_drift(

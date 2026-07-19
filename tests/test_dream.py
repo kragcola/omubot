@@ -524,6 +524,7 @@ async def test_dream_plugin_wires_context_social_narrative_store(
 
     social_store = object()
     reflection_provider = object()
+    worldbook_bridge = object()
     captured: dict[str, object] = {}
 
     class _CaptureAgent:
@@ -545,6 +546,7 @@ async def test_dream_plugin_wires_context_social_narrative_store(
         runtime_state=None,
         social_narrative_store=social_store,
         social_narrative_reflection_provider=reflection_provider,
+        worldbook_dream_bridge=worldbook_bridge,
         allowed_groups={200},
     )
 
@@ -554,6 +556,7 @@ async def test_dream_plugin_wires_context_social_narrative_store(
         "DreamPlugin must pass only the gated reflection provider into DreamAgent"
     )
     assert captured.get("reflection_allowed_group_ids") == {"200"}
+    assert captured.get("worldbook_dream_bridge") is worldbook_bridge
 
 
 async def test_dream_group_reflection_injects_strict_group_factual_context(
@@ -620,6 +623,44 @@ async def test_dream_global_reflection_does_not_query_or_inject_group_facts(
     assert "共同经历：一起理顺了排练节奏" not in reflection_requests[0]
 
 
+async def test_dream_global_reflection_updates_arc_without_writing_memory_cards(
+    store: CardStore,
+) -> None:
+    arc = _reflection_arc()
+    arc.variables.pop("reflection_group_id")
+    agent = DreamAgent(
+        store=store,
+        life_reflection_enabled=True,
+        schedule_store=_FakeScheduleStore(_reflection_schedule()),
+        story_arc_store=_FakeStoryArcStore(arc),
+    )
+
+    async def mock_api_call(
+        system: list,
+        messages: list,
+        tools: list | None = None,
+        max_tokens: int = 1024,
+    ) -> dict:
+        del system, messages, tools, max_tokens
+        return {
+            "text": json.dumps({
+                "cards": [{
+                    "scope": "global",
+                    "scope_id": "global",
+                    "category": "event",
+                    "content": "合成剧情不进入通用记忆。",
+                    "confidence": 0.8,
+                }],
+                "last_event_summary": "虚构故事完成了一段排练。",
+            }, ensure_ascii=False),
+            "tool_uses": [],
+        }
+
+    assert await agent._run_life_reflection(mock_api_call) == 0
+    assert await store.search_cards("合成剧情", limit=5) == []
+    assert arc.last_events[-1]["subject_kind"] == "fiction"
+
+
 def test_social_narrative_facts_remain_out_of_schedule_and_story_arc_prompts() -> None:
     import inspect
 
@@ -661,7 +702,7 @@ async def test_dream_life_reflection_flag_off_preserves_existing_loop(store: Car
     assert await store.search_cards("洞察", limit=5) == []
 
 
-async def test_dream_life_reflection_writes_cards_and_updates_arc(store: CardStore) -> None:
+async def test_dream_life_reflection_writes_only_group_cards_and_updates_arc(store: CardStore) -> None:
     schedule_store = _FakeScheduleStore(_reflection_schedule())
     arc = _reflection_arc()
     story_store = _FakeStoryArcStore(arc)
@@ -725,12 +766,13 @@ async def test_dream_life_reflection_writes_cards_and_updates_arc(store: CardSto
     await agent._run(mock_api_call)
 
     cards = await store.search_cards("经历洞察", limit=5)
-    assert len(cards) == 2
+    assert len(cards) == 1
     assert {card.source for card in cards} == {"dream_reflection"}
     assert {card.captured_by for card in cards} == {"dream_reflection"}
-    assert {card.scope for card in cards} == {"group", "global"}
+    assert {card.scope for card in cards} == {"group"}
     assert story_store.saved == [arc]
     assert arc.last_events[-1]["source"] == "dream_reflection"
+    assert arc.last_events[-1]["subject_kind"] == "fiction"
     assert "动作难度是否继续下调" in arc.open_threads
     assert arc.next_day_seed == "明天先复习再排练，减少临场焦虑。"
     assert schedule_store.load_calls and schedule_store.load_calls[-1][1] is False
@@ -802,13 +844,10 @@ async def test_dream_life_reflection_binds_scope_to_selected_group(store: CardSt
             "tool_uses": [],
         }
 
-    assert await agent._run_life_reflection(mock_api_call) == 2
+    assert await agent._run_life_reflection(mock_api_call) == 0
 
     cards = await store.search_cards("经历洞察", limit=10)
-    assert {(card.scope, card.scope_id) for card in cards} == {
-        ("group", "200"),
-        ("global", "global"),
-    }
+    assert cards == []
 
 
 async def test_dream_life_reflection_without_group_rejects_group_scope(store: CardStore) -> None:
@@ -845,12 +884,10 @@ async def test_dream_life_reflection_without_group_rejects_group_scope(store: Ca
             "tool_uses": [],
         }
 
-    assert await agent._run_life_reflection(mock_api_call) == 1
+    assert await agent._run_life_reflection(mock_api_call) == 0
 
     cards = await store.search_cards("经历洞察", limit=10)
-    assert [(card.scope, card.scope_id, card.content) for card in cards] == [
-        ("global", "global", "经历洞察：只保留全局卡。"),
-    ]
+    assert cards == []
 
 
 async def test_dream_life_reflection_rejects_group_outside_real_allowlist(

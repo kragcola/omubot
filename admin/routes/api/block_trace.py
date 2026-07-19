@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Query
+from loguru import logger
 
 from services.block_trace.store import BlockTraceStore
 from services.storage.retention import (
@@ -135,5 +136,37 @@ def create_block_trace_router(
                 for src, counts in sorted(rows.items())
             ],
         }
+
+    @router.get("/joint-memory-paths")
+    async def joint_memory_paths(
+        limit: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """Closed joint dual-path memory telemetry (jdt_v1).
+
+        Read-only; delegates to BlockTraceStore.joint_dual_path_snapshot.
+        Missing store is fail-closed. Exceptions expose type only.
+        """
+        store = _resolve_store()
+        if store is None:
+            return {"ok": False, "error": "BlockTraceStore not available"}
+        if not hasattr(store, "joint_dual_path_snapshot"):
+            return {"ok": False, "error": "BlockTraceStore not available"}
+        try:
+            # Call the public store method only; never str(exc) on failure.
+            # CancelledError is BaseException and propagates past Exception.
+            snapshot = await store.joint_dual_path_snapshot(limit=limit)
+        except Exception as exc:
+            err_type = type(exc).__name__
+            logger.warning("joint_dual_path_snapshot failed | error={}", err_type)
+            return {
+                "ok": False,
+                "error": f"joint_snapshot_failed:{err_type}",
+            }
+        if not isinstance(snapshot, dict):
+            return {
+                "ok": False,
+                "error": "joint_snapshot_failed:TypeError",
+            }
+        return {"ok": True, "snapshot": snapshot}
 
     return router

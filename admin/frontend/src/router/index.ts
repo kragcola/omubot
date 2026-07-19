@@ -137,6 +137,12 @@ const router = createRouter({
       component: () => import('../views/block-trace/BlockTraceView.vue'),
     },
     {
+      path: '/worldbook',
+      name: 'worldbook',
+      meta: { title: '世界书 / Living Story', keepAlive: true },
+      component: () => import('../views/worldbook/WorldbookView.vue'),
+    },
+    {
       path: '/memos',
       name: 'memos',
       redirect: () => ({
@@ -174,6 +180,12 @@ const router = createRouter({
       name: 'birthday',
       meta: { title: '生日祝福', keepAlive: true },
       component: () => import('../views/birthday/BirthdayView.vue'),
+    },
+    {
+      path: '/qzone-journal',
+      name: 'qzone-journal',
+      meta: { title: '空间日志', keepAlive: true },
+      component: () => import('../views/qzone-journal/QzoneJournalView.vue'),
     },
     {
       path: '/replay/weekly',

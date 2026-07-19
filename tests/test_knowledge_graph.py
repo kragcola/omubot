@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -351,5 +352,466 @@ async def test_scope_risks_list_legacy_global_memory_facts(tmp_path) -> None:
         assert [item["fact_id"] for item in risks] == [legacy.fact_id]
         assert risks[0]["scope"] == "global"
         assert risks[0]["evidence"][0]["type"] == "memory_card"
+    finally:
+        await graph.close()
+
+
+@pytest.mark.asyncio
+async def test_scoped_relationship_window_batches_evidence_loading(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    graph = KnowledgeGraphService(tmp_path / "scoped-evidence.db")
+    await graph.init()
+    try:
+        fact = await graph.submit_fact_candidate(
+            subject="用户123",
+            predicate="喜欢",
+            object="音游",
+            confidence=0.8,
+            source="test",
+            evidence={"type": "fixture", "id": "evidence-1"},
+            scope="user",
+            scope_id="123",
+            promote_directly=True,
+        )
+        assert isinstance(fact, GraphFact)
+
+        async def reject_n_plus_one(_fact_id: str) -> list[dict[str, Any]]:
+            raise AssertionError("scoped window must batch evidence loading")
+
+        monkeypatch.setattr(graph._store, "list_evidence", reject_n_plus_one)
+        rows = await graph.list_relationships_for_scopes(
+            allowed_scopes=[("user", "123"), ("global", "global")],
+            limit_per_scope=200,
+        )
+
+        row = next(item for item in rows if item["fact_id"] == fact.fact_id)
+        assert [(item["type"], item["id"]) for item in row["evidence"]] == [
+            ("fixture", "evidence-1")
+        ]
+    finally:
+        await graph.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approve_candidate_same_service_promotes_once(tmp_path) -> None:
+    """Same service, two concurrent approve_candidate: one winner, one fact, one listener."""
+    graph = KnowledgeGraphService(tmp_path / "graph-race.db")
+    await graph.init()
+    try:
+        candidate = await graph.submit_fact_candidate(
+            subject="用户123",
+            predicate="喜欢",
+            object="音游",
+            confidence=0.9,
+            source="test",
+            evidence={"card_id": "card_race", "quote": "喜欢音游"},
+        )
+        assert isinstance(candidate, GraphCandidate)
+
+        listener_calls: list[str] = []
+
+        async def _listener(fact: GraphFact, _evidence: dict[str, Any]) -> None:
+            listener_calls.append(fact.fact_id)
+
+        graph.add_fact_listener(_listener)
+        results = await asyncio.gather(
+            graph.approve_candidate(candidate.candidate_id),
+            graph.approve_candidate(candidate.candidate_id),
+        )
+        successes = [item for item in results if item is not None]
+        assert len(successes) == 1
+        assert sum(1 for item in results if item is None) == 1
+
+        relationships = await graph.list_relationships()
+        assert len(relationships) == 1
+        assert relationships[0]["fact_id"] == successes[0].fact_id
+
+        refreshed = await graph._store.get_candidate(candidate.candidate_id)
+        assert refreshed is not None
+        assert refreshed.status == "active"
+
+        db = graph._store._require_db()
+        async with db.execute("SELECT COUNT(*) AS n FROM graph_facts") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert int(row["n"]) == 1
+        async with db.execute("SELECT COUNT(*) AS n FROM graph_evidence") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert int(row["n"]) == 1
+        assert listener_calls == [successes[0].fact_id]
+    finally:
+        await graph.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approve_candidate_separate_connections_promotes_once(
+    tmp_path,
+) -> None:
+    """Two services / connections on the same SQLite file: exactly one fact."""
+    db_path = tmp_path / "graph-cross-conn.db"
+    seeder = KnowledgeGraphService(db_path)
+    await seeder.init()
+    try:
+        candidate = await seeder.submit_fact_candidate(
+            subject="用户456",
+            predicate="在用",
+            object="Omubot",
+            confidence=0.88,
+            source="test",
+            evidence={"card_id": "card_cross", "quote": "在用 Omubot"},
+        )
+        assert isinstance(candidate, GraphCandidate)
+        cid = candidate.candidate_id
+    finally:
+        await seeder.close()
+
+    left = KnowledgeGraphService(db_path)
+    right = KnowledgeGraphService(db_path)
+    await left.init()
+    await right.init()
+    try:
+        left_calls: list[str] = []
+        right_calls: list[str] = []
+
+        async def _left(fact: GraphFact, _evidence: dict[str, Any]) -> None:
+            left_calls.append(fact.fact_id)
+
+        async def _right(fact: GraphFact, _evidence: dict[str, Any]) -> None:
+            right_calls.append(fact.fact_id)
+
+        left.add_fact_listener(_left)
+        right.add_fact_listener(_right)
+
+        results = await asyncio.gather(
+            left.approve_candidate(cid),
+            right.approve_candidate(cid),
+        )
+        successes = [item for item in results if item is not None]
+        assert len(successes) == 1
+        assert sum(1 for item in results if item is None) == 1
+
+        async with left._store._require_db().execute(
+            "SELECT COUNT(*) AS n FROM graph_facts WHERE status = 'active'"
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert int(row["n"]) == 1
+
+        async with left._store._require_db().execute(
+            "SELECT status FROM extraction_candidates WHERE candidate_id = ?",
+            (cid,),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row["status"] == "active"
+
+        assert len(left_calls) + len(right_calls) == 1
+        assert (left_calls + right_calls) == [successes[0].fact_id]
+    finally:
+        await left.close()
+        await right.close()
+
+
+@pytest.mark.asyncio
+async def test_approve_candidate_cancel_rolls_back_and_skips_listener(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D2: real task.cancel mid-promotion rolls back and does not poison ordinary writes.
+
+    Blocks after transaction mutations but before commit, cancels the promote
+    task, asserts candidate stays pending with zero fact/evidence/listener, and
+    proves a concurrent ordinary-connection write commits successfully (not
+    joined to or rolled back with the promotion transaction).
+    """
+    graph = KnowledgeGraphService(tmp_path / "graph-cancel.db")
+    await graph.init()
+    try:
+        candidate = await graph.submit_fact_candidate(
+            subject="用户789",
+            predicate="关注",
+            object="知识图谱",
+            confidence=0.9,
+            source="test",
+            evidence={"card_id": "card_cancel", "quote": "关注知识图谱"},
+        )
+        assert isinstance(candidate, GraphCandidate)
+
+        listener_calls: list[str] = []
+
+        async def _listener(fact: GraphFact, _evidence: dict[str, Any]) -> None:
+            listener_calls.append(fact.fact_id)
+
+        graph.add_fact_listener(_listener)
+
+        reached_block = asyncio.Event()
+        release_block = asyncio.Event()
+        original_insert = graph._store._insert_evidence
+
+        async def _block_after_evidence(
+            fact_id: str,
+            evidence: dict[str, Any],
+            *,
+            db: Any | None = None,
+        ) -> None:
+            await original_insert(fact_id, evidence, db=db)
+            # Mutations (CAS + fact + evidence) are in the open promotion txn;
+            # block before promote_candidate commits so cancel can roll back.
+            reached_block.set()
+            await release_block.wait()
+
+        monkeypatch.setattr(graph._store, "_insert_evidence", _block_after_evidence)
+
+        promote_task = asyncio.create_task(graph.approve_candidate(candidate.candidate_id))
+        await asyncio.wait_for(reached_block.wait(), timeout=2.0)
+
+        # Ordinary self._db write while promotion holds an open transaction on
+        # the dedicated promotion connection. Start as a task so SQLite busy
+        # wait cannot deadlock the test before cancel is delivered.
+        ordinary_task = asyncio.create_task(
+            graph.submit_fact_candidate(
+                subject="旁路写者",
+                predicate="记录",
+                object="隔离事务",
+                confidence=0.7,
+                source="test",
+                evidence={"card_id": "card_ordinary", "quote": "ordinary write"},
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        promote_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await promote_task
+        # Unblock any residual waiters if cancel landed after the await site.
+        release_block.set()
+
+        concurrent = await asyncio.wait_for(ordinary_task, timeout=5.0)
+        assert isinstance(concurrent, GraphCandidate)
+
+        refreshed = await graph._store.get_candidate(candidate.candidate_id)
+        assert refreshed is not None
+        assert refreshed.status == "pending"
+        assert await graph.list_relationships() == []
+        assert listener_calls == []
+
+        # Cancelled promotion left no fact/evidence; ordinary candidate remains.
+        db = graph._store._require_db()
+        async with db.execute("SELECT COUNT(*) AS n FROM graph_facts") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert int(row["n"]) == 0
+        async with db.execute("SELECT COUNT(*) AS n FROM graph_evidence") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert int(row["n"]) == 0
+
+        ordinary = await graph._store.get_candidate(concurrent.candidate_id)
+        assert ordinary is not None
+        assert ordinary.status == "pending"
+        assert ordinary.subject == "旁路写者"
+    finally:
+        await graph.close()
+
+
+@pytest.mark.asyncio
+async def test_reject_after_active_false_active_fact_intact(tmp_path) -> None:
+    """reject_candidate CAS must not overwrite active; fact stays active."""
+    graph = KnowledgeGraphService(tmp_path / "graph-reject-active.db")
+    await graph.init()
+    try:
+        candidate = await graph.submit_fact_candidate(
+            subject="用户甲",
+            predicate="喜欢",
+            object="音游",
+            confidence=0.9,
+            source="test",
+            evidence={"card_id": "card_ra", "quote": "喜欢音游"},
+        )
+        assert isinstance(candidate, GraphCandidate)
+        fact = await graph.approve_candidate(candidate.candidate_id)
+        assert fact is not None
+        assert fact.status == "active"
+
+        ok = await graph.reject_candidate(candidate.candidate_id, note="late reject")
+        assert ok is False
+
+        refreshed = await graph._store.get_candidate(candidate.candidate_id)
+        assert refreshed is not None
+        assert refreshed.status == "active"
+
+        relationships = await graph.list_relationships()
+        assert len(relationships) == 1
+        assert relationships[0]["fact_id"] == fact.fact_id
+        assert relationships[0]["status"] == "active"
+    finally:
+        await graph.close()
+
+
+@pytest.mark.asyncio
+async def test_keep_after_active_false(tmp_path) -> None:
+    """keep_candidate CAS must not pull active back to pending."""
+    graph = KnowledgeGraphService(tmp_path / "graph-keep-active.db")
+    await graph.init()
+    try:
+        candidate = await graph.submit_fact_candidate(
+            subject="用户乙",
+            predicate="在用",
+            object="Omubot",
+            confidence=0.88,
+            source="test",
+            evidence={"card_id": "card_ka", "quote": "在用 Omubot"},
+        )
+        assert isinstance(candidate, GraphCandidate)
+        fact = await graph.approve_candidate(candidate.candidate_id)
+        assert fact is not None
+
+        ok = await graph.keep_candidate(candidate.candidate_id, note="late keep")
+        assert ok is False
+
+        refreshed = await graph._store.get_candidate(candidate.candidate_id)
+        assert refreshed is not None
+        assert refreshed.status == "active"
+        assert len(await graph.list_relationships()) == 1
+    finally:
+        await graph.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approve_versus_reject_one_coherent_outcome(tmp_path) -> None:
+    """Concurrent approve vs reject: exactly one winner, coherent terminal state."""
+    graph = KnowledgeGraphService(tmp_path / "graph-approve-reject.db")
+    await graph.init()
+    try:
+        candidate = await graph.submit_fact_candidate(
+            subject="用户丙",
+            predicate="关注",
+            object="知识图谱",
+            confidence=0.91,
+            source="test",
+            evidence={"card_id": "card_ar", "quote": "关注知识图谱"},
+        )
+        assert isinstance(candidate, GraphCandidate)
+        cid = candidate.candidate_id
+
+        approve_result, reject_result = await asyncio.gather(
+            graph.approve_candidate(cid),
+            graph.reject_candidate(cid, note="race reject"),
+        )
+
+        refreshed = await graph._store.get_candidate(cid)
+        assert refreshed is not None
+        facts = await graph.list_relationships()
+
+        if approve_result is not None:
+            assert reject_result is False
+            assert refreshed.status == "active"
+            assert len(facts) == 1
+            assert facts[0]["fact_id"] == approve_result.fact_id
+        else:
+            assert reject_result is True
+            assert refreshed.status == "rejected"
+            assert facts == []
+    finally:
+        await graph.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approve_versus_keep_never_fact_plus_pending(
+    tmp_path,
+) -> None:
+    """Concurrent approve vs keep: never active fact + pending candidate."""
+    graph = KnowledgeGraphService(tmp_path / "graph-approve-keep.db")
+    await graph.init()
+    try:
+        candidate = await graph.submit_fact_candidate(
+            subject="用户丁",
+            predicate="记录",
+            object="CAS 竞态",
+            confidence=0.87,
+            source="test",
+            evidence={"card_id": "card_ak", "quote": "CAS 竞态"},
+        )
+        assert isinstance(candidate, GraphCandidate)
+        cid = candidate.candidate_id
+
+        approve_result, keep_result = await asyncio.gather(
+            graph.approve_candidate(cid),
+            graph.keep_candidate(cid, note="race keep"),
+        )
+
+        refreshed = await graph._store.get_candidate(cid)
+        assert refreshed is not None
+        facts = await graph.list_relationships()
+
+        # Coherent outcomes only:
+        # - approve wins: fact active, candidate active (keep may or may not
+        #   have written a review_note while still pending before promote CAS)
+        # - keep "wins" first then approve: still promote from pending, or
+        #   approve loses if somehow status left non-pending (not expected for keep→pending)
+        if approve_result is not None:
+            assert refreshed.status == "active"
+            assert len(facts) == 1
+            assert facts[0]["fact_id"] == approve_result.fact_id
+            # Must never leave a pending candidate alongside the fact
+            assert refreshed.status != "pending"
+        else:
+            assert keep_result is True
+            assert refreshed.status == "pending"
+            assert facts == []
+
+        # Explicit invariant: no active fact with pending candidate
+        if facts:
+            assert refreshed.status != "pending"
+        if refreshed.status == "pending":
+            assert facts == []
+    finally:
+        await graph.close()
+
+
+@pytest.mark.asyncio
+async def test_reapprove_after_attempted_revert_no_duplicate_fact(tmp_path) -> None:
+    """After promote, reject/keep fail; re-approve does not duplicate the fact."""
+    graph = KnowledgeGraphService(tmp_path / "graph-reapprove.db")
+    await graph.init()
+    try:
+        candidate = await graph.submit_fact_candidate(
+            subject="用户戊",
+            predicate="使用",
+            object="pytest",
+            confidence=0.93,
+            source="test",
+            evidence={"card_id": "card_re", "quote": "使用 pytest"},
+        )
+        assert isinstance(candidate, GraphCandidate)
+        cid = candidate.candidate_id
+
+        fact1 = await graph.approve_candidate(cid)
+        assert fact1 is not None
+
+        assert await graph.reject_candidate(cid, note="attempt revert reject") is False
+        assert await graph.keep_candidate(cid, note="attempt revert keep") is False
+
+        fact2 = await graph.approve_candidate(cid)
+        assert fact2 is None
+
+        refreshed = await graph._store.get_candidate(cid)
+        assert refreshed is not None
+        assert refreshed.status == "active"
+
+        db = graph._store._require_db()
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM graph_facts WHERE status = 'active'"
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert int(row["n"]) == 1
+
+        relationships = await graph.list_relationships()
+        assert len(relationships) == 1
+        assert relationships[0]["fact_id"] == fact1.fact_id
     finally:
         await graph.close()

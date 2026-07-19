@@ -18,6 +18,7 @@ _KAOMOJI_RE = re.compile(r"[\(（][^()\n（）]{0,12}[\)）]|[｡ωд▽≧≦�
 _DECOR_RE = re.compile(r"[☆♪✦★♡♥]")
 _EXCITED_RE = re.compile(r"[!！]{2,}|哈哈哈|太棒|冲冲|绝了|笑死")
 _TEMPLATE_RE = re.compile(r"作为一个AI|根据你的要求|我将|我会尽力|以下是")
+_CAUGHT_OUT_RE = re.compile(r"被你(看穿|发现|抓到|逮到|识破)|被发现了|哎呀被发现|我认栽")
 _OVERFAMILIAR_RE = re.compile(r"亲亲|宝贝|老婆|贴贴|抱抱")
 
 
@@ -144,6 +145,9 @@ class StylometricScorer:
         if _TEMPLATE_RE.search(text):
             issues.append("surface.template_phrase")
             score = min(score, 0.55)
+        if _CAUGHT_OUT_RE.search(text):
+            issues.append("surface.phrase_family")
+            score = min(score, 0.6)
         if len(re.findall(r"[!！?？]", text)) >= 4:
             issues.append("surface.too_many_punctuations")
             score = min(score, 0.62)

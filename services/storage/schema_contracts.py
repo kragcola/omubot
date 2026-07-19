@@ -350,6 +350,53 @@ EPISODIC_V1_CONTRACT = SchemaContract(
 )
 
 
+ENTITY_ALIASES_V1_CONTRACT = SchemaContract(
+    db_id="entity_aliases",
+    target_user_version=1,
+    tables=(
+        TableContract(
+            "entity_aliases",
+            (
+                _column("alias_id", "TEXT", primary_key=1),
+                _column("entity_key", "TEXT", not_null=True),
+                _column("alias_norm", "TEXT", not_null=True),
+                _column("alias_surface", "TEXT", not_null=True),
+                _column("scope", "TEXT", not_null=True),
+                _column("scope_id", "TEXT", not_null=True, default_sql="''"),
+                _column("confidence", "REAL", not_null=True, default_sql="0.5"),
+                _column("source", "TEXT", not_null=True),
+                _column("status", "TEXT", not_null=True, default_sql="'active'"),
+                _column("valid_from", "TEXT", not_null=True),
+                _column("valid_to", "TEXT", not_null=True, default_sql="''"),
+                _column("created_at", "TEXT", not_null=True),
+                _column("updated_at", "TEXT", not_null=True),
+                _column("meta_json", "TEXT", not_null=True, default_sql="'{}'"),
+            ),
+        ),
+    ),
+    indexes=(
+        IndexContract(
+            "ux_entity_alias_active_scope_norm",
+            "entity_aliases",
+            ("scope", "scope_id", "alias_norm"),
+            unique=True,
+            partial=True,
+            where_sql="status = 'active' AND valid_to = ''",
+        ),
+        IndexContract(
+            "idx_entity_alias_entity",
+            "entity_aliases",
+            ("entity_key", "status"),
+        ),
+        IndexContract(
+            "idx_entity_alias_resolve",
+            "entity_aliases",
+            ("scope", "scope_id", "alias_norm", "status"),
+        ),
+    ),
+)
+
+
 RESEARCH_TOPIC_ASSIGNMENTS_V1_MIGRATION_NAME = "topic_assignment_baseline_v1"
 RESEARCH_TOPIC_ASSIGNMENTS_V1_MIGRATION_CHECKSUM = (
     "sha256:a54260933061fdc77bcabe066100400ef261f023cb51008118319fcbf9b09ec0"
@@ -488,6 +535,7 @@ _CONTRACTS = {
         BLOCK_TRACE_V1_CONTRACT,
         USAGE_V1_CONTRACT,
         EPISODIC_V1_CONTRACT,
+        ENTITY_ALIASES_V1_CONTRACT,
         RESEARCH_TOPIC_ASSIGNMENTS_V1_CONTRACT,
     )
 }

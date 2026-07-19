@@ -113,6 +113,29 @@ def create_episodes_router(*, ctx: Any = None, bus: Any = None) -> APIRouter:
             return JSONResponse(status_code=404, content={"ok": False, "error": "episode not found"})
         return {"ok": True, "episode_id": episode_id, "new_state": "approved"}
 
+    @router.post("/{episode_id}/enable")
+    async def enable_episode(episode_id: str, request: Request):
+        """Transition an approved episode into the prompt recall set."""
+        store = await _store()
+        body = await _read_json(request)
+        reason = str(body.get("reason", "")).strip() or "admin enable for prompt"
+        try:
+            ok = await store.transition_state(
+                episode_id,
+                new_state="enabled_for_prompt",
+                actor="admin",
+                reason=reason,
+            )
+        except ValueError as e:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+        if not ok:
+            return JSONResponse(status_code=404, content={"ok": False, "error": "episode not found"})
+        return {
+            "ok": True,
+            "episode_id": episode_id,
+            "new_state": "enabled_for_prompt",
+        }
+
     @router.post("/{episode_id}/disable")
     async def disable_episode(episode_id: str, request: Request):
         """Transition any -> disabled."""
@@ -144,6 +167,41 @@ def create_episodes_router(*, ctx: Any = None, bus: Any = None) -> APIRouter:
         if not ok:
             return JSONResponse(status_code=404, content={"ok": False, "error": "episode not found"})
         return {"ok": True, "episode_id": episode_id, "new_state": "approved"}
+
+    @router.post("/{episode_id}/decay")
+    async def set_episode_decay(episode_id: str, request: Request):
+        """Set or clear ``decay_at`` via the strict EpisodeStore contract.
+
+        Body: ``{"decay_at": "<ISO-8601 or empty>", "reason": optional}``.
+        Empty ``decay_at`` clears expiry. Missing key or invalid value → 400;
+        unknown episode → 404. Success returns the normalized ``decay_at``.
+        """
+        store = await _store()
+        body = await _read_json(request)
+        if "decay_at" not in body:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "decay_at is required (use empty string to clear)"},
+            )
+        reason = str(body.get("reason", "")).strip() or "admin set decay_at"
+        try:
+            ok = await store.set_decay_at(
+                episode_id,
+                decay_at=body["decay_at"],
+                actor="admin",
+                reason=reason,
+            )
+        except (TypeError, ValueError) as e:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(e)})
+        if not ok:
+            return JSONResponse(status_code=404, content={"ok": False, "error": "episode not found"})
+        ep = await store.get_episode(episode_id)
+        normalized = ep.decay_at if ep is not None else ""
+        return {
+            "ok": True,
+            "episode_id": episode_id,
+            "decay_at": normalized,
+        }
 
     @router.get("/{episode_id}/revisions")
     async def list_revisions(episode_id: str, request: Request):

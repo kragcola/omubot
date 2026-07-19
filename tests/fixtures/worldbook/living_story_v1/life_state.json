@@ -1,0 +1,57 @@
+{
+  "revision": 0,
+  "updated_at": "2026-07-01T08:00:00+08:00",
+  "items": {
+    "location": {
+      "key": "location",
+      "value": "凤凰奇幻乐园侧舞台（虚构影评快照）",
+      "meta": {
+        "source": "life_state",
+        "scope": "self",
+        "confidence": "high",
+        "privacy": "private",
+        "updated_at": "2026-07-01T08:00:00+08:00",
+        "decay_at": "2026-12-31T23:59:59+08:00",
+        "revision": 0,
+        "evidence_refs": ["fixture:life_state:location"],
+        "hit_reason": "",
+        "priority": 100,
+        "budget_decision": ""
+      }
+    },
+    "mood": {
+      "key": "mood",
+      "value": "明亮而略紧",
+      "meta": {
+        "source": "life_state",
+        "scope": "self",
+        "confidence": "medium",
+        "privacy": "private",
+        "updated_at": "2026-07-01T08:00:00+08:00",
+        "decay_at": "2026-12-31T23:59:59+08:00",
+        "revision": 0,
+        "evidence_refs": ["fixture:life_state:mood"],
+        "hit_reason": "",
+        "priority": 100,
+        "budget_decision": ""
+      }
+    },
+    "energy": {
+      "key": "energy",
+      "value": "0.8",
+      "meta": {
+        "source": "life_state",
+        "scope": "self",
+        "confidence": "medium",
+        "privacy": "private",
+        "updated_at": "2026-07-01T08:00:00+08:00",
+        "decay_at": "2026-12-31T23:59:59+08:00",
+        "revision": 0,
+        "evidence_refs": ["fixture:life_state:energy"],
+        "hit_reason": "",
+        "priority": 100,
+        "budget_decision": ""
+      }
+    }
+  }
+}

@@ -7,6 +7,20 @@ from collections import Counter, defaultdict, deque
 from dataclasses import replace
 from typing import Any
 
+from services.context.evidence_use_contract import (
+    DEFAULT_EVIDENCE_USE_CONTRACT_POLICY,
+    EvidenceUseContractPolicy,
+    aggregate_evidence_use_metrics,
+    derive_evidence_use_contract,
+    sanitize_evidence_use_contract_metrics,
+)
+from services.context.pack_evidence_gate import (
+    DEFAULT_PACK_EVIDENCE_GATE_POLICY,
+    PackEvidenceGatePolicy,
+    apply_pack_evidence_gate,
+    extract_trace_seed_ids,
+    sanitize_pack_evidence_gate_metrics,
+)
 from services.context.packing import DEFAULT_BUDGET, ContextBudget, pack_context_hits
 from services.context.sources import GraphContextSource, KnowledgeContextSource, MemoryContextSource
 from services.context.types import ContextHit, ContextPack
@@ -43,12 +57,24 @@ class ContextService:
         rrf_k: int = DEFAULT_RRF_K,
         rrf_weights: dict[str, float] | None = None,
         budget: ContextBudget | None = None,
+        pack_evidence_gate: PackEvidenceGatePolicy | None = None,
+        evidence_use_contract: EvidenceUseContractPolicy | None = None,
     ) -> None:
         self._sources = list(sources or [])
         self._recent: deque[dict[str, Any]] = deque(maxlen=80)
         self._rrf_k = max(1, int(rrf_k))
         self._rrf_weights = dict(rrf_weights) if rrf_weights else dict(DEFAULT_RRF_WEIGHTS)
         self._budget = budget or DEFAULT_BUDGET
+        self._pack_evidence_gate = (
+            pack_evidence_gate
+            if pack_evidence_gate is not None
+            else DEFAULT_PACK_EVIDENCE_GATE_POLICY
+        )
+        self._evidence_use_contract = (
+            evidence_use_contract
+            if evidence_use_contract is not None
+            else DEFAULT_EVIDENCE_USE_CONTRACT_POLICY
+        )
 
     @classmethod
     def from_runtime(
@@ -56,20 +82,31 @@ class ContextService:
         ctx: Any,
         *,
         bus: Any = None,
+        include_memory: bool = True,
         rrf_k: int = DEFAULT_RRF_K,
         rrf_weights: dict[str, float] | None = None,
         budget: ContextBudget | None = None,
+        pack_evidence_gate: PackEvidenceGatePolicy | None = None,
+        evidence_use_contract: EvidenceUseContractPolicy | None = None,
     ) -> ContextService:
         sources: list[Any] = []
         card_store = getattr(ctx, "card_store", None)
-        if card_store is not None:
+        if include_memory and card_store is not None:
             sources.append(MemoryContextSource(
                 card_store,
                 group_memory_config=getattr(ctx, "group_memory_config", None),
+                retrieval_gate=getattr(ctx, "retrieval", None),
             ))
         sources.append(KnowledgeContextSource(ctx=ctx, bus=bus or getattr(ctx, "bus", None)))
         sources.append(GraphContextSource(ctx=ctx))
-        return cls(sources, rrf_k=rrf_k, rrf_weights=rrf_weights, budget=budget)
+        return cls(
+            sources,
+            rrf_k=rrf_k,
+            rrf_weights=rrf_weights,
+            budget=budget,
+            pack_evidence_gate=pack_evidence_gate,
+            evidence_use_contract=evidence_use_contract,
+        )
 
     async def search(
         self,
@@ -82,12 +119,13 @@ class ContextService:
         types: set[str] | None = None,
         type_caps: dict[str, int] | None = None,
         mode: str = "hybrid",
+        plan_meta: dict[str, Any] | None = None,
     ) -> list[ContextHit]:
         # PR5: retrieve_mode short-circuits the whole retrieval if "skip".
         if mode == "skip":
             self._record(
                 query, session_id, user_id, group_id, [],
-                error="", source_timings={}, mode=mode,
+                error="", source_timings={}, mode=mode, plan_meta=plan_meta,
             )
             return []
         # None = no filter (hybrid / unknown mode falls back to hybrid).
@@ -133,6 +171,7 @@ class ContextService:
             error=";".join(errors),
             source_timings=source_timings,
             mode=mode,
+            plan_meta=plan_meta,
         )
         return result
 
@@ -149,6 +188,7 @@ class ContextService:
         type_caps: dict[str, int] | None = None,
         mode: str = "hybrid",
         wrap_with_safety_tags: bool = True,
+        plan_meta: dict[str, Any] | None = None,
     ) -> ContextPack:
         hits = await self.search(
             query,
@@ -158,15 +198,79 @@ class ContextService:
             top_k=top_k,
             type_caps=type_caps,
             mode=mode,
+            plan_meta=plan_meta,
         )
+        # Pack-Time Evidence Gate v1: after search (RRF + type caps + top_k),
+        # before pack_context_hits. search() itself remains unchanged.
+        trace_seed_ids = extract_trace_seed_ids(hits)
+        gated = apply_pack_evidence_gate(hits, policy=self._pack_evidence_gate)
+        pack_hits = list(gated.hits)
         # Resolution order: explicit budget arg > legacy max_chars > service default
-        if budget is not None:
-            pack = pack_context_hits(hits, budget=budget, wrap_with_safety_tags=wrap_with_safety_tags)
+        if not pack_hits:
+            pack = ContextPack(
+                text="",
+                hits=[],
+                omitted_count=int(gated.omitted_count),
+                trace_seed_ids=trace_seed_ids,
+            )
+        elif budget is not None:
+            pack = pack_context_hits(
+                pack_hits, budget=budget, wrap_with_safety_tags=wrap_with_safety_tags
+            )
+            pack = ContextPack(
+                text=pack.text,
+                hits=pack.hits,
+                omitted_count=int(gated.omitted_count) + int(pack.omitted_count),
+                trace_seed_ids=trace_seed_ids,
+            )
         elif max_chars is not None:
-            pack = pack_context_hits(hits, max_chars=max_chars, wrap_with_safety_tags=wrap_with_safety_tags)
+            pack = pack_context_hits(
+                pack_hits, max_chars=max_chars, wrap_with_safety_tags=wrap_with_safety_tags
+            )
+            pack = ContextPack(
+                text=pack.text,
+                hits=pack.hits,
+                omitted_count=int(gated.omitted_count) + int(pack.omitted_count),
+                trace_seed_ids=trace_seed_ids,
+            )
         else:
-            pack = pack_context_hits(hits, budget=self._budget, wrap_with_safety_tags=wrap_with_safety_tags)
-        self._record_pack(query, session_id, user_id, group_id, pack)
+            pack = pack_context_hits(
+                pack_hits, budget=self._budget, wrap_with_safety_tags=wrap_with_safety_tags
+            )
+            pack = ContextPack(
+                text=pack.text,
+                hits=pack.hits,
+                omitted_count=int(gated.omitted_count) + int(pack.omitted_count),
+                trace_seed_ids=trace_seed_ids,
+            )
+        # Evidence-use contract v1: pack-state observability after gate+pack.
+        euc_policy = self._evidence_use_contract
+        contract = derive_evidence_use_contract(
+            pack_hits=pack.hits,
+            omitted_count=int(pack.omitted_count),
+            peg_metrics=dict(gated.metrics),
+            retrieve_mode=mode,
+            enabled=bool(euc_policy.enabled),
+            inject_constrained_instruction=bool(
+                euc_policy.inject_constrained_instruction
+            ),
+        )
+        pack = ContextPack(
+            text=pack.text,
+            hits=pack.hits,
+            omitted_count=pack.omitted_count,
+            trace_seed_ids=pack.trace_seed_ids,
+            evidence_use_contract=contract,
+        )
+        self._record_pack(
+            query,
+            session_id,
+            user_id,
+            group_id,
+            pack,
+            pack_evidence_gate=dict(gated.metrics),
+            evidence_use_contract=contract.to_metrics(),
+        )
         return pack
 
     def recent(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -200,6 +304,7 @@ class ContextService:
             "omitted_total": sum(int(item.get("omitted_count", 0) or 0) for item in items),
             "hit_type_counts": dict(type_counts),
             "hit_source_counts": dict(source_counts),
+            "evidence_use_contract": aggregate_evidence_use_metrics(items),
             "recent": items[-20:],
         }
 
@@ -214,8 +319,9 @@ class ContextService:
         error: str = "",
         source_timings: dict[str, float] | None = None,
         mode: str = "hybrid",
+        plan_meta: dict[str, Any] | None = None,
     ) -> None:
-        self._recent.append({
+        item: dict[str, Any] = {
             "created_at": time.time(),
             "query": query,
             "session_id": session_id,
@@ -234,7 +340,15 @@ class ContextService:
                 name: round(elapsed, 2)
                 for name, elapsed in (source_timings or {}).items()
             },
-        })
+        }
+        # Additive only: absent when caller omits plan_meta (pre-v1 compatibility).
+        # Sanitize to closed secret-free keys; deep-copy nested values so caller
+        # mutation after search/build cannot alter recorded metrics state.
+        if plan_meta is not None:
+            from services.context.query_plan import sanitize_plan_meta
+
+            item["query_aware_plan"] = sanitize_plan_meta(plan_meta)
+        self._recent.append(item)
 
     def _record_pack(
         self,
@@ -243,6 +357,9 @@ class ContextService:
         user_id: str,
         group_id: str | None,
         pack: ContextPack,
+        *,
+        pack_evidence_gate: dict[str, Any] | None = None,
+        evidence_use_contract: dict[str, Any] | None = None,
     ) -> None:
         if not self._recent:
             return
@@ -257,6 +374,15 @@ class ContextService:
         item["pack_chars"] = len(pack.text)
         item["omitted_count"] = pack.omitted_count
         item["duplicate_count"] = _count_duplicate_hits(pack.hits)
+        # Additive secret-free gate metrics; deep-copy via sanitizer.
+        if pack_evidence_gate is not None:
+            item["pack_evidence_gate"] = sanitize_pack_evidence_gate_metrics(
+                pack_evidence_gate
+            )
+        if evidence_use_contract is not None:
+            item["evidence_use_contract"] = sanitize_evidence_use_contract_metrics(
+                evidence_use_contract
+            )
 
 
 def _rrf_fuse(
@@ -299,10 +425,16 @@ def _rrf_fuse(
             if current is None or hit.score > current.score:
                 node_map[key] = hit
 
-    return sorted(
-        (replace(node_map[key], score=score) for key, score in fused_score.items()),
-        key=lambda h: (-h.score, h.type, h.id),
-    )
+    fused_hits: list[ContextHit] = []
+    for key, score in fused_score.items():
+        hit = node_map[key]
+        breakdown = hit.score_breakdown
+        if breakdown is not None:
+            breakdown = replace(breakdown, fusion=score)
+        fused_hits.append(
+            replace(hit, score=score, score_breakdown=breakdown)
+        )
+    return sorted(fused_hits, key=lambda h: (-h.score, h.type, h.id))
 
 
 async def _search_source(

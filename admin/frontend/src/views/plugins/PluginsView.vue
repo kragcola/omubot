@@ -13,6 +13,7 @@ import AppCard from '../../components/common/AppCard.vue'
 import AppPage from '../../components/common/AppPage.vue'
 import EmptyState from '../../components/common/EmptyState.vue'
 import PageToolbar from '../../components/common/PageToolbar.vue'
+import { PLUGIN_MENU_VISIBILITY_CHANGED } from '../../layouts/pluginMenuVisibility'
 import { onRovingKeydown } from '../../utils/a11y'
 
 type PluginMode = 'user' | 'system' | 'store' | 'governance'
@@ -529,6 +530,7 @@ async function setPluginEnabled(plugin: Plugin, enabled: boolean) {
     if (data.requires_restart) message.success('插件状态已保存，重启后生效')
     else message.success(enabled ? '插件已启用' : '插件已停用')
     await loadPlugins(true)
+    window.dispatchEvent(new Event(PLUGIN_MENU_VISIBILITY_CHANGED))
   } catch (error) {
     message.error(error instanceof Error ? error.message : '状态切换失败')
   } finally {

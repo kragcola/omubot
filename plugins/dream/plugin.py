@@ -123,6 +123,10 @@ class LifeReflectionDraft:
     last_event_summary: str = ""
     open_threads: list[str] = field(default_factory=list)
     next_day_seed: str = ""
+    # Trusted internal journal privacy. Default unknown; only
+    # ``_bind_life_reflection_scope`` may set public when the selected
+    # reflection group is global. Parser/model output must never set this.
+    journal_privacy: str = field(default="unknown", init=False)
 
 
 def _truncate_reflection_text(text: str, limit: int) -> str:
@@ -289,6 +293,9 @@ def _bind_life_reflection_scope(
     """Bind model output to the reflection input's actual scope boundary."""
     group_id = str(selected_group_id or "").strip()
     has_group = bool(group_id and group_id != "global")
+    # Trusted privacy: public only when the actual selected reflection group is
+    # global. Group-context reflections stay unknown even if text looks safe.
+    journal_privacy = "public" if not has_group else "unknown"
     cards: list[LifeReflectionCardDraft] = []
     for card in draft.cards:
         if card.scope == "global":
@@ -306,23 +313,38 @@ def _bind_life_reflection_scope(
             content=card.content,
             confidence=card.confidence,
         ))
-    return LifeReflectionDraft(
+    bound = LifeReflectionDraft(
         cards=cards,
         last_event_summary=draft.last_event_summary,
         open_threads=list(draft.open_threads),
         next_day_seed=draft.next_day_seed,
     )
+    bound.journal_privacy = journal_privacy
+    return bound
 
 
 def _apply_life_reflection_to_arc(arc: Any, draft: LifeReflectionDraft) -> None:
     today = datetime.now(_CST).strftime("%Y-%m-%d")
     if draft.last_event_summary:
+        from plugins.schedule.story_arc import JournalEventRecord
+
         last_events = [dict(item) for item in list(getattr(arc, "last_events", []) or []) if isinstance(item, dict)]
-        reflection_event = {
-            "date": today,
-            "source": "dream_reflection",
-            "summary": draft.last_event_summary,
-        }
+        privacy = str(getattr(draft, "journal_privacy", "unknown") or "unknown").strip()
+        if privacy not in {"public", "private", "unknown"}:
+            privacy = "unknown"
+        arc_scope = str(getattr(arc, "scope", "") or "").strip()
+        subject_kind = "fiction" if arc_scope == "fiction" else "self"
+        if arc_scope != "fiction":
+            privacy = "unknown"
+        reflection_event = JournalEventRecord(
+            date=today,
+            source="dream_reflection",
+            summary=draft.last_event_summary,
+            subject_kind=subject_kind,  # type: ignore[arg-type]
+            privacy=privacy,  # type: ignore[arg-type]
+            salience=0.82,
+            event_id=f"dream_reflection:{today}",
+        ).to_dict()
         replaced = False
         for index, event in enumerate(last_events):
             if event.get("date") == today and event.get("source") == "dream_reflection":
@@ -546,6 +568,7 @@ class DreamAgent:
         social_narrative_store: Any | None = None,
         reflection_allowed_group_ids: set[str] | list[str] | tuple[str, ...] | None = None,
         task_supervisor: BackgroundTaskSupervisor | None = None,
+        worldbook_dream_bridge: Any | None = None,
     ) -> None:
         self._store = store
         self._interval_hours = interval_hours
@@ -570,6 +593,7 @@ class DreamAgent:
         self._running: bool = False
         self._loop_task: asyncio.Task[None] | None = None
         self._task_supervisor = task_supervisor
+        self._worldbook_dream_bridge = worldbook_dream_bridge
         self._api_call: ApiCaller | None = None
         self._run_ledger = _dream_run_ledger_for_store(store)
         self._daily_lock = _dream_run_lock(self._run_ledger.path)
@@ -897,7 +921,9 @@ class DreamAgent:
             dream_logger.warning("life reflection skipped | invalid JSON")
             return 0
         draft = _bind_life_reflection_scope(draft, group_id)
-        if not draft.cards:
+        if not draft.cards and not (
+            draft.last_event_summary or draft.open_threads or draft.next_day_seed
+        ):
             dream_logger.warning("life reflection skipped | no cards within selected scope")
             return 0
         if social_context.strip():
@@ -906,7 +932,19 @@ class DreamAgent:
                 group_id,
             )
             return 0
-        return await self._commit_life_reflection(draft, arc)
+        cards_to_persist = [
+            card
+            for card in draft.cards
+            if group_id != "global"
+            and bool(recent_messages)
+            and card.scope == "group"
+            and card.scope_id == group_id
+        ]
+        return await self._commit_life_reflection(
+            draft,
+            arc,
+            cards_to_persist=cards_to_persist,
+        )
 
     def _load_today_schedule(self) -> Any | None:
         store = self._schedule_store
@@ -1010,17 +1048,86 @@ class DreamAgent:
             )
             return ""
 
-    async def _commit_life_reflection(self, draft: LifeReflectionDraft, arc: Any | None) -> int:
+    async def _commit_life_reflection(
+        self,
+        draft: LifeReflectionDraft,
+        arc: Any | None,
+        *,
+        cards_to_persist: list[LifeReflectionCardDraft] | None = None,
+    ) -> int:
         writes = 0
         today = datetime.now(_CST).strftime("%Y-%m-%d")
+        bridge = self._worldbook_dream_bridge
+        if bridge is not None and bool(getattr(bridge, "enabled", False)):
+            summary = str(
+                draft.last_event_summary
+                or draft.next_day_seed
+                or "；".join(draft.open_threads)
+            ).strip()
+            if not summary:
+                return 0
+            arc_id = str(getattr(arc, "arc_id", "") or "")
+            digest_payload = "\x1f".join((today, arc_id, summary))
+            digest = hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()[:16]
+            proposal_id = f"dream.{today}.{digest}"
+            payload = {
+                "last_event_summary": draft.last_event_summary,
+                "open_threads": list(draft.open_threads),
+                "next_day_seed": draft.next_day_seed,
+            }
+            # Proposal first (immutable status=proposal), then deterministic
+            # validate→commit when possible. Rejection records a decision only.
+            process = getattr(bridge, "submit_and_process", None)
+            if callable(process):
+                result = process(
+                    proposal_id=proposal_id,
+                    kind="arc_replan" if arc_id else "reflection",
+                    summary=summary,
+                    arc_id=arc_id,
+                    payload=payload,
+                )
+                status = str(getattr(result, "status", "") or "")
+                dream_logger.info(
+                    "life reflection worldbook lifecycle | arc_id={} status={}",
+                    arc_id or "none",
+                    status or "unknown",
+                )
+            else:
+                bridge.submit(
+                    proposal_id=proposal_id,
+                    kind="arc_replan" if arc_id else "reflection",
+                    summary=summary,
+                    arc_id=arc_id,
+                    payload=payload,
+                )
+                validate_and_commit = getattr(bridge, "validate_and_commit", None)
+                if callable(validate_and_commit):
+                    result = validate_and_commit(proposal_id)
+                    status = str(getattr(result, "status", "") or "")
+                    dream_logger.info(
+                        "life reflection worldbook lifecycle | arc_id={} status={}",
+                        arc_id or "none",
+                        status or "unknown",
+                    )
+                else:
+                    dream_logger.info(
+                        "life reflection routed to worldbook proposal | arc_id={}",
+                        arc_id or "none",
+                    )
+            return 0
+        persist_cards = (
+            draft.cards
+            if cards_to_persist is None
+            else cards_to_persist
+        )[:_REFLECTION_CARD_LIMIT]
         planned_source_ids = [
             self._reflection_source_message_id(today, card)
-            for card in draft.cards[:_REFLECTION_CARD_LIMIT]
+            for card in persist_cards
         ]
         new_source_ids: list[str] = []
         try:
             for card, source_msg_id in zip(
-                draft.cards[:_REFLECTION_CARD_LIMIT],
+                persist_cards,
                 planned_source_ids,
                 strict=True,
             ):
@@ -1278,6 +1385,7 @@ class DreamPlugin(AmadeusPlugin):
                 for group_id in getattr(ctx, "allowed_groups", set())
             },
             task_supervisor=getattr(ctx, "background_task_supervisor", None),
+            worldbook_dream_bridge=getattr(ctx, "worldbook_dream_bridge", None),
         )
         ctx.dream = self._dream_agent
 

@@ -401,11 +401,14 @@ class ConversationArchive:
         last_id = 0
         while True:
             cursor = await self._db.execute(
-                """SELECT id, group_id, role, speaker, content_text, content_json,
-                          message_id, created_at
-                   FROM group_messages
-                   WHERE id > ?
-                   ORDER BY id
+                """SELECT gm.id, gm.group_id, gm.role, gm.speaker,
+                          gm.content_text, gm.content_json,
+                          gm.message_id, gm.created_at
+                   FROM group_messages AS gm
+                   LEFT JOIN conversation_messages AS cm
+                     ON cm.legacy_row_id = gm.id
+                   WHERE gm.id > ? AND cm.message_pk IS NULL
+                   ORDER BY gm.id
                    LIMIT ?""",
                 (last_id, int(batch_size)),
             )
@@ -414,8 +417,6 @@ class ConversationArchive:
                 break
             for row in rows:
                 last_id = int(row["id"])
-                if await self._archive_row_exists(legacy_row_id=last_id):
-                    continue
                 before = self._db.total_changes
                 await self._insert_archive_message(
                     group_id=str(row["group_id"]),
@@ -459,6 +460,40 @@ class ConversationArchive:
                LIMIT ?""",
             (group_id, int(limit)),
         )
+        rows = await cursor.fetchall()
+        return [_row_dict(row) for row in list(rows)[::-1]]
+
+    async def query_term_hits(
+        self,
+        group_id: str,
+        terms: list[str],
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return up to N user messages whose content_text matches any term.
+
+        MessageLog-compatible: group-scoped, role=user, any cleaned term LIKE,
+        newest ``limit`` then chronological return. Empty/uninitialized/empty
+        terms yield ``[]``. Shape matches MessageLog (role/speaker/content_text/
+        message_id/created_at).
+        """
+        if not self._db or not terms:
+            return []
+        cleaned = [t for t in (str(t or "").strip() for t in terms) if t]
+        if not cleaned:
+            return []
+        like_clauses = " OR ".join(["content_text LIKE ?"] * len(cleaned))
+        params: list[Any] = [group_id]
+        params.extend(f"%{t}%" for t in cleaned)
+        params.append(int(limit))
+        sql = (
+            "SELECT role, speaker, content_text, message_id, created_at "
+            "FROM group_messages "
+            f"WHERE group_id = ? AND role = 'user' AND content_text IS NOT NULL "
+            f"AND ({like_clauses}) "
+            "ORDER BY created_at DESC LIMIT ?"
+        )
+        cursor = await self._db.execute(sql, params)
         rows = await cursor.fetchall()
         return [_row_dict(row) for row in list(rows)[::-1]]
 
@@ -605,6 +640,61 @@ class ConversationArchive:
                ORDER BY message_pk ASC""",
             (chat_type, chat_id, int(from_message_pk), int(to_message_pk)),
         )
+        return [_row_dict(row) for row in await cursor.fetchall()]
+
+    async def get_messages_by_pks(
+        self,
+        message_pks: Any,
+        *,
+        chat_type: str | None = None,
+        chat_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch archive rows by primary keys with optional chat scope filter.
+
+        Returns empty list for empty/invalid/non-positive ids. IDs are deduped
+        and results are ordered by ascending ``message_pk``. Platform message
+        id is exposed as ``message_id`` (aliased from ``platform_message_id``).
+        """
+        if not self._db or message_pks is None:
+            return []
+        if isinstance(message_pks, (str, bytes, bytearray, bool, int, float)):
+            return []
+        try:
+            raw_pks = iter(message_pks)
+        except TypeError:
+            return []
+        pks: list[int] = []
+        for raw in raw_pks:
+            if isinstance(raw, bool):
+                continue
+            if isinstance(raw, int):
+                value = raw
+            elif isinstance(raw, str) and raw.strip().isdecimal():
+                value = int(raw.strip())
+            else:
+                continue
+            if value <= 0 or value in pks:
+                continue
+            pks.append(value)
+        if not pks:
+            return []
+        placeholders = ", ".join("?" for _ in pks)
+        sql = (
+            "SELECT message_pk, chat_type, chat_id, legacy_group_id, role, speaker, "
+            "content_text, content_json, platform_message_id AS message_id, "
+            "created_at, ingested_at, meta_json "
+            "FROM conversation_messages "
+            f"WHERE message_pk IN ({placeholders})"
+        )
+        params: list[Any] = list(pks)
+        if chat_type is not None:
+            sql += " AND chat_type = ?"
+            params.append(str(chat_type))
+        if chat_id is not None:
+            sql += " AND chat_id = ?"
+            params.append(str(chat_id))
+        sql += " ORDER BY message_pk ASC"
+        cursor = await self._db.execute(sql, tuple(params))
         return [_row_dict(row) for row in await cursor.fetchall()]
 
     async def list_messages_after_pk(

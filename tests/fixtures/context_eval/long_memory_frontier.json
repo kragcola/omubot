@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "description": "LongMemEval/LoCoMo 风格本地检索基线：事实回忆、事实更新、时间更新、跨群隔离与无证据零命中。该 fixture 不复制论文数据，只复现能力维度。",
+  "cases": [
+    {
+      "id": "fact-recall-across-session",
+      "query": "我偏好的饮料是什么",
+      "session_id": "longmem-user-a-session-2",
+      "user_id": "u_a",
+      "group_id": null,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "偏好的饮料是无糖乌龙茶"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "偏好的饮料是可乐"
+        }
+      ],
+      "max_duplicate_hits": 0,
+      "notes": "跨会话事实回忆，同时禁止串入其他用户的同类事实。"
+    },
+    {
+      "id": "knowledge-update-current-fact",
+      "query": "我现在住在哪里",
+      "session_id": "longmem-user-a-session-3",
+      "user_id": "u_a",
+      "group_id": null,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "现在住在上海"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "以前住在杭州"
+        }
+      ],
+      "max_duplicate_hits": 0,
+      "notes": "LongMemEval knowledge update：旧事实保留证据但不得继续注入。"
+    },
+    {
+      "id": "temporal-update-latest-plan",
+      "query": "会议最后改到什么时候",
+      "session_id": "longmem-user-a-session-4",
+      "user_id": "u_a",
+      "group_id": null,
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "会议改到周五晚上八点"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "会议原定周四晚上七点"
+        }
+      ],
+      "max_duplicate_hits": 0,
+      "notes": "时间更新必须召回最后有效安排，不能把旧安排作为当前事实。"
+    },
+    {
+      "id": "cross-group-isolation",
+      "query": "团建地点定在哪里",
+      "session_id": "longmem-group-alpha-session-2",
+      "user_id": "u_a",
+      "group_id": "g_alpha",
+      "required_hits": [
+        {
+          "type": "memory_card",
+          "contains": "阿尔法群团建地点定在东湖"
+        }
+      ],
+      "forbidden_hits": [
+        {
+          "contains": "贝塔群团建地点定在西山"
+        }
+      ],
+      "max_duplicate_hits": 0,
+      "notes": "同关键词的其他群事实不得越过 scope 边界。"
+    },
+    {
+      "id": "no-evidence-abstention",
+      "query": "量子章鱼的股票代码是什么",
+      "user_id": "u_a",
+      "group_id": "g_alpha",
+      "max_hit_count": 0,
+      "max_pack_chars": 0,
+      "required_hits": [],
+      "forbidden_hits": [
+        {
+          "type": "memory_card"
+        }
+      ],
+      "max_duplicate_hits": 0,
+      "notes": "无证据问题必须零命中，为回答层拒答保留干净输入。"
+    }
+  ]
+}

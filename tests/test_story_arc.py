@@ -98,6 +98,12 @@ def test_story_arc_from_dict_allows_partner_states_placeholder() -> None:
         "last_events",
         "next_day_seed",
         "event_budget",
+        "arc_role",
+        "stack_order",
+        "status",
+        "deadlines",
+        "causal_links",
+        "event_history",
     }
 
 

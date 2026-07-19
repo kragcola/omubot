@@ -380,12 +380,14 @@ def test_plugin_manifest_toggle_policy_matches_resource_lifecycle() -> None:
         "food",
         "knowledge",
         "memo",
+        "qzone_journal",
         "schedule",
         "slang",
         "social_narrative",
         "sticker",
-        "style",
-    }
+            "style",
+            "worldbook",
+        }
     expected_runtime = {
         "affection",
         "bilibili",

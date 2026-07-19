@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from services.memory.message_log import MessageLog
+    from services.memory.message_log import MessageLogPort
 
 _CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
 _AT_RE = re.compile(r"@(\d+)")
@@ -125,7 +125,7 @@ class GroupStateBoard:
     _TOP_TOPIC_COUNT = 3
 
     def __init__(
-        self, message_log: MessageLog, bot_self_id: str = ""
+        self, message_log: MessageLogPort, bot_self_id: str = ""
     ) -> None:
         self._message_log = message_log
         self.bot_self_id = bot_self_id

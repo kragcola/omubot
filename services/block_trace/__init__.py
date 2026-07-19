@@ -4,6 +4,12 @@ from services.block_trace.budget_manager import PromptBudgetManager
 from services.block_trace.catchphrase_provider import CatchphraseProvider
 from services.block_trace.episode_provider import EpisodeProvider
 from services.block_trace.homophone_provider import HomophoneProvider
+from services.block_trace.joint_telemetry import (
+    JDT_VERSION,
+    aggregate_joint_snapshot,
+    classify_request_traces,
+    disabled_snapshot,
+)
 from services.block_trace.providers import ContextProvider, QueryContext
 from services.block_trace.register_provider import RegisterProvider
 from services.block_trace.slang_provider import SlangProvider
@@ -28,6 +34,7 @@ from services.block_trace.types import (
 BlockTraceBus = BlockTraceStore
 
 __all__ = [
+    "JDT_VERSION",
     "AcceptedDecision",
     "BlockTraceBus",
     "BlockTraceStore",
@@ -47,4 +54,7 @@ __all__ = [
     "StickerRegisterProvider",
     "StyleProvider",
     "ThinkerProvider",
+    "aggregate_joint_snapshot",
+    "classify_request_traces",
+    "disabled_snapshot",
 ]

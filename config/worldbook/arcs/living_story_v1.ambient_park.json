@@ -1,0 +1,46 @@
+{
+  "arc_id": "living_story_v1.ambient_park",
+  "revision": 0,
+  "title": "乐园余温的环境线",
+  "scope": "fiction",
+  "stage": "active",
+  "status": "active",
+  "starts_on": "",
+  "ends_on": "",
+  "arc_role": "ambient",
+  "stack_order": 20,
+  "goals": [
+    "让乐园侧世界在主线之外仍有独立推进感",
+    "给虚构伙伴留出不必等主线点名也能发生的日常"
+  ],
+  "active_conflicts": [],
+  "variables": {
+    "partner_momentum": 0.05
+  },
+  "partner_states": {
+    "nene": {
+      "mood": "练习中",
+      "note": "虚构伙伴：乐园侧继续自己的练习与闲逛，不依赖主线点名"
+    }
+  },
+  "open_threads": [
+    "下次碰面时再同步各自进度即可"
+  ],
+  "last_events": [],
+  "event_history": [],
+  "causal_links": [],
+  "deadlines": [],
+  "next_day_seed": "环境线：乐园侧世界自行继续，不抢主线镜头。",
+  "event_budget": {
+    "now_step": 0,
+    "last_event_step": 0,
+    "generated_days": 0,
+    "setback_count": 0,
+    "events_this_tick": 0,
+    "triggered_once": [],
+    "cooldowns": {},
+    "storylet_available_at": {},
+    "last_viewed": {},
+    "committed_event_ids": []
+  }
+}

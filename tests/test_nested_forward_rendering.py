@@ -262,7 +262,8 @@ async def test_existing_segment_summaries_remain_readable() -> None:
     rendered = await _render_forward_msg("root", bot)
 
     assert "Alice(901): hello" in rendered
-    assert "«图片: https://example.test/a.jpg»" in rendered
+    assert "«图片»" in rendered
+    assert "https://example.test/a.jpg" not in rendered
     assert "«表情»" in rendered
     assert "@all" in rendered
     assert "«文件: report.pdf»" in rendered

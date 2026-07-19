@@ -1,0 +1,1 @@
+"""QZone Journal plugin package."""

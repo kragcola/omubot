@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用世界书运行时",
+      "description": "总开关，默认 false。关闭时不得读取 registry、改 Prompt、选 Storylet、改写状态。"
+    },
+    "chat_projection_enabled": {
+      "type": "boolean",
+      "title": "聊天投影",
+      "description": "注册 PromptProvider 注入世界书块；默认 false。"
+    },
+    "schedule_projection_enabled": {
+      "type": "boolean",
+      "title": "日程投影",
+      "description": "Schedule 共享投影（永不含 Social Evidence）；默认 false。"
+    },
+    "storylet_enabled": {
+      "type": "boolean",
+      "title": "Storylet / Drama",
+      "description": "启用 Storylet 选择与 Drama Manager；默认 false。"
+    },
+    "dream_proposal_enabled": {
+      "type": "boolean",
+      "title": "Dream 提案桥",
+      "description": "Dream 仅写 proposal，不自动晋升 factual/Canon；默认 false。"
+    },
+    "social_evidence_enabled": {
+      "type": "boolean",
+      "title": "社交证据桥",
+      "description": "聊天路径当前群/用户 factual 证据；默认 false。Schedule 永不注入。"
+    },
+    "social_group_allowlist": {
+      "type": "array",
+      "title": "社交→故事群白名单",
+      "description": "允许写入主线 Social Influence 的群 ID。空列表 fail-closed（即使 social_evidence_enabled=true）。",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "canon_dir": {
+      "type": "string",
+      "title": "Canon 配置目录",
+      "minLength": 1
+    },
+    "storylet_dir": {
+      "type": "string",
+      "title": "Storylet 配置目录",
+      "minLength": 1
+    },
+    "arc_seed_dir": {
+      "type": "string",
+      "title": "StoryArc 生产种子目录",
+      "description": "版本化生产 Arc 种子包（config/worldbook/arcs）。仅 enabled+storylet_enabled 时在启动导入缺失 ID；不新增独立布尔开关。",
+      "minLength": 1
+    },
+    "state_dir": {
+      "type": "string",
+      "title": "可变状态目录",
+      "minLength": 1
+    },
+    "story_arc_dir": {
+      "type": "string",
+      "title": "StoryArc 目录（复用现有账本）",
+      "minLength": 1
+    },
+    "total_budget_chars": { "type": "integer", "minimum": 0 },
+    "canon_budget_chars": { "type": "integer", "minimum": 0 },
+    "life_budget_chars": { "type": "integer", "minimum": 0 },
+    "arc_budget_chars": { "type": "integer", "minimum": 0 },
+    "social_budget_chars": { "type": "integer", "minimum": 0 },
+    "storylet_budget_chars": { "type": "integer", "minimum": 0 },
+    "max_setbacks_per_arc": { "type": "integer", "minimum": 0 },
+    "max_events_per_tick": { "type": "integer", "minimum": 0 },
+    "recovery_window_steps": { "type": "integer", "minimum": 0 }
+  }
+}

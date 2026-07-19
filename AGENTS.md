@@ -87,6 +87,73 @@ trigger Tencent anti-fraud and force re-login.
   `git status -uno`, and `git ls-files --others --exclude-standard`; never rely
   on `stash apply` exit code alone or let `-uno` hide untracked build inputs.
 
+## Token-Aware Parallel Workflow
+
+- For every non-trivial task, run a lightweight parallel-fit check inline. The
+  compact rules here are sufficient for normal fit and dispatch; do not load an
+  additional orchestration skill merely to evaluate or run parallel work. Load
+  one only when the user explicitly requests that workflow.
+- Delegate only when the user explicitly requests agents/delegation and at least
+  two bounded streams can reduce wall-clock time while progressing independently
+  without sharing a mutable conflict domain or requiring immediate sequential
+  results. Otherwise stay single-agent and use parallel tool calls for independent
+  reads or shell checks.
+- Model conflicts beyond filenames: symbols/modules, APIs/types/schemas,
+  generated outputs/lockfiles/fixtures, databases/ports/caches/test namespaces,
+  uncommitted WIP, and ordering dependencies.
+- Codex retains planning, architecture, sequencing, decisions, integration,
+  acceptance, and the final answer. Count the main agent, Codex workers,
+  top-level Grok processes, and Grok children against one global budget. Start
+  with at most two delegated workers across that budget by default; exceed that
+  default only when the user explicitly requests a larger safe team. Keep the
+  main agent on the critical path.
+- Give each stream a stable id, one objective, ownership/conflict boundaries,
+  dependencies, base revision, isolation mode, allowed/forbidden actions,
+  acceptance evidence, and delivery artifact. Default to `fork_turns="none"`
+  with a complete prompt; use a small positive fork only when recent conversation
+  state is essential, and never use `fork_turns="all"` without explicit user
+  authorization.
+- Keep one canonical target per stream. Use one writer per conflict domain and
+  one owner for generated files, lockfiles, fixtures, migrations, and schemas.
+  Concurrent writers use isolated worktrees; shared-workspace workers must be
+  read-only or disjoint across every conflict domain. Preserve user WIP: never
+  clean, reset, stash, or commit it merely to enable delegation.
+- For write-capable, hybrid, multi-step, long-running, or interruption-prone
+  runs, keep a persistent ledger and require delivery manifests with outcome,
+  base/artifact location, changed files, conflict domains, exact checks, risks,
+  and integration notes. Integrate in dependency order, inspect the combined
+  diff, and run the smallest meaningful cross-stream verification.
+- User requests to avoid delegation always win.
+
+### Grok and recovery
+
+- Use `dispatch-grok` only after explicit Grok authorization. Cost-saving mode
+  also requires an explicit cost/token-saving request. Explicit Grok parallelism
+  sets `parallel requirement: required`: require a real child id, distinct
+  bounded assignment, observable activity, and valid isolation at the first
+  natural checkpoint and completion. Zero children is an unmet contract; never
+  fabricate a child or silently downgrade to optional.
+- Ordinary Grok dispatch defaults Codex subagents to zero. A mixed Codex/Grok
+  team requires explicit mixed-team authorization and the shared conflict graph
+  and concurrency budget above. Codex independently validates Grok's diff,
+  structured evidence, checks, and manifest.
+- Preserve delegated scope across interruptions and never silently move required
+  scope back to the main agent. Resume the canonical Codex target with
+  `followup_task`, or the same Grok process, from its checkpoint. If the target is
+  closed, deleted, missing, unknown, or reconnect fails and it is not running,
+  visibly mark `rebuilding` and immediately create one replacement with the same
+  scope, conflicts, base, isolation, and checkpoint. Only one reconnect or
+  replacement may be active for a stream.
+- For transient `429`, timeout, or transport failures, use token-light,
+  non-blocking backoff from 15 to 60 seconds. Start one continuous outage window
+  at the first failure; acknowledgements are not progress, and only concrete
+  progress resets the window. Continue recovery until 30 continuous minutes pass
+  without concrete progress, then preserve artifacts and mark
+  `failed_after_30m`. Stop immediately on explicit quota, billing,
+  authentication, policy, cancellation, or permission failures. Keep
+  `reconnecting`, `rebuilding`, replacement, and terminal states visible, and
+  never finish while a required stream remains active or recovering.
+
 ## Local Environment Notes
 
 - **Read-only inspection of live SQLite DBs**: a plain writable open can
@@ -119,8 +186,9 @@ state.
   the real result from that output, not from "tool succeeded".
 - **Before claiming "committed" / "written", require external evidence**: HEAD
   hash actually changed, file actually on disk, index matches expectation (D4).
-- **Stop after two failures of the same action** — switch approach (atomic bash)
-  or report; do not keep retrying against the response wording.
+- **Stop after two failures of the same local atomic action** — switch approach
+  (atomic bash) or report. Delegated transient `429`, timeout, and transport
+  recovery follows the continuous 30-minute policy above.
 
 ## Skill Trigger
 
@@ -161,6 +229,11 @@ rediscovering the repository from scratch.
 Create or update an active tracker for work that spans sessions, touches 3+
 files, involves production/runtime/skills/hooks/prompts, or requires a bug test
 ledger. Keep `maintenance-log.md` for durable completed changes, not live todo.
+An active tracker may double as the persistent parallel run ledger only when it
+records the run/workstream ids, accepted base and dirty baseline, global budget,
+conflict/ownership/isolation boundaries, status/checkpoints, evidence, and final
+delivery manifests. Otherwise use `$CODEX_HOME/state/parallel-runs` and
+cross-link it from the tracker; never maintain two competing ledgers.
 
 ## Maintenance Log
 

@@ -14,6 +14,7 @@ EXPECTED_DATABASES = {
     "consolidator_candidates": "storage/consolidator_candidates.db",
     "consolidator_normalizer": "storage/consolidator_normalizer.db",
     "episodic": "storage/episodic.db",
+    "entity_aliases": "storage/entity_aliases.db",
     "hawkes_cache": "storage/hawkes_cache.db",
     "knowledge_graph": "storage/knowledge_graph.db",
     "knowledge_index": "storage/knowledge_index.db",
@@ -23,6 +24,7 @@ EXPECTED_DATABASES = {
     "living_persona_m2_climate": "storage/living_persona/m2_climate.db",
     "memory_cards": "storage/memory_cards.db",
     "messages": "storage/messages.db",
+    "qzone_journal": "storage/qzone_journal.db",
     "research_events": "storage/research_events.db",
     "research_topic_assignments": "storage/research_topic_assignments.db",
     "scheduler_replay": "storage/scheduler_replay.db",
@@ -108,6 +110,12 @@ def test_default_catalog_is_valid_and_has_unique_ids_and_paths() -> None:
     assert catalog.validate() == ()
     assert len({spec.id for spec in specs}) == len(specs)
     assert len({spec.path for spec in specs}) == len(specs)
+
+
+def test_qzone_catalog_tracks_current_schema_version() -> None:
+    _, _, _, _, _, catalog = _load_api()
+
+    assert catalog.get("qzone_journal").target_user_version == 6
 
 
 def test_shared_database_can_declare_one_owner_and_multiple_clients() -> None:

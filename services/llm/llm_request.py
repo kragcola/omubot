@@ -64,6 +64,7 @@ LLMTask = Literal[
     "scheduler_replay_judge",
     # Misc autonomous actions.
     "birthday_wish",
+    "qzone_journal_compose",
 ]
 
 
@@ -302,6 +303,7 @@ TASK_CACHE_PROFILES: dict[str, TaskCacheProfile] = {
     "scheduler_replay_judge":  TaskCacheProfile(system_breakpoints=1),
     # misc autonomous actions — single static system prompt.
     "birthday_wish":           TaskCacheProfile(system_breakpoints=1),
+    "qzone_journal_compose":   TaskCacheProfile(system_breakpoints=1),
 }
 
 DEFAULT_TASK_CACHE_PROFILE = TaskCacheProfile(system_breakpoints=1)

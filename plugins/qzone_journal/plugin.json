@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "qzone_journal",
+  "display_name": {
+    "zh": "空间日志",
+    "en": "QZone Journal"
+  },
+  "description": "把 Living Persona 中值得记录的事实事件整理为待审 QQ 空间日志",
+  "version": "0.8.2",
+  "priority": 155,
+  "tier": "user",
+  "toggle_policy": "restart_required",
+  "category": "expression",
+  "permissions": [
+    "lifecycle",
+    "tick",
+    "storage",
+    "network",
+    "admin"
+  ],
+  "capabilities": [
+    "qzone_journal",
+    "living_persona_journal"
+  ],
+  "optional_dependencies": {
+    "schedule": ">=1.1.5",
+    "dream": ">=1.1.3"
+  },
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "dry_run",
+      "allow_live_publish",
+      "allowed_live_uins",
+      "advanced_enabled",
+      "manual_review",
+      "max_posts_per_day",
+      "max_drafts_per_tick",
+      "max_drafts_per_day",
+      "salience_threshold",
+      "allowed_sources",
+      "wire_profile_id"
+    ]
+  },
+  "store": {
+    "visibility": "marketplace_ready",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

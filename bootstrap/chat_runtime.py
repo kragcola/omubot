@@ -291,7 +291,9 @@ def create_chat_runtime_assembly(ctx: Any, builder: Builder) -> ChatRuntimeAssem
         "usage_tracker",
         "block_trace_store",
         "social_narrative_store",
+        "visual_identity_store",
         "card_store",
+        "entity_alias_store",
         "memory_consolidator_store",
         "memory_consolidator_normalizer",
         "catchphrase_normalizer",
@@ -402,7 +404,9 @@ def create_chat_runtime_assembly(ctx: Any, builder: Builder) -> ChatRuntimeAssem
         ("usage_tracker", lambda: close_attr("usage_tracker")),
         ("block_trace_store", lambda: close_attr("block_trace_store")),
         ("social_narrative_store", lambda: close_attr("social_narrative_store")),
+        ("visual_identity_store", lambda: close_attr("visual_identity_store")),
         ("card_store", lambda: close_attr("card_store")),
+        ("entity_alias_store", lambda: close_attr("entity_alias_store")),
         ("memory_consolidator_store", lambda: close_attr("memory_consolidator_store")),
         ("memory_consolidator_normalizer", lambda: close_attr("memory_consolidator_normalizer")),
         ("catchphrase_normalizer", lambda: close_attr("catchphrase_normalizer")),
@@ -603,15 +607,25 @@ async def build_chat_runtime(
     # ---- card store ----
     from plugins.memo import MemoConfig
     from services.memory.card_store import CardStore
+    from services.memory.entity_alias_store import EntityAliasStore
+    from services.memory.visual_identity import VisualIdentityStore
     from services.social_narrative import SocialNarrativeStore
 
     memo_cfg = load_plugin_config("plugins/memo/config.default.json", MemoConfig)
     card_store = CardStore(db_path="storage/memory_cards.db")
     ctx.card_store = card_store
     await card_store.init(migrate_from_md=memo_cfg.dir)
+    visual_identity_store = VisualIdentityStore(db_path="storage/memory_cards.db")
+    ctx.visual_identity_store = visual_identity_store
+    await visual_identity_store.init()
     social_narrative_store = SocialNarrativeStore(db_path="storage/memory_cards.db")
     ctx.social_narrative_store = social_narrative_store
     await social_narrative_store.init()
+
+    # ---- entity alias store (nickname / speaker surface → entity_key) ----
+    entity_alias_store = EntityAliasStore("storage/entity_aliases.db")
+    ctx.entity_alias_store = entity_alias_store
+    await entity_alias_store.init()
 
     # ---- short term memory ----
     from services.memory.short_term import ShortTermMemory
@@ -755,10 +769,14 @@ async def build_chat_runtime(
         ctx.affection_engine = None
     ctx.affection_enabled = affection_enabled
 
-    # ---- message log ----
-    from services.memory.message_log import MessageLog
+    # ---- message log (ConversationArchive owns storage/messages.db) ----
+    # MessageLog remains a compatibility client module; composition root uses
+    # ConversationArchive so scanners/consolidator get cursor-backed reads.
+    # Downstream consumers are annotated with MessageLogPort (structural);
+    # no cast(Any) needed at the construction site.
+    from services.conversation_archive import ConversationArchive
 
-    message_log = MessageLog(db_path="storage/messages.db")
+    message_log = ConversationArchive(db_path="storage/messages.db")
     ctx.msg_log = message_log
     await message_log.init()
 
@@ -795,7 +813,14 @@ async def build_chat_runtime(
     # ---- derived knowledge graph (safe, rebuildable fact layer) ----
     from services.knowledge_graph import KnowledgeGraphService
 
-    ctx.knowledge_graph = KnowledgeGraphService("storage/knowledge_graph.db")
+    kg_cfg = getattr(config, "knowledge_graph", None)
+    kg_gate = bool(getattr(kg_cfg, "provenance_gate_enabled", True))
+    kg_obs = bool(getattr(kg_cfg, "observability_enabled", True))
+    ctx.knowledge_graph = KnowledgeGraphService(
+        "storage/knowledge_graph.db",
+        provenance_gate_enabled=kg_gate,
+        observability_enabled=kg_obs,
+    )
     await ctx.knowledge_graph.init()
 
     # Phase E.4 graph edge double-write — mirror doc-backed facts to
@@ -841,6 +866,10 @@ async def build_chat_runtime(
     ctx.episode_promoter = EpisodePromoter(
         candidates_store=ctx.memory_consolidator_store,
         episode_store=ctx.episode_store,
+        message_archive=ctx.msg_log,
+        card_store=ctx.card_store,
+        knowledge_graph=ctx.knowledge_graph,
+        entity_alias_store=ctx.entity_alias_store,
     )
     # D.5 graph edge double-write: approved/disabled episodes mirror
     # into knowledge_graph.db as episode_supports_profile edges.
@@ -911,7 +940,14 @@ async def build_chat_runtime(
     from services.block_trace.budget_manager import PromptBudgetManager
     from services.block_trace.store import BlockTraceStore
 
-    trace_store = BlockTraceStore(db_path="storage/block_trace.db")
+    bt_cfg = getattr(config, "block_trace", None)
+    joint_jdt = bool(
+        getattr(bt_cfg, "joint_dual_path_telemetry_enabled", True)
+    )
+    trace_store = BlockTraceStore(
+        db_path="storage/block_trace.db",
+        joint_dual_path_telemetry_enabled=joint_jdt,
+    )
     ctx.block_trace_store = trace_store
     await trace_store.init()
     ctx.bot_pair_guard = BotPairLoopGuard(
@@ -1209,6 +1245,7 @@ async def build_chat_runtime(
     memo_extractor = MemoExtractor(
         card_store=card_store,
         api_call=llm._call,
+        config=memo_cfg,
     )
     ctx.memo_extractor = memo_extractor
     if config.llm.usage.enabled:

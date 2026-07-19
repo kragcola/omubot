@@ -1,5 +1,6 @@
 """Affection-related tools: set_nickname."""
 
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from loguru import logger
@@ -9,20 +10,49 @@ from services.tools.context import ToolContext
 
 _L = logger.bind(channel="affection")
 
+_ALIAS_CONFIDENCE = 0.9
+
 
 class AffectionEnginePort(Protocol):
-    def set_group_nickname(self, user_id: str, nickname: str, *, group_id: str | None) -> None: ...
+    def set_group_nickname(
+        self,
+        user_id: str,
+        nickname: str,
+        *,
+        group_id: str | None = None,
+        pool_ids: list[str] | None = None,
+    ) -> Any: ...
 
-    def set_nickname(self, user_id: str, nickname: str) -> None: ...
+    def set_nickname(self, user_id: str, nickname: str) -> Any: ...
 
-    def set_suffix(self, user_id: str, suffix: str) -> None: ...
+    def set_suffix(self, user_id: str, suffix: str) -> Any: ...
 
 
 class SetNicknameTool(Tool):
     """Allow the LLM to store a preferred nickname for a user."""
 
-    def __init__(self, engine: AffectionEnginePort) -> None:
+    def __init__(
+        self,
+        engine: AffectionEnginePort,
+        *,
+        entity_alias_store: Any = None,
+        entity_alias_store_getter: Callable[[], Any] | None = None,
+    ) -> None:
         self._engine = engine
+        self._entity_alias_store = entity_alias_store
+        self._entity_alias_store_getter = entity_alias_store_getter
+
+    def _resolve_alias_store(self) -> Any:
+        if self._entity_alias_store is not None:
+            return self._entity_alias_store
+        getter = self._entity_alias_store_getter
+        if callable(getter):
+            try:
+                return getter()
+            except Exception as exc:
+                _L.warning("entity_alias_store_getter failed | err={}", exc)
+                return None
+        return None
 
     @property
     def name(self) -> str:
@@ -73,7 +103,51 @@ class SetNicknameTool(Tool):
                 self._engine.set_suffix(user_id, suffix)
             scope = "群聊" if in_group else "私聊"
             _L.info("nickname set | user={} nickname={} suffix={} scope={}", user_id, nickname, suffix, scope)
-            return f"已记住（{scope}），以后称呼 {user_id} 为「{nickname}」"
         except Exception as e:
             _L.error("set_nickname failed | user={} error={}", user_id, e)
             return f"设置昵称失败: {e}"
+
+        await self._seed_entity_alias(ctx, user_id=user_id, nickname=nickname)
+        return f"已记住（{scope}），以后称呼 {user_id} 为「{nickname}」"
+
+    async def _seed_entity_alias(
+        self,
+        ctx: ToolContext,
+        *,
+        user_id: str,
+        nickname: str,
+    ) -> None:
+        """Best-effort EntityAliasStore seed after a successful nickname set."""
+        canonical = str(user_id or "").strip()
+        if not canonical.isdigit() or int(canonical) <= 0:
+            return
+        # Normalize leading zeros while preserving positive decimal digits.
+        canonical = str(int(canonical))
+        store = self._resolve_alias_store()
+        if store is None:
+            return
+        alias = str(nickname or "").strip()
+        if not alias:
+            return
+        if ctx.group_id:
+            scope = "group"
+            scope_id = str(ctx.group_id)
+        else:
+            scope = "user"
+            scope_id = canonical
+        try:
+            await store.observe(
+                entity_key=f"user:qq:{canonical}",
+                alias=alias,
+                scope=scope,
+                scope_id=scope_id,
+                confidence=_ALIAS_CONFIDENCE,
+                source="affection_nickname",
+            )
+        except Exception as exc:
+            _L.warning(
+                "affection nickname alias seed failed | user={} alias={} err={}",
+                canonical,
+                alias,
+                exc,
+            )

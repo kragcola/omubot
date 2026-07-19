@@ -6,7 +6,7 @@
     "en": "Context"
   },
   "description": "统一聚合记忆卡片、文档知识和未来图谱事实的系统级上下文插件",
-  "version": "0.1.9",
+  "version": "0.1.14",
   "priority": 7,
   "tier": "system",
   "toggle_policy": "locked",
@@ -30,7 +30,12 @@
       "takeover_dynamic_prompt",
       "max_hits",
       "max_chars",
-      "graph_auto_extract"
+      "graph_auto_extract",
+      "temporal_trace",
+      "query_aware_plan",
+      "card_eligibility",
+      "pack_evidence_gate",
+      "evidence_use_contract"
     ]
   },
   "store": {

@@ -75,11 +75,11 @@ Fix any errors discovered during testing, even if they were pre-existing and not
 
 - **只读检查运行中 SQLite**：普通可写打开可能争用锁、产生 sidecar 或改变连接状态。live/WAL-aware 检查用 `sqlite3 'file:storage/<db>.db?mode=ro' '<query>'`，容量同时统计主 DB、`-wal`、`-shm`、`-journal`；不要给 live DB 加 `immutable=1`，它只适合明确离线、不再变化且无需 WAL replay 的静态备份 payload。先核对 schema、`PRAGMA user_version`、索引和 `PRAGMA quick_check`，运行期间不得写库。
 - **macOS 沙盒下进程探测**：`pgrep` / 部分 `ps` 会报 `sysmond service not found` 或权限错误。查进程/端口改用 `docker compose ps`、容器日志、pidfile，或 `lsof -nP -iTCP:<port>`。
-- **NapCat OneBot HTTP API（本地调试，已常开）**：本机 NapCat 配了无鉴权 HTTP server `localhost:29300`（`napcat/config/onebot11_384801062.json` 的 `network.httpServers`，gitignored）。调试发消息/查状态直接打它，**不用动 bot 进程、不用重启 NapCat**（运行态已开，重启反而有掉登录风险见 Docker 条）。仅本机可达、无 token、零 API 花费——**仅限本机开发环境，生产/公网严禁这么配**。
+- **NapCat OneBot HTTP API（本地调试，已常开）**：本机 NapCat 配了无鉴权 HTTP server `localhost:29300`（`napcat/config/onebot11_384801062.json` 的 `network.httpServers`，gitignored）。只读状态查询可按任务需要使用；发送、撤回或其他写调用会改变真实 QQ 外部状态，必须获得当前任务对精确动作和目标的明确授权。命令示例本身不是授权。无需为查询或已授权调用重启 NapCat；仅本机可达、无 token、零 API 花费，**生产/公网严禁这么配**。
   - 查登录态：`curl -sX POST http://localhost:29300/get_login_info -d '{}'`
-  - 发图到测试群（**测试群=984198159**，别发 963737802 那个静默观察群）：先 `B64=$(docker compose exec -T bot python3 -c "import base64;print(base64.b64encode(open('/app/storage/stickers/<id>.jpg','rb').read()).decode())")`，再 `curl -sX POST http://localhost:29300/send_group_msg -H 'Content-Type: application/json' -d "{\"group_id\":984198159,\"message\":[{\"type\":\"image\",\"data\":{\"file\":\"base64://${B64}\"}}]}"`（base64:// 与 bot 发图路径一致；compose service 名是 `bot`，container 名是 `qq-bot`）。
-  - 撤回：`curl -sX POST http://localhost:29300/delete_msg -d '{"message_id":<id>}'`（超过 QQ 撤回时限会 timeout，best-effort）。
-  - 排查富媒体发送失败别再重启/重配 NapCat（见 Docker 条 D6）——直接用此 API 复现即可。
+  - **仅在已获精确授权后**发图到测试群（测试群 `984198159`；绝不向静默观察群 `963737802` 发送）：先 `B64=$(docker compose exec -T bot python3 -c "import base64;print(base64.b64encode(open('/app/storage/stickers/<id>.jpg','rb').read()).decode())")`，再 `curl -sX POST http://localhost:29300/send_group_msg -H 'Content-Type: application/json' -d "{\"group_id\":984198159,\"message\":[{\"type\":\"image\",\"data\":{\"file\":\"base64://${B64}\"}}]}"`。
+  - **仅在已获精确授权后**撤回：`curl -sX POST http://localhost:29300/delete_msg -d '{"message_id":<id>}'`（超过 QQ 撤回时限会 timeout，best-effort）。
+  - 未获外部写授权时，富媒体排查只用离线 fixture、dry-run、只读日志和状态接口，不通过真实发送复现，也不重启/重配 NapCat。
 
 ### 工具调用：有依赖的写操作合并原子执行 + 自验证
 

@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "worldbook",
+  "display_name": {
+    "zh": "世界书运行时",
+    "en": "Worldbook Runtime"
+  },
+  "description": "Living Story Runtime：Canon / Life / Storylet / Drama / Projection（默认关闭）",
+  "version": "0.1.0",
+  "priority": 45,
+  "tier": "user",
+  "toggle_policy": "restart_required",
+  "category": "memory",
+  "permissions": [
+    "prompt",
+    "storage"
+  ],
+  "capabilities": [
+    "worldbook"
+  ],
+  "min_omubot_version": "",
+  "config": {
+    "defaults": "config.default.json",
+    "schema": "config.schema.json",
+    "apply_mode": "restart_required",
+    "restart_required_fields": [
+      "enabled",
+      "chat_projection_enabled",
+      "schedule_projection_enabled",
+      "storylet_enabled",
+      "dream_proposal_enabled",
+      "social_evidence_enabled",
+      "social_group_allowlist",
+      "canon_dir",
+      "storylet_dir",
+      "arc_seed_dir",
+      "state_dir",
+      "story_arc_dir"
+    ]
+  },
+  "store": {
+    "visibility": "internal",
+    "marketplace_id": ""
+  },
+  "author": "Omubot"
+}

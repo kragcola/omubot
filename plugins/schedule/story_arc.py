@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -37,6 +39,156 @@ _TERMINAL_STAGES = frozenset({
 })
 _STORE_LOCKS_GUARD = threading.Lock()
 _STORE_LOCKS: dict[str, threading.RLock] = {}
+
+_JOURNAL_SOURCES = frozenset({
+    "event_replan",
+    "dream_reflection",
+    "schedule_generator",
+})
+# Additive: factual is producer-carriable when public_projection is present.
+# Deep template/hash/alias validation stays in QZone (no reverse import here).
+_JOURNAL_SUBJECT_KINDS = frozenset({"self", "fiction", "factual"})
+_JOURNAL_PRIVACY = frozenset({"public", "private", "unknown"})
+_JOURNAL_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$")
+
+
+def _deep_freeze_public_projection_value(value: Any) -> Any:
+    """Deep-freeze nested projection payload (maps + sequences).
+
+    A frozen dataclass alone is not enough: a shallow ``dict(...)`` still aliases
+    nested lists/dicts, so external mutation could silently rewrite carrier
+    content after construction. Primitives are left as-is.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                str(key): _deep_freeze_public_projection_value(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze_public_projection_value(item) for item in value)
+    return value
+
+
+def _deep_thaw_public_projection_value(value: Any) -> Any:
+    """Return a plain JSON-ready deep copy of a frozen projection payload."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _deep_thaw_public_projection_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return [_deep_thaw_public_projection_value(item) for item in value]
+    if isinstance(value, list):
+        return [_deep_thaw_public_projection_value(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class JournalEventRecord:
+    """Producer-owned metadata for a StoryArc journal-eligible event.
+
+    QZone must not invent subject_kind / privacy / salience; producers emit them
+    at creation (Generative Agents / A-MEM style ingestion-time metadata).
+
+    Factual events are strictly additive carriers: they require ``privacy=public``
+    and a mapping ``public_projection`` payload. Template/hash/alias deep checks
+    remain QZone-owned. self/fiction must not carry ``public_projection``.
+    Schedule/Dream do not generate factual events in this cut.
+
+    ``public_projection`` is deep-frozen at construction (MappingProxy + tuples)
+    so nested mutation cannot rewrite a frozen record after the fact.
+    """
+
+    date: str
+    source: Literal["event_replan", "dream_reflection", "schedule_generator"]
+    summary: str
+    subject_kind: Literal["self", "fiction", "factual"]
+    privacy: Literal["public", "private", "unknown"]
+    salience: float
+    event_id: str | None = None
+    public_projection: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            date.fromisoformat(str(self.date).strip())
+        except ValueError as exc:
+            raise ValueError(f"invalid date: {self.date!r}") from exc
+        object.__setattr__(self, "date", str(self.date).strip())
+
+        source = str(self.source or "").strip()
+        if source not in _JOURNAL_SOURCES:
+            raise ValueError(f"invalid source: {self.source!r}")
+        object.__setattr__(self, "source", source)
+
+        summary = str(self.summary or "").strip()
+        if not summary:
+            raise ValueError("summary must be non-empty")
+        object.__setattr__(self, "summary", summary)
+
+        subject_kind = str(self.subject_kind or "").strip()
+        if subject_kind not in _JOURNAL_SUBJECT_KINDS:
+            raise ValueError(f"invalid subject_kind: {self.subject_kind!r}")
+        object.__setattr__(self, "subject_kind", subject_kind)
+
+        privacy = str(self.privacy or "").strip()
+        if privacy not in _JOURNAL_PRIVACY:
+            raise ValueError(f"invalid privacy: {self.privacy!r}")
+        object.__setattr__(self, "privacy", privacy)
+
+        if isinstance(self.salience, bool) or not isinstance(self.salience, (int, float)):
+            raise ValueError(f"invalid salience: {self.salience!r}")
+        salience = float(self.salience)
+        if not math.isfinite(salience) or not 0.0 <= salience <= 1.0:
+            raise ValueError(f"invalid salience: {self.salience!r}")
+        object.__setattr__(self, "salience", salience)
+
+        if self.event_id is not None:
+            event_id = str(self.event_id).strip()
+            if _JOURNAL_EVENT_ID_RE.fullmatch(event_id) is None:
+                raise ValueError(f"invalid event_id: {self.event_id!r}")
+            object.__setattr__(self, "event_id", event_id)
+
+        # Strict additive factual carrier (shallow structure only at this boundary).
+        if subject_kind == "factual":
+            if privacy != "public":
+                raise ValueError("factual events require public privacy")
+            if self.public_projection is None:
+                raise ValueError(
+                    "factual events require public_projection mapping payload"
+                )
+            if not isinstance(self.public_projection, Mapping):
+                raise ValueError("public_projection must be a mapping")
+            # Deep freeze nested maps/lists; do not import qzone validators here.
+            object.__setattr__(
+                self,
+                "public_projection",
+                _deep_freeze_public_projection_value(self.public_projection),
+            )
+        elif self.public_projection is not None:
+            raise ValueError(
+                "public_projection is only allowed for subject_kind=factual"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "date": self.date,
+            "source": self.source,
+            "summary": self.summary,
+            "subject_kind": self.subject_kind,
+            "privacy": self.privacy,
+            "salience": self.salience,
+        }
+        if self.event_id is not None:
+            payload["event_id"] = self.event_id
+        # Include projection only for factual carriers (never for self/fiction).
+        # Deep thaw so callers receive plain dict/list without shared mutables.
+        if self.subject_kind == "factual" and self.public_projection is not None:
+            payload["public_projection"] = _deep_thaw_public_projection_value(
+                self.public_projection
+            )
+        return payload
 
 
 def _list_str(value: object) -> list[str]:
@@ -117,6 +269,14 @@ class StoryArc:
     starts_on: str = ""
     ends_on: str = ""
     event_budget: dict[str, Any] = field(default_factory=dict)
+    # Worldbook Living Story Runtime v1 extensions (optional, default-safe).
+    # arc_role/stack_order pin main+side+ambient without mtime selection.
+    arc_role: str = "side"
+    stack_order: int = 0
+    status: str = "active"
+    deadlines: list[dict[str, Any]] = field(default_factory=list)
+    causal_links: list[dict[str, Any]] = field(default_factory=list)
+    event_history: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -138,6 +298,12 @@ class StoryArc:
             "last_events": [dict(event) for event in self.last_events],
             "next_day_seed": self.next_day_seed,
             "event_budget": dict(self.event_budget),
+            "arc_role": str(self.arc_role or "side"),
+            "stack_order": int(self.stack_order or 0),
+            "status": str(self.status or "active"),
+            "deadlines": [dict(item) for item in self.deadlines],
+            "causal_links": [dict(item) for item in self.causal_links],
+            "event_history": [dict(item) for item in self.event_history],
         }
 
     @classmethod
@@ -149,6 +315,9 @@ class StoryArc:
             for entity_id, state in raw_partner_states.items()
             if isinstance(state, dict)
         }
+        role = str(data.get("arc_role") or data.get("role") or "side").strip().lower()
+        if role not in {"main", "side", "ambient"}:
+            role = "side"
         return cls(
             arc_id=arc_id,
             revision=max(0, int(data.get("revision", 0) or 0)),
@@ -165,6 +334,12 @@ class StoryArc:
             last_events=_list_dict(data.get("last_events")),
             next_day_seed=str(data.get("next_day_seed", "") or ""),
             event_budget=_dict_value(data.get("event_budget")),
+            arc_role=role,
+            stack_order=int(data.get("stack_order") or 0),
+            status=str(data.get("status") or "active") or "active",
+            deadlines=_list_dict(data.get("deadlines")),
+            causal_links=_list_dict(data.get("causal_links")),
+            event_history=_list_dict(data.get("event_history")),
         )
 
 
@@ -211,6 +386,8 @@ class FictionPartnerState:
     availability: str = "normal"
     recent_events: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
+    # Exact, non-expiring side-effect ledger. recent_events is bounded history only.
+    applied_event_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         if self.kind != "fiction":
@@ -225,6 +402,7 @@ class FictionPartnerState:
             "availability": self.availability,
             "recent_events": list(self.recent_events),
             "constraints": list(self.constraints),
+            "applied_event_ids": list(self.applied_event_ids),
         }
 
     @classmethod
@@ -232,6 +410,15 @@ class FictionPartnerState:
         kind = str(data.get("kind", "fiction") or "fiction")
         if kind != "fiction":
             raise ValueError("only fiction partner states are supported in C-MVP")
+        raw_applied = data.get("applied_event_ids")
+        applied: list[str] = []
+        if isinstance(raw_applied, list):
+            seen: set[str] = set()
+            for item in raw_applied:
+                text = str(item or "").strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    applied.append(text)
         return cls(
             entity_id=_safe_arc_id(str(data.get("entity_id", "") or "")),
             kind="fiction",
@@ -242,6 +429,7 @@ class FictionPartnerState:
             availability=str(data.get("availability", "") or "normal"),
             recent_events=_list_str(data.get("recent_events")),
             constraints=_list_str(data.get("constraints")),
+            applied_event_ids=applied,
         )
 
     @classmethod
@@ -263,6 +451,7 @@ class FictionPartnerState:
             "availability": self.availability,
             "recent_events": list(self.recent_events[:3]),
             "constraints": list(self.constraints[:3]),
+            "applied_event_ids": list(self.applied_event_ids),
         }
 
 

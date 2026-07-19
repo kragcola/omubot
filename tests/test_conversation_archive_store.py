@@ -21,6 +21,33 @@ async def archive(tmp_path):
     await store.close()
 
 
+# Public MessageLog surface still used by runtime callers (timeline, slang
+# backlog, compact, consolidator fallback path). ConversationArchive must
+# expose every method with compatible signatures.
+_MESSAGE_LOG_PUBLIC_METHODS = (
+    "init",
+    "close",
+    "record",
+    "query_recent",
+    "query_term_hits",
+    "list_group_ids",
+    "record_session_msg",
+    "query_for_compact",
+)
+
+
+def test_archive_exposes_message_log_public_surface() -> None:
+    """Every runtime MessageLog method must exist on ConversationArchive."""
+    from services.memory.message_log import MessageLog
+
+    for name in _MESSAGE_LOG_PUBLIC_METHODS:
+        assert hasattr(MessageLog, name), f"MessageLog missing {name}"
+        assert hasattr(ConversationArchive, name), (
+            f"ConversationArchive missing MessageLog method {name}"
+        )
+        assert callable(getattr(ConversationArchive, name))
+
+
 async def test_archive_compat_message_log_methods(archive: ConversationArchive) -> None:
     """Existing MessageLog-shaped calls should keep working."""
     first_pk = await archive.record(
@@ -55,6 +82,94 @@ async def test_archive_compat_message_log_methods(archive: ConversationArchive) 
     session_rows = await archive.query_recent("session:private-1", limit=10)
     assert [row["content_text"] for row in session_rows] == ["secret"]
     assert await archive.list_group_ids() == ["100"]
+
+
+async def test_query_term_hits_parity_scope_and_ordering(
+    archive: ConversationArchive,
+    tmp_path,
+) -> None:
+    """query_term_hits: user-only, group-scoped, newest-N then chronological."""
+    from services.memory.message_log import MessageLog
+
+    group = "term-g1"
+    other = "term-g2"
+    # Older → newer within group; include assistant + other group noise.
+    samples = [
+        (group, "user", "u1", "alpha early", 1, 1000.0),
+        (group, "user", "u2", "beta middle", 2, 1001.0),
+        (group, "assistant", None, "alpha from bot", 3, 1002.0),
+        (group, "user", "u3", "alpha late", 4, 1003.0),
+        (group, "user", "u4", "gamma only", 5, 1004.0),
+        (other, "user", "x", "alpha other group", 6, 1005.0),
+    ]
+    for gid, role, speaker, text, mid, ts in samples:
+        await archive.record(
+            group_id=gid,
+            role=role,
+            speaker=speaker,
+            content_text=text,
+            content_json=None,
+            message_id=mid,
+            created_at=ts,
+        )
+
+    # Uninitialized / empty terms → []
+    cold = ConversationArchive(db_path=str(tmp_path / "cold.db"))
+    assert await cold.query_term_hits(group, ["alpha"]) == []
+    assert await archive.query_term_hits(group, []) == []
+    assert await archive.query_term_hits(group, ["  ", ""]) == []
+
+    hits = await archive.query_term_hits(group, ["alpha", "beta"], limit=5)
+    assert [row["content_text"] for row in hits] == [
+        "alpha early",
+        "beta middle",
+        "alpha late",
+    ]
+    for row in hits:
+        assert set(row) >= {
+            "role",
+            "speaker",
+            "content_text",
+            "message_id",
+            "created_at",
+        }
+        assert row["role"] == "user"
+
+    # Newest-limit then chronological: only 2 newest matching among the three
+    limited = await archive.query_term_hits(group, ["alpha", "beta"], limit=2)
+    assert [row["content_text"] for row in limited] == ["beta middle", "alpha late"]
+
+    # Parity against MessageLog on a shared legacy-only seed DB
+    shared = tmp_path / "term_parity.db"
+    ml = MessageLog(db_path=str(shared))
+    await ml.init()
+    try:
+        db = ml._db
+        assert db is not None
+        for gid, role, speaker, text, mid, ts in samples:
+            # MessageLog.record uses time.time(); seed via direct SQL for parity
+            await db.execute(
+                """INSERT INTO group_messages
+                       (group_id, role, speaker, content_text, content_json,
+                        message_id, created_at)
+                   VALUES (?, ?, ?, ?, NULL, ?, ?)""",
+                (gid, role, speaker, text, mid, ts),
+            )
+        await db.commit()
+        ml_hits = await ml.query_term_hits(group, ["alpha", "beta"], limit=5)
+        ml_lim = await ml.query_term_hits(group, ["alpha", "beta"], limit=2)
+    finally:
+        await ml.close()
+
+    arc = ConversationArchive(db_path=str(shared))
+    await arc.init()
+    try:
+        arc_hits = await arc.query_term_hits(group, ["alpha", "beta"], limit=5)
+        assert [dict(r) for r in arc_hits] == [dict(r) for r in ml_hits]
+        arc_lim = await arc.query_term_hits(group, ["alpha", "beta"], limit=2)
+        assert [dict(r) for r in arc_lim] == [dict(r) for r in ml_lim]
+    finally:
+        await arc.close()
 
 
 async def test_group_activity_summary_excludes_sessions(archive: ConversationArchive) -> None:
@@ -135,9 +250,46 @@ async def test_archive_backfills_legacy_rows_idempotently(tmp_path) -> None:
             "created_at": 2000.0,
         }]
         assert await archive.backfill_legacy_messages() == 0
-        cursor = await archive._db.execute("SELECT COUNT(*) AS n FROM conversation_messages")
+        db = archive._db
+        assert db is not None
+        cursor = await db.execute("SELECT COUNT(*) AS n FROM conversation_messages")
         row = await cursor.fetchone()
+        assert row is not None
         assert row["n"] == 1
+    finally:
+        await archive.close()
+
+
+async def test_backfill_ignores_already_mirrored_rows_without_per_row_probes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    archive = ConversationArchive(db_path=str(tmp_path / "messages.db"))
+    await archive.init()
+    try:
+        for idx in range(4):
+            await archive.record(
+                group_id="backfill-cost",
+                role="user",
+                speaker=f"U({idx})",
+                content_text=f"m{idx}",
+                content_json=None,
+                message_id=idx + 1,
+                created_at=1000.0 + idx,
+            )
+
+        original = archive._archive_row_exists
+        probes = 0
+
+        async def counted_probe(*, legacy_row_id: int) -> bool:
+            nonlocal probes
+            probes += 1
+            return await original(legacy_row_id=legacy_row_id)
+
+        monkeypatch.setattr(archive, "_archive_row_exists", counted_probe)
+
+        assert await archive.backfill_legacy_messages(batch_size=2) == 0
+        assert probes == 0
     finally:
         await archive.close()
 
@@ -157,11 +309,13 @@ async def test_archive_compat_queries_follow_legacy_deletes(
     )
     assert len(await archive.query_recent("250", limit=10)) == 1
 
-    await archive._db.execute(
+    db = archive._db
+    assert db is not None
+    await db.execute(
         "DELETE FROM group_messages WHERE group_id = ? AND message_id = ?",
         ("250", 250),
     )
-    await archive._db.commit()
+    await db.commit()
     assert await archive.query_recent("250", limit=10) == []
 
     archived = await archive.list_messages_by_pk_range(
@@ -600,13 +754,16 @@ async def test_archive_needs_rescan_legacy_fallback_is_audited(
     assert cursor is not None
     assert cursor["status"] == "needs_rescan"
     assert cursor["last_message_pk"] == first_pk
-    run_cursor = await archive._db.execute(
+    db = archive._db
+    assert db is not None
+    run_cursor = await db.execute(
         """SELECT status, finished_at, scanned_count, meta_json
            FROM conversation_scan_runs
            WHERE run_id = ?""",
         (batch["run_id"],),
     )
     run = await run_cursor.fetchone()
+    assert run is not None
     assert run["status"] == "legacy_fallback"
     assert run["finished_at"] is not None
     assert run["scanned_count"] == 2
@@ -654,11 +811,14 @@ async def test_archive_abandoned_scan_batch_does_not_advance_cursor(
         chat_id="380",
     )
     assert cursor is None
-    run_cursor = await archive._db.execute(
+    db = archive._db
+    assert db is not None
+    run_cursor = await db.execute(
         "SELECT status, error FROM conversation_scan_runs WHERE run_id = ?",
         (batch["run_id"],),
     )
     run = await run_cursor.fetchone()
+    assert run is not None
     assert dict(run) == {"status": "abandoned", "error": "cancelled"}
 
 
@@ -680,13 +840,16 @@ async def test_archive_scan_run_lifecycle(archive: ConversationArchive) -> None:
         filtered_count=1,
         saved_count=1,
     )
-    cursor = await archive._db.execute(
+    db = archive._db
+    assert db is not None
+    cursor = await db.execute(
         """SELECT status, scanned_count, extracted_count, filtered_count, saved_count
            FROM conversation_scan_runs
            WHERE run_id = ?""",
         (run_id,),
     )
     row = await cursor.fetchone()
+    assert row is not None
     assert dict(row) == {
         "status": "success",
         "scanned_count": 10,
@@ -930,6 +1093,9 @@ async def test_archive_business_ref_sync_is_idempotent(
     assert first["style"]["linked"] == 1
     assert second["slang"]["linked"] == 1
     assert second["style"]["linked"] == 1
-    cursor = await archive._db.execute("SELECT COUNT(*) AS n FROM conversation_message_refs")
+    db = archive._db
+    assert db is not None
+    cursor = await db.execute("SELECT COUNT(*) AS n FROM conversation_message_refs")
     row = await cursor.fetchone()
+    assert row is not None
     assert row["n"] == 2

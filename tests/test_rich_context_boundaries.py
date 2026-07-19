@@ -371,13 +371,19 @@ async def test_active_reply_ancestor_image_uses_existing_enrichment_and_keeps_re
     )
     text = _content_text(rendered)
 
-    assert "Ancestor Hero" in text and "Ancestor Work" in text
+    assert "Ancestor Hero" not in text and "Ancestor Work" not in text
     assert "current body" in text
     assert isinstance(rendered, list)
-    assert any(
-        block.get("type") == "image_ref" and block.get("path") == str(image_cache.path)
+    image_refs = [
+        block
         for block in rendered
-    )
+        if block.get("type") == "image_ref"
+        and block.get("path") == str(image_cache.path)
+    ]
+    assert len(image_refs) == 1
+    assert image_refs[0].get("visual_identity") == [
+        "Ancestor Hero（Ancestor Work）"
+    ]
     assert session.urls == ["https://example.test/ancestor.png"]
     assert image_cache.calls == [(raw, "ancestor-source")]
     assert recognizer.payloads == [normalized]
@@ -460,7 +466,8 @@ async def test_missing_url_image_refetch_timeout_is_local(
         pytest.fail("quoted image refetch timeout escaped instead of degrading locally")
     text = _content_text(rendered)
 
-    assert "slow image" in text
+    assert "slow image" not in text
+    assert "[图片]" in text
     assert "parent survives" in text and "current survives" in text
     assert bot.get_msg_ids == [300]
 

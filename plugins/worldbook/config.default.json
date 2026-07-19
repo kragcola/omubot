@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "plugin": "worldbook",
+  "values": {
+    "enabled": false,
+    "chat_projection_enabled": false,
+    "schedule_projection_enabled": false,
+    "storylet_enabled": false,
+    "dream_proposal_enabled": false,
+    "social_evidence_enabled": false,
+    "social_group_allowlist": [],
+    "canon_dir": "config/worldbook/canon",
+    "storylet_dir": "config/worldbook/storylets",
+    "arc_seed_dir": "config/worldbook/arcs",
+    "state_dir": "storage/worldbook",
+    "story_arc_dir": "storage/living_persona/story_arcs",
+    "total_budget_chars": 2400,
+    "canon_budget_chars": 900,
+    "life_budget_chars": 400,
+    "arc_budget_chars": 700,
+    "social_budget_chars": 400,
+    "storylet_budget_chars": 300,
+    "max_setbacks_per_arc": 1,
+    "max_events_per_tick": 1,
+    "recovery_window_steps": 3
+  }
+}

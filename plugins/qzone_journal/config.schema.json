@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "启用空间日志"
+    },
+    "dry_run": {
+      "type": "boolean",
+      "title": "仅预演发布请求"
+    },
+    "allow_live_publish": {
+      "type": "boolean",
+      "title": "允许真实发布（仍需已验证 wire profile）"
+    },
+    "allowed_live_uins": {
+      "type": "array",
+      "title": "允许真实发布的 QQ UIN 白名单",
+      "description": "空列表表示禁止任何 live publish；仅在凭证获取后、claim/HTTP 前校验",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9]{5,16}$"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "advanced_enabled": {
+      "type": "boolean",
+      "title": "启用进阶叙事来源（当前仍拒绝真人材料）"
+    },
+    "manual_review": {
+      "type": "boolean",
+      "title": "发布前人工审核",
+      "const": true
+    },
+    "max_posts_per_day": {
+      "type": "integer",
+      "title": "每日发布上限",
+      "minimum": 1,
+      "maximum": 3
+    },
+    "max_drafts_per_tick": {
+      "type": "integer",
+      "title": "单次 tick 最多生成草稿数",
+      "minimum": 1,
+      "maximum": 3,
+      "default": 1
+    },
+    "max_drafts_per_day": {
+      "type": "integer",
+      "title": "按事件日占用的草稿预算",
+      "description": "按 event_date 统计 pending_review/approved/dispatching/unknown/published；rejected/failed 不占额度",
+      "minimum": 1,
+      "maximum": 3,
+      "default": 1
+    },
+    "salience_threshold": {
+      "type": "number",
+      "title": "事件显著度阈值",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "allowed_sources": {
+      "type": "array",
+      "title": "允许的事实来源",
+      "items": {
+        "type": "string",
+        "enum": [
+          "event_replan",
+          "dream_reflection",
+          "schedule_generator"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "wire_profile_id": {
+      "type": "string",
+      "title": "QZone 发布线协议版本",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "enabled",
+    "dry_run",
+    "allow_live_publish",
+    "allowed_live_uins",
+    "advanced_enabled",
+    "manual_review",
+    "max_posts_per_day",
+    "max_drafts_per_tick",
+    "max_drafts_per_day",
+    "salience_threshold",
+    "allowed_sources",
+    "wire_profile_id"
+  ]
+}

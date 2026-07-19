@@ -1,0 +1,60 @@
+{
+  "arc_id": "living_story_v1.main",
+  "revision": 0,
+  "title": "Living Story v1 · 主线排练周",
+  "scope": "fiction",
+  "stage": "active",
+  "status": "active",
+  "starts_on": "2026-07-01",
+  "ends_on": "2026-12-31",
+  "arc_role": "main",
+  "stack_order": 0,
+  "goals": [
+    "完成本周联排核心段落",
+    "在考试压力下保持可演出状态"
+  ],
+  "active_conflicts": [
+    "考试档期与联排档期冲突"
+  ],
+  "variables": {
+    "energy": 0.8,
+    "rehearsal_progress": 0.1,
+    "exam_pressure": 0.05,
+    "stage_pressure": 0.05,
+    "study_progress": 0.0,
+    "setback_flag": 0.0,
+    "recovery_flag": 0.0,
+    "replan_debt": 0.0,
+    "partner_momentum": 0.0,
+    "week_closure": 0.0,
+    "focus_split": 0.0,
+    "study_load": 0.0,
+    "spare_time": 0.5
+  },
+  "partner_states": {
+    "tsukasa": {
+      "mood": "focused",
+      "note": "fiction partner independent motion seed"
+    }
+  },
+  "open_threads": [
+    "记下走位不稳处"
+  ],
+  "last_events": [],
+  "event_history": [],
+  "causal_links": [],
+  "deadlines": [],
+  "next_day_seed": "day0: warm-up on stage",
+  "event_budget": {
+    "now_step": 0,
+    "last_event_step": 0,
+    "generated_days": 0,
+    "setback_count": 0,
+    "events_this_tick": 0,
+    "triggered_once": [],
+    "cooldowns": {},
+    "storylet_available_at": {},
+    "last_viewed": {},
+    "committed_event_ids": []
+  }
+}

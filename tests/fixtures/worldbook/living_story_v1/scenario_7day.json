@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "pack_id": "living_story_v1",
+  "current_scope": {
+    "group_id": "fixture-group-living-story",
+    "user_id": "fixture-user-living-story"
+  },
+  "reload_after_step": 3,
+  "steps": [
+    {
+      "day": 0,
+      "step": 0,
+      "mode": "chat",
+      "conversation_text": "今天在凤凰奇幻乐园舞台做排练热身，走位先热起来。",
+      "variable_nudges": {},
+      "notes": "expect daily.rehearsal_warmup"
+    },
+    {
+      "day": 1,
+      "step": 1,
+      "mode": "schedule",
+      "conversation_text": "抽出安静时间复习学园功课，笔记堆高。",
+      "variable_nudges": {
+        "exam_pressure": 0.15
+      },
+      "notes": "schedule must project zero social; study or ambient may fire"
+    },
+    {
+      "day": 2,
+      "step": 2,
+      "mode": "both",
+      "conversation_text": "下周小测和排练档期撞车了，考试与舞台都要守。",
+      "variable_nudges": {
+        "exam_pressure": 0.3,
+        "stage_pressure": 0.1
+      },
+      "notes": "expect tension.exam_vs_stage"
+    },
+    {
+      "day": 3,
+      "step": 3,
+      "mode": "chat",
+      "conversation_text": "联排关键道具失灵，段落中断，今晚不能硬撑完整走台。",
+      "variable_nudges": {
+        "stage_pressure": 0.35
+      },
+      "notes": "expect setback.prop_failure; reload checkpoint after this step"
+    },
+    {
+      "day": 4,
+      "step": 4,
+      "mode": "chat",
+      "conversation_text": "为消化道具故障开始重排，砍掉一段花活，欠下精力债。",
+      "variable_nudges": {},
+      "notes": "expect tension.replan_cost; once/cooldown survive reload"
+    },
+    {
+      "day": 5,
+      "step": 5,
+      "mode": "schedule",
+      "conversation_text": "小步重练核心段落，确认道具替代方案，情绪回稳。",
+      "variable_nudges": {},
+      "notes": "expect recovery.after_setback"
+    },
+    {
+      "day": 6,
+      "step": 6,
+      "mode": "both",
+      "conversation_text": "一周收束：考试还欠一点，舞台已回稳，伙伴各自推进。",
+      "variable_nudges": {},
+      "notes": "expect closure.week_aftermath"
+    }
+  ]
+}

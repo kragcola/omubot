@@ -186,6 +186,46 @@ async def test_humanization_rewrite_low_score_runs_one_extra_round_and_persists_
     assert rows[0]["metadata"]["initial_score"] < 0.95
 
 
+async def test_real_chat_rejects_punctuation_only_humanization_rewrite(
+    persona_runtime: PersonaRuntime,
+    identity_snapshot: IdentitySnapshot,
+) -> None:
+    short_term = ShortTermMemory()
+    runtime_state = create_humanization_state_bus()
+    client = await _client(
+        short_term,
+        persona_runtime,
+        rewrite_threshold=0.95,
+        runtime_state=runtime_state,
+    )
+    try:
+        with patch(
+            "services.llm.client.call_api",
+            new_callable=AsyncMock,
+            side_effect=[
+                _result("作为一个AI，我会尽力解释——以下是答案。"),
+                _result("..."),
+            ],
+        ) as mock_api:
+            reply = await client.chat(
+                session_id="private_100",
+                user_id="100",
+                user_content="hello",
+                identity=identity_snapshot,
+            )
+    finally:
+        await client.close()
+
+    assert mock_api.await_count == 2
+    assert reply
+    assert reply.strip() not in {"...", "…", "……", "!!!", "？？"}
+    assistant_rows = [
+        row for row in short_term.get("private_100") if row["role"] == "assistant"
+    ]
+    assert len(assistant_rows) == 1
+    assert str(assistant_rows[0]["content"]).strip() == reply.strip()
+
+
 async def test_humanization_rewrite_cancel_path_does_not_write_assistant_or_metrics(
     persona_runtime: PersonaRuntime,
     identity_snapshot: IdentitySnapshot,

@@ -23,6 +23,7 @@ from services.memory.card_store import CardStore, NewCard
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "context_eval" / "basic.json"
 OWNER_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "context_eval" / "owner_scenarios.json"
 OWNER_REALISTIC_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "context_eval" / "owner_realistic.json"
+LONG_MEMORY_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "context_eval" / "long_memory_frontier.json"
 
 
 @pytest.mark.asyncio
@@ -158,6 +159,49 @@ async def test_context_eval_reports_pack_budget_violations() -> None:
 
 
 @pytest.mark.asyncio
+async def test_context_eval_enforces_zero_hit_no_evidence_contract() -> None:
+    service = ContextService([_StaticSource([
+        ContextHit(
+            id="memory_unsupported",
+            type="memory_card",
+            content="与问题无关的记忆",
+            score=0.8,
+            source="test",
+        ),
+    ])])
+    case = ContextEvalCase.from_dict({
+        "id": "no-evidence-must-abstain",
+        "query": "没有证据的问题",
+        "max_hit_count": 0,
+    })
+
+    summary = await evaluate_context_cases(service, [case])
+    result = summary.results[0]
+
+    assert summary.passed_cases == 0
+    assert summary.to_dict()["hit_count_violations"] == 1
+    assert result.to_dict()["max_hit_count"] == 0
+    assert result.to_dict()["hit_count_exceeded"] is True
+
+
+@pytest.mark.asyncio
+async def test_context_eval_forwards_fixture_session_id() -> None:
+    service = _SessionAwareService()
+    case = ContextEvalCase.from_dict({
+        "id": "cross-session-recall",
+        "query": "上次聊到哪里了",
+        "session_id": "locomo-session-2",
+        "max_hit_count": 0,
+    })
+
+    summary = await evaluate_context_cases(service, [case])
+
+    assert summary.passed_cases == 1
+    assert service.session_ids == ["locomo-session-2"]
+    assert case.to_dict()["session_id"] == "locomo-session-2"
+
+
+@pytest.mark.asyncio
 async def test_owner_context_eval_scenarios_guard_scope_and_noise(tmp_path) -> None:
     store = CardStore(str(tmp_path / "memory.db"))
     await store.init()
@@ -237,6 +281,30 @@ async def test_owner_realistic_context_eval_fixture_passes(tmp_path) -> None:
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_long_memory_frontier_fixture_passes(tmp_path) -> None:
+    store = CardStore(str(tmp_path / "memory.db"))
+    await store.init()
+    try:
+        await _seed_long_memory_store(store)
+        service = ContextService([MemoryContextSource(store)])
+        cases = load_context_eval_cases(LONG_MEMORY_FIXTURE_PATH)
+
+        summary = await evaluate_context_cases(service, cases)
+        results_by_id = {result.case_id: result for result in summary.results}
+
+        assert summary.total_cases == 5
+        assert summary.passed_cases == 5
+        assert summary.required_hit_recall == 1.0
+        assert summary.forbidden_violations == 0
+        assert summary.duplicate_hits == 0
+        assert summary.pack_budget_violations == 0
+        assert summary.hit_count_violations == 0
+        assert results_by_id["no-evidence-abstention"].hit_count == 0
+    finally:
+        await store.close()
+
+
 class _StaticSource:
     name = "static"
 
@@ -253,6 +321,24 @@ class _StaticSource:
     ) -> list[ContextHit]:
         del query, user_id, group_id
         return self._hits[:top_k]
+
+
+class _SessionAwareService:
+    def __init__(self) -> None:
+        self.session_ids: list[str] = []
+
+    async def search(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        user_id: str = "",
+        group_id: str | None = None,
+        top_k: int = 8,
+    ) -> list[ContextHit]:
+        del query, user_id, group_id, top_k
+        self.session_ids.append(session_id)
+        return []
 
 
 async def _seed_owner_context_store(store: CardStore) -> None:
@@ -312,3 +398,89 @@ def _seed_owner_knowledge_base(tmp_path) -> KnowledgeBase:
     kb = KnowledgeBase(str(docs))
     kb.reload()
     return kb
+
+
+async def _seed_long_memory_store(store: CardStore) -> None:
+    await store.add_card(NewCard(
+        category="preference",
+        scope="user",
+        scope_id="u_a",
+        content="偏好的饮料是无糖乌龙茶",
+        source="longmem_fixture",
+    ))
+    await store.add_card(NewCard(
+        category="preference",
+        scope="user",
+        scope_id="u_b",
+        content="偏好的饮料是可乐",
+        source="longmem_fixture",
+    ))
+
+    old_location = await store.add_card(
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="u_a",
+            content="以前住在杭州",
+            source="longmem_fixture",
+        ),
+        source_msg_id="msg-location-old",
+        captured_at="2026-01-02T10:00:00+08:00",
+        captured_by="longmem_fixture",
+    )
+    await store.add_card(
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="u_a",
+            content="现在住在上海",
+            source="longmem_fixture",
+            supersedes=old_location,
+        ),
+        source_msg_id="msg-location-new",
+        captured_at="2026-06-18T10:00:00+08:00",
+        captured_by="longmem_fixture",
+    )
+    await store.update_card(old_location, status="superseded")
+
+    old_meeting = await store.add_card(
+        NewCard(
+            category="event",
+            scope="user",
+            scope_id="u_a",
+            content="会议原定周四晚上七点",
+            source="longmem_fixture",
+        ),
+        source_msg_id="msg-meeting-old",
+        captured_at="2026-07-01T09:00:00+08:00",
+        captured_by="longmem_fixture",
+    )
+    await store.add_card(
+        NewCard(
+            category="event",
+            scope="user",
+            scope_id="u_a",
+            content="会议改到周五晚上八点",
+            source="longmem_fixture",
+            supersedes=old_meeting,
+        ),
+        source_msg_id="msg-meeting-new",
+        captured_at="2026-07-02T09:00:00+08:00",
+        captured_by="longmem_fixture",
+    )
+    await store.update_card(old_meeting, status="superseded")
+
+    await store.add_card(NewCard(
+        category="event",
+        scope="group",
+        scope_id="g_alpha",
+        content="阿尔法群团建地点定在东湖",
+        source="longmem_fixture",
+    ))
+    await store.add_card(NewCard(
+        category="event",
+        scope="group",
+        scope_id="g_beta",
+        content="贝塔群团建地点定在西山",
+        source="longmem_fixture",
+    ))

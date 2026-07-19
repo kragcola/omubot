@@ -4,6 +4,1027 @@
 
 ---
 
+## 2026-07-19 生产 Style 视觉/system provenance 污染精确清理
+
+**变更类型**：获授权的生产 `style.db` 行级数据修复；无代码部署、commit/push、QQ/QZone/NapCat 或容器重启。
+
+**边界与 dry-run**：运行真值为 `qq-bot:/app/storage/style.db`，宿主旧副本不参与。只清理 `style_evidence.source_type=human` 且 evidence 自身 `raw_text` 命中当前结构化视觉/system marker 合同的记录。曾评估把 context marker 纳入条件，会命中 558 条邻近图片但正文正常的 expression，判定为高误伤并否决。最终精确集为 73 expression / 73 evidence：2 approved、71 pending；40 条 image marker、33 条 angle system annotation；无 mixed evidence、无 enabled profile；candidate SHA-256 `0c2a00416518177b87c27da70b2a7b735c8a39f9b654c79a7b5129ba47e5756c`。
+
+**备份与执行**：BackupService fresh trusted backup `pre-change-20260719-224533`，26 ok / 0 failed，style backup SHA-256 `9c7f8a57bb14733c7a481190d8906dd8865f532c22521d165a252acaaa80a47b`、quick_check=ok。0600 cleanup plan 位于 backup 目录，SHA-256 `53355a9f79d64484b3c42f561a6705d8978fcd2ba37157800318b433ccd42b88`。同一 deterministic transaction 先在 fresh backup copy 演练，再以 `BEGIN IMMEDIATE` 对生产执行：73 evidence `human→system`，73 expression `approved/pending→rejected`，写入 73 条 actor=`codex_style_visual_cleanup` revision；不删除正文或 evidence。
+
+**验证 / 影响 / 回滚**：production counts 从 approved/pending/rejected `12/1175/9` 变为 `10/1104/82`；structured human evidence remaining=0，target system/rejected=73，target approved=0，`PRAGMA quick_check=ok`。container `29444b2626ac…` 保持 running、restart=0。整库 rollback plan 已生成，只允许另行授权后 stop bot→恢复 backup style.db→删除 WAL/SHM→quick_check→start bot；也可按 plan 主键行级恢复。宿主 provenance 修复版 extractor SHA `ef96f86b…f7f` 与当前容器 `20ac3799…9cf` 不同，说明防再污染代码尚未部署；部署前不要重新触发 Style 手工抽取/自动审批。
+
+---
+
+## 2026-07-19 Bot 记忆、措辞与图片回复行为修复完成（未部署）
+
+**变更类型**：记忆隐私边界、视觉身份持久化、LLM 最终可见输出、Style provenance、跨轮短语去重、工具授权与迁移文档；代码/离线测试完成，未 commit/push/deploy，未写生产 SQLite，未触 QQ/QZone/NapCat。
+
+**内容**：关闭 2026-07-18 审计的五条行为链。群聊记忆现在保留主体/来源群/visibility，并只召回当前发言人在当前群可见的 user 卡；显式单图纠正通过脱敏 `ReplyContext.visual_evidence` 与 `trigger_mode` 写入完整 SHA-256 + correcting user + scope 的 `visual_identities`，人工纠正覆盖错误机器身份，不再污染 preference/fact 或 Style human evidence；repair/rewrite/guardrail 全部回到 visible floor，纯标点/省略号失败关闭；视觉数值诊断不进入 model-visible evidence，跨轮 phrase-family 使用有界 assistant-only 历史。CardLookup/CardUpdate chat tool 只读写当前 user/current group（读取另允许 canonical `global/global`），外部 card ID、全局写入与非 canonical global namespace 均 fail-closed；工具 schema/描述已与执行权限对齐。视觉纠正写入点现二次验证 correction trigger、单图数量、`visual_system` provenance 与同一 full SHA。
+
+**同模式扫描 / Grok 复核**：扫描 `store_visual_correction` / `store_correction` 全调用面、`search_cards` chat/background 路径、CardUpdate add/update/supersede/expire 四种变更与引用图 timeout/cancel 路径。required Grok 实现/复核使用真实 child：router session `bf004f17-572b-4127-a5d1-8f3ee2e5e2ad` + child `019f7a96-0ffa-7f23-801e-2d5736dba707`；最终只读 review session `d329e4f7-c07d-433e-a4ec-271bfa92d33a` + completed child `019f7abd-c8e9-7fd1-8107-44ab395892c4`，0 Critical。旧的 CardUpdate Important finding在终稿中判定 stale；Codex 继续关闭 store 二次门禁、tool prompt/schema 与 noncanonical global query。Router Grok 曾违反红线执行一次 path-only `git stash push -- kernel/router.py` 后成功 pop；结构化事件证明仅该路径，最终 stash 为空、相关 helper/tests 完整，事件已记录且未重演。
+
+**验证 / 影响 / 回滚**：最终全仓 **5093 passed / 17 skipped / 189 warnings**；scoped Ruff clean；scoped Pyright **0 errors / 0 warnings**。迁移清单见 `docs/migrations/bot-memory-language-visual-remediation-2026-07-19.md`。回滚仅逐文件反向回退本任务 scoped hunks；additive `visual_identities` 表可保留，不 reset/clean/stash 用户 WIP。生产历史 Style 污染数据保持原样，任何清理必须另做可信备份、迁移语义与显式授权。诊断措辞 scrub 仍是 defense-in-depth；主要边界依赖结构化 evidence 不携带阈值/距离，未来加载非一方插件前需重新审计 ReplyContext hash/observation 信任面。
+
+---
+
+## 2026-07-19 Codex / Grok token-aware parallel workflow
+
+**变更类型**：项目级 Agent 协作与执行安全规则；`AGENTS.md`、`CLAUDE.md`、两份 `omubot-deep-delivery` skill mirror、completion tracker/ACTIVE；无运行行为、配置或数据变更。
+
+**内容**：新增内联 parallel-fit、全局 conflict graph/concurrency budget、默认最多两个 delegated workers、完整 prompt + 默认 `fork_turns="none"`、单 conflict-domain writer、并发 writer worktree 隔离、delivery manifest/run ledger、依赖序集成与组合验收。Grok 显式并行必须设置 `parallel requirement: required`，并在首个自然 checkpoint 与完成时验证真实 child id/独立任务/活动/隔离；zero-child 不得冒充并行。恢复规则统一为单 canonical target、禁止静默吸收 delegated scope、可见 `reconnecting/rebuilding`、15–60 秒 token-light 非阻塞 backoff、只由 concrete progress 重置的连续 30 分钟 outage window；显式 quota/billing/auth/policy/cancellation/permission 立即停止。deep-delivery 同步改为 live SQLite WAL-aware `mode=ro`，并明确 QQ/QZone/NapCat/webhook 外部写入必须逐任务获得精确授权，不能作为常规自检。
+
+**影响/交接**：普通 fit 判断只使用 `AGENTS.md` 紧凑规则；只有用户明确请求对应工作流才加载额外 orchestration skill。用户未明确授权 delegation 时不生成子代理；用户要求不 delegation 时优先。Worldbook 收口与本次独立 workflow 审计的 required Grok 包均遇明确 `auth_unavailable`；本次 session `cd6f3847-cee5-4da0-83b6-d45db50aeb8c` 无 `subagents/`，已按终止型认证错误停止，拒绝计为 Grok 并行，未降级 optional、未伪造 child、未将其 scope 静默吸收为“成功”。
+
+---
+
+## 2026-07-19 Worldbook Living Story 完整交付、开发启用与 Admin 可读性终验
+
+**变更类型**：Living Story 内容/运行时/只读 Admin、生产 Arc seed、bot-only 部署、rollback drill、前端可读性；未 commit/push；未触 QZone live/approval/凭据；NapCat 未 restart/recreate。
+
+**实现与运行态**：完成 main/side/ambient Storylet commit、有限 TTL Life、partner 幂等动态状态、Dream proposal→decision→commit、当前 scope factual→generic bounded Social consequence、七日 shadow 与 GET-only Admin。生产 seed 先全包验证、仅补缺失、不覆盖现有，legacy `weekly_life_20260716` 字节不变。Worldbook 与 Social 均仅 allowlist `984198159`；六项 Worldbook gate 全 true。生产已有 main `daily.rehearsal_warmup.s4`、side `daily.study_session.s4`、ambient `ambient.partner_independent.s4` 正式事件。
+
+**部署/回滚证明**：bot image `sha256:9aa7e39aae781dd4f27757b23784f7631386765f94dc884cafee1ccdd6427a51`，container `29444b2626ac…`。bot-only restart 后 seed `existing=3/seeded=0`，Arc/Life/partner/event hash 不变。实际关闭 gate/plugin 后 snapshot `available=false/reason=runtime_not_mounted` 且状态不再变化；恢复后最终保持启用。备份 `/app/storage/backups/worldbook-wave-e-rollback-20260719T021136Z`，manifest `cd0394e5c78752dcff4c3507bc8b5ba23b19497329ca27e80a12060a1d1dd473`。QZone config `7a07a817…2753`、plugin subtree `32c602c3…8160`、NapCat config aggregate `0842ed44…bfe0` 前后不变。
+
+**验证**：历史全仓可执行等价 **5006 passed**；本轮 fresh Worldbook/Dream/Social/Admin focused **245 passed**；前端 Node **11 passed**；`vue-tsc --noEmit`、Vite build、diff check 全绿。七日 shadow `pass`，essential hash `12bffcb74edc0832ff51d4e468d5638edbfd57ea71171cc29a0c46f6ad7feb35`。Admin 实机真实数据可见；Worldbook 一级菜单仅插件启用时显示；浅色最低对比度 `4.64:1`、深色 `5.88:1`，刷新按钮 `80x44`，900/1440/1920 无水平溢出，browser console 无 warning/error。
+
+**残余风险**：生产未设置 `ADMIN_TOKEN`，middleware 回退默认 `admin`；设置 secret 需单独授权与交付方式。只读 snapshot 的 registry 仍可能显示 `runtime_loaded=false/count=0`，但 provider、正式 runtime registry 与 14/8 内容路径已验证。未制造真实 QQ SocialExperience 或 Dream proposal。
+
+---
+
+## 2026-07-18 Worldbook Stage 2：多 Arc 因果 Storylet / Life / partner 闭环
+
+**变更类型**：`services/worldbook` 运行时 / schema / living_story 内容 / focused 测试；未 commit/deploy；生产 gate 保持 false；未触 Docker/NapCat/QZone/凭据。
+
+**问题与根因**：7 日 shadow 中 `budget_setback_count=2` 而 `major_setback_count=1`。`DramaManager.apply_selection_budget` 与 `EventReducer` 对 major 各加一次 setback，且 Stage 1 shadow 在投影后再手工合成 `EventRecord` 提交。
+
+**实现**：
+- `domain/schema/content`：Storylet 增加 authored `target_arc_id`；cost/consequence 与 nested Life/partner 字段均为闭集，未知键、改写 pinned profile、无 TTL 失败关闭；最大合法 Arc/Storylet ID 使用有界 hash event id。
+- `runtime/drama/reducer`：锁内 Arc 真值重检，StoryArcStore `update` 为唯一 commit 端口；Schedule 取整个 active ledger 的最大日序；Storylet 对各自 target Arc 资格评估并全局排序；同 Arc 同 step 的 chat/schedule 共用持久 cap；setback/recovery 仅 reducer 对 committed event 单计。
+- `Life/partner`：Arc commit 后以 event id catch-up；LifeState 与 FictionPartnerState/Arc partner mirror 均保存不淘汰的 exact applied-event ledger，旧事件重放不会覆盖新状态；未知 fiction partner 不临时发明。
+- `shadow`：删除手工 EventRecord；union chat/schedule 正式提交；扫描所有 Arc 的 commit ledger，强制 `budget_setback_matches_committed` 与 `formal_commit_observation_complete`。
+- 内容语义：main/side/ambient 真正分别演化；冲突 cost 显式分离；recovery 清除 setback flag 并进入 recovery，closure 回到 active。
+
+**验证**：Codex 独立终验 `content_pack+shadow+runtime+schedule_integration` **95 passed**；Ruff clean；Pyright **0 errors**。7-day shadow：`overall=pass`、9 formal commits 无漏报、main/side/ambient 均变化、major=budget=1、recovery=true、final main `stage=active` / `setback_flag=0`；跨重启 continuity 与 gates-all-false 通过。
+
+**影响/回滚**：生产 gate 仍全关，未 commit/deploy，未触 Docker/NapCat/QZone/凭据。回滚精确还原 Worldbook Stage 2 文件与 living_story pack；独立 state 为 additive，可保留。下一步为 Dream proposal lifecycle。
+
+---
+
+## 2026-07-18 Bot 记忆、措辞与图片回复行为只读审计
+
+**变更类型**：日志/生产 SQLite/代码/测试只读审计与持久报告；无运行行为、配置、schema、数据或部署变更；未触 Docker/NapCat/QZone/凭据。
+
+**结论与交接**：审计确认三项 P1：群聊记忆固定写 user scope 而群聊只读 group/global，且图片身份被误抽取为用户偏好；persona drift repair 位于 visible finalize 之后，可把 `...` 重新带回发送链；视觉说明被当作用户正文且 Style 已把系统视觉注释误标为 human 并批准，形成描述反馈环。两项 P2 为内部置信诊断词直接进入可复述 prompt，以及跨多轮短语词族重复防线缺失。完整证据、隐私边界、测试缺口和建议顺序见 `docs/audits/bot-memory-language-visual-behavior-audit-2026-07-18.md`；本轮未实施修复、未清理生产 Style 数据、未部署。
+
+---
+
+## 2026-07-18 Worldbook Living Story Runtime v1 Stage 0 离线实现与验收
+
+**变更类型**：分层世界书、长期生活故事、Storylet/Drama、Prompt Projection、Dream proposal、记忆 scope hardening；源码与离线验收；所有 gate 默认关闭；未 commit/deploy；未触 Docker/NapCat/QZone/凭据/生产数据。
+
+**架构与实现**：新增 `services/worldbook/` 九层运行时：Persona/Native Canon read-only 引用、带 source/confidence/privacy/TTL/revision 的 Life State、当前 group/user Social Evidence adapter、main/side/ambient Story Ledger、Storylet Registry、Drama Manager、committed event reducer、Dream proposal gate、带 source/scope/evidence/budget trace 的 Prompt Projection。新增 `plugins/worldbook/` manifest/default/schema，priority 45 在 Chat ProviderBus 后、Dream 前完成接线；新增 authoring README 与 Canon/Storylet JSON Schema，registry 初始为空，不预装未经核验的事实或事件。
+
+**Schedule/Dream/StoryArc**：StoryArc additive 增加 `arc_role/stack_order/status/deadlines/causal_links/event_history`，旧 JSON 默认兼容，无 bulk migration。worldbook schedule gate 开时不再按 mtime 选主线、不再固定 `+0.08/+0.03`，改为显式 main + shared schedule projection（永不带 Social Evidence）+ 幂等 committed event reducer；gate 关保持旧行为。Dream gate 开时 reflection 只写确定性 proposal，不写 memory card、不直接更新 Arc、不晋升 factual/Persona Canon/Native Canon；gate 关保持旧行为。
+
+**Grok 并行执行实况**：首个顶层 Grok 会话遇 503 后自动恢复，落地 12 个 core modules、plugin scaffold 与 StoryArc 扩展；两次 context compaction 后陷入重复读取，未完成测试/接线。focused rebuild 再次 503 后恢复但无落盘，主动停止。终审后的 core repair 与窄 correction 两个 Grok 会话也各遇一次 503 后在原会话恢复，完成 Storylet/Social/Life/trigger/reducer/proposal 修复。Codex 保留 Grok 实质贡献，但两次独立拒收其“全绿”结论：先发现 512-id 淘汰与 persist-failure Storylet 泄漏，再由 Grok 定点修正；未并发竞写同一文件。
+
+**TDD、终审与缺陷关闭**：初轮 RED→GREEN 关闭 reducer 重放双加、Dream nested Canon/factual、Life TTL、Social cross-scope/privacy、Storylet/config/plugin/Schedule/global memory 等 13 类缺口。后续只读终审为 **0 Critical / 11 Important**；逐条复现后 1 项是既有 QZone v0.8.2 真实性修复的时间线误报，10 项 confirmed。最终补齐 Worldbook Schedule 独立 provision StoryArcStore、无显式 main 不回退 mtime、真实 Storylet step/evidence、persist-success-before-project、Life/Social fail-closed、`always_active` 禁激活、未知 condition 拒绝、event.arc_id 绑定、精确长期 reducer 幂等、proposal-only persistence。全仓顺带发现的 `CardLookupTool(query)` scope 泄露也已按当前 user + 当前 group + global 修复。
+
+**同模式扫描**：production `search_cards` 仅剩 CardStore 定义、CardLookup、Dream 后台维护工具、Schedule。Schedule 已限定 `scope=global`；CardLookup 已限定可见 user/group/global；Dream 位点是独立后台记忆维护工具，不进入 chat/Schedule projection，保留用于跨实体管理。QZone/NapCat 相关路径只做 status 碰撞核对，未修改其配置、实现或运行态。
+
+**验证**：最终 Worldbook + integration **58 passed**；Schedule/Dream/QZone/plugin collision **132 passed**；全仓 **4900 passed / 17 skipped / 186 warnings**，零失败。相关 Ruff clean；targeted Pyright **0 errors / 0 warnings**；JSON/schema 可解析；六项默认 gate 全 false；`git diff --check` clean。全仓首跑暴露一条 Python 3.13 event-loop 测试隔离问题，Codex 改为标准 async pytest 后单测与全仓复跑通过。真实离线生命周期 probe：PromptProviderBus 注册 worldbook，Canon query 产生 1 个 `world` candidate 且 evidence=`canon:place.stage`，Schedule/Dream bridge 正确绑定；disabled 配置不创建 registry/state 目录、不注册 provider。
+
+**影响/回滚/交接**：Worldbook 六项 gate 全 false，因此相对本轮开始时已部署的 QZone v0.8.2 baseline，不改变 Prompt、Schedule、Dream；同轮 `CardLookupTool(query)` scope hardening 是明确的隐私行为修复。未改 `config/config.json`、Admin 菜单/API、SystemModule reserved 状态、SQLite schema 或 production data。回滚删除 worldbook 新文件并精确还原 Schedule/Dream/StoryArc/PluginContext/memo lookup hunks；由于未部署无需数据或容器回滚。下一步必须取得用户新授权后从 Stage 1 fixture/shadow projection 开始，不得直接全量启用，不得联动 QZone live。
+
+---
+
+## 2026-07-18 QZone v0.8.2 真实性 / 审批作用域修复与生产部署
+
+**变更类型**：Critical 内容真实性修复、schema v6、Admin 审批边界、合成记忆清理、bot-only 生产部署；未 commit；未发起 QZone POST/retry/delete；NapCat 未 restart/recreate。
+
+**根因与代码修复**：fiction schedule 被 Schedule/Dream producer 写成 `self/public`，Dream 又把合成反思写入 global memory，composer/approval/capture 没有在 live 边界重验事实类型。v0.8.2 改为 fiction arc 的 Schedule/Dream=`fiction/public`，其他 arc=`self/unknown`；selector 拒绝 synthetic source + self；fiction 确定性前缀 `虚构故事里，`，factual 正文严格等于公开投影且不调用 LLM；Schedule 不再读取 `dream_reflection` 卡，global synthetic Dream 不落 memory。review provenance 增加 `arc_scope`。
+
+**Grok 交叉审查与二次 hardening**：只读 Grok review 指出历史 outbox 可绕过 producer/selector、普通 Approve 会随双 live flags 自动升级、fiction/factual 缺少 delivery 内容不变量、catalog/docs 未同步。最终 live delivery 在取凭证前拒绝缺失 review metadata、synthetic-self、无前缀 fiction、被改写 factual；普通 Admin Approve 与 Web 请求显式为 `dry_run`，只有请求明确 `live` 且完整 live gate ready 才能授权。schema v6 的 `approval_scope` 默认 `dry_run`，中央 catalog target 从 5 修正为 6。
+
+**运行态发现与同模式扫描**：首轮部署后新 fiction 草稿存成 `虚构故事里,`。根因是 `public_safety` 的全角 ASCII 折叠在 composer 之后把中文逗号改写；新增 compose→store 往返 RED 后保留中文逗号，并继续用中英文分隔符扫描 secret。扫描了 `enqueue` / `create_revision` 两个 `scrub_public_text(content)` 持久化路径、compose/recompose、delivery/capture、Schedule/Dream producer；三个固化 ASCII 逗号的旧测试同步迁移。旧草稿采用 immutable revision：原行 rejected，新 revision 2 仅修正固定前缀，其他正文/provenance/source_summary 继承。
+
+**验证**：最终 QZone/Dream/Schedule/catalog/backup 相关 **447 passed**；全仓 **4840 passed / 17 skipped / 186 warnings**；Ruff clean；Pyright 0；`vue-tsc --noEmit`、frontend build、plugin-aware sidebar **5/5** 通过；`BUILTIN_WIRE_PROFILE.validated=false`、catalog target=6。Grok post-fix 只读复核的 115 项 focused tests 通过，确认旧 P0/P1 全关闭、无新 Critical/Important，仅余 delivery 已兜底的 P3 防御纵深。in-app browser 可加载 Admin 登录页且 console error/warn 为 0，但无现成登录态，未读取或填写 token；容器内本地认证 API health 200 完成真实页面数据源验收。
+
+**备份、部署与数据修复**：BackupService `pre-change-20260718-091031` 为 trusted，26 ok / 0 failed，关键 QZone DB、memory DB、plugin config、StoryArc 均 ok，两库 backup `quick_check=ok`。仅两次 build + force-recreate bot；最终 bot created `2026-07-18T01:27:33.719324504Z`、restart=0、running。NapCat 始终 created `2026-06-22T07:00:35.653702969Z`、started `2026-07-09T22:51:47.963549084Z`、restart=0、running。
+
+**最终运行态**：QZone schema v6、`quick_check=ok`；历史 published 行 `approval_scope=dry_run`；当前 tip 为 1 条 `fiction/public`、`arc_scope=fiction`、中文虚构前缀、revision 2、`pending_review/dry_run`，approved/dispatching/unknown 均 0。两张精确污染卡经 `CardStore.expire_card()` 变为 expired，active target=0；active fiction StoryArc 中两条 2026-07-17 stale self 事件经 `StoryArcStore.update()` 修正为 `fiction/public`。runtime health：enabled=true、dry_run=true、live=false、allowlist 空、profile 未验证、live gate ready=false。
+
+**回滚/交接**：代码异常回滚上一 bot image 并只 recreate bot；数据需回滚时按上述 trusted BackupService payload 做精确 restore plan。v6 为 additive；远端既有日志保持不变。未来真实发布仍需新的显式用户授权、明确 live approval、ready live gate 与新的原始 attested capture，禁止重发既有 draft 或修改内置 profile。
+
+---
+
+## 2026-07-17 QZone Web / 插件侧栏 / 一次性真实发布测试收口
+
+**变更类型**：管理端 UX、插件运行态导航、QZone profile/capture hardening、生产部署与一次性真实发布验收；未 commit；仅 rebuild/restart/recreate bot，NapCat 未 restart/recreate。
+
+**管理端与侧栏**：空间日志页改为 Calm Ops 详情型控制台，重做指标、运行门说明、筛选、草稿列表、诊断与详情抽屉；浅/深色及 900/1280/1440/1920 真实浏览器检查通过。插件专属一级菜单显式映射 `/stickers → sticker`、`/knowledge → knowledge`、`/birthday → calendar_context`、`/qzone-journal → qzone_journal`；disabled、缺失或 API 失败时 fail-closed 隐藏，插件页保存状态后触发侧栏刷新。最终第四指标为“已发布 1 / published · 已确认远端记录”。
+
+**发布边界 hardening**：内置 profile 永久 `validated=false`。真实 fixture 使用 exact bytes 的 detached HMAC attestation；专用 32-byte QZone key 位于 `/app/storage/qzone_wire_profiles/attestation.secret` 且 mode 0600，不复用 research pseudonymization secret；验签后解析同一 bytes，关闭 TOCTOU；response echo 覆盖正文、JSON/URL 编码、UIN、cookie、`p_skey`、`g_tk`；DB 到 `published` 后才提交 fixture；cleanup shielded 且尝试全部资源。最终独立 review GO，0 Critical / 0 Important；QZone regression 最新 301 passed，专项复跑 24 passed。
+
+**一次性真实发布结果**：用户授权的单个 POST 恰好执行一次。严格 publish parser 未得到明确 success，工具返回 `publish_failed_or_ambiguous`，不重试，将 `qzd_9e0753f900cd837b46d6d3bd` 置 `unknown`，且不生成 fixture/attestation。随后只读认证 QZone feed 返回 HTTP 200 / code 0，精确命中正文并带远端 post ID；使用既有人工处置状态机确认成 `published`，没有第二次发布。不得把 feed 响应伪造成原始 publish fixture，也不得再次发送该 draft。
+
+**最终运行态**：Bot container `ce829a2f7657...`，image `sha256:4689af9a1e18a80cd7995b015155901d50f1be502286ed237a163ca0a8f27f3b`，tag `omubot-bot:qzone-live-20260717-v2`。QZone plugin enabled，但常驻配置已恢复 `dry_run=true`、`allow_live_publish=false`、内置 profile、空 UIN allowlist，Admin 明确显示 live gate locked。DB schema v5、`PRAGMA quick_check=ok`、counts=`{published: 1}`、manual resolution=1；content SHA-256 `cae01edff8ec7db05407cd58e14d18ff2d3b12cecf52cd1f22c79b6654f5b4c2`，external ID 只保留 SHA-256 `ab9355123c5bbf63322e97d0ab0a2b555b53468a2b30f7a4f02f1b846e2508e8`。
+
+**运行态负向验收**：`calendar_context` 初始 enabled/“生日祝福”可见；保存 disabled 后页面标记“待重启停用”，仅 restart bot 后 runtime disabled 且侧栏隐藏；保存 enabled 后再次仅 restart bot，最终 runtime enabled 且侧栏恢复。两次操作均未触 QZone publish。NapCat 始终为 `19f6cf13607c...`、restart=0、started `2026-07-09T22:51:47.963549084Z`，未重启/重建。
+
+**备份/回滚/交接**：发布前备份 `/app/storage/backups/qzone-live-20260717-215117-prepublish`；旧 image 回滚 tag `omubot-bot:qzone-prelive-20260717`。前端静态资源为 bind mount，回滚相关 view/menu helper 后重建 static；后端异常仅回滚/recreate bot；永不 `docker compose down`、touch NapCat 或自动删除远端日志。未来再次真实发布必须有新的显式授权、新的 approved draft 与新的原始 attested publish capture。
+
+---
+
+## 2026-07-17 Memory Stage-0 + QZone v0.8.1 生产部署与授权测试
+
+**变更类型**：生产部署、运行配置、QZone 鉴权/dry-run、存储 catalog 修复；未 commit；只 recreate bot，NapCat 未 restart/recreate。
+
+**部署**：冻结旧运行基线 `98887a5`，旧镜像回滚 tag `omubot-bot:rollback-98887a5-20260717`；宿主 config 与 stopped live storage 备份到 `.workspace/deploy-backups/memory-qzone-20260717-stage0/`（live payload 439 MiB）。生产 bot 最终为 container `2e5afddabaa3...`、image `sha256:0c01368005b16ce31c328a87d376bc94fd8c814653cb696eff80f17f65cd7d4d`、`GIT_COMMIT=worktree-20260717-memory-qzone-stage0-catalog-v5`、restart=0。NapCat 保持 container `19f6cf13607c...`、image `sha256:cde89d766604...`、restart=0。
+
+**Stage-0 配置**：`config/config.json` 新增 KG provenance=true、observability=false、JDT=false；真实 `PluginConfigStore` 深合并 context TemporalTrace/query planner/card eligibility/pack evidence/evidence-use 均 false，memo write policy=false。QZone plugin/state enabled，但 `dry_run=true`、`allow_live_publish=false`、allowlist 空、每日上限 1、built-in profile 仍 `validated=false`。
+
+**运行验证**：Application startup、23/23 PluginBus、OneBot 连接、群出站 guard、protocol trace、Admin health、memory 查询、QZone DB migration 均通过。QZone `user_version=5`、WAL、`PRAGMA quick_check=ok`。全局 services 最终无 error，仅保留两个既有 optional DB 未创建的 warning。
+
+**生产发现与修复**：Admin 首轮把 QZone DB 报成 future 5/1。根因是 `services/storage/catalog._spec()` 将目标版本硬编码为 1；TDD RED 精确复现后，为 helper 增加默认 1 的 `target_user_version` 参数，仅 QZone 声明 5。catalog/status/backup 62 passed；QZone core/runtime/revisions 79 passed；Ruff clean；Pyright 0；diff-check clean。修复后生产 catalog 为 5/5 current、SQLite error=0。
+
+**QZone 授权测试**：部署前后均以 secret-safe 方式验证 NapCat login/cookie API、cookie header、`p_skey`、cookie/login UIN 一致，UIN 仅留哈希前缀 `0e5e6e5315a6`。生产自动生成的唯一 draft 经人工检查为 self/public、73 chars、secret/ID scan false；审批写入 1 条 audit；dry-run 200 仅返回 profile/host/path/field names/content length+SHA256；真实 publish 负向测试本地 409。最终 DB 只有 `{approved: 1}`，published/external ID 均 0。
+
+**边界与交接**：未执行 live canary。原因是无 `real_sanitized` fixture，built-in profile 永久 unvalidated，live flag/allowlist 均关闭，且用户要求的全绿条件未满足。未来只能用独立、secret-scanned、ephemeral `WireProfile(validated=True)` 走同一 approved draft；禁止改 `BUILTIN_WIRE_PROFILE.validated`、批量发布或自动远端删除。Admin 登录实际使用 runtime `ADMIN_TOKEN`，与 checked-in config token 不一致，本次未改认证源。
+
+**回滚**：Stage flags/config 可恢复上述备份后 bot-only recreate；结构/代码异常用旧 image tag；QZone volume 保留审计，不自动删远端；永不 `docker compose down` 或 touch NapCat。
+
+---
+
+## 2026-07-17 全记忆 A/B/C/D 总审 + staged rollout/rollback v1（未部署）
+
+**变更类型**：全系统证据审计 + 离线部署控制面合同；**无** production runtime/schema/data/config mutation；**未** commit/deploy；**未**触 live DB/Docker/NapCat/QZone/凭据；生产仍文档化为 `98887a5`。
+
+**总审结论**：Grok read-only 总审 session `615cbc4d-0331-4a40-a01d-225c840db462` 完整 `grok-exit: 0`。Archive、write lifecycle、identity/typed refs、temporal/conflict、retrieval/planner/eligibility/pack、graph provenance/window/observability、Episode、autopilot、jdt 均为 **已实现但未部署（B）**；synthetic/eval/LongMemEval manual replay 为 **离线完成（A）**；真实 canary/population/latency/user outcome 为 **真残留（C）**；PPR、GraphRAG community、完整 MemGPT/Letta tools、官方全量 benchmark CI、legacy row inventory、meta index/big-bang backfill 继续 **NO-GO/defer（D）**。
+
+**Critical/Important**：多项 worktree 默认同时 enabled，朴素首发会一次改变 write/retrieve/pack/prompt/graph；Entity/typed refs、graph window/hub、Episode v2、archive composition 等又无 kill-switch。仓库此前没有 memory staged runbook 或 cross-flag identity gate。
+
+**实现**：
+1. `docs/runbooks/memory-system-staged-rollout-v1.json`：十个闭集 flag、八个累积 phase；Stage 0 仅 gpg 保持 true（false 是 unsafe legacy path），其余 flappable behavior 全暗。
+2. `docs/runbooks/memory-system-staged-rollout-v1.md`：Preflight、Stage 0、累积 phase、Canary metrics、Stop conditions、Rollback、无 flag 结构切片与 NO-GO。
+3. `tests/test_memory_staged_rollout_contract.py`：profile 闭集/单调、planner/eligibility/PEG/EUC Stage-0 identity；新增同 profile 的 TemporalTrace 零 assembler/零 sidecar、memo 真实 legacy add-only、gpo pre-gpo shape/无 quality SQL、jdt exact disabled zero shape/无 joint SELECT；并经真实 plugin/main config owner 验证 dotted flags。
+4. wiki 对齐本地未部署版本：context `0.1.14`、memo `1.1.6`、qzone_journal `0.8.1`，明确生产仍旧行为与 staged rollout 门。
+5. 迁移：`docs/migrations/memory-staged-rollout-contract-v1-2026-07-17.md`。
+
+**独立审查与修正**：post-implementation Grok session `717a68ed-b0a4-47be-a3a6-acc361754e94` 为 **ACCEPT / 0 Critical / 2 Important / 4 Minor**。I1 是 Stage-0 集成门未覆盖 TemporalTrace/memo/gpo/jdt 真实 disabled 行为；I2 是 flag path 仅手写词表，未绑定 `storage/plugins/config/{context,memo}.json` canonical wrapper、manifest/schema/runtime loader 与主 `BotConfig`。修正同时补 operator values 深合并，避免 Stage slice 擦除无关设置；只读调查 session `fec176a0-00d4-4fbe-8145-ddec3d8103ee` 完整 `grok-exit: 0`。
+
+**TDD/验证**：初版 RED **3 failed** → GREEN **3 passed**；remediation 时四条 runtime/config 先通过、runbook mapping 保持 **1 failed / 4 passed** → GREEN contract **5 passed**；rollout 相关组合 **314 passed**；config-store/loader 组合 **37 passed**；全仓 **4790 passed / 17 skipped / 186 warnings**；scoped Ruff clean；targeted Pyright **0 errors / 0 warnings**；JSON parse / diff-check clean。post-fix 前两次 reviewer 在 verdict 前 524；最终 Grok `9aedda78-378c-4282-832f-3cc84f255baa` 完整 `grok-exit: 0`，**ACCEPT / 0 Critical / 0 Important / 2 Minor**，I1/I2 全关闭。两个 Minor 为已知 no-canary 授权边界与 `set_values` 替换语义（runbook/test 已要求 deep-merge），不阻塞 offline objective 归零。
+
+**回滚/边界**：当前包仅 docs/tests，删除新增三类 artifact 并还原 tracker/wiki/log 即可。未来若用户另行授权：phase flag-off + bot-only restart/recreate；结构切片异常恢复旧 bot image；gpg 默认保持 on；永不 recreate NapCat、自动删 live memory 数据或用 synthetic 指标过 PPR 门。
+
+---
+
+## 2026-07-17 LongMemEval replay 独立审查修正（未部署）
+
+**变更类型**：离线评测适配器 contract/privacy/scorer hardening；**无** runtime wiring/schema/data migration；**未** commit/deploy；**未**触 live DB/Docker/NapCat/QZone/凭据/官方数据下载；`BUILTIN_WIRE_PROFILE.validated=false`。
+
+**根因与修正**：
+1. parser 只校验 replay 会消费的字段，弱于“严格官方 v1 schema”声明：现强制官方六种 `question_type`、非空 `answer/question_date`、`user|assistant` role、非空 haystack/session turns；answer/date 只验证后丢弃，不扩张到 answer scoring。
+2. success report 直接序列化外部 question/session/turn ID；本地自定义数据若把 PII 写进 ID 会泄漏：现按 case 域输出 SHA-256 opaque ID，原始 ID 只留在单 case 内存/临时库映射。
+3. `score_ranked_refs` 隐含唯一排名前提，重复 ref 可令 nDCG >1：现 duplicate ranked refs fail-closed，不静默去重追分。
+4. 本工具的 session metrics 来自最终 pack 的 turn-top-k 有序 unique sessions，不具备 upstream `evaluate_retrieval_turn2session` 为凑齐 k 个 unique session 扩窗的完整 ranking：report 新增 `upstream_turn_to_session_equivalent=false` 与精确 scope 字段，保留 pinned recall/nDCG 公式但不冒充转换等价。
+5. real stack 的 DEBUG 日志可把 question/keywords 写到 stderr/既有 Loguru sink，绕过 JSON 脱敏：CLI 仅在 replay 执行期临时 disable `services.context` / `services.memory` namespace，并在 `finally` 恢复；不改生产 logger 配置。
+
+**审查/验证**：Grok 正常模式 session `fb683c70-061f-4e9e-8e1d-bb48f35b2859` 完整 `grok-exit: 0`，初审 **ACCEPT**，并列出 I1 session scorer scope、I2 DEBUG query leak、I3 文档过称、I4 adversarial gaps。Codex 直接从官方 pinned commit 复核 README 与 `src/retrieval/eval_utils.py`。TDD RED **11 failed / 31 passed**，CLI log RED **1 failed** → GREEN focused **42 passed**；CardStore/RetrievalGate/ContextService/pack related **235 passed**；全仓 **4785 passed / 17 skipped / 186 warnings**；Ruff clean；targeted Pyright **0 errors / 0 warnings**；diff-check clean。post-fix 前两次主请求 524，第三次 session `cf7d58ae-f213-4321-9ed8-c1aeadfc5d42` **ACCEPT / 0 Critical / 0 Important / 3 Minor / grok-exit 0**；I1-I4 全关闭，stale 4769 文案已清。
+
+**回滚/边界**：回退 `services/context/official_replay.py`、focused tests 与本条文档即可；不改生产 ranking、Query-Aware Planner、RetrievalGate、CardStore schema 或 prompt。官方全量 benchmark/CI、reader/LLM judge、PPR/GraphRAG 继续 NO-GO/defer。
+
+---
+
+## 2026-07-17 QZone Journal v0.8.1 Tip CAS / Action Boundary Hardening（离线 TDD）
+
+**变更类型**：patch hardening（非 v0.9）；**无 schema migration**；**未** commit / deploy；**未**触 live DB / Docker / NapCat / 凭据 / 真实 QZone HTTP；`BUILTIN_WIRE_PROFILE.validated=false`。
+
+**内容**：
+1. **M1** `JournalStore.create_revision`：仅将 `qzone_journal_drafts.supersedes_draft_id` 的 UNIQUE（`sqlite_errorcode` 2067 + 约束身份）映射为 `InvalidDraftTransitionError`（Admin 409）；其他 IntegrityError/BUSY/取消原样传播；失败事务无 revision/audit/预算污染。
+2. **M2** 公共只读 `is_lineage_tip(draft_id)`：已知 tip/非 tip 返回 bool；未知 id → `KeyError`；私有连接级 helper 保留。
+3. **M3** `JournalDelivery.deliver`：approved + tip 门禁先于 describe/凭据/transport；non-tip fail-closed。
+4. **M4** `confirm_published` / `confirm_not_published`：同一 `BEGIN IMMEDIATE` 内、幂等 shortcut 前 revalidate tip；历史 non-tip 无状态/audit 污染；tip 精确匹配幂等保留。
+5. **M5** `DraftDetailDrawer.vue`：`canDryRun` / `canResolve` 与 handler、按钮共用 tip 真值；`revisions=[]` 非可操作；保留 actionGeneration 迟到保护；无新样式/路由/组件。
+6. **M6** 插件 class + manifest → `0.8.1`；migration checklist：`docs/migrations/qzone-journal-tip-cas-action-boundary-v0.8.1-2026-07-17.md`。ACTIVE/tracker 去掉过时 Grok endpoint 阻塞叙述。
+
+**影响范围**：`plugins/qzone_journal/store.py`、`delivery.py`、`plugin.py`、`plugin.json`；`admin/frontend/src/views/qzone-journal/DraftDetailDrawer.vue`；focused tests；docs/tracking + maintenance-log。
+
+**回滚**：无 DB 步骤；回退上述文件到 v0.8.0 表面即可。若曾部署仅 recreate bot，永不触 NapCat。
+
+**Codex 最终验收**：宿主 SQLite 冲突为 `2067 / SQLITE_CONSTRAINT_UNIQUE` 且精确列身份可识别；历史 non-tip `unknown` 的 confirm-published / confirm-not-published Admin 路由均为 409 且无状态/audit/预算污染；QZone **273 passed**；全仓 **4775 passed / 17 skipped / 186 warnings**；Ruff clean；Pyright 0；vue-tsc/JSON 通过。Codex direct review 无 Critical/Important。独立 Grok reviewer 多次在 final synthesis 遭上游 524，未返回结论，故不记录虚假的 `0C/0I`。
+
+---
+
+## 2026-07-17 LongMemEval Raw-Turn Replay v1 离线验收
+
+**变更类型**：官方数据形状的手动离线 retrieval/pack replay + strict schema/cancel/privacy hardening；**未** commit / deploy；**未**触 live DB / Docker / NapCat / QZone；`validated=false`。
+
+**内容**：
+1. 新增 `services/context/official_replay.py` 与 `tools/run_longmemeval_replay.py`：用户显式提供本地 LongMemEval v1 JSON；每 case 独立临时 CardStore，经真实 MemoryContextSource→RetrievalGate→ContextService→pack，输出官方 recall_any/recall_all/nDCG 聚合。
+2. 固定 upstream `xiaowu0162/LongMemEval@9e0b455f4ef0e2ab8f2e582289761153549043fc`（MIT），schema 与 scorer 均按 pin 复核；不下载/打包官方数据，不接 regular CI，不评 memory extraction/answer generation，不声称 leaderboard parity。
+3. 修复 replay 把 question ID 当新 session 导致 `full_new_session` 绕过 query relevance；完整 turn DTO 保留 `[date] role: content`，CardStore search projection 为 `[date] content`，避免 adapter 角色标签制造关键词命中；生产 RetrievalGate/RRF/Card weights 未改。
+4. strict parser 拒绝重复 question/session/answer ID、三数组错位、空/非字符串字段、string boolean、未知 evidence session、非法 root/case；无 selected case 时仍校验 top_k/max_chars。
+5. 脱敏 report 不含 question/answer/turn/pack 正文，失败只暴露异常类型；外部 search cancel 与 init 已打开连接后的 cancel 均传播并完成 store/temp DB 清理。
+6. report 明示 `deterministic_provenance=true`、`ranking_tie_break_deterministic=false`：production CardStore 随机 ID 下的等分顺序不伪造稳定性，generic English keyword tie 作为真实限制保留。
+
+**验证**：focused **32 passed**；CardStore/RetrievalGate/ContextService 组合 **170 passed**；Ruff clean；Pyright **0 errors / 0 warnings**；全仓 **4769 passed / 17 skipped / 186 warnings**。
+
+**影响/回滚/交接**：仅离线 service/tool/test/docs，无 runtime wiring、schema 或数据迁移；删除四类文件即可回滚。full LongMemEval/LongMemEval-V2/LoCoMo CI 继续 NO-GO/defer。Grok delegated review 保持 `reconnecting`：用户称地址已更新，但安全 launcher 的有效 `~/.grok/config.toml` 仍是旧 host/mtime，真实变化前不得重派旧 endpoint。迁移：`docs/migrations/memory-longmemeval-raw-turn-replay-v1-2026-07-17.md`。
+
+---
+
+## 2026-07-17 Joint Dual-Path Memory Telemetry v1 离线终验（jdt_v1）
+
+**变更类型**：Context↔Episode 最终 prompt budget 联合只读观测 + privacy hardening；**未** commit / deploy；**未**触 live DB / Docker / NapCat / QZone；`validated=false`。
+
+**内容**：
+1. A-D 剩余候选前沿/代码对比后选 B：ContextService 与 EpisodeProvider 保持有意双路径，不合并 RRF/ranking；联合观测优先于 legacy inventory、Episode meta index 与 official benchmark CI。
+2. 复用既有 `prompt_block_traces`，新增纯 `jdt_v1` role/decision/outcome 聚合；`BlockTraceStore.joint_dual_path_snapshot()` 以一次有界 CTE SELECT 获取完整相关 request，不在 `LLMClient` / `PromptBudgetManager` 热路径重复写入。
+3. 闭集 role：Context main / TemporalTrace / EUC constrained / Episode；闭集 decision：accepted / trimmed / rejected；shadow/未知/畸形/空 request fail-closed，不产生虚假 present/sample。
+4. 新 Admin `GET /api/admin/block-trace/joint-memory-paths` 只调用公共 Store；type-only error，`CancelledError` 传播；`block_trace.joint_dual_path_telemetry_enabled=false` 时返回 disabled zero shape 且不跑 SQL。
+5. 独立初审发现 **1 Critical privacy**：runtime request ID 内嵌 `group_<群号>` / `private_<用户号>` session。最终响应完全移除 request ID，不透传 query/text/group/user/session/candidate/evidence/provider/metadata/budget reason；post-fix review **0C/0I/0M，ACCEPT**。
+
+**验证**：新 jdt **24 passed**；focused **56 passed**；全仓 **4737 passed / 17 skipped / 186 warnings**；jdt 相关 Ruff clean；targeted Pyright **0 errors / 0 warnings**；`git diff --check` clean。全项目 Ruff/Pyright 被既有无关 dirty/untracked 文件 **179 / 378** 项挡住，不误报全绿、不在本切片处理。
+
+**影响范围**：`services/block_trace/joint_telemetry.py`、BlockTrace Store/export、Admin block-trace route、`BlockTraceConfig` 与 bootstrap 透传、TDD 与 migration。现有 trace schema/version、写入、retention、`/stats`、`/alignment`、PromptBudgetManager accepted list、Context/Episode prompt 行为不变。
+
+**残留/回滚**：依赖现有 trace retention；只观察 emitted block role，不伪报精确 ContextPack `pack_state` 或 trimmed 后字符；Admin CTE 延迟待真实规模观测。回滚设 `block_trace.joint_dual_path_telemetry_enabled=false` 后仅 restart/recreate **bot**。下一切片为 legacy graph evidence 有界只读 inventory/dry-run design；apply/UPDATE/bulk repair/PPR 继续 NO-GO。迁移：`docs/migrations/memory-joint-dual-path-telemetry-v1-2026-07-17.md`。
+
+---
+
+## 2026-07-17 Graph Population & Evidence-Quality Observability v1 离线终验（gpo_v1）
+
+**变更类型**：gpo_v1 实现 + TDD + 独立 review/fix + 全仓终验 + 文档同步；**未** commit / deploy；**未**触 live DB / Docker / NapCat / QZone；`validated=false`。
+
+**内容**：
+1. 只读 population/evidence-quality 可观测性：纯分类层 + `KnowledgeGraphStore.health_snapshot()` 拥有全部 SELECT；Admin `graph_health` 经 service 公开入口，不再直接访问 `writer._db`。
+2. 启用 `knowledge_graph.observability_enabled` 时 additive nested `observability`（`version=gpo_v1`）：active fact support、evidence rows/type histogram、pending quality 与闭集 gate code；旧顶层 health 字段兼容。**禁止** candidate→fact conversion rate（`graph_facts` 无持久 `candidate_id`）。
+3. TDD：新测试 **21 passed**（RED→GREEN / adversarial）。
+4. 独立初审 **0 Critical / 3 Important**：I1 type-only 安全错误与 cancel 传播；I2 精确计数 + kill-switch 不触发质量 SQL；I3 全量只读扫描性能残留接受。
+5. Codex focused **144 passed**；最终全仓 **4713 passed / 17 skipped / 186 warnings**；Ruff clean；Pyright **0 errors / 0 warnings**；`git diff --check` clean。
+6. post-fix 独立 review：**0 Critical / 0 Important，ACCEPT post-fix**。
+
+**影响范围**：`services/knowledge_graph/observability.py`、store/service health snapshot、`kernel/config.py`、`bootstrap/chat_runtime.py`、`admin/routes/api/knowledge.py`、`tests/test_graph_population_observability.py`、ACTIVE/记忆 tracker/migration。不改写入路径、检索 ranking、PPR/hop、schema。
+
+**残留**：启用时 admin-only health 对 active facts/evidence 与 pending candidates 做完整只读扫描；大图可能增加 health 延迟或 SQLite 读竞争（非聊天热路径）。
+
+**回滚/交接**：`knowledge_graph.observability_enabled=false` 后仅 restart/recreate **bot**（恢复 pre-gpo 顶层 key shape，跳过质量扫描）。无 DB migration / 数据回滚。本切片**未授权部署/commit**。下一候选：legacy evidence 有界只读诊断/repair 工具 vs Episode↔Context 联合 telemetry；**PPR 在已部署真实脱敏 population、evidence-quality 与 latency 证据前继续 NO-GO**。迁移：`docs/migrations/memory-graph-population-observability-v1-2026-07-17.md`。
+
+---
+
+## 2026-07-17 Graph Provenance Gate v1 离线终验（新 Grok endpoint / scalar hardening）
+
+**变更类型**：gpg_v1 最终验收与小型 correctness 补强；**未** commit / deploy；**未**触 live DB / Docker / NapCat / QZone；`validated=false`。
+
+**内容**：
+1. suite regression 修正后全仓 **4672 passed / 17 skipped / 186 warnings**，原 8 个裸 id / alias listener 回归关闭。
+2. 更新后的 Grok endpoint 完成长时独立 adversarial review：`grok-exit: 0`、无 524、**0 Critical / 0 Important，ACCEPT offline**。启动标题生成仍可能单次 503 后自动降级，不影响主会话。
+3. Codex 复现 review residual：`True` / `NaN` / `±Inf` 会被 stringify 为伪证据 ID。新增 20 个参数化 RED，写侧统一 `invalid_id_scalar`，读侧 `_strip_id` fail-closed 且不抛异常。
+4. post-fix：相关 KG/bridge/Context/Episode/Application **152 passed**；最终全仓 **4692 passed / 17 skipped / 186 warnings**；Ruff clean；Pyright **0 errors**；diff-check clean。
+5. Grok 窄范围 post-fix review：**0 Critical / 0 Important，ACCEPT post-fix**；`grok-exit: 0`；未改文件。
+
+**影响范围**：`services/knowledge_graph/provenance.py`、`tests/test_graph_provenance_gate.py`、gpg migration、ACTIVE/记忆 tracker。普通字符串/整数/既有可通过的非零有限 float、bare id→evidence、alias、primary/derived、listener 合同不变。
+
+**回滚/交接**：`knowledge_graph.provenance_gate_enabled=false` 仅重新打开 unsafe 写接受；读侧 `graph_fact:*` quarantine 与 supersede no-self-fallback 仍保留。无 schema migration/bulk repair。下一只读切片比较 graph facts populate/observability、legacy evidence 有界诊断/repair 工具与 EpisodeProvider↔Context alignment；PPR 继续 NO-GO。
+
+---
+
+## 2026-07-17 gpg_v1 全量回归修正（裸 id→evidence + 禁止合成 alias）
+
+**变更类型**：gpg_v1 suite correction；**未** commit / deploy；**未**触 live DB / Docker / NapCat / QZone。
+
+**内容**：
+1. **A**：裸非空 `{"id":…}`（无 type）合法 legacy 锚点 → 规范化为 `type=evidence, id=…` 且 primary；与 pre-gpg `evidence:<id>` / reverse lookup bare `evidence_id` 兼容。空白 id 仍 `whitespace_id`。
+2. **B**：仅当输入实际使用 `card_id`/`chunk_id`/`message_id` 时写出 alias 字段；`type=doc_chunk`+`id`  alone **不**合成 `chunk_id`，FactGraphBridge 保持 no-op（`test_missing_chunk_id_is_noop` 不变）。
+3. `evidence_type_from_mapping` / `is_primary_evidence_mapping` 对齐裸 id → evidence。
+4. 迁移文档与测试：去掉「裸 id 缺 type 拒绝」；新增 bare-id / no-synthesize-alias 回归。
+
+**影响范围**：`services/knowledge_graph/provenance.py`、`tests/test_graph_provenance_gate.py`、迁移 md。whitespace / conflict / graph_fact 护栏未削弱。
+
+**回滚**：同 gpg kill-switch；或还原本批 provenance 变更。
+
+---
+
+## 2026-07-17 gpg_v1 primary 合同修正（deny-set / 读写一致）
+
+**变更类型**：acceptance correction；**未**部署、**未** commit。
+
+**内容**：`is_primary_evidence_type` 改为「非空 type 且非 derived」；v1 derived 仅 `graph_fact`。读路径 `_graph_evidence_refs`/`_graph_provenance_kind` 与 `primary_evidence_from_rows` 共用 provenance 谓词。`observation` 等显式类型无需 allowlist。可选 type token `^[a-z][a-z0-9_]*$`。
+
+**验证**：focused provenance + KG/context；Ruff/Pyright/diff-check。
+
+**回滚**：同 gpg_v1 kill-switch `knowledge_graph.provenance_gate_enabled=false`。
+
+---
+
+## 2026-07-17 Graph Provenance Gate v1（gpg_v1 实现完成 / 未部署 / 未 commit）
+
+**变更类型**：KG 写侧 provenance 门禁 + 读侧 evidence_refs 轻隔离；**未**部署、**未** commit、**未**触 live DB/Docker/NapCat/QZone/凭据；`validated=false`。
+
+**内容**：
+1. 新增纯模块 `services/knowledge_graph/provenance.py`：`normalize_graph_evidence` / `GraphProvenanceError` / `primary_evidence_from_rows`；规范 card/chunk/message/fixture；拒绝空/空白/冲突/`graph_fact` primary。
+2. 默认 `KnowledgeGraphConfig.provenance_gate_enabled=true`；bootstrap 透传；store/service 构造器可测。
+3. Defense in depth：`add_fact` / `add_candidate` / `promote_candidate` 规范化；submit 无效 → None；approve 无效 legacy → pending + `provenance_gate:<code>`；supersede 仅复制 primary，移除 `graph_fact:self`。
+4. 读：`_graph_evidence_refs` 过滤 `graph_fact:*`；metadata `graph_provenance_kind`；不改 RRF/hop/peg/euc。
+5. 无 schema migration、无 bulk repair。迁移：`docs/migrations/memory-graph-provenance-gate-v1-2026-07-17.md`。
+
+**验证**：gpg **24 passed**；组合 KG/peg/bootstrap **72 passed**；Ruff clean；Pyright **0 errors**；`git diff --check` clean。全量由 Codex 独立跑。
+
+**回滚**：`knowledge_graph.provenance_gate_enabled=false` 后仅 restart bot（文档标明 unsafe legacy）。
+
+**同模式扫描**：store add_fact/add_candidate/promote；service submit/approve/supersede；listeners 收规范 dict；admin supersede 走 service；无 `graph_fact:self` 制造路径。
+
+---
+
+## 2026-07-17 euc_v1 Codex 验收修正（最终 pack 优先 / omit_only 注入 / sanitizer 不变量）
+
+**变更类型**：acceptance correction；**未**部署、**未** commit、**未**触 live DB/Docker/NapCat/QZone/凭据。
+
+**内容**：
+1. `pack_state` 以最终 pack 为准：`demote_present` 仅当 ≥1 demoted non-hint survivor 留在 `pack_hits`；demote 后 budget 丢光 → `empty` + inject。
+2. `omit_only` 仍为诊断态，但无可用最终证据 → 与 empty/hint_only 同软约束注入（mode≠skip 且 inject 开）。
+3. Sanitizer：`action=identity` 仅 disabled 或 identity=true；`constrained_instruction` 仅 inject=true 且 state∈{empty,hint_only,omit_only}；否则 none；畸形 fail-closed。
+4. schema / migration / plugin 文案同步；service 级 demote→budget-empty 与 omit_only 回归。
+
+**影响范围**：`services/context/evidence_use_contract.py`、`plugins/context/*` 文档与 schema、`tests/test_context_evidence_use_contract.py`、migration。
+
+**最终验收**：Codex focused context **181 passed**；全仓 **4646 passed / 17 skipped / 186 warnings**；Ruff clean；Pyright **0 errors**；JSON / `git diff --check` clean；独立 Grok review **0 Critical / 0 Important，ACCEPT offline**。review 仅余 tracker 文案、可选 rate、eval opt-in 覆盖度等 Minor，不阻塞离线接受。
+
+**回滚**：`evidence_use_contract.enabled=false`；无 DB 迁移。
+
+---
+
+## 2026-07-17 Evidence-Use / Pack-State Contract v1（实现完成 / 未部署 / 未 commit）
+
+**变更类型**：记忆 pack-state 观测 + 空包软约束；**未**部署、**未** commit、**未**触 live DB/Docker/NapCat/QZone/凭据；`BUILTIN_WIRE_PROFILE.validated` 保持 `false`。
+
+**内容**：
+1. 新增纯模块 `services/context/evidence_use_contract.py`：闭集 `pack_state`（empty/hint_only/nonempty/demote_present/omit_only/skip）+ action；sanitize/aggregate 无密文。
+2. `ContextService.build_prompt_context()` 在 gate+pack 后 derive 合同，挂 `ContextPack.evidence_use_contract`（`to_dict()` 不暴露）并写入 recent；`metrics()` 增聚合计数。
+3. `ContextPlugin` 对 empty/hint_only/omit_only（最终无可用非 hint 证据）注入低优先级中文软约束；有幸存 hit 的 demote_present 不注入；不强制 pass_turn/静默；TemporalTrace seed 路径不变。
+4. 配置 `evidence_use_contract.enabled` / `inject_constrained_instruction`，插件 `0.1.14` restart-required；disabled = identity。
+5. 离线 eval 默认仍 `search()+pack_context_hits()`；opt-in `score_evidence_use_contract` 仅记 `pack_state`。
+6. 迁移：`docs/migrations/memory-evidence-use-contract-v1-2026-07-17.md`。不改 RRF/type caps/Card/TemporalTrace/Episode/tool/QZone。
+
+**验证**：focused context **181 passed**；全仓 **4646 passed / 17 skipped / 186 warnings**；Ruff clean；Pyright **0 errors**；独立 Grok review **0 Critical / 0 Important，ACCEPT offline**；未部署。
+
+**回滚**：`evidence_use_contract.enabled=false` 后仅 restart/recreate bot；无 DB 迁移。
+
+---
+
+## 2026-07-17 Pack-Time Confidence/Evidence Gate v1（实现完成 / 未部署 / 未 commit）
+
+**变更类型**：记忆 pack 期 evidence-aware tiering；**未**部署、**未** commit、**未**触 live DB/Docker/NapCat/QZone/凭据；`BUILTIN_WIRE_PROFILE.validated` 保持 `false`。
+
+**内容**：
+1. 新增纯模块 `services/context/pack_evidence_gate.py`：不可变 policy/result；keep→demote 原序；omit 缺席；metrics 仅闭集 action/reason/count。
+2. 唯一插入点 `ContextService.build_prompt_context()`：`search()`（RRF+type caps+top_k）之后、`pack_context_hits()` 之前；`search()` 行为不变。
+3. `ContextPack.trace_seed_ids` 记录 gate 前真实 memory ids（排除 `memory_hint:`）；`to_dict()` 不暴露。
+4. `ContextPlugin` TemporalTrace 优先 `trace_seed_ids`，旧/fake pack 回退 packed memory ids。
+5. 配置 `pack_evidence_gate.enabled`（默认 true）、`memory_soft_confidence=0.45`、`graph_soft_confidence=0.60`，schema `[0,1]`，插件 `0.1.13` restart-required。
+6. 迁移：`docs/migrations/memory-pack-evidence-gate-v1-2026-07-17.md`。不改 RRF/Card 权重、RetrievalGate、Query-Aware、graph hops、TemporalTrace auth/schema。
+
+**验证**：实现 focused **248 passed**，Codex hardening 后 focused **249 passed**；全仓 **4618 passed / 17 skipped / 186 warnings**；Ruff clean；生产 Pyright **0 errors**；JSON schema parse ok；`git diff --check` clean；独立 Grok review **0 Critical / 0 Important，ACCEPT**。
+
+**回滚**：`pack_evidence_gate.enabled=false` 后仅 restart/recreate bot；无 DB 迁移。
+
+---
+
+## 2026-07-17 Memory Card Category Time Eligibility v1（实现完成 / 未部署 / 未 commit）
+
+**变更类型**：记忆 prompt recall 读时时效过滤；**未**部署、**未** commit、**未**触 live DB/Docker/NapCat/凭据；`BUILTIN_WIRE_PROFILE.validated` 保持 `false`。
+
+**内容**：
+1. 新增纯模块 `services/memory/card_eligibility.py`：不可变 policy、Asia/Shanghai offset-less 解析、`updated_at`→`created_at` 锚点、默认仅 `status=30d`/`event=180d` 衰减。
+2. `RetrievalGate` full/keyword/semantic/count 共用过滤；full-cache 存 raw、读时再滤；`total_active`/`matched_active` 仅计合格卡。
+3. `RetrievalGate` keyword 改为复用 eligible full-cache；关闭“过期高优先级行先占 SQL LIMIT、饿死新匹配”的假 miss，RRF/Card score 权重不变。
+4. `TemporalTraceAssembler` 仅过滤 active heads；按硬上限 24 取候选后再过滤 malformed/expired 行，supersedes 父节点不被 TTL 剔除。
+5. 配置 `card_eligibility.enabled` kill-switch（默认 true）、`status_ttl_days`/`event_ttl_days`、schema bounds、plugin `0.1.12` restart-required；真实 startup 测试确认共享 RetrievalGate 与 TemporalTraceAssembler 使用同一 policy。
+6. **不**解释 `ttl_turns`；无 schema 列/backfill；Admin/list 直读路径不变。
+7. 迁移：`docs/migrations/memory-card-category-time-eligibility-v1-2026-07-17.md`。
+
+**验证**：focused **252 passed**；全仓 **4581 passed / 17 skipped / 186 warnings**；Ruff clean；生产 Pyright **0 errors**；`git diff --check` clean；独立 Grok review **0 Critical / 0 Important，ACCEPT**。更新后的 Grok endpoint 本轮 investigation / implementation / review 均未出现 524；辅助标题请求仍偶发 `503 No available channel`，不影响主任务完成。
+
+**回滚**：`card_eligibility.enabled=false` 后仅 restart/recreate bot；无 DB 迁移。
+
+---
+
+## 2026-07-17 Memory Query-Aware Retrieval Planner v1（离线终审 / 未部署 / 未 commit）
+
+**变更类型**：记忆检索规划 / prompt pack budget / metrics 合同；**未**部署、**未** commit、**未**触 live DB/Docker/NapCat/QZone/凭据；`BUILTIN_WIRE_PROFILE.validated=false`。
+
+**内容**：
+1. 新增纯同步 deterministic planner：从 resolved query + current message 识别最多两个闭集 need；英文单词边界、中文强短语，歧义回 ordinary identity。
+2. `ContextPlugin` 在 query/mode 解析后、`ContextService` 前接线；Thinker `skip|doc|fact|hybrid` 原样传递，RetrievalGate 仍为 Card 唯一 owner。
+3. v1 仅改 RRF 后 `type_caps` 与 pack `ContextBudget`；非 identity 桶总和不超过 `total-buffer`；identity/disabled 精确保留旧 caps、旧 budget 对象与 hit order。
+4. 新增 `query_aware_plan.enabled=true` kill-switch、插件 `0.1.11`、restart-required 配置。
+5. metrics 仅保留闭集 plan 字段；未知 key/字符串/宽松 bool 丢弃或规范化，嵌套列表/字典重建，避免后续 mutation 污染 recent/metrics。
+6. 迁移清单：`docs/migrations/memory-query-aware-retrieval-planner-v1-2026-07-17.md`。
+
+**审评纠偏**：首版独立 review 无 Critical，但英文 substring、中文弱 marker、自定义小预算、`plan_meta` 浅拷贝为 Important；全部经 adversarial RED→GREEN 修复。post-fix Grok review **0 Critical / 0 Important，ACCEPT**。
+
+**验证**：focused **251 passed**；最终补强 **119 passed**；全仓 **4543 passed / 17 skipped / 188 warnings**；Ruff clean；生产 Pyright **0 errors**；`git diff --check` clean。新增两条 warning 为既有 aiosqlite 线程收尾路径，不在本切片。
+
+**Grok transport**：新 endpoint `http://45.207.201.200:3040` 的只读审计、首轮实现和短 post-fix review 均成功；长 correction 会话仍在约 677s / 15 calls 后出现 524。工作树修改已保留并由 Codex 独立验收；后续 Grok 包应缩短，辅助 `grok-build` 503 仍仅影响标题。
+
+**回滚**：首选设 `query_aware_plan.enabled=false` 后仅 restart/recreate bot；代码回滚 planner/plugin/service/config/tests/docs。无 schema/data rollback；永不 touch NapCat。
+
+---
+
+## 2026-07-16 QZone Journal v0.8 草稿修订 lineage + 显式 recompose（未部署 / 未 commit）
+
+**变更类型**：存储 / API / Admin 里程碑 + **state/safety 纠偏** + **I1 factual recompose max_chars 修复**；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB/真实 QZone HTTP/凭据；`BUILTIN_WIRE_PROFILE.validated` 保持 `false`。
+
+**内容**：
+1. **SQLite migration v5**：`revision_root_id` / `revision` / `supersedes_draft_id`；既有行 backfill 为 r1 且 root=自身；unique partial index 保证同一源至多一个直接后继。
+2. **Store**：`create_revision`（CAS + **tip-only 日预算**同事务：`NOT EXISTS` 后继 + occupied tip statuses；历史 immutable 不占）、`list_revisions`；运营 `list`/`count`/`stats`/`list_recent_source_summaries` 默认 tip-only（`include_superseded` 物理行 escape）；源行永不 mutate；新行恒 `pending_review` 且不继承 approval/publish 字段；**仅 lineage tip** 可 approve/reject/recompose/claim；factual body 必须等于 inherited verified `source_summary`；**无** `source_summary`/`provenance` override 参数；**移除**测试专用公共 `mark_failed`。
+3. **Composer / Plugin**：`recompose()` factual 保持投影摘要；fiction/self LLM 措辞；operator_guidance scrub 且不作事实；plugin **preflight**（status/tip/non-empty `source_summary`）在 LLM 前；`GET …/revisions`、`POST …/recompose`；版本 **0.8.0**。
+4. **Admin SPA**：详情抽屉版本历史 + **tip + pending/rejected** 才显示通过/拒绝/「修订并重新入队」；`revisions=[]` **fail-closed**（`isLineageTip=false`）；成功 recompose 后 `emit('select', newDraftId)` 切到新 tip；无 `/publish` UI。
+5. **文档**：`docs/migrations/qzone-journal-draft-revisions-v0.8-2026-07-16.md`；tracker 同步 tip-only / I1 纠偏、Codex 全仓验收与 post-fix 独立复审证据。
+6. **I1（independent review c78ba9b3，pre-fix 0C/1I/4M）**：`JournalComposer.recompose(factual)` 不再对 verified summary 施加默认 `max_chars=280` 截断；返回完整 scrubbed summary（store 侧仍 ≤500 且 body 全等）。self/fiction wording cap 与 store equality **未**放宽。
+
+**验证**（tip-only 纠偏会话）：
+- RED：reject tip 后 occupied 仍 1；list 含历史 pending；summaries 按 revision 重复；drawer 空历史 return true。
+- GREEN：`tests/test_qzone_journal_revisions.py` **28 passed**；QZone `test_qzone_journal*.py` + producer **264 passed**。
+- （前序 state/safety：revisions 23 / QZone+producer 259；本轮叠加 tip-only 合同。）
+
+**验证**（I1 factual long-summary 会话，2026-07-16）：
+- RED：composer 对 ~400 字 factual summary 返回 280；plugin recompose → store `factual revision content must equal verified projected source_summary`。
+- GREEN：`test_factual_recompose_returns_full_long_verified_summary_not_max_chars` + `test_factual_recompose_long_legal_summary_creates_revision_exact`；revisions **31 passed**；QZone + producer **267 passed**；scoped Ruff clean；production Pyright 0。
+- Codex 最终：QZone + producer **267 passed**；全仓 **4473 passed / 17 skipped / 186 warnings**；Ruff clean；生产 Pyright **0 errors**；vue-tsc/build 通过。
+- 浏览器：desktop light/dark；recompose 后选中新 `qzd_r3` 且历史 r1→r2→r3；390px drawer 实测 width=390、无横向溢出；console 0 error/warn。
+- post-fix independent review `0d93819c-0003-4b1f-8be8-df77ad3e1c49`：**0 Critical / 0 Important / 4 Minor residual，ACCEPT offline**。
+
+**回滚**：还原 `plugins/qzone_journal/{store,composer,plugin,plugin.json}`、Admin qzone-journal 前端、`tests/test_qzone_journal_revisions.py`、本 migration/tracker/本条；开发库可删 `qzone_journal.db` 重建。
+
+---
+
+## 2026-07-16 Learning Autopilot applied-outcome 合同对齐 Style/Episode/Slang（未部署 / 未 commit）
+
+**变更类型**：final-review remediation packet B；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB/QZone/validated profiles。
+
+**内容**：
+1. **StyleAIReviewer / EpisodeAIReviewer / SlangReviewerAdapter**：`_apply_verdict` 返回 applied outcome（`approved|rejected|kept`）；batch/state 计数与 `approved_in_batch`/`rejected_in_batch`/`kept_in_batch` 仅反映阈值后真实写入；`completed == (remaining == 0)`。
+2. **诚实 empty cursor**：无行时计真实 pending/candidate/actionable backlog；reset pass cursor + inactive；仅 drained 时写 last_done；sticky kept 不得假 completed。
+3. **Episode 状态模型不变**：applied approved → `enabled_for_prompt`，rejected → `disabled`，kept → `candidate`。
+4. **Slang remaining**：改走 `count_pending`（`candidate AND ai_reviewed_at IS NULL`），已审 sticky 不计入可行动 backlog。
+5. **llm_assess 类型**：`_TASK_MAP` / `task_name` 用 `TYPE_CHECKING` 绑定 `LLMTask`，消除 production Pyright；**parser 语义不变**。
+
+**迁移清单**：`docs/migrations/learning-autopilot-applied-outcomes-v1-2026-07-16.md`。
+
+**验证**：Packet B focused **116 passed**；Codex 最终 KG/四 reviewer/Admin/Application 组合 **177 passed**；QZone v0.7 **236 passed**；全仓 **4442 passed / 17 skipped / 186 warnings**；scoped Ruff clean；production Pyright **0 errors**；`git diff --check` clean。Grok closure review **0 Critical / 0 Important**。
+
+**回滚**：还原 `style_reviewer.py` / `episode_reviewer.py` / `slang_adapter.py` / `llm_assess.py` 与对应 tests / 迁移文档 / 本条。
+
+---
+
+## 2026-07-16 KG final-review remediation A：candidate CAS + 诚实 completion + domain 合同（未部署 / 未 commit）
+
+**变更类型**：独立审评 Important 修复；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB/QZone；不改 parser / QZone。
+
+**内容**：
+1. **Candidate 状态 CAS**：`KnowledgeGraphStore.transition_candidate_status` 单次 `UPDATE … WHERE status IN allowed`；`reject_candidate` 仅 `pending|approved→rejected`；`keep_candidate` 仅 `pending|approved→pending`，去掉 pre-read TOCTOU；**永不**经 service 覆盖 `active`。`promote_candidate` 原子 CAS 保留。
+2. **诚实 empty-cursor**：`KnowledgeAIReviewer` 在 `last_id` 无行时 `_count_backlog`；`remaining`=真 backlog；`completed` 仅 remaining=0；`last_done` 仅真正 drained；`active=False` + `last_id=""` 以便 sticky kept 后续显式 run 重扫。
+3. **Domain 合同**：构造仅 `fact` / legacy `graph_relation`（均→`fact`）；其它 `ValueError`；pipeline 仍单 fact reviewer。
+
+**验证**：new CAS/cursor/domain regressions + KG/四 reviewer/Admin/Application 最终组合 **177 passed**；QZone v0.7 **236 passed**；全仓 **4442 passed / 17 skipped / 186 warnings**；scoped Ruff clean；production Pyright **0 errors**；`git diff --check` clean。Grok closure review **0 Critical / 0 Important**。
+
+**同模式扫描**：`set_candidate_status` 仍为无条件内部 API（admin/其它路径未改服务面）；reviewer reject/keep 仅走 service CAS。残留：`submit_fact_candidate(promote_directly=True)` 非 candidate 状态机路径。
+
+**回滚**：还原 `store.py` / `service.py` / `knowledge_reviewer.py` 与对应 tests / migration 本节。
+
+---
+
+## 2026-07-16 KnowledgeGraphService.approve_candidate 原子晋升（未部署 / 未 commit）
+
+**变更类型**：并发 race 修复 + 事务隔离纠偏；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB/schema migration。
+
+**根因**：`approve_candidate` 先 `add_fact` 提交，再 `set_candidate_status` 第二次提交；人类与 autopilot 并发可 materialize 重复 active fact 并双触发 listener。首版 `promote_candidate` 在共享 `self._db` 上 `BEGIN IMMEDIATE`，仅 `_promotion_lock` 覆盖晋升路径，`add_candidate`/`add_fact`/status 等普通写仍可 interleave 进同一连接事务。
+
+**内容**：
+1. `KnowledgeGraphStore.promote_candidate`：per-store `asyncio.Lock` + **专用长生命周期 `_promotion_db`**（`init` 打开 / `close` 关闭，仅锁内使用）+ `BEGIN IMMEDIATE`；加载候选、allowed-status CAS 置 `active`、同事务插入 1 fact + 1 evidence（`_insert_evidence(..., db=promotion_db)` 显式走事务连接）、单次 commit；失败/`CancelledError` rollback。普通写仍用 `self._db`，不共享晋升事务。
+2. `KnowledgeGraphService.approve_candidate` 仅委托该 API；listener 仅 commit 后触发。默认 pending-only + `allow_legacy_approved` 合同不变。无 schema 迁移。
+
+**验证**（验收纠偏后）：
+- 同 service / 双 service 并发各 1 次晋升；真实 `task.cancel` 在 mutation 后 commit 前回滚 + 旁路 ordinary write 仍提交；listener 仅成功路径。
+- focused 3 例 + `test_knowledge_graph` / `test_knowledge_ai_reviewer` / `test_fact_graph_bridge` / `test_entity_identity` 共 **76 passed**。
+- Ruff 改动文件 clean（exit 0）；Pyright production store+service **0 errors**；`git diff --check` clean。
+
+**同模式扫描**：候选→active 多提交路径已收敛到 `promote_candidate`；`knowledge_reviewer` 仅经 `approve_candidate`。残留非候选路径：`submit_fact_candidate(promote_directly=True)` 单次 `add_fact`；`supersede_relationship` 仍为 `add_fact` + `set_fact_status` 两提交（fact 取代，非 candidate 晋升）。
+
+**回滚**：还原 `services/knowledge_graph/store.py`、`service.py`、`tests/test_knowledge_graph.py`。
+
+---
+
+## 2026-07-16 Memory Knowledge Autopilot Promotion Loop v1 — Codex 验收缺口修正（未部署 / 未 commit）
+
+**变更类型**：验收纠偏（TDD RED→GREEN）；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB/frontend/QZone/PPR。
+
+**Codex 缺口 → 修复**：
+1. 删除 `learning_pipeline` 中 uninitialized fallback `KnowledgeGraphService`；**仅** `ctx.knowledge_graph` 存在时注册 fact reviewer，否则 fail-closed 不注册。
+2. `KnowledgeGraphService.db_path: Path` 公共只读属性；reviewer 不再访问 `_store._db_path`。
+3. 严格 LLM verdict：decision 精确 `approved|rejected|kept`（未知→kept）；confidence 精确非 bool int/float、有限、`[0,1]`；非法永不 auto-approve/reject，pending + kept note。
+4. 畸形 legacy：恰好 1 次 fresh LLM；合法 approve → 恰好 1 fact + active（去掉宽 OR）。
+5. D2：blocked LLM + `task.cancel` → 无 active fact / 假 approved 计数；后续 batch 成功。
+6. 删除 unused `outcomes` 积累，仅 applied batch counters。
+
+**验证**：
+- RED：**13 failed / 10 passed**（`db_path` 缺失、fallback 仍注册、非法 verdict 仍 promote）。
+- GREEN focused：`tests/test_knowledge_ai_reviewer.py` **23 passed**.
+- 组合 KG/admin/application：**91 passed**.
+- Ruff touched clean；Pyright production（service/reviewer/learning_pipeline）**0 errors**.
+
+**影响/残留**：仍仅离线代码验收；live ~56 legacy 未改；PPR/replay 仍 NO-GO。并发 service transaction 重构未做（独立 review）。回滚 service/reviewer/llm_assess/learning_pipeline/tests/migration 即可。
+
+---
+
+## 2026-07-16 Memory Knowledge Autopilot Promotion Loop v1（未部署 / 未 commit）
+
+**变更类型**：治理 bug 修复（TDD RED→GREEN）；**未**部署、**未** commit、**未**触 Docker/NapCat/live 私库读写、**未**改 QZone / PPR / ranking。
+
+**根因**：
+1. `KnowledgeAIReviewer` 高置信 approve 写非法 `status='approved'`（`GraphStatus` 无此值），且从不调用 `KnowledgeGraphService.approve_candidate`，故无 `graph_facts` / evidence / listeners。
+2. `_get_autopilot_runner` 对无 domain 列的共享 `extraction_candidates` 双注册 `fact`+`graph_relation`，`run_all` 并发双扫。
+
+**内容**：
+1. `approve_candidate(..., review_note=None, allow_legacy_approved=False)`；默认 human/admin 仍 pending-only；`keep_candidate` 仅写合法 `pending`。
+2. `KnowledgeAIReviewer` 注入 live `KnowledgeGraphService`；approve/reject/kept 走 service；batch 计数=实际 apply 结果。
+3. Legacy `approved`：合法 `ai_review`（decision=approved + 有限非 bool 数值 conf ≥ 阈值）无 LLM repair；畸形 fail-closed 回 pending 再审，永不凭脏元数据 materialize。
+4. run-all **仅**注册 canonical fact reviewer；不注册 graph_relation 扫同表。
+5. 迁移：`docs/migrations/memory-knowledge-autopilot-promotion-loop-v1-2026-07-16.md`；ACTIVE / frontier tracker / 本条。
+
+**D1 同模式扫描**：Style/Episode 的 `approved` 属各自 status 合同（保留）；Slang 独立；admin knowledge human approve 默认签名兼容；consolidator inventory 查询可仍含 graph_relation，但不 double-process 共享候选表。
+
+**D2**：promotion 失败 / cancel 不宣称 approved；无 fact 则 `approved_in_batch=0`。
+
+**验证**：RED 8 failed → GREEN focused **8 passed**；组合 `test_knowledge_graph` + `test_admin_api_learning_pipeline` + application build **44 passed**；scoped Ruff clean；Pyright 生产 touched。
+
+**影响/残留**：**代码仅离线验收**。生产曾聚合观测约 **56** 条 legacy `approved`——**未修改任何 live 行**；下一次 autopilot 才 repair-on-run。**meaningful real graph replay / PPR 仍 NO-GO**（facts 未可靠 populate）。回滚 service/reviewer/wiring/tests/docs；已 materialize 的 fact 不自动删除。
+
+---
+
+## 2026-07-16 Memory Episode v2 julianday offset-safe decay compare（审评修复 / 未部署 / 未 commit）
+
+**变更类型**：独立审评 Important 修复（TDD）；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB/QZone；**未**处理 Minor（atomic revision/TOCTOU/admin reread）。
+
+**内容**：
+1. **问题**：`list_for_recall` / `expire_decayed` 对 ISO 字符串字典序比较；探针 `'2026-07-16T12:32:15+00:00' > '2026-07-16T19:32:15+08:00'` 为 0，尽管前者绝对时间晚 1h。
+2. **RED**：`tests/test_episode.py::test_list_for_recall_offset_safe_keeps_future_legacy_utc` — 直写 legacy UTC-offset `decay_at` + 固定 `_now_iso`；实现前断言失败（默认 recall 误杀仍 future 行）。
+3. **GREEN**：默认 eligibility `decay_at='' OR julianday(decay_at) > julianday(?)`；sweeper `decay_at!='' AND julianday(decay_at) <= julianday(?)`。非法非空 legacy → NULL → fail-closed；无 backfill/schema migration。
+4. 文档：迁移清单、ACTIVE/frontier tracker ledger、本条 maintenance。
+
+**验证**：focused 三文件 **79 passed**；typed-refs/bootstrap 相关 **161 passed**；QZone v0.7 保留 **236 passed**；全仓 **4350 passed / 17 skipped / 187 warnings**；scoped Ruff clean；生产 Pyright **0 errors**；`git diff --check` clean。全仓 Ruff/Pyright 仍被既有未跟踪 coursework/research/IPv6 与历史测试类型债阻断，本 slice 未改。
+
+**影响/残留**：读时/sweeper 跨 offset 正确；新写入仍 normalize 上海。回滚 store SQL + 回归测试 + docs 即可。
+
+---
+
+## 2026-07-16 Memory Episode v2 decay eligibility + query rerank（未部署 / 未 commit）
+
+**变更类型**：代码验收收口 + 迁移文档；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB/QZone。
+
+**内容**：
+1. `EpisodeStore`：严格 `_normalize_decay_at`；默认 `list_for_recall` 读时排除过期；`set_decay_at` 审计修订；`include_decayed` 仍为 wide historical reader。
+2. Admin：`POST /api/admin/episodes/{id}/decay`（缺字段 400 / 非法 400 / 未知 404）。
+3. `EpisodeProvider`：`fetch_limit=min(24, max(top_k, top_k*3))`；register→ngram relevance DESC→top_k；composite 总长 cap **1200**；仅 selected 写 evidence/stamp。
+4. 迁移：`docs/migrations/memory-episode-decay-query-rerank-v2-2026-07-16.md`；ACTIVE/frontier tracker 以 Episode v2 为 Current next_step，保留 QZone v0.7 与 graph/PPR 事实。
+
+**验证**：`pytest -q` 三文件 focused；Ruff touched；Pyright 生产文件；`git diff --check`。
+
+**影响/残留**：离线合同收紧，生产行为待 bot recreate。回滚 store/provider/admin/tests/docs 即可；无 schema 反向迁移。
+
+---
+
+## 2026-07-16 QZone v0.7 independent final review / deep-freeze correction（未部署 / 未 commit）
+
+**变更类型**：独立终审 + 1 处 Important 修复；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB、**未**真实 QZone HTTP、**未**将 `validated` 设为 true。
+
+**Findings**：
+1. **Important（已修）**：`JournalEventRecord` 仅浅拷贝 `public_projection`，嵌套 `identities`/claim 列表与调用方共享；构造后外部 mutation 可静默改写 frozen 载体（含 label+hash 再赋值后改变 adapter 输出）。
+2. **Minor（已修）**：provenance 顶层 `schema_version` 显式值曾被 `int(...)` 强转；现在缺省才使用 v1，显式值必须是精确 `int`，`True` / `2.0` / 字符串均拒绝。
+
+**修复**：`story_arc.py` 对 projection deep-freeze（`MappingProxyType` + nested tuples）与 `to_dict` deep thaw；RED：`test_journal_event_record_public_projection_is_deep_frozen`。
+
+**验证（本 pass 实跑）**：public_projection **37 passed**；focused 九文件 **236 passed**；Dream/Schedule/producer **136 passed**；producer contract **50 passed**；全仓 **4318 passed / 17 skipped / 187 warnings**；Ruff clean；Pyright **0 errors**；`BUILTIN_WIRE_PROFILE.validated=false`；`git diff --check` 通过。Admin type/build 在前一实现 pass 已通过，本次未改前端。
+
+**影响/残留**：载体不可变合同收紧；Schedule/Dream 仍不产 factual。live 发布三门禁不变。回滚 deep-freeze 补丁即可；无 DB migration。
+
+---
+
+## 2026-07-16 QZone Journal v0.7 closed-template public projection（未部署 / 未 commit）
+
+**变更类型**：factual Part C 公开投影 by-construction 重写 + 对抗测试 + Admin 安全元数据；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB、**未**真实 QZone HTTP、**未**读取凭据、**未**将 `validated` 设为 true。
+
+**内容**：
+1. `public_projection.py`：闭集 `public_template_id`（social/attendance/milestone × solo/duo）+ `GENERIC_PUBLIC_LABELS`；`render_public_summary` 仅模板渲染；raw 仅 hash-bound；删除 CJK unbound-name / free-form 替换。
+2. `compute_source_event_hash` v1 绑定 raw、ordered bindings（position/entity_key/surface/alias_id/public_label）、claims、`public_template_id`；伪造模板/标签会 hash 失配。
+3. 共享 `validate_public_projection_metadata`：精确类型（bool≠int）、闭集 policy/schema/claim/template、非空有界列表、标签 allowlist、唯一 alias、未知键拒绝；`store._sanitize_public_projection_meta` 复用。
+4. selector：裸 factual / 无效投影 → `reject_public_projection`；same-tick 不毒 dedupe。adapter/provenance/Admin 仅挂安全 metadata（含 `public_template_id`）。manifest **0.7.0**。
+5. 迁移：`docs/migrations/qzone-journal-public-projection-v0.7-2026-07-16.md`；tracker/ACTIVE 已同步。
+
+**验证（实现会话；计数已被终审 pass 刷新，见上条）**：当时 public_projection **35** / focused **225** / Dream-Schedule **125**；Ruff/Pyright 0；Admin type/build 通过；`validated=false`。
+
+**影响/残留**：factual 可在模板合同下进候选，但 live 发布三门禁不变。回滚 projection/store/selector/plugin/Admin/tests/docs/version 即可；无 DB schema 反向迁移。Codex 四反例须保持红灯关闭。
+
+---
+
+## 2026-07-16 Memory graph window / hub control v1（未部署 / 未 commit）
+
+
+**变更类型**：生产 graph retrieval 基础修复 + 离线 eval/CI hardening；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB、**未**接 PPR。
+
+**内容**：
+1. `GraphContextSource` 不再先取全局 confidence top-200 再过滤：current user/group -> global -> shared pools，最多 8 个 scope、每 scope 200；旧 provider 继续 fallback。
+2. `KnowledgeGraphStore/Service` 用 scope partition window query 保证公平窗口；evidence 改为 400 IDs 分块批量读取，关闭最多约 1600 次 N+1 查询。
+3. 多跳仍要求双 direct seed、max hops=2、hard top-k；新增 degree>=8 hub fanout cap，下一跳只走新实体；raw lexical 排序优先于 hop floor，再看 continuation degree/confidence。
+4. `graph_eval` 对 NaN/Inf/overflow/bool/负计数/非法 top-k/结构矛盾/空 gold/window fail-closed，稳定 reason 为 `invalid_metrics` / `invalid_thresholds`；CI graph gate 扩为 eval + context source + KG service/store。
+
+**验证**：graph CI exact 三文件 **83 passed**；graph eval **53 passed**；独立 final review **0 Critical / 0 Important**；Ruff clean；Pyright 0 errors；全仓 **4272 passed, 17 skipped, 187 warnings**。
+
+**影响/残留**：生产检索行为有变但尚未部署；RRF、RetrievalGate、TemporalTrace/evidence-use 不变。真实脱敏图 replay 和延迟观测仍待部署前后执行；PPR/GraphRAG/Memory Tools 保持 NO-GO/后置。迁移/回滚：`docs/migrations/memory-graph-window-hub-control-v1-2026-07-16.md`；无 DB schema 反向迁移。
+
+---
+
+## 2026-07-16 QZone Journal v0.6 producer candidate contract（未部署 / 未 commit）
+
+**变更类型**：producer/adapter typed boundary hardening + TDD；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB、**未**真实 QZone HTTP、**未**读取凭据、**未**创建 validated profile。
+
+**内容**：
+1. `plugins/schedule/story_arc.py` 新增冻结 `JournalEventRecord`，统一校验三官方 source、ISO date、非空 summary、`self/fiction` subject、`public/private/unknown` privacy、非 bool 有限 `[0,1]` salience；可选 `event_id` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$`。
+2. Dream/Schedule/Replan 在生产时显式写出 `subject_kind/privacy/salience`：Dream global=`self/public/0.82`、group=`self/unknown/0.82`；Schedule=`self/public/0.35`；Replan=`fiction/0.95`，且仅 fiction arc 为 public，其他 arc 为 unknown。Dream LLM 结果不能自我授权 public。
+3. QZone adapter 不再从 source 或 arc scope 推断元数据：缺 subject/privacy → `reject_missing_subject_privacy`；缺失/bool/非数值/非有限 salience → `reject_adapter_unparseable`；有限越界仍由 selector 返回 `reject_salience_out_of_range`。legacy 坏记录 fail-closed，不进入 LLM。
+4. QZone plugin/manifest 版本升至 **0.6.0**；无 SQLite migration、无配置默认值或发布门禁放宽。迁移/回滚：`docs/migrations/qzone-journal-producer-candidate-contract-v0.6-2026-07-16.md`。
+
+**验证**：QZone focused **201 passed**；Dream/Schedule related **130 passed**；producer candidate contract **41 passed**；Ruff clean；Pyright **0 errors**。全部为离线验证。
+
+**影响/残留**：候选公开性责任已前移到 producer，但 factual/social public projection 仍 NO-GO，须先有公开化名 DTO 与对抗审计；真实 QZone HTTP 仍 NO-GO；`BUILTIN_WIRE_PROFILE.validated=false`，真实脱敏 fixture -> 独立 validated profile -> 用户授权 canary 三门禁不变。回滚 v0.6 DTO/producer/adapter/version/tests/docs 即可，无 DB 反向迁移。
+
+---
+
+## 2026-07-16 QZone Journal v0.5 选材可观测性（未部署 / 未 commit）
+
+**变更类型**：feature + typed boundary hardening + Admin SPA；**未**部署、**未** commit、**未**触 Docker/NapCat/live DB、**未**真实 QZone HTTP、**未**读取凭据、**未**创建 validated profile。
+
+**内容**：
+1. `plugin.py` health 保留完整 `selection_decisions`，新增明确 `process_lifetime` 的 `selection_summary`（total/accepted/rejected/rate）；插件/manifest 版本升 `0.5.0`，DB 与配置默认值不变。
+2. `PluginConfig.allowed_sources` 增 typed validator，只允许 `event_replan / dream_reflection / schedule_generator`，与 JSON Schema 对齐且异常不回显原始恶意值；未知 raw source 仍只落 closed-safe metric code。
+3. Admin QZone 页新增“选材诊断”：本进程摘要、单次/当日草稿预算、非零闭集 reason 与零状态；无 `/publish` 调用。QZone 页局部 surface 可收缩，live gate 长 reason code 可换行。
+4. 上线前复审补强：Drawer 所有异步动作以 draft id + generation 防止切换草稿后的迟到响应串写/toast；health gate 明确区分 loading/error/ready/blocked，失败时不显示旧 reasons/meta；`mark_published` 与人工确认共用 120 字符 external post id 消毒合同，response parser 同步在 121 字符处 fail-closed，避免 CGI 判成功后落库失败。
+5. 迁移/回滚：`docs/migrations/qzone-journal-selection-observability-v0.5-2026-07-16.md`；QZone tracker 已同步，memory ACTIVE 保持不变。
+
+**TDD / 验证**：health summary、Admin contract、manifest version、typed source、窄屏 surface/code 均先有精确 RED 后 GREEN；复审补强另以 4 条精确回归冻结 Store ID 消毒、parser 120/121 边界、Drawer action generation 与 gate phase。最终 QZone 七文件 + metrics **160 passed**；全仓 **4196 passed / 17 skipped / 186 warnings**；Ruff clean；Pyright **0 errors**；`vue-tsc --noEmit` 与 production build 通过。1440 light/dark 与 390 collapsed 由独立 `127.0.0.1:4179` 合成 API 预览验证，未连接现有 `8081`；390 collapsed `scrollWidth == innerWidth == 390`。
+
+**Grok 状态**：按用户要求使用最新版全量正常 `dispatch-grok` 做范围/复审；早期范围审查曾因 `524` / `503` 重建。上线前独立复审在当前文件上给出 **0 Critical / 2 Important**（Drawer dry-run 迟到串写、`mark_published` 未统一消毒），均已 RED→GREEN；Codex 验收追加发现 parser 128 / Store 120 边界不一致并回派修正。实现后最终只读复审为 **0 Critical / 0 Important**。瞬时 `503` 均在同 scope 自动恢复，没有静默收回委派范围。
+
+**边界/残留**：真实发布仍 NO-GO，阻塞保持 real_sanitized fixture -> 独立 validated profile -> 用户授权 canary。factual/social public projection 继续后置，先建立生产者侧公开化名 DTO；本版摘要跨重启不持久。回滚 v0.5 plugin/manifest/frontend/tests/docs 即可，无 DB migration；`BUILTIN_WIRE_PROFILE.validated=false`。
+
+---
+
+## 2026-07-16 evidence-use 真实栈轻量 CI 门禁（configured locally / 未 commit）
+
+**变更类型**：CI workflow；**未**部署、**未** commit、远端 GitHub Actions **尚未运行**、**未**触 Docker/NapCat/live DB/QZone runtime。
+
+**内容**：`.github/workflows/typed-boundaries.yml` 新增独立 `Validate long-memory evidence-use gate` step，执行 `uv run pytest tests/test_context_eval_evidence_use.py`。该模块包含 versioned synthetic fixture 的真实 CardStore+TemporalTraceAssembler E1–E6、专用 E7–E10、legacy/cancel 与 20 条 adversarial strictness regression。
+
+**验证**：CI exact command 本地 **41 passed**；PyYAML parse + step name/run 精确断言通过；`git diff --check` 通过。远端 run 未观察，不声明 Actions green。
+
+**影响/回滚**：仅增加 PR/main push 检查时长（本地约 0.13s，不含环境安装）；删除该 workflow step 即可回滚，不影响 runtime 或数据。
+
+---
+
+## 2026-07-16 memory-longmem-evidence-use-eval-gate-v1 + strict remediation（未部署 / 未 commit）
+
+**变更类型**：feature + TDD（离线 CI/eval 扩展）；**未**部署、**未** commit、**未**触 NapCat/Docker/live DB、**未**改 ContextService/RRF/RetrievalGate/TemporalTraceAssembler 生产语义。
+
+**背景**：
+- 前沿比较后冻结切片：将 LongMemEval-V2 premise/temporal/evidence-use 与 MemTrace current/earlier/trajectory **能力维**映射到现有 ContextService + TemporalTraceAssembler 合同。
+- 诚实声明：synthetic capability dimensions，**非**官方数据集 parity / leaderboard / 答案生成评分。
+
+**内容**：
+1. `services/context/eval.py`：additive `ContextEvalCase.current_message` / `rewritten_query` / `TemporalTraceExpectation`；Result/Summary 增 `trace_*` 与 `trace_violations`；`evaluate_context_case(..., trace_assembler=)`；结构化字段计分（不 parse rendered prose 发明维度）；缺 assembler / assembler 异常 fail-closed；`CancelledError` 透传。
+2. `services/context/__init__.py`：导出 `TemporalTraceExpectation`。
+3. Fixture：`tests/fixtures/context_eval/long_memory_evidence_use_v1.json`（v1，description 明示 synthetic）。
+4. 测试：`tests/test_context_eval_evidence_use.py` — schema/compat + E1–E10 真实 CardStore+assembler + E8/E9 fail-closed + fixture 全过；E11 由既有 2-hop graph 负向 focused 套件覆盖。
+5. 迁移：`docs/migrations/memory-longmem-evidence-use-eval-gate-v1-2026-07-16.md`；更新 ACTIVE + memory tracker。
+6. 独立 adversarial review 复现初版 **2 Critical / 5 Important / 1 Minor**：bool/string/list 强转、非 mapping trace 静默丢弃、reason-only/absent+required 假绿、任意非 `None` 冒充有效 DTO、跨 KP 拼接假阳性、E7 断言过软。
+7. TDD remediation：trace fixture schema 严格类型/未知键/矛盾声明 fail-fast；reason/required 隐含 presence；malformed DTO `trace_malformed`；required current/earlier/trajectory/refs 同 KP 闭合；E7 确定性证明 trusted cross-category correction 已存储但 walk/assembler 拒绝。
+
+**验证**：
+- 初版 RED/GREEN：实现前 `ImportError: TemporalTraceExpectation`；evidence-use **21 passed**；related focused **147 passed**；全仓 **4148 passed / 17 skipped / 186 warnings**。
+- remediation RED：schema **13 failed**；absent-path **2 failed**；malformed DTO **4 failed**；split-KP **1 failed**；均为具体 assertion failure。
+- 最终 GREEN：evidence-use **41 passed**；related focused **167 passed**；QZone **154 passed**；全仓 **4168 passed / 17 skipped / 186 warnings**（相对 4148 净增 20）。
+- post-remediation Grok review：**0 Critical / 0 Important**；scoped ruff clean；scoped pyright **0 errors**；内置 QZone wire profile 保持 `validated=false`。
+
+**回滚**：回退 `services/context/eval.py`、`services/context/__init__.py`、新测试/fixture/迁移文档与本日志条目即可；无 schema/config/runtime 开关。
+
+**同模式扫描（D1）**：legacy fixture 路径与 `to_dict` 旧键保留；缺 assembler、reason/required 缺 trace、malformed DTO、split-KP 不静默 pass；ordinary search 与 trace 评分独立；不解析 prose 推断 current/earlier/trajectory。
+
+**诚实限制**：fixture 查询对 ngram 敏感，验证合同而非 embedding 质量；不评分 LLM 答案；cycle/missing/expired chain 仍以既有 temporal/card 单测为主；E7 是专用真实栈测试而非六条 JSON fixture case；forbidden-only/budget-only expectation 需显式写 `expected_present` 才约束存在性。
+
+---
+
+## 2026-07-16 QZone Journal v0.4 same-tick hard-gate 先于 dedupe 排序修正（未部署 / 未 commit）
+
+**变更类型**：bug fix（TDD RED→GREEN）；**未**部署、**未** commit、**未**触 NapCat/容器/live DB、**未**真实 QZone HTTP、**未**改 store/selector/config/manifest/Admin SPA/ACTIVE。
+
+**背景**：
+- Codex 验收发现 Important：`on_tick` 在 `selector.evaluate` 之前检查/登记 `seen_dedupe_keys`。
+- 同 tick 内适配成功但硬门禁失败的候选（如 `subject_kind=factual`）会占用 dedupe key，压制后到的同 source/date/stable_id 公开虚构孪生。
+- 冻结流水线：adapter → hard gate → dedupe → day budget → rank → compose。
+
+**内容**：
+1. 回归（先 RED）：`test_same_tick_hard_gate_reject_does_not_poison_dedupe_key_for_valid_twin` — 期望 hard-gate 精确 reason、1 draft/LLM/accept、`reject_duplicate_dedupe==0`。
+2. `plugin.py`：same-tick/persistent dedupe 检查与 `seen_dedupe_keys.add` 移到 hard-gate accept 之后；硬门禁拒绝不登记 key。
+3. 文档：migration / implementation tracker / 本日志补排序修正与 **154 passed**。
+
+**验证**：
+- RED：`reject_duplicate_dedupe` assert `1 == 0`（valid twin 被误杀）。
+- GREEN：新回归 + `test_same_tick_duplicate_dedupe_key_counts_one_accept_one_reject` → **2 passed**。
+- 七 QZone 文件 + `tests/test_humanization_metrics_persist.py` → **154 passed**。
+- scoped `ruff check` clean；scoped `pyright` 0 errors。
+- Codex 最终全仓验收 → **4127 passed / 17 skipped / 189 warnings**；warnings 为既有依赖弃用与 aiosqlite 线程退出告警，0 failure。
+
+**回滚**：回退 `plugins/qzone_journal/plugin.py` 与对应 runtime 回归即可；无 DB migration。
+
+**同模式扫描（D1）**：compose 前 persistent dedupe 仍在；同 tick 双合法孪生仍一 accept / 一 duplicate；day budget 与 ranking 路径未动。
+
+---
+
+## 2026-07-16 QZone Journal v0.4 审查四合同修正（未部署 / 未 commit）
+
+**变更类型**：审查冻结用例驱动的 store/plugin 精确修正；**未**部署、**未** commit、**未**触 NapCat/容器/live DB、**未**真实 QZone HTTP、**未**创建 validated profile、**未**改 tests/selector/config/manifest/Admin SPA/ACTIVE。
+
+**背景**：
+- 6 冻结回归曾 **2 GREEN / 4 RED**（selector 排名 2 绿保留）。
+- 外部 worker 误截断 untracked `store.py`；Codex 终止该 worker 并从独立 review 会话完整恢复权威文件（48045 bytes / 1406 行 / AST valid）。本轮禁止整文件替换/截断恢复，仅小上下文编辑。
+
+**内容**：
+1. `store.py`：`JournalStore(..., max_drafts_per_day: int | None = None)`；`DayDraftBudgetExceededError`；`enqueue` 在 BEGIN IMMEDIATE 事务内、same-dedupe 查找之后、insert 之前原子检查占用；导出 `validate_review_fields_for_compose` 复用既有 sanitizer。
+2. `plugin.py`：startup 传入配置的 `max_drafts_per_day`；map 类型预算拒绝 → `reject_day_draft_budget`（无 false accept / draft_created）；同 tick `seen_dedupe_keys` 在排名/LLM 前拒绝；compose 前再查 persistent dedupe；compose 前校验 review fields + provenance；`qzone_selection_decision` / `qzone_draft_rejected` 的 source 仅允许 `event_replan`/`dream_reflection`/`schedule_generator`，其余 → `unknown`。
+3. 文档：migration + implementation tracker 补审查 RED→GREEN 与恢复事故记录。
+
+**验证**：
+- 6 frozen：**6 passed**。
+- 七 QZone 文件 + `tests/test_humanization_metrics_persist.py`：**153 passed**。
+- scoped `ruff check` clean；scoped `pyright` 0 errors。
+- JSON/profile smoke：`version=0.4.0`、`manual_review=True`、defaults dry_run/allow_live 不变、`BUILTIN_WIRE_PROFILE.validated is False`。
+- `store.py` 1475 行、AST valid；本 worker **未修改**任何 test 文件内容。
+
+**回滚**：回退 `plugins/qzone_journal/store.py` 与 `plugin.py` 至修正前；无 DB migration。
+
+**同模式扫描（D1）**：day budget 与 `max_posts_per_day` 发布额度仍分离；enqueue 校验保留 defense-in-depth；metric scrub 仅作用于 selection/reject 键，不改变其他 runtime metric。
+
+---
+
+## 2026-07-16 QZone Journal v0.4.0 离线选择质量（未部署）
+
+**变更类型**：插件选择/排名/预算 + BlockTrace runtime metrics 白名单 + 测试与迁移文档；TDD；**未**部署、**未**触 NapCat/容器、**未**真实 QZone HTTP、**未**创建 validated profile、**未**改 `BUILTIN_WIRE_PROFILE.validated`、**未**改 ACTIVE、**未** commit。
+
+**内容**：
+- `selector.py`：闭集 `SELECTION_REASON_CODES`；`evaluate()` → `SelectionDecision`；Unicode 分词 + Jaccard；`compute_publish_worth` / `rank_accepted`（无 embedding / LLM 排名）。
+- `plugin.py` tick：适配器闭集 reason → 硬门禁 → dedupe → 日预算 → 排名 → 至多 `max_drafts_per_tick` compose；poison review-field 不占 slot，继续后续候选；版本 **0.4.0**。
+- 配置：`max_drafts_per_tick` / `max_drafts_per_day` 默认 1、范围 1..3；写入 default/schema/plugin.json restart 字段 / PluginConfig / health。
+- `store.py`：`count_occupied_drafts_for_event_date`（pending_review/approved/dispatching/unknown/published）；`list_recent_source_summaries`；**无 schema migration**。
+- health：`selection_decisions` 仅闭集 reason → int；不暴露 summary/stable_id/secrets。
+- BlockTrace：`qzone_draft_rejected` + `qzone_selection_decision` 纳入 `_RUNTIME_METRIC_KEYS` 聚合；metadata 仅 reason + source。
+- 迁移：`docs/migrations/qzone-journal-selection-decision-v0.4-2026-07-16.md`；tracker：`docs/tracking/qzone-journal-implementation-2026-07-15.md`。
+
+**验证**：
+- v0.4 focused：**8 passed**；QZone 七文件 + metrics：**148 passed**。
+- scoped `ruff check` clean；scoped `pyright` **0 errors**。
+- R7 默认 fail-closed 不变；R8 dream 缺 subject/privacy → `reject_missing_subject_privacy`；R10 静态通过。
+
+**回滚**：回退插件树至 v0.3.0 即可（无 DB 反向迁移）；runtime metric 新 key 可保留。
+
+**同模式扫描（D1）**：`_RUNTIME_METRIC_KEYS` 与既有 qzone_* 聚合一致；day budget 与 `max_posts_per_day` 发布额度分离（草稿 vs 发布）；tick poison fallthrough 保留 v0.2 隔离语义。
+
+---
+
+## 2026-07-16 Temporal Trace Option A 部署阻断修正（未部署）
+
+**变更类型**：TemporalTraceAssembler + ContextPlugin + CardStore + LLMClient 合同修正；TDD RED→GREEN；**未**部署、**未**触 NapCat/容器/QZone/Admin SPA、**未**改 `BUILTIN_WIRE_PROFILE.validated`、**未** commit。
+
+**内容**：
+- `TemporalTraceAssembler`：群 scope 经 `GroupMemoryConfig.resolve_group_pools()` 解析（含 `__global__`）；跨 pool 共享 `max_heads` 预算；私聊仅 `user/<user_id>`，群聊不读 private。
+- premise_conflict：earlier-only 证据必须出现在 `current_message` 本身；`rewritten_query` 仅辅助链匹配；移除 住/养/喜欢 等 topic-shape 硬编码 fallback。
+- evidence_refs 类型化为 `card:` / `message:` / `obs:`；observation 读取与 ref 总量有界。
+- 渲染合同 100..600、整行/整 KP 优先、禁止 mid-line/mid-ref 硬切；Pydantic 与 schema 边界一致，低于 100 fail-closed。
+- `CardStore.walk_supersedes_chain` public `max_depth` clamp 到 4；`list_observations(..., limit=)` 可选有界查询（兼容旧调用）。
+- ContextPlugin：ordinary query 空/标点仍可跑 fact/hybrid temporal trace；startup 注入 group_memory_config。
+- LLMClient：`resolve_current_human_message` 单次计算，供 instruction gate 与 PromptContext；禁止 `locals().get("current_msg")`。
+- 真实 `on_startup` + CardStore + pool 集成通过；Admin 式共享 `GroupMemoryConfig.memory` 原位替换可被 assembler 观察。
+- 插件版本保持 **0.1.10**；config defaults **24/2/4/600**。
+
+**验证（RED 证据）**：
+- 新回归 RED：pool miss / 还住上海误开杭州 / rewrite 补 earlier token / bare refs / mid-line 截断 / max_depth 不 clamp / empty-query 不跑 trace / schema 1200 / locals wiring → **13 failed**。
+- 第一轮 GREEN focused → **145 passed**；post-fix review **0 Critical** 后补 runtime bounds / startup / false-green 修正，最终 focused **149 passed**。
+- 相关 smoke（retrieval/context/RRF/write-policy/application wiring）**94 passed**；`ruff check` clean；`pyright` **0 errors**。
+- 最终全仓 pytest：**4116 passed, 17 skipped, 186 warnings**。
+
+**回滚/影响**：未部署。`context.temporal_trace.enabled=false` 后 restart bot 可零行为回退；ordinary active-only 检索、Dream 跨 category no-op、cancel 传播保持。迁移清单：`docs/migrations/memory-temporal-trace-premise-awareness-v1-2026-07-16.md`。
+
+**同模式扫描（D1）**：`resolve_group_pools` 在 RetrievalGate/sources 已存在，trace 对齐；`list_observations(limit)` 兼容无 limit 调用点；`locals().get` 仅该 PromptContext 接线点已清。
+
+---
+
+## 2026-07-16 记忆热写入冲突感知策略 v1（未部署）
+
+**变更类型**：MemoExtractor write-policy + CardStore observations/原子 supersede；TDD RED→GREEN；**未**部署、**未**触 NapCat/容器/QZone/Admin SPA、**未**改 `BUILTIN_WIRE_PROFILE.validated`。
+
+**内容**：
+- `MemoExtractor`：有界 active-card 决策上下文（cap 24）→ JSONL `add|reinforce|supersede|skip`；旧 `[category] content` 兼容为 add；`stats` 计数。
+- prompt target allowlist 仅限实际展示的 top-24；全量 user active 只用于确定性 add→reinforce 防重。exact/高阈值 ngram 为重复，包含扩展不再误合并。
+- supersede 需同 category prompt target + 当前 user message 更新线索与新内容词汇证据；LLM content 不能自证。
+- `CardStore`：additive `memory_card_observations` + 索引/幂等 partial unique；同实例 write lock + `BEGIN IMMEDIATE`；并发 loser/cancel/commit 失败 rollback，无双 active/孤儿 observation。Dream/tools 保留同 owner category correction，跨 scope/scope_id 拒绝。
+- `source_message_id` 自 `ReplyContext` 经 `on_post_reply` 透传；`captured_by=memo_extractor`。
+- `MemoConfig.write_policy_enabled` 默认 true（restart-required）；false 恢复 legacy add-only。
+- memo 插件版本 **1.1.6**；bootstrap 传入 `config=memo_cfg`。
+- 纯 helper：`services/memory/write_policy.py`。
+- 迁移清单：`docs/migrations/memory-hotpath-write-policy-v1-2026-07-16.md`。
+
+**验证**：
+- RED：`tests/test_memo_extractor_write_policy.py` + card_store 扩展 → **31 failed, 48 passed**。
+- 初版 GREEN focused：**79 passed**；独立 review 后 correction **11 failed, 85 passed → 96 passed**；prompt target allowlist **1 failed → 97 passed**。
+- Dream 分类纠正回归由 full **1 failed, 4037 passed** 复现，direct + integration **2 failed → 2 passed**；最终 Dream+related **123 passed**。
+- scoped Ruff clean；Pyright **0 errors**；config/schema/plugin JSON parse ok。
+- 最终全仓 pytest：**4038 passed, 17 skipped, 186 warnings**。
+- 负向：无更新信号不 supersede、非法/跨用户/跨 category target 不突变、observation 幂等、commit 取消无双 active、flag=false legacy add-only。
+
+**回滚/影响**：未部署。配置 `write_policy_enabled=false` 即可 legacy；代码还原 migration Key Files。observations 为 additive。未来部署只 recreate bot。
+
+**残留**：无 Admin observation UI；未部署；启发式策略刻意保守；下一切片为 temporal trace / false-premise awareness。
+
+---
+
+## 2026-07-16 记忆 Episode typed refs / alias registry 生产接线（未部署）
+
+**变更类型**：生产接线 + 真实 resolver ports + TDD RED→GREEN；**未**部署、**未** backfill 旧 episode、**未**触 QZone/NapCat/容器、**未**改 `BUILTIN_WIRE_PROFILE.validated`。
+
+**内容**：
+- `ConversationArchive.get_messages_by_pks`：参数化 SQL、去重升序、可选 `chat_type`/`chat_id`；`platform_message_id AS message_id`。
+- `CardStore.find_by_source_message_ids`：仅 active；`allowed_scopes` 过滤；稳定 `card_id` 序。
+- `KnowledgeGraphService.find_fact_ids_by_evidence_refs`：`graph_evidence` 反查仅 active facts；`allowed_scopes`。
+- `EpisodePromoter`：数字 `group_id` 时 scoped 请求 archive/card/kg；`allowed_scopes=group + proven users`；非数字 group 只保留 `message_pk`，不做无作用域 enrichment。
+- Bootstrap：`EntityAliasStore("storage/entity_aliases.db")` init → `ctx.entity_alias_store` → assembly 一次 close；四端口注入 `EpisodePromoter`。
+- `EpisodeProvider`：选中 episode 追加 `linked_ref_evidence`；metadata `typed_evidence_count`/`typed_evidence_refs`；prompt 文案与 episode-id evidence 兼容。
+- `SetNicknameTool.execute`：昵称成功后 best-effort `observe(source=affection_nickname)`；群/私聊 scope 分离；alias 失败不拖垮昵称。
+- 独立 review remediation：resolver PK 规范化拒绝 bool/float 与非集合标量，seeded PK 1 测试消除假绿；Provider 在空 `linked_memory_ids` 时回退 typed property，并支持 `LinkedMemoryRef` 对象规范化。
+- 迁移清单：`docs/migrations/memory-episode-typed-refs-alias-wiring-2026-07-16.md`。
+
+**验证**：
+- RED（5 新测试文件）：**32 failed, 3 passed**。
+- GREEN focused：**35 passed**；+ promoter unit fake 兼容：**54 passed**；related：**254 passed**。
+- 独立 Grok review：**0 Critical / 2 Important**；两项经 Codex 探针复现后新增 **3 failed** RED，并修至 focused **38 passed**、相关组合 **110 passed**。
+- scoped Ruff clean；Pyright **0 errors**。
+- 全仓 pytest：**3988 passed, 17 skipped, 186 warnings**（相对 3950 净增 38）。
+- 负向：跨群 poison PK、同 evidence 他群 card/fact、superseded/expired/non-active、malformed refs、非数字 group 无 unscoped enrichment、昵称跨群隔离、alias reopen、bootstrap close、re-promote 幂等。
+
+**回滚/影响**：未部署。还原 migration 清单 Key Files 即可；`entity_aliases.db` 与 episode linked refs 为 additive。未来部署只 recreate bot。
+
+**残留**：无历史 episode backfill；未部署；可选 meta 索引 / 有界 re-promote；长期 PPR/GraphRAG/MemGPT tools。
+
+---
+
+## 2026-07-16 QZone Journal v0.3.0 人工审核控制台（未部署）
+
+**变更类型**：预发布后端契约 + governed SQLite migration v4 + Calm Ops Admin SPA + TDD / 独立复审；**未**部署、**未**真实发布、**未**读凭据、**未**改 `BUILTIN_WIRE_PROFILE.validated=false`、**未**触 NapCat/容器。
+
+**内容**：
+- additive migration v4：`qzone_journal_review_decisions`（与 `manual_resolutions` 分离）；`decision_id` PK、`approve|reject`、scrub 后 operator note、previous/new status、draft/time 索引。
+- `approve`/`reject` 状态迁移与 audit insert 同 `BEGIN IMMEDIATE` 事务；幂等重复 approve/reject 不重复审计行；reject 保留 `last_error_code` reason，Admin reject 强制非空 note，approve 可选 note（空 body 仍可用）；普通 reject 仅允许 `pending_review → rejected`，approved 仅 dry-run。
+- Admin：`GET /drafts` 分页（status/limit/offset/total/has_more，API max 100）、`GET /drafts/{id}`、`GET /drafts/{id}/audit`（`review_decisions` + `manual_resolutions` 分离数组）；保留 `/publish` 后端端点。
+- Health `counts` 补齐七态；新增结构化 `live_publish_gate`（ready + reasons code/中文 message），覆盖 disabled/dry-run/allow_live_publish/profile/uins/bot/transport。
+- 新增 `/admin/qzone-journal`：四指标卡、health gate banner、状态筛选/分页、详情与双审计抽屉；pending approve/reject、approved dry-run、unknown 两种人工确认，其余状态只读。
+- 前端 dry-run 固定安全字段白名单；列表/health/详情使用 request generation guard，旧响应不会覆盖新筛选、新草稿或已关闭抽屉；QZone 前端无 `/publish` 调用。
+- 插件与 Manifest V3 版本同步升至 `0.3.0`；迁移清单：`docs/migrations/qzone-journal-review-console-v0.3-2026-07-16.md`。
+
+**验证**：
+- RED：`tests/test_qzone_journal_review_console.py` 9 failed（缺 v4 / note / offset / gate）。
+- Codex 主审补审计写失败 trigger 故障注入：approve/reject 均整体回滚，草稿状态与 `last_error_code` 不出现半提交；非法 status filter 返回 422。
+- GREEN：七文件 QZone 套件 **133 passed**；scoped ruff clean；pyright 0 errors。
+- Admin：正确工作目录下 `vue-tsc --noEmit` 通过；production build 通过；UI compliance 通过；QZone 新文件无 raw color、`!important`、静态 inline style 或 `/publish` 调用。
+- 独立 Grok review：0 Critical；2 Important（approved reject 状态矩阵、陈旧请求覆盖）均已修复并复验。
+- 同模式扫描：QZone 无残留 `pending_review|approved` 普通 reject SQL/条件；list/health/detail 三条异步加载均具 request-generation stale-response guard。
+- 最终全仓 pytest：**3950 passed, 17 skipped, 186 warnings**。
+
+**回滚/影响**：未部署。回退 store/plugin/v4 测试、QZone frontend route/menu/view/API 并重新 build 即可；v4 表 additive，可保留。未来部署只 recreate bot。
+
+**残留**：真实发布仍严格阻塞于 real_sanitized CGI fixture → 独立 validated profile → 用户授权单条 canary；本控制台不提供 live publish。
+
+---
+
+## 2026-07-16 QZone Journal v0.2.0 进阶 fiction / 审核 provenance（未部署）
+
+**变更类型**：预发布功能实现 + SQLite additive migration + TDD / 独立安全复审；**未**真实发布、**未**读凭据、**未**创建 validated profile、**未**触 NapCat/容器/生产库。
+
+**内容**：
+- `advanced_enabled` 从无效占位变为 fiction-only 世界书适配：只给已经通过 selector 的高显著度 fiction 事件补 StoryArc/fiction partner 上下文；不新增日常伙伴候选、不改变“有事才发”频率。
+- `qzone_journal.db` governed migration v3 additive 增加 `stable_id/subject_kind/privacy/salience/source_summary/provenance_json`；旧 v2 草稿六列为 NULL 双读兼容；Admin drafts 增加强制 `review` bundle，health 暴露 advanced/manual-review/wire-profile/profile-validated/salience/allowed-sources。
+- 新增统一 `public_safety.py`：覆盖 prompt、worldbook、LLM 成稿、Store 正文、review provenance 与 manual-resolution note；处理 Unicode Cf/ZWSP、全角 Latin/数字/赋值符、Bearer 残留、QQ-like 5–16 位编号；worldbook 保留多行结构并硬限 1600。
+- per-candidate `ValueError` 隔离：单个脏 `stable_id/source_summary/provenance` 只拒绝当前候选并记录 best-effort `qzone_draft_rejected`，不再阻断同 tick 后续健康事件。
+- Part C factual 真人数据仍不接入公开空间；advanced 开启也继续拒绝 `subject_kind=factual`。内置 `BUILTIN_WIRE_PROFILE.validated=false` 保持不变。
+- 迁移/回滚清单：`docs/migrations/qzone-journal-advanced-fiction-review-provenance-2026-07-16.md`。
+
+**验证**：
+- 原始 advanced/provenance RED：**13 failed, 2 passed**；Grok GREEN 后 Codex 补正文/Store 最终边界。
+- 独立 adversarial review 首轮：1 Critical + 5 Important；对应 Unicode/ZWSP/Bearer、tick isolation、worldbook structure、manual note 精确 RED→GREEN；复审 **0 Critical / 0 Important**。
+- QZone 六文件：**123 passed**；QZone + manifest/catalog/ownership：**159 passed**。
+- scoped Ruff clean；Pyright **0 errors**；JSON parse / diff-check clean。
+- 当前混合工作树全量：**3940 passed, 17 skipped, 186 warnings**。
+
+**回滚/影响**：未部署。代码回退 v0.2.0 advanced/public-safety/store-v3 hunks即可；v3 六列为 nullable additive，可保留不删。未来部署只 recreate bot，永不 touch NapCat。
+
+**残留**：真实发布仍严格阻塞于 real_sanitized CGI fixture → 独立 validated profile → 用户授权单条 canary。可选离线后续为 producer-side public projection、Admin SPA 审核页与 selection counters，需另立切片。
+
+---
+
+## 2026-07-16 记忆 Entity Identity v1（Card/KG/Context；未部署）
+
+**变更类型**：前沿对比审计 + TDD 实现 + 独立代码复核；**未**部署、**未**改 SQLite schema、**未**批量回写历史数据、**未**触 NapCat/QZone 真实发布。
+
+**内容**：
+- 新增 `services/memory/entity_identity.py`：不可变 `EntityRef`；`user:qq` / `group:qq` 平台 key；`concept:<scope>:<scope_id>:<slug>` scoped fallback；显式 `用户/群` 前缀识别；bare digits 不冒充 QQ；符号 surface 使用稳定 raw hash。
+- Card provenance 的 owner identity 与 category 解耦；KG 新 active fact 在 direct promote、candidate approval、supersede 三入口 additive 写 `subject_entity_key` / `object_entity_key`。
+- GraphContext provenance 与 bounded multi-hop 优先合法 canonical key；正常 legacy surface fallback；malformed 顶层 key 不遮蔽内嵌 metadata；符号/空 role 不再毒化整个 graph source。
+- supersede 三态：显示名改名保留 subject identity；显式另一个 platform entity 重算；pre-v1 空 metadata 从旧 subject 恢复；object 随新事实更新。
+- 迁移/回滚清单：`docs/migrations/memory-entity-identity-v1-2026-07-16.md`。
+
+**验证**：
+- Grok identity matrix + 两轮只读 review；首轮 Critical/Important 均按 RED 修复，复审无原问题残留；额外 blank-role source isolation 已补齐。
+- Entity Identity focused：**29 passed**；knowledge graph/context/eval/fact bridge/RRF 组合：**81 passed**。
+- scoped Ruff clean；Pyright **0 errors**（含测试）。
+- 最终全量 pytest：**3848 passed, 17 skipped, 186 warnings**（相对上一基线净增 29 个 identity 测试）。
+
+**回滚/影响**：additive JSON metadata，无数据回滚；还原 identity/context/KG hunks 即可，旧 reader 会忽略未知 metadata。影响 Card owner provenance、KG active write、GraphContext provenance/multi-hop；不改变 review 门、active-only、hop/top_k、listener。
+
+**残留**：Episode entity back-link / alias registry 尚未完成；PPR/GraphRAG community/历史 backfill 不在本 slice。
+
+---
+
+## 2026-07-16 记忆系统三 medium 残留收口（promoter 幂等 / counts / MessageLogPort；未部署）
+
+**变更类型**：实现 + TDD 测试；**未**部署、**未**触 NapCat/生产库、**未**改 prompt、**未** commit。
+
+**内容**：
+- **A EpisodePromoter 持久幂等**：`EpisodeStore.find_by_source_meta`（`json_valid`/`json_extract`，meta_key 严格标识符）；promoter 去掉 `list_episodes(limit=200)` Python 扫描。
+- **B 检索计数真相**：`MemoryRetrievalResult.total_active` = scope+global 可见 active 总量；新增 `matched_active` = pre-top_k 匹配数。Context metadata 暴露 `scope_card_count`/`matched_card_count`，`card_count` 仅兼容别名。
+- **C 类型债**：`MessageLogPort` 结构协议；`client`/`timeline`/`state_board` 注解改 port；bootstrap 构造 `ConversationArchive` **无** `cast(Any, ...)`。
+
+**验证**：
+- RED：5 项在实现前失败（AttributeError/KeyError/ImportError/cast assert）。
+- Grok GREEN focused（promote/admin/episode + retrieval/context + archive/timeline/state_board）：**200 passed**。
+- Codex 主审补强：显式证明目标不在旧 recent-200 中；增加 meta-key 注入/坏 JSON 负向；memory focused **201 passed**。
+- 与 QZone 组合 focused **305 passed**；最终全量 **3819 passed, 17 skipped, 186 warnings**。
+- scoped Ruff clean；Pyright **0 errors**；`rg` 无 promoter `limit=200`、无 `cast(Any, ConversationArchive(`。
+
+**回滚**：还原本条目所列 touched Python/测试与 tracker；无 schema migration。
+
+**影响范围**：`services/episodic/store.py`、`services/memory_consolidator/promoter.py`、`services/memory/retrieval.py`、`services/context/sources.py`、`services/memory/message_log.py`、`services/llm/client.py`、`services/memory/timeline.py`、`services/memory/state_board.py`、`bootstrap/chat_runtime.py` 及对应测试。
+
+**残留**：全局 entity identity、GraphRAG community、MemGPT tools、可选 meta 索引。
+
+---
+
+## 2026-07-16 QZone 离线 sanitized fixture 符合性 harness（未部署、未真网）
+
+**变更类型**：新增纯离线 fixture 合同/校验器/CLI/测试/runbook；**未**设 `validated=True`、**未**真实发布、**未**触 NapCat/凭据/生产库。
+
+**内容**：
+- `plugins/qzone_journal/fixture_conformance.py`：schema_version=1、origin（synthetic|real_sanitized）、names-only request fingerprint、secret scan、与未验证 WireProfile 对照、`parse_qzone_publish_response` 结果对照、`ConformanceReport`（含 advisory `profile_creation_eligible`，永不 mutate profile）。
+- `tools/verify_qzone_fixture.py`：无网络 CLI，输出 secret-free JSON。
+- `tests/fixtures/qzone_journal/synthetic_publish_json_v1.json`：仅 synthetic 模板。
+- `tests/test_qzone_journal_fixture_conformance.py`：TDD RED→GREEN（synthetic 不可资格、secret 拒绝、request drift、parser mismatch 等）。
+- Runbook：`docs/runbooks/qzone-sanitized-fixture-conformance.md`；tracker 已区分 harness 完成 vs 真实 fixture 证据仍缺。
+
+**验证**：Grok 阶段 fixture 20 / QZone 五文件 96 passed；Codex 主审补 JSON 键式 secret、重复 JSON key/header、safe remote_id、CLI 不回显与去恒真断言后 fixture **28** / QZone 五文件 **104 passed**；两主线组合 focused **305 passed**；最终全量 **3819 passed, 17 skipped, 186 warnings**；scoped Ruff clean；Pyright 0 errors；CLI smoke `profile_creation_eligible=false`；`BUILTIN_WIRE_PROFILE.validated is False`。
+
+**回滚**：删除上述新文件并还原 tracker/本条目；不影响既有 transport/parser/delivery。
+
+**残留阻塞**：真实脱敏 CGI fixture → 独立 validated profile → 用户授权单条 canary。
+
+---
+
+## 2026-07-16 记忆系统短期 A/B/C 与 QZone 预发布文档收口（未部署）
+
+**变更类型**：测试补强 + tracker/ACTIVE/维护日志真相对齐；本轮**未**改 GraphContextSource 实现、**未**改 QZone `validated`、**未**部署。
+
+**内容**：
+- 记忆：确认 composition-root 已由 `ConversationArchive` 持有 `storage/messages.db`（anti-join 幂等 legacy backfill）、共享 `RetrievalGate`、semantic 健康/降级、统一 `ContextProvenance`/`ContextScoreBreakdown`、卡片排序 45/25/15/15（recency 半衰减 30 天）、LongMemEval/LoCoMo 风格本地 fixture、consolidator approved→episode dry_run→candidate→approved + 独立 enable 门与 `POST /api/admin/episodes/{id}/enable`、图 temporal supersede 与有界 2-hop。
+- 新增 2 条 graph **负向**回归（`tests/test_context_service.py`）：① 单个 direct seed 不触发扩展；② hub 高连通 fixture 结果 ≤ top_k、hop≤2、断开分支不进入结果。行为已存在，测试即 GREEN，无实现补丁。
+- 全量首次暴露 `tests/test_memory_consolidator_promote.py` 仍断言旧 `dry_run` 合同；同模式扫描确认直接 `create_episode()` 的 dry-run 语义未变，只有 promoter 应随已批准候选推进到 `approved`。测试现同时验证 `dry_run → candidate → approved` 三条 revision，不是只替换期望字符串。
+- QZone：独立复核 `response_parser` + transport 集成已存在；tracker 将 **parser 实现标为已完成**。真实发布剩余阻塞仅：真实脱敏 CGI fixture 符合性、新建独立 validated profile、用户另行授权单条 canary。**禁止**设置 `BUILTIN_WIRE_PROFILE.validated=true`。
+
+**验证（focused，精确计数）**：
+- memory/context：`test_context_service` + `test_context_eval` + `test_retrieval` → **54 passed**；加上 `test_conversation_archive_store` + `test_admin_memory_consolidator` → **100 passed**。
+- promoter/admin 合同修正：`test_memory_consolidator_promote` + `test_admin_memory_consolidator` + `test_admin_episodes` → **35 passed**。
+- QZone 四文件：`test_qzone_journal` + `runtime` + `transport` + `delivery` → **76 passed**。
+- 最终全量：**3785 passed, 17 skipped, 186 warnings**。
+
+
+---
+
 ## 2026-07-15 Living Persona 全链修复与 Part C Social Narrative 上线
 
 **变更类型**：Living Persona reliability 修复 + Part C 真人 Social Narrative 插件/服务 + 生产 Dream 污染 scope 迁移 + bot-only 部署 + 文档收口。对应 tracker `docs/tracking/living-persona-repair-partc-2026-07-15.md`、迁移清单 `docs/migrations/living-persona-partc-2026-07-15.md`，实现提交 `98887a548eb574f5ab0d068b1529ad06e53f88aa`。
@@ -657,7 +1678,7 @@
 **做了什么**：
 
 - **新增 [REASONIX.md](REASONIX.md)**（项目根，73 行）：Reasonix 专属项目记忆。源码实锤 Reasonix 自动加载 `REASONIX.md / AGENTS.md / CLAUDE.md`（`internal/memory/doc.go` docNames），同目录多份全部 fold 进 system-prompt prefix（boot 时一次）。内容：定位 delivery executor、显式声明 `.agents/skills/**` 下 skill 可加载可触发（**修正初版误写的「skill 不适用」**）、区分「omubot-continuity 原则适用」vs「Codex 的 ACTIVE.md tracker 文件不必维护（仅 cross-agent handoff 时更新）」、macOS sandbox 默认断网需手开。
-- **特化 [omubot-deep-delivery](.agents/skills/omubot-deep-delivery/SKILL.md)**（79→111 行，`.agents` + `.claude` 两份同步）：新增「Delivery Executor Mode」一节，针对实测 5 类失败模式——① 权限内信息自读不问；② 动手前复述目标+验收标准；③ 声明完成前重读自己 diff；④ 自验证工具箱（pytest/pyright/ruff/sqlite 只读/NapCat `localhost:29300`），仅主观体感可移交用户，「我测不了」非合法完成态；⑤ 失败先诊断换法、带证据才升级，不未尝试就甩回。
+- **特化 [omubot-deep-delivery](.agents/skills/omubot-deep-delivery/SKILL.md)**（79→111 行，`.agents` + `.claude` 两份同步；**2026-07-19 安全勘误**）：当时新增「Delivery Executor Mode」与自验证工具箱。当前规则已明确 live SQLite 必须 WAL-aware `mode=ro`，NapCat/QQ/QZone/webhook 写调用属于真实外部变更，只有当前任务对精确动作和目标明确授权后才可执行；旧文中的 `localhost:29300` 示例不再构成常规自检授权。
 - **新增 [/done 完成协议](.reasonix/commands/done.md)**（`.reasonix/commands/`，39 行，仅 Reasonix 读）：声明完成前强制 8 步——重读 diff / D1 同模式扫描 / 静态检查 / 测试 / 运行态外部状态 / 负向碰撞 / 回滚路径 / maintenance-log，必须贴真实输出，禁止空断言。
 
 **影响范围**：纯 agent 配置层；不碰任何业务代码、运行态、NapCat。AGENTS.md 一字未动（Codex 继续用，零风险）。Claude Code 行为仅受 deep-delivery 特化影响（内容为条件式中立，对派单方无害）。

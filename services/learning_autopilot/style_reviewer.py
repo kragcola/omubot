@@ -59,11 +59,7 @@ class StyleAIReviewer:
         if not self._db_path.exists():
             return 0
         async with aiosqlite.connect(self._db_path) as db:
-            cur = await db.execute(
-                "SELECT COUNT(*) FROM style_expressions WHERE status = 'pending'"
-            )
-            row = await cur.fetchone()
-            return int(row[0]) if row else 0
+            return await self._count_pending_inner(db)
 
     async def run_one_batch(
         self, *, batch_size: int, config: AggressivenessConfig, llm_client: Any
@@ -80,8 +76,14 @@ class StyleAIReviewer:
                     await self._save_meta(db, _DONE_KEY, _now())
                     return ReviewBatchResult(ok=True, completed=True)
                 state = {
-                    "active": True, "processed": 0, "approved": 0, "rejected": 0,
-                    "kept": 0, "total_at_start": total, "started_at": _now(), "last_id": "",
+                    "active": True,
+                    "processed": 0,
+                    "approved": 0,
+                    "rejected": 0,
+                    "kept": 0,
+                    "total_at_start": total,
+                    "started_at": _now(),
+                    "last_id": "",
                 }
                 await self._save_meta(db, _STATE_KEY, state)
 
@@ -92,75 +94,138 @@ class StyleAIReviewer:
                 "ORDER BY expression_id LIMIT ?",
                 (last_id, batch_size),
             )
-            rows = await cur.fetchall()
+            rows = [dict(r) for r in await cur.fetchall()]
+
             if not rows:
+                # Cursor exhausted for this pass, but sticky kept/pending rows may
+                # still sit at or before last_id. Report true backlog; only mark
+                # completed + last_done when remaining is actually zero.
+                remaining = await self._count_pending_inner(db)
+                drained = remaining == 0
                 state["active"] = False
+                state["last_id"] = ""
+                if drained:
+                    await self._save_meta(db, _DONE_KEY, _now())
                 await self._save_meta(db, _STATE_KEY, state)
-                await self._save_meta(db, _DONE_KEY, _now())
-                return ReviewBatchResult(ok=True, completed=True, total_at_start=int(state.get("total_at_start", 0)))
+                return ReviewBatchResult(
+                    ok=True,
+                    processed_in_batch=0,
+                    remaining=remaining,
+                    completed=drained,
+                    total_at_start=int(state.get("total_at_start", 0)),
+                )
 
             sem = asyncio.Semaphore(config.concurrency)
-            items_and_rows: list[tuple[dict, CandidateItem]] = []
-            for row in rows:
-                d = dict(row)
+            items_and_rows: list[tuple[dict[str, Any], CandidateItem]] = []
+            for d in rows:
                 item = CandidateItem(
                     id=str(d["expression_id"]),
                     domain="style",
                     content=f"{d.get('situation', '')} / {d.get('style', '')}",
                     context=str(d.get("scope", "")),
                     group_id=str(d.get("group_id", "")),
-                    confidence=float(d.get("confidence", 0.5)),
+                    confidence=float(d.get("confidence", 0.5) or 0.5),
                 )
                 items_and_rows.append((d, item))
 
-            async def _assess(pair: tuple[dict, CandidateItem]) -> tuple[dict, CandidateItem, Any]:
+            async def _assess(
+                pair: tuple[dict[str, Any], CandidateItem],
+            ) -> tuple[dict[str, Any], CandidateItem, Any]:
                 async with sem:
                     verdict = await assess_candidate(llm_client, pair[1])
                 return (pair[0], pair[1], verdict)
 
             results = await asyncio.gather(*[_assess(p) for p in items_and_rows])
-            for d, item, verdict in results:
-                await self._apply_verdict(db, d, verdict, config)
-                state["last_id"] = item.id
-                state["processed"] = int(state.get("processed", 0)) + 1
-                state[verdict.decision] = int(state.get(verdict.decision, 0)) + 1
-                state["last_progress_at"] = _now()
+            approved_n = 0
+            rejected_n = 0
+            kept_n = 0
+            for d, _item, verdict in results:
+                applied = await self._apply_verdict(db, d, verdict, config)
+                if applied == "approved":
+                    approved_n += 1
+                elif applied == "rejected":
+                    rejected_n += 1
+                else:
+                    kept_n += 1
 
-            await self._save_meta(db, _STATE_KEY, state)
+            # State counters from *applied* outcomes only (not raw LLM decision).
+            state["processed"] = int(state.get("processed", 0)) + len(rows)
+            state["approved"] = int(state.get("approved", 0)) + approved_n
+            state["rejected"] = int(state.get("rejected", 0)) + rejected_n
+            state["kept"] = int(state.get("kept", 0)) + kept_n
+            state["last_id"] = str(rows[-1]["expression_id"])
+            state["last_progress_at"] = _now()
+
             remaining = await self._count_pending_inner(db)
+            if remaining == 0:
+                state["active"] = False
+                await self._save_meta(db, _DONE_KEY, _now())
+            await self._save_meta(db, _STATE_KEY, state)
+
             return ReviewBatchResult(
                 ok=True,
                 processed_in_batch=len(rows),
+                approved_in_batch=approved_n,
+                rejected_in_batch=rejected_n,
+                kept_in_batch=kept_n,
                 remaining=remaining,
+                completed=remaining == 0,
                 total_at_start=int(state.get("total_at_start", 0)),
             )
 
     async def _apply_verdict(
-        self, db: aiosqlite.Connection, row: dict, verdict: Any, config: AggressivenessConfig,
-    ) -> None:
+        self,
+        db: aiosqlite.Connection,
+        row: dict[str, Any],
+        verdict: Any,
+        config: AggressivenessConfig,
+    ) -> str:
+        """Apply LLM verdict with thresholds; return applied outcome."""
         eid = row["expression_id"]
-        meta = json.loads(row.get("meta_json") or "{}") if isinstance(row.get("meta_json"), str) else {}
+        meta = (
+            json.loads(row.get("meta_json") or "{}")
+            if isinstance(row.get("meta_json"), str)
+            else {}
+        )
+        decision = str(getattr(verdict, "decision", "kept") or "kept")
+        confidence = float(getattr(verdict, "confidence", 0.0) or 0.0)
+        reason = str(getattr(verdict, "reason", "") or "")
         meta["ai_review"] = {
-            "decision": verdict.decision, "confidence": verdict.confidence,
-            "reason": verdict.reason, "reviewed_at": _now(),
+            "decision": decision,
+            "confidence": confidence,
+            "reason": reason,
+            "reviewed_at": _now(),
         }
-        meta["ai_review_decision"] = verdict.decision
+        meta["ai_review_decision"] = decision
         meta["ai_reviewed_at"] = _now()
 
         new_status = "pending"
-        if verdict.decision == "approved" and verdict.confidence >= config.auto_approve_min_confidence:
+        applied = "kept"
+        if (
+            decision == "approved"
+            and confidence >= config.auto_approve_min_confidence
+        ):
             new_status = "approved"
-        elif verdict.decision == "rejected" and verdict.confidence >= config.auto_reject_max_confidence:
+            applied = "approved"
+        elif (
+            decision == "rejected"
+            and confidence >= config.auto_reject_max_confidence
+        ):
             new_status = "rejected"
+            applied = "rejected"
 
         await db.execute(
-            "UPDATE style_expressions SET status = ?, meta_json = ?, updated_at = ? WHERE expression_id = ?",
+            "UPDATE style_expressions SET status = ?, meta_json = ?, updated_at = ? "
+            "WHERE expression_id = ?",
             (new_status, json.dumps(meta, ensure_ascii=False), _now(), eid),
         )
         await db.commit()
+        return applied
 
     async def _count_pending_inner(self, db: aiosqlite.Connection) -> int:
-        cur = await db.execute("SELECT COUNT(*) FROM style_expressions WHERE status = 'pending'")
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM style_expressions WHERE status = 'pending'"
+        )
         row = await cur.fetchone()
         return int(row[0]) if row else 0
 
@@ -176,7 +241,9 @@ class StyleAIReviewer:
 
     async def _save_meta(self, db: aiosqlite.Connection, key: str, value: Any) -> None:
         try:
-            await db.execute("CREATE TABLE IF NOT EXISTS style_meta (key TEXT PRIMARY KEY, value TEXT)")
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS style_meta (key TEXT PRIMARY KEY, value TEXT)"
+            )
             await db.execute(
                 "INSERT OR REPLACE INTO style_meta (key, value) VALUES (?, ?)",
                 (key, json.dumps(value, ensure_ascii=False)),

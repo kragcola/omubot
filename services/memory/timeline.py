@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, overload
 from services.memory.types import Content, ContentBlock, TextBlock
 
 if TYPE_CHECKING:
-    from services.memory.message_log import MessageLog
+    from services.memory.message_log import MessageLogPort
 
 _MAX_GROUPS = 200
 
@@ -171,7 +171,7 @@ class _GroupState:
 class GroupTimeline:
     """Group chat unified timeline with append-only turns and pending buffer."""
 
-    def __init__(self, message_log: MessageLog | None = None) -> None:
+    def __init__(self, message_log: MessageLogPort | None = None) -> None:
         self._store: dict[str, _GroupState] = {}
         self._message_log = message_log
 

@@ -1,0 +1,43 @@
+{
+  "arc_id": "living_story_v1.side_study",
+  "revision": 0,
+  "title": "Living Story v1 · 侧线功课",
+  "scope": "fiction",
+  "stage": "active",
+  "status": "active",
+  "starts_on": "2026-07-01",
+  "ends_on": "2026-12-31",
+  "arc_role": "side",
+  "stack_order": 1,
+  "goals": [
+    "完成小测前一章练习"
+  ],
+  "active_conflicts": [
+    "复习时间被排练挤占"
+  ],
+  "variables": {
+    "study_progress": 0.05,
+    "exam_pressure": 0.1
+  },
+  "partner_states": {},
+  "open_threads": [
+    "练习题还没收尾"
+  ],
+  "last_events": [],
+  "event_history": [],
+  "causal_links": [],
+  "deadlines": [],
+  "next_day_seed": "side: quiet study block",
+  "event_budget": {
+    "now_step": 0,
+    "last_event_step": 0,
+    "generated_days": 0,
+    "setback_count": 0,
+    "events_this_tick": 0,
+    "triggered_once": [],
+    "cooldowns": {},
+    "storylet_available_at": {},
+    "last_viewed": {},
+    "committed_event_ids": []
+  }
+}

@@ -92,6 +92,7 @@ def create_api_router(
     from admin.routes.api.style import create_style_router
     from admin.routes.api.system import create_system_router
     from admin.routes.api.usage import create_usage_router
+    from admin.routes.api.worldbook import create_worldbook_router
 
     router.include_router(create_auth_router())
     router.include_router(create_bandit_router(scheduler=scheduler, ctx=ctx))
@@ -198,5 +199,16 @@ def create_api_router(
         backup_scheduler=getattr(ctx, "backup_scheduler", None),
         config_path=config_path,
     ))
+    router.include_router(create_worldbook_router(ctx=ctx))
+
+    if bus is not None and hasattr(bus, "collect_admin_routes"):
+        for plugin_route in bus.collect_admin_routes():
+            path = str(getattr(plugin_route, "path", "") or "").strip()
+            plugin_router = getattr(plugin_route, "router", None)
+            if not path.startswith("/") or ".." in path.split("/"):
+                raise ValueError(f"invalid plugin admin route path: {path!r}")
+            if plugin_router is None:
+                raise ValueError(f"plugin admin route has no router: {path!r}")
+            router.include_router(plugin_router, prefix=path.rstrip("/"))
 
     return router

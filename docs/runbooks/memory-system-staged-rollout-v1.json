@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "profile": "memory_staged_rollout_v1",
+  "production_baseline_commit": "98887a5",
+  "authorization": "none",
+  "phases": [
+    {
+      "id": "stage0_dark",
+      "flags": {
+        "memo.write_policy_enabled": false,
+        "context.temporal_trace.enabled": false,
+        "context.query_aware_plan.enabled": false,
+        "context.card_eligibility.enabled": false,
+        "context.pack_evidence_gate.enabled": false,
+        "context.evidence_use_contract.enabled": false,
+        "context.evidence_use_contract.inject_constrained_instruction": false,
+        "knowledge_graph.provenance_gate_enabled": true,
+        "knowledge_graph.observability_enabled": false,
+        "block_trace.joint_dual_path_telemetry_enabled": false
+      }
+    },
+    {
+      "id": "stage1_observe",
+      "flags": {
+        "memo.write_policy_enabled": false,
+        "context.temporal_trace.enabled": false,
+        "context.query_aware_plan.enabled": false,
+        "context.card_eligibility.enabled": false,
+        "context.pack_evidence_gate.enabled": false,
+        "context.evidence_use_contract.enabled": false,
+        "context.evidence_use_contract.inject_constrained_instruction": false,
+        "knowledge_graph.provenance_gate_enabled": true,
+        "knowledge_graph.observability_enabled": true,
+        "block_trace.joint_dual_path_telemetry_enabled": true
+      }
+    },
+    {
+      "id": "stage2_write_hygiene",
+      "flags": {
+        "memo.write_policy_enabled": true,
+        "context.temporal_trace.enabled": false,
+        "context.query_aware_plan.enabled": false,
+        "context.card_eligibility.enabled": false,
+        "context.pack_evidence_gate.enabled": false,
+        "context.evidence_use_contract.enabled": false,
+        "context.evidence_use_contract.inject_constrained_instruction": false,
+        "knowledge_graph.provenance_gate_enabled": true,
+        "knowledge_graph.observability_enabled": true,
+        "block_trace.joint_dual_path_telemetry_enabled": true
+      }
+    },
+    {
+      "id": "stage3_read_eligibility",
+      "flags": {
+        "memo.write_policy_enabled": true,
+        "context.temporal_trace.enabled": false,
+        "context.query_aware_plan.enabled": false,
+        "context.card_eligibility.enabled": true,
+        "context.pack_evidence_gate.enabled": false,
+        "context.evidence_use_contract.enabled": false,
+        "context.evidence_use_contract.inject_constrained_instruction": false,
+        "knowledge_graph.provenance_gate_enabled": true,
+        "knowledge_graph.observability_enabled": true,
+        "block_trace.joint_dual_path_telemetry_enabled": true
+      }
+    },
+    {
+      "id": "stage4_pack_observe",
+      "flags": {
+        "memo.write_policy_enabled": true,
+        "context.temporal_trace.enabled": false,
+        "context.query_aware_plan.enabled": false,
+        "context.card_eligibility.enabled": true,
+        "context.pack_evidence_gate.enabled": true,
+        "context.evidence_use_contract.enabled": true,
+        "context.evidence_use_contract.inject_constrained_instruction": false,
+        "knowledge_graph.provenance_gate_enabled": true,
+        "knowledge_graph.observability_enabled": true,
+        "block_trace.joint_dual_path_telemetry_enabled": true
+      }
+    },
+    {
+      "id": "stage5_evidence_instruction",
+      "flags": {
+        "memo.write_policy_enabled": true,
+        "context.temporal_trace.enabled": false,
+        "context.query_aware_plan.enabled": false,
+        "context.card_eligibility.enabled": true,
+        "context.pack_evidence_gate.enabled": true,
+        "context.evidence_use_contract.enabled": true,
+        "context.evidence_use_contract.inject_constrained_instruction": true,
+        "knowledge_graph.provenance_gate_enabled": true,
+        "knowledge_graph.observability_enabled": true,
+        "block_trace.joint_dual_path_telemetry_enabled": true
+      }
+    },
+    {
+      "id": "stage6_query_planner",
+      "flags": {
+        "memo.write_policy_enabled": true,
+        "context.temporal_trace.enabled": false,
+        "context.query_aware_plan.enabled": true,
+        "context.card_eligibility.enabled": true,
+        "context.pack_evidence_gate.enabled": true,
+        "context.evidence_use_contract.enabled": true,
+        "context.evidence_use_contract.inject_constrained_instruction": true,
+        "knowledge_graph.provenance_gate_enabled": true,
+        "knowledge_graph.observability_enabled": true,
+        "block_trace.joint_dual_path_telemetry_enabled": true
+      }
+    },
+    {
+      "id": "stage7_temporal_trace",
+      "flags": {
+        "memo.write_policy_enabled": true,
+        "context.temporal_trace.enabled": true,
+        "context.query_aware_plan.enabled": true,
+        "context.card_eligibility.enabled": true,
+        "context.pack_evidence_gate.enabled": true,
+        "context.evidence_use_contract.enabled": true,
+        "context.evidence_use_contract.inject_constrained_instruction": true,
+        "knowledge_graph.provenance_gate_enabled": true,
+        "knowledge_graph.observability_enabled": true,
+        "block_trace.joint_dual_path_telemetry_enabled": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "arc_id": "living_story_v1.side_study",
+  "revision": 0,
+  "title": "功课与小测的侧线",
+  "scope": "fiction",
+  "stage": "active",
+  "status": "active",
+  "starts_on": "",
+  "ends_on": "",
+  "arc_role": "side",
+  "stack_order": 10,
+  "goals": [
+    "在联排空隙里完成小测前一章练习",
+    "把复习切成可打断的小块，避免整晚被拖垮"
+  ],
+  "active_conflicts": [
+    "复习时段被联排与补排反复挤占"
+  ],
+  "variables": {
+    "study_progress": 0.05,
+    "exam_pressure": 0.1,
+    "study_load": 0.2,
+    "spare_time": 0.35
+  },
+  "partner_states": {},
+  "open_threads": [
+    "练习题还没收尾，下一空档先写完错题订正"
+  ],
+  "last_events": [],
+  "event_history": [],
+  "causal_links": [],
+  "deadlines": [],
+  "next_day_seed": "侧线：安静坐下来，把功课推一小步。",
+  "event_budget": {
+    "now_step": 0,
+    "last_event_step": 0,
+    "generated_days": 0,
+    "setback_count": 0,
+    "events_this_tick": 0,
+    "triggered_once": [],
+    "cooldowns": {},
+    "storylet_available_at": {},
+    "last_viewed": {},
+    "committed_event_ids": []
+  }
+}

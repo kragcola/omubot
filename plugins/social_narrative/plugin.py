@@ -40,6 +40,10 @@ class SocialNarrativePlugin(AmadeusPlugin):
         self._store: Any | None = None
         self._affection_engine: Any | None = None
         self._climate_engine: Any | None = None
+        # Persistent root PluginContext for late-bound worldbook_runtime lookup.
+        # Do not cache the runtime object: worldbook may start after priority-44
+        # social and hot-replace the attribute later.
+        self._root_ctx: PluginContext | None = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
         cfg = self._config_override or load_plugin_config(
@@ -55,6 +59,7 @@ class SocialNarrativePlugin(AmadeusPlugin):
         self._store = getattr(ctx, "social_narrative_store", None)
         self._affection_engine = getattr(ctx, "affection_engine", None)
         self._climate_engine = getattr(ctx, "climate_engine", None)
+        self._root_ctx = ctx
         ctx.social_narrative_reflection_provider = self
         if not self._enabled:
             _L.info("social narrative plugin disabled")
@@ -73,6 +78,7 @@ class SocialNarrativePlugin(AmadeusPlugin):
     async def on_shutdown(self, ctx: PluginContext) -> None:
         if getattr(ctx, "social_narrative_reflection_provider", None) is self:
             ctx.social_narrative_reflection_provider = None
+        self._root_ctx = None
         self._store = None
         self._affection_engine = None
         self._climate_engine = None
@@ -133,7 +139,7 @@ class SocialNarrativePlugin(AmadeusPlugin):
         bot_reply = str(ctx.reply_content or "").strip()
         if not user_text or not bot_reply:
             return
-        await self._store.record_shared_experience(
+        record = await self._store.record_shared_experience(
             group_id=group_id,
             user_id=user_id,
             evidence_message_id=source_message_id,
@@ -143,6 +149,66 @@ class SocialNarrativePlugin(AmadeusPlugin):
             bot_reply=bot_reply,
             entity_kind="factual",
             relationship=self._relationship_snapshot(group_id, user_id),
+        )
+        # Story bridge only after factual persist success. Late-bound runtime
+        # so priority-44 social never caches a stale None from priority-45 startup.
+        if record is None:
+            return
+        await self._maybe_commit_social_story(ctx, record, group_id=group_id, user_id=user_id)
+
+    def _resolve_worldbook_runtime(self) -> Any | None:
+        """Resolve worldbook_runtime from the retained root PluginContext.
+
+        Production ``ReplyContext`` has no worldbook_runtime / plugin_context /
+        ctx fields. The bridge must late-bind via the startup PluginContext
+        reference and re-read the attribute each call (never cache runtime).
+        """
+        root = self._root_ctx
+        if root is None:
+            return None
+        return getattr(root, "worldbook_runtime", None)
+
+    async def _maybe_commit_social_story(
+        self,
+        ctx: ReplyContext,
+        record: Any,
+        *,
+        group_id: str,
+        user_id: str,
+    ) -> None:
+        """Best-effort social→story bridge; never rolls back factual success."""
+        _ = ctx  # production ReplyContext is intentionally runtime-free
+        runtime = self._resolve_worldbook_runtime()
+        if runtime is None:
+            return
+        commit = getattr(runtime, "commit_social_experience", None)
+        if not callable(commit):
+            return
+        try:
+            result = commit(record, group_id=group_id, user_id=user_id)
+        except Exception as exc:
+            _L.warning(
+                "social story commit raised | group={} experience={} err={}",
+                group_id,
+                getattr(record, "experience_id", ""),
+                exc,
+            )
+            return
+        status = str(getattr(result, "status", "") or "")
+        reason = str(getattr(result, "reason", "") or "")
+        if status == "rejected":
+            _L.debug(
+                "social story commit rejected | group={} reason={}",
+                group_id,
+                reason,
+            )
+            return
+        _L.info(
+            "social story commit | status={} reason={} event_id={} arc_id={}",
+            status,
+            reason,
+            getattr(result, "event_id", ""),
+            getattr(result, "arc_id", ""),
         )
 
     async def on_pre_prompt(self, ctx: PromptContext) -> None:

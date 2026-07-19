@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Query
 
 from services.knowledge_graph.graph_writer import GraphWriter
+
+logger = logging.getLogger(__name__)
 
 
 def create_knowledge_router(
@@ -359,67 +361,30 @@ def create_knowledge_router(
     async def graph_health():
         """Diagnostic snapshot for the graph extraction pipeline.
 
-        Read-only aggregation across extraction_candidates, graph_facts, and
-        graph_edges. Surfaces 24h activity so plan A consumers can tell
-        whether the LLM extractor / Phase E listeners are firing without
-        having to shell into sqlite.
+        Read-only aggregation owned by KnowledgeGraphService.health_snapshot
+        (gpo_v1 optional nested observability). Routes must not touch private
+        store DB handles.
         """
-        writer = _resolve_graph_writer()
-        if writer is None:
+        graph = _resolve_knowledge_graph()
+        if graph is None:
             return {"available": False}
-        db = writer._db
-        if db is None:
+        snapshot_fn = getattr(graph, "health_snapshot", None)
+        if not callable(snapshot_fn):
             return {"available": False}
-
-        # Created_at is stored with +08:00 offset; build the cutoff in the
-        # same form so lexical comparison works without julianday casts.
-        tz = timezone(timedelta(hours=8))
-        now = datetime.now(tz)
-        since_24h_iso = (now - timedelta(hours=24)).isoformat()
-
-        cursor = await db.execute(
-            "SELECT status, COUNT(*) FROM extraction_candidates "
-            "WHERE created_at >= ? GROUP BY status",
-            (since_24h_iso,),
-        )
-        candidate_24h = {row[0]: row[1] for row in await cursor.fetchall()}
-
-        cursor = await db.execute(
-            "SELECT status, COUNT(*) FROM extraction_candidates GROUP BY status"
-        )
-        candidate_total = {row[0]: row[1] for row in await cursor.fetchall()}
-
-        cursor = await db.execute(
-            "SELECT source, COUNT(*) FROM graph_facts "
-            "WHERE status='active' GROUP BY source"
-        )
-        facts_active_by_source = {row[0]: row[1] for row in await cursor.fetchall()}
-
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM graph_facts "
-            "WHERE status='active' AND created_at >= ?",
-            (since_24h_iso,),
-        )
-        row = await cursor.fetchone()
-        facts_active_24h = int(row[0]) if row else 0
-
-        cursor = await db.execute(
-            "SELECT edge_type, COUNT(*) FROM graph_edges "
-            "WHERE status='active' AND created_at >= ? GROUP BY edge_type",
-            (since_24h_iso,),
-        )
-        edges_24h = {row[0]: row[1] for row in await cursor.fetchall()}
-
-        return {
-            "available": True,
-            "checked_at": now.isoformat(),
-            "since": since_24h_iso,
-            "candidate_24h": candidate_24h,
-            "candidate_total": candidate_total,
-            "facts_active_by_source": facts_active_by_source,
-            "facts_active_24h": facts_active_24h,
-            "edges_24h": edges_24h,
-        }
+        try:
+            result = await snapshot_fn()  # type: ignore[misc]
+        except Exception as exc:
+            # Type-only diagnostics: never str(exc) / paths / secrets / evidence.
+            # asyncio.CancelledError is BaseException and propagates uncaught.
+            err_type = type(exc).__name__
+            logger.warning("graph health_snapshot failed: %s", err_type)
+            return {
+                "available": False,
+                "error": f"health_snapshot_failed:{err_type}",
+            }
+        if not isinstance(result, dict):
+            return {"available": False}
+        return result
 
     def _search(kb: Any, query: str, *, top_k: int) -> list[dict[str, Any]]:
         if hasattr(kb, "search_hits"):

@@ -77,6 +77,7 @@ def test_memory_cards_catalog_declares_social_narrative_as_shared_client() -> No
     assert spec.owner == "services.memory.card_store"
     assert spec.clients == (
         "services.memory.card_store",
+        "services.memory.visual_identity",
         "services.social_narrative",
     )
 

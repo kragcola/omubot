@@ -303,6 +303,7 @@ async def test_decide_candidate_promotes_episode_on_approve(
     assert len(episodes) == 1
     assert episodes[0].episode_id == promote["episode_id"]
     assert episodes[0].source == "consolidator"
+    assert episodes[0].episode_state == "approved"
     assert episodes[0].meta["consolidator_candidate_id"] == cid
     assert episodes[0].meta["promoted_by"] == "alice"
 

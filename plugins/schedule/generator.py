@@ -7,7 +7,7 @@ import contextlib
 import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
@@ -24,6 +24,7 @@ from plugins.schedule.store import ScheduleStore
 from plugins.schedule.story_arc import (
     FictionPartnerProfile,
     FictionPartnerState,
+    JournalEventRecord,
     StoryArc,
 )
 from plugins.schedule.types import ALLOWED_ACTIVITY_LABELS, Schedule, TimeSlot, normalize_activity_label
@@ -124,6 +125,7 @@ class ScheduleGenerator:
         event_replan_enabled: bool = False,
         task_supervisor: BackgroundTaskSupervisor | None = None,
         calendar_service: Any | None = None,
+        worldbook_runtime: Any | None = None,
     ) -> None:
         self._store = store
         self._generate_at_hour = generate_at_hour
@@ -139,6 +141,20 @@ class ScheduleGenerator:
         self._task: asyncio.Task[None] | None = None
         self._task_supervisor = task_supervisor
         self._calendar_service = calendar_service
+        self._worldbook_runtime = worldbook_runtime
+
+    def set_worldbook_runtime(self, runtime: Any | None) -> None:
+        self._worldbook_runtime = runtime
+
+    def set_worldbook_story_arc_store(self, store: Any | None) -> None:
+        """Attach the ledger provisioned by the Worldbook lifecycle.
+
+        Worldbook schedule projection is an independent gate from the legacy
+        ``schedule.story_arc_enabled`` flag, so late plugin startup must be able
+        to supply the shared store without rebuilding the schedule generator.
+        """
+        self._story_arc_store = store
+        self._story_arc_enabled = store is not None
 
     def start(self, api_call: ApiCaller) -> None:
         if self._task is not None:
@@ -274,6 +290,9 @@ class ScheduleGenerator:
             arc_text = _render_story_arc_context(active_arc)
             if arc_text:
                 user_parts.extend(["", arc_text])
+        worldbook_text = self._build_worldbook_schedule_context("\n".join(user_parts))
+        if worldbook_text:
+            user_parts.extend(["", worldbook_text])
 
         messages = [{"role": "user", "content": "\n".join(user_parts)}]
 
@@ -289,6 +308,20 @@ class ScheduleGenerator:
         self._store.save(schedule)
         self._update_story_arc_after_schedule(active_arc, schedule)
         _L.info("schedule generated | date={} theme={} slots={}", schedule.date, schedule.theme, len(schedule.slots))
+
+    def _build_worldbook_schedule_context(self, conversation_text: str) -> str:
+        runtime = self._worldbook_runtime
+        if runtime is None:
+            return ""
+        project = getattr(runtime, "project_schedule", None)
+        if not callable(project):
+            return ""
+        try:
+            result = project(conversation_text=conversation_text)
+        except Exception as exc:
+            _L.warning("worldbook schedule projection failed | error={}", exc)
+            return ""
+        return str(getattr(result, "text", "") or "").strip()
 
     def _seconds_until_next_run(self) -> int:
         """Seconds until the next generate_at_hour CST."""
@@ -311,39 +344,33 @@ class ScheduleGenerator:
         if search_cards is None:
             return []
         try:
-            cards = await search_cards("", limit=_RECENT_MEMORY_CARD_LIMIT)
+            cards = await search_cards(
+                "",
+                scope="global",
+                limit=_RECENT_MEMORY_CARD_LIMIT,
+            )
         except Exception as exc:
             _L.warning("recent memory card lookup failed | error={}", exc)
             return []
-        return list(cards or [])[:_RECENT_MEMORY_CARD_LIMIT]
+        return [
+            card
+            for card in list(cards or [])
+            if str(getattr(card, "source", "") or "") != "dream_reflection"
+        ][:_RECENT_MEMORY_CARD_LIMIT]
 
     async def _build_reflection_insight_context(self) -> str:
         return _render_reflection_insight_context(await self._load_recent_reflection_insight_cards())
 
     async def _load_recent_reflection_insight_cards(self) -> list[Any]:
-        if self._memory_card_store is None:
-            return []
-        search_cards = getattr(self._memory_card_store, "search_cards", None)
-        if search_cards is None:
-            return []
-        try:
-            cards = await search_cards("经历洞察", limit=_REFLECTION_INSIGHT_CARD_LIMIT)
-        except Exception as exc:
-            _L.warning("reflection insight card lookup failed | error={}", exc)
-            return []
-        filtered = []
-        for card in list(cards or []):
-            source = str(getattr(card, "source", "") or "")
-            content = str(getattr(card, "content", "") or "")
-            if source == "dream_reflection" or "经历洞察" in content:
-                filtered.append(card)
-            if len(filtered) >= _REFLECTION_INSIGHT_CARD_LIMIT:
-                break
-        return filtered
+        # Dream reflections are derived from generated schedules. Reinjecting
+        # them here creates a synthetic schedule -> memory -> schedule loop.
+        return []
 
     def _load_active_story_arc(self, on_date: str | None = None) -> StoryArc | None:
         if not self._story_arc_enabled or self._story_arc_store is None:
             return None
+        if self._worldbook_schedule_enabled():
+            return self._load_worldbook_main_arc(on_date)
         load_active: Any = self._story_arc_store.load_active
         arc: StoryArc | None
         try:
@@ -365,6 +392,53 @@ class ScheduleGenerator:
         if arc is None:
             return None
         return self._sync_fiction_partner_states(arc)
+
+    def _load_worldbook_main_arc(self, on_date: str | None) -> StoryArc | None:
+        runtime = self._worldbook_runtime
+        if runtime is None or self._story_arc_store is None:
+            return None
+        try:
+            view = runtime.ledger.load_stack(on_date=on_date)
+        except Exception as exc:
+            _L.warning("worldbook story ledger lookup failed | error={}", exc)
+            return None
+        main = getattr(view, "main", None)
+        if isinstance(main, dict):
+            arc_id = str(main.get("arc_id") or "")
+            load = getattr(self._story_arc_store, "load", None)
+            if arc_id and callable(load):
+                try:
+                    loaded = cast(StoryArc | None, cast(Any, load)(arc_id))
+                except Exception as exc:
+                    _L.warning(
+                        "worldbook main arc load failed | arc_id={} error={}",
+                        arc_id,
+                        exc,
+                    )
+                    return None
+                if loaded is not None:
+                    return self._sync_fiction_partner_states(loaded)
+        if tuple(getattr(view, "sides", ()) or ()) or tuple(
+            getattr(view, "ambient", ()) or ()
+        ):
+            _L.warning(
+                "worldbook story ledger has no explicit main; refusing legacy fallback"
+            )
+            return None
+        ensure_seeded = getattr(self._story_arc_store, "ensure_seeded", None)
+        if callable(ensure_seeded) and on_date:
+            try:
+                seeded = cast(StoryArc | None, cast(Any, ensure_seeded)(on_date))
+            except Exception as exc:
+                _L.warning(
+                    "worldbook story arc seed failed | date={} error={}",
+                    on_date,
+                    exc,
+                )
+                return None
+            if seeded is not None:
+                return self._sync_fiction_partner_states(seeded)
+        return None
 
     def _sync_fiction_partner_states(self, arc: StoryArc) -> StoryArc:
         if self._partner_state_store is None or not self._fiction_partner_profiles:
@@ -397,6 +471,9 @@ class ScheduleGenerator:
     def _update_story_arc_after_schedule(self, arc: StoryArc | None, schedule: Schedule) -> None:
         if arc is None or not self._story_arc_enabled or self._story_arc_store is None:
             return
+        if self._worldbook_schedule_enabled():
+            self._commit_worldbook_schedule_event(arc, schedule)
+            return
         changed = False
 
         def apply(latest: StoryArc) -> None:
@@ -421,6 +498,60 @@ class ScheduleGenerator:
                 return
         if changed and committed is not None:
             self._save_partner_states_from_arc(committed)
+
+    def _worldbook_schedule_enabled(self) -> bool:
+        runtime = self._worldbook_runtime
+        config = getattr(runtime, "config", None)
+        return bool(
+            runtime is not None
+            and getattr(config, "enabled", False)
+            and getattr(config, "schedule_projection_enabled", False)
+        )
+
+    def _commit_worldbook_schedule_event(
+        self,
+        arc: StoryArc,
+        schedule: Schedule,
+    ) -> None:
+        runtime = self._worldbook_runtime
+        if runtime is None or self._story_arc_store is None:
+            return
+        summary = _summarize_generated_schedule(schedule)
+        if not summary:
+            return
+        from services.worldbook.domain import EventRecord
+
+        event = EventRecord(
+            event_id=f"schedule.{schedule.date}",
+            event_type="schedule",
+            summary=summary,
+            status="committed",
+            arc_id=arc.arc_id,
+            variable_deltas={},
+            severity="daily",
+            evidence_refs=(f"schedule:{schedule.date}",),
+        )
+        try:
+            step = date.fromisoformat(schedule.date).toordinal()
+        except ValueError:
+            step = 0
+
+        def apply(latest: StoryArc) -> None:
+            runtime.commit_event(latest, event, now_step=step)
+
+        update: Any = getattr(self._story_arc_store, "update", None)
+        try:
+            if callable(update):
+                cast(Any, update)(arc.arc_id, apply)
+                return
+            apply(arc)
+            self._story_arc_store.save(arc)
+        except Exception as exc:
+            _L.warning(
+                "worldbook schedule event commit failed | arc_id={} error={}",
+                arc.arc_id,
+                exc,
+            )
 
     def _save_partner_states_from_arc(self, arc: StoryArc) -> None:
         if self._partner_state_store is None:
@@ -596,12 +727,20 @@ def update_story_arc_after_schedule(arc: StoryArc, schedule: Schedule) -> bool:
             arc.event_budget["generated_schedule_dates"] = sorted(generated_dates)[-32:]
             return False
     if summary:
-        arc.last_events.append({
-            "date": schedule.date,
-            "source": "schedule_generator",
-            "theme": schedule.theme,
-            "summary": summary,
-        })
+        arc_scope = str(getattr(arc, "scope", "") or "").strip()
+        subject_kind = "fiction" if arc_scope == "fiction" else "self"
+        privacy = "public" if arc_scope == "fiction" else "unknown"
+        event = JournalEventRecord(
+            date=schedule.date,
+            source="schedule_generator",
+            summary=summary,
+            subject_kind=subject_kind,  # type: ignore[arg-type]
+            privacy=privacy,  # type: ignore[arg-type]
+            salience=0.35,
+            event_id=f"schedule_generator:{schedule.date}",
+        ).to_dict()
+        event["theme"] = schedule.theme
+        arc.last_events.append(event)
         arc.last_events = arc.last_events[-_ARC_LAST_EVENTS_LIMIT:]
     arc.next_day_seed = _build_next_day_seed(schedule, arc)
     _update_arc_variables(arc)

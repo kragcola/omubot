@@ -413,3 +413,226 @@ async def test_evidence_refs_format_for_blocktrace_lookup(episode_store):
     assert ep_id in refs
     # Should be the bare episode_id, not "ep:..." or a dict
     assert all(isinstance(r, str) and r.startswith("ep_") for r in refs)
+
+
+@pytest.mark.asyncio
+async def test_provide_reranks_query_relevant_over_higher_confidence(episode_store):
+    """Lower-confidence but query-relevant episode outranks irrelevant high-conf."""
+    relevant_id = await _seed_enabled_episode(
+        episode_store,
+        situation="Kubernetes 部署回滚失败",
+        action_taken="先查 rollout 状态",
+        outcome_signal="找到镜像 tag 错误",
+        reflection="下次先核对 image tag",
+        confidence=0.55,
+    )
+    irrelevant_id = await _seed_enabled_episode(
+        episode_store,
+        situation="周末团建选餐厅",
+        action_taken="投了火锅",
+        outcome_signal="大家都开心",
+        reflection="下次再约",
+        confidence=0.99,
+    )
+
+    provider = EpisodeProvider(store_getter=lambda: episode_store, top_k=1)
+    out = await provider.provide(QueryContext(
+        request_id="req_rr",
+        session_id="s",
+        user_id="u",
+        group_id="g1",
+        conversation_text="k8s 部署回滚 image tag 有问题",
+    ))
+
+    assert len(out) == 1
+    assert out[0].evidence_refs[0] == relevant_id
+    assert irrelevant_id not in out[0].evidence_refs
+
+
+@pytest.mark.asyncio
+async def test_provide_relevance_ties_preserve_store_order(episode_store):
+    """Equal relevance must keep EpisodeStore confidence DESC / updated_at DESC."""
+    low = await _seed_enabled_episode(
+        episode_store,
+        situation="完全无关的闲聊",
+        reflection="随便",
+        confidence=0.5,
+    )
+    high = await _seed_enabled_episode(
+        episode_store,
+        situation="也是无关的另一条",
+        reflection="随便二",
+        confidence=0.9,
+    )
+
+    provider = EpisodeProvider(store_getter=lambda: episode_store, top_k=2)
+    out = await provider.provide(QueryContext(
+        request_id="req_tie",
+        session_id="s",
+        user_id="u",
+        group_id="g1",
+        conversation_text="zzzz 无匹配词",
+    ))
+
+    assert len(out) == 1
+    # both ~zero relevance → store order: high conf first
+    assert list(out[0].evidence_refs) == [high, low]
+
+
+@pytest.mark.asyncio
+async def test_provide_empty_query_preserves_store_order(episode_store):
+    low = await _seed_enabled_episode(
+        episode_store, situation="场景A", reflection="a", confidence=0.4,
+    )
+    high = await _seed_enabled_episode(
+        episode_store, situation="场景B", reflection="b", confidence=0.85,
+    )
+    provider = EpisodeProvider(store_getter=lambda: episode_store, top_k=2)
+    out = await provider.provide(QueryContext(
+        request_id="req_empty",
+        session_id="s",
+        user_id="u",
+        group_id="g1",
+        conversation_text="",
+    ))
+    assert list(out[0].evidence_refs) == [high, low]
+
+
+@pytest.mark.asyncio
+async def test_provide_register_filter_before_final_top_k(episode_store):
+    """Register filtering applies before final top_k selection after rerank.
+
+    With top_k=1, fetch_limit is only 3 — seed so the playful-relevant row
+    still enters the store head, then prove serious is dropped by register
+    (not by top_k alone) and query rerank prefers the K8s playful line.
+    """
+    # conf mid so store head can still include it under limit=3
+    playful_k8s = await _seed_enabled_episode(
+        episode_store,
+        situation="Kubernetes 部署玩笑",
+        reflection="可以接梗",
+        confidence=0.7,
+        meta={"register_labels": ["playful"]},
+    )
+    serious_high = await _seed_enabled_episode(
+        episode_store,
+        situation="Kubernetes 正式事故",
+        reflection="严肃排查",
+        confidence=0.99,
+        meta={"register_labels": ["serious"]},
+    )
+    # One high-conf playful noise (not K8s) — still in pool after register filter
+    await _seed_enabled_episode(
+        episode_store,
+        situation="闲聊天气",
+        reflection="无",
+        confidence=0.95,
+        meta={"register_labels": ["playful"]},
+    )
+
+    provider = EpisodeProvider(store_getter=lambda: episode_store, top_k=1)
+    out = await provider.provide(QueryContext(
+        request_id="req_reg",
+        session_id="s",
+        user_id="u",
+        group_id="g1",
+        conversation_text="Kubernetes 部署",
+        runtime_state=_state_with_register("playful"),
+    ))
+
+    assert out[0].evidence_refs[0] == playful_k8s
+    assert serious_high not in out[0].evidence_refs
+
+
+@pytest.mark.asyncio
+async def test_provide_candidate_fetch_is_bounded(episode_store, monkeypatch):
+    """list_for_recall limit = min(CAP, max(top_k, top_k*3)); not always CAP."""
+    from services.block_trace import episode_provider as ep_mod
+
+    captured: dict[str, int] = {}
+    real_list = episode_store.list_for_recall
+
+    async def _wrap(*, group_id: str, limit: int = 3, include_decayed: bool = False):
+        captured["limit"] = limit
+        return await real_list(
+            group_id=group_id, limit=limit, include_decayed=include_decayed,
+        )
+
+    monkeypatch.setattr(episode_store, "list_for_recall", _wrap)
+
+    for i in range(5):
+        await _seed_enabled_episode(
+            episode_store, situation=f"s{i}", reflection=f"r{i}", confidence=0.5 + i * 0.01,
+        )
+
+    cap = getattr(ep_mod, "_CANDIDATE_POOL_CAP", None)
+    assert cap is not None, "EpisodeProvider must expose _CANDIDATE_POOL_CAP"
+
+    # Small top_k: headroom is 3×top_k, not the full pool (top_k=1 → 3).
+    provider_small = EpisodeProvider(store_getter=lambda: episode_store, top_k=1)
+    await provider_small.provide(_ctx())
+    assert captured["limit"] == min(cap, max(1, 1 * 3))
+    assert captured["limit"] == 3
+
+    # Large top_k must not request more than the hard candidate pool cap.
+    provider_large = EpisodeProvider(store_getter=lambda: episode_store, top_k=100)
+    await provider_large.provide(_ctx())
+    assert captured["limit"] == min(cap, max(100, 100 * 3))
+    assert captured["limit"] == cap
+    assert captured["limit"] <= 32
+
+
+def test_episode_composite_text_enforces_total_char_cap():
+    """Joined rerank fields must hard-truncate at _COMPOSITE_CHAR_CAP."""
+    from types import SimpleNamespace
+
+    from services.block_trace import episode_provider as ep_mod
+
+    cap = ep_mod._COMPOSITE_CHAR_CAP
+    assert cap == 1200
+    # situation alone exceeds the total cap; order preserved, tail dropped.
+    long_situation = "S" * (cap + 200)
+    ep = SimpleNamespace(
+        situation=long_situation,
+        observed_context="CTX_SHOULD_NOT_APPEAR_IF_TRUNCATED_EARLY",
+        action_taken="ACT",
+        outcome_signal="OUT",
+        reflection="REF",
+    )
+    text = ep_mod._episode_composite_text(ep)
+    assert len(text) == cap
+    assert text == long_situation[:cap]
+    assert "CTX_SHOULD_NOT" not in text
+
+
+@pytest.mark.asyncio
+async def test_provide_only_stamps_selected_ids(episode_store):
+    """Only final top_k selected episodes get last_used stamp / evidence."""
+    selected_like = await _seed_enabled_episode(
+        episode_store,
+        situation="数据库锁等待",
+        reflection="先查 slow query",
+        confidence=0.5,
+    )
+    not_selected = await _seed_enabled_episode(
+        episode_store,
+        situation="天气真好",
+        reflection="出去玩",
+        confidence=0.99,
+    )
+
+    provider = EpisodeProvider(store_getter=lambda: episode_store, top_k=1)
+    out = await provider.provide(QueryContext(
+        request_id="req_stamp",
+        session_id="s",
+        user_id="u",
+        group_id="g1",
+        conversation_text="数据库 锁 slow query",
+    ))
+
+    assert out[0].evidence_refs == (selected_like,)
+    sel = await episode_store.get_episode(selected_like)
+    other = await episode_store.get_episode(not_selected)
+    assert sel is not None and other is not None
+    assert sel.last_used_at != ""
+    assert other.last_used_at == ""

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omubot.local/schemas/worldbook-canon-v1.schema.json",
+  "title": "Omubot Worldbook Canon v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entries"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "entries": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/entry"}
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_id", "title", "text"],
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$"
+        },
+        "title": {"type": "string", "minLength": 1},
+        "text": {"type": "string", "minLength": 1},
+        "keywords": {"$ref": "#/$defs/stringArray"},
+        "aliases": {"$ref": "#/$defs/stringArray"},
+        "regexes": {"$ref": "#/$defs/stringArray"},
+        "entity_ids": {"$ref": "#/$defs/stringArray"},
+        "related_entities": {"$ref": "#/$defs/stringArray"},
+        "priority": {"type": "integer", "default": 100},
+        "always_active": {
+          "type": "boolean",
+          "const": false,
+          "default": false,
+          "description": "Deprecated for projection: Canon activates only via keyword/alias/regex/semantic/entity cascade. Must be false or omitted."
+        },
+        "metadata": {"type": "object", "default": {}}
+      }
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true,
+      "default": []
+    }
+  }
+}

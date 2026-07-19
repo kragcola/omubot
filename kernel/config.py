@@ -195,6 +195,7 @@ class LLMConfig(BaseModel):
             "scheduler_eot",
             "scheduler_replay_judge",
             "birthday_wish",
+            "qzone_journal_compose",
         ):
             self.task_profiles.setdefault(task, fallback)
         return self
@@ -2235,6 +2236,33 @@ class ArbiterConfig(BaseModel):
         return normalized
 
 
+class KnowledgeGraphConfig(BaseModel):
+    """Derived knowledge-graph write-side governance.
+
+    ``provenance_gate_enabled`` defaults True (gpg_v1). Setting False restores
+    legacy truthy evidence acceptance for emergency rollback only — unsafe:
+    empty/whitespace/graph_fact-primary evidence may re-enter pending/active.
+    No runtime config-file mutation; pass through bootstrap constructor.
+
+    ``observability_enabled`` defaults True (gpo_v1). Setting False restores
+    the pre-gpo graph_health top-level key shape and skips quality scanning.
+    """
+
+    provenance_gate_enabled: bool = True
+    observability_enabled: bool = True
+
+
+class BlockTraceConfig(BaseModel):
+    """Prompt-block trace store observability (jdt_v1 joint dual-path view).
+
+    ``joint_dual_path_telemetry_enabled`` defaults True. Setting False returns
+    the disabled zero snapshot and skips the joint SELECT (restart bot only).
+    No schema migration; no effect on write/trace emission paths.
+    """
+
+    joint_dual_path_telemetry_enabled: bool = True
+
+
 class InstructionGateConfig(BaseModel):
     """Issue 15 — instruction authority gate.
 
@@ -2399,6 +2427,8 @@ class BotConfig(BaseModel):
     )
     arbiter: ArbiterConfig = Field(default_factory=ArbiterConfig)
     instruction_gate: InstructionGateConfig = Field(default_factory=InstructionGateConfig)
+    knowledge_graph: KnowledgeGraphConfig = Field(default_factory=KnowledgeGraphConfig)
+    block_trace: BlockTraceConfig = Field(default_factory=BlockTraceConfig)
 
     # 管理员 & 白名单
     admins: dict[str, str] = {}

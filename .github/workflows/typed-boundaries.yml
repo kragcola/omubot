@@ -24,6 +24,14 @@ jobs:
         run: bash scripts/check-typed-boundaries.sh
       - name: Validate plugin manifests
         run: uv run python scripts/check_plugin_manifests.py
+      - name: Validate long-memory evidence-use gate
+        run: uv run pytest tests/test_context_eval_evidence_use.py
+      - name: Validate graph retrieval evaluation gate
+        run: |
+          uv run pytest \
+            tests/test_graph_eval.py \
+            tests/test_context_service.py \
+            tests/test_knowledge_graph.py
       - name: Validate plugin lifecycle and capability health
         run: |
           uv run pytest \

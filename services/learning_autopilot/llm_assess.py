@@ -4,11 +4,30 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+import math
+from typing import TYPE_CHECKING, Any
 
 from .base import CandidateItem, ReviewVerdict
 
+if TYPE_CHECKING:
+    from services.llm.llm_request import LLMTask
+
 logger = logging.getLogger(__name__)
+
+_VALID_DECISIONS = frozenset({"approved", "rejected", "kept"})
+
+
+def _parse_strict_confidence(raw: Any) -> float | None:
+    """Return confidence only for exact int/float (not bool), finite, in [0, 1]."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    conf_f = float(raw)
+    if not math.isfinite(conf_f):
+        return None
+    if conf_f < 0.0 or conf_f > 1.0:
+        return None
+    return conf_f
+
 
 _SYSTEM_PROMPTS: dict[str, str] = {
     "slang": (
@@ -53,7 +72,8 @@ _SYSTEM_PROMPTS: dict[str, str] = {
     ),
 }
 
-_TASK_MAP: dict[str, str] = {
+# Typed against canonical LLMTask via TYPE_CHECKING — no runtime import cycle.
+_TASK_MAP: dict[str, LLMTask] = {
     "slang": "slang_review",
     "style": "style_review",
     "episode": "episode_review",
@@ -70,7 +90,7 @@ async def assess_candidate(
         return ReviewVerdict(decision="kept", confidence=0.5, reason="LLM unavailable")
 
     system_prompt = _SYSTEM_PROMPTS.get(item.domain, _SYSTEM_PROMPTS["fact"])
-    task_name = _TASK_MAP.get(item.domain, "graph_review")
+    task_name: LLMTask = _TASK_MAP.get(item.domain, "graph_review")
 
     payload = {
         "candidate_id": item.id,
@@ -100,6 +120,14 @@ async def assess_candidate(
 
 
 def _parse_verdict(result: Any) -> ReviewVerdict:
+    """Parse LLM JSON into a type-safe fail-closed ReviewVerdict.
+
+    - decision accepted only when exactly ``approved`` / ``rejected`` / ``kept``
+      (no case-folding)
+    - confidence accepted only for exact int/float (not bool), finite, in [0, 1]
+    - any invalid decision or confidence → decision ``kept``, confidence ``0.0``
+    - never retains a raw non-float confidence on ReviewVerdict
+    """
     text = ""
     if isinstance(result, dict):
         text = str(result.get("text") or result.get("content") or "")
@@ -113,14 +141,42 @@ def _parse_verdict(result: Any) -> ReviewVerdict:
         end = text.rfind("}") + 1
         if start >= 0 and end > start:
             data = json.loads(text[start:end])
-            decision = str(data.get("decision", "kept")).lower()
-            if decision not in ("approved", "rejected", "kept"):
-                decision = "kept"
+            if not isinstance(data, dict):
+                return ReviewVerdict(
+                    decision="kept",
+                    confidence=0.5,
+                    reason="Failed to parse LLM response: root is not an object",
+                )
+
+            raw_decision = data.get("decision", "kept")
+            decision_ok = (
+                isinstance(raw_decision, str) and raw_decision in _VALID_DECISIONS
+            )
+            raw_conf = data.get("confidence", 0.5)
+            conf = _parse_strict_confidence(raw_conf)
+            reason = str(data.get("reason", "") or "")
+            improved = str(data.get("improved_content", "") or "")
+
+            if not decision_ok or conf is None:
+                detail_parts: list[str] = []
+                if not decision_ok:
+                    detail_parts.append(f"invalid decision={raw_decision!r}")
+                if conf is None:
+                    detail_parts.append(f"invalid confidence={raw_conf!r}")
+                detail = "; ".join(detail_parts) + "; fail closed to kept"
+                final_reason = f"{reason} ({detail})" if reason else detail
+                return ReviewVerdict(
+                    decision="kept",
+                    confidence=0.0,
+                    reason=final_reason,
+                    improved_content=improved,
+                )
+
             return ReviewVerdict(
-                decision=decision,
-                confidence=float(data.get("confidence", 0.5)),
-                reason=str(data.get("reason", "")),
-                improved_content=str(data.get("improved_content", "")),
+                decision=raw_decision,
+                confidence=conf,
+                reason=reason,
+                improved_content=improved,
             )
     except (json.JSONDecodeError, ValueError, TypeError):
         pass

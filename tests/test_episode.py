@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from services.episodic import (
@@ -386,3 +389,286 @@ async def test_update_last_used_returns_false_for_unknown(store: EpisodeStore):
 async def test_update_last_used_handles_empty_id(store: EpisodeStore):
     ok = await store.update_last_used("")
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Memory Episode v2 — decay eligibility / validation / audited setter
+# ---------------------------------------------------------------------------
+
+_TZ_SH = ZoneInfo("Asia/Shanghai")
+
+
+def _future_iso(*, hours: int = 24) -> str:
+    return (datetime.now(_TZ_SH) + timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+def _past_iso(*, hours: int = 24) -> str:
+    return (datetime.now(_TZ_SH) - timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+@pytest.mark.asyncio
+async def test_create_episode_decay_at_empty_means_no_expiry(store: EpisodeStore):
+    ep = await store.create_episode(
+        situation="no expiry",
+        group_id="g1",
+        decay_at="",
+    )
+    assert ep.decay_at == ""
+    fetched = await store.get_episode(ep.episode_id)
+    assert fetched is not None
+    assert fetched.decay_at == ""
+
+
+@pytest.mark.asyncio
+async def test_create_episode_decay_at_normalizes_aware_iso_to_shanghai(store: EpisodeStore):
+    # UTC noon → Asia/Shanghai 20:00 same day
+    ep = await store.create_episode(
+        situation="normalize tz",
+        group_id="g1",
+        decay_at="2026-08-01T12:00:00+00:00",
+    )
+    assert ep.decay_at == "2026-08-01T20:00:00+08:00"
+    fetched = await store.get_episode(ep.episode_id)
+    assert fetched is not None
+    assert fetched.decay_at == "2026-08-01T20:00:00+08:00"
+
+
+@pytest.mark.asyncio
+async def test_create_episode_decay_at_accepts_zulu_suffix(store: EpisodeStore):
+    ep = await store.create_episode(
+        situation="zulu",
+        group_id="g1",
+        decay_at="2026-08-01T12:00:00Z",
+    )
+    assert ep.decay_at == "2026-08-01T20:00:00+08:00"
+
+
+@pytest.mark.asyncio
+async def test_create_episode_decay_at_rejects_naive_iso(store: EpisodeStore):
+    with pytest.raises(ValueError):
+        await store.create_episode(
+            situation="naive",
+            group_id="g1",
+            decay_at="2026-08-01T12:00:00",
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_episode_decay_at_rejects_malformed(store: EpisodeStore):
+    with pytest.raises(ValueError):
+        await store.create_episode(
+            situation="bad",
+            group_id="g1",
+            decay_at="not-a-timestamp",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad",
+    [True, False, 123, 1.5, ["2026-08-01T12:00:00+08:00"], {"t": "x"}],
+)
+async def test_create_episode_decay_at_rejects_non_string(store: EpisodeStore, bad):
+    with pytest.raises((TypeError, ValueError)):
+        await store.create_episode(
+            situation="typed",
+            group_id="g1",
+            decay_at=bad,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_for_recall_excludes_past_decay_without_sweeper(store: EpisodeStore):
+    """Default recall must hide expired enabled rows even if expire_decayed has not run."""
+    live = await _seed_enabled(store, situation="still live", confidence=0.7)
+    expired_id = await _seed_enabled(store, situation="should be hidden", confidence=0.95)
+    past = _past_iso(hours=2)
+    # Direct DB write of a past decay_at (simulates wall-clock passage without sweeper).
+    db = store._require_db()
+    await db.execute(
+        "UPDATE episodes SET decay_at = ? WHERE episode_id = ?",
+        (past, expired_id),
+    )
+    await db.commit()
+
+    out = await store.list_for_recall(group_id="g1", limit=10)
+    assert [e.episode_id for e in out] == [live]
+    assert all(e.episode_id != expired_id for e in out)
+
+
+@pytest.mark.asyncio
+async def test_list_for_recall_offset_safe_keeps_future_legacy_utc(
+    store: EpisodeStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Lexicographic ISO compare is wrong across offsets; absolute time must win.
+
+    Probe: '2026-07-16T12:32:15+00:00' is one hour *later* than
+    '2026-07-16T19:32:15+08:00', but string compare treats the UTC form as
+    smaller (T12… < T19…). Default recall must still keep the future episode;
+    expire_decayed must not treat it as past.
+    """
+    fixed_now = "2026-07-16T19:32:15+08:00"  # 11:32 UTC
+    legacy_future_utc = "2026-07-16T12:32:15+00:00"  # 12:32 UTC (still future)
+    # Guard the trap still holds under plain string ordering.
+    assert not (legacy_future_utc > fixed_now)
+
+    monkeypatch.setattr("services.episodic.store._now_iso", lambda: fixed_now)
+
+    future_id = await _seed_enabled(
+        store, situation="legacy utc offset still future", confidence=0.9
+    )
+    db = store._require_db()
+    await db.execute(
+        "UPDATE episodes SET decay_at = ? WHERE episode_id = ?",
+        (legacy_future_utc, future_id),
+    )
+    await db.commit()
+
+    out = await store.list_for_recall(group_id="g1", limit=10)
+    assert [e.episode_id for e in out] == [future_id]
+
+    n = await store.expire_decayed()
+    assert n == 0
+    still = await store.get_episode(future_id)
+    assert still is not None
+    assert still.episode_state == "enabled_for_prompt"
+    assert still.decay_at == legacy_future_utc
+
+
+@pytest.mark.asyncio
+async def test_list_for_recall_includes_future_and_empty_decay(store: EpisodeStore):
+    empty_id = await _seed_enabled(store, situation="never expires", confidence=0.6)
+    future_id = await _seed_enabled(store, situation="expires later", confidence=0.8)
+    future = _future_iso(hours=48)
+    db = store._require_db()
+    await db.execute(
+        "UPDATE episodes SET decay_at = ? WHERE episode_id = ?",
+        (future, future_id),
+    )
+    await db.commit()
+
+    out = await store.list_for_recall(group_id="g1", limit=10)
+    ids = [e.episode_id for e in out]
+    assert future_id in ids
+    assert empty_id in ids
+    # confidence DESC: future (0.8) before empty (0.6)
+    assert ids.index(future_id) < ids.index(empty_id)
+
+
+@pytest.mark.asyncio
+async def test_list_for_recall_include_decayed_is_wide_historical_reader(store: EpisodeStore):
+    """include_decayed=True = enabled_for_prompt + disabled; no default expiry exclusion."""
+    live = await _seed_enabled(store, situation="live", confidence=0.5)
+    expired_enabled = await _seed_enabled(store, situation="expired still enabled", confidence=0.9)
+    disabled_id = await _seed_enabled(store, situation="admin disabled", confidence=0.7)
+    await store.transition_state(disabled_id, new_state="disabled", actor="admin", reason="test")
+
+    past = _past_iso(hours=1)
+    db = store._require_db()
+    await db.execute(
+        "UPDATE episodes SET decay_at = ? WHERE episode_id = ?",
+        (past, expired_enabled),
+    )
+    await db.commit()
+
+    default = await store.list_for_recall(group_id="g1", limit=10)
+    assert [e.episode_id for e in default] == [live]
+
+    wide = await store.list_for_recall(group_id="g1", limit=10, include_decayed=True)
+    wide_ids = {e.episode_id for e in wide}
+    assert live in wide_ids
+    assert expired_enabled in wide_ids  # still enabled_for_prompt but past decay — wide reader keeps it
+    assert disabled_id in wide_ids
+
+
+@pytest.mark.asyncio
+async def test_set_decay_at_updates_and_records_revision(store: EpisodeStore):
+    ep_id = await _seed_enabled(store, situation="set decay")
+    target = "2026-09-01T10:00:00+00:00"
+    ok = await store.set_decay_at(
+        ep_id,
+        decay_at=target,
+        actor="admin",
+        reason="schedule sunset",
+    )
+    assert ok is True
+    fetched = await store.get_episode(ep_id)
+    assert fetched is not None
+    assert fetched.decay_at == "2026-09-01T18:00:00+08:00"
+    assert fetched.updated_at != ""
+
+    revs = await store.list_revisions(ep_id)
+    assert any(r.action == "set_decay_at" for r in revs)
+    rev = next(r for r in revs if r.action == "set_decay_at")
+    assert rev.actor == "admin"
+    assert rev.reason == "schedule sunset"
+    assert rev.before.get("decay_at") == ""
+    assert rev.after.get("decay_at") == "2026-09-01T18:00:00+08:00"
+
+
+@pytest.mark.asyncio
+async def test_set_decay_at_clear_with_empty_string(store: EpisodeStore):
+    ep_id = await _seed_enabled(store, situation="clear decay")
+    await store.set_decay_at(
+        ep_id,
+        decay_at=_future_iso(hours=12),
+        actor="admin",
+        reason="temp",
+    )
+    ok = await store.set_decay_at(
+        ep_id,
+        decay_at="",
+        actor="admin",
+        reason="clear expiry",
+    )
+    assert ok is True
+    fetched = await store.get_episode(ep_id)
+    assert fetched is not None
+    assert fetched.decay_at == ""
+    revs = await store.list_revisions(ep_id)
+    clear_rev = next(r for r in revs if r.action == "set_decay_at" and r.after.get("decay_at") == "")
+    assert clear_rev.reason == "clear expiry"
+
+
+@pytest.mark.asyncio
+async def test_set_decay_at_missing_returns_false(store: EpisodeStore):
+    ok = await store.set_decay_at(
+        "ep_missing_xyz",
+        decay_at=_future_iso(),
+        actor="admin",
+        reason="noop",
+    )
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_set_decay_at_rejects_invalid(store: EpisodeStore):
+    ep_id = await _seed_enabled(store)
+    with pytest.raises(ValueError):
+        await store.set_decay_at(ep_id, decay_at="2026-01-01T00:00:00", actor="admin")
+    with pytest.raises((TypeError, ValueError)):
+        await store.set_decay_at(ep_id, decay_at=123, actor="admin")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_expire_decayed_still_disables_past_enabled(store: EpisodeStore):
+    """Sweeper remains compatible: past decay_at enabled → disabled."""
+    ep_id = await _seed_enabled(store, situation="to expire")
+    past = _past_iso(hours=3)
+    db = store._require_db()
+    await db.execute(
+        "UPDATE episodes SET decay_at = ? WHERE episode_id = ?",
+        (past, ep_id),
+    )
+    await db.commit()
+
+    n = await store.expire_decayed()
+    assert n == 1
+    fetched = await store.get_episode(ep_id)
+    assert fetched is not None
+    assert fetched.episode_state == "disabled"
+    # After sweeper, default recall empty; wide reader still sees disabled
+    assert await store.list_for_recall(group_id="g1", limit=5) == []
+    wide = await store.list_for_recall(group_id="g1", limit=5, include_decayed=True)
+    assert [e.episode_id for e in wide] == [ep_id]

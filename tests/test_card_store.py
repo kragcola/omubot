@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import inspect
 from collections.abc import AsyncIterator
 
 import pytest
@@ -565,6 +567,747 @@ async def test_series_table_created(store: CardStore) -> None:
 
 
 # ------------------------------------------------------------------
+# Observations / atomic supersede+reinforce provenance (write-policy v1)
+# ------------------------------------------------------------------
+
+
+def _assert_supersede_provenance_api() -> None:
+    sig = inspect.signature(CardStore.supersede_card)
+    params = sig.parameters
+    assert "source_msg_id" in params or "source_message_id" in params, (
+        "supersede_card must accept optional provenance kwargs "
+        "(source_msg_id / evidence_text / captured_by)"
+    )
+    assert "evidence_text" in params or "evidence" in params
+
+
+def _assert_reinforce_observation_api() -> None:
+    sig = inspect.signature(CardStore.reinforce)
+    params = sig.parameters
+    assert "evidence_text" in params or "source_message_id" in params, (
+        "reinforce must accept optional observation kwargs when evidence is supplied"
+    )
+
+
+@pytest.mark.asyncio
+async def test_init_creates_memory_card_observations_table(store: CardStore) -> None:
+    cursor = await store._db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_card_observations'"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["name"] == "memory_card_observations"
+
+    # Required columns
+    col_cursor = await store._db.execute("PRAGMA table_info(memory_card_observations)")
+    cols = {r["name"] for r in await col_cursor.fetchall()}
+    for required in (
+        "observation_id",
+        "card_id",
+        "decision",
+        "source_message_id",
+        "evidence_text",
+        "observed_at",
+        "captured_by",
+        "meta_json",
+    ):
+        assert required in cols, f"missing column {required}"
+
+
+@pytest.mark.asyncio
+async def test_observations_indexes_exist(store: CardStore) -> None:
+    cursor = await store._db.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='memory_card_observations'"
+    )
+    rows = await cursor.fetchall()
+    sqls = " ".join((r["sql"] or r["name"] or "") for r in rows).lower()
+    names = " ".join((r["name"] or "") for r in rows).lower()
+    blob = sqls + " " + names
+    assert "card_id" in blob
+    assert "source_message_id" in blob
+    # Idempotency for non-null source_message_id: unique partial index or unique index
+    assert "unique" in blob
+
+
+@pytest.mark.asyncio
+async def test_list_observations_and_card_observation_type(store: CardStore) -> None:
+    from services.memory import card_store as cs_mod
+
+    assert hasattr(cs_mod, "CardObservation"), "CardObservation dataclass must be exported"
+    assert callable(getattr(store, "list_observations", None)), (
+        "CardStore.list_observations(card_id) public API required"
+    )
+
+    cid = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="seed"),
+    )
+    empty = await store.list_observations(cid)
+    assert empty == []
+
+    _assert_reinforce_observation_api()
+    ok = await store.reinforce(
+        cid,
+        boost=0.1,
+        evidence_text="用户再次确认喜欢猫",
+        source_message_id="msg_obs_1",
+        captured_by="memo_extractor",
+        decision="reinforce",
+    )
+    assert ok is True
+    obs = await store.list_observations(cid)
+    assert len(obs) == 1
+    row = obs[0]
+    assert isinstance(row, cs_mod.CardObservation)
+    assert row.card_id == cid
+    assert row.decision == "reinforce"
+    assert str(row.source_message_id) == "msg_obs_1"
+    assert row.evidence_text
+    assert row.captured_by == "memo_extractor"
+    assert row.observed_at
+    assert row.observation_id
+
+
+@pytest.mark.asyncio
+async def test_observation_idempotent_same_card_source_decision(store: CardStore) -> None:
+    _assert_reinforce_observation_api()
+    assert callable(getattr(store, "list_observations", None))
+
+    cid = await store.add_card(
+        NewCard(category="preference", scope="user", scope_id="1", content="喜欢茶"),
+    )
+    kwargs = dict(
+        boost=0.05,
+        evidence_text="again",
+        source_message_id="msg_same",
+        captured_by="memo_extractor",
+        decision="reinforce",
+    )
+    assert await store.reinforce(cid, **kwargs)
+    conf_after_first = (await store.get_card(cid)).confidence
+    # Second call with same source_message_id + decision must not insert second obs
+    assert await store.reinforce(cid, **kwargs)
+    obs = await store.list_observations(cid)
+    same = [
+        o
+        for o in obs
+        if str(o.source_message_id or "") == "msg_same" and o.decision == "reinforce"
+    ]
+    assert len(same) == 1
+    card = await store.get_card(cid)
+    assert card.confidence <= 1.0
+    assert conf_after_first <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_supersede_card_with_provenance_is_atomic_success(store: CardStore) -> None:
+    _assert_supersede_provenance_api()
+    assert callable(getattr(store, "list_observations", None))
+
+    old_id = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="用户住在杭州"),
+    )
+    new_id = await store.supersede_card(
+        old_id,
+        NewCard(category="fact", scope="user", scope_id="1", content="用户住在上海"),
+        source_msg_id="msg_sup_atomic",
+        captured_by="memo_extractor",
+        evidence_text="用户说现在住在上海",
+    )
+    old = await store.get_card(old_id)
+    new = await store.get_card(new_id)
+    assert old is not None and old.status == "superseded"
+    assert new is not None and new.status == "active"
+    assert new.supersedes == old_id
+    assert str(new.source_msg_id) == "msg_sup_atomic"
+    assert new.captured_by == "memo_extractor"
+
+    obs = await store.list_observations(new_id)
+    assert len(obs) >= 1
+    assert any(o.decision == "supersede" for o in obs)
+    assert any(str(o.source_message_id or "") == "msg_sup_atomic" for o in obs)
+
+    active = await store.get_entity_cards("user", "1", category="fact")
+    assert len(active) == 1
+    assert active[0].card_id == new_id
+
+
+@pytest.mark.asyncio
+async def test_supersede_missing_or_inactive_old_fails_without_new_card(
+    store: CardStore,
+) -> None:
+    _assert_supersede_provenance_api()
+    assert callable(getattr(store, "list_observations", None))
+
+    # Nonexistent old card: must fail without creating a new active card.
+    before = await store.get_entity_cards("user", "1")
+    with pytest.raises(ValueError):
+        await store.supersede_card(
+            "card_missing",
+            NewCard(category="fact", scope="user", scope_id="1", content="orphan"),
+            source_msg_id="msg_x",
+            evidence_text="x",
+            captured_by="memo_extractor",
+        )
+    after = await store.get_entity_cards("user", "1")
+    assert len(after) == len(before)
+    assert all(c.content != "orphan" for c in after)
+
+    # Inactive old card
+    old_id = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="old inactive"),
+    )
+    await store.expire_card(old_id)
+    with pytest.raises(ValueError):
+        await store.supersede_card(
+            old_id,
+            NewCard(category="fact", scope="user", scope_id="1", content="should not insert"),
+            source_msg_id="msg_y",
+            evidence_text="y",
+            captured_by="memo_extractor",
+        )
+    active = await store.get_entity_cards("user", "1")
+    assert all(c.content != "should not insert" for c in active)
+    assert await store.list_observations("card_never") == []
+
+
+@pytest.mark.asyncio
+async def test_supersede_cancel_or_failure_rolls_back_full_transaction(
+    store: CardStore,
+) -> None:
+    _assert_supersede_provenance_api()
+    assert callable(getattr(store, "list_observations", None))
+
+    old_id = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="用户住在杭州"),
+    )
+
+    # Force a mid-transaction failure. Prefer patching commit so GREEN's single
+    # SQLite transaction either fully lands or fully rolls back.
+    real_commit = store._db.commit
+    commit_hits = {"n": 0}
+
+    async def boom_commit() -> None:
+        commit_hits["n"] += 1
+        raise asyncio.CancelledError()
+
+    store._db.commit = boom_commit  # type: ignore[method-assign]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await store.supersede_card(
+                old_id,
+                NewCard(category="fact", scope="user", scope_id="1", content="用户住在上海"),
+                source_msg_id="msg_cancel",
+                captured_by="memo_extractor",
+                evidence_text="搬家了",
+            )
+    finally:
+        store._db.commit = real_commit  # type: ignore[method-assign]
+
+    old = await store.get_card(old_id)
+    assert old is not None
+    assert old.status == "active", "cancel must leave old card active"
+
+    active = await store.get_entity_cards("user", "1", category="fact")
+    assert len(active) == 1
+    assert active[0].card_id == old_id
+    assert "杭州" in active[0].content
+
+    all_obs_cursor = await store._db.execute(
+        "SELECT card_id, decision FROM memory_card_observations WHERE decision = 'supersede'"
+    )
+    obs_rows = await all_obs_cursor.fetchall()
+    assert list(obs_rows) == []
+
+
+@pytest.mark.asyncio
+async def test_supersede_exception_rolls_back_no_double_active(store: CardStore) -> None:
+    _assert_supersede_provenance_api()
+
+    old_id = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="v1"),
+    )
+    real_commit = store._db.commit
+
+    async def boom_commit() -> None:
+        raise RuntimeError("injected commit failure")
+
+    store._db.commit = boom_commit  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError):
+            await store.supersede_card(
+                old_id,
+                NewCard(category="fact", scope="user", scope_id="1", content="v2"),
+                source_msg_id="msg_fail",
+                captured_by="memo_extractor",
+                evidence_text="fail path",
+            )
+    finally:
+        store._db.commit = real_commit  # type: ignore[method-assign]
+
+    old = await store.get_card(old_id)
+    assert old is not None and old.status == "active"
+    active = await store.get_entity_cards("user", "1")
+    assert len(active) == 1
+    assert active[0].card_id == old_id
+
+
+@pytest.mark.asyncio
+async def test_reinforce_with_observation_atomic_no_confidence_without_obs(
+    store: CardStore,
+) -> None:
+    _assert_reinforce_observation_api()
+    assert callable(getattr(store, "list_observations", None))
+
+    cid = await store.add_card(
+        NewCard(
+            category="preference",
+            scope="user",
+            scope_id="1",
+            content="喜欢咖啡",
+            confidence=0.5,
+        ),
+    )
+    real_commit = store._db.commit
+
+    async def boom_commit() -> None:
+        raise RuntimeError("injected reinforce commit failure")
+
+    store._db.commit = boom_commit  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError):
+            await store.reinforce(
+                cid,
+                boost=0.2,
+                evidence_text="再次确认喜欢咖啡",
+                source_message_id="msg_re_fail",
+                captured_by="memo_extractor",
+            )
+    finally:
+        store._db.commit = real_commit  # type: ignore[method-assign]
+
+    card = await store.get_card(cid)
+    assert card is not None
+    assert card.confidence == pytest.approx(0.5), (
+        "confidence must not update without its observation when observation data supplied"
+    )
+    assert await store.list_observations(cid) == []
+
+
+@pytest.mark.asyncio
+async def test_reinforce_without_evidence_keeps_legacy_behavior(store: CardStore) -> None:
+    """Optional provenance kwargs: omitting them preserves current reinforce semantics."""
+    cid = await store.add_card(
+        NewCard(
+            category="preference",
+            scope="user",
+            scope_id="1",
+            content="喜欢茶",
+            confidence=0.7,
+        ),
+    )
+    ok = await store.reinforce(cid)
+    assert ok
+    card = await store.get_card(cid)
+    assert card.confidence == pytest.approx(0.8)
+
+
+# ==================================================================
+# Correction packet gaps (RED) — write lock / supersede TOCTOU
+# ==================================================================
+
+
+@pytest.mark.asyncio
+async def test_concurrent_double_supersede_exactly_one_successor(
+    store: CardStore,
+) -> None:
+    """Two concurrent supersedes of the same active card: one wins, one fails cleanly."""
+    old_id = await store.add_card(
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="1",
+            content="用户住在杭州",
+        )
+    )
+
+    # Widen the TOCTOU window when both callers observe old as active.
+    # With a proper write lock, the second caller waits and then fails cleanly
+    # on non-active old — it never double-enters the active read.
+    entered = {"n": 0}
+    both_entered = asyncio.Event()
+    enter_lock = asyncio.Lock()
+    real_get_card = store.get_card
+
+    async def racing_get_card(card_id: str, *args: object, **kwargs: object):
+        card = await real_get_card(card_id, *args, **kwargs)
+        if (
+            card_id == old_id
+            and card is not None
+            and getattr(card, "status", None) == "active"
+        ):
+            async with enter_lock:
+                entered["n"] += 1
+                if entered["n"] >= 2:
+                    both_entered.set()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(both_entered.wait(), timeout=0.4)
+            await asyncio.sleep(0.05)
+        return card
+
+    store.get_card = racing_get_card  # type: ignore[method-assign]
+
+    async def _supersede(content: str, src: str) -> str:
+        return await store.supersede_card(
+            old_id,
+            NewCard(category="fact", scope="user", scope_id="1", content=content),
+            source_msg_id=src,
+            captured_by="memo_extractor",
+            evidence_text=f"move to {content}",
+        )
+
+    try:
+        results = await asyncio.gather(
+            _supersede("用户住在上海", "msg_race_a"),
+            _supersede("用户住在北京", "msg_race_b"),
+            return_exceptions=True,
+        )
+    finally:
+        store.get_card = real_get_card  # type: ignore[method-assign]
+
+
+    successes = [r for r in results if isinstance(r, str)]
+    failures = [r for r in results if isinstance(r, BaseException)]
+    assert len(successes) == 1, (
+        f"exactly one concurrent supersede must succeed, got successes={successes!r} "
+        f"failures={failures!r}"
+    )
+    assert len(failures) == 1, (
+        "the losing concurrent supersede must fail with a clean exception"
+    )
+
+    old = await store.get_card(old_id)
+    assert old is not None
+    assert old.status == "superseded"
+
+    active = await store.get_entity_cards("user", "1", category="fact")
+    assert len(active) == 1, (
+        f"exactly one active successor required, got {[c.content for c in active]}"
+    )
+    assert active[0].card_id == successes[0]
+    assert active[0].supersedes == old_id
+    assert active[0].content in {"用户住在上海", "用户住在北京"}
+
+    # No orphan supersede observation for a failed would-be card.
+    all_obs = await store._db.execute(
+        "SELECT card_id, decision, source_message_id FROM memory_card_observations "
+        "WHERE decision = 'supersede'"
+    )
+    obs_rows = await all_obs.fetchall()
+    # Only the winning successor may have a supersede observation.
+    obs_card_ids = {r["card_id"] for r in obs_rows}
+    assert obs_card_ids == {successes[0]} or obs_card_ids <= {successes[0]}, (
+        f"orphan supersede observations for failed branch: {list(obs_rows)}"
+    )
+    # Total active fact cards for the entity remains 1 (already asserted).
+
+
+@pytest.mark.asyncio
+async def test_supersede_rejects_cross_scope_but_allows_category_correction(
+    store: CardStore,
+) -> None:
+    """Scope ownership is fixed, while trusted callers may correct category."""
+    old_id = await store.add_card(
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="1",
+            content="用户住在杭州",
+        )
+    )
+    before_active = await store.get_entity_cards("user", "1")
+
+    # Cross scope_id
+    with pytest.raises(ValueError):
+        await store.supersede_card(
+            old_id,
+            NewCard(
+                category="fact",
+                scope="user",
+                scope_id="999",
+                content="用户住在上海",
+            ),
+            source_msg_id="msg_xscope",
+            evidence_text="x",
+            captured_by="memo_extractor",
+        )
+    old = await store.get_card(old_id)
+    assert old is not None and old.status == "active"
+    assert len(await store.get_entity_cards("user", "1")) == len(before_active)
+    assert len(await store.get_entity_cards("user", "999")) == 0
+
+    # Cross scope type (user -> group)
+    with pytest.raises(ValueError):
+        await store.supersede_card(
+            old_id,
+            NewCard(
+                category="fact",
+                scope="group",
+                scope_id="g1",
+                content="群住在上海",
+            ),
+            source_msg_id="msg_xgroup",
+            evidence_text="x",
+            captured_by="memo_extractor",
+        )
+    old = await store.get_card(old_id)
+    assert old is not None and old.status == "active"
+
+    # Dream/CardUpdateTool may correct a card's category within the same owner scope.
+    new_id = await store.supersede_card(
+        old_id,
+        NewCard(
+            category="status",
+            scope="user",
+            scope_id="1",
+            content="身份: 研究生（已更新）",
+        ),
+        source_msg_id="msg_category_correction",
+        evidence_text="trusted category correction",
+        captured_by="dream",
+    )
+    old = await store.get_card(old_id)
+    assert old is not None and old.status == "superseded"
+    active = await store.get_entity_cards("user", "1")
+    assert len(active) == 1
+    assert active[0].card_id == new_id
+    assert active[0].category == "status"
+    assert active[0].supersedes == old_id
+
+
+@pytest.mark.asyncio
+async def test_supersede_uses_begin_immediate(store: CardStore) -> None:
+    """Supersede transaction must take a write reservation via BEGIN IMMEDIATE."""
+    old_id = await store.add_card(
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="1",
+            content="用户住在杭州",
+        )
+    )
+
+    executed: list[str] = []
+    real_execute = store._db.execute
+
+    async def spy_execute(sql: str, parameters: object = ()) -> object:
+        executed.append(str(sql).strip())
+        return await real_execute(sql, parameters)
+
+    store._db.execute = spy_execute  # type: ignore[method-assign]
+    try:
+        await store.supersede_card(
+            old_id,
+            NewCard(
+                category="fact",
+                scope="user",
+                scope_id="1",
+                content="用户住在上海",
+            ),
+            source_msg_id="msg_begin",
+            evidence_text="搬家",
+            captured_by="memo_extractor",
+        )
+    finally:
+        store._db.execute = real_execute  # type: ignore[method-assign]
+
+    begin_hits = [
+        s for s in executed if "BEGIN IMMEDIATE" in s.upper().replace("  ", " ")
+    ]
+    # Also accept source-level requirement if runtime path is hard to spy.
+    if not begin_hits:
+        src = inspect.getsource(CardStore.supersede_card)
+        assert "BEGIN IMMEDIATE" in src.upper(), (
+            "supersede_card must BEGIN IMMEDIATE (write reservation); "
+            f"execute log sample={executed[:12]!r}"
+        )
+    else:
+        assert begin_hits, "expected BEGIN IMMEDIATE in supersede transaction"
+
+
+@pytest.mark.asyncio
+async def test_supersede_second_loses_when_old_already_superseded(
+    store: CardStore,
+) -> None:
+    """Conditional UPDATE / TOCTOU: if old is already superseded, second fails cleanly."""
+    old_id = await store.add_card(
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="1",
+            content="用户住在杭州",
+        )
+    )
+    winner = await store.supersede_card(
+        old_id,
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="1",
+            content="用户住在上海",
+        ),
+        source_msg_id="msg_first",
+        evidence_text="first move",
+        captured_by="memo_extractor",
+    )
+    with pytest.raises(ValueError):
+        await store.supersede_card(
+            old_id,
+            NewCard(
+                category="fact",
+                scope="user",
+                scope_id="1",
+                content="用户住在北京",
+            ),
+            source_msg_id="msg_second",
+            evidence_text="second move",
+            captured_by="memo_extractor",
+        )
+
+    active = await store.get_entity_cards("user", "1", category="fact")
+    assert len(active) == 1
+    assert active[0].card_id == winner
+    assert "北京" not in active[0].content
+    # Failed branch must not leave an orphan active card for 北京.
+    all_beijing = [
+        c
+        for c in await store.list_cards(scope="user", scope_id="1", status="active")
+        if "北京" in c.content
+    ]
+    assert all_beijing == []
+
+
+@pytest.mark.asyncio
+async def test_write_lock_serializes_supersede_then_other_mutations(
+    store: CardStore,
+) -> None:
+    """After supersede, mark_seen / expire / get_or_create_series must not deadlock."""
+    old_id = await store.add_card(
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="1",
+            content="用户住在杭州",
+        )
+    )
+    new_id = await store.supersede_card(
+        old_id,
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="1",
+            content="用户住在上海",
+        ),
+        source_msg_id="msg_lock_chain",
+        evidence_text="move",
+        captured_by="memo_extractor",
+    )
+    # Same-instance follow-up writes must complete (no deadlock with write lock).
+    assert await store.mark_seen(new_id) is True
+    series = await store.get_or_create_series(
+        "test_lock:1", scope="user", scope_id="1", label="lock-test"
+    )
+    assert series.series_id
+    # Expire a separate card to ensure expire path still works post-supersede.
+    other = await store.add_card(
+        NewCard(category="status", scope="user", scope_id="1", content="临时状态")
+    )
+    assert await store.expire_card(other) is True
+    expired = await store.get_card(other)
+    assert expired is not None and expired.status == "expired"
+
+    # Optional surface: a write lock attribute for same-instance serialization.
+    lock = getattr(store, "_write_lock", None) or getattr(store, "write_lock", None)
+    if lock is not None:
+        assert isinstance(lock, asyncio.Lock)
+
+
+@pytest.mark.asyncio
+async def test_reinforce_observation_cancel_still_rolls_back_with_write_lock(
+    store: CardStore,
+) -> None:
+    """Reinforce+obs under commit failure still rolls back conf+obs together."""
+    cid = await store.add_card(
+        NewCard(
+            category="preference",
+            scope="user",
+            scope_id="1",
+            content="喜欢咖啡",
+            confidence=0.5,
+        )
+    )
+    real_commit = store._db.commit
+
+    async def boom_commit() -> None:
+        raise RuntimeError("injected reinforce failure under write lock")
+
+    store._db.commit = boom_commit  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError):
+            await store.reinforce(
+                cid,
+                boost=0.2,
+                evidence_text="again",
+                source_message_id="msg_re_lock_fail",
+                captured_by="memo_extractor",
+            )
+    finally:
+        store._db.commit = real_commit  # type: ignore[method-assign]
+
+    card = await store.get_card(cid)
+    assert card is not None
+    assert card.confidence == pytest.approx(0.5)
+    assert await store.list_observations(cid) == []
+
+    # Store remains usable after failed write (lock released).
+    assert await store.reinforce(cid, boost=0.1) is True
+    refreshed = await store.get_card(cid)
+    assert refreshed is not None
+    assert refreshed.confidence == pytest.approx(0.6)
+
+
+@pytest.mark.asyncio
+async def test_legacy_supersede_without_provenance_still_works(
+    store: CardStore,
+) -> None:
+    """Dream/CardUpdateTool same-scope callers without provenance must still work."""
+    old_id = await store.add_card(
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="1",
+            content="old fact legacy",
+        )
+    )
+    new_id = await store.supersede_card(
+        old_id,
+        NewCard(
+            category="fact",
+            scope="user",
+            scope_id="1",
+            content="new fact legacy",
+        ),
+    )
+    old = await store.get_card(old_id)
+    new = await store.get_card(new_id)
+    assert old is not None and old.status == "superseded"
+    assert new is not None and new.status == "active"
+    assert new.supersedes == old_id
+    # No observation required for legacy no-provenance path.
+    assert await store.list_observations(new_id) == []
+
+
+# ------------------------------------------------------------------
 # Backfill food series
 # ------------------------------------------------------------------
 
@@ -670,3 +1413,352 @@ async def test_backfill_food_series(tmp_path) -> None:
         assert len(series_list) == 2  # food_served + food_pref
     finally:
         await s3.close()
+
+
+# ------------------------------------------------------------------
+# Temporal-trace chain primitives (list_active_chain_heads / walk_supersedes_chain)
+# RED: GREEN implements these methods; existing active-only APIs must stay active-only.
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_active_chain_heads_returns_only_active_with_supersedes(
+    store: CardStore,
+) -> None:
+    """R6/R10/R13: heads are active cards whose supersedes IS NOT NULL."""
+    # Lone active (no supersedes) — not a chain head.
+    lone = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="孤卡无链"),
+    )
+    # Superseded parent + active successor with supersedes pointer.
+    old = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="旧杭州"),
+    )
+    head = await store.supersede_card(
+        old,
+        NewCard(category="fact", scope="user", scope_id="1", content="新上海"),
+    )
+    # Other scope must not appear.
+    other_old = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="2", content="别的用户旧"),
+    )
+    await store.supersede_card(
+        other_old,
+        NewCard(category="fact", scope="user", scope_id="2", content="别的用户新"),
+    )
+
+    heads = await store.list_active_chain_heads("user", "1", limit=24)
+    head_ids = [c.card_id for c in heads]
+    assert head in head_ids
+    assert lone not in head_ids
+    assert old not in head_ids
+    assert all(c.status == "active" for c in heads)
+    assert all(c.supersedes for c in heads)
+    assert all(c.scope == "user" and c.scope_id == "1" for c in heads)
+
+
+@pytest.mark.asyncio
+async def test_list_active_chain_heads_respects_category_and_limit(
+    store: CardStore,
+) -> None:
+    for i in range(5):
+        old = await store.add_card(
+            NewCard(category="fact", scope="user", scope_id="1", content=f"f-old-{i}"),
+        )
+        await store.supersede_card(
+            old,
+            NewCard(category="fact", scope="user", scope_id="1", content=f"f-new-{i}"),
+        )
+    pref_old = await store.add_card(
+        NewCard(category="preference", scope="user", scope_id="1", content="pref-old"),
+    )
+    pref_new = await store.supersede_card(
+        pref_old,
+        NewCard(category="preference", scope="user", scope_id="1", content="pref-new"),
+    )
+
+    facts = await store.list_active_chain_heads(
+        "user", "1", limit=2, category="fact",
+    )
+    assert len(facts) <= 2
+    assert all(c.category == "fact" for c in facts)
+
+    prefs = await store.list_active_chain_heads(
+        "user", "1", limit=24, category="preference",
+    )
+    assert [c.card_id for c in prefs] == [pref_new]
+
+
+@pytest.mark.asyncio
+async def test_list_active_chain_heads_limit_hard_capped_at_24(store: CardStore) -> None:
+    for i in range(30):
+        old = await store.add_card(
+            NewCard(category="fact", scope="user", scope_id="1", content=f"old{i}"),
+        )
+        await store.supersede_card(
+            old,
+            NewCard(category="fact", scope="user", scope_id="1", content=f"new{i}"),
+        )
+    # Caller may request higher, implementation must hard-cap at 24.
+    heads = await store.list_active_chain_heads("user", "1", limit=100)
+    assert len(heads) <= 24
+
+
+@pytest.mark.asyncio
+async def test_list_active_chain_heads_stable_ordering(store: CardStore) -> None:
+    ids: list[str] = []
+    for i in range(3):
+        old = await store.add_card(
+            NewCard(
+                category="fact",
+                scope="user",
+                scope_id="1",
+                content=f"ord-old-{i}",
+                priority=5,
+            ),
+        )
+        new = await store.supersede_card(
+            old,
+            NewCard(
+                category="fact",
+                scope="user",
+                scope_id="1",
+                content=f"ord-new-{i}",
+                priority=5,
+            ),
+        )
+        ids.append(new)
+    first = [c.card_id for c in await store.list_active_chain_heads("user", "1", limit=24)]
+    second = [c.card_id for c in await store.list_active_chain_heads("user", "1", limit=24)]
+    assert first == second
+    assert set(ids).issubset(set(first))
+
+
+@pytest.mark.asyncio
+async def test_list_active_chain_heads_uses_parameterized_sql(store: CardStore) -> None:
+    """R13: method source must parameterize scope filters (no f-string SQL)."""
+    src = inspect.getsource(CardStore.list_active_chain_heads)
+    assert "scope" in src
+    # Must not interpolate scope_id into SQL via f-string of the filter value.
+    assert 'f"SELECT' not in src and "f'SELECT" not in src
+    assert "?" in src or "%s" in src or ":" in src
+
+
+@pytest.mark.asyncio
+async def test_walk_supersedes_chain_head_first_then_parents(store: CardStore) -> None:
+    """R5/R10: max_depth=4 means head + up to 3 ancestors; head first."""
+    v0 = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="V0北京"),
+    )
+    v1 = await store.supersede_card(
+        v0,
+        NewCard(category="fact", scope="user", scope_id="1", content="V1天津"),
+    )
+    v2 = await store.supersede_card(
+        v1,
+        NewCard(category="fact", scope="user", scope_id="1", content="V2南京"),
+    )
+    v3 = await store.supersede_card(
+        v2,
+        NewCard(category="fact", scope="user", scope_id="1", content="V3杭州"),
+    )
+    v4 = await store.supersede_card(
+        v3,
+        NewCard(category="fact", scope="user", scope_id="1", content="V4上海"),
+    )
+
+    chain = await store.walk_supersedes_chain(v4, max_depth=4)
+    assert chain is not None
+    assert len(chain) == 4
+    assert chain[0].card_id == v4
+    assert chain[0].status == "active"
+    assert all(c.status == "superseded" for c in chain[1:])
+    walked = [c.card_id for c in chain]
+    assert v0 not in walked  # depth cap drops oldest
+    assert walked == [v4, v3, v2, v1] or (
+        walked[0] == v4 and set(walked[1:]).issubset({v3, v2, v1, v0}) and len(walked) <= 4
+    )
+    # Same scope/category throughout.
+    assert all(c.scope == "user" and c.scope_id == "1" and c.category == "fact" for c in chain)
+
+
+@pytest.mark.asyncio
+async def test_walk_supersedes_chain_fail_closed_missing_parent(store: CardStore) -> None:
+    head_id = "card_walk_missing"
+    await store._db.execute(
+        "INSERT INTO memory_cards ("
+        "card_id, category, scope, scope_id, content, confidence, "
+        "status, priority, supersedes, source, created_at, updated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            head_id, "fact", "user", "1", "head", 0.7, "active", 5,
+            "card_does_not_exist", "manual",
+            "2026-01-01T00:00:00", "2026-01-01T00:00:00",
+        ),
+    )
+    await store._db.commit()
+    chain = await store.walk_supersedes_chain(head_id, max_depth=4)
+    assert chain == [] or chain is None
+
+
+@pytest.mark.asyncio
+async def test_walk_supersedes_chain_fail_closed_cycle(store: CardStore) -> None:
+    a_id, b_id = "card_walk_cycle_a", "card_walk_cycle_b"
+    ts = "2026-01-01T00:00:00"
+    await store._db.execute(
+        "INSERT INTO memory_cards ("
+        "card_id, category, scope, scope_id, content, confidence, "
+        "status, priority, supersedes, source, created_at, updated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (a_id, "fact", "user", "1", "A", 0.7, "active", 5, b_id, "manual", ts, ts),
+    )
+    await store._db.execute(
+        "INSERT INTO memory_cards ("
+        "card_id, category, scope, scope_id, content, confidence, "
+        "status, priority, supersedes, source, created_at, updated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (b_id, "fact", "user", "1", "B", 0.7, "superseded", 5, a_id, "manual", ts, ts),
+    )
+    await store._db.commit()
+    chain = await store.walk_supersedes_chain(a_id, max_depth=4)
+    assert chain == [] or chain is None
+
+
+@pytest.mark.asyncio
+async def test_walk_supersedes_chain_fail_closed_expired_parent(store: CardStore) -> None:
+    old = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="旧"),
+    )
+    head = await store.supersede_card(
+        old,
+        NewCard(category="fact", scope="user", scope_id="1", content="新"),
+    )
+    assert await store.expire_card(old)
+    chain = await store.walk_supersedes_chain(head, max_depth=4)
+    assert chain == [] or chain is None
+
+
+@pytest.mark.asyncio
+async def test_walk_supersedes_chain_fail_closed_cross_category(store: CardStore) -> None:
+    """Parents/head must share category for temporal walks (Dream correction no-op path)."""
+    old = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="事实旧"),
+    )
+    head = await store.supersede_card(
+        old,
+        NewCard(category="status", scope="user", scope_id="1", content="状态新"),
+        source_msg_id="msg_cc",
+        evidence_text="dream correction",
+        captured_by="dream",
+    )
+    chain = await store.walk_supersedes_chain(head, max_depth=4)
+    # Store may return empty (strict) or full chain for Dream visibility.
+    # If non-empty, temporal layer no-ops — store itself must still not invent nodes.
+    if chain:
+        assert chain[0].card_id == head
+        assert all(c.scope_id == "1" for c in chain)
+
+
+@pytest.mark.asyncio
+async def test_walk_supersedes_chain_clamps_max_depth_to_4(store: CardStore) -> None:
+    """Public walk max_depth is hard-clamped to 4 even if callers pass more."""
+    root = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="V0"),
+    )
+    prev = root
+    for i in range(1, 7):
+        prev = await store.supersede_card(
+            prev,
+            NewCard(category="fact", scope="user", scope_id="1", content=f"V{i}"),
+        )
+    chain = await store.walk_supersedes_chain(prev, max_depth=100)
+    assert len(chain) == 4
+    assert chain[0].card_id == prev
+
+
+@pytest.mark.asyncio
+async def test_list_observations_optional_limit_bound(store: CardStore) -> None:
+    """Optional bounded observation query without breaking existing callers."""
+    cid = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="bound-obs"),
+    )
+    for i in range(8):
+        await store.reinforce(
+            cid,
+            boost=0.0,
+            source_message_id=f"m_lim_{i}",
+            evidence_text=f"e{i}",
+            decision="reinforce",
+            captured_by="test",
+        )
+    all_obs = await store.list_observations(cid)
+    assert len(all_obs) == 8
+    limited = await store.list_observations(cid, limit=3)
+    assert len(limited) == 3
+
+
+@pytest.mark.asyncio
+async def test_walk_supersedes_chain_rejects_non_active_head(store: CardStore) -> None:
+    old = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="old"),
+    )
+    head = await store.supersede_card(
+        old,
+        NewCard(category="fact", scope="user", scope_id="1", content="new"),
+    )
+    # Supersede head again so original head is no longer active.
+    await store.supersede_card(
+        head,
+        NewCard(category="fact", scope="user", scope_id="1", content="newer"),
+    )
+    chain = await store.walk_supersedes_chain(head, max_depth=4)
+    assert chain == [] or chain is None
+
+
+@pytest.mark.asyncio
+async def test_get_entity_cards_still_active_only_after_chain_exists(
+    store: CardStore,
+) -> None:
+    """R1/R13: ordinary get_entity_cards must NOT start returning superseded."""
+    old = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="用户住在杭州"),
+    )
+    new = await store.supersede_card(
+        old,
+        NewCard(category="fact", scope="user", scope_id="1", content="用户住在上海"),
+    )
+    active = await store.get_entity_cards("user", "1")
+    assert [c.card_id for c in active] == [new]
+    assert all(c.status == "active" for c in active)
+    assert all("杭州" not in c.content for c in active)
+
+    listed = await store.list_cards(scope="user", scope_id="1", status="active")
+    assert all(c.status == "active" for c in listed)
+    assert all(c.card_id != old for c in listed)
+
+
+@pytest.mark.asyncio
+async def test_dream_fact_to_status_correction_still_works(store: CardStore) -> None:
+    """R14: CardStore supersede category correction remains allowed (Dream)."""
+    old_id = await store.add_card(
+        NewCard(category="fact", scope="user", scope_id="1", content="用户住在杭州"),
+    )
+    new_id = await store.supersede_card(
+        old_id,
+        NewCard(
+            category="status",
+            scope="user",
+            scope_id="1",
+            content="身份: 研究生（已更新）",
+        ),
+        source_msg_id="msg_category_correction",
+        evidence_text="trusted category correction",
+        captured_by="dream",
+    )
+    old = await store.get_card(old_id)
+    assert old is not None and old.status == "superseded"
+    active = await store.get_entity_cards("user", "1")
+    assert len(active) == 1
+    assert active[0].card_id == new_id
+    assert active[0].category == "status"
+    assert active[0].supersedes == old_id

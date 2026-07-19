@@ -63,6 +63,7 @@ const providerTaskOrder: ProviderTaskKey[] = [
   'scheduler_eot',
   'scheduler_replay_judge',
   'birthday_wish',
+  'qzone_journal_compose',
 ]
 
 const providerTaskLabels: Record<ProviderTaskKey, string> = {
@@ -91,6 +92,7 @@ const providerTaskLabels: Record<ProviderTaskKey, string> = {
   scheduler_eot: '调度 EOT',
   scheduler_replay_judge: '调度重放评审',
   birthday_wish: '生日祝福',
+  qzone_journal_compose: '空间日志成稿',
 }
 
 const activeProvider = computed(() =>

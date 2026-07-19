@@ -1,0 +1,60 @@
+{
+  "arc_id": "living_story_v1.main",
+  "revision": 0,
+  "title": "联排与考试并行的主线",
+  "scope": "fiction",
+  "stage": "active",
+  "status": "active",
+  "starts_on": "",
+  "ends_on": "",
+  "arc_role": "main",
+  "stack_order": 0,
+  "goals": [
+    "在联排关键段落里稳住走位与气息",
+    "把考试压力压进可调度的日常节奏，而不是让排练被整段吞掉"
+  ],
+  "active_conflicts": [
+    "考试档期与联排档期互相挤占同一块专注时间"
+  ],
+  "variables": {
+    "energy": 0.8,
+    "rehearsal_progress": 0.1,
+    "exam_pressure": 0.05,
+    "stage_pressure": 0.05,
+    "study_progress": 0.0,
+    "setback_flag": 0.0,
+    "recovery_flag": 0.0,
+    "replan_debt": 0.0,
+    "partner_momentum": 0.0,
+    "week_closure": 0.0,
+    "focus_split": 0.0,
+    "study_load": 0.0,
+    "spare_time": 0.5
+  },
+  "partner_states": {
+    "tsukasa": {
+      "mood": "专注",
+      "note": "虚构伙伴：舞台侧会先把热身做完，再等联排对齐"
+    }
+  },
+  "open_threads": [
+    "记下走位不稳的段落，下次联排优先复盘"
+  ],
+  "last_events": [],
+  "event_history": [],
+  "causal_links": [],
+  "deadlines": [],
+  "next_day_seed": "从今天的联排热身开始，把身体状态接上主线。",
+  "event_budget": {
+    "now_step": 0,
+    "last_event_step": 0,
+    "generated_days": 0,
+    "setback_count": 0,
+    "events_this_tick": 0,
+    "triggered_once": [],
+    "cooldowns": {},
+    "storylet_available_at": {},
+    "last_viewed": {},
+    "committed_event_ids": []
+  }
+}

@@ -16,7 +16,12 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from kernel.types import AmadeusPlugin, PluginContext, PromptContext, ReplyContext
-from plugins.schedule.story_arc import StoryArc, StoryArcEventCandidate, record_event_trigger
+from plugins.schedule.story_arc import (
+    JournalEventRecord,
+    StoryArc,
+    StoryArcEventCandidate,
+    record_event_trigger,
+)
 from plugins.schedule.types import Schedule
 
 
@@ -518,12 +523,22 @@ def _update_arc_for_event_replan(
 ) -> None:
     today = now.strftime("%Y-%m-%d")
     arc.stage = "setback_replan"
-    arc.last_events.append({
-        "date": today,
-        "source": "event_replan",
-        "summary": summary,
-        "reason": reason,
-    })
+    privacy = (
+        "public"
+        if str(getattr(arc, "scope", "") or "").strip() == "fiction"
+        else "unknown"
+    )
+    event = JournalEventRecord(
+        date=today,
+        source="event_replan",
+        summary=summary,
+        subject_kind="fiction",
+        privacy=privacy,  # type: ignore[arg-type]
+        salience=0.95,
+        event_id=f"event_replan:{today}",
+    ).to_dict()
+    event["reason"] = reason
+    arc.last_events.append(event)
     arc.last_events = arc.last_events[-6:]
     thread = f"{partner_name}轻微扭伤后的降难度站位怎么调整"
     if thread not in arc.open_threads:

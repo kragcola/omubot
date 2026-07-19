@@ -113,6 +113,128 @@
           "maximum": 5000
         }
       }
+    },
+    "temporal_trace": {
+      "type": "object",
+      "title": "记忆时间轨迹",
+      "description": "历史意图/前提冲突时注入 supersedes 时间轨迹 sidecar（Option A）。普通检索仍为 active-only。",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "启用时间轨迹",
+          "description": "关闭后不调用 TemporalTraceAssembler，不注入「记忆时间轨迹」块。"
+        },
+        "max_heads": {
+          "type": "integer",
+          "title": "最多扫描链头",
+          "minimum": 1,
+          "maximum": 24
+        },
+        "max_kps": {
+          "type": "integer",
+          "title": "最多知识点",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "max_depth": {
+          "type": "integer",
+          "title": "链最大深度",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "max_chars": {
+          "type": "integer",
+          "title": "轨迹最大字符",
+          "minimum": 100,
+          "maximum": 600
+        }
+      }
+    },
+    "query_aware_plan": {
+      "type": "object",
+      "title": "查询感知检索规划",
+      "description": "Query-Aware Retrieval Planner v1：按查询 need 调整 RRF 后 type_caps 与 pack 预算。关闭时与 pre-v1 hit order/pack 行为一致。不改变 retrieve_mode、RetrievalGate 或 RRF 权重。",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "启用查询感知规划",
+          "description": "默认开启。关闭后强制 ordinary identity（仅既有 doc_chunk cap 与配置 budget）。"
+        }
+      }
+    },
+    "card_eligibility": {
+      "type": "object",
+      "title": "记忆卡片时效资格",
+      "description": "Card Category Time Eligibility v1：读时、非破坏性、fail-closed 的 prompt recall 过滤。仅 status/event 默认衰减；不解释 ttl_turns；不改写 Card 状态。关闭后与 pre-v1 active-only 行为一致。",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "启用卡片时效过滤",
+          "description": "默认开启。关闭后 RetrievalGate / TemporalTrace active-head 不再按类别 TTL 过滤（仍仅 active）。"
+        },
+        "status_ttl_days": {
+          "type": "integer",
+          "title": "status 类别有效天数",
+          "description": "以 updated_at（空则 created_at）为锚的日历天 TTL。越界由运行时夹紧到 1–3650。",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "event_ttl_days": {
+          "type": "integer",
+          "title": "event 类别有效天数",
+          "description": "以 updated_at（空则 created_at）为锚的日历天 TTL。越界由运行时夹紧到 1–3650。",
+          "minimum": 1,
+          "maximum": 3650
+        }
+      }
+    },
+    "pack_evidence_gate": {
+      "type": "object",
+      "title": "打包期证据门控",
+      "description": "Pack-Time Confidence/Evidence Gate v1：search（RRF+type caps+top_k）之后、pack 之前的 evidence-aware tiering。不改 RRF/Card 权重；关闭时与 pre-v1 hit order/pack 严格 identity。",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "启用打包期证据门控",
+          "description": "默认开启。关闭后 gate 为严格 identity（相同 hit 顺序/内容，不 mutate 输入）。"
+        },
+        "memory_soft_confidence": {
+          "type": "number",
+          "title": "记忆软置信阈值",
+          "description": "无 refs 的非信任源 memory_card 低于此值时 demote（不硬 omit）。范围 [0,1]。",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "graph_soft_confidence": {
+          "type": "number",
+          "title": "图谱软置信阈值",
+          "description": "graph_fact 弱置信判定阈值；弱+空 evidence+hop>=1 才硬 omit。范围 [0,1]。",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "evidence_use_contract": {
+      "type": "object",
+      "title": "资料使用合同",
+      "description": "Evidence-Use / Pack-State Contract v1 (euc_v1)：以最终 pack 结果为主的闭集 pack_state 观测 + 可选 empty/hint_only/omit_only 软约束中文指令。demote_present 仅当 demoted non-hint 仍留在 pack 时成立。不是 grounding 证明；不强制 pass_turn/静默/硬拒答。关闭后 identity（不注入指令）。",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "启用资料使用合同",
+          "description": "默认开启。关闭后不注入约束指令；metrics 仍可记录 identity 行。"
+        },
+        "inject_constrained_instruction": {
+          "type": "boolean",
+          "title": "注入空包软约束",
+          "description": "empty/hint_only/omit_only 且非 skip 时注入短中文软约束（最终 pack 无可引用非 hint 资料）。默认开启；demote_present（有幸存 demoted hit）/nonempty/skip 默认不注入。"
+        }
+      }
     }
   }
 }

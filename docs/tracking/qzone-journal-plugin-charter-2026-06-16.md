@@ -5,6 +5,7 @@
 > 关联：[Living Persona 系列](living-persona-part0-overview.md)（数据来源）、[Part B Generative Life](living-persona-partB-generative-life.md)（day_narrative/story_arc/经历洞察）、[Part C Social Narrative](living-persona-partC-social-narrative.md)（进阶版真人红线）
 > 本轮交付：**仅本立项文档**（QZone 可行性考察 + 插件设计 + 红线）。**不写代码**。下一步按用户裁定回到 [A-M2](living-persona-partA-dialogue-climate.md)（living 情绪层先行）。
 > 2026-07-15 状态校正：A-M2/M3/M4 已实现、提交、部署并在当前 effective config 中启用；QZone Journal 本身仍无代码，下一步是用户显式批准后启动基础版实现。
+> 2026-07-16 状态校正：QZone Journal v0.3.0 的基础 MVP、严格 parser、离线 fixture harness、advanced fiction worldbook、review provenance 与专用 Admin 人工审核控制台已实现但未部署；本页 §6/§8 的“是否人工审核”已由 `manual_review=true` 决策取代，真人 factual→公开空间仍阻塞，真实发布仍需 real_sanitized fixture → 独立 validated profile → 用户授权 canary。
 
 ---
 
@@ -81,7 +82,7 @@ QZone 发说说的成熟非官方路径是"拿 QZone 域 cookie → 算 g_tk →
 | --- | --- | --- |
 | 日程叙事 | `schedule.day_narrative`（[plugins/schedule](../../plugins/schedule)） | 一天主线 |
 | 剧情弧 | `story_arc.last_events` / `stage` / `next_day_seed`（[plugins/schedule/story_arc.py:47](../../plugins/schedule/story_arc.py#L47)） | 世界书联动（进阶版核心） |
-| 经历洞察 | Dream `dream_reflection` memo 卡（[plugins/dream/plugin.py](../../plugins/dream/plugin.py)） | 情感强度 + 反思素材 |
+| 经历洞察 | Dream 写入 StoryArc 的 `dream_reflection` 事件（[plugins/dream/plugin.py](../../plugins/dream/plugin.py)） | 仅作为带 `arc_scope` 的 fiction 反思候选；global synthetic memo 不落卡、不作为事实证据、不回灌 Schedule |
 | 伙伴状态 | `FictionPartnerState`（fiction-only） | 进阶版"伙伴共造故事" |
 
 ---

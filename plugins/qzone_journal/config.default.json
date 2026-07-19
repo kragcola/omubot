@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "plugin": "qzone_journal",
+  "values": {
+    "enabled": false,
+    "dry_run": true,
+    "allow_live_publish": false,
+    "allowed_live_uins": [],
+    "advanced_enabled": false,
+    "manual_review": true,
+    "max_posts_per_day": 1,
+    "max_drafts_per_tick": 1,
+    "max_drafts_per_day": 1,
+    "salience_threshold": 0.7,
+    "allowed_sources": [
+      "event_replan",
+      "dream_reflection",
+      "schedule_generator"
+    ],
+    "wire_profile_id": "qzone-text-v1-unverified"
+  }
+}

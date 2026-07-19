@@ -10,6 +10,39 @@ pack enrollment, prompt/skill/hook changes, production runtime changes, or any
 turn where the user says the previous work lacked depth, initiative, or
 verification.
 
+## Delivery Executor Mode
+
+When you are implementing an already-scoped, already-dispatched task (the
+planning/architecture happened upstream), these rules are not optional — they
+exist to stop the five failure modes that recur on this repo:
+
+1. **Read before you ask.** You have read access (`read_file`, `grep`, `glob`,
+   `ls`). If the answer is in the repo, find it yourself. Only ask the user for
+   information that genuinely cannot be obtained from the codebase, logs, DB, or
+   docs — never to save yourself a lookup you have permission to do.
+2. **Confirm understanding before editing.** Restate the objective and the
+   concrete acceptance criteria in your own words. If your restatement could be
+   wrong, surface it before touching files, not after.
+3. **Never claim done without re-reading your own work.** Before saying a task is
+   complete, re-open the files you changed and confirm the edit actually does
+   what was asked — not just that the tool returned success.
+4. **Verify with the self-check toolbox; do not offload testing to the user.**
+   Most claims on this repo are machine-verifiable, so prove them yourself:
+   - logic / behavior → `uv run pytest` (run the relevant tests, paste output)
+   - types / lint → `uv run pyright`, `uv run ruff check`
+   - live DB / runtime state → `sqlite3 'file:storage/<db>.db?mode=ro' '<query>'`
+     so committed WAL state remains visible; use `immutable=1` only for a known
+     offline backup that cannot require WAL replay
+   - QQ, QZone, NapCat, webhook, or other external sends are never routine
+     self-checks. They require current-task authorization for the exact action and
+     target; otherwise use offline fixtures, dry-runs, and read-only status.
+   If a required check needs new authority, credentials, or an external mutation,
+   report that boundary explicitly. Never broaden scope or invent verification.
+5. **Attempt before escalating.** If a first approach fails, diagnose and try a
+   different one. Escalate to the user only after a real attempt, with evidence
+   of what you tried and why it failed — do not dispatch the problem back
+   unattempted.
+
 ## Operating Mode
 
 1. Restate the real objective and acceptance criteria in your own words before
@@ -47,8 +80,9 @@ Do not declare done until the relevant rows have evidence.
 - **Semantic**: prove the core meaning, not only shape. Example: character packs
   need no duplicate `character_id`, correct `work/relation`, and collision
   checks against existing packs.
-- **Runtime**: hit the actual API/sidecar/admin endpoint when available. Confirm
-  registry counts, health output, cache behavior, or UI visibility.
+- **Runtime**: hit the actual read-only API/sidecar/admin endpoint when available.
+  Confirm registry counts, health output, cache behavior, or UI visibility.
+  External writes or messages require explicit current-task authorization.
 - **Negative/collision**: test the case most likely to be confused, such as PJSK
   初音 vs 本家初音, same-title wiki results, or duplicate pack IDs.
 - **Idempotency/rollback**: note whether rerun is safe and how to revert runtime

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import aiosqlite
 from loguru import logger
@@ -41,6 +41,62 @@ FROM group_messages
 WHERE group_id = ? AND created_at <= ?
 ORDER BY created_at
 """
+
+
+@runtime_checkable
+class MessageLogPort(Protocol):
+    """Structural port for MessageLog-compatible message persistence.
+
+    Production composition root may inject either the concrete
+    :class:`MessageLog` or :class:`~services.conversation_archive.store.ConversationArchive`.
+    Return types are intentionally permissive where the two differ
+    (e.g. ``record`` may return ``None`` or a message pk).
+    """
+
+    async def init(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def record(
+        self,
+        *,
+        group_id: str,
+        role: str,
+        speaker: str | None,
+        content_text: str | None,
+        content_json: str | None,
+        message_id: int | None = None,
+    ) -> Any: ...
+
+    async def query_recent(
+        self,
+        group_id: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]: ...
+
+    async def query_term_hits(
+        self,
+        group_id: str,
+        terms: list[str],
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_group_ids(self) -> list[str]: ...
+
+    async def record_session_msg(
+        self,
+        session_id: str,
+        role: str,
+        content_text: str,
+    ) -> Any: ...
+
+    async def query_for_compact(
+        self,
+        group_id: str,
+        *,
+        before: float,
+    ) -> list[dict[str, Any]]: ...
 
 
 class MessageLog:

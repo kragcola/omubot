@@ -47,6 +47,9 @@ class GuardrailContext:
     session_count: int = 0
     bot_name: str = ""
     config: Any = None
+    # Bounded assistant-only outbound history (phrase-family multi-turn).
+    # User turns and quoted user text must never appear here.
+    assistant_history: tuple[str, ...] = ()
 
 
 RuleHandler = Callable[[str, GuardrailContext], GuardrailResult]
@@ -164,11 +167,17 @@ class SentinelRegistry:
         session_count: int = 0,
         bot_name: str = "",
         config: Any = None,
+        assistant_history: Sequence[str] | None = None,
     ) -> GuardrailResult:
         current = text
         hits: list[GuardrailHit] = []
         metadata: dict[str, Any] = {}
         failed_closed = False
+        history = tuple(
+            str(item).strip()
+            for item in (assistant_history or ())
+            if str(item or "").strip()
+        )
         context = GuardrailContext(
             thinker_thought=thinker_thought,
             last_assistant_text=last_assistant_text,
@@ -176,6 +185,7 @@ class SentinelRegistry:
             session_count=session_count,
             bot_name=bot_name,
             config=config,
+            assistant_history=history,
         )
         for rule in self._ordered_rules():
             result = rule(current, context)
@@ -231,6 +241,7 @@ def apply_guardrails(
     session_count: int = 0,
     bot_name: str = "",
     config: Any = None,
+    assistant_history: Sequence[str] | None = None,
 ) -> GuardrailResult:
     return _REGISTRY.apply(
         text,
@@ -240,6 +251,7 @@ def apply_guardrails(
         session_count=session_count,
         bot_name=bot_name,
         config=config,
+        assistant_history=assistant_history,
     )
 
 

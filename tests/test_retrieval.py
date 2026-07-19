@@ -1,17 +1,24 @@
 """Tests for RetrievalGate: 4-tier gating strategy for memory card injection."""
 
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+
 import pytest
 
+from kernel.config import GroupMemoryConfig, MemoryModeConfig, PoolConfig
 from services.memory.card_store import CardStore, NewCard
 from services.memory.retrieval import RetrievalGate, extract_keywords
 
 
 @pytest.fixture
-async def store(tmp_path) -> CardStore:
+async def store(tmp_path) -> AsyncIterator[CardStore]:
     db_path = str(tmp_path / "test_retrieval.db")
     s = CardStore(db_path=db_path)
     await s.init()
-    return s
+    try:
+        yield s
+    finally:
+        await s.close()
 
 
 @pytest.fixture
@@ -230,6 +237,88 @@ async def test_invalidate_entity(store: CardStore, gate: RetrievalGate) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pool_cache_keeps_request_group_header_and_invalidates_shared_pool(
+    store: CardStore,
+) -> None:
+    config = GroupMemoryConfig(
+        memory=MemoryModeConfig(
+            mode="pool",
+            pools={
+                "friends": PoolConfig(groups=["456", "789"]),
+            },
+        ),
+    )
+    gate = RetrievalGate(
+        card_store=store,
+        refresh_interval=5,
+        group_memory_config=config,
+    )
+    await store.add_card(NewCard(
+        category="fact",
+        scope="group",
+        scope_id="friends",
+        content="共享池旧事实",
+    ))
+
+    first = await gate.build_memo_block("pool-s1", "123", "456")
+    second = await gate.build_memo_block("pool-s2", "123", "789")
+
+    assert "【当前在群 #456 中对话】" in first
+    assert "【当前在群 #789 中对话】" in second
+    assert "共享池旧事实" in first
+    assert "共享池旧事实" in second
+
+    await store.add_card(NewCard(
+        category="fact",
+        scope="group",
+        scope_id="friends",
+        content="共享池新事实",
+    ))
+    stale = await gate.build_memo_block("pool-s3", "123", "789")
+    assert "共享池新事实" not in stale
+
+    gate.invalidate_entity("group", "456")
+    refreshed = await gate.build_memo_block("pool-s4", "123", "789")
+    assert "共享池新事实" in refreshed
+
+
+@pytest.mark.asyncio
+async def test_global_card_invalidation_refreshes_all_scoped_full_caches(
+    store: CardStore,
+    gate: RetrievalGate,
+) -> None:
+    await store.add_card(NewCard(
+        category="fact",
+        scope="user",
+        scope_id="123",
+        content="用户事实",
+    ))
+    await store.add_card(NewCard(
+        category="fact",
+        scope="global",
+        scope_id="global",
+        content="全局旧事实",
+    ))
+
+    initial = await gate.build_memo_block("global-s1", "123", None)
+    assert "用户事实" in initial
+    assert "全局旧事实" in initial
+
+    await store.add_card(NewCard(
+        category="fact",
+        scope="global",
+        scope_id="global",
+        content="全局新事实",
+    ))
+    stale = await gate.build_memo_block("global-s2", "123", None)
+    assert "全局新事实" not in stale
+
+    gate.invalidate_entity("global", "global")
+    refreshed = await gate.build_memo_block("global-s3", "123", None)
+    assert "全局新事实" in refreshed
+
+
+@pytest.mark.asyncio
 async def test_invalidate_session(store: CardStore, gate: RetrievalGate) -> None:
     await store.add_card(NewCard(category="fact", scope="user", scope_id="123", content="喜欢音游"))
 
@@ -403,3 +492,158 @@ async def test_embedding_backend_falls_back_to_ngram_safely(store: CardStore) ->
     assert semantic["active_backend"] == "ngram"
     assert semantic["fallbacks"] >= 1
     assert semantic["errors"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_embedding_backend_health_gate_degrades_before_first_query(
+    store: CardStore,
+) -> None:
+    gate = RetrievalGate(
+        card_store=store,
+        refresh_interval=5,
+        semantic_enabled=True,
+        semantic_backend="embedding",
+    )
+
+    semantic = gate.semantic_status()
+
+    assert semantic["requested_backend"] == "embedding"
+    assert semantic["active_backend"] == "ngram"
+    assert semantic["healthy"] is False
+    assert semantic["degraded"] is True
+    assert semantic["fallbacks"] == 1
+    assert semantic["errors"] == 1
+    assert "not installed" in semantic["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_structured_retrieval_ranks_with_relevance_importance_and_recency(
+    store: CardStore,
+) -> None:
+    old_id = await store.add_card(NewCard(
+        category="fact",
+        scope="user",
+        scope_id="123",
+        content="对花粉过敏，旧记录",
+        confidence=0.8,
+        priority=5,
+    ))
+    new_id = await store.add_card(NewCard(
+        category="fact",
+        scope="user",
+        scope_id="123",
+        content="对花粉过敏，新记录",
+        confidence=0.8,
+        priority=5,
+    ))
+    db = store._db
+    assert db is not None
+    await db.execute(
+        "UPDATE memory_cards SET updated_at = ? WHERE card_id = ?",
+        ("2025-01-01T00:00:00+00:00", old_id),
+    )
+    await db.execute(
+        "UPDATE memory_cards SET updated_at = ? WHERE card_id = ?",
+        ("2026-07-15T00:00:00+00:00", new_id),
+    )
+    await db.commit()
+
+    gate = RetrievalGate(
+        card_store=store,
+        now_provider=lambda: datetime(2026, 7, 16, tzinfo=UTC),
+    )
+    result = await gate.retrieve_cards(
+        user_id="123",
+        conversation_text="花粉过敏",
+        top_k=2,
+    )
+
+    assert [hit.card.card_id for hit in result.hits] == [new_id, old_id]
+    assert getattr(result.hits[0], "recency", -1.0) > getattr(
+        result.hits[1], "recency", -1.0
+    )
+    assert result.hits[0].source_score > result.hits[1].source_score
+
+
+# ------------------------------------------------------------------
+# Truthful total_active / matched_active counts
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retrieval_counts_full_keyword_semantic_and_minimal(
+    store: CardStore,
+) -> None:
+    """total_active = all visible active cards in scope+global;
+    matched_active = pre-top_k candidates for the decision path.
+    """
+    await store.add_card(NewCard(
+        category="fact", scope="user", scope_id="123", content="喜欢音游节奏大师",
+    ))
+    await store.add_card(NewCard(
+        category="fact", scope="user", scope_id="123", content="会弹钢琴",
+    ))
+    await store.add_card(NewCard(
+        category="preference", scope="user", scope_id="123", content="讨厌早起",
+    ))
+    await store.add_card(NewCard(
+        category="fact", scope="user", scope_id="123", content="对猫毛过敏",
+    ))
+    await store.add_card(NewCard(
+        category="fact", scope="global", scope_id="global", content="全局运营规则",
+    ))
+    # Other-user card must not count toward this scope's total_active.
+    await store.add_card(NewCard(
+        category="fact", scope="user", scope_id="999", content="别人的卡片",
+    ))
+
+    gate = RetrievalGate(
+        card_store=store,
+        refresh_interval=5,
+        semantic_enabled=True,
+        semantic_backend="ngram",
+    )
+
+    # Full retrieval (new session): total == matched == all visible (4 user + 1 global)
+    full = await gate.retrieve_cards(session_id="count_s1", user_id="123")
+    assert full.decision.startswith("full_")
+    assert full.total_active == 5
+    assert full.matched_active == 5
+    assert len(full.hits) == 5
+
+    # Keyword: 5 visible; only one keyword match before top_k
+    kw = await gate.retrieve_cards(
+        session_id="count_s1",
+        user_id="123",
+        conversation_text="音游",
+        top_k=1,
+    )
+    assert kw.decision == "keyword"
+    assert kw.total_active == 5
+    assert kw.matched_active == 1
+    assert len(kw.hits) == 1
+    assert "音游" in kw.hits[0].card.content
+
+    # Semantic when keyword misses (same pattern as existing ngram test)
+    sem = await gate.retrieve_cards(
+        session_id="count_s1",
+        user_id="123",
+        conversation_text="对猫会过敏",
+        top_k=1,
+    )
+    assert sem.decision.startswith("semantic_")
+    assert sem.total_active == 5
+    assert sem.matched_active >= 1
+    assert len(sem.hits) <= 1
+
+    # Minimal / miss path: accurate total_active, matched_active == 0
+    minimal = await gate.retrieve_cards(
+        session_id="count_s1",
+        user_id="123",
+        conversation_text="海底两万里科幻小说",
+    )
+    assert minimal.decision in {"minimal_hint", "miss"}
+    if minimal.decision == "minimal_hint":
+        assert minimal.total_active == 5
+        assert minimal.matched_active == 0
+        assert minimal.hits == ()

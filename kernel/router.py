@@ -12,7 +12,7 @@ import re
 import secrets
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
@@ -48,7 +48,15 @@ from services.humanization.qq_interactions import (
     parse_qq_interaction_signal,
     register_climate_mention_irritation,
 )
-from services.media.visual_evidence import StickerEvidence, VisualEvidence, render_visual_evidence
+from services.media.vision import classify_image_intent
+from services.media.visual_evidence import (
+    NEUTRAL_ANIMATED_PLACEHOLDER,
+    NEUTRAL_IMAGE_PLACEHOLDER,
+    NEUTRAL_QUOTED_IMAGE_PLACEHOLDER,
+    StickerEvidence,
+    VisualEvidence,
+    attach_visual_sidechannel,
+)
 from services.name_registry import NameVariationRegistry
 from services.onebot_segments import RichRenderLimits, render_onebot_segments
 from services.private_conversation import (
@@ -973,13 +981,8 @@ def _render_forward_segment_summary(seg_type: str, data: object) -> str:
     if seg_type == "text":
         return str(payload.get("text", ""))
     if seg_type == "image":
-        url = str(payload.get("url", ""))
-        fname = str(payload.get("file", ""))
-        if url:
-            return f"«图片: {url[:80]}»"
-        if fname:
-            return f"«图片: {fname}»"
-        return "«图片（无描述）»"
+        # Forward-card summaries are user-visible text; never embed vision prose.
+        return NEUTRAL_IMAGE_PLACEHOLDER
     if seg_type == "face":
         return "«表情»"
     if seg_type == "at":
@@ -1185,6 +1188,104 @@ async def _refetch_reply_image_url(bot: Bot, message_id: object) -> str | None:
     return None
 
 
+
+def _format_image_sidechannel(desc: str | None = None, *, user_text: str = "") -> str:
+    """Neutral placeholder for user-authored text surfaces.
+
+    Visual observations must never be rewritten into content_text; structured
+    evidence attaches to image_ref side-channel metadata instead.
+    """
+    del desc, user_text
+    return NEUTRAL_IMAGE_PLACEHOLDER
+
+
+def _neutral_image_placeholder(*, animated: bool = False) -> str:
+    return NEUTRAL_ANIMATED_PLACEHOLDER if animated else NEUTRAL_IMAGE_PLACEHOLDER
+
+
+async def _lookup_human_corrected_identity(
+    image_sha256: str,
+    *,
+    visual_identity_store: Any | None,
+    current_user_id: str,
+    current_group_id: str | None,
+) -> str | None:
+    """Exact full-SHA visual-identity recall; fail closed on missing store/context.
+
+    Persisted labels are structured system visual evidence only. Never appends
+    to user-authored text. Uses VisualIdentityStore.lookup_for_context when
+    available (getattr-safe for concurrent composition-root wiring).
+    """
+    store = visual_identity_store
+    if store is None:
+        return None
+    lookup = getattr(store, "lookup_for_context", None)
+    if not callable(lookup):
+        return None
+    user = str(current_user_id or "").strip()
+    if not user:
+        return None
+    sha = str(image_sha256 or "").strip().lower()
+    if len(sha) != 64:
+        return None
+    try:
+        record = await cast(Any, lookup)(
+            sha,
+            current_user_id=user,
+            current_group_id=current_group_id,
+        )
+    except Exception:
+        _log_debug.debug("visual identity lookup failed | sha={}", sha[:12])
+        return None
+    if record is None:
+        return None
+    label = str(getattr(record, "entity_label", "") or "").strip()
+    return label or None
+
+
+def _merge_human_corrected_identity(
+    evidence: VisualEvidence,
+    entity_label: str,
+) -> VisualEvidence:
+    """Inject a trusted recognition for a human-corrected entity label.
+
+    Returns a new VisualEvidence so desc_cache base entries stay unscoped.
+    Label rides structured visual_identity / side-channel only.
+    """
+    from services.media.character_recognizer import CharacterRecognition
+
+    label = str(entity_label or "").strip()
+    if not label:
+        return evidence
+    # difference/threshold None => trusted by _is_trusted_identity (no diagnostics).
+    correction = CharacterRecognition(
+        matched=True,
+        character_id=None,
+        character_name=label,
+        difference=None,
+        threshold=None,
+        source="user_correction",
+    )
+    return VisualEvidence(
+        image_sha256=evidence.image_sha256,
+        image_sha256_short=evidence.image_sha256_short,
+        sticker=evidence.sticker,
+        # An exact human correction is authoritative for this image/scope.
+        # Preserve non-identity detections for count/body context, but remove
+        # every machine identity candidate so a prior false positive cannot
+        # appear beside the corrected label.
+        recognitions=(
+            correction,
+            *(
+                item
+                for item in evidence.recognitions
+                if not (item.matched and item.character_name)
+            ),
+        ),
+        vision_description=evidence.vision_description,
+    )
+
+
 async def _describe_image_data(
     data: bytes,
     *,
@@ -1192,100 +1293,137 @@ async def _describe_image_data(
     vision_client: Any | None = None,
     character_recognizer: Any | None = None,
     sticker_store: Any | None = None,
-    desc_cache: dict[str, str] | None = None,
+    desc_cache: dict[str, Any] | None = None,
     mood_engine: Any | None = None,
     mood_group_id: str | int | None = None,
     mood_session_id: str = "",
-) -> str | None:
-    """Describe one image via the shared visual evidence pipeline.
+    visual_identity_store: Any | None = None,
+    current_user_id: str = "",
+    current_group_id: str | None = None,
+) -> VisualEvidence | None:
+    """Build structured visual evidence for one image (side-channel only).
 
-    Sticker lookup, character recognition, low-confidence candidates, and Qwen
-    VL are collected as annotations on the same image. This prevents a legacy
-    sticker description from short-circuiting identity evidence, while still
-    preserving sticker text as a fallback or weak hint.
+    Sticker lookup, character recognition, and Qwen VL are collected as
+    annotations on the same image (diagnostics stay internal). This prevents a
+    legacy sticker description from short-circuiting identity evidence, while
+    still preserving sticker text as a fallback or weak hint.
+
+    Exact visual-identity recall (full SHA-256) is applied after the base
+    pipeline using privacy-safe current_user_id / current_group_id. Identity
+    enrichment is never stored in desc_cache so cache hits cannot leak across
+    user/group boundaries.
 
     Centralizing this keeps quoted-reply images (`@bot 引用图 这是谁`) on the
     same recognition path as directly-posted images — previously the quoted
     branch only ran plain VL and never consulted CCIP/AnimeTrace/stickers.
+
+    Returns VisualEvidence for image_ref side-channel attach; never injects
+    prose into user-authored text.
     """
     if desc_cache is None:
         desc_cache = {}
-    img_hash = hashlib.sha256(data).hexdigest()[:8]
+    full_sha = hashlib.sha256(data).hexdigest()
+    short_sha = full_sha[:8]
 
-    if img_hash in desc_cache:
-        _log_debug.debug("desc cache HIT | hash={}", img_hash)
-        return desc_cache[img_hash]
-
-    sticker: StickerEvidence | None = None
-
-    if sticker_store is not None:
-        sticker_id = sticker_store.lookup_by_hash(data)
-        if sticker_id is not None:
-            entry = sticker_store.get(sticker_id)
-            if entry is not None and entry.get("description"):
-                sticker = StickerEvidence(
-                    sticker_id=sticker_id,
-                    description=str(entry.get("description") or ""),
-                    usage_hint=str(entry.get("usage_hint") or ""),
-                    ocr_text=str(entry.get("ocr_text") or ""),
-                    source=str(entry.get("source") or ""),
-                )
-                _log_debug.debug("sticker cache HIT | id={}", sticker_id)
-
-    results = []
-    if character_recognizer is not None:
-        results = await character_recognizer.identify(data, media_type=media_type)
-        matched = [r for r in results if r.matched and r.character_name]
-        if matched:
-            _log_debug.debug(
-                "character recognition HIT | count={} matches={}",
-                len(matched),
-                [
-                    {
-                        "id": r.character_id,
-                        "difference": r.difference,
-                        "threshold": r.threshold,
-                    }
-                    for r in matched
-                ],
-            )
-            # Phase 3: self/friend → transient mood nudge (first self/friend wins).
-            if mood_engine is not None:
-                for r in matched:
-                    if r.relation in ("self", "friend"):
-                        try:
-                            mood_engine.register_recognition_signal(
-                                r.relation,
-                                group_id=mood_group_id,
-                                session_id=mood_session_id,
-                            )
-                        except Exception:
-                            _log_debug.debug("mood recognition-nudge skipped")
-                        break
-
-    vision_desc: str | None = None
-    should_run_vl = (
-        vision_client is not None
-        and (
-            bool(results)
-            or sticker is None
-            or sticker.weak_authority
+    cached = desc_cache.get(full_sha) or desc_cache.get(short_sha)
+    if isinstance(cached, VisualEvidence):
+        _log_debug.debug("desc cache HIT | hash={}", short_sha)
+        evidence = cached
+    elif isinstance(cached, str) and cached:
+        # Legacy string cache entry — re-wrap as observation-only evidence.
+        evidence = VisualEvidence(
+            image_sha256=full_sha,
+            image_sha256_short=short_sha,
+            vision_description=cached,
         )
+        desc_cache[full_sha] = evidence
+        desc_cache[short_sha] = evidence
+    else:
+        sticker: StickerEvidence | None = None
+
+        if sticker_store is not None:
+            sticker_id = sticker_store.lookup_by_hash(data)
+            if sticker_id is not None:
+                entry = sticker_store.get(sticker_id)
+                if entry is not None and entry.get("description"):
+                    sticker = StickerEvidence(
+                        sticker_id=sticker_id,
+                        description=str(entry.get("description") or ""),
+                        usage_hint=str(entry.get("usage_hint") or ""),
+                        ocr_text=str(entry.get("ocr_text") or ""),
+                        source=str(entry.get("source") or ""),
+                    )
+                    _log_debug.debug("sticker cache HIT | id={}", sticker_id)
+
+        results = []
+        if character_recognizer is not None:
+            results = await character_recognizer.identify(data, media_type=media_type)
+            matched = [r for r in results if r.matched and r.character_name]
+            if matched:
+                _log_debug.debug(
+                    "character recognition HIT | count={} matches={}",
+                    len(matched),
+                    [
+                        {
+                            "id": r.character_id,
+                            "difference": r.difference,
+                            "threshold": r.threshold,
+                        }
+                        for r in matched
+                    ],
+                )
+                # Phase 3: self/friend → transient mood nudge (first self/friend wins).
+                if mood_engine is not None:
+                    for r in matched:
+                        if r.relation in ("self", "friend"):
+                            try:
+                                mood_engine.register_recognition_signal(
+                                    r.relation,
+                                    group_id=mood_group_id,
+                                    session_id=mood_session_id,
+                                )
+                            except Exception:
+                                _log_debug.debug("mood recognition-nudge skipped")
+                            break
+
+        vision_desc: str | None = None
+        should_run_vl = (
+            vision_client is not None
+            and (
+                bool(results)
+                or sticker is None
+                or sticker.weak_authority
+            )
+        )
+        if should_run_vl and vision_client is not None:
+            _log_debug.debug("desc cache MISS | hash={} -> Qwen VL", short_sha)
+            vision_desc = await vision_client.describe_image(data)
+
+        evidence = VisualEvidence(
+            image_sha256=full_sha,
+            image_sha256_short=short_sha,
+            sticker=sticker,
+            recognitions=tuple(results),
+            vision_description=vision_desc,
+        )
+        # Cache base evidence only (no user-scoped identity).
+        desc_cache[full_sha] = evidence
+        desc_cache[short_sha] = evidence
+
+    corrected = await _lookup_human_corrected_identity(
+        full_sha,
+        visual_identity_store=visual_identity_store,
+        current_user_id=current_user_id,
+        current_group_id=current_group_id,
     )
-    if should_run_vl and vision_client is not None:
-        _log_debug.debug("desc cache MISS | hash={} -> Qwen VL", img_hash)
-        vision_desc = await vision_client.describe_image(data)
-
-    desc = render_visual_evidence(VisualEvidence(
-        image_sha256_short=img_hash,
-        sticker=sticker,
-        recognitions=tuple(results),
-        vision_description=vision_desc,
-    ))
-
-    if desc:
-        desc_cache[img_hash] = desc
-    return desc
+    if corrected:
+        evidence = _merge_human_corrected_identity(evidence, corrected)
+        _log_debug.debug(
+            "visual identity HIT | sha={} label={!r}",
+            short_sha,
+            corrected,
+        )
+    return evidence
 
 
 async def _render_message(
@@ -1302,10 +1440,13 @@ async def _render_message(
     max_images_per_message: int = 5,
     sticker_store: Any | None = None,
     image_cache: Any | None = None,
-    desc_cache: dict[str, str] | None = None,
+    desc_cache: dict[str, Any] | None = None,
     mood_engine: Any | None = None,
     mood_group_id: str | int | None = None,
     mood_session_id: str = "",
+    visual_identity_store: Any | None = None,
+    current_user_id: str = "",
+    current_group_id: str | None = None,
 ) -> Content:
     from kernel.qq_face import face_to_text
 
@@ -1313,8 +1454,15 @@ async def _render_message(
         desc_cache = {}
 
     text_parts: list[str] = []
-    quoted_images: list[ImageRefBlock] = []
+    quoted_images: list[ImageRefBlock | dict[str, Any]] = []
     image_count = 0
+    # User-authored text collected first so image intent can gate side-channel
+    # summaries without rewriting prose into content_text.
+    user_text_for_intent = ""
+    for _seg in msg:
+        if getattr(_seg, "type", "") == "text":
+            user_text_for_intent += str(getattr(_seg, "data", {}).get("text", "") or "")
+    image_intent = classify_image_intent(user_text_for_intent)
 
     if reply is not None:
         reply_msg = getattr(reply, "message", None)
@@ -1337,6 +1485,7 @@ async def _render_message(
                 source_message_id: int | None,
             ) -> tuple[str, ImageRefBlock | None]:
                 summary = str(data.get("summary", "") or "").strip("[]") or "图片"
+                del summary  # never inject vision prose; neutral placeholder only
                 url = str(data.get("url", "") or "")
                 if not url and bot is not None and source_message_id is not None:
                     if source_message_id not in refetched_reply_urls:
@@ -1351,13 +1500,13 @@ async def _render_message(
                             refetched_reply_urls[source_message_id] = None
                     url = refetched_reply_urls[source_message_id] or ""
                 if not url or session is None or not vision_enabled:
-                    return f"[{summary}]", None
+                    return NEUTRAL_QUOTED_IMAGE_PLACEHOLDER, None
 
-                image_ref: ImageRefBlock | None = None
+                image_ref: dict[str, Any] | None = None
                 try:
                     async with session.get(url) as img_resp:
                         if img_resp.status != 200:
-                            return f"[{summary}]", None
+                            return NEUTRAL_QUOTED_IMAGE_PLACEHOLDER, None
                         img_data = await img_resp.read()
                         media_type = "image/jpeg"
                         if image_cache is not None:
@@ -1367,7 +1516,6 @@ async def _render_message(
                                 file_id = f"quoted_{hashlib.sha256(img_data).hexdigest()[:24]}"
                             image_ref = await image_cache.save_bytes(img_data, file_id=file_id)
                             if image_ref is not None:
-                                quoted_images.append(image_ref)
                                 from pathlib import Path
 
                                 try:
@@ -1378,23 +1526,66 @@ async def _render_message(
                                         "quoted cached image read failed | file_id={}",
                                         file_id,
                                     )
-                        desc = await _describe_image_data(
-                            img_data,
-                            media_type=media_type,
-                            vision_client=vision_client,
-                            character_recognizer=character_recognizer,
-                            sticker_store=sticker_store,
-                            desc_cache=desc_cache,
-                            mood_engine=mood_engine,
-                            mood_group_id=mood_group_id,
-                            mood_session_id=mood_session_id,
-                        )
+                        if image_ref is None:
+                            # Side-channel-only ref when disk cache is unavailable.
+                            # Path is non-loadable; structured metadata still rides
+                            # the image_ref for request-local system evidence.
+                            image_ref = {
+                                "type": "image_ref",
+                                "path": f"memory://quoted/{hashlib.sha256(img_data).hexdigest()[:24]}",
+                                "media_type": media_type,
+                            }
+                        try:
+                            enrichment_timeout_s = reply_limits.image_timeout_s
+                            if enrichment_timeout_s is None:
+                                enrichment_timeout_s = reply_limits.resolve_timeout_s
+                            evidence = await asyncio.wait_for(
+                                _describe_image_data(
+                                    img_data,
+                                    media_type=media_type,
+                                    vision_client=vision_client,
+                                    character_recognizer=character_recognizer,
+                                    sticker_store=sticker_store,
+                                    desc_cache=desc_cache,
+                                    mood_engine=mood_engine,
+                                    mood_group_id=mood_group_id,
+                                    mood_session_id=mood_session_id,
+                                    visual_identity_store=visual_identity_store,
+                                    current_user_id=current_user_id,
+                                    current_group_id=current_group_id,
+                                ),
+                                timeout=max(0.0001, float(enrichment_timeout_s)),
+                            )
+                        except TimeoutError:
+                            _log_debug.debug(
+                                "quoted image enrichment timed out | url={}",
+                                url[:80],
+                            )
+                            evidence = None
+                        except Exception:
+                            _log_debug.debug(
+                                "quoted image describe failed | url={}",
+                                url[:80],
+                            )
+                            evidence = None
+                        if image_ref is not None and evidence is not None:
+                            image_ref = attach_visual_sidechannel(
+                                image_ref, evidence, intent=image_intent
+                            )
+                        # Always surface image_ref when available so side-channel
+                        # (or bare ref) is not lost even if describe fails.
+                        if image_ref is not None:
+                            return NEUTRAL_QUOTED_IMAGE_PLACEHOLDER, image_ref  # type: ignore[return-value]
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     _log_debug.debug("quoted image fetch/describe failed | url={}", url[:80])
-                    return f"[{summary}]", None
-                return (f"[图片: {desc}]" if desc else f"[{summary}]"), None
+                    if image_ref is not None:
+                        return NEUTRAL_QUOTED_IMAGE_PLACEHOLDER, image_ref  # type: ignore[return-value]
+                    return NEUTRAL_QUOTED_IMAGE_PLACEHOLDER, None
+                # User text gets only a neutral quoted-image marker; evidence is
+                # on image_ref side-channel metadata.
+                return NEUTRAL_QUOTED_IMAGE_PLACEHOLDER, None
 
             uid = str(getattr(sender, "user_id", "") or "")
             is_reply_to_bot = bool(self_id and uid == self_id)
@@ -1410,6 +1601,16 @@ async def _render_message(
                 image_timeout_s=15.0,
                 max_images=max_images_per_message,
             )
+            enrichment_budget_s = reply_limits.image_timeout_s
+            if enrichment_budget_s is None:
+                enrichment_budget_s = reply_limits.resolve_timeout_s
+            renderer_limits = replace(
+                reply_limits,
+                # The inner enrichment budget must expire first so a saved
+                # image_ref can be returned instead of being cancelled by the
+                # renderer's whole-image timeout.
+                image_timeout_s=max(0.0001, float(enrichment_budget_s)) + 0.05,
+            )
             rendered_reply = await render_onebot_segments(
                 (),
                 reply=reply,
@@ -1417,7 +1618,7 @@ async def _render_message(
                 reply_resolver=resolve_reply if bot is not None else None,
                 forward_renderer=render_forward if bot is not None else None,
                 image_renderer=render_quoted_image,
-                limits=reply_limits,
+                limits=renderer_limits,
             )
             text_parts.append(rendered_reply.text)
             quoted_images.extend(rendered_reply.images)
@@ -1450,43 +1651,53 @@ async def _render_message(
                     image_tasks.append((task, label_prefix))
                     image_count += 1
                 else:
-                    text_parts.append(f"«{label_prefix}»")
+                    text_parts.append(_neutral_image_placeholder(animated=sub_type == 1))
             else:
-                text_parts.append(f"«{label_prefix}»")
+                text_parts.append(_neutral_image_placeholder(animated=sub_type == 1))
         elif seg.type == "image":
-            summary = seg.data.get("summary", "").strip("[]") or "图片"
-            text_parts.append(f"«{summary}»")
+            sub_type = int(seg.data.get("sub_type", 0) or 0)
+            text_parts.append(_neutral_image_placeholder(animated=sub_type == 1))
         elif seg.type == "forward":
             forward_id = seg.data.get("id", "")
             if forward_id and bot is not None:
                 text_parts.append(await _render_forward_msg(forward_id, bot))
 
-    images: list[tuple[ImageRefBlock, str]] = []
+    images: list[tuple[dict[str, Any], str]] = []
     if image_tasks:
         t0 = time.perf_counter()
         tasks = [t for t, _ in image_tasks]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for (_, label_prefix), r in zip(image_tasks, results, strict=True):
             if isinstance(r, BaseException) or r is None:
-                text_parts.append(f"«{label_prefix}»")
+                animated = label_prefix == "动画表情"
+                text_parts.append(_neutral_image_placeholder(animated=animated))
             else:
-                images.append((r, label_prefix))
+                images.append((dict(r), label_prefix))
         elapsed_ms = (time.perf_counter() - t0) * 1000
         _log_debug.debug(
             "render_message images | tasks={} ok={} elapsed={:.0f}ms",
             len(image_tasks), len(images), elapsed_ms,
         )
 
-    if images and (vision_client is not None or character_recognizer is not None):
+    enriched_images: list[dict[str, Any]] = []
+    if images and (
+        vision_client is not None
+        or character_recognizer is not None
+        or sticker_store is not None
+        or visual_identity_store is not None
+    ):
         from pathlib import Path
 
-        for i, (ref, label_prefix) in enumerate(images):
+        for ref, label_prefix in images:
             img_path = ref["path"]
+            animated = label_prefix == "动画表情"
             try:
                 data = Path(img_path).read_bytes()
                 # Full pipeline (desc_cache → sticker → CCIP/AnimeTrace → VL),
                 # shared with the quoted-reply branch via _describe_image_data.
-                desc = await _describe_image_data(
+                # Exact visual-identity recall is applied inside with privacy
+                # params (never cached into desc_cache).
+                evidence = await _describe_image_data(
                     data,
                     media_type=str(ref.get("media_type", "image/jpeg")),
                     vision_client=vision_client,
@@ -1496,29 +1707,37 @@ async def _render_message(
                     mood_engine=mood_engine,
                     mood_group_id=mood_group_id,
                     mood_session_id=mood_session_id,
+                    visual_identity_store=visual_identity_store,
+                    current_user_id=current_user_id,
+                    current_group_id=current_group_id,
                 )
-
-                if desc:
-                    text_parts.append(f"«{label_prefix}{i + 1}: {desc}»")
-                else:
-                    text_parts.append(f"«{label_prefix}»")
+                if evidence is not None:
+                    ref = attach_visual_sidechannel(ref, evidence, intent=image_intent)
+                enriched_images.append(ref)
+                # User-authored text: neutral placeholder only (never vision prose).
+                text_parts.append(_neutral_image_placeholder(animated=animated))
             except Exception:
                 _log_debug.warning("auto-describe failed | path={}", img_path)
-                text_parts.append(f"«{label_prefix}»")
-    elif images and vision_client is None:
-        for _i, (_ref, label_prefix) in enumerate(images):
-            text_parts.append(f"«{label_prefix}»")
+                text_parts.append(_neutral_image_placeholder(animated=animated))
+                enriched_images.append(ref)
+    elif images:
+        for ref, label_prefix in images:
+            enriched_images.append(ref)
+            text_parts.append(
+                _neutral_image_placeholder(animated=label_prefix == "动画表情")
+            )
 
     text = "".join(text_parts).strip()
 
-    if not images and not quoted_images:
+    if not enriched_images and not quoted_images:
         return text
 
     blocks: list[ContentBlock] = []
     if text:
         blocks.append(TextBlock(type="text", text=text))
-    blocks.extend(quoted_images)
-    blocks.extend(ref for ref, _ in images)
+    # image_ref dicts may carry extra visual side-channel keys beyond ImageRefBlock.
+    blocks.extend(cast(Any, quoted_images))
+    blocks.extend(cast(Any, enriched_images))
     return blocks
 
 
@@ -1946,6 +2165,9 @@ def setup_routers(
                 mood_engine=getattr(ctx, "mood_engine", None),
                 mood_group_id=group_id,
                 mood_session_id=f"group_{group_id}",
+                visual_identity_store=getattr(ctx, "visual_identity_store", None),
+                current_user_id=str(event.user_id),
+                current_group_id=str(group_id),
             )
 
             if not content:
@@ -2401,6 +2623,9 @@ def setup_routers(
             mood_engine=getattr(ctx, "mood_engine", None),
             mood_group_id=None,
             mood_session_id=f"private_{event.user_id}",
+            visual_identity_store=getattr(ctx, "visual_identity_store", None),
+            current_user_id=str(event.user_id),
+            current_group_id=None,
         )
         if not user_content:
             # NoneBot's _check_nickname strips the nickname from the message.

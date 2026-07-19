@@ -1,0 +1,45 @@
+{
+  "arc_id": "living_story_v1.ambient_park",
+  "revision": 0,
+  "title": "Living Story v1 · 环境线乐园余温",
+  "scope": "fiction",
+  "stage": "active",
+  "status": "active",
+  "starts_on": "2026-07-01",
+  "ends_on": "2026-12-31",
+  "arc_role": "ambient",
+  "stack_order": 2,
+  "goals": [
+    "保持乐园侧世界独立推进感"
+  ],
+  "active_conflicts": [],
+  "variables": {
+    "partner_momentum": 0.05
+  },
+  "partner_states": {
+    "nene": {
+      "mood": "practicing",
+      "note": "fiction ambient partner seed"
+    }
+  },
+  "open_threads": [
+    "下次碰面同步进度"
+  ],
+  "last_events": [],
+  "event_history": [],
+  "causal_links": [],
+  "deadlines": [],
+  "next_day_seed": "ambient: park continues without bot",
+  "event_budget": {
+    "now_step": 0,
+    "last_event_step": 0,
+    "generated_days": 0,
+    "setback_count": 0,
+    "events_this_tick": 0,
+    "triggered_once": [],
+    "cooldowns": {},
+    "storylet_available_at": {},
+    "last_viewed": {},
+    "committed_event_ids": []
+  }
+}

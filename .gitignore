@@ -16,6 +16,8 @@ dist/
 /config/
 !config/
 config/*
+!config/worldbook/
+!config/worldbook/**
 !config/persona/
 config/persona/*
 !config/persona/*/

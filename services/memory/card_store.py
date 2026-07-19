@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import secrets
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ CATEGORY_LABELS: dict[str, str] = {
 _VALID_CATEGORIES: frozenset[str] = frozenset(CATEGORY_LABELS.keys())
 _VALID_SCOPES: frozenset[str] = frozenset(("user", "group", "global"))
 _VALID_STATUSES: frozenset[str] = frozenset(("active", "superseded", "expired"))
+# Visibility is distinct from storage scope. Missing/unknown → fail closed
+# for cross-scope automatic recall (see services.memory.visibility).
+_VALID_VISIBILITIES: frozenset[str] = frozenset(("private", "same_group", "global"))
 
 _CREATE_TABLE = """\
 CREATE TABLE IF NOT EXISTS memory_cards (
@@ -61,12 +65,35 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_cards_source ON memory_cards(source)",
 ]
 
+_CREATE_OBSERVATIONS_TABLE = """\
+CREATE TABLE IF NOT EXISTS memory_card_observations (
+    observation_id    TEXT PRIMARY KEY,
+    card_id           TEXT NOT NULL,
+    decision          TEXT NOT NULL,
+    source_message_id TEXT,
+    evidence_text     TEXT,
+    observed_at       TEXT NOT NULL,
+    captured_by       TEXT NOT NULL DEFAULT 'unknown',
+    meta_json         TEXT
+)"""
+
+_CREATE_OBSERVATION_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_obs_card_id ON memory_card_observations(card_id)",
+    "CREATE INDEX IF NOT EXISTS idx_obs_source_message_id "
+    "ON memory_card_observations(source_message_id)",
+    # Idempotency: same (card, source, decision) only once when source is present.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_card_source_decision_unique "
+    "ON memory_card_observations(card_id, source_message_id, decision) "
+    "WHERE source_message_id IS NOT NULL",
+]
+
 _INSERT = """\
 INSERT INTO memory_cards
     (card_id, category, scope, scope_id, content, confidence, status, priority,
      supersedes, source, source_msg_id, captured_at, captured_by,
-     created_at, updated_at, last_seen_at, ttl_turns, series_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+     created_at, updated_at, last_seen_at, ttl_turns, series_id,
+     origin_group_id, visibility, subject_user_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 _CREATE_SERIES_TABLE = """\
 CREATE TABLE IF NOT EXISTS card_series (
@@ -121,6 +148,10 @@ class Card:
     last_seen_at: str | None
     ttl_turns: int | None
     series_id: str | None = None
+    # Visibility / provenance (additive; None on legacy rows → fail closed)
+    origin_group_id: str | None = None
+    visibility: str | None = None
+    subject_user_id: str | None = None
 
 
 @dataclass
@@ -135,6 +166,9 @@ class NewCard:
     supersedes: str | None = None
     ttl_turns: int | None = None
     series_id: str | None = None
+    origin_group_id: str | None = None
+    visibility: str | None = None
+    subject_user_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.category not in _VALID_CATEGORIES:
@@ -146,6 +180,20 @@ class NewCard:
             raise ValueError("scope_id is required for user/group cards")
         if self.scope == "global" and not self.scope_id:
             self.scope_id = "global"
+        if self.origin_group_id is not None:
+            og = str(self.origin_group_id).strip()
+            self.origin_group_id = og or None
+        if self.visibility is not None:
+            vis = str(self.visibility).strip().lower()
+            if vis not in _VALID_VISIBILITIES:
+                raise ValueError(
+                    f"Invalid visibility: {self.visibility!r}, "
+                    f"must be one of {sorted(_VALID_VISIBILITIES)}"
+                )
+            self.visibility = vis
+        if self.subject_user_id is not None:
+            sub = str(self.subject_user_id).strip()
+            self.subject_user_id = sub or None
 
 
 @dataclass
@@ -171,7 +219,20 @@ class NewCardSeries:
     meta_json: str | None = None
 
 
+@dataclass
+class CardObservation:
+    observation_id: str
+    card_id: str
+    decision: str
+    source_message_id: str | None
+    evidence_text: str | None
+    observed_at: str
+    captured_by: str
+    meta_json: str | None = None
+
+
 def _row_to_card(row: aiosqlite.Row) -> Card:
+    keys = row.keys()
     return Card(
         card_id=row["card_id"],
         category=row["category"],
@@ -183,14 +244,17 @@ def _row_to_card(row: aiosqlite.Row) -> Card:
         priority=row["priority"],
         supersedes=row["supersedes"],
         source=row["source"],
-        source_msg_id=row["source_msg_id"] if "source_msg_id" in row.keys() else None,  # noqa: SIM118
-        captured_at=row["captured_at"] if "captured_at" in row.keys() else None,  # noqa: SIM118
-        captured_by=row["captured_by"] if "captured_by" in row.keys() else "unknown",  # noqa: SIM118
+        source_msg_id=row["source_msg_id"] if "source_msg_id" in keys else None,
+        captured_at=row["captured_at"] if "captured_at" in keys else None,
+        captured_by=row["captured_by"] if "captured_by" in keys else "unknown",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         last_seen_at=row["last_seen_at"],
         ttl_turns=row["ttl_turns"],
-        series_id=row["series_id"] if "series_id" in row.keys() else None,  # noqa: SIM118
+        series_id=row["series_id"] if "series_id" in keys else None,
+        origin_group_id=row["origin_group_id"] if "origin_group_id" in keys else None,
+        visibility=row["visibility"] if "visibility" in keys else None,
+        subject_user_id=row["subject_user_id"] if "subject_user_id" in keys else None,
     )
 
 
@@ -208,10 +272,36 @@ def _row_to_series(row: aiosqlite.Row) -> CardSeries:
     )
 
 
+def _row_to_observation(row: aiosqlite.Row) -> CardObservation:
+    return CardObservation(
+        observation_id=row["observation_id"],
+        card_id=row["card_id"],
+        decision=row["decision"],
+        source_message_id=row["source_message_id"],
+        evidence_text=row["evidence_text"],
+        observed_at=row["observed_at"],
+        captured_by=row["captured_by"] if "captured_by" in row.keys() else "unknown",  # noqa: SIM118
+        meta_json=row["meta_json"] if "meta_json" in row.keys() else None,  # noqa: SIM118
+    )
+
+
+def _normalize_source_msg_id(source_msg_id: Any) -> str | None:
+    if source_msg_id is None:
+        return None
+    value = str(source_msg_id).strip()
+    return value or None
+
+
+def _generate_observation_id() -> str:
+    return "obs_" + secrets.token_hex(8)
+
+
 class CardStore:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        # Same-instance write serialization (supersede / reinforce / mutators).
+        self._write_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -236,7 +326,29 @@ class CardStore:
             await self._db.execute(
                 "ALTER TABLE memory_cards ADD COLUMN captured_by TEXT NOT NULL DEFAULT 'unknown'"
             )
+        # Visibility / provenance (additive; NULL = legacy fail-closed for cross-scope)
+        with contextlib.suppress(Exception):
+            await self._db.execute(
+                "ALTER TABLE memory_cards ADD COLUMN origin_group_id TEXT DEFAULT NULL"
+            )
+        with contextlib.suppress(Exception):
+            await self._db.execute(
+                "ALTER TABLE memory_cards ADD COLUMN visibility TEXT DEFAULT NULL"
+            )
+        with contextlib.suppress(Exception):
+            await self._db.execute(
+                "ALTER TABLE memory_cards ADD COLUMN subject_user_id TEXT DEFAULT NULL"
+            )
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_cards_series ON memory_cards(series_id)")
+        with contextlib.suppress(Exception):
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cards_origin_group "
+                "ON memory_cards(origin_group_id, visibility, status)"
+            )
+        # Write-policy observations (additive)
+        await self._db.execute(_CREATE_OBSERVATIONS_TABLE)
+        for idx in _CREATE_OBSERVATION_INDEXES:
+            await self._db.execute(idx)
         await self._db.commit()
 
         await self._backfill_food_series()
@@ -359,6 +471,23 @@ class CardStore:
         captured_at: str | None = None,
         captured_by: str = "unknown",
     ) -> str:
+        async with self._write_lock:
+            return await self._add_card_unlocked(
+                card,
+                source_msg_id=source_msg_id,
+                captured_at=captured_at,
+                captured_by=captured_by,
+            )
+
+    async def _add_card_unlocked(
+        self,
+        card: NewCard,
+        *,
+        source_msg_id: str | None = None,
+        captured_at: str | None = None,
+        captured_by: str = "unknown",
+        commit: bool = True,
+    ) -> str:
         card_id = _generate_card_id()
         now = _now_iso()
         source_msg_id_value = str(source_msg_id).strip() if source_msg_id is not None else None
@@ -378,17 +507,28 @@ class CardStore:
                 captured_at_value or None, captured_by_value,
                 now, now, None, card.ttl_turns,
                 card.series_id,
+                card.origin_group_id,
+                card.visibility,
+                card.subject_user_id,
             ),
         )
-        await db.commit()
+        if commit:
+            await db.commit()
         logger.debug("card added | id={} category={} scope={}/{}", card_id, card.category, card.scope, card.scope_id)
         return card_id
 
     async def update_card(self, card_id: str, **fields: Any) -> bool:
+        async with self._write_lock:
+            return await self._update_card_unlocked(card_id, **fields)
+
+    async def _update_card_unlocked(self, card_id: str, **fields: Any) -> bool:
         if not fields:
             return False
-        allowed = {"content", "category", "confidence", "priority", "status",
-                   "supersedes", "last_seen_at", "ttl_turns", "scope", "scope_id", "series_id"}
+        allowed = {
+            "content", "category", "confidence", "priority", "status",
+            "supersedes", "last_seen_at", "ttl_turns", "scope", "scope_id",
+            "series_id", "origin_group_id", "visibility", "subject_user_id",
+        }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False
@@ -426,17 +566,200 @@ class CardStore:
         cards.sort(key=lambda c: (-c.priority, c.updated_at), reverse=False)
         return cards
 
-    async def supersede_card(self, old_card_id: str, new_card: NewCard) -> str:
-        new_card.supersedes = old_card_id
-        new_id = await self.add_card(new_card)
-        await self.update_card(old_card_id, status="superseded")
-        return new_id
+    async def supersede_card(
+        self,
+        old_card_id: str,
+        new_card: NewCard,
+        *,
+        source_msg_id: str | None = None,
+        source_message_id: str | None = None,
+        captured_by: str = "unknown",
+        evidence_text: str | None = None,
+        evidence: str | None = None,
+        meta_json: str | None = None,
+    ) -> str:
+        """Insert *new_card*, mark *old_card_id* superseded, optionally record obs.
+
+        Runs under the same-instance write lock with BEGIN IMMEDIATE so concurrent
+        supersedes of the same card serialize cleanly: exactly one successor, and
+        the loser fails without orphans. The new card must keep the same owner
+        scope/scope_id; trusted Dream/tool callers may correct its category.
+        """
+        # Accept either source_msg_id or source_message_id alias.
+        src = _normalize_source_msg_id(
+            source_msg_id if source_msg_id is not None else source_message_id
+        )
+        evidence_value = evidence_text if evidence_text is not None else evidence
+        # Provenance/observation only when evidence or source is supplied.
+        # Dream/tools call with default captured_by="unknown" and no evidence —
+        # keep legacy insert+status behaviour without observation rows.
+        has_provenance = bool(
+            src is not None
+            or (evidence_value is not None and str(evidence_value).strip())
+        )
+
+        async with self._write_lock:
+            db = self._require_db()
+            # Reserve a write lock at the SQLite level before any mutation.
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                # Re-read / validate old card INSIDE the transaction.
+                cursor = await db.execute(_SELECT_BY_ID, (old_card_id,))
+                row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError(
+                        f"cannot supersede non-active or missing card: {old_card_id!r}"
+                    )
+                old = _row_to_card(row)
+                if old.status != "active":
+                    raise ValueError(
+                        f"cannot supersede non-active or missing card: {old_card_id!r}"
+                    )
+
+                # Ownership cannot move across scopes. Category corrections are
+                # allowed for trusted Dream/tool callers; MemoExtractor enforces
+                # same-category targets before reaching the store.
+                if (
+                    new_card.scope != old.scope
+                    or new_card.scope_id != old.scope_id
+                ):
+                    raise ValueError(
+                        "supersede new card must match old scope/scope_id: "
+                        f"old=({old.scope!r},{old.scope_id!r},{old.category!r}) "
+                        f"new=({new_card.scope!r},{new_card.scope_id!r},{new_card.category!r})"
+                    )
+
+                new_card.supersedes = old_card_id
+                card_id = _generate_card_id()
+                now = _now_iso()
+                captured_by_value = str(captured_by or "").strip() or "unknown"
+                captured_at_value = now if src is not None else None
+
+                # Conditional status flip: only one concurrent winner gets rowcount==1.
+                status_cur = await db.execute(
+                    "UPDATE memory_cards SET status = ?, updated_at = ? "
+                    "WHERE card_id = ? AND status = 'active'",
+                    ("superseded", now, old_card_id),
+                )
+                if status_cur.rowcount != 1:
+                    raise ValueError(
+                        f"cannot supersede non-active or missing card: {old_card_id!r}"
+                    )
+
+                # Inline insert (do not call add_card — would re-enter write lock).
+                # Preserve visibility metadata from the new card; if omitted,
+                # inherit origin/visibility/subject from the superseded card so
+                # write-policy supersede does not silently strip scope metadata.
+                origin_group_id = (
+                    new_card.origin_group_id
+                    if new_card.origin_group_id is not None
+                    else old.origin_group_id
+                )
+                visibility = (
+                    new_card.visibility
+                    if new_card.visibility is not None
+                    else old.visibility
+                )
+                subject_user_id = (
+                    new_card.subject_user_id
+                    if new_card.subject_user_id is not None
+                    else old.subject_user_id
+                )
+                await db.execute(
+                    _INSERT,
+                    (
+                        card_id,
+                        new_card.category,
+                        new_card.scope,
+                        new_card.scope_id,
+                        new_card.content,
+                        new_card.confidence,
+                        "active",
+                        new_card.priority,
+                        old_card_id,
+                        new_card.source,
+                        src,
+                        captured_at_value,
+                        captured_by_value,
+                        now,
+                        now,
+                        None,
+                        new_card.ttl_turns,
+                        new_card.series_id,
+                        origin_group_id,
+                        visibility,
+                        subject_user_id,
+                    ),
+                )
+                if has_provenance:
+                    obs_id = _generate_observation_id()
+                    await db.execute(
+                        "INSERT INTO memory_card_observations "
+                        "(observation_id, card_id, decision, source_message_id, "
+                        "evidence_text, observed_at, captured_by, meta_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            obs_id,
+                            card_id,
+                            "supersede",
+                            src,
+                            (
+                                str(evidence_value).strip()
+                                if evidence_value is not None
+                                else None
+                            )
+                            or None,
+                            now,
+                            captured_by_value,
+                            meta_json,
+                        ),
+                    )
+                await db.commit()
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+                raise
+
+            logger.debug(
+                "card superseded | old={} new={} category={}",
+                old_card_id,
+                card_id,
+                new_card.category,
+            )
+            return card_id
 
     async def mark_seen(self, card_id: str) -> bool:
         return await self.update_card(card_id, last_seen_at=_now_iso())
 
     async def expire_card(self, card_id: str) -> bool:
         return await self.update_card(card_id, status="expired")
+
+    async def list_observations(
+        self,
+        card_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[CardObservation]:
+        """List observations for a card.
+
+        ``limit`` is optional and backward-compatible: omit for all rows
+        (legacy callers). When provided, returns at most ``limit`` rows in
+        observed_at ASC order.
+        """
+        sql = (
+            "SELECT * FROM memory_card_observations WHERE card_id = ? "
+            "ORDER BY observed_at ASC, observation_id ASC"
+        )
+        params: list[Any] = [card_id]
+        if limit is not None:
+            lim = max(0, int(limit))
+            if lim == 0:
+                return []
+            sql += " LIMIT ?"
+            params.append(lim)
+        cursor = await self._require_db().execute(sql, params)
+        rows = await cursor.fetchall()
+        return [_row_to_observation(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Query helpers
@@ -476,6 +799,80 @@ class CardStore:
         rows = await cursor.fetchall()
         return [_row_to_card(r) for r in rows]
 
+    async def list_active_chain_heads(
+        self,
+        scope: str,
+        scope_id: str,
+        *,
+        limit: int = 24,
+        category: str | None = None,
+    ) -> list[Card]:
+        """Active cards that supersede a parent (temporal-trace chain heads).
+
+        Hard-capped at 24. Ordering is deterministic across calls.
+        """
+        limit = max(0, min(int(limit), 24))
+        if limit == 0:
+            return []
+        sql = (
+            "SELECT * FROM memory_cards "
+            "WHERE scope = ? AND scope_id = ? AND status = 'active' "
+            "AND supersedes IS NOT NULL AND supersedes != ''"
+        )
+        params: list[Any] = [scope, scope_id]
+        if category is not None:
+            sql += " AND category = ?"
+            params.append(category)
+        sql += " ORDER BY updated_at DESC, card_id ASC LIMIT ?"
+        params.append(limit)
+        cursor = await self._require_db().execute(sql, params)
+        rows = await cursor.fetchall()
+        return [_row_to_card(r) for r in rows]
+
+    async def walk_supersedes_chain(
+        self,
+        head_card_id: str,
+        *,
+        max_depth: int = 4,
+    ) -> list[Card]:
+        """Walk head → parents via ``supersedes`` pointers (head first).
+
+        Fail-closed: returns ``[]`` on missing head/parent, non-active head,
+        non-superseded parent, cross-scope/category, or cycle.
+
+        Public ``max_depth`` is hard-clamped to 4 (temporal-trace v1 bound).
+        """
+        max_depth = max(0, min(int(max_depth), 4))
+        if max_depth == 0 or not head_card_id:
+            return []
+        head = await self.get_card(head_card_id)
+        if head is None or head.status != "active":
+            return []
+        chain: list[Card] = [head]
+        seen: set[str] = {head.card_id}
+        current = head
+        while len(chain) < max_depth:
+            parent_id = (current.supersedes or "").strip()
+            if not parent_id:
+                break
+            if parent_id in seen:
+                return []
+            parent = await self.get_card(parent_id)
+            if parent is None:
+                return []
+            if parent.status != "superseded":
+                return []
+            if (
+                parent.scope != head.scope
+                or parent.scope_id != head.scope_id
+                or parent.category != head.category
+            ):
+                return []
+            seen.add(parent.card_id)
+            chain.append(parent)
+            current = parent
+        return chain
+
     async def search_cards(self, query: str, *, scope: str | None = None, limit: int = 10) -> list[Card]:
         sql = "SELECT * FROM memory_cards WHERE status = 'active' AND content LIKE ?"
         params: list[Any] = [f"%{query}%"]
@@ -493,6 +890,10 @@ class CardStore:
     # ------------------------------------------------------------------
 
     async def create_series(self, series: NewCardSeries) -> CardSeries:
+        async with self._write_lock:
+            return await self._create_series_unlocked(series)
+
+    async def _create_series_unlocked(self, series: NewCardSeries) -> CardSeries:
         series_id = "ser_" + secrets.token_hex(4)
         now = _now_iso()
         db = self._require_db()
@@ -529,10 +930,15 @@ class CardStore:
         existing = await self.get_series_by_key(series_key)
         if existing:
             return existing
-        return await self.create_series(NewCardSeries(
-            series_key=series_key, scope=scope, scope_id=scope_id,
-            label=label, source=source,
-        ))
+        async with self._write_lock:
+            # Re-check under lock to avoid races / double create.
+            existing = await self.get_series_by_key(series_key)
+            if existing:
+                return existing
+            return await self._create_series_unlocked(NewCardSeries(
+                series_key=series_key, scope=scope, scope_id=scope_id,
+                label=label, source=source,
+            ))
 
     async def get_series_cards(self, series_id: str, *, status: str = "active") -> list[Card]:
         cursor = await self._require_db().execute(
@@ -553,6 +959,61 @@ class CardStore:
             "SELECT * FROM card_series ORDER BY created_at DESC")
         rows = await cursor.fetchall()
         return [_row_to_series(r) for r in rows]
+
+    async def find_by_source_message_ids(
+        self,
+        message_ids: Any,
+        *,
+        allowed_scopes: set[tuple[str, str]] | None = None,
+    ) -> list[Card]:
+        """Return active cards whose ``source_msg_id`` is in ``message_ids``.
+
+        Dedupes by card_id, orders by card_id ascending. When
+        ``allowed_scopes`` is provided, only cards whose (scope, scope_id)
+        pair is in that set are returned.
+        """
+        if not message_ids:
+            return []
+        mids: list[str] = []
+        for raw in message_ids:
+            if raw is None:
+                continue
+            mid = str(raw).strip()
+            if not mid or mid in mids:
+                continue
+            mids.append(mid)
+        if not mids:
+            return []
+        placeholders = ", ".join("?" for _ in mids)
+        sql = (
+            "SELECT * FROM memory_cards "
+            f"WHERE status = 'active' AND source_msg_id IN ({placeholders})"
+        )
+        params: list[Any] = list(mids)
+        if allowed_scopes is not None:
+            scope_pairs = [
+                (str(scope), str(scope_id))
+                for scope, scope_id in allowed_scopes
+                if scope is not None and scope_id is not None
+            ]
+            if not scope_pairs:
+                return []
+            scope_clauses = " OR ".join("(scope = ? AND scope_id = ?)" for _ in scope_pairs)
+            sql += f" AND ({scope_clauses})"
+            for scope, scope_id in scope_pairs:
+                params.extend([scope, scope_id])
+        sql += " ORDER BY card_id ASC"
+        cursor = await self._require_db().execute(sql, tuple(params))
+        cards = [_row_to_card(row) for row in await cursor.fetchall()]
+        # Defensive dedupe by card_id (SQL should already be unique).
+        seen: set[str] = set()
+        result: list[Card] = []
+        for card in cards:
+            if card.card_id in seen:
+                continue
+            seen.add(card.card_id)
+            result.append(card)
+        return result
 
     # ------------------------------------------------------------------
     # Similarity & reinforcement
@@ -579,13 +1040,91 @@ class CardStore:
         card = _row_to_card(row)
         return card if card.confidence >= threshold else None
 
-    async def reinforce(self, card_id: str, boost: float = 0.1) -> bool:
-        """Increase confidence of a card (cap at 1.0) and update last_seen_at."""
-        card = await self.get_card(card_id)
-        if card is None:
-            return False
-        new_conf = min(1.0, card.confidence + boost)
-        return await self.update_card(card_id, confidence=new_conf, last_seen_at=_now_iso())
+    async def reinforce(
+        self,
+        card_id: str,
+        boost: float = 0.1,
+        *,
+        evidence_text: str | None = None,
+        source_message_id: str | None = None,
+        captured_by: str | None = None,
+        decision: str = "reinforce",
+        meta_json: str | None = None,
+    ) -> bool:
+        """Increase confidence of a card (cap at 1.0) and update last_seen_at.
+
+        When evidence/source is supplied, confidence + observation land in the
+        same transaction. Same (card_id, source_message_id, decision) is
+        idempotent (unique partial index).
+        """
+        src = _normalize_source_msg_id(source_message_id)
+        has_observation = bool(
+            src is not None
+            or (evidence_text is not None and str(evidence_text).strip())
+        )
+
+        async with self._write_lock:
+            card = await self.get_card(card_id)
+            if card is None:
+                return False
+
+            # Legacy path: confidence + last_seen only (under write lock, no nested lock).
+            if not has_observation:
+                new_conf = min(1.0, card.confidence + boost)
+                return await self._update_card_unlocked(
+                    card_id, confidence=new_conf, last_seen_at=_now_iso()
+                )
+
+            now = _now_iso()
+            new_conf = min(1.0, card.confidence + boost)
+            captured_by_value = str(captured_by or "").strip() or "unknown"
+            decision_value = str(decision or "reinforce").strip() or "reinforce"
+            evidence_value = (
+                str(evidence_text).strip() if evidence_text is not None else None
+            ) or None
+            db = self._require_db()
+
+            # Idempotent: if observation already exists, skip conf re-boost.
+            if src is not None:
+                cursor = await db.execute(
+                    "SELECT observation_id FROM memory_card_observations "
+                    "WHERE card_id = ? AND source_message_id = ? AND decision = ?",
+                    (card_id, src, decision_value),
+                )
+                existing = await cursor.fetchone()
+                if existing is not None:
+                    return True
+
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.execute(
+                    "UPDATE memory_cards SET confidence = ?, last_seen_at = ?, "
+                    "updated_at = ? WHERE card_id = ?",
+                    (new_conf, now, now, card_id),
+                )
+                obs_id = _generate_observation_id()
+                await db.execute(
+                    "INSERT INTO memory_card_observations "
+                    "(observation_id, card_id, decision, source_message_id, "
+                    "evidence_text, observed_at, captured_by, meta_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        obs_id,
+                        card_id,
+                        decision_value,
+                        src,
+                        evidence_value,
+                        now,
+                        captured_by_value,
+                        meta_json,
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+                raise
+            return True
 
     # ------------------------------------------------------------------
     # Prompt builders

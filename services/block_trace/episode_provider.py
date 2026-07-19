@@ -1,23 +1,27 @@
 """EpisodeProvider — D.4 recall path for ``enabled_for_prompt`` episodes.
 
-Pulls top-K episodes whose state is ``enabled_for_prompt`` for the
-current group, renders them into one PromptBlockCandidate, and stamps
-``last_used_at`` per recalled episode for downstream decay accounting.
+Pulls a bounded candidate pool of episodes whose state is
+``enabled_for_prompt`` for the current group (and not past ``decay_at``
+under the store default eligibility contract), applies register filter,
+reranks by deterministic ngram relevance against the query conversation
+text, selects top-K, renders one PromptBlockCandidate, and stamps
+``last_used_at`` per *selected* episode for downstream decay accounting.
 
 Design notes (from
 ``docs/audits/multilayer-memory-phase-d-design-audit-2026-05-21.md``
-§ D.4):
+§ D.4 + Memory Episode v2 decay/rerank slice):
 
 - ``enabled_for_prompt`` is the **only** state that may surface in the
   prompt — invariant enforced by ``EpisodeStore.list_for_recall``
 - top-K default = 3, priority **lower** than slang/style so the budget
   manager trims episodes first under pressure
-- no new LLM call: matching is left to operator promotion + (future)
-  normalizer cluster_id lookups; this provider is pure SQL + string
+- candidate fetch is hard-capped (``_CANDIDATE_POOL_CAP``); final output
+  is hard-capped at ``top_k``
+- query-conditioned rerank is stable: relevance DESC only so ties keep
+  store order (confidence DESC / updated_at DESC). Empty query → no
+  reordering. No relevance threshold (does not suppress all fallback).
 - ``BlockTraceBus`` double-write is the responsibility of the bus
-  itself (it records every PromptBlockCandidate that surfaces); the
-  provider only encodes ``evidence_refs=(episode_id,)`` so that
-  ``find_by_source_ref(source='episode', source_id=ep_id)`` works
+  itself; the provider encodes ``evidence_refs`` for selected ids only
 """
 
 from __future__ import annotations
@@ -32,6 +36,8 @@ from loguru import logger
 from services.block_trace.providers import ContextProvider, QueryContext
 from services.block_trace.types import PromptBlockCandidate
 from services.humanization import REGISTER_LABEL_SLOT
+from services.memory.linked_refs import linked_ref_evidence
+from services.similarity import create_similarity_provider
 from services.system_module import Scope
 
 if TYPE_CHECKING:
@@ -49,6 +55,28 @@ _EPISODE_PRIORITY = 50
 # even when an admin slipped through a long reflection. Total block size
 # is therefore at most top_k * this cap.
 _PER_EPISODE_CHAR_CAP = 280
+
+# Hard cap on how many eligible episodes we pull from the store before
+# register filter + query-conditioned rerank. Final selection remains top_k.
+# Fetch sizing: min(CAP, max(top_k, top_k * 3)) so small top_k does not
+# always pull the full pool while large top_k stays hard-capped.
+_CANDIDATE_POOL_CAP = 24
+
+# Total character budget for the ngram composite document (all rerank
+# fields joined). Field order is fixed; overflow truncates the joined
+# string at this cap (no partial-field rebalancing).
+_COMPOSITE_CHAR_CAP = 1200
+
+# Fields composed into the ngram scoring document (bounded composite).
+_RERANK_FIELDS = (
+    "situation",
+    "observed_context",
+    "action_taken",
+    "outcome_signal",
+    "reflection",
+)
+
+_SIMILARITY = create_similarity_provider("ngram")
 
 
 def _render_episode_line(ep: Episode) -> str:
@@ -84,6 +112,49 @@ def _render_episode_line(ep: Episode) -> str:
     return line
 
 
+def _episode_composite_text(ep: Any) -> str:
+    """Bounded composite document for ngram relevance scoring.
+
+    Fields are joined in ``_RERANK_FIELDS`` order with ``\\n``. Empty
+    fields are skipped. The joined document is hard-truncated at
+    ``_COMPOSITE_CHAR_CAP`` (default 1200) so a single long reflection
+    cannot dominate scoring cost or inflate similarity inputs.
+    """
+    chunks: list[str] = []
+    for field in _RERANK_FIELDS:
+        raw = getattr(ep, field, "") or ""
+        text = str(raw).strip()
+        if text:
+            chunks.append(text)
+    joined = "\n".join(chunks)
+    if len(joined) > _COMPOSITE_CHAR_CAP:
+        return joined[:_COMPOSITE_CHAR_CAP]
+    return joined
+
+
+def _rerank_by_query(episodes: list[Any], query_text: str) -> list[Any]:
+    """Stable relevance DESC sort; ties preserve store order.
+
+    Empty or normalization-empty query leaves ``episodes`` order unchanged
+    (store: confidence DESC, updated_at DESC).
+    """
+    query = (query_text or "").strip()
+    if not query:
+        return list(episodes)
+    # Probe normalize emptiness via similarity self-score path: empty keys
+    # yield 0.0 for any right side when left normalizes empty.
+    if _SIMILARITY.similarity(query, query) <= 0.0:
+        return list(episodes)
+
+    scored: list[tuple[float, int, Any]] = []
+    for index, ep in enumerate(episodes):
+        score = _SIMILARITY.similarity(query, _episode_composite_text(ep))
+        scored.append((score, index, ep))
+    # relevance DESC only; index ASC preserves store order on ties
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [ep for _, _, ep in scored]
+
+
 class EpisodeProvider:
     """ContextProvider that pulls ``enabled_for_prompt`` episodes.
 
@@ -113,10 +184,17 @@ class EpisodeProvider:
         if store is None:
             return []
         register_label = _read_register_label(ctx)
+        # Bounded candidate pool: want headroom for register filter + rerank
+        # (about 3× top_k) but never below top_k and never above the hard cap.
+        # top_k=1 → fetch 3; top_k=10 → fetch 24 (cap); top_k=100 → still 24.
+        fetch_limit = min(
+            _CANDIDATE_POOL_CAP,
+            max(self._top_k, self._top_k * 3),
+        )
         try:
             episodes = await store.list_for_recall(
                 group_id=str(ctx.group_id),
-                limit=max(self._top_k, self._top_k * 3),
+                limit=fetch_limit,
             )
         except Exception as exc:
             _L.warning("episode recall failed | group={} err={}", ctx.group_id, exc)
@@ -124,16 +202,27 @@ class EpisodeProvider:
         if not episodes:
             return []
 
+        # 1) Register filter on the full candidate pool (before top_k).
+        register_matched = [
+            ep for ep in episodes if _episode_matches_register(ep, register_label)
+        ]
+        if not register_matched:
+            return []
+
+        # 2) Query-conditioned stable rerank (ties keep store order).
+        ranked = _rerank_by_query(register_matched, ctx.conversation_text or "")
+
+        # 3) Final top_k selection among renderable lines.
         lines: list[str] = []
         episode_ids: list[str] = []
-        for ep in episodes:
-            if not _episode_matches_register(ep, register_label):
-                continue
+        selected_episodes: list[Any] = []
+        for ep in ranked:
             line = _render_episode_line(ep)
             if not line:
                 continue
             lines.append(f"- {line}")
             episode_ids.append(ep.episode_id)
+            selected_episodes.append(ep)
             if len(lines) >= self._top_k:
                 break
 
@@ -142,7 +231,22 @@ class EpisodeProvider:
 
         block_text = "相关历史反思（从过往同类场景沉淀，仅供参考）：\n" + "\n".join(lines)
 
-        # Stamp last_used_at on every recalled episode — best-effort.
+        # Typed linked evidence for selected episodes only (after episode ids).
+        typed_evidence: list[str] = []
+        seen_typed: set[str] = set()
+        for ep in selected_episodes:
+            linked_raw = getattr(ep, "linked_memory_ids", None)
+            if not linked_raw:
+                linked_raw = getattr(ep, "linked_memory_refs", None)
+            for ref in linked_ref_evidence(linked_raw):
+                if ref in seen_typed:
+                    continue
+                seen_typed.add(ref)
+                typed_evidence.append(ref)
+
+        evidence_refs = tuple(episode_ids) + tuple(typed_evidence)
+
+        # Stamp last_used_at on every *selected* episode — best-effort.
         # Failures here must not block the prompt block from surfacing,
         # so we suppress and log. ``asyncio.gather`` keeps stamping
         # parallel-ish without serializing the recall path.
@@ -167,8 +271,13 @@ class EpisodeProvider:
             group_id=ctx.group_id or "",
             hit_reason="episode_recall_enabled_for_prompt",
             char_count=len(block_text),
-            evidence_refs=tuple(episode_ids),
-            metadata={"episode_count": len(episode_ids), "register_label": register_label},
+            evidence_refs=evidence_refs,
+            metadata={
+                "episode_count": len(episode_ids),
+                "register_label": register_label,
+                "typed_evidence_count": len(typed_evidence),
+                "typed_evidence_refs": list(typed_evidence),
+            },
         )
         return [candidate]
 

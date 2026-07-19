@@ -25,6 +25,11 @@
     "history_enabled": {
       "type": "boolean",
       "title": "启用历史记忆"
+    },
+    "write_policy_enabled": {
+      "type": "boolean",
+      "title": "启用热路径写入策略",
+      "description": "Conflict-aware add/reinforce/supersede/skip for MemoExtractor"
     }
   }
 }

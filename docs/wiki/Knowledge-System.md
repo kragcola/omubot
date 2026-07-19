@@ -434,6 +434,16 @@ Omubot 管理端也叫 Web 后台、Admin Console、控制台。
 - `knowledge` 插件配置中的扫描目录 / include / exclude；
 - `ContextPlugin` 的命中日志与 `doc_chunk` 观察结果。
 
+### 2026-07-17 本地记忆加强（尚未部署）
+
+当前工作树已离线完成 query-aware plan、card category eligibility、
+pack/evidence-use gates、TemporalTrace、graph provenance/observability 与
+联合 prompt telemetry，但生产仍是 `98887a5` 的旧行为。上述开关不可按
+本地默认值一次性首发；未来若另行获得部署授权，必须使用
+`docs/runbooks/memory-system-staged-rollout-v1.md` 与对应 JSON 累积 profile，
+从 Stage 0 dark behavior 开始逐阶段观察。PPR、GraphRAG community summary、
+完整 MemGPT/Letta tool loop 与官方全量 benchmark CI 仍是 NO-GO/defer。
+
 ## 和知识图谱的关系
 
 文档知识库是“原文资料层”，知识图谱是“派生事实层”。

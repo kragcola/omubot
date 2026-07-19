@@ -6,7 +6,7 @@
     "en": "Memo"
   },
   "description": "记忆系统：卡片索引、实体记忆注入、对话后提取",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "priority": 30,
   "tier": "user",
   "toggle_policy": "restart_required",
@@ -35,7 +35,8 @@
       "user_max_chars",
       "group_max_chars",
       "index_max_lines",
-      "history_enabled"
+      "history_enabled",
+      "write_policy_enabled"
     ]
   },
   "store": {

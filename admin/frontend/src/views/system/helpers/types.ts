@@ -125,6 +125,7 @@ export type ProviderTaskKey =
   | 'scheduler_eot'
   | 'scheduler_replay_judge'
   | 'birthday_wish'
+  | 'qzone_journal_compose'
 
 export interface ProviderTaskProfile {
   task: ProviderTaskKey | string

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from services.cross_group import (
     visibility_from_db,
     visibility_to_db,
 )
+from services.memory.linked_refs import LinkedMemoryRef, normalize_linked_refs, parse_linked_ref
 from services.storage import close_with_checkpoint, connect_sqlite
 from services.storage.migrations import Migration, MigrationRunner
 from services.storage.schema_contracts import verify_catalog_schema_async
@@ -191,6 +193,15 @@ class Episode:
     cross_group_enabled_reason: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def linked_memory_refs(self) -> tuple[LinkedMemoryRef, ...]:
+        refs: list[LinkedMemoryRef] = []
+        for value in self.linked_memory_ids:
+            ref = parse_linked_ref(value)
+            if ref is not None:
+                refs.append(ref)
+        return tuple(refs)
+
 
 @dataclass
 class EpisodeRevision:
@@ -209,6 +220,38 @@ class EpisodeRevision:
 
 def _now_iso() -> str:
     return datetime.now(TZ_SHANGHAI).isoformat(timespec="seconds")
+
+
+def _normalize_decay_at(value: Any) -> str:
+    """Strict decay_at contract for create/set.
+
+    - Empty string (or whitespace-only after strip on str) means no expiry → ``""``.
+    - Non-empty must be a timezone-aware ISO-8601 string; normalize to
+      Asia/Shanghai with second precision.
+    - Naive, malformed, bool/numeric/container inputs raise TypeError or
+      ValueError — never silently coerced.
+    """
+    if value is None:
+        raise TypeError("decay_at must be a string, not None")
+    if isinstance(value, bool) or not isinstance(value, str):
+        raise TypeError(
+            f"decay_at must be a string, got {type(value).__name__}"
+        )
+    raw = value.strip()
+    if not raw:
+        return ""
+    cleaned = raw.replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(cleaned)
+    except ValueError as exc:
+        raise ValueError(
+            f"decay_at must be a valid timezone-aware ISO-8601 string, got {value!r}"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(
+            f"decay_at must be timezone-aware ISO-8601 (got naive): {value!r}"
+        )
+    return parsed.astimezone(TZ_SHANGHAI).isoformat(timespec="seconds")
 
 
 def _generate_id(prefix: str) -> str:
@@ -245,7 +288,12 @@ def _row_to_episode(row: aiosqlite.Row) -> Episode:
     if "linked_memory_ids" in keys:
         raw = d["linked_memory_ids"] or "[]"
         try:
-            linked = json.loads(raw) if isinstance(raw, str) else []
+            parsed = json.loads(raw) if isinstance(raw, str) else []
+            linked = (
+                list(normalize_linked_refs(parsed, preserve_legacy=True))
+                if isinstance(parsed, list)
+                else []
+            )
         except (json.JSONDecodeError, TypeError):
             linked = []
     meta: dict[str, Any] = {}
@@ -390,15 +438,22 @@ class EpisodeStore:
         scope: str = "group",
         source: str = "consolidator",
         confidence: float = 0.5,
-        linked_memory_ids: list[str] | None = None,
+        linked_memory_ids: list[Any] | None = None,
         meta: dict[str, Any] | None = None,
+        decay_at: str = "",
     ) -> Episode:
         db = self._require_db()
         now = _now_iso()
         episode_id = _generate_id("ep")
         confidence = _clamp01(confidence)
-        linked = linked_memory_ids or []
+        linked = list(
+            normalize_linked_refs(
+                list(linked_memory_ids or []),
+                preserve_legacy=True,
+            )
+        )
         ep_meta = meta or {}
+        normalized_decay = _normalize_decay_at(decay_at)
 
         await db.execute(
             """INSERT INTO episodes (
@@ -406,11 +461,11 @@ class EpisodeStore:
                 action_taken, outcome_signal, reflection, linked_memory_ids,
                 confidence, episode_state, source, decay_at, last_used_at,
                 created_at, updated_at, meta_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dry_run', ?, '', '', ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dry_run', ?, ?, '', ?, ?, ?)""",
             (
                 episode_id, group_id, scope, situation, observed_context,
-                action_taken, outcome_signal, reflection, json.dumps(linked),
-                confidence, source, now, now, json.dumps(ep_meta),
+                action_taken, outcome_signal, reflection, json.dumps(linked, ensure_ascii=False),
+                confidence, source, normalized_decay, now, now, json.dumps(ep_meta),
             ),
         )
         await db.commit()
@@ -428,7 +483,7 @@ class EpisodeStore:
             confidence=confidence,
             episode_state="dry_run",
             source=source,
-            decay_at="",
+            decay_at=normalized_decay,
             last_used_at="",
             created_at=now,
             updated_at=now,
@@ -440,6 +495,38 @@ class EpisodeStore:
         async with db.execute(
             "SELECT * FROM episodes WHERE episode_id = ?", (episode_id,)
         ) as cur:
+            row = await cur.fetchone()
+        return _row_to_episode(row) if row else None
+
+    async def find_by_source_meta(
+        self,
+        *,
+        source: str,
+        meta_key: str,
+        meta_value: str,
+    ) -> Episode | None:
+        """Database-wide lookup by ``source`` + a single ``meta_json`` field.
+
+        Used for durable promote idempotency (e.g. consolidator candidate
+        provenance). ``meta_key`` must be a strict JSON object identifier
+        (``[A-Za-z_][A-Za-z0-9_]*``); unvalidated input is never interpolated
+        into SQL. Scans with ``json_valid`` / ``json_extract`` — no extra
+        index in this slice; correctness first.
+        """
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", meta_key or ""):
+            raise ValueError(f"invalid meta_key for json_extract: {meta_key!r}")
+        db = self._require_db()
+        # meta_key is identifier-validated above; only values are bound.
+        path = f"$.{meta_key}"
+        sql = (
+            "SELECT * FROM episodes "
+            "WHERE source = ? "
+            "AND json_valid(meta_json) "
+            "AND CAST(json_extract(meta_json, ?) AS TEXT) = ? "
+            "ORDER BY updated_at DESC "
+            "LIMIT 1"
+        )
+        async with db.execute(sql, (source, path, str(meta_value))) as cur:
             row = await cur.fetchone()
         return _row_to_episode(row) if row else None
 
@@ -481,29 +568,91 @@ class EpisodeStore:
     ) -> list[Episode]:
         """Episodes eligible for prompt injection (D.4 recall path).
 
-        Default behavior keeps the Phase D recall invariant and only returns
-        ``episode_state='enabled_for_prompt'`` rows scoped to ``group_id``.
-        ``include_decayed=True`` widens the reader for long-range lookups so
-        disabled/decayed episodes remain discoverable outside the prompt path.
+        **Default** (``include_decayed=False``): only
+        ``episode_state='enabled_for_prompt'`` rows for ``group_id`` whose
+        ``decay_at`` is empty **or** strictly later than now. Expired
+        ``enabled_for_prompt`` rows are excluded even when ``expire_decayed``
+        has not run (read-time eligibility, not sweeper-dependent).
 
-        Order: ``confidence DESC, updated_at DESC`` so the most-trusted
-        recently-promoted reflections surface first; ``last_used_at`` is
-        deliberately not in the ORDER BY (it's an audit field, not a
-        ranking signal — see ``update_last_used``).
+        **``include_decayed=True``** is the backward-compatible *historical
+        wide reader*: returns ``enabled_for_prompt`` **and** ``disabled``
+        for the group, **without** the default expiry exclusion. It is not
+        a "decay-only" filter — disabled admin rows and past-``decay_at``
+        still-enabled rows both surface for long-range / audit lookups.
+
+        Order: ``confidence DESC, updated_at DESC``. ``last_used_at`` is an
+        audit stamp only (see ``update_last_used``). Empty ``group_id``
+        fails closed to ``[]``.
         """
         if not group_id:
             return []
         db = self._require_db()
         states = ("enabled_for_prompt", "disabled") if include_decayed else ("enabled_for_prompt",)
         placeholders = ",".join("?" for _ in states)
-        async with db.execute(
-            "SELECT * FROM episodes "
-            f"WHERE episode_state IN ({placeholders}) AND group_id = ? "
-            "ORDER BY confidence DESC, updated_at DESC LIMIT ?",
-            (*states, group_id, max(0, int(limit))),
-        ) as cur:
+        # Absolute-time eligibility via julianday (offset-safe across +00:00 /
+        # +08:00 and fractions). Lexicographic ISO compare is wrong across
+        # offsets. Empty decay_at means never expires. Invalid non-empty
+        # legacy values yield NULL julianday and fail closed (excluded).
+        if include_decayed:
+            sql = (
+                "SELECT * FROM episodes "
+                f"WHERE episode_state IN ({placeholders}) AND group_id = ? "
+                "ORDER BY confidence DESC, updated_at DESC LIMIT ?"
+            )
+            params: tuple[Any, ...] = (*states, group_id, max(0, int(limit)))
+        else:
+            now = _now_iso()
+            sql = (
+                "SELECT * FROM episodes "
+                f"WHERE episode_state IN ({placeholders}) AND group_id = ? "
+                "AND (decay_at = '' OR julianday(decay_at) > julianday(?)) "
+                "ORDER BY confidence DESC, updated_at DESC LIMIT ?"
+            )
+            params = (*states, group_id, now, max(0, int(limit)))
+        async with db.execute(sql, params) as cur:
             rows = await cur.fetchall()
         return [_row_to_episode(r) for r in rows]
+
+    async def set_decay_at(
+        self,
+        episode_id: str,
+        *,
+        decay_at: str,
+        actor: str = "system",
+        reason: str = "",
+    ) -> bool:
+        """Audited setter for ``decay_at`` (empty string clears expiry).
+
+        Returns ``False`` when the episode is missing. On success updates
+        ``decay_at`` + ``updated_at`` and records an ``EpisodeRevision`` with
+        before/after, actor, and reason. Validation is strict via
+        :func:`_normalize_decay_at`.
+        """
+        episode_id = str(episode_id or "").strip()
+        if not episode_id:
+            return False
+        ep = await self.get_episode(episode_id)
+        if ep is None:
+            return False
+        normalized = _normalize_decay_at(decay_at)
+        db = self._require_db()
+        now = _now_iso()
+        await db.execute(
+            "UPDATE episodes SET decay_at = ?, updated_at = ? WHERE episode_id = ?",
+            (normalized, now, episode_id),
+        )
+        await db.commit()
+        await self.record_revision(
+            episode_id,
+            action="set_decay_at",
+            actor=actor,
+            prev_state=ep.episode_state,
+            new_state=ep.episode_state,
+            before={"decay_at": ep.decay_at},
+            after={"decay_at": normalized},
+            reason=reason or "set_decay_at",
+        )
+        return True
 
     async def update_last_used(self, episode_id: str) -> bool:
         """Stamp ``last_used_at`` for an episode that was just recalled.
@@ -663,9 +812,10 @@ class EpisodeStore:
     async def expire_decayed(self) -> int:
         db = self._require_db()
         now = _now_iso()
+        # julianday: absolute time; invalid non-empty decay_at → NULL, not selected.
         async with db.execute(
             "SELECT episode_id FROM episodes WHERE episode_state = 'enabled_for_prompt' "
-            "AND decay_at != '' AND decay_at <= ?",
+            "AND decay_at != '' AND julianday(decay_at) <= julianday(?)",
             (now,),
         ) as cur:
             rows = await cur.fetchall()

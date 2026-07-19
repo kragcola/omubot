@@ -176,7 +176,8 @@ class TestBuildGroupMessages:
         assert tail[0]["type"] == "text"
         assert "只绑定本轮待处理消息中的图片" in tail[0]["text"]
         assert "历史人物名不能覆盖本轮视觉证据" in tail[0]["text"]
-        assert "低置信候选不得当作人物答案" in tail[0]["text"]
+        assert "不确定" in tail[0]["text"] or "证据不足" in tail[0]["text"]
+        assert "低置信候选" not in tail[0]["text"]
         assert any(block.get("type") == "image_ref" for block in tail)
         image_paths = [
             block["path"]

@@ -1,14 +1,35 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import aiohttp
 import pytest
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
 from kernel.router import _render_message
+from services.llm.client import content_text
 from services.media.character_recognizer import CharacterRecognition
+from services.media.visual_evidence import (
+    collect_image_ref_sidechannels,
+    format_visual_evidence_system_block,
+)
+
+
+def _text_of(rendered: Any) -> str:
+    if isinstance(rendered, str):
+        return rendered
+    return content_text(rendered)
+
+
+def _image_refs(rendered: Any) -> list[dict[str, Any]]:
+    if not isinstance(rendered, list):
+        return []
+    return [
+        block
+        for block in rendered
+        if isinstance(block, dict) and block.get("type") == "image_ref"
+    ]
 
 
 class _FakeImageCache:
@@ -58,24 +79,6 @@ class _FakeCharacterRecognizer:
             difference=0.02,
             threshold=0.18,
         )]
-
-    # Also expose a single-result wrapper used by some tests
-    async def identify_single(
-        self,
-        image_data: bytes,
-        *,
-        media_type: str = "image/jpeg",
-    ) -> CharacterRecognition | None:
-        del image_data, media_type
-        return CharacterRecognition(
-            matched=True,
-            character_id="emu_otori",
-            character_name="凤笑梦",
-            relation="self",
-            context_label="世界计划 / ワンダショ",
-            difference=0.02,
-            threshold=0.18,
-        )
 
 
 class _FakeVisionClient:
@@ -133,12 +136,17 @@ async def test_render_message_prefixes_vl_description_with_character_name(tmp_pa
         image_cache=_FakeImageCache(image_path),
     )
 
-    text = rendered if isinstance(rendered, str) else "".join(
-        block.get("text", "") for block in rendered if isinstance(block, dict)
-    )
-    assert "凤笑梦" in text
-    assert "世界计划 / ワンダショ" in text
-    assert "开心地跳起来" in text
+    text = _text_of(rendered)
+    assert "凤笑梦" not in text
+    assert "开心地跳起来" not in text
+    assert "«图片»" in text
+    refs = _image_refs(rendered)
+    assert refs
+    ref = refs[0]
+    assert ref.get("provenance") == "visual_system"
+    assert "凤笑梦" in " ".join(ref.get("visual_identity") or [])
+    assert "开心地跳起来" in (ref.get("visual_observation") or ref.get("visual_summary") or "")
+    assert len(str(ref.get("image_sha256") or "")) == 64
 
 
 @pytest.mark.asyncio
@@ -170,11 +178,15 @@ async def test_render_message_prefers_context_label_over_broad_work(tmp_path: Pa
         image_cache=_FakeImageCache(image_path),
     )
 
-    text = rendered if isinstance(rendered, str) else "".join(
-        block.get("text", "") for block in rendered if isinstance(block, dict)
-    )
-    assert "星尘（中V / 五维介质）" in text
-    assert "星尘（中V）" not in text
+    text = _text_of(rendered)
+    assert "星尘" not in text or text.strip() in {"«图片»", ""}
+    assert "«图片»" in text
+    refs = _image_refs(rendered)
+    assert refs
+    identity = " ".join(refs[0].get("visual_identity") or [])
+    summary = str(refs[0].get("visual_summary") or "")
+    assert "星尘（中V / 五维介质）" in identity or "星尘（中V / 五维介质）" in summary
+    assert "星尘（中V）" not in identity and "星尘（中V）" not in summary
 
 
 @pytest.mark.asyncio
@@ -216,12 +228,21 @@ async def test_render_message_sticker_hit_does_not_short_circuit_identity(tmp_pa
         image_cache=_FakeImageCache(image_path),
     )
 
-    text = rendered if isinstance(rendered, str) else "".join(
-        block.get("text", "") for block in rendered if isinstance(block, dict)
-    )
+    text = _text_of(rendered)
     assert recognizer.calls == 1
-    assert "初音未来（Project SEKAI / Virtual Singer）" in text
     assert "瞳孔地震" not in text
+    assert "«图片»" in text
+    refs = _image_refs(rendered)
+    assert refs
+    blob = " ".join(
+        [
+            " ".join(refs[0].get("visual_identity") or []),
+            str(refs[0].get("visual_summary") or ""),
+            str(refs[0].get("visual_observation") or ""),
+        ]
+    )
+    assert "初音未来（Project SEKAI / Virtual Singer）" in blob
+    assert "瞳孔地震" not in blob
 
 
 @pytest.mark.asyncio
@@ -281,14 +302,26 @@ async def test_render_message_surfaces_partial_multi_character_identity(tmp_path
         image_cache=_FakeImageCache(image_path),
     )
 
-    text = rendered if isinstance(rendered, str) else "".join(
-        block.get("text", "") for block in rendered if isinstance(block, dict)
-    )
-    assert "检测到4个角色/头像" in text
-    assert "可信识别：初音未来（Project SEKAI / Virtual Singer）" in text
-    assert "其余3个未达到置信阈值" in text
-    assert "低置信候选：重音テト 0.231、弦巻マキ 0.247、ONE 0.225" in text
-    assert "开心地跳起来" in text
+    text = _text_of(rendered)
+    assert "检测到" not in text
+    assert "置信" not in text
+    assert "0.231" not in text
+    assert "«图片»" in text
+    refs = _image_refs(rendered)
+    assert refs
+    summary = str(refs[0].get("visual_summary") or "")
+    obs = str(refs[0].get("visual_observation") or "")
+    blob = f"{summary} {obs}"
+    assert "画面中约有4个" in blob or "未能确认" in blob or "初音未来" in blob
+    assert "低置信候选" not in blob
+    assert "置信阈值" not in blob
+    assert "0.231" not in blob
+    assert "0.247" not in blob
+    assert "0.225" not in blob
+    # system block composition must also stay clean
+    block = format_visual_evidence_system_block(refs, user_text="图里是什么") or ""
+    for bad in ("低置信候选", "置信阈值", "0.231", "threshold=", "distance="):
+        assert bad not in block
 
 
 class _Sender:
@@ -298,8 +331,6 @@ class _Sender:
 
 
 class _Reply:
-    """Minimal stand-in for nonebot's Reply object."""
-
     def __init__(self, message: Message, *, message_id: int, sender: _Sender) -> None:
         self.message = message
         self.message_id = message_id
@@ -307,8 +338,6 @@ class _Reply:
 
 
 class _FakeSession:
-    """aiohttp.ClientSession.get(url) stand-in returning fixed image bytes."""
-
     def __init__(self, payload: bytes = b"fake-quoted-png") -> None:
         self._payload = payload
 
@@ -333,8 +362,6 @@ class _FakeSession:
 
 @pytest.mark.asyncio
 async def test_quoted_reply_image_runs_character_recognition() -> None:
-    """A quoted image (@bot 引用图 这是谁) must go through CCIP recognition,
-    not just plain VL — previously the quoted branch skipped the recognizer."""
     quoted = Message(
         [MessageSegment("image", {"url": "http://example.invalid/q.png", "file": "q.png"})]
     )
@@ -351,19 +378,24 @@ async def test_quoted_reply_image_runs_character_recognition() -> None:
         vision_enabled=True,
     )
 
-    text = rendered if isinstance(rendered, str) else "".join(
-        block.get("text", "") for block in rendered if isinstance(block, dict)
-    )
-    # Quoted preview carries the recognized character name + VL desc.
-    assert "凤笑梦" in text
+    text = _text_of(rendered)
     assert "QUOTED_MSG" in text
+    assert "[图片]" in text
+    assert "凤笑梦" not in text  # not user-authored prose
+    refs = _image_refs(rendered)
+    assert refs, "quoted image_ref with side-channel must be present"
+    blob = " ".join(
+        [
+            " ".join(refs[0].get("visual_identity") or []),
+            str(refs[0].get("visual_summary") or ""),
+        ]
+    )
+    assert "凤笑梦" in blob
+    assert refs[0].get("provenance") == "visual_system"
 
 
 @pytest.mark.asyncio
 async def test_quoted_reply_image_refetches_stale_url() -> None:
-    """When the quoted image segment has no url, _render_message must re-fetch
-    the original message by message_id via bot.get_msg to recover it."""
-    # Quoted segment carries NO url (stale) — only a summary.
     quoted = Message([MessageSegment("image", {"file": "q.png", "summary": "[动画表情]"})])
     reply = _Reply(quoted, message_id=678, sender=_Sender("99999", "群友"))
     message = Message([MessageSegment.text("这是谁")])
@@ -374,7 +406,6 @@ async def test_quoted_reply_image_refetches_stale_url() -> None:
 
         async def get_msg(self, message_id: int):
             self.called_with = message_id
-            # Authoritative copy now has a working url.
             return {
                 "message": [
                     {"type": "image", "data": {"url": "http://example.invalid/fresh.png"}}
@@ -393,11 +424,12 @@ async def test_quoted_reply_image_refetches_stale_url() -> None:
         vision_enabled=True,
     )
 
-    text = rendered if isinstance(rendered, str) else "".join(
-        block.get("text", "") for block in rendered if isinstance(block, dict)
-    )
-    assert bot.called_with == 678  # get_msg was invoked to recover the url
-    assert "凤笑梦" in text
+    text = _text_of(rendered)
+    assert bot.called_with == 678
+    assert "凤笑梦" not in text
+    refs = _image_refs(rendered)
+    assert refs
+    assert "凤笑梦" in " ".join(refs[0].get("visual_identity") or [])
 
 
 @pytest.mark.asyncio
@@ -439,18 +471,17 @@ async def test_quoted_reply_image_uses_normalized_image_cache_bytes(tmp_path: Pa
         vision_enabled=True,
     )
 
-    text = rendered if isinstance(rendered, str) else "".join(
-        block.get("text", "") for block in rendered if isinstance(block, dict)
-    )
+    text = _text_of(rendered)
     assert image_cache.calls == [(raw_payload, "quoted-file")]
     assert recognizer.seen_payloads == [normalized_payload]
     assert recognizer.seen_media_types == ["image/png"]
-    assert "凤笑梦" in text
+    assert "凤笑梦" not in text
     assert isinstance(rendered, list)
     assert any(
         block.get("type") == "image_ref"
         and block.get("path") == str(tmp_path / "quoted.png")
         and block.get("media_type") == "image/png"
+        and block.get("provenance") == "visual_system"
         for block in rendered
     )
 
@@ -489,7 +520,6 @@ async def test_quoted_reply_keeps_image_ref_when_description_pipeline_fails(tmp_
 
 @pytest.mark.asyncio
 async def test_borderline_character_hit_is_not_rendered_as_trusted_identity(tmp_path: Path) -> None:
-    """Regression: stk_01db713d was Purisesu but CCIP barely matched Fuji Miyako."""
     image_path = tmp_path / "purisesu.jpg"
     image_path.write_bytes(b"fake-purisesu-image")
 
@@ -519,13 +549,18 @@ async def test_borderline_character_hit_is_not_rendered_as_trusted_identity(tmp_
         image_cache=_FakeImageCache(image_path),
     )
 
-    text = rendered if isinstance(rendered, str) else "".join(
-        block.get("text", "") for block in rendered if isinstance(block, dict)
-    )
-    assert "未能可信识别具体角色" in text
-    assert "识别结果接近阈值" in text
+    text = _text_of(rendered)
     assert "藤 都子" not in text
-    assert "开心地跳起来" in text
+    assert "«图片»" in text
+    refs = _image_refs(rendered)
+    assert refs
+    identity = refs[0].get("visual_identity") or []
+    summary = str(refs[0].get("visual_summary") or "")
+    assert "藤 都子" not in identity
+    assert "藤 都子" not in summary
+    assert "不确定" in summary or "未能确认" in summary or not identity
+    # describe/identify intent can expose observation without trusted label
+    assert "开心地跳起来" in (refs[0].get("visual_observation") or summary or "")
 
 
 @pytest.mark.asyncio
@@ -586,10 +621,40 @@ async def test_quoted_reply_visual_evidence_is_not_truncated_to_generic_preview_
         vision_enabled=True,
     )
 
-    text = rendered if isinstance(rendered, str) else "".join(
-        block.get("text", "") for block in rendered if isinstance(block, dict)
+    text = _text_of(rendered)
+    assert "检测到4个角色/头像" not in text
+    assert "0.231" not in text
+    refs = _image_refs(rendered)
+    assert refs
+    summary = str(refs[0].get("visual_summary") or "")
+    assert "Virtual …" not in summary
+    assert "低置信候选" not in summary
+    assert "置信阈值" not in summary
+    assert "0.231" not in summary
+    assert "初音未来" in summary or "初音未来" in " ".join(refs[0].get("visual_identity") or [])
+
+
+@pytest.mark.asyncio
+async def test_content_text_never_includes_vision_prose(tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.png"
+    image_path.write_bytes(b"fake-png")
+    message = Message([
+        MessageSegment("image", {"url": "http://example.invalid/sample.png", "file": "sample.png"}),
+        MessageSegment.text("看看这是谁"),
+    ])
+    rendered = await _render_message(
+        message,
+        session=cast(aiohttp.ClientSession, object()),
+        vision_client=_FakeVisionClient(),
+        character_recognizer=_FakeCharacterRecognizer(),
+        vision_enabled=True,
+        image_cache=_FakeImageCache(image_path),
     )
-    assert "检测到4个角色/头像" in text
-    assert "其余3个未达到置信阈值" in text
-    assert "低置信候选：重音テト 0.231、弦巻マキ 0.247、ONE 0.225" in text
-    assert "Virtual …" not in text
+    text = content_text(rendered) if not isinstance(rendered, str) else rendered
+    assert "看看这是谁" in text
+    assert "凤笑梦" not in text
+    assert "开心地跳起来" not in text
+    assert "«图片" in text or "«图片»" in text
+    # collect sidechannels still works for client inject
+    refs = collect_image_ref_sidechannels(rendered if isinstance(rendered, list) else [])
+    assert refs and refs[0].get("provenance") == "visual_system"

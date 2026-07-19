@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import secrets
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +21,10 @@ from services.cross_group import (
     resolve_cross_group_visibility,
     visibility_from_db,
     visibility_to_db,
+)
+from services.knowledge_graph.provenance import (
+    GraphProvenanceError,
+    normalize_graph_evidence,
 )
 from services.knowledge_graph.types import GraphCandidate, GraphFact, GraphStatus
 from services.storage import close_with_checkpoint, connect_sqlite
@@ -128,9 +135,27 @@ _CREATE_INDEXES = [
 
 
 class KnowledgeGraphStore:
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        provenance_gate_enabled: bool = True,
+        observability_enabled: bool = True,
+    ) -> None:
         self._db_path = str(db_path)
+        # gpg_v1 write gate. False = legacy truthy acceptance (unsafe rollback).
+        self.provenance_gate_enabled = bool(provenance_gate_enabled)
+        # gpo_v1 read-side quality health. False skips quality scan and omits
+        # nested observability from health_snapshot (pre-gpo key shape).
+        self.observability_enabled = bool(observability_enabled)
         self._db: aiosqlite.Connection | None = None
+        # Dedicated connection for promote_candidate only. Ordinary mutators
+        # (add_candidate, add_fact, set_candidate_status, graph nodes/edges)
+        # use self._db and must never share an open promotion transaction.
+        self._promotion_db: aiosqlite.Connection | None = None
+        # Serializes same-instance candidate promotions; cross-connection races
+        # still rely on BEGIN IMMEDIATE + compare-and-set on candidate status.
+        self._promotion_lock = asyncio.Lock()
 
     async def init(self) -> None:
         self._db = await connect_sqlite(self._db_path)
@@ -185,6 +210,9 @@ class KnowledgeGraphStore:
             "WHERE cross_group_visible IN (1, 2)"
         )
         await self._db.commit()
+        # Open after schema is ready so promotions never share self._db's
+        # autocommit / ordinary-write transaction state.
+        self._promotion_db = await connect_sqlite(self._db_path)
 
     async def _ensure_column(self, table: str, column: str, definition: str) -> None:
         db = self._require_db()
@@ -194,6 +222,11 @@ class KnowledgeGraphStore:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     async def close(self) -> None:
+        if self._promotion_db is not None:
+            await close_with_checkpoint(
+                self._promotion_db, name="knowledge_graph_promotion"
+            )
+            self._promotion_db = None
         if self._db is not None:
             await close_with_checkpoint(self._db, name="knowledge_graph")
             self._db = None
@@ -202,6 +235,11 @@ class KnowledgeGraphStore:
         if self._db is None:
             raise RuntimeError("KnowledgeGraphStore is not initialized")
         return self._db
+
+    def _require_promotion_db(self) -> aiosqlite.Connection:
+        if self._promotion_db is None:
+            raise RuntimeError("KnowledgeGraphStore promotion connection is not initialized")
+        return self._promotion_db
 
     async def add_fact(
         self,
@@ -218,7 +256,7 @@ class KnowledgeGraphStore:
         supersedes: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> GraphFact:
-        self._require_evidence(evidence)
+        evidence = self._prepare_evidence(evidence)
         fact_id = "gf_" + secrets.token_hex(6)
         now = _now_iso()
         db = self._require_db()
@@ -275,6 +313,7 @@ class KnowledgeGraphStore:
         scope: str = "global",
         scope_id: str = "global",
     ) -> GraphCandidate:
+        evidence = self._prepare_evidence(evidence, require_for_candidate=True)
         candidate_id = "gc_" + secrets.token_hex(6)
         now = _now_iso()
         db = self._require_db()
@@ -319,6 +358,42 @@ class KnowledgeGraphStore:
         cursor = await self._require_db().execute(
             "SELECT * FROM graph_facts WHERE status = ? ORDER BY confidence DESC, updated_at DESC LIMIT ?",
             (status, limit),
+        )
+        return [_row_to_fact(row) for row in await cursor.fetchall()]
+
+    async def list_facts_by_scopes(
+        self,
+        *,
+        allowed_scopes: list[tuple[str, str]],
+        status: str = "active",
+        limit_per_scope: int = 200,
+    ) -> list[GraphFact]:
+        """Return a confidence-ordered, fair window for each allowed scope."""
+        scope_pairs = sorted({
+            (str(scope), str(scope_id))
+            for scope, scope_id in allowed_scopes
+        })
+        if not scope_pairs:
+            return []
+        normalized_limit = max(1, int(limit_per_scope))
+        scope_sql = " OR ".join(
+            "(scope = ? AND scope_id = ?)" for _ in scope_pairs
+        )
+        params: list[Any] = [status]
+        for scope, scope_id in scope_pairs:
+            params.extend((scope, scope_id))
+        params.append(normalized_limit)
+        cursor = await self._require_db().execute(
+            "WITH ranked AS ("
+            "SELECT graph_facts.*, "
+            "ROW_NUMBER() OVER ("
+            "PARTITION BY scope, scope_id "
+            "ORDER BY confidence DESC, updated_at DESC, fact_id ASC"
+            ") AS scope_rank "
+            "FROM graph_facts WHERE status = ? AND (" + scope_sql + ")"
+            ") SELECT * FROM ranked WHERE scope_rank <= ? "
+            "ORDER BY confidence DESC, updated_at DESC, fact_id ASC",
+            params,
         )
         return [_row_to_fact(row) for row in await cursor.fetchall()]
 
@@ -400,6 +475,7 @@ class KnowledgeGraphStore:
         return _row_to_candidate(row) if row else None
 
     async def set_candidate_status(self, candidate_id: str, status: str, *, review_note: str = "") -> bool:
+        """Unconditional status write (legacy / internal). Prefer transition_candidate_status."""
         db = self._require_db()
         cursor = await db.execute(
             "UPDATE extraction_candidates SET status = ?, review_note = ?, updated_at = ? WHERE candidate_id = ?",
@@ -407,6 +483,157 @@ class KnowledgeGraphStore:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+    async def transition_candidate_status(
+        self,
+        candidate_id: str,
+        *,
+        to_status: str,
+        allowed_statuses: Collection[str],
+        review_note: str = "",
+    ) -> bool:
+        """Compare-and-set candidate status in one UPDATE.
+
+        Succeeds only when the row exists and its current status is in
+        ``allowed_statuses``. Never pre-reads: the WHERE clause is the sole
+        authority (no TOCTOU). Returns False when the CAS loses (missing row
+        or disallowed status such as ``active`` / ``rejected`` when not listed).
+        """
+        allowed = tuple(dict.fromkeys(str(s) for s in allowed_statuses if str(s)))
+        if not allowed:
+            raise ValueError(
+                "transition_candidate_status requires a non-empty allowed_statuses set"
+            )
+        db = self._require_db()
+        cursor = await db.execute(
+            "UPDATE extraction_candidates "
+            "SET status = ?, review_note = ?, updated_at = ? "
+            f"WHERE candidate_id = ? AND status IN ({', '.join('?' for _ in allowed)})",
+            (to_status, review_note, _now_iso(), candidate_id, *allowed),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def promote_candidate(
+        self,
+        candidate_id: str,
+        *,
+        review_note: str = "approved",
+        allowed_statuses: Collection[str] = ("pending",),
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[GraphFact, dict[str, Any]] | None:
+        """Atomically promote a candidate to one active fact + evidence.
+
+        Runs exclusively on the dedicated ``_promotion_db`` connection under
+        the per-store promotion lock so ordinary ``self._db`` writers cannot
+        interleave into, commit, or be rolled back with this transaction:
+
+        1. ``BEGIN IMMEDIATE``
+        2. load the candidate; require status in ``allowed_statuses``
+        3. compare-and-set that exact row to ``active``
+        4. insert exactly one ``graph_facts`` row and one evidence row
+        5. commit once
+
+        On any failure or cancellation the transaction is rolled back and the
+        candidate / facts tables are left unchanged. Returns ``(fact, evidence)``
+        where *evidence* is the candidate's original evidence dict (for
+        post-commit listeners); ``fact.evidence`` is the persisted evidence list.
+        Concurrent winners: exactly one success, loser returns ``None``.
+        """
+        allowed = tuple(dict.fromkeys(str(s) for s in allowed_statuses if str(s)))
+        if not allowed:
+            raise ValueError("promote_candidate requires a non-empty allowed_statuses set")
+
+        async with self._promotion_lock:
+            db = self._require_promotion_db()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT * FROM extraction_candidates WHERE candidate_id = ?",
+                    (candidate_id,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.rollback()
+                    return None
+                candidate = _row_to_candidate(row)
+                if candidate.status not in allowed:
+                    await db.rollback()
+                    return None
+
+                evidence = self._prepare_evidence(
+                    dict(candidate.evidence or {}),
+                )
+
+                now = _now_iso()
+                status_cur = await db.execute(
+                    "UPDATE extraction_candidates "
+                    "SET status = ?, review_note = ?, updated_at = ? "
+                    f"WHERE candidate_id = ? AND status IN ({', '.join('?' for _ in allowed)})",
+                    ("active", review_note, now, candidate_id, *allowed),
+                )
+                if status_cur.rowcount != 1:
+                    await db.rollback()
+                    return None
+
+                fact_id = "gf_" + secrets.token_hex(6)
+                await db.execute(
+                    "INSERT INTO graph_facts "
+                    "(fact_id, subject, predicate, object, confidence, status, scope, scope_id, source, supersedes, "
+                    "metadata_json, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        fact_id,
+                        candidate.subject,
+                        candidate.predicate,
+                        candidate.object,
+                        candidate.confidence,
+                        "active",
+                        candidate.scope,
+                        candidate.scope_id,
+                        candidate.source,
+                        None,
+                        json.dumps(metadata or {}, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+                await self._insert_evidence(fact_id, evidence, db=db)
+
+                evidence_cursor = await db.execute(
+                    "SELECT * FROM graph_evidence WHERE fact_id = ? ORDER BY created_at ASC",
+                    (fact_id,),
+                )
+                evidence_rows = [
+                    _row_to_evidence(ev_row) for ev_row in await evidence_cursor.fetchall()
+                ]
+                await db.commit()
+            except GraphProvenanceError:
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+                raise
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await db.rollback()
+                raise
+
+            fact = GraphFact(
+                fact_id=fact_id,
+                subject=candidate.subject,
+                predicate=candidate.predicate,
+                object=candidate.object,
+                confidence=candidate.confidence,
+                status="active",
+                source=candidate.source,
+                scope=candidate.scope,
+                scope_id=candidate.scope_id,
+                supersedes=None,
+                metadata=metadata or {},
+                evidence=evidence_rows,
+                created_at=now,
+                updated_at=now,
+            )
+            return fact, evidence
 
     async def set_fact_status(
         self,
@@ -543,6 +770,116 @@ class KnowledgeGraphStore:
         )
         return True
 
+    async def health_snapshot(self) -> dict[str, Any]:
+        """Read-only graph population + optional evidence-quality health.
+
+        Returns the pre-gpo top-level fields always. When
+        ``observability_enabled`` is True, adds nested ``observability``
+        (gpo_v1) with closed secret-free counters. Never writes.
+        """
+        from datetime import timedelta, timezone
+
+        from services.knowledge_graph.observability import (
+            accumulate_active_evidence,
+            accumulate_pending_candidate,
+            empty_observability_payload,
+        )
+
+        if self._db is None:
+            return {"available": False}
+
+        db = self._db
+        # Created_at is stored with +08:00 offset; build the cutoff in the
+        # same form so lexical comparison works without julianday casts.
+        tz = timezone(timedelta(hours=8))
+        now = datetime.now(tz)
+        since_24h_iso = (now - timedelta(hours=24)).isoformat()
+
+        cursor = await db.execute(
+            "SELECT status, COUNT(*) FROM extraction_candidates "
+            "WHERE created_at >= ? GROUP BY status",
+            (since_24h_iso,),
+        )
+        candidate_24h = {row[0]: int(row[1]) for row in await cursor.fetchall()}
+
+        cursor = await db.execute(
+            "SELECT status, COUNT(*) FROM extraction_candidates GROUP BY status"
+        )
+        candidate_total = {row[0]: int(row[1]) for row in await cursor.fetchall()}
+
+        cursor = await db.execute(
+            "SELECT source, COUNT(*) FROM graph_facts "
+            "WHERE status='active' GROUP BY source"
+        )
+        facts_active_by_source = {
+            row[0]: int(row[1]) for row in await cursor.fetchall()
+        }
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM graph_facts "
+            "WHERE status='active' AND created_at >= ?",
+            (since_24h_iso,),
+        )
+        row = await cursor.fetchone()
+        facts_active_24h = int(row[0]) if row else 0
+
+        cursor = await db.execute(
+            "SELECT edge_type, COUNT(*) FROM graph_edges "
+            "WHERE status='active' AND created_at >= ? GROUP BY edge_type",
+            (since_24h_iso,),
+        )
+        edges_24h = {row[0]: int(row[1]) for row in await cursor.fetchall()}
+
+        payload: dict[str, Any] = {
+            "available": True,
+            "checked_at": now.isoformat(),
+            "since": since_24h_iso,
+            "candidate_24h": candidate_24h,
+            "candidate_total": candidate_total,
+            "facts_active_by_source": facts_active_by_source,
+            "facts_active_24h": facts_active_24h,
+            "edges_24h": edges_24h,
+        }
+
+        if not self.observability_enabled:
+            return payload
+
+        obs = empty_observability_payload(
+            provenance_gate_enabled=self.provenance_gate_enabled,
+        )
+
+        cursor = await db.execute(
+            "SELECT fact_id FROM graph_facts WHERE status='active' "
+            "ORDER BY fact_id ASC"
+        )
+        fact_ids = [str(r[0]) for r in await cursor.fetchall()]
+        evidence_by_fact = await self.list_evidence_for_facts(fact_ids)
+        for fact_id in fact_ids:
+            accumulate_active_evidence(obs, evidence_by_fact.get(fact_id) or [])
+
+        cursor = await db.execute(
+            "SELECT evidence_json, review_note FROM extraction_candidates "
+            "WHERE status='pending' ORDER BY candidate_id ASC"
+        )
+        for pend_row in await cursor.fetchall():
+            raw_evidence: Any
+            evidence_json = pend_row[0]
+            if evidence_json is None or evidence_json == "":
+                raw_evidence = None
+            else:
+                try:
+                    raw_evidence = json.loads(evidence_json)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    raw_evidence = str(evidence_json)
+            accumulate_pending_candidate(
+                obs,
+                evidence=raw_evidence,
+                review_note=pend_row[1] or "",
+            )
+
+        payload["observability"] = obs
+        return payload
+
     async def list_entities(self, *, limit: int = 100) -> list[dict[str, Any]]:
         cursor = await self._require_db().execute(
             "SELECT subject AS name, COUNT(*) AS fact_count FROM graph_facts WHERE status = 'active' "
@@ -566,21 +903,137 @@ class KnowledgeGraphStore:
         )
         return [_row_to_evidence(row) for row in await cursor.fetchall()]
 
-    async def _insert_evidence(self, fact_id: str, evidence: dict[str, Any]) -> None:
+    async def list_evidence_for_facts(
+        self,
+        fact_ids: list[str],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Batch evidence lookup with bounded SQLite parameter chunks."""
+        ordered_ids = list(dict.fromkeys(str(fact_id) for fact_id in fact_ids if fact_id))
+        evidence_by_fact = {fact_id: [] for fact_id in ordered_ids}
+        chunk_size = 400
+        for offset in range(0, len(ordered_ids), chunk_size):
+            chunk = ordered_ids[offset:offset + chunk_size]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = await self._require_db().execute(
+                "SELECT * FROM graph_evidence "
+                f"WHERE fact_id IN ({placeholders}) "
+                "ORDER BY fact_id ASC, created_at ASC, evidence_row_id ASC",
+                chunk,
+            )
+            for row in await cursor.fetchall():
+                evidence_by_fact[str(row["fact_id"])].append(_row_to_evidence(row))
+        return evidence_by_fact
+
+    async def find_fact_ids_by_evidence_refs(
+        self,
+        evidence_ids: Any,
+        *,
+        allowed_scopes: set[tuple[str, str]] | None = None,
+    ) -> list[str]:
+        """Return active fact_ids linked to any of the given evidence ids.
+
+        Joins ``graph_evidence`` → ``graph_facts`` with ``status='active'``
+        only. Results are deduped and ordered by fact_id ascending. When
+        ``allowed_scopes`` is set, only facts whose (scope, scope_id) pair
+        is allowed are returned.
+        """
+        if not evidence_ids:
+            return []
+        eids: list[str] = []
+        for raw in evidence_ids:
+            if raw is None:
+                continue
+            eid = str(raw).strip()
+            if not eid or eid in eids:
+                continue
+            eids.append(eid)
+        if not eids:
+            return []
+        placeholders = ", ".join("?" for _ in eids)
+        sql = (
+            "SELECT DISTINCT f.fact_id FROM graph_facts f "
+            "JOIN graph_evidence e ON e.fact_id = f.fact_id "
+            f"WHERE f.status = 'active' AND e.evidence_id IN ({placeholders})"
+        )
+        params: list[Any] = list(eids)
+        if allowed_scopes is not None:
+            scope_pairs = [
+                (str(scope), str(scope_id))
+                for scope, scope_id in allowed_scopes
+                if scope is not None and scope_id is not None
+            ]
+            if not scope_pairs:
+                return []
+            scope_clauses = " OR ".join("(f.scope = ? AND f.scope_id = ?)" for _ in scope_pairs)
+            sql += f" AND ({scope_clauses})"
+            for scope, scope_id in scope_pairs:
+                params.extend([scope, scope_id])
+        sql += " ORDER BY f.fact_id ASC"
+        cursor = await self._require_db().execute(sql, tuple(params))
+        return [str(row["fact_id"]) for row in await cursor.fetchall()]
+
+    async def _insert_evidence(
+        self,
+        fact_id: str,
+        evidence: dict[str, Any],
+        *,
+        db: aiosqlite.Connection | None = None,
+    ) -> None:
+        """Insert one evidence row on *db* (or the ordinary store connection).
+
+        Callers inside an open promotion transaction must pass that connection
+        explicitly so the insert is not silently routed to ``self._db``.
+        Evidence is expected to already be prepared via ``_prepare_evidence``.
+        """
+        conn = db if db is not None else self._require_db()
         evidence_type = _evidence_type(evidence)
-        evidence_id = str(evidence.get("id") or evidence.get("card_id") or evidence.get("chunk_id") or "")
+        evidence_id = str(
+            evidence.get("id")
+            or evidence.get("card_id")
+            or evidence.get("chunk_id")
+            or evidence.get("message_id")
+            or ""
+        )
         quote = str(evidence.get("quote") or "")
-        await self._require_db().execute(
+        await conn.execute(
             "INSERT INTO graph_evidence (evidence_row_id, fact_id, evidence_type, evidence_id, quote, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             ("ge_" + secrets.token_hex(6), fact_id, evidence_type, evidence_id, quote, _now_iso()),
         )
 
+    def _prepare_evidence(
+        self,
+        evidence: dict[str, Any] | None,
+        *,
+        require_for_candidate: bool = False,
+    ) -> dict[str, Any]:
+        """Normalize (gate on) or legacy-require (gate off) write-side evidence.
+
+        When the gate is enabled, always returns a stripped canonical dict and
+        raises ``GraphProvenanceError`` on invalid input.
+
+        When disabled (unsafe rollback), preserves legacy truthy acceptance:
+        any non-empty id/card_id/chunk_id (including whitespace-only strings)
+        is accepted for facts; candidates may store empty ``{}``.
+        """
+        raw = dict(evidence or {})
+        if self.provenance_gate_enabled:
+            return normalize_graph_evidence(raw)
+
+        # Legacy unsafe path — keep truthy behavior for emergency rollback.
+        if require_for_candidate and not raw:
+            return {}
+        self._require_evidence_legacy(raw)
+        return raw
+
     @staticmethod
-    def _require_evidence(evidence: dict[str, Any]) -> None:
+    def _require_evidence_legacy(evidence: dict[str, Any]) -> None:
         evidence_id = evidence.get("id") or evidence.get("card_id") or evidence.get("chunk_id")
         if not evidence_id:
             raise ValueError("graph fact requires card_id or chunk_id evidence")
+
+    # Back-compat alias used by older tests/monkeypatches.
+    _require_evidence = _require_evidence_legacy
 
 
 def _row_to_fact(row: aiosqlite.Row) -> GraphFact:
@@ -674,7 +1127,10 @@ def _evidence_type(evidence: dict[str, Any]) -> str:
         return "memory_card"
     if evidence.get("chunk_id"):
         return "doc_chunk"
+    if evidence.get("message_id"):
+        return "message"
     return ""
+
 
 
 def _now_iso() -> str:

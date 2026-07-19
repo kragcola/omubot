@@ -1,5 +1,10 @@
 # Living Persona 派单 — 角色生命化全量实施（执行追踪）
 
+> 2026-07-18 authenticity supersession：本文 Wave 4/5 中
+> `dream_reflection` 写 global memory 并反馈给次日 Schedule 的闭环是历史实现记录，
+> 已被 QZone v0.8.2 修复禁止。当前 global synthetic reflection 不落 memory card，
+> Schedule 不读取任何 `dream_reflection` card；不得按旧验收文字恢复该闭环。
+
 > 状态：2026-06-08 立。本文是 [Living Persona 系列](living-persona-part0-overview.md)（Part 0/A/B/C + [故事弧调研](living-persona-research-story-arc-2026-06-08.md)）的**执行派发版**，交付执行者按 Wave 顺序落地。
 >
 > 范围：把 omubot 从"无状态的当下生物"升级为"有情绪、有连贯生活、有伙伴的生命化角色"。本批覆盖 **A-M1（tension 单维）+ B-L1（角色驱动）+ B-L1.5（剧情弧账本）+ C-MVP（虚构伙伴卡）+ B-L2（反思）+ B-L3（重规划闭环）**。A 全维（M2–M4）、C 主体（真人入叙事）、SQLite 迁移 **搁置保留、不在本批**（见 §6 搁置区）。

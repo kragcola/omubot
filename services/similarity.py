@@ -30,6 +30,14 @@ class SimilarityProvider(ABC):
 
     backend: SimilarityBackend
 
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def unavailable_reason(self) -> str:
+        return ""
+
     @abstractmethod
     def similarity(self, left: str, right: str) -> float:
         ...
@@ -58,8 +66,16 @@ class NgramSimilarityProvider(SimilarityProvider):
 class EmbeddingSimilarityProvider(SimilarityProvider):
     backend: SimilarityBackend = "embedding"
 
+    @property
+    def available(self) -> bool:
+        return False
+
+    @property
+    def unavailable_reason(self) -> str:
+        return "embedding similarity backend is not installed/enabled"
+
     def similarity(self, left: str, right: str) -> float:
-        raise RuntimeError("embedding similarity backend is not installed/enabled")
+        raise RuntimeError(self.unavailable_reason)
 
 
 def create_similarity_provider(backend: SimilarityBackend = "ngram") -> SimilarityProvider:

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "pack_id": "living_story_v1",
+  "invariants": {
+    "registry_canon_min": 8,
+    "registry_storylet_min": 6,
+    "registry_storylet_exact": 8,
+    "step_count": 7,
+    "main_arc_id": "living_story_v1.main",
+    "side_arc_ids": ["living_story_v1.side_study"],
+    "ambient_arc_ids": ["living_story_v1.ambient_park"],
+    "schedule_social_blocks_max": 0,
+    "chat_social_accept_only_current_scope": true,
+    "required_social_accept_reasons": ["accepted"],
+    "required_social_reject_reasons": [
+      "rejected:cross_group",
+      "rejected:cross_user",
+      "rejected:privacy",
+      "rejected:missing_evidence"
+    ],
+    "major_setback_max": 1,
+    "recovery_required": true,
+    "reload_continuity_required": true,
+    "once_cooldown_survive_reload": true,
+    "deterministic_rerun": true,
+    "default_plugin_gates_all_false": true,
+    "overall_verdict": "pass",
+    "partner_entity_min": 2,
+    "partner_change_min": 2,
+    "story_ledger_item_min": 3,
+    "story_ledger_ttl_required": true,
+    "recovery_steps_min": 2,
+    "recovery_steps_max": 3,
+    "final_main_stage": "active",
+    "final_setback_flag_cleared": true
+  },
+  "expected_storylet_path": {
+    "must_include": [
+      "setback.prop_failure",
+      "recovery.after_setback"
+    ],
+    "optional_include": [
+      "daily.rehearsal_warmup",
+      "daily.study_session",
+      "tension.exam_vs_stage",
+      "tension.replan_cost",
+      "ambient.partner_independent",
+      "closure.week_aftermath"
+    ]
+  },
+  "expected_partner_state": {
+    "entity_ids_min": ["nene", "tsukasa"],
+    "change_count_min": 3
+  },
+  "expected_life_state": {
+    "story_ledger_item_min": 3,
+    "every_story_ledger_has_ttl": true
+  },
+  "expected_setback_recovery": {
+    "recovery_steps_after_setback": 2
+  },
+  "expected_continuity": {
+    "final_main_stage": "active",
+    "final_setback_flag": 0
+  }
+}

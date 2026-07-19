@@ -190,6 +190,71 @@ class StyleExtractor:
         return extracted
 
 
+
+_VISUAL_OR_SYSTEM_MARKERS = (
+    "«图片",
+    "[图片",
+    "«当前视觉",
+    "视觉指代",
+    "可信识别",
+    "未能可信识别",
+    "视觉侧信道",
+    "图上文字：",
+    # Structured vision-system phrasing (not bare human uses of 检测到)
+    "检测到",
+    "画面中约有",
+    "可确认：",
+)
+
+
+def is_style_human_evidence_eligible(row: dict[str, Any]) -> bool:
+    """Fail-closed: only plain human user chat is eligible Style evidence.
+
+    Visual/system/bot-derived rows (image previews, vision grounding, assistant
+    replies, explicit system source_type) must never train Style extraction.
+    Ordinary human sentences that merely contain generic words (e.g. 检测到)
+    remain eligible unless they carry structured visual/system markers.
+    """
+    if not isinstance(row, dict):
+        return False
+    role = str(row.get("role") or "").strip().lower()
+    if role != "user":
+        return False
+    source_type = str(row.get("source_type") or "human").strip().lower()
+    if source_type and source_type not in {"human", "user", ""}:
+        return False
+    provenance = str(row.get("provenance") or "").strip().lower()
+    if provenance in {"visual_system", "system", "bot", "assistant"}:
+        return False
+    text = str(row.get("content_text") or row.get("content") or "").strip()
+    if not text:
+        return False
+    # Structured visual/system markers only (not bare substrings of ordinary chat).
+    structured_markers = (
+        "«图片",
+        "[图片",
+        "«当前视觉",
+        "视觉指代",
+        "可信识别",
+        "未能可信识别",
+        "视觉侧信道",
+        "图上文字：",
+        "画面中约有",
+        "可确认：",
+        "检测到",  # only when paired with role/avatar framing below
+    )
+    for marker in structured_markers:
+        if marker == "检测到":
+            # Fail closed only for vision-system detection phrasing.
+            if "检测到" in text and ("角色" in text or "头像" in text or "可信" in text):
+                return False
+            continue
+        if marker in text:
+            return False
+    # Angle-bracket system annotations
+    return not (text.startswith("«") and "»" in text)
+
+
 def format_style_messages(messages: list[dict[str, Any]], *, limit: int = _MAX_MESSAGES) -> str:
     lines: list[str] = []
     for row in messages[-limit:]:

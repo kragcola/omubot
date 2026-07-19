@@ -1765,7 +1765,7 @@ def test_system_runtime_errors_endpoint_and_health(tmp_path: Path) -> None:
     assert health_payload["maintenance_window"]["recommended"] is True
 
 
-def test_system_services_health_endpoint(tmp_path: Path) -> None:
+def test_system_services_health_endpoint(tmp_path: Path, monkeypatch) -> None:
     storage_dir = tmp_path / "storage"
     storage_dir.mkdir()
     for spec in DEFAULT_DATABASE_CATALOG.all():
@@ -1806,6 +1806,14 @@ def test_system_services_health_endpoint(tmp_path: Path) -> None:
             "errors": 1,
             "last_error": "embedding backend unavailable",
         }),
+    )
+    monkeypatch.setattr(
+        "os.statvfs",
+        lambda _path: SimpleNamespace(
+            f_blocks=100,
+            f_frsize=1,
+            f_bavail=50,
+        ),
     )
 
     app = FastAPI()

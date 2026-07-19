@@ -15,6 +15,7 @@ from services.style.extractor import (
     StyleExtraction,
     StyleExtractor,
     format_style_messages,
+    is_style_human_evidence_eligible,
     select_style_source_row,
 )
 from services.style.store import StyleScope, StyleStatus, StyleStore
@@ -123,7 +124,7 @@ async def run_style_manual_extract(
                     user_rows = [
                         row
                         for row in rows
-                        if row.get("role") == "user" and str(row.get("content_text") or "").strip()
+                        if is_style_human_evidence_eligible(row)
                     ]
                     batch_text_count = len(user_rows)
                     batch_filtered_count = 0

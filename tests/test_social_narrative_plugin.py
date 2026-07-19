@@ -6,6 +6,7 @@ import importlib
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from kernel.types import Identity, PluginContext, PromptContext, ReplyContext
@@ -83,6 +84,35 @@ class _FakeNarrativeStore:
             "evidence_message_id": "7001",
             "user_text": "共同经历-200-100",
         }]
+
+
+class _FakeWorldbookRuntime:
+    def __init__(self, *, raises: bool = False) -> None:
+        self.raises = raises
+        self.calls: list[tuple[Any, str, str]] = []
+
+    def commit_social_experience(
+        self,
+        record: Any,
+        *,
+        group_id: str,
+        user_id: str,
+    ) -> Any:
+        self.calls.append((record, group_id, user_id))
+        if self.raises:
+            raise RuntimeError("story bridge unavailable")
+        return SimpleNamespace(
+            status="committed",
+            reason="ok",
+            event_id="social.event",
+            arc_id="arc.main",
+        )
+
+
+class _NoneNarrativeStore(_FakeNarrativeStore):
+    async def record_shared_experience(self, **payload: Any) -> None:
+        self.recorded.append(dict(payload))
+        return None
 
 
 async def _started_plugin(
@@ -168,6 +198,57 @@ async def test_adapter_records_only_allowlisted_group_reply_with_message_evidenc
     assert recorded["entity_kind"] == "factual"
     assert recorded["evidence_time"]
     assert recorded["evidence_source"]
+
+
+async def test_post_reply_late_binds_worldbook_from_root_plugin_context() -> None:
+    store = _FakeNarrativeStore()
+    runtime = _FakeWorldbookRuntime()
+    plugin, root_ctx = await _started_plugin(store)
+    root_ctx.worldbook_runtime = runtime
+
+    reply = _reply_context(group_id="200", user_id="100", source_message_id=7001)
+    assert not hasattr(reply, "worldbook_runtime")
+    assert not hasattr(reply, "plugin_context")
+    try:
+        await plugin.on_post_reply(reply)
+    finally:
+        await plugin.on_shutdown(root_ctx)
+
+    assert len(store.recorded) == 1
+    assert len(runtime.calls) == 1
+    _record, group_id, user_id = runtime.calls[0]
+    assert (group_id, user_id) == ("200", "100")
+
+    await plugin.on_post_reply(reply)
+    assert len(runtime.calls) == 1
+
+
+async def test_post_reply_story_bridge_runs_only_after_persist_success() -> None:
+    store = _NoneNarrativeStore()
+    runtime = _FakeWorldbookRuntime()
+    plugin, root_ctx = await _started_plugin(store)
+    root_ctx.worldbook_runtime = runtime
+    try:
+        await plugin.on_post_reply(_reply_context(group_id="200"))
+    finally:
+        await plugin.on_shutdown(root_ctx)
+
+    assert len(store.recorded) == 1
+    assert runtime.calls == []
+
+
+async def test_post_reply_story_failure_never_rolls_back_factual_record() -> None:
+    store = _FakeNarrativeStore()
+    runtime = _FakeWorldbookRuntime(raises=True)
+    plugin, root_ctx = await _started_plugin(store)
+    root_ctx.worldbook_runtime = runtime
+    try:
+        await plugin.on_post_reply(_reply_context(group_id="200"))
+    finally:
+        await plugin.on_shutdown(root_ctx)
+
+    assert len(store.recorded) == 1
+    assert len(runtime.calls) == 1
 
 
 async def test_adapter_records_current_relationship_snapshot_from_runtime_engines() -> None:

@@ -80,10 +80,15 @@ def _get_autopilot_runner(ctx: Any) -> AutopilotRunner | None:
     if episode_db.exists():
         runner.register(EpisodeAIReviewer(episode_db))
 
-    kg_db = storage_dir / "knowledge_graph.db"
-    if kg_db.exists():
-        runner.register(KnowledgeAIReviewer(kg_db, domain="fact"))
-        runner.register(KnowledgeAIReviewer(kg_db, domain="graph_relation"))
+    # Shared extraction_candidates has no domain column. Register exactly one
+    # canonical fact-domain KnowledgeAIReviewer so run_all cannot double-process
+    # the same rows under fact + graph_relation. Consolidator graph_relation
+    # inventory remains a separate pipeline (not promoted here).
+    # Fail closed: only the live injected KnowledgeGraphService may own the
+    # connection — never construct an uninitialized fallback service here.
+    kg_service = getattr(ctx, "knowledge_graph", None) if ctx else None
+    if kg_service is not None:
+        runner.register(KnowledgeAIReviewer(kg_service, domain="fact"))
 
     # Slang adapter — only if slang_store is available
     slang_store = getattr(ctx, "slang_store", None) if ctx else None

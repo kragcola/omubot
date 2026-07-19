@@ -15,8 +15,16 @@ import {
   SparklesOutline,
   GiftOutline,
   ScanOutline,
+  JournalOutline,
+  BookOutline,
 } from '@vicons/ionicons5'
+import { api } from '../../api/client'
 import { useAppStore } from '../../stores/app'
+import {
+  PLUGIN_MENU_VISIBILITY_CHANGED,
+  enabledPluginNamesFromPayload,
+  isPluginMenuRouteVisible,
+} from '../pluginMenuVisibility'
 
 const router = useRouter()
 const route = useRoute()
@@ -26,7 +34,7 @@ function renderIcon(icon: Component) {
   return () => h('span', { class: 'flex-center' }, h(icon))
 }
 
-const menuOptions: MenuOption[] = [
+const baseMenuOptions: MenuOption[] = [
   {
     type: 'group',
     label: '日常',
@@ -39,6 +47,7 @@ const menuOptions: MenuOption[] = [
       { label: '表情包', key: '/stickers', icon: renderIcon(HappyOutline) },
       { label: '角色识别', key: '/characters', icon: renderIcon(ScanOutline) },
       { label: '生日祝福', key: '/birthday', icon: renderIcon(GiftOutline) },
+      { label: '空间日志', key: '/qzone-journal', icon: renderIcon(JournalOutline) },
     ],
   },
   {
@@ -49,6 +58,7 @@ const menuOptions: MenuOption[] = [
       { label: '学习管道', key: '/learning', icon: renderIcon(AnalyticsOutline) },
       { label: '知识库', key: '/knowledge', icon: renderIcon(LibraryOutline) },
       { label: 'BlockTrace', key: '/block-trace', icon: renderIcon(AnalyticsOutline) },
+      { label: '世界书', key: '/worldbook', icon: renderIcon(BookOutline) },
       { label: '反事实重放', key: '/replay/weekly', icon: renderIcon(AnalyticsOutline) },
     ],
   },
@@ -65,6 +75,47 @@ const menuOptions: MenuOption[] = [
     ],
   },
 ]
+
+const enabledPlugins = ref<ReadonlySet<string>>(new Set())
+let pluginVisibilityRequestId = 0
+
+const menuOptions = computed<MenuOption[]>(() => baseMenuOptions.map(option => ({
+  ...option,
+  children: option.children?.filter(child =>
+    isPluginMenuRouteVisible(child.key, enabledPlugins.value),
+  ),
+})))
+
+async function refreshPluginMenuVisibility() {
+  const requestId = ++pluginVisibilityRequestId
+  try {
+    const payload = await api<unknown>('/api/admin/plugins?include_system=true')
+    if (requestId !== pluginVisibilityRequestId) return
+    enabledPlugins.value = enabledPluginNamesFromPayload(payload)
+  }
+  catch {
+    if (requestId !== pluginVisibilityRequestId) return
+    enabledPlugins.value = new Set()
+  }
+}
+
+function onPluginMenuVisibilityChanged() {
+  void refreshPluginMenuVisibility()
+}
+
+onMounted(() => {
+  window.addEventListener(PLUGIN_MENU_VISIBILITY_CHANGED, onPluginMenuVisibilityChanged)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener(PLUGIN_MENU_VISIBILITY_CHANGED, onPluginMenuVisibilityChanged)
+})
+
+watch(
+  () => route.fullPath,
+  () => { void refreshPluginMenuVisibility() },
+  { immediate: true },
+)
 
 const activeKey = computed(() => {
   if (route.path.startsWith('/soul')) return '/persona-importer'

@@ -21,6 +21,30 @@
       "doc_tokens": 2500,
       "graph_tokens": 1700,
       "buffer_tokens": 300
+    },
+    "temporal_trace": {
+      "enabled": true,
+      "max_heads": 24,
+      "max_kps": 2,
+      "max_depth": 4,
+      "max_chars": 600
+    },
+    "query_aware_plan": {
+      "enabled": true
+    },
+    "card_eligibility": {
+      "enabled": true,
+      "status_ttl_days": 30,
+      "event_ttl_days": 180
+    },
+    "pack_evidence_gate": {
+      "enabled": true,
+      "memory_soft_confidence": 0.45,
+      "graph_soft_confidence": 0.60
+    },
+    "evidence_use_contract": {
+      "enabled": true,
+      "inject_constrained_instruction": true
     }
   }
 }

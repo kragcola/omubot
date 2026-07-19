@@ -66,10 +66,16 @@ class FakeMemoryCard:
 class FakeMemoryCardStore:
     def __init__(self, cards: list[FakeMemoryCard]) -> None:
         self.cards = cards
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, str | None, int]] = []
 
-    async def search_cards(self, query: str, *, limit: int = 10):
-        self.calls.append((query, limit))
+    async def search_cards(
+        self,
+        query: str,
+        *,
+        scope: str | None = None,
+        limit: int = 10,
+    ):
+        self.calls.append((query, scope, limit))
         return self.cards[:limit]
 
 
@@ -411,7 +417,7 @@ class TestPersonaDrivenScheduleFlag:
         )
 
         user_text = call["messages"][0]["content"]
-        assert memory_store.calls == [("", 5)]
+        assert memory_store.calls == [("", "global", 5)]
         assert "【跨天连续与最近记忆】" in user_text
         assert "昨日日程摘要" in user_text
         assert "排练复盘日" in user_text
@@ -478,7 +484,11 @@ class TestPersonaDrivenScheduleFlag:
 
         assert len(saved_themes) == 3
         assert len(set(saved_themes)) == 3
-        assert memory_store.calls == [("", 5), ("", 5), ("", 5)]
+        assert memory_store.calls == [
+            ("", "global", 5),
+            ("", "global", 5),
+            ("", "global", 5),
+        ]
         assert "昨日主题：开局低落复盘" in prompts[1]
         assert "昨日主题：低难度重整" in prompts[2]
         assert all("不要重复昨日主题" in prompt for prompt in prompts)
@@ -509,7 +519,7 @@ class TestEventReplanScheduleGenerator:
         assert off_call == default_call
         assert memory_store.calls == []
 
-    async def test_event_replan_flag_on_injects_dream_reflection_insights(self, tmp_path, monkeypatch):
+    async def test_event_replan_flag_on_does_not_reinject_dream_reflection_insights(self, tmp_path, monkeypatch):
         memory_store = FakeMemoryCardStore([
             FakeMemoryCard(
                 category="event",
@@ -533,11 +543,10 @@ class TestEventReplanScheduleGenerator:
         )
 
         user_text = call["messages"][0]["content"]
-        assert memory_store.calls == [("经历洞察", 3)]
-        assert "【昨日经历洞察】" in user_text
-        assert "昨天排练后团队意识到要先稳住低难度动作" in user_text
+        assert memory_store.calls == []
+        assert "【昨日经历洞察】" not in user_text
+        assert "昨天排练后团队意识到要先稳住低难度动作" not in user_text
         assert "普通闲聊" not in user_text
-        assert "不生成真人线下行为" in user_text
 
 
 class TestStoryArcSchedule:
