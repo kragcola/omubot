@@ -7,10 +7,10 @@
 - mode: task-bug
 - tracker: `docs/tracking/bot-memory-visual-authorized-deploy-2026-07-19.md`
 - objective: 提交、测试并部署可复现的当前生产源码闭包与 Bot memory/language/visual + Style provenance 修复。
-- status: 已获提交/部署/测试授权；commit manifest 与 clean-build preflight 进行中，尚未重建容器。
-- next_step: 冻结 staging 排除项，在干净 worktree 验证 staged tree；不从主 dirty worktree build。
-- last_completed: 生产 Style 污染精确清理完成，73/73，quick_check=ok。
-- rollback: bot image `9aa7e39a…a51` + Style backup `pre-change-20260719-224533`；NapCat 禁止重建。
+- status: 源码 commit `40a8e32`、clean image `d89121d9`、bot-only 部署与主要运行验收已完成；用户要求暂时中断并重启机器。
+- next_step: 机器重启后先盘点宿主高活跃进程/内存压力，以最低必要 Docker 内存与服务恢复；保护 NapCat identity，不执行 down/recreate；复用 `d89121d9`，仅在 image 丢失时从 `40a8e32` clean rebuild。随后复验 runtime 并收口。
+- last_completed: bot `e95c0b9b…` 运行新 image，Admin/API/UI、Worldbook、Style、QZone dry-run lock 与 NapCat 不变量均通过。
+- rollback: `omubot-bot:rollback-9aa7e39a-20260719` + trusted backup `pre-change-20260719-232315`；NapCat 禁止重建。
 
 ## Recovery Order
 

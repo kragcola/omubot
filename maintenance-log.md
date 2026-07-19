@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-07-19 Bot memory / QZone / Living Story 可复现源码提交与生产部署
+
+**变更类型**：生产源码闭包 commit、clean-worktree frontend/Docker build、bot-only recreate、运行验收与回滚准备；未 push、未发送 QQ/QZone、未重启或重建 NapCat。
+
+**提交与验证**：308-file closure 已提交为 `40a8e32faede3cf1a8b9152967c0dd98ecbb6b55`（tree `78b119cd…`），明确排除 Reasonix/coursework/NapCat/pytest/tmp/IPv6/压力实验/`.workspace`；凭据扫描只有 placeholder、测试 fixture 与普通 substring。clean tree 验证为前端 Node 11/11、vue-tsc/Vite、strict plugin layout、全仓 pytest 5093 passed / 17 skipped / 189 warnings；changed-Python Ruff 195 files clean，runtime Pyright 105 files 0 errors。required Grok review 使用 top-level `eb5d2b5b-662b-4aca-87c9-59dfb35fbe6d` + child `019f7aef-da26-7c51-bbcf-5e2c170ba7cd`，0 Critical；Grok 无写入。
+
+**部署与回滚**：fresh BackupService `pre-change-20260719-232315` 为 26 ok / 0 failed / trusted。旧 image `9aa7e39a…` 已标记 `omubot-bot:rollback-9aa7e39a-20260719`。从正式 commit 的独立 worktree 重建 101 个 SPA assets 后构建 `omubot-bot:latest` → `sha256:d89121d98ef0…`，image `GIT_COMMIT=40a8e32…`，Style/LLM/router/memo/visual/QZone 六个关键源码 SHA 与 commit 相同。仅执行 `docker compose up -d --no-deps --force-recreate --no-build bot`；新 bot container `e95c0b9b…` restart=0，NapCat container/image/created/started/restart/status 全不变。
+
+**运行验收**：NoneBot startup / PluginBus 24 / OneBot connected；Admin health 200，services 11 ok / 2 warning / 0 error；context/memo/worldbook/qzone 均 enabled 且 plugin errors=0。Worldbook snapshot available，Living Story 页面显示 main/side/ambient、Life TTL、shadow pass。Style `quick_check=ok`、structured human remaining=0、cleanup revisions=73；清理后新增 3 条 pending 均为正常 human extractor evidence、structured=0。QZone 插件启用但 `dry_run=true`、`live_allowed=false`、built-in `validated=false`、allowlist 空、live gate ready=false；未发送内容。
+
+**中断 / 重启交接**：用户要求暂时中断并重启机器。重启后先盘点宿主其他高活跃进程与内存压力，只给 Docker 保留 Omubot 恢复所需最低内存/服务；优先复用 image/volume，不盲目全栈重建。NapCat 严禁 `down` 或 recreate。详细恢复顺序与精确 IDs 见 `docs/tracking/bot-memory-visual-authorized-deploy-2026-07-19.md`。
+
+---
+
 ## 2026-07-19 生产 Style 视觉/system provenance 污染精确清理
 
 **变更类型**：获授权的生产 `style.db` 行级数据修复；无代码部署、commit/push、QQ/QZone/NapCat 或容器重启。
