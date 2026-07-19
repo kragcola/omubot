@@ -1,10 +1,10 @@
 # Bot 记忆/视觉修复授权提交与部署（2026-07-19）
 
-> 状态：paused-post-deploy-reboot
+> 状态：completed
 > mode: task-bug
 > 授权：用户明确要求“部署，提交，测试”。
-> 当前下一步：机器重启后先盘点高活跃进程与内存压力，再以最低必要 Docker 内存恢复 Omubot 必需服务；优先复用现有 image/volume/container identity，不从 dirty worktree 重建，不重建 NapCat。恢复后复验 runtime/Style/QZone/NapCat，再收口 tracker。
-> 阻塞：用户要求暂时中断并进行机器重启；本轮不再操作 Docker 或系统。
+> 当前下一步：无；本任务完成后立即终止，不自动承接其他 pending。
+> 阻塞：无。
 > 回滚：旧 bot tag `omubot-bot:rollback-9aa7e39a-20260719` → image `sha256:9aa7e39aae781dd4f27757b23784f7631386765f94dc884cafee1ccdd6427a51`；fresh trusted backup `pre-change-20260719-232315`；NapCat 禁止重建。
 > 用户收尾指令：完成本任务后立即终止，不展开其他事项；保留“重启任务”作为后续 handoff。
 
@@ -42,10 +42,10 @@
 
 ## Stop / Restart Handoff
 
-- 用户在部署与主要运行验收完成后要求暂时中断并重启机器；本 checkpoint 后立即停止。
-- 机器重启后不得盲目 `docker compose up -d` 全栈：先查看宿主高活跃进程、内存压力和 Docker Desktop 当前资源配置，只保留 Omubot 恢复所需的最低内存与服务。
-- 恢复顺序必须保护 NapCat：先 inspect 现存 container/image/volume/login state；禁止 `down`、禁止 recreate/rebuild NapCat。Bot 优先复用已构建 `omubot-bot:latest` (`d89121d9…`) 与 commit `40a8e32…`；只有 image 丢失或校验失败才从该 commit 的 clean worktree 重建。
-- 重启后只做必要 runtime 验收与本 tracker 收口，不自动承接其他 pending；“重启任务”以本节为 handoff。
+- 机器重启后已完成恢复：先盘点宿主高活跃进程、内存压力和 Docker Desktop 资源配置，再只启动 `napcat`、`ccip-sidecar`、`qq-bot` 三个必要原容器。
+- 使用 `docker start` 复用原 identity/image/volume；未 build、未 Compose up、未 down、未 recreate/rebuild NapCat。`pmubot`、三个 socket proxy、watchtower 与四个测试 NapCat 全部保持停止。
+- Docker Desktop `MemoryMiB=5120` 保持不变：修改该上限会重启 Docker VM 并再次冲击 NapCat；实际三容器合计约 1.08 GiB，VM 约 2.99 GiB，宿主仍 65% memory available、无 swap，已通过最小服务集控制实际占用。
+- 重启任务完成；本轮不自动承接其他 pending。
 
 ## Plan
 
@@ -55,8 +55,8 @@
 - [x] Commit and verify HEAD/tree.
 - [x] Tag rollback image and build deployment image from clean commit worktree.
 - [x] Bot-only force recreate; verify runtime/DB/config/NapCat invariants.
-- [ ] After host reboot, recover Docker with minimum necessary memory/services and re-run runtime invariants.
-- [~] Update maintenance log / trackers / ACTIVE and checkpoint handoff.
+- [x] After host reboot, recover Docker with minimum necessary memory/services and re-run runtime invariants.
+- [x] Update maintenance log / trackers / ACTIVE and checkpoint handoff.
 
 ## Test Ledger
 
@@ -72,6 +72,9 @@
 | T07 | Bot-only recreate | `docker compose up -d --no-deps --force-recreate --no-build bot`；bot `e95c0b9b…` / image `d89121d9…` / restart 0；NapCat ID/image/created/started/restart/status byte-for-byte unchanged | Only bot replaced；NapCat red line preserved | 2026-07-19 |
 | T08 | Runtime/API/UI acceptance | startup complete、PluginBus 24、OneBot connected；Admin health 200；services 11 ok / 2 warning / 0 error；context/memo/worldbook/qzone enabled且 plugin errors=0；Worldbook snapshot available；browser dashboard settled to Bot online/NapCat normal，QZone/Worldbook pages render | Primary deployment acceptance passed before interruption | 2026-07-19 |
 | T09 | Style/QZone read-only invariants | style quick_check=ok、structured human remaining=0、cleanup revisions=73、approved/rejected=10/82；3 new pending all post-cleanup normal human extractor rows，structured=0；QZone dry_run=true/live=false/validated=false/allowlist empty/gate ready=false；no send | Preventive provenance code active；QZone remains test/dry-run only | 2026-07-19 |
+| T10 | Post-reboot host/Docker inventory | 16 GiB host；74% available before service start、no swap；Docker `MemoryMiB=5120`；image `d89121d9`、volume `omubot-storage` 与三个原容器均存在；0 running / 13 stopped | No rebuild required；avoid Docker VM restart and preserve identities | 2026-07-20 |
+| T11 | Minimal existing-container recovery | sequential `docker start napcat` → `ccip-sidecar` → `qq-bot`；IDs/images/created/restart=0 unchanged；OneBot login retcode=0；CCIP 4 packs / 136 characters | Necessary stack restored without recreate；auxiliary/test containers remain stopped | 2026-07-20 |
+| T12 | Post-reboot runtime/memory acceptance | Bot health 200、connected_bots=1、services 11 ok / 2 warning / 0 error、PluginBus 24；Worldbook available；Style quick_check=ok/structured=0/revisions=73；QZone dry-run/live/validated/allowlist 四重锁；container memory约 600.7/321.6/160.5 MiB，host 65% available/no swap | Recovery complete；actual Docker memory limited by minimal running set；no external send | 2026-07-20 |
 
 ## Interruption Checkpoint
 
@@ -79,4 +82,11 @@
 - Active image before host reboot: `sha256:d89121d98ef0baaa94827ebf1465c6095b4c48b815bb819f468fb6fd40a93e30`.
 - Active bot container before host reboot: `e95c0b9b20e96e6f9c008e97036e6c23ebc427c74d1ac1b1d78833afe9a6b2b9`, restart 0.
 - NapCat before host reboot: container `19f6cf13607c…`，image `cde89d76…`，restart 0；严禁 recreate。
-- Pending solely because of user interruption: host reboot后的 memory-aware Docker recovery、同一组 runtime invariants重检、把状态标为 completed/ACTIVE=none（或指向用户指定后续任务）。不要重跑已经通过的全量测试，除非 commit/image发生变化。
+- Post-reboot recovery completed 2026-07-20；ACTIVE 可置 none。不要重跑已经通过的全量测试，除非 commit/image发生变化。
+
+## Final Outcome
+
+- Source commit `40a8e32` 与 deployed image `d89121d9` 在机器重启后继续复用；未重新 build。
+- Necessary running set precisely equals `napcat`、`ccip-sidecar`、`qq-bot`；所有辅助/测试容器停止。
+- NapCat、CCIP、Bot container identity 与 restart count 均保持；OneBot、Admin、Worldbook、Style、QZone 安全锁运行正常。
+- No push，no QQ/QZone send，no NapCat restart/recreate，no production cleanup/write beyond normal service operation。

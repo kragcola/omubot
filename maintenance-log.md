@@ -14,7 +14,9 @@
 
 **运行验收**：NoneBot startup / PluginBus 24 / OneBot connected；Admin health 200，services 11 ok / 2 warning / 0 error；context/memo/worldbook/qzone 均 enabled 且 plugin errors=0。Worldbook snapshot available，Living Story 页面显示 main/side/ambient、Life TTL、shadow pass。Style `quick_check=ok`、structured human remaining=0、cleanup revisions=73；清理后新增 3 条 pending 均为正常 human extractor evidence、structured=0。QZone 插件启用但 `dry_run=true`、`live_allowed=false`、built-in `validated=false`、allowlist 空、live gate ready=false；未发送内容。
 
-**中断 / 重启交接**：用户要求暂时中断并重启机器。重启后先盘点宿主其他高活跃进程与内存压力，只给 Docker 保留 Omubot 恢复所需最低内存/服务；优先复用 image/volume，不盲目全栈重建。NapCat 严禁 `down` 或 recreate。详细恢复顺序与精确 IDs 见 `docs/tracking/bot-memory-visual-authorized-deploy-2026-07-19.md`。
+**重启后最小 Docker 恢复（2026-07-20）**：宿主 16 GiB、启动前 74% memory available、无 swap；Docker Desktop 上限 5 GiB，原 image/volume/container 均存在，因此没有重新 build 或 Compose recreate。按顺序只 `docker start napcat ccip-sidecar qq-bot`（实际逐个启动并验收），三者 ID/image/created/restart=0 均保持；`pmubot`、三个 socket proxy、watchtower 与四个测试 NapCat 全部保持 exited。三容器实际内存约 600.7/321.6/160.5 MiB（合计约 1.08 GiB），Docker VM 约 2.99 GiB，宿主仍 65% available、无 swap；不下调 Docker Desktop 上限，因为更改会重启 VM 并再次冲击 NapCat，最小运行集已经控制实际占用。
+
+**重启后复验**：OneBot `get_login_info` 200/retcode=0，CCIP 4 packs / 136 characters，Bot commit `40a8e32…`、PluginBus 24、Admin health 200、services 11 ok / 2 warning / 0 error。Worldbook snapshot available；Style quick_check=ok、structured human remaining=0、cleanup revisions=73；QZone 仍 `dry_run=true/live=false/profile_validated=false/allowlist empty`、gate ready=false。未发送 QQ/QZone，未重启/重建 NapCat。恢复 tracker 已完成并将 ACTIVE 置 none。
 
 ---
 
