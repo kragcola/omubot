@@ -9,7 +9,7 @@
 - objective: none
 - status: Docker 最低内存任务完成；当前无 active task。
 - next_step: none
-- last_completed: Docker Desktop `5120→3072 MiB`，只运行 `napcat + qq-bot`；VM约 2.23 GiB，Bot health p95 0.73 ms，host swap 0。
+- last_completed: Docker Desktop `5120→3072 MiB`；最终运行 `napcat + qq-bot + ccip-sidecar`，容器合计约 1.06 GiB，CCIP 4 packs / 136 characters，host swap 0。
 - rollback: `.workspace/docker-settings-store.pre-3072-20260720.json`（5120 MiB）+ `docker desktop restart`。
 
 ## Recovery Order

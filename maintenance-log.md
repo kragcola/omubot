@@ -4,15 +4,15 @@
 
 ---
 
-## 2026-07-20 Docker Desktop 最低内存与 Bot 核心运行集
+## 2026-07-20 Docker Desktop 最低内存与 Bot 功能运行集
 
 **变更类型**：获授权的本机 Docker Desktop 资源下调与运行服务裁剪；不改 Compose/业务源码，不 build/recreate，不 push，不发送 QQ/QZone。
 
 **决策与执行**：Docker Desktop `MemoryMiB` 从 5120 降至 3072。选择 3 GiB 而非 2–2.5 GiB，是因为 Bot 容器 hard limit 已为 2 GiB，NapCat 常驻约 0.6 GiB，仍需 Linux VM/kernel/file-cache 峰值余量；更低无法同时声称“Bot 流畅”。原设置已备份为 `.workspace/docker-settings-store.pre-3072-20260720.json`。当前 `plutil` 不接受该合法 JSON 文件（写前报 `Unexpected character {`），因此没有用它强写；最终只对 `MemoryMiB` 做一行 JSON patch，再通过官方 `docker desktop restart` 应用。engine 可用内存约 2.845 GiB。
 
-**最小运行集与降级**：只恢复原 `napcat` 与 `qq-bot` 容器；CCIP、PMUbot、三个 socket proxy、watchtower 与四个测试 NapCat 全部保持 exited。Bot/NapCat ID/image/restart=0 保留，NapCat 登录仍有效。CCIP 端口 8620 明确不可用，角色识别属于接受的内存优先降级；核心消息链保留。
+**最终运行集**：最初只恢复原 `napcat` 与 `qq-bot`；用户根据 761.6 MiB 实占要求恢复 CCIP 后，复用原容器执行 `docker start ccip-sidecar`，未 build/recreate。最终运行集为 `napcat + qq-bot + ccip-sidecar`；PMUbot、三个 socket proxy、watchtower 与四个测试 NapCat 保持 exited。三者 ID/image/restart=0 保留，NapCat 登录不受影响；CCIP 角色识别恢复。
 
-**验证 / 影响 / 回滚**：Docker VM process 从约 3.56 GiB 降至约 2.23 GiB，释放约 1.33 GiB；NapCat/Bot 容器约 621.7/181.8 MiB，OOM=false、restart=0。Admin health 20 次 median/p95/max 为 0.43/0.73/1.23 ms；connected_bots=1，services 11 ok / 2 warning / 0 error，核心插件 0 error，Worldbook available，QZone 仍 dry-run/live locked。宿主 65% memory available、swap 0。回滚为恢复上述 backup（或设 `MemoryMiB=5120`）→ `docker desktop restart` → 启动需要的原容器。完整记录见 `docs/tracking/docker-minimum-memory-bot-runtime-2026-07-20.md`。
+**验证 / 影响 / 回滚**：最低两容器态 Docker VM process 从约 3.56 GiB 降至约 2.23 GiB，释放约 1.33 GiB；Admin health 20 次 median/p95/max 为 0.43/0.73/1.23 ms，connected_bots=1，services 11 ok / 2 warning / 0 error，核心插件 0 error，Worldbook available，QZone 仍 dry-run/live locked。恢复 CCIP 后 health 为 ok、4 packs / 136 characters、registry `7a60b4f27c86`，Admin 200、OneBot 200/retcode=0/status=ok；NapCat/Bot/CCIP 约 574.2/214.3/299.0 MiB，合计 1087.5 MiB，OOM=false、restart=0，宿主 swap 0。回滚为停止 CCIP，或恢复上述 backup（或设 `MemoryMiB=5120`）→ `docker desktop restart` → 启动需要的原容器。完整记录见 `docs/tracking/docker-minimum-memory-bot-runtime-2026-07-20.md`。
 
 ---
 
