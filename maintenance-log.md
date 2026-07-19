@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-07-20 Lily 官方 expression 角色包小批上线
+
+**变更类型**：角色包来源白名单、测试、日V运行包替换与 CCIP-only reload；Grok normal required-parallel 来源研究/审查；未触 QQ/QZone/生产 SQLite，未重启或重建 NapCat。
+
+**来源与决策**：向 `tools/enroll_virtual_singers_pack.py` 写回 Animove Lily 官方商品路径下两张粘土人脸板：歌唱脸 `121031_02.jpg`（SHA-256 `13a4840223b208b9d857446da5dc186775afffd4ea46f3ca2c7e9a2cef5ec5ae`）与ハリィ脸 `121031_03.jpg`（`ddfd1a513a208c2f54d3b78c69a307287d9c5dfdff6b1cc1e7607e598bc1934d`），均按 `expression` 计入。两图只有 150x225，且ハリィ脸带绿色挂件，因此保留低分辨率/配件风险；来源绑定、双图 centroid 与运行碰撞结果足以通过本批。HARU `vip-300-0034` 实际为头身约 1:6-1:7 的正比全身亚克力图，来源研究中的 SD/chibi 标签错误，禁止写回。BangDream 10 个目标本轮来源研究 approved=0。
+
+**并行与验证**：continuity、来源研究、预部署及部署后审查均使用 Grok normal required-parallel。预部署 top-level `0569d1cb-0117-4fe8-b911-02b0cec49f99` + child `019f7b68-4b74-79e3-89a3-2ad5d2b79edc` 通过 Lily/HARU 语义门槛；部署后 top-level `e2639a08-e606-4255-be09-9204f0d9dc32` + child `019f7b75-2610-7632-8cff-c223a16b7da2` 发现首版 303 图包误减小春六花 `moegirl_profile_03`。Codex 不接受“Important 但 ACCEPT”，以部署前包为基线仅替换 Lily manifest/centroid，生成 304 图纯增量 v2；最终 top-level `2b1e7861-c5f7-4950-9d82-6068f3bcacf5` + child `019f7b80-e575-7522-a2b4-5e30964b9c9b` 用 NPZ 数组比较、102-file SHA matrix 与独立三包差分确认 Critical=0、Important=0，Grok 全程零写入。最终相对旧包 `manifest_changed=[lily]`、`embedding_changed=[lily]`、`sample_changed=[]`。定向 pytest `56 passed`，ruff clean，pyright `0 errors, 0 warnings`；四包 136 IDs unique、NPZ keys match、768 维、sample dirs 齐全、under5=[]。两图活动态 `/identify` 与 `/identify-multi` 均单命中 Lily；全 136 top8 的 diff/margin 分别为 `0.0503031239 / 0.1108303145` 与 `0.0343155079 / 0.1310237534`。
+
+**部署、影响与回滚**：原始活动包备份为 `config/character_packs/backups/ja_virtual_singers.charpack.bak-20260720-013026-pre-lily-nendoroid-expression-active`；首版漂移包归档为 `ja_virtual_singers.charpack.bak-20260720-014714-pre-pure-lily-fix-active`，仅作取证。两次切换都经同卷 staging 校验且只执行 `docker compose restart ccip-sidecar`。最终 sidecar healthy，4 packs / 136 characters；日V 34 人 / 304 图，Lily 缺口清零，仅剩 `haru:chibi`，全局剩 BangDream 10 个 `chibi` + HARU。HARU 研究 `candidates.json/report.md` 已把 `vip-300-0034` 从可审查 chibi 改为 normal-proportion wrong-form reject。NapCat 容器 ID、Created、StartedAt、restart=0、running、OOM=false 前后完全不变。回滚为恢复原始 013026 备份后仅重启 `ccip-sidecar`。
+
+---
+
 ## 2026-07-20 Docker Desktop 最低内存与 Bot 功能运行集
 
 **变更类型**：获授权的本机 Docker Desktop 资源下调与运行服务裁剪；不改 Compose/业务源码，不 build/recreate，不 push，不发送 QQ/QZone。

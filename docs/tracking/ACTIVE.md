@@ -4,13 +4,13 @@
 
 ## Current
 
-- mode: none
-- tracker: none
-- objective: none
-- status: Docker 最低内存任务完成；当前无 active task。
-- next_step: none
-- last_completed: Docker Desktop `5120→3072 MiB`；最终运行 `napcat + qq-bot + ccip-sidecar`，容器合计约 1.06 GiB，CCIP 4 packs / 136 characters，host swap 0。
-- rollback: `.workspace/docker-settings-store.pre-3072-20260720.json`（5120 MiB）+ `docker desktop restart`。
+- mode: task
+- tracker: `docs/tracking/character-pack-batch-fill-2026-06-06.md`
+- objective: 继续补齐 BangDream 10 个 `chibi` 与日V `haru:chibi`；仅录入来源强绑定且通过结构、识别和全包碰撞验收的素材。
+- status: Lily Animove 官方粘土人歌唱脸/ハリィ脸 expression 纯增量小批已部署；首版重构误减小春六花 1 图，已由 Grok 终审发现并修为只改变 Lily 的 v2。BangDream 10 人本轮检索 approved=0，HARU 亚克力候选确认为正比图并拒绝。
+- next_step: 只从新的官方或可核验授权单人 SD 来源继续 BangDream 10 人与 HARU；不要重跑现有商品搜索、旧 plush、KV、包装、背面图或 `vip-300-0034` 亚克力立牌。
+- last_completed: Grok normal required-parallel 来源研究与部署后审查完成；活动日V包 34 人 / 304 图，Lily 无缺口且相对部署前包仅 Lily manifest/centroid 变化，sidecar healthy（4 packs / 136 characters），NapCat 未重启或重建。
+- rollback: 恢复 `config/character_packs/backups/ja_virtual_singers.charpack.bak-20260720-013026-pre-lily-nendoroid-expression-active` 后仅执行 `docker compose restart ccip-sidecar`；NapCat 禁止重建。
 
 ## Recovery Order
 
@@ -30,7 +30,7 @@
 
 ## Pending (authoritative; not the Current task)
 
-- **Character pack gap filling（active）**：sidecar healthy，4 packs / 136 characters；剩 BangDream 10 个 `chibi`、`lily:expression`、`haru:chibi`。
+- **Character pack gap filling（active）**：sidecar healthy，4 packs / 136 characters；Lily expression 已清，剩 BangDream 10 个 `chibi` 与 `haru:chibi`。
 - **QZone Journal v0.8.2（真实性/schema v6 已部署，常驻 live 锁定）**：Schedule/Dream fiction 分类、确定性 fiction frame、factual exact compose、delivery live authenticity、显式 approval scope、memory-loop 断开已上线；历史 published 行为 `dry_run`，当前仅 1 条 canonical fiction pending/dry-run tip，approved/dispatching/unknown=0。built-in `validated=false`、dry-run=true、live=false、allowlist 空。既有远端日志不处置；未来需新授权 + 新 draft + 明确 live approval + 新原始 attested capture。详见 `docs/tracking/qzone-authenticity-remediation-2026-07-18.md`。
 - **Memory graph window / hub control v1（结构切片已部署）**：scope 公平窗口、batch evidence、hub-aware max-2-hop 已随 Stage-0 image 生效；PPR 仍 NO-GO。迁移：`docs/migrations/memory-graph-window-hub-control-v1-2026-07-16.md`。
 - **Memory Episode typed refs / alias（结构切片已部署）**：真实 resolver、scoped promoter、provider typed evidence、alias lifecycle、nickname seed 已上线；无 big-bang backfill。

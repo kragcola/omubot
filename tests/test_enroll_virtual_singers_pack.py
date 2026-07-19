@@ -608,6 +608,22 @@ def test_lily_animove_official_goods_adds_chibi_source() -> None:
     )
 
 
+def test_lily_animove_official_nendoroid_adds_expression_sources() -> None:
+    expected = {
+        "official_expression_animove_lily_nendoroid_singing_face_20121031": (
+            "https://animove.jp/lily/goods/2012/10/31/121031_02.jpg"
+        ),
+        "official_expression_animove_lily_nendoroid_harry_face_20121031": (
+            "https://animove.jp/lily/goods/2012/10/31/121031_03.jpg"
+        ),
+    }
+    lily_sources = dict(pack.EXTRA_IMAGE_URLS["lily"])
+
+    for source, url in expected.items():
+        assert pack.source_form(source) == "expression"
+        assert lily_sources[source] == url
+
+
 def test_selected_official_portrait_sources_count_as_expression() -> None:
     expected = {
         "kafu": "official_profile_kafu_about",

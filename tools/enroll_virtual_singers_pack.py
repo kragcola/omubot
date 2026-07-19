@@ -477,6 +477,14 @@ EXTRA_IMAGE_URLS: dict[str, list[tuple[str, ImageUrl]]] = {
             "official_chibi_animove_lily_goods_sd_20130401",
             "https://animove.jp/lily/goods/2013/04/01/130401_sd.jpg",
         ),
+        (
+            "official_expression_animove_lily_nendoroid_singing_face_20121031",
+            "https://animove.jp/lily/goods/2012/10/31/121031_02.jpg",
+        ),
+        (
+            "official_expression_animove_lily_nendoroid_harry_face_20121031",
+            "https://animove.jp/lily/goods/2012/10/31/121031_03.jpg",
+        ),
     ],
     "kaai_yuki": [
         (
