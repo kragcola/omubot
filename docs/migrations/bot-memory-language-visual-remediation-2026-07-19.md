@@ -1,8 +1,9 @@
 # Bot 记忆、措辞与图片行为修复迁移清单（2026-07-19）
 
-> 状态：代码与离线验收完成，未部署
-> 数据边界：未写生产 SQLite，未清理 Style 污染数据，未触 QQ/QZone/NapCat
+> 状态：代码与离线验收完成；后续已提交并完成 bot-only 生产部署与 Style 授权清理复验
+> 数据边界：实现阶段未写生产 SQLite；后续仅按独立授权精确清理 Style 数据。未触 QQ/QZone，NapCat 未重启或重建
 > 基线：`dcc75aaeb7f08d2e8b02f8cf0522bb48f204b97a`
+> 部署：commit `40a8e32faede3cf1a8b9152967c0dd98ecbb6b55`；image `sha256:d89121d98ef0...`；extractor SHA-256 `ef96f86b60985d25a1ecbd45671e5dff22c57b9157bc96fe51217709a7147f7f`
 
 ## 迁移目标
 
@@ -42,7 +43,7 @@
 - 旧记录无法形成合法 scope 时不删除，迁移到 `quarantine:<row>`；公开 lookup 不查询 quarantine，因此 fail-closed。
 - 迁移失败时 rollback 并关闭未发布连接；composition root 启动失败会按 LIFO finalizer 关闭已创建资源。
 
-本轮没有打开生产 `storage/memory_cards.db` 的可写连接。未来部署前必须先创建可信备份，并在维护窗口内仅重建/recreate bot；NapCat 不需要也不得重启。
+实现与离线验收阶段没有打开生产 `storage/memory_cards.db` 的可写连接。当时要求未来部署前先创建可信备份，并在维护窗口内仅重建/recreate bot；后续部署已遵守该边界，NapCat 未重启或重建。
 
 ## 最终离线验收
 
@@ -50,22 +51,23 @@
 - Post-review hardening：视觉纠正授权上下文 5 类负例、Memo parser 4 类负例、Card tool schema/description、noncanonical global query 均已覆盖。
 - 全仓：`5093 passed, 17 skipped, 189 warnings`。
 - Scoped Ruff：pass；Scoped Pyright：`0 errors, 0 warnings`。
-- 未执行 commit/push/deploy、生产 DB 写入、QQ/QZone 发送、Docker/NapCat 操作。
+- 该离线验收阶段未执行 commit/push/deploy、生产 DB 写入、QQ/QZone 发送、Docker/NapCat 操作；后续授权动作见下节。
 
-## 部署后最小检查（未来授权后执行）
+## 后续授权的部署与最小检查（已执行）
 
-1. 部署前：`git stash list`、`git status -uno`、未跟踪文件审计、BackupService trusted backup。
-2. 仅重建 bot image；禁止 `docker compose down`，禁止重启/recreate NapCat。
-3. 启动日志确认 CardStore、VisualIdentityStore、SocialNarrativeStore 均初始化成功。
-4. 只读 WAL-aware 检查：`PRAGMA quick_check`、`PRAGMA table_info(visual_identities)`、主键顺序与两个索引。
-5. 使用离线 fixture 或获授权测试群验证；未经新授权不得真实发送 QQ/QZone。
+1. 部署前完成 `git stash list`、tracked/untracked 边界审计和 BackupService trusted backup。
+2. 防再污染代码随 `40a8e32` 构建为 image `sha256:d89121d98ef0...`，只 recreate bot；未执行 `docker compose down`，NapCat 未重启或重建。
+3. 当前 `qq-bot` ID `e95c0b9b...`，`GIT_COMMIT=40a8e32...`，restart=0、OOM=false；宿主与容器 `services/style/extractor.py` SHA-256 均为 `ef96f86b...f7f`。
+4. Style focused pytest `49 passed`，Ruff pass，Pyright `0 errors, 0 warnings`；容器 runtime smoke 拒绝 visual/system evidence、接受普通 human 文本，manual extract 已调用同一 eligibility helper。
+5. 生产 Style WAL-aware 只读复验：`quick_check=ok`，structured human remaining=0，cleanup revisions=73；当前 approved/pending/rejected=`10/1114/82`，清理后新增 10 条均为 eligible human evidence。
+6. 未发送 QQ/QZone；未触发 Style 手工抽取或自动审批。Grok normal required-parallel 复核为 top-level `7a52dcb7-dcd2-45db-9a98-efa03c0fa8f4` + child `019f7d13-8eab-7ff3-b2be-30b071c84eeb`。
 
 ## 回滚
 
 - 代码：逐文件反向回退本迁移清单对应 hunks，或回滚到上一 bot image；不 reset/clean/stash 用户 WIP。
 - SQLite：`visual_identities` 为 additive。旧生产代码不会读取该表，可原样保留；不要为回滚主动删除表或记录。
-- Style：本轮未改生产 Style 数据，无数据回滚动作。
-- 外部状态：本轮未发送 QQ/QZone、未部署、未重启 NapCat，因此无外部回滚。
+- Style：实现阶段未改生产 Style 数据；后续清理可使用 trusted backup `pre-change-20260719-224533`，或按 SHA-256 `53355a9f79d64484b3c42f561a6705d8978fcd2ba37157800318b433ccd42b88` 的 0600 计划做行级恢复。整库恢复必须另行授权并 stop/start bot。
+- 外部状态：未发送 QQ/QZone，NapCat 未重启或重建。代码回滚优先切回部署前 bot image，仅 recreate bot。
 
 ## 后续授权数据清理（2026-07-19）
 
@@ -75,4 +77,5 @@
 - cleanup plan：SHA-256 `53355a9f79d64484b3c42f561a6705d8978fcd2ba37157800318b433ccd42b88`，mode 0600。
 - 73 条 evidence `human→system`；对应 73 条 expression `pending/approved→rejected`；73 条 revision；无物理删除。
 - production counts：approved `12→10`、pending `1175→1104`、rejected `9→82`；post-write `quick_check=ok`，错误 structured human evidence remaining=0。
-- 容器未重启、restart=0；未部署代码、未触 QQ/QZone/NapCat。当前容器尚不含新的 Style provenance 防线，预防再次污染需要另行部署授权。
+- 清理事务完成时容器未重启、restart=0，且当时尚未部署代码；这是清理阶段的历史事实。
+- 后续授权已完成提交与 bot-only 部署：当前容器 `GIT_COMMIT=40a8e32...`，extractor SHA 与宿主一致。当前数据为 approved/pending/rejected=`10/1114/82`，`quick_check=ok`，structured human remaining=0；防再污染防线已经生效。

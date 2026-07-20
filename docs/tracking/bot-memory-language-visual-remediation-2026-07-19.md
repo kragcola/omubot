@@ -2,20 +2,28 @@
 
 > 状态：completed
 > mode: task-bug
-> 最后更新：2026-07-19 CST
-> 当前下一步：无；任务已完成并从 ACTIVE 收口，部署与生产 Style 数据清理均需另行授权。
+> 最后更新：2026-07-20 CST
+> 当前下一步：无；代码、生产 Style 精确清理、bot-only 部署与复验均已完成并从 ACTIVE 收口。
 > 阻塞：无。
-> 验证证据：最终全仓 5093 passed / 17 skipped / 189 warnings；scoped Ruff/Pyright 0；required Grok 终审 0 Critical。
-> 回滚入口：仅回退本 tracker 所列代码/测试/文档增量；不改生产 DB，不触 QQ/QZone/NapCat。
+> 验证证据：离线全仓 5093 passed / 17 skipped / 189 warnings；Style follow-up 49 passed、Ruff/Pyright 0；required Grok 终审与部署交叉验证完成；生产 `quick_check=ok`、structured human remaining=0。
+> 回滚入口：代码切回部署前 bot image；Style 使用 trusted backup `pre-change-20260719-224533` 或经独立授权按 0600 行级计划恢复；不触 QQ/QZone/NapCat。
 
 ## Resume Capsule
 
 - objective: 修复 `docs/audits/bot-memory-language-visual-behavior-audit-2026-07-18.md` 确认的五条行为链：记忆 scope 断链、repair 后纯标点泄漏、视觉 prose 污染用户正文与 Style、置信度诊断泄漏、跨轮角色化短语重复。
-- next_step: none；若未来部署，先可信备份并按迁移清单做 bot-only 维护窗口；历史 Style 污染清理需独立授权。
+- next_step: none；后续授权的可信备份、Style 精确清理、代码 commit 与 bot-only 维护窗口均已完成。
 - current_files: `kernel/types.py`, `services/llm/client.py`, `plugins/memo/plugin.py`, `services/memory/visual_identity.py`, `services/tools/memo_tools.py`, `bootstrap/chat_runtime.py`, `kernel/router.py`, `services/media/visual_evidence.py`, `services/storage/catalog.py`, 对应 tests/docs。
-- last_verified: HEAD `dcc75aaeb7f08d2e8b02f8cf0522bb48f204b97a`；protected review baseline 118 tracked / 146 untracked；最终 status surface 118 tracked / 147 untracked，porcelain-path SHA-256 `a52024eb997c526d27f953e4417368aefa55463d3db2295fcba91d626c08a5f6`。全部既有 dirty/untracked WIP 保留。
-- do_not_redo: 不重做生产源码/容器 SHA 对齐、SQLite quick_check、历史 BlockTrace 与 Style 只读统计；不把历史启发式发生率当精确比例。
-- rollback: 保留用户既有 WIP；通过本任务 scoped patch 逐文件反向回退，不 reset/clean/stash/commit。
+- last_verified: 防线已包含于 commit `40a8e32faede3cf1a8b9152967c0dd98ecbb6b55` / image `sha256:d89121d98ef0...`；当前 bot `GIT_COMMIT=40a8e32...`、restart=0。Style focused 49 passed，生产 approved/pending/rejected=`10/1114/82`、`quick_check=ok`、structured human remaining=0。
+- do_not_redo: 不重复 build/recreate 已运行相同代码的 bot；不重做生产源码/容器 SHA 对齐或历史清理；不重新触发 Style 手工抽取/自动审批来“测试”；不把历史启发式发生率当精确比例。
+- rollback: 保留用户既有 WIP；代码切回部署前 bot image。数据使用 `pre-change-20260719-224533` 或 cleanup plan `53355a9f...2b88`，整库恢复需另行授权并 stop/start bot；NapCat 禁止重建。
+
+## 2026-07-20 Authorized Deployment Follow-up
+
+- lineage: `40a8e32faede3cf1a8b9152967c0dd98ecbb6b55` -> `sha256:d89121d98ef0...` -> running `qq-bot` `e95c0b9b...`；宿主/容器 extractor SHA-256 均为 `ef96f86b60985d25a1ecbd45671e5dff22c57b9157bc96fe51217709a7147f7f`。
+- acceptance: Style focused pytest `49 passed`；Ruff pass；Pyright `0 errors, 0 warnings`；容器 runtime smoke 拒绝 visual/system evidence 并接受普通 human 文本，manual path 调用同一 eligibility helper。
+- production truth: `quick_check=ok`；cleanup revisions=73；approved/pending/rejected=`10/1114/82`；structured human remaining=0；清理后新增 10 条 evidence 均为 eligible human。
+- deploy decision: 当前生产 bot 已运行目标 image，因此本次复验为 no-op deploy，不重复 build/recreate。bot restart=0；NapCat restart=0、OOM=false；未发送 QQ/QZone，未触发 Style 抽取或审批。
+- independent review: Grok normal required-parallel top-level `7a52dcb7-dcd2-45db-9a98-efa03c0fa8f4` + child `019f7d13-8eab-7ff3-b2be-30b071c84eeb`，只读且零文件变更；Codex 独立完成 live container/volume 验收。
 
 ## Codex-owned contract freeze
 
@@ -53,9 +61,9 @@ Status values: `pending`, `running`, `reconnecting`, `rebuilding`, `replacement_
 | --- | --- | --- | --- |
 | Context | done | Gate/skills/session/ACTIVE/audit handoff restored; current dirty baseline captured | only update on contradiction |
 | Plan | done | contract/conflict graph frozen；required Grok implementation + review packets recorded | only update on review contradiction |
-| Implementation | done | memory visibility、视觉身份、side-channel、visible floor、Style/dedup 与 composition root 已接线 | no deploy |
+| Implementation | done | memory visibility、视觉身份、side-channel、visible floor、Style/dedup 与 composition root 已接线；后续已随 `40a8e32` 部署 | no further deploy |
 | Verification | done | post-review RED→GREEN、full pytest 5093、scoped Ruff/Pyright 0、same-pattern/global namespace negatives | preserve full-lint baseline caveat |
-| Handoff | done | migration、maintenance、tracker 与 ACTIVE 已对齐；未部署 | production Style cleanup remains separately authorized |
+| Handoff | done | migration、maintenance、tracker 与 ACTIVE 已对齐；后续清理/部署/复验均闭环 | none |
 
 ## Todo
 
@@ -77,6 +85,8 @@ Status values: `pending`, `running`, `reconnecting`, `rebuilding`, `replacement_
 | --- | --- | --- | --- |
 | Deployment | not authorized | User asked for remediation; prior live-publish authority does not automatically carry into this task | 2026-07-19 |
 | Production data cleanup | deferred, separately authorized only | Style evidence cleanup requires backup and migration semantics | 2026-07-19 |
+| Production data cleanup follow-up | completed by later authorization | 精确 73 条集合，排除 558 条 context-only 候选；backup + 0600 plan 可回滚 | 2026-07-19 |
+| Deployment follow-up | completed by later authorization | `40a8e32` 已提交并 bot-only 部署；当前 image/SHA/runtime 一致，无需二次部署 | 2026-07-20 |
 | Parallel requirement | required | User explicitly requested Grok parallel agents and two independent conflict domains exist | 2026-07-19 |
 | Cost mode | normal | User requested speed, not token/cost reduction | 2026-07-19 |
 

@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-07-20 Style provenance 防再污染提交、部署与复验闭环
+
+**变更类型**：对 2026-07-19 Style 历史视觉/system 污染清理的后续授权收口；确认防再污染代码已提交并完成 bot-only 生产部署，补做代码、容器、生产 DB 与 Grok normal required-parallel 交叉验证。未 push、未发送 QQ/QZone，未重启或重建 NapCat，未触发 Style 手工抽取或自动审批。
+
+**代码与运行态**：防线包含于 commit `40a8e32faede3cf1a8b9152967c0dd98ecbb6b55`，生产 image 为 `sha256:d89121d98ef0...`；当前 `qq-bot` ID `e95c0b9b...`、`GIT_COMMIT=40a8e32...`、restart=0、OOM=false。宿主与容器 `services/style/extractor.py` SHA-256 均为 `ef96f86b60985d25a1ecbd45671e5dff22c57b9157bc96fe51217709a7147f7f`，已替代清理时容器旧 SHA `20ac3799...`。当前容器已经运行目标代码，本次采取 no-op deploy 验收，没有重复 build/recreate；NapCat 仍为原容器 `19f6cf13...`、restart=0、OOM=false。
+
+**测试与生产数据**：Style focused pytest `49 passed`；Ruff pass；Pyright `0 errors, 0 warnings`。容器 smoke 证明 visual marker 与 system source fail-closed、普通 human 文本可进入；manual extract 已调用同一 eligibility helper。生产 `/app/storage/style.db` 以 `mode=ro` 复验：`quick_check=ok`，approved/pending/rejected=`10/1114/82`，evidence human/system=`1133/73`，cleanup revisions=73，structured human remaining=0，approved/pending 与 non-human evidence 交集=`0/0`；清理后新增 10 条 evidence 全为 eligible human。
+
+**并行、影响与回滚**：Grok top-level `7a52dcb7-dcd2-45db-9a98-efa03c0fa8f4` + child `019f7d13-8eab-7ff3-b2be-30b071c84eeb` 只读交叉验证代码/部署 lineage，零文件变更；Codex 独立完成 live container/volume 验收。历史数据回滚仍使用 trusted backup `pre-change-20260719-224533`（Style SHA-256 `9c7f8a57bb14733c7a481190d8906dd8865f532c22521d165a252acaaa80a47b`）或 mode 0600 cleanup plan（SHA-256 `53355a9f79d64484b3c42f561a6705d8978fcd2ba37157800318b433ccd42b88`）；整库恢复必须另行授权并 stop/start bot。代码回滚切回部署前 bot image，仅处理 bot，NapCat 禁止重建。
+
+---
+
 ## 2026-07-20 Lily 官方 expression 角色包小批上线
 
 **变更类型**：角色包来源白名单、测试、日V运行包替换与 CCIP-only reload；Grok normal required-parallel 来源研究/审查；未触 QQ/QZone/生产 SQLite，未重启或重建 NapCat。
@@ -52,7 +64,7 @@
 
 **备份与执行**：BackupService fresh trusted backup `pre-change-20260719-224533`，26 ok / 0 failed，style backup SHA-256 `9c7f8a57bb14733c7a481190d8906dd8865f532c22521d165a252acaaa80a47b`、quick_check=ok。0600 cleanup plan 位于 backup 目录，SHA-256 `53355a9f79d64484b3c42f561a6705d8978fcd2ba37157800318b433ccd42b88`。同一 deterministic transaction 先在 fresh backup copy 演练，再以 `BEGIN IMMEDIATE` 对生产执行：73 evidence `human→system`，73 expression `approved/pending→rejected`，写入 73 条 actor=`codex_style_visual_cleanup` revision；不删除正文或 evidence。
 
-**验证 / 影响 / 回滚**：production counts 从 approved/pending/rejected `12/1175/9` 变为 `10/1104/82`；structured human evidence remaining=0，target system/rejected=73，target approved=0，`PRAGMA quick_check=ok`。container `29444b2626ac…` 保持 running、restart=0。整库 rollback plan 已生成，只允许另行授权后 stop bot→恢复 backup style.db→删除 WAL/SHM→quick_check→start bot；也可按 plan 主键行级恢复。宿主 provenance 修复版 extractor SHA `ef96f86b…f7f` 与当前容器 `20ac3799…9cf` 不同，说明防再污染代码尚未部署；部署前不要重新触发 Style 手工抽取/自动审批。
+**验证 / 影响 / 回滚**：production counts 从 approved/pending/rejected `12/1175/9` 变为 `10/1104/82`；structured human evidence remaining=0，target system/rejected=73，target approved=0，`PRAGMA quick_check=ok`。container `29444b2626ac…` 保持 running、restart=0。整库 rollback plan 已生成，只允许另行授权后 stop bot→恢复 backup style.db→删除 WAL/SHM→quick_check→start bot；也可按 plan 主键行级恢复。宿主 provenance 修复版 extractor SHA `ef96f86b…f7f` 与清理时容器 `20ac3799…9cf` 不同，说明防再污染代码在该清理阶段尚未部署；后续部署闭环见上方 2026-07-20 条目。
 
 ---
 
