@@ -7,10 +7,10 @@
 - mode: task
 - tracker: `docs/tracking/agent-runtime-v2-production-activation-2026-08-14.md`
 - objective: 按 Agent Runtime v2 production activation runbook 依次完成显式 source、operator/ACL、trusted trigger、组合根、attestation 与验证；全程保持外部效果 fail-closed。
-- status: P0-P5 暗态/本地验收已完成；当前快照审计的七项 release 缺口已经关闭，production composition 19 passed、Runtime/Memory/Worldbook/router/guard 交叉 879 passed、Ruff/Pyright/diff clean。用户已授权在 `agent_runtime.enabled=false` 条件下从隔离输入发布 bot-only 暗态代码；没有真实 operator evidence 时，worker 仍无法取得 lease。
-- next_step: 提交、备份当前 bot/admin 静态产物，从隔离 release worktree 构建并 bot-only 替换，然后核验容器/API/无 lease/无新 DB/无外部效果。真实 activation 仍等待 production source、backup、restore/rollback rehearsal、operator ACL、Worldbook witness 和 profile-bound manifest。
-- last_completed: 生产 profile/source、operator ACL、credential-authenticated Admin principal/exact target ACL、trusted invocation、受限组合根、durable single-worker/exclusive-recovery lease、bootstrap 生命周期、worker startup dark/activation/rollback gate、Admin operator transport、offline reconciliation 与严格 GET query 接口均完成暗态验收；当前运行态仍没有 Runtime v2 source/worker。
-- rollback: 默认 feature gate 关闭，停 worker、保留未知 external call 供 reconcile；不建/删 production DB、不重建 NapCat；`BUILTIN_WIRE_PROFILE.validated=false`。
+- status: Agent Runtime v2 default-off release 已于 2026-08-14 上线：`6880dd0` / image `4f02f5b17f66…`，Runtime/Memory/Worldbook/router/guard 交叉 879 passed、frontend 10 passed、Ruff/Pyright/diff clean。生产 `agent_runtime_enabled=False`、无新 Runtime source/lease/worker，NapCat 未重启或重建；真实 activation 仍被缺失的 operator-owned artifact 阻断。
+- next_step: 仅收集和独立核验 production source/schema、backup SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness 与 profile-bound manifest；完整证据前禁止启动 worker 或修改 gate。
+- last_completed: Runtime v2 的 profile/source、operator ACL、trusted invocation、受限组合根、lease/recovery、bootstrap 生命周期、worker hard gate、Admin operator transport、offline reconciliation、strict GET query 和当前快照七项修复均已以默认关闭 image 上线并完成容器/SPA/静态资源/gate/no-source/no-worker/NapCat 不变性核验。
+- rollback: 将 `omubot-bot:pre-agent-runtime-v2-dark-20260814` 重标为 `omubot-bot:latest`，恢复 `.workspace/rollback/agent-runtime-v2-dark-20260814.WhgUDO/admin-static`，然后仅执行 `docker compose up -d --no-deps --force-recreate --no-build bot`；不建/删 production DB、不重建 NapCat；`BUILTIN_WIRE_PROFILE.validated=false`。
 
 ## Recovery Order
 

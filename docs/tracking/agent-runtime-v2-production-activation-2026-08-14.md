@@ -3,17 +3,17 @@
 > 状态：active
 > mode: task
 > 最后更新：2026-08-14 CST
-> 当前下一步：用户已明确授权仅在 `agent_runtime.enabled=false` 条件下发布暗态代码；先提交隔离 release 输入、备份当前 bot/admin 静态产物，再 bot-only 替换并验证运行态。全程绝不启动 worker。
+> 当前下一步：`6880dd0` 已作为默认关闭的 dark release 由 bot-only image 上线；等待 operator 提供真实 production source、备份、restore/rollback rehearsal 与 Worldbook witness，才可进行新的 activation 决策。全程绝不启动 worker。
 > 阻塞：真实 production source/schema、冻结 backup SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness/profile-bound manifest 仍未齐备；这些只阻断真实 worker activation，不阻断本次默认关闭的代码发布。
-> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；2026-08-14 当前快照审计的七项 release 缺口已关闭；production composition 19 passed，Runtime/Memory/Worldbook/router/guard 交叉回归 879 passed，Ruff clean、Pyright 0 errors、`git diff --check` clean。worker 缺失/部分/无效/取消/manifest/backup 篡改均在 lease 前 fail-closed。
+> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；当前快照审计的七项 release 缺口已关闭；production composition 19 passed，交叉回归 879 passed，frontend contracts 10 passed、`vue-tsc`/build passed，Ruff clean、Pyright 0 errors、`git diff --check` clean。生产 `qq-bot` image/commit=`4f02f5b17f66…`/`6880dd0`、`agent_runtime_enabled=False`、新 Runtime source files=0、worker log events=0；NapCat 未变。
 > 回滚入口：保持 feature gate 默认关闭；不创建 production Runtime/Memory/Worldbook DB，不接管 LLM loop，不启动 worker；恢复 legacy loop。NapCat 永不重建。
 
 ## Resume Capsule
 
 - objective: 按 `docs/migrations/agent-runtime-v2-2026-07-21.md` 的 Future Production Activation Runbook，依次完成受限生产组合、认证/ACL、可信触发、attestation、recovery 和交付验证，同时保持所有外部效果 fail-closed。
-- next_step: 提交当前已审计 release，再从隔离 worktree 构建 bot-only image 和 Admin 静态产物，以 `agent_runtime.enabled=false` 替换生产 bot；随后核验容器 commit、Runtime API、无 lease/新 production DB/外部效果。真实 activation 继续等待完整 manifest 与 operator-owned artifact，禁止用测试 manifest 替代。
+- next_step: 仅收集并独立核验真实 production source path、schema、backup payload/digest、restore/rollback rehearsal、具名 operator ACL、deployment input 与 Worldbook authoritative-reread/reducer/no-dual-truth witness；完整 manifest 到位前不得启动 worker，禁止用测试 manifest 替代。
 - current_files: `kernel/config.py`、`services/agent_runtime/`、`services/memory/governance_*.py`、`services/worldbook/governance_*.py`、`services/llm/client.py`、`bot.py`、`admin/__init__.py`、`admin/routes/api/`、对应测试与本 tracker。
-- last_verified: 当前快照审计关闭 worker 多 tool lease、取消 run 收束、group-policy terminal、offline reconciliation adapter、Admin operator header/401、GET query strictness 和 rollback key 七项缺口；production composition 19 passed、跨域交叉 879 passed、Ruff clean、Pyright 0 errors、diff clean。前一 tracker 的 P0-P5 focused 90、core 509、compatibility 515 / 42 upstream warnings、frontend contracts 9、vue-tsc/build 仍有效；当前运行 `qq-bot` 容器未包含 Runtime v2 后端或 governance DB。
+- last_verified: 当前快照审计关闭 worker 多 tool lease、取消 run 收束、group-policy terminal、offline reconciliation adapter、Admin operator header/401、GET query strictness 和 rollback key 七项缺口；production composition 19 passed、跨域交叉 879 passed、frontend contracts 10 passed、Ruff clean、Pyright 0 errors、diff clean。生产 `qq-bot` 已运行 image `sha256:4f02f5b17f66e54a2383af182fdd88b5806611918cce5576e8606e79848583de` / `GIT_COMMIT=6880dd0…`，SPA 和 asset 均为 200；unauthenticated Runtime summary 为预期 401。实际配置没有 `agent_runtime`，所以没有 Runtime source/lease/worker。
 - do_not_redo: 不重写已验收 P0-P5 dark 合同；不把 HTTP POST、OneBot 自动 reconciliation 或 raw QZone transport 标记为已迁移；不把浏览器 token 当作 principal。
 - rollback: 禁用 `agent_runtime.enabled`，停止有界 worker，保留 `unknown`/`dispatching` ledger 供人工 reconcile；仅在 schema compatibility 检查后回滚 bot image，绝不重建 NapCat。
 
@@ -23,13 +23,13 @@
 - dirty baseline: 90 条 `git status --short` 记录，其中 4,724 个未跟踪文件；Agent Runtime v2 本身仍是未提交 WIP，与 NapCat、课程资料及其他用户 WIP 混存。
 - isolation: 不执行 `git add -A`、不清理/stash/reset 用户 WIP；不直接从当前工作树 build/deploy Docker image。若最终需要 release，必须从隔离的精确输入构造 bot-only artifact。
 - external boundary: 本次实现不发送 QQ/QZone/webhook，不启用 QZone live，不改 `BUILTIN_WIRE_PROFILE.validated`，不重启/重建 NapCat。
-- deployment boundary: 用户已授权本次 bot-only 暗态交付，输入必须来自隔离 release worktree，生产配置保持 `agent_runtime.enabled=false`；source/backup/restore/rollback/Worldbook attestation 全绿前不得把它解释为或升级为 worker activation。
+- deployment boundary: 用户授权的 bot-only 暗态交付已完成，输入来自隔离 release worktree；生产配置保持 `agent_runtime.enabled=false`。source/backup/restore/rollback/Worldbook attestation 全绿前不得把它解释为或升级为 worker activation。
 
 ## Parallel Ledger
 
 | Workstream | Owner | Conflict domain | Isolation | Status | Checkpoint |
 | --- | --- | --- | --- | --- | --- |
-| ARV2-A | Codex main | runtime composition, config, schemas, tests, docs, dark deployment | isolated release worktree; single writer | in_progress | Current-snapshot seven-gap audit closed; local cross verification 879 passed; preparing authorized default-off delivery |
+| ARV2-A | Codex main | runtime composition, config, schemas, tests, docs, dark deployment | isolated release worktree; single writer | in_progress | Current-snapshot seven-gap audit closed; local cross verification 879 passed; `6880dd0` dark bot deployed, real activation artifacts remain pending |
 | ARV2-B | bootstrap_tdd_tests | new bootstrap contract test only | shared workspace; sole writer for `tests/test_agent_runtime_bootstrap.py`; no production-file reads/writes | completed | Bootstrap contracts delivered; implementation integrated and cross-verified |
 | ARV2-C | arv2_attestation_audit | read-only current-snapshot attestation audit | shared workspace; no writes | completed | Confirmed absent production attestors and direct worker-start bypass; findings incorporated in A9 |
 | ARV2-D | arv2_a11_contracts | A11 test/repair design for profile, lease and manifest code | shared workspace; read-only, no test or production writes | completed | Confirmed four findings plus same-pattern renew lease; contracts and repair integrated by main writer |
@@ -42,9 +42,9 @@ The production implementation remains serial because composition, source paths a
 | Section | Status | Evidence / Note | Next Update |
 | --- | --- | --- | --- |
 | Context | done | P0-P5 dark/local complete; default-off production composition and bootstrap wiring complete | Keep source facts current |
-| Plan | in_progress | 用户已授权默认关闭的 bot-only 交付；真实 activation 仍按原 runbook 等待 artifact | 构建、替换并做只读运行验收 |
-| Implementation | in_progress | Profile/config、operator ACL、trusted trigger、host ingress receipt、disabled-safe assembly/LLM bridge、durable lease/recovery、offline reconciliation、strict query 和 Admin operator transport complete | 等待真实 source/restore/rollback/Worldbook evidence 才可 activation |
-| Verification | in_progress | Current-snapshot audit seven gaps closed；production composition 19 passed，交叉 879 passed，Ruff/Pyright/diff clean | 做暗态 image/API/no-effect 验收 |
+| Plan | in_progress | 默认关闭 bot-only 交付已完成；真实 activation 仍按原 runbook 等待 artifact | 只读核验真实 artifact |
+| Implementation | in_progress | Profile/config、operator ACL、trusted trigger、host ingress receipt、disabled-safe assembly/LLM bridge、durable lease/recovery、offline reconciliation、strict query 和 Admin operator transport 已在生产 image，但 gate=false | 等待真实 source/restore/rollback/Worldbook evidence 才可 activation |
+| Verification | in_progress | Current-snapshot audit seven gaps closed；production composition 19 passed，交叉 879 passed，frontend 10 passed；生产 image/commit、SPA/asset、gate=false、no source/worker 与 NapCat 不变均已核验 | 做未来真实 artifact preflight |
 | Handoff | pending |  | Update when paused or complete |
 
 ## Todo
@@ -59,7 +59,7 @@ The production implementation remains serial because composition, source paths a
 - [~] Run focused/compat/static/storage-isolation/external-effect-negative verification and independent current-snapshot review. A11 focused/static/negative/runtime checks pass; real-artifact verification is pending.
 - [x] Close A11 local fail-closed audit: `start_worker()` re-runs source/backup preflight before lease; acquire and renew cleanup exact committed tokens before cancellation propagates; every enabled profile requires a digest-pinned manifest and production rejects callback readiness; boolean manifest schema versions are rejected. RED 4+2 failed, focused 45 passed and cross 238 passed.
 - [x] Close current-snapshot release audit: recheck the exact worker lease before every tool use; project pre-dispatch cancellation to a cancelled run; classify group-policy denial as terminal; inject only offline OneBot reconciliation; require Admin operator headers without logging out the browser cookie session; reject unknown Runtime/Memory query keys; correct every rollback gate reference to `agent_runtime.enabled`.
-- [~] Commit, build and deploy the user-authorized dark release. Preserve `agent_runtime.enabled=false`, do not create Runtime/Memory/Worldbook production DBs, and do not start a worker.
+- [x] Commit, build and deploy the user-authorized dark release. `6880dd0` -> image `sha256:4f02f5b17f66…`; `agent_runtime.enabled=false`，未创建 Runtime/Memory/Worldbook production DB，未启动 worker；旧 image/static manifest 已保存，NapCat 未操作。
 
 ## Decisions
 
@@ -121,6 +121,7 @@ The production implementation remains serial because composition, source paths a
 | Authoritative host ingress | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest tests/test_agent_runtime_host_ingress.py tests/test_agent_runtime_production_composition.py tests/test_router_b_cluster_wiring.py tests/test_router_qq_interactions.py tests/test_scheduler.py tests/test_agent_runtime_invocation_store.py -q` | 142 passed; group/private receipt, stale/malformed receipt, cancellation and missing-ID negative paths covered |
 | Scoped static analysis | `uv run ruff check ...` and `uv run pyright ...` for the new profile/store modules | clean / 0 errors |
 | Admin governance frontend | `node --experimental-strip-types --test tests/agent-runtime-governance.test.ts`; `vue-tsc --noEmit`; `npm run build` | 10 passed; typecheck passed; Vite 4421 modules built (existing Rollup `#__PURE__` warnings only) |
+| Production dark release | isolated `docker compose build bot`; active `docker compose up -d --no-deps --force-recreate --no-build bot`; read-only inspect/curl/config/storage checks | image/commit match; SPA+asset 200; unauth summary 401; gate=false; source files/worker log events=0; bot healthy; NapCat image/start/restart unchanged |
 
 ## Test Ledger
 
@@ -158,10 +159,11 @@ The production implementation remains serial because composition, source paths a
 | A12-STATIC | `uv run --no-sync ruff check` and `uv run --no-sync pyright` over every Python file changed from `HEAD`; both diff checks | Ruff clean; Pyright 0 errors / 0 warnings; both diff checks clean | Release input has no scoped lint, type or whitespace debt | 2026-08-14 |
 | A12-CROSS | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -q` over all `test_agent_runtime_*`, governed Memory/Worldbook, router, scheduler, guard and affected tool modules | 879 passed in 18.26s | Runtime v2 changes preserve governed execution, dark bootstrap, legacy route and external-effect-negative contracts | 2026-08-14 |
 | A12-FRONTEND | `node --experimental-strip-types --test tests/agent-runtime-governance.test.ts && vue-tsc --noEmit && npm run build` | 10 passed; typecheck passed; Vite built 4,421 modules | Admin operator header transport, read-only governance views and the generated SPA entry are release-ready; only existing Rollup `#__PURE__` warnings remain | 2026-08-14 |
+| A12-PROD-DARK | Build from isolated commit `6880dd0`; backup old image/static manifest; sync verified SPA; active `docker compose up -d --no-deps --force-recreate --no-build bot`; inspect/curl/config/storage/log counts | `qq-bot` image `4f02f5b17f66…` / commit `6880dd0…`, restart=0; SPA+asset=200; unauth summary=401; gate=false; new source files=0; worker log events=0; post-deploy error events=0; NapCat unchanged/restart=0 | Default-off code is live and externally inert. Rollback is `omubot-bot:pre-agent-runtime-v2-dark-20260814` plus static snapshot `agent-runtime-v2-dark-20260814.WhgUDO`; no worker activation claim | 2026-08-14 |
 
 ## Next Session Starts Here
 
-- Direction: Commit and deploy the explicitly authorized dark release from this isolated worktree. The release must retain `agent_runtime.enabled=false`; no worker start or production source/DB creation is permitted.
-- First action: Verify git input, commit the explicit Runtime v2 file set, backup current bot image and `admin/static` with SHA-256, build isolated bot/Admin assets, bot-only replace, then verify container commit/API/no lease/no DB/no external effect.
+- Direction: Default-off release `6880dd0` is live. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
+- First action: Obtain explicit operator-owned source locations/schema, backup payloads/digests, restore and rollback rehearsal records, named operator ACL and Worldbook authoritative-reread/reducer/no-dual-truth witness. Verify them read-only and produce a new independent review before any activation decision.
 - Open questions: Exact production source locations, backup artifact owner, restore rehearsal, rollback rehearsal and Worldbook witness remain unavailable; they must never be inferred from Admin state or replaced with test manifests.
 - Do not redo: P0-P5 dark/local implementation or the seven completed current-snapshot fixes. Do not turn dark deployment into real activation.

@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-14 Agent Runtime v2 默认关闭生产上线
+
+**变更类型**：生产部署 / 暗态发布。已提交 `6880dd0`（112 个 Runtime v2 文件），从隔离 worktree 构建 image `sha256:4f02f5b17f66e54a2383af182fdd88b5806611918cce5576e8606e79848583de`，仅执行 `docker compose up -d --no-deps --force-recreate --no-build bot`。`qq-bot` 运行 `GIT_COMMIT=6880dd0…`、restart=0；未重启、重建或 `down` NapCat，NapCat image、启动时间和 restart=0 均保持不变。
+
+**发布边界与验证**：production 配置无 `agent_runtime` 段，运行时 `agent_runtime_enabled=False`；未创建 Runtime/Memory/Worldbook/operator/invocation source，worker/lease 日志计数为 0，部署后 bot ERROR/CRITICAL/Traceback 计数为 0。`/admin/agent-runtime` 与已构建 entry asset 均为 200；未携带网页登录态的 Runtime summary 为预期 401，不把它伪报为已认证数据读取。上线前 production composition **19 passed**、交叉 **879 passed**、frontend contracts **10 passed**、`vue-tsc`/Vite build/Ruff/Pyright/diff 均通过；Vite 仅保留既有 Rollup `#__PURE__` 注释 warning。
+
+**回滚与交接**：旧 image 已固定为 `omubot-bot:pre-agent-runtime-v2-dark-20260814`=`sha256:d89121d98ef…`；旧 `admin/static` 107 文件快照与 SHA-256 manifest 位于 `.workspace/rollback/agent-runtime-v2-dark-20260814.WhgUDO/`，新 release input manifest 位于 `.workspace/deploy/agent-runtime-v2-dark-20260814.hELrKl/`。回滚先恢复静态快照，再把旧 image 重标 `latest` 并只重建 bot；绝不操作 NapCat。真实 worker activation 仍缺 production source/schema、冻结 backup/digest、restore/rollback rehearsal、具名 operator ACL、Worldbook witness 与 profile-bound manifest，继续保持 `agent_runtime.enabled=false`。
+
 ## 2026-08-14 Agent Runtime v2 当前快照审计收口与暗态发布准备
 
 **变更类型**：发布阻断修复 / 暗态生产交付准备。用户明确授权仅在 `agent_runtime.enabled=false` 条件下交付 bot-only 代码；真实 worker activation 仍未授权也未满足前置证据。未创建生产 Runtime/Memory/Worldbook/operator/invocation DB，未启动 worker，未发送 QQ/QZone/webhook，未启用 QZone live，`BUILTIN_WIRE_PROFILE.validated=false`，NapCat 不得重启、重建或 `down`。
