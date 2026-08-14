@@ -41,6 +41,10 @@ from kernel.types import (
     ReplyObligation,
     TextBlock,
 )
+from services.agent_runtime.invocation_store import (
+    TrustedInvocationRecordV1,
+    is_authoritative_invocation_id,
+)
 from services.humanization import AFFECTION_FAMILIARITY_SLOT
 from services.humanization.qq_interactions import (
     QQInteractionSignal,
@@ -728,6 +732,156 @@ def _should_bypass_coalescer(
     return is_addressed or trigger is not None
 
 
+def _canonical_onebot_positive_id(value: object) -> str | None:
+    """Normalize a host-owned numeric OneBot ID, otherwise reject it."""
+
+    if isinstance(value, bool):
+        return None
+    raw = str(value or "").strip()
+    if not raw.isascii() or not raw.isdigit():
+        return None
+    parsed = int(raw)
+    return str(parsed) if parsed > 0 else None
+
+
+def _canonical_onebot_trigger_identity(
+    *,
+    group_id: object | None,
+    user_id: object,
+    message_id: object,
+) -> tuple[str | None, str, str] | None:
+    """Return canonical host identity only when every required ref exists."""
+
+    clean_user_id = _canonical_onebot_positive_id(user_id)
+    clean_message_id = _canonical_onebot_positive_id(message_id)
+    if clean_user_id is None or clean_message_id is None:
+        return None
+    if group_id is None:
+        return None, clean_user_id, clean_message_id
+    clean_group_id = _canonical_onebot_positive_id(group_id)
+    if clean_group_id is None:
+        return None
+    return clean_group_id, clean_user_id, clean_message_id
+
+
+async def _record_authoritative_runtime_invocation(
+    ctx: PluginContext,
+    *,
+    group_id: str | None,
+    user_id: str,
+    message_id: object,
+) -> tuple[bool, str | None]:
+    """Return a persisted host invocation, or fail closed when configured.
+
+    An absent ingress means Runtime v2 is still dark and the legacy route keeps
+    its existing behavior. Once bootstrap explicitly attaches an ingress, any
+    malformed response, store error, or missing message identity is a hard stop
+    for this message; the caller must not invoke the legacy LLM/tool route.
+    """
+
+    ingress = getattr(ctx, "agent_runtime_host_ingress", None)
+    if ingress is None:
+        return False, None
+    identity = _canonical_onebot_trigger_identity(
+        group_id=group_id,
+        user_id=user_id,
+        message_id=message_id,
+    )
+    if identity is None:
+        _log_system.warning("runtime host ingress received incomplete OneBot identity; dropping message")
+        return True, None
+    canonical_group_id, canonical_user_id, canonical_message_id = identity
+    recorder: Any = getattr(ingress, "record_onebot_message", None)
+    if not callable(recorder):
+        _log_system.warning("runtime host ingress is misconfigured; dropping message")
+        return True, None
+    try:
+        receipt = await cast(
+            Any,
+            recorder(
+                group_id=canonical_group_id,
+                user_id=canonical_user_id,
+                message_id=canonical_message_id,
+            ),
+        )
+    except Exception:
+        _log_system.exception("runtime host ingress persistence failed; dropping message")
+        return True, None
+    invocation_id = _bound_authoritative_invocation_id(
+        receipt,
+        group_id=canonical_group_id,
+        user_id=canonical_user_id,
+        message_id=canonical_message_id,
+    )
+    if invocation_id is None:
+        _log_system.warning("runtime host ingress returned an unattested invocation; dropping message")
+        return True, None
+    return True, invocation_id
+
+
+def _bound_authoritative_invocation_id(
+    receipt: object,
+    *,
+    group_id: str | None,
+    user_id: str,
+    message_id: object,
+) -> str | None:
+    """Accept only a store record bound to this exact OneBot message."""
+
+    if not isinstance(receipt, TrustedInvocationRecordV1):
+        return None
+    identity = _canonical_onebot_trigger_identity(
+        group_id=group_id,
+        user_id=user_id,
+        message_id=message_id,
+    )
+    if identity is None:
+        return None
+    group_identity, expected_user_id, expected_message_id = identity
+    expected_group_id = group_identity or ""
+    expected_trigger_ref = (
+        f"onebot:group:{expected_group_id}:message:{expected_message_id}"
+        if expected_group_id
+        else f"onebot:user:{expected_user_id}:message:{expected_message_id}"
+    )
+    expected_session_id = (
+        f"group_{expected_group_id}"
+        if expected_group_id
+        else f"private_{expected_user_id}"
+    )
+    if (
+        not is_authoritative_invocation_id(receipt.invocation_id)
+        or receipt.trigger_type != "message"
+        or receipt.trigger_ref != expected_trigger_ref
+        or receipt.principal_kind != "onebot_user"
+        or receipt.principal_id != expected_user_id
+        or receipt.group_id != expected_group_id
+        or receipt.session_id != expected_session_id
+        or receipt.onebot_message_refs != (expected_trigger_ref,)
+    ):
+        return None
+    return receipt.invocation_id
+
+
+async def _discard_coalesced_message_after_cancellation(
+    coalescer: Any,
+    *,
+    group_id: str,
+    user_id: str,
+) -> None:
+    """Finish bucket cleanup before propagating inbound-task cancellation."""
+
+    discard_task = asyncio.ensure_future(coalescer.discard(group_id, user_id))
+    while not discard_task.done():
+        try:
+            await asyncio.shield(discard_task)
+        except asyncio.CancelledError:
+            # The outer message task remains cancelled; complete cleanup first
+            # so the idle timer cannot later dispatch a stale invocation.
+            continue
+    discard_task.result()
+
+
 async def _notify_group_scheduler(
     ctx: PluginContext,
     *,
@@ -742,9 +896,19 @@ async def _notify_group_scheduler(
     scheduler = getattr(ctx, "scheduler", None)
     if scheduler is None:
         return
+    ingress_configured, runtime_invocation_id = await _record_authoritative_runtime_invocation(
+        ctx,
+        group_id=group_id,
+        user_id=user_id,
+        message_id=getattr(event, "message_id", None),
+    )
+    if ingress_configured and runtime_invocation_id is None:
+        return
     message_text = _content_to_text(message) if message is not None else ""
     tb = _extract_topic_block_signals(event, self_id)
     tb["is_addressed"] = is_addressed
+    if runtime_invocation_id is not None:
+        tb["runtime_invocation_id"] = runtime_invocation_id
     coalescer = getattr(ctx, "message_coalescer", None)
     bypass = _should_bypass_coalescer(trigger=trigger, is_addressed=is_addressed)
     if not _coalesce_enabled(ctx) or coalescer is None:
@@ -795,23 +959,34 @@ async def _notify_group_scheduler(
             metadata={"sender_id": user_id, "message_count": len(messages)},
         )
         merged_text = " ".join(_content_to_text(item) for item in messages if item is not None).strip()
-        scheduler.notify(group_id, user_id=user_id, message_text=merged_text)
+        flush_kwargs: dict[str, Any] = {}
+        if runtime_invocation_id is not None:
+            flush_kwargs["runtime_invocation_id"] = runtime_invocation_id
+        scheduler.notify(group_id, user_id=user_id, message_text=merged_text, **flush_kwargs)
 
-    await coalescer.enqueue(
-        group_id,
-        user_id,
-        message,
-        on_flush=_flush,
-    )
-    await _record_runtime_metric(
-        ctx,
-        metric_key="coalesce_enqueued",
-        group_id=group_id,
-        metadata={
-            "sender_id": user_id,
-            "message_type": "content" if message else "empty",
-        },
-    )
+    try:
+        await coalescer.enqueue(
+            group_id,
+            user_id,
+            message,
+            on_flush=_flush,
+        )
+        await _record_runtime_metric(
+            ctx,
+            metric_key="coalesce_enqueued",
+            group_id=group_id,
+            metadata={
+                "sender_id": user_id,
+                "message_type": "content" if message else "empty",
+            },
+        )
+    except asyncio.CancelledError:
+        await _discard_coalesced_message_after_cancellation(
+            coalescer,
+            group_id=group_id,
+            user_id=user_id,
+        )
+        raise
 
 
 def _has_recent_assistant_reply(timeline: Any, group_id: str, *, within_s: float) -> bool:
@@ -2637,6 +2812,14 @@ def setup_routers(
                 return
 
         sid = _session_id(event)
+        ingress_configured, runtime_invocation_id = await _record_authoritative_runtime_invocation(
+            ctx,
+            group_id=None,
+            user_id=str(event.user_id),
+            message_id=getattr(event, "message_id", None),
+        )
+        if ingress_configured and runtime_invocation_id is None:
+            return
         identity = ctx.persona_runtime.identity_snapshot()
         tool_ctx = ToolContext(bot=bot, user_id=str(event.user_id), group_id=None, session_id=sid)
         private_actor = get_private_conversation_actor(sid)
@@ -2680,6 +2863,7 @@ def setup_routers(
                         ctx=tool_ctx,
                         on_segment=send_segment,
                         force_reply=False,
+                        runtime_invocation_id=runtime_invocation_id,
                     )
                     break
                 except RateLimitError:

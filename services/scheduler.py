@@ -95,6 +95,36 @@ def _should_force_reply(trigger: TriggerContext | None) -> bool:
     return bool(trigger.extra.get("addressee_self", True))
 
 
+_RUNTIME_INVOCATION_ID_KEY = "runtime_invocation_id"
+
+
+def _trigger_runtime_invocation_id(trigger: TriggerContext | None) -> str | None:
+    if trigger is None:
+        return None
+    value = trigger.extra.get(_RUNTIME_INVOCATION_ID_KEY)
+    return value if isinstance(value, str) and value else None
+
+
+def _with_runtime_invocation_id(
+    trigger: TriggerContext | None,
+    runtime_invocation_id: str | None,
+) -> TriggerContext | None:
+    if trigger is None or runtime_invocation_id is None:
+        return trigger
+    extra = dict(trigger.extra)
+    extra[_RUNTIME_INVOCATION_ID_KEY] = runtime_invocation_id
+    return replace(trigger, extra=extra)
+
+
+def _latest_runtime_invocation_id(
+    pending: list[PendingMessage],
+) -> str | None:
+    # The final pending message is the host trigger for the follow-on turn.
+    # Do not walk backward past a missing value: that would grant the latest
+    # legacy/untrusted message authority owned by an earlier message.
+    return pending[-1].runtime_invocation_id if pending else None
+
+
 class _GroupSlot:
     __slots__ = (
         "arbiter_task",
@@ -119,6 +149,7 @@ class _GroupSlot:
         "msg_count",
         "pending_during_generation",
         "running_task",
+        "runtime_invocation_id",
         "trigger",
         "wait_defer_task",
         "wait_deferrals",
@@ -143,6 +174,7 @@ class _GroupSlot:
         self.last_role: str = "addressed"
         self.last_rws: dict[str, Any] | None = None
         self.trigger: TriggerContext | None = None
+        self.runtime_invocation_id: str | None = None
         # Path Y (multi-addressee): when a burst spans multiple topic blocks,
         # fire serially. `block_fire_queue` holds per-block merged
         # TriggerContexts; the _do_chat finally-block drains it with NO
@@ -564,6 +596,7 @@ class GroupChatScheduler:
         at_targets: tuple[str, ...] = (),
         at_self: bool = False,
         is_addressed: bool = False,
+        runtime_invocation_id: str | None = None,
     ) -> None:
         """Called on every group message. Manages probability-based dispatch."""
         if group_id in self._muted_groups:
@@ -636,6 +669,10 @@ class GroupChatScheduler:
         resolved = self._group_config.resolve(int(group_id))
 
         slot = self._slots.setdefault(group_id, _GroupSlot())
+        # The newest message is the current host trigger for the ordinary path.
+        # A missing value intentionally clears prior state so no old invocation
+        # can authorize a later legacy turn after a configured ingress failure.
+        slot.runtime_invocation_id = runtime_invocation_id
         # msg_count is incremented only when the message reaches the probability /
         # gray-zone scoring path below.  Rule-layer fire/skip paths (@, closing,
         # followup, correction, video_always, at_only, busy, interval) either fire
@@ -661,6 +698,7 @@ class GroupChatScheduler:
             block_id=block_id,
             evidence=(trigger.mode if trigger is not None else ""),
             obligation_level=(str(trigger.obligation) if trigger is not None else ""),
+            runtime_invocation_id=runtime_invocation_id,
         )
 
         # ════════════════════════════════════════════════════════════════════
@@ -757,10 +795,12 @@ class GroupChatScheduler:
             if slot.closing_done:
                 _L.info("scheduler | group={} closing already done, skip", group_id)
                 slot.trigger = None
+                slot.runtime_invocation_id = None
                 return
             if (now_wall - slot.last_light_time) < _LIGHT_COOLDOWN_S:
                 _L.info("scheduler | group={} closing within light cooldown, skip", group_id)
                 slot.trigger = None
+                slot.runtime_invocation_id = None
                 return
             if slot.running_task and not slot.running_task.done():
                 slot.pending_during_generation.append(pending_message)
@@ -786,6 +826,7 @@ class GroupChatScheduler:
             if (now_wall - slot.last_light_time) < _LIGHT_COOLDOWN_S:
                 _L.info("scheduler | group={} greeting within light cooldown, skip", group_id)
                 slot.trigger = None
+                slot.runtime_invocation_id = None
                 return
             if slot.running_task and not slot.running_task.done():
                 slot.pending_during_generation.append(pending_message)
@@ -818,6 +859,7 @@ class GroupChatScheduler:
         if resolved.at_only:
             _L.info("scheduler | group={} at_only, skip (msgs={})", group_id, slot.msg_count)
             slot.trigger = None  # clear trigger on skip — prevent leak
+            slot.runtime_invocation_id = None
             return
 
         if slot.running_task and not slot.running_task.done():
@@ -836,6 +878,7 @@ class GroupChatScheduler:
         if now - slot.last_fire_time < resolved.planner_smooth:
             _L.info("scheduler | group={} interval too short, skip (msgs={})", group_id, slot.msg_count)
             slot.trigger = None  # clear trigger on skip — prevent leak
+            slot.runtime_invocation_id = None
             return
 
         slot.msg_count += 1
@@ -903,6 +946,7 @@ class GroupChatScheduler:
                 slot.last_skip_time = time.monotonic()
                 slot.last_response_class = ResponseClass.SILENCE.value
                 slot.trigger = None
+                slot.runtime_invocation_id = None
                 return
             if mode == "threshold":
                 boost = float(getattr(self._topic_block_config, "overhearer_threshold_boost", 0.0) or 0.0)
@@ -1012,6 +1056,11 @@ class GroupChatScheduler:
                     mode="companion",
                     target_message_id=(trigger.target_message_id if trigger is not None else None),
                     target_user_id=(slot.last_user_id or ""),
+                    extra=(
+                        {_RUNTIME_INVOCATION_ID_KEY: slot.runtime_invocation_id}
+                        if slot.runtime_invocation_id is not None
+                        else {}
+                    ),
                 )
                 self._enqueue_reward(group_id, decision=True, rws=rws, threshold=threshold)
                 self._fire(group_id, block_trigger=companion_trigger)
@@ -1033,6 +1082,7 @@ class GroupChatScheduler:
                 f"{rws.score:.2f}" if rws is not None else "--",
             )
             slot.trigger = None  # clear trigger on skip — prevent leak
+            slot.runtime_invocation_id = None
             self._enqueue_reward(group_id, decision=False, rws=rws, threshold=threshold)
 
     # B1-addressed: focus an addressed reply on the @-ed message + its topic
@@ -1094,6 +1144,24 @@ class GroupChatScheduler:
                     anchor_uid = msg.user_id
                     break
             extra: dict[str, Any] = dict(base_trigger.extra) if base_trigger is not None else {}
+            invocation_id: str | None = None
+            if anchor_mid is not None:
+                for msg in reversed(members):
+                    if (
+                        msg.target_message_id == anchor_mid
+                        and msg.runtime_invocation_id is not None
+                    ):
+                        invocation_id = msg.runtime_invocation_id
+                        break
+            if invocation_id is None:
+                for msg in reversed(members):
+                    if msg.runtime_invocation_id is not None:
+                        invocation_id = msg.runtime_invocation_id
+                        break
+            if invocation_id is None:
+                extra.pop(_RUNTIME_INVOCATION_ID_KEY, None)
+            else:
+                extra[_RUNTIME_INVOCATION_ID_KEY] = invocation_id
             if len(addressees) > 1:
                 extra["block_addressees"] = list(addressees)
             extra["block_id"] = "" if key == "_nob" else key
@@ -1234,6 +1302,7 @@ class GroupChatScheduler:
             return
         slot.msg_count = 0
         slot.trigger = None
+        slot.runtime_invocation_id = None
         slot.pending_during_generation = []
         slot.block_fire_queue = []
         if cancel_running and slot.running_task and not slot.running_task.done():
@@ -1811,10 +1880,18 @@ class GroupChatScheduler:
         # over the scalar slot.trigger; otherwise consume slot.trigger once.
         if block_trigger is not None:
             trigger = block_trigger
+            runtime_invocation_id = _trigger_runtime_invocation_id(trigger)
+            # Block triggers carry their own immutable ID. Clear the scalar in
+            # every case: it belongs to a prior ordinary arrival unless a later
+            # pending message explicitly restores it in the finally path.
+            slot.runtime_invocation_id = None
             slot.trigger = None
         else:
             trigger = slot.trigger
+            runtime_invocation_id = slot.runtime_invocation_id
             slot.trigger = None
+            slot.runtime_invocation_id = None
+        trigger = _with_runtime_invocation_id(trigger, runtime_invocation_id)
         slot.msg_count = 0
         slot.last_response_class = ResponseClass.FULL_REPLY.value
         # Record the in-flight fire's addressee identity so a same-block /
@@ -1824,7 +1901,13 @@ class GroupChatScheduler:
         slot.firing_block_id = str(trigger.extra.get("block_id", "") or "") if trigger is not None else ""
         slot.firing_user_id = str(trigger.target_user_id or "") if trigger is not None else ""
         slot.first_segment_sent = False
-        slot.running_task = asyncio.create_task(self._do_chat(group_id, trigger=trigger))
+        slot.running_task = asyncio.create_task(
+            self._do_chat(
+                group_id,
+                trigger=trigger,
+                runtime_invocation_id=runtime_invocation_id,
+            )
+        )
         slot.running_task.add_done_callback(lambda _: None)
 
     _ADDRESSED_WAIT_MODES = frozenset({"at_mention"})
@@ -2124,12 +2207,20 @@ class GroupChatScheduler:
                 continue
             return 0.0
 
-    async def _do_chat(self, group_id: str, *, trigger: TriggerContext | None = None) -> None:
+    async def _do_chat(
+        self,
+        group_id: str,
+        *,
+        trigger: TriggerContext | None = None,
+        runtime_invocation_id: str | None = None,
+    ) -> None:
         slot = self._slots.get(group_id)
         reply_run: ReplyRun | None = None
         try:
             if slot is None:
                 return
+            if runtime_invocation_id is None:
+                runtime_invocation_id = _trigger_runtime_invocation_id(trigger)
             slot_ref = slot
             async with slot_ref.chat_lock:
                 monitor_task: asyncio.Task[None] | None = None
@@ -2324,6 +2415,7 @@ class GroupChatScheduler:
                                 force_reply=force_reply,
                                 must_emit=must_emit,
                                 trigger=trigger,
+                                runtime_invocation_id=runtime_invocation_id,
                             ),
                             timeout=_CHAT_LOCK_LLM_TIMEOUT_S,
                         )
@@ -2452,12 +2544,14 @@ class GroupChatScheduler:
                     next_trigger = slot.block_fire_queue.pop(0)
                     self._fire(group_id, block_trigger=next_trigger)
                 elif slot.pending_during_generation:
-                    slot.burst_pending.extend(slot.pending_during_generation)
+                    pending = slot.pending_during_generation
+                    slot.burst_pending.extend(pending)
                     slot.pending_during_generation = []
                     if self._arbiter_enabled(group_id):
                         slot.arbiter_task = asyncio.create_task(self._arbiter_completeness_loop(group_id))
                         slot.arbiter_task.add_done_callback(lambda _: None)
                     else:
+                        slot.runtime_invocation_id = _latest_runtime_invocation_id(pending)
                         self._fire(group_id)
                 elif slot.msg_count > 0:
                     self._fire(group_id)

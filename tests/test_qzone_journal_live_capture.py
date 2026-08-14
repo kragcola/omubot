@@ -13,7 +13,10 @@ from typing import Any
 import httpx
 import pytest
 
-from plugins.qzone_journal.delivery import BUILTIN_WIRE_PROFILE
+from plugins.qzone_journal.delivery import (
+    BUILTIN_WIRE_PROFILE,
+    DeliveryPostDispatchError,
+)
 from plugins.qzone_journal.fixture_conformance import (
     run_conformance,
     validate_fixture_dict,
@@ -510,7 +513,7 @@ async def test_db_publish_failure_cannot_leave_capture_fixture(
         http_client=client,
     )
     try:
-        with pytest.raises(RuntimeError, match="DB commit failure"):
+        with pytest.raises(DeliveryPostDispatchError) as raised:
             await api.publish_once(
                 request=api.CaptureRequest(
                     draft_id="qzd_expected",
@@ -522,6 +525,8 @@ async def test_db_publish_failure_cannot_leave_capture_fixture(
                 credential_source=CredentialSource(),
                 transport=transport,
             )
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert "DB commit failure" in str(raised.value.__cause__)
     finally:
         await client.aclose()
 

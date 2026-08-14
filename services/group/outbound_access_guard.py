@@ -11,6 +11,17 @@ from kernel.config import GroupAccessConfig, GroupConfig
 
 _CallApi = Callable[..., Awaitable[Any]]
 _GENERIC_SEND_ACTIONS = frozenset({"send_msg", "send_forward_msg"})
+_GROUP_REQUIRED_ACTIONS = frozenset(
+    {
+        "set_group_ban",
+        "set_group_special_title",
+    }
+)
+_OPTIONAL_GROUP_ACTIONS = frozenset({"send_poke"})
+
+
+class GroupOutboundPolicyDeniedError(PermissionError):
+    """Raised before a guarded OneBot call reaches its provider."""
 
 
 class OutboundGroupAccessGuard:
@@ -40,29 +51,43 @@ class OutboundGroupAccessGuard:
 
         async def _guarded_call_api(action: str, **params: Any) -> Any:
             if self._targets_group(str(action), params):
-                group_id = self._validated_group_id(params.get("group_id"))
-                if group_id is None or not self._allows_group(group_id):
-                    if self._log_dropped():
-                        logger.warning(
-                            "group outbound blocked | action={} group={}",
-                            action,
-                            self._safe_group_label(params.get("group_id")),
-                        )
-                    raise PermissionError(
-                        f"OneBot group outbound blocked by group policy: action={action}"
-                    )
+                self.assert_group_allowed(
+                    params.get("group_id"),
+                    action=str(action),
+                )
             return await original(action, **params)
 
         bot.call_api = _guarded_call_api
+        bot._omubot_assert_group_outbound_allowed = self.assert_group_allowed
         bot._omubot_outbound_group_access_guard_wrapped = True
         self._wrapped_bot_ids.add(bot_id)
         return True
+
+    def assert_group_allowed(self, group_id: Any, *, action: str) -> None:
+        """Fail closed for group actions whose provider payload lacks group_id."""
+
+        validated = self._validated_group_id(group_id)
+        if validated is not None and self._allows_group(validated):
+            return
+        if self._log_dropped():
+            logger.warning(
+                "group outbound blocked | action={} group={}",
+                action,
+                self._safe_group_label(group_id),
+            )
+        raise GroupOutboundPolicyDeniedError(
+            f"OneBot group outbound blocked by group policy: action={action}"
+        )
 
     @staticmethod
     def _targets_group(action: str, params: dict[str, Any]) -> bool:
         normalized = action.strip().lower()
         if normalized.startswith("send_group_") or normalized.startswith("_send_group_"):
             return True
+        if normalized in _GROUP_REQUIRED_ACTIONS:
+            return True
+        if normalized in _OPTIONAL_GROUP_ACTIONS:
+            return "group_id" in params
         if normalized not in _GENERIC_SEND_ACTIONS:
             return False
         return (

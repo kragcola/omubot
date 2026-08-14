@@ -37,6 +37,8 @@ def _delivery_api() -> Any:
         "BUILTIN_WIRE_PROFILE",
         "DeliveryConfig",
         "DeliveryGateError",
+        "DeliveryPostDispatchError",
+        "DeliveryPreDispatchError",
         "JournalDelivery",
         "JournalDraft",
     )
@@ -369,7 +371,7 @@ async def test_credential_failure_keeps_approved_and_never_claims_or_calls_http(
     transport = _Transport(events=events)
     delivery = _delivery(api, store=store, credentials=credentials, transport=transport)
 
-    with pytest.raises(RuntimeError, match="credentials unavailable"):
+    with pytest.raises(api.DeliveryPreDispatchError, match="credentials"):
         await delivery.deliver(_DRAFT_ID)
 
     assert store.status == "approved"
@@ -410,14 +412,20 @@ async def test_ambiguous_exception_after_dispatch_marks_unknown_not_approved() -
     events: list[str] = []
     store = _Store(api, events=events)
     credentials = _CredentialSource(events=events)
-    transport = _Transport(events=events, publish_error=OSError("read timeout after dispatch"))
+    transport = _Transport(
+        events=events,
+        publish_error=OSError("read timeout cookie=p_skey=never-persist-this"),
+    )
     delivery = _delivery(api, store=store, credentials=credentials, transport=transport)
 
-    with pytest.raises(OSError, match="read timeout after dispatch"):
+    with pytest.raises(api.DeliveryPostDispatchError) as raised:
         await delivery.deliver(_DRAFT_ID)
 
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "never-persist-this" in str(raised.value.__cause__)
     assert store.status == "unknown"
-    assert "read timeout" in store.unknown_reason
+    assert store.unknown_reason == "OSError"
+    assert "never-persist-this" not in store.unknown_reason
     assert events[-1] == "store.mark_unknown"
     assert "store.mark_published" not in events
 
@@ -437,6 +445,53 @@ async def test_cancelled_after_dispatch_marks_unknown_then_propagates_cancellati
     assert store.unknown_reason
     assert events[-1] == "store.mark_unknown"
     assert "store.mark_published" not in events
+
+
+@pytest.mark.parametrize(
+    "finalization_error",
+    [
+        RuntimeError("local finalization failed"),
+        asyncio.CancelledError(),
+    ],
+)
+async def test_failure_after_publish_response_marks_unknown_before_propagating(
+    finalization_error: BaseException,
+) -> None:
+    api = _delivery_api()
+    events: list[str] = []
+
+    class _FinalizationFailureStore(_Store):
+        async def mark_published(
+            self,
+            draft_id: str,
+            *,
+            remote_id: str | None = None,
+        ) -> Any:
+            assert draft_id == _DRAFT_ID
+            assert self.status == "dispatching"
+            self.events.append("store.mark_published")
+            raise finalization_error
+
+    store = _FinalizationFailureStore(api, events=events)
+    credentials = _CredentialSource(events=events)
+    transport = _Transport(events=events)
+    delivery = _delivery(
+        api,
+        store=store,
+        credentials=credentials,
+        transport=transport,
+    )
+
+    with pytest.raises(type(finalization_error)):
+        await delivery.deliver(_DRAFT_ID)
+
+    assert store.status == "unknown"
+    assert store.unknown_reason
+    assert events[-3:] == [
+        "transport.publish",
+        "store.mark_published",
+        "store.mark_unknown",
+    ]
 
 
 async def test_transport_failed_or_ambiguous_marks_unknown_not_published() -> None:
@@ -470,7 +525,7 @@ async def test_transport_failed_or_ambiguous_marks_unknown_not_published() -> No
         transport = _NonSuccessTransport(payload, events=events)
         delivery = _delivery(api, store=store, credentials=credentials, transport=transport)
 
-        with pytest.raises(RuntimeError, match="not explicitly successful"):
+        with pytest.raises(api.DeliveryPostDispatchError):
             await delivery.deliver(_DRAFT_ID)
 
         assert store.status == "unknown"

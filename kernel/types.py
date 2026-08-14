@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -54,6 +55,231 @@ class ResponseClass(StrEnum):
 # ============================================================================
 
 
+class ToolEffect(StrEnum):
+    """Observable effect class used by the governed runtime policy."""
+
+    LEGACY_UNCLASSIFIED = "legacy_unclassified"
+    PURE = "pure"
+    READ = "read"
+    EXTERNAL_READ = "external_read"
+    WRITE_LOCAL = "write_local"
+    EXTERNAL_REVERSIBLE = "external_reversible"
+    EXTERNAL_IRREVERSIBLE = "external_irreversible"
+
+
+class ToolApproval(StrEnum):
+    NEVER = "never"
+    POLICY = "policy"
+    ALWAYS = "always"
+
+
+class ToolIdempotency(StrEnum):
+    NOT_NEEDED = "not_needed"
+    REQUIRED = "required"
+    PROVIDER_SUPPORTED = "provider_supported"
+    RECONCILE_ONLY = "reconcile_only"
+
+
+class ToolRetryPolicy(StrEnum):
+    NEVER = "never"
+    SAFE_TRANSIENT = "safe_transient"
+
+
+class ToolConcurrency(StrEnum):
+    PARALLEL = "parallel"
+    KEYED_SERIAL = "keyed_serial"
+    GLOBAL_SERIAL = "global_serial"
+
+
+class ToolResultStatus(StrEnum):
+    SUCCEEDED = "succeeded"
+    DENIED = "denied"
+    FAILED_RETRYABLE = "failed_retryable"
+    FAILED_TERMINAL = "failed_terminal"
+    UNKNOWN = "unknown"
+    CANCELLED = "cancelled"
+
+
+class ToolExecutionError(RuntimeError):
+    """Structured tool failure with a fail-safe external-dispatch claim."""
+
+    __slots__ = (
+        "code",
+        "external_effect_started",
+        "safe_message",
+        "transient",
+    )
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        safe_message: str,
+        external_effect_started: bool = True,
+        transient: bool = False,
+    ) -> None:
+        clean_code = str(code or "").strip()
+        if (
+            not clean_code
+            or len(clean_code) > 64
+            or not clean_code.isascii()
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789_"
+                for character in clean_code
+            )
+        ):
+            raise ValueError("ToolExecutionError code must be a safe identifier")
+        clean_message = str(safe_message or "").strip()
+        if not clean_message or len(clean_message) > 240:
+            raise ValueError(
+                "ToolExecutionError safe_message must be 1..240 characters"
+            )
+        super().__init__(clean_message)
+        self.code = clean_code
+        self.safe_message = clean_message
+        self.external_effect_started = bool(external_effect_started)
+        self.transient = bool(transient)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolError:
+    code: str
+    retryable: bool
+    safe_message: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolEffectReceipt:
+    """Internal receipt. It is deliberately excluded from model output."""
+
+    provider: str
+    external_id: str
+    request_digest: str
+    committed_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResult:
+    status: ToolResultStatus
+    structured_output: Any = None
+    error: ToolError | None = None
+    effect_receipt: ToolEffectReceipt | None = None
+    started_at: str = ""
+    ended_at: str = ""
+
+    def __post_init__(self) -> None:
+        try:
+            normalized = ToolResultStatus(self.status)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid ToolResult status") from exc
+        object.__setattr__(self, "status", normalized)
+
+    def to_model_payload(self) -> dict[str, Any]:
+        """Return only the projection safe to feed back to the model."""
+        payload: dict[str, Any] = {
+            "status": self.status.value,
+            "output": self.structured_output,
+        }
+        if self.error is not None:
+            payload["error"] = {
+                "code": self.error.code,
+                "message": self.error.safe_message,
+                "retryable": self.error.retryable,
+            }
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ToolInvocationBinding:
+    """Tool-owned durable target/key material derived from trusted context."""
+
+    target_ref: str = ""
+    concurrency_key: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "target_ref", str(self.target_ref or "").strip())
+        object.__setattr__(
+            self,
+            "concurrency_key",
+            str(self.concurrency_key or "").strip(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    """Additive v2 metadata; legacy tools default to a fail-closed effect."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any] | None = None
+    abi_version: int = 2
+    version: str = "1"
+    owner: str = "legacy"
+    effect: ToolEffect = ToolEffect.LEGACY_UNCLASSIFIED
+    required_scopes: tuple[str, ...] = ()
+    credential_mode: str = "none"
+    approval: ToolApproval = ToolApproval.POLICY
+    idempotency: ToolIdempotency = ToolIdempotency.RECONCILE_ONLY
+    retry_policy: ToolRetryPolicy = ToolRetryPolicy.NEVER
+    concurrency: ToolConcurrency = ToolConcurrency.GLOBAL_SERIAL
+    concurrency_key_template: str = ""
+    timeout_ms: int = 30_000
+    data_classification: tuple[str, ...] = ()
+    result_visibility: str = "model_safe"
+    binding_required: bool = False
+
+    def __post_init__(self) -> None:
+        enum_fields: tuple[tuple[str, type[StrEnum]], ...] = (
+            ("effect", ToolEffect),
+            ("approval", ToolApproval),
+            ("idempotency", ToolIdempotency),
+            ("retry_policy", ToolRetryPolicy),
+            ("concurrency", ToolConcurrency),
+        )
+        for field_name, enum_type in enum_fields:
+            try:
+                normalized = enum_type(getattr(self, field_name))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid ToolSpec {field_name}") from exc
+            object.__setattr__(self, field_name, normalized)
+        if self.abi_version != 2:
+            raise ValueError("ToolSpec abi_version must be 2")
+        if not self.name.strip():
+            raise ValueError("ToolSpec name is required")
+        if not self.owner.strip():
+            raise ValueError("ToolSpec owner is required")
+        if not self.version.strip():
+            raise ValueError("ToolSpec version is required")
+        if not isinstance(self.input_schema, dict):
+            raise TypeError("ToolSpec input_schema must be a dict")
+        if self.output_schema is not None and not isinstance(self.output_schema, dict):
+            raise TypeError("ToolSpec output_schema must be a dict or None")
+        if self.timeout_ms <= 0:
+            raise ValueError("ToolSpec timeout_ms must be positive")
+        object.__setattr__(self, "binding_required", bool(self.binding_required))
+        if (
+            self.concurrency == ToolConcurrency.KEYED_SERIAL
+            and not self.binding_required
+            and not self.concurrency_key_template.strip()
+        ):
+            raise ValueError("keyed_serial ToolSpec requires concurrency_key_template")
+        object.__setattr__(
+            self,
+            "required_scopes",
+            tuple(str(scope).strip() for scope in self.required_scopes if str(scope).strip()),
+        )
+        object.__setattr__(
+            self,
+            "data_classification",
+            tuple(
+                str(item).strip()
+                for item in self.data_classification
+                if str(item).strip()
+            ),
+        )
+
+
 class Tool(ABC):
     """LLM 可调用工具的抽象基类。内核定义接口，系统服务层实现。"""
 
@@ -80,6 +306,23 @@ class Tool(ABC):
         """执行工具，返回文本结果给 LLM。"""
         ...
 
+    @property
+    def spec(self) -> ToolSpec:
+        """Return v2 metadata without making legacy tools permissive."""
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            input_schema=dict(self.parameters),
+        )
+
+    def bind_invocation(
+        self,
+        ctx: ToolContext,
+        arguments: Mapping[str, Any] | dict[str, Any],
+    ) -> ToolInvocationBinding:
+        """Derive durable target/key from trusted context; legacy default is empty."""
+        return ToolInvocationBinding()
+
     def to_openai_tool(self) -> dict[str, Any]:
         return {
             "type": "function",
@@ -105,6 +348,17 @@ class ToolContext:
     group_id: str | None = None
     session_id: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
+    principal_kind: str = ""
+    principal_id: str = ""
+    run_id: str = ""
+    step_id: str = ""
+    call_id: str = ""
+    target_ref: str = ""
+    auth_context_ref: str = ""
+    approval_ref: str = ""
+    idempotency_key: str = ""
+    trace_id: str = ""
+    registry_generation: int = 0
 
 
 # ============================================================================
@@ -200,6 +454,13 @@ class PluginContext:
     tool_registry: Any = None
     scheduler: Any = None
     research_event_capture: Any = None
+    agent_runtime_host_ingress: Any = None
+    agent_runtime_assembly: Any = None
+    agent_runtime_query: Any = None
+    memory_governance_query: Any = None
+    worldbook_governance_query: Any = None
+    agent_runtime_readiness: Any = None
+    agent_runtime_operator_action_factory: Any = None
 
     # 其他 —— UsageTracker / Humanizer / Identity
     usage_tracker: Any = None
@@ -594,7 +855,7 @@ class AmadeusPlugin:
     tier: PluginTier = "user"
     toggle_policy: PluginTogglePolicy = "runtime"
     config_spec: dict[str, Any] = {}  # noqa: RUF012 — manifest v3 config contract
-    store: dict[str, Any] = {}  # noqa: RUF012 — local/marketplace metadata
+    store: Any = {}  # noqa: RUF012 — plugins may expose metadata or a runtime-owned store
     silent_safe: bool = False
     """Silent-learn safety flag for the on_message hook.
 

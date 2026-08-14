@@ -6,6 +6,14 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from kernel.types import (
+    ToolApproval,
+    ToolConcurrency,
+    ToolEffect,
+    ToolIdempotency,
+    ToolRetryPolicy,
+    ToolSpec,
+)
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 
@@ -39,6 +47,22 @@ class DateTimeTool(Tool):
     @property
     def parameters(self) -> dict[str, Any]:
         return {"type": "object", "properties": {}}
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            input_schema=dict(self.parameters),
+            owner="datetime",
+            effect=ToolEffect.READ,
+            required_scopes=("time:read",),
+            approval=ToolApproval.NEVER,
+            idempotency=ToolIdempotency.NOT_NEEDED,
+            retry_policy=ToolRetryPolicy.SAFE_TRANSIENT,
+            concurrency=ToolConcurrency.PARALLEL,
+            data_classification=("local_time",),
+        )
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         try:

@@ -13,7 +13,18 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from kernel.types import AmadeusPlugin, MessageContext, PluginContext, PromptContext
+from kernel.types import (
+    AmadeusPlugin,
+    MessageContext,
+    PluginContext,
+    PromptContext,
+    ToolApproval,
+    ToolConcurrency,
+    ToolEffect,
+    ToolIdempotency,
+    ToolRetryPolicy,
+    ToolSpec,
+)
 from services.learning_extract_coordinator import (
     ExtractRunParams,
     run_coordinated_extract,
@@ -23,6 +34,7 @@ from services.slang import (
     SlangDatabaseCorruptError,
     SlangDriftReviewer,
     SlangExtractor,
+    SlangSettings,
     SlangStore,
     normalize_term,
 )
@@ -85,6 +97,22 @@ class SlangLookupTool(Tool):
             },
             "required": ["query"],
         }
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            input_schema=dict(self.parameters),
+            owner="slang",
+            effect=ToolEffect.READ,
+            required_scopes=("slang:read",),
+            approval=ToolApproval.NEVER,
+            idempotency=ToolIdempotency.NOT_NEEDED,
+            retry_policy=ToolRetryPolicy.SAFE_TRANSIENT,
+            concurrency=ToolConcurrency.PARALLEL,
+            data_classification=("group_slang",),
+        )
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         settings = await self._store.load_settings()
@@ -257,7 +285,7 @@ class SlangPlugin(AmadeusPlugin):
         self._tick_task = asyncio.create_task(self._run_tick_jobs(ctx, settings))
         self._tick_task.add_done_callback(self._on_tick_job_done)
 
-    async def _run_tick_jobs(self, ctx: PluginContext, settings: Any) -> None:
+    async def _run_tick_jobs(self, ctx: PluginContext, settings: SlangSettings) -> None:
         try:
             await asyncio.wait_for(
                 self._run_tick_jobs_inner(ctx, settings),
@@ -270,7 +298,7 @@ class SlangPlugin(AmadeusPlugin):
         except Exception as exc:
             _L.warning("slang tick job failed | error={}", exc)
 
-    async def _run_tick_jobs_inner(self, ctx: PluginContext, settings: Any) -> None:
+    async def _run_tick_jobs_inner(self, ctx: PluginContext, settings: SlangSettings) -> None:
         await self._maybe_age_out_drifts(settings)
         await self.run_backlog_review_one_batch_if_due(ctx, settings=settings)
         interval_s = settings.extract_interval_minutes * 60
@@ -321,7 +349,7 @@ class SlangPlugin(AmadeusPlugin):
         with contextlib.suppress(Exception):
             task.result()
 
-    async def _maybe_age_out_drifts(self, settings: Any) -> None:
+    async def _maybe_age_out_drifts(self, settings: SlangSettings) -> None:
         """Run the drift age-out gate at most once per local day."""
         if self.store is None:
             return
@@ -349,7 +377,7 @@ class SlangPlugin(AmadeusPlugin):
         self,
         ctx: PluginContext | None = None,
         *,
-        settings: Any | None = None,
+        settings: SlangSettings | None = None,
     ) -> dict[str, Any]:
         if self.store is None:
             return {"ok": False, "error": "SlangStore not available"}
@@ -431,7 +459,7 @@ class SlangPlugin(AmadeusPlugin):
         self,
         ctx: PluginContext | None = None,
         *,
-        settings: Any | None = None,
+        settings: SlangSettings | None = None,
         batch_size: int | None = None,
         min_confidence: float | None = None,
         _caller_holds_lock: bool = False,

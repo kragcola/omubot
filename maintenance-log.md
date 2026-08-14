@@ -4,6 +4,182 @@
 
 ---
 
+## 2026-08-14 Agent Runtime v2 当前快照审计收口与暗态发布准备
+
+**变更类型**：发布阻断修复 / 暗态生产交付准备。用户明确授权仅在 `agent_runtime.enabled=false` 条件下交付 bot-only 代码；真实 worker activation 仍未授权也未满足前置证据。未创建生产 Runtime/Memory/Worldbook/operator/invocation DB，未启动 worker，未发送 QQ/QZone/webhook，未启用 QZone live，`BUILTIN_WIRE_PROFILE.validated=false`，NapCat 不得重启、重建或 `down`。
+
+**内容与同模式扫描**：当前快照审计关闭七项缺口：dispatcher 在每个 tool use 前复核 exact worker lease；派发前取消将 Run 收束为 `cancelled`，派发后不确定仍保留 `waiting_external`；群策略拒绝是确定性 `failed_terminal`；production factory 仅注入 `offline_only` OneBot 人工见证 adapter；治理抽屉将仅内存 operator ID/credential 作为 headers 发送且这类 401 不注销网页登录态；Runtime/Memory GET 与 Worldbook 一样拒绝未知 query；全部回滚入口统一为 `agent_runtime.enabled=false`。扫描了 lease、取消、group guard、reconciliation、Admin transport、GET route 和 rollback key 的相邻路径，未发现同类遗漏。
+
+**验证、交接与回滚**：production composition **19 passed**；Runtime/Memory/Worldbook/router/guard 交叉回归 **879 passed**；发布范围 Ruff clean、Pyright **0 errors**、`git diff --check` clean。暗态发布前必须从隔离 release worktree 构建，先备份旧 bot image 与 `admin/static` 并记录 SHA-256；上线后验证容器 commit、`agent_runtime.enabled=false`、read-only Runtime API、无 worker lease/新 production DB/外部效果。回滚为恢复该静态产物快照并仅重建 bot 到旧 image；绝不操作 NapCat。真实 activation 仍缺真实五类 source/schema、冻结 backup 与 SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness 和 profile-bound manifest。
+
+## 2026-08-14 Agent Runtime v2 A11 fail-closed 审计修复（仍为暗态）
+
+**变更类型**：关闭独立 A11 审计发现的本地启动安全缺口，并完成同模式 renewal 扫描；未 commit/push/build/deploy，默认 feature gate 仍关闭。未创建生产 Runtime/Memory/Worldbook/operator/invocation DB、未启动真实 worker、未发送 QQ/QZone/webhook、未替换 legacy loop，NapCat 未重启或重建，`BUILTIN_WIRE_PROFILE.validated=false`。
+
+**实现与影响范围**：enabled `ProductionActivationProfileV1` 现在必须配置完整 SHA-256-pinned manifest；production composition 不再接受外部 readiness callback，手工构造的 unpinned profile 也无法组合。`start_worker()` 在所有 readiness gate 后、lease 前重新执行 explicit source/backup preflight，因此 assembly 成功后的 backup 篡改会停在 dispatcher 之前。manifest `schema_version` 必须是 JSON integer `1`，拒绝 `true`。`acquire_worker_lease()` 和同模式的 `renew_worker_lease()` 在 SQLite commit 后遇到取消或异常时，会先 shield 完成 rollback + exact-token delete，再向上抛出，避免未知 lease 占用 TTL。
+
+**验证、回滚与交接**：四组 A11 RED 为 **4 failed**，同模式 acquire/renew RED 为 **2 failed**；修复后 profile/manifest/composition/invocation/bootstrap focused **45 passed**，Runtime/Admin/host ingress/router/scheduler 交叉回归 **238 passed**，Ruff clean、Pyright **0 errors**、doctor **0 fail / 0 warn**、`git diff --check` clean。只读核验确认 `config/config.json` 仍未配置 `agent_runtime`、`storage/` 无 source，运行中的 `qq-bot` 容器没有 `/app/services/agent_runtime`；仅有既有 `qq-bot` 与 NapCat 在运行。回滚继续保持 feature gate 关闭并从隔离 release 输入撤回本次暗态代码；不得以 test manifest 代替 operator-owned source、backup、restore/rollback rehearsal 或 Worldbook witness。下一步只接受这些外部 artifact 的只读独立核验。
+
+## 2026-08-14 Agent Runtime v2 digest-pinned attestation 与 worker 硬门暗态接线
+
+**变更类型**：补齐 production activation 的证据绑定和 worker 启动硬门。`agent_runtime.attestation` 使用显式 `manifest_path` + `manifest_sha256` 读取严格 schema 的离线 JSON；该 manifest 绑定完整 activation profile，并把每个 activation/rollback gate 的证据引用留在文件内，不回显给 readiness/Admin API。未 commit/push/build/deploy，默认 feature gate 仍关闭；未创建生产 Runtime/Memory/Worldbook/operator/invocation DB、未启动真实 worker、未发送 QQ/QZone/webhook、未操作或重启 NapCat，`BUILTIN_WIRE_PROFILE.validated=false`。
+
+**实现与信任边界**：`start_worker()` 在 worker lock 内、获取 durable lease 前必须同时通过 dark readiness、`activation_authorized=true` 的 activation readiness 与 rollback readiness；缺失、部分、无效、manifest 摘要/profile 不匹配或取消均不能激活 dispatcher。配置绑定 manifest 时不允许 callback 覆盖，避免测试 attestor 代替部署证据。profile fingerprint 覆盖 worker、scope、exact target 及五类 source 的路径/schema/备份 digest/restore/rollback ref；manifest 内容被 SHA-256 固定，gate map 严格闭集，`evidence_ref` 只作本地验证并剥离。该条中的无 pair `not_assessed` 语义已由上方 A11 更新收紧：默认 `enabled=false` 不组合 runtime，而 enabled profile 缺少该 pair 现在直接无效。
+
+**验证、影响与交接**：worker gate RED 复现为 **1 failed**（未 attested 仍取得 lease），修复后 profile/manifest/readiness/bootstrap/application focused **67 passed**，扩大 Runtime/Admin/host ingress/scheduler 交叉回归 **234 passed**；范围 Ruff clean、Pyright **0 errors**，doctor **0 fail / 0 warn**。只读核验确认 `config/config.json` 未配置 `agent_runtime`、`storage/` 无 Runtime/governance/invocation source，运行中的 `qq-bot` 容器没有 `/app/services/agent_runtime`；未部署本次代码。回滚删除 manifest reader、profile/config 字段与 worker readiness gate 后保持 `agent_runtime.enabled=false`；不要伪造真实 source/备份/restore/rollback/Worldbook witness，正式激活仍需独立 artifact、人工 evidence 和隔离 release 输入。
+
+## 2026-08-14 Agent Runtime v2 OneBot authoritative host ingress 暗态接线
+
+**变更类型**：将 Agent Runtime v2 的真实 OneBot 入站消息接到可信 invocation 持久化和 LLM ID 透传边界。未 commit/push/build/deploy，默认 activation gate 仍关闭；未创建 production Runtime/Memory/Worldbook DB、未启动 worker、未替换 legacy loop、未发送 QQ/QZone/webhook 或操作 NapCat，`BUILTIN_WIRE_PROFILE.validated=false`。
+
+**实现与信任边界**：`AuthoritativeHostTriggerIngressV1` 以 host 提供的 group/user/message ID、当前 ToolRegistry generation 和 profile scope/target 写入 immutable record，并返回 `TrustedInvocationRecordV1` receipt。router 只接受与当前 group、user、message、session、trigger ref 和 OneBot refs 全部精确一致的 canonical receipt；裸字符串、过期/其他消息 record、持久化异常和缺失 message ID 都直接停止，绝不让 legacy dispatcher 猜测或回退。group/private 路径将唯一 ID 传给 scheduler/`LLMClient.chat()`；arbiter、block、pending 与 coalescer 只携带最新关联 ID，取消清理后不会延迟触发旧 ID。QQ poke/reaction notice 在 ingress 已配置但没有可信消息身份时同样 fail-closed。
+
+**同模式扫描、验证与回滚**：扫描 `agent_runtime_host_ingress`、`record_onebot_message`、`scheduler.notify()`、`runtime_invocation_id` 和 LLM chat 调用后，非测试入站入口只剩 router 的 group/private 两处与 QQ interaction notice 一处，均已覆盖。缺失 message ID 的 group/private RED 为 **2 failed**，修复后 host ingress/production composition/router/QQ interaction/scheduler/invocation focused **142 passed**；范围 Ruff clean、Pyright **0 errors**、`git diff --check` clean。回滚移除 host ingress adapter 与 router/scheduler/arbiter/notice 透传，继续保持 `agent_runtime.enabled=false`；不得删除任何 unknown ledger 或重建 NapCat。下一步仅审读 bootstrap 在 plugin tools merge 后的默认关闭组合，不启动 worker。
+
+## 2026-08-14 Agent Runtime v2 Admin named principal 与 exact resource ACL 暗态接线
+
+**变更类型**：为 Agent Runtime v2 Admin 敏感 context/decision 路由接入 request-scoped named operator principal。未 commit/push/build/deploy，默认 activation gate 仍关闭；未自动打开 production source、未创建新生产 DB、未调用 QQ/QZone/webhook/NapCat，`BUILTIN_WIRE_PROFILE.validated=false`。
+
+**实现与信任边界**：敏感请求必须同时提供 `X-Agent-Runtime-Operator-Id` 与 `Authorization: Bearer <credential>`，由已打开的 `OperatorAuthorizationStoreV1` 认证；网页登录 cookie 仅由既有 Admin middleware 维持页面/API 会话，不再参与 actor 选择。`OfflineAdminActionsV1` 在读取服务端 ToolCall 的 `target_ref` 或 Memory candidate 后，分别用 `runtime:tool:*` / `memory:candidate:decide` 的 exact resource grant 再授权，拒绝通配符、无 grant、revoked operator，并覆盖 context 与 mutation 两条路径。Production assembly 只暴露显式 `create_admin_operator_actions_factory()`，没有 bootstrap 自动挂载。
+
+**验证、影响与交接**：新增 HTTP principal/ACL RED→GREEN；cookie-only、错误 credential、target mismatch、candidate mismatch 均为负例。Admin principal + existing Admin/Worldbook/production composition focused **37 passed**；范围 Ruff clean、Pyright **0 errors**。回滚删除 `admin_operator.py`、route factory/header wiring 和 resource-authorizer hook，恢复原有暗态 static action injection；无生产数据迁移。下一步是把真实 message/scheduler host trigger 持久化为 invocation，并透传 `LLMClient.runtime_invocation_id`。
+
+## 2026-08-14 Agent Runtime v2 Production Activation A1-A6 暗态组合与单 worker 证据
+
+**变更类型**：在既有 P0-P5 暗态能力上补齐 production activation 的前六个内层合同：显式 source/profile、named operator ACL、authoritative trigger 持久化、受限组合根、LLM dispatcher 边界，以及 durable single-worker / exclusive-recovery lease。未 commit/push/build/deploy，默认 feature gate 仍关闭；未创建生产 Runtime/Memory/Worldbook/operator/invocation DB，未接真实 bot host 或 Admin HTTP principal，未调用 QQ/QZone/webhook/NapCat，`BUILTIN_WIRE_PROFILE.validated=false`。
+
+**实现与信任边界**：组合根只在 Runtime、Memory、Worldbook、operator、invocation 五个 caller-owned source 的 schema/backup/restore/rollback preflight 全绿后打开。选中的 `LLMToolDispatcherV1` 缺 trusted invocation 或 current worker lease 时只返回拒绝，不回落到 legacy `ToolRegistry.call`，并关闭 post-reply sticker 直通。worker lease 存在 invocation DB schema v2，使用 token-bound compare-and-swap 获取/续租/释放；启动必须持有唯一 lease 后才做 exclusive recovery，取消 shutdown 时先释放 lease 再传播取消。此处仍是可测试的暗态组合，不构成 production readiness 或 worker 启动授权。
+
+**验证、影响与交接**：`tests/test_agent_runtime_activation_profile.py tests/test_agent_runtime_operator_auth.py tests/test_agent_runtime_invocation_store.py tests/test_agent_runtime_production_composition.py -q` 为 **24 passed**；`tests/test_agent_runtime_ledger.py tests/test_agent_runtime_coordinator.py tests/test_agent_runtime_executor.py -q` 为 **85 passed**；范围 Ruff clean、Pyright **0 errors**。下一步是 Admin 的 credential-authenticated named operator principal，以及 tool target / Memory candidate 的 exact resource ACL；浏览器 cookie 只能维持网页登录态。回滚保持 `agent_runtime.enabled=false`，停 worker、保留 unknown/dispatching 供 reconcile，绝不重建 NapCat。
+
+## 2026-07-22 Agent Runtime v2 P5 Admin / Rollout 暗态验收与项目收口
+
+**变更类型**：P5 显式来源 Admin 查询、token-bound 人工裁决、attested report-only readiness 与 Calm Ops 管理页；Agent Runtime v2 P0-P5 暗态项目收口。未 commit/push/deploy，未创建或挂载生产 Runtime/Memory/Worldbook governance DB，未接 principal、LLMClient、ToolRegistry 或 bootstrap，未启 worker，未调用 QQ/QZone/NapCat/provider。
+
+**实现与信任边界**：Runtime、Memory、Worldbook query 只接受调用者显式注入且已打开的 source，缺失时通用 unavailable 且不创建路径/DB；DTO 有界并深度脱敏。Worldbook cursor v2 同时冻结 proposal/decision/receipt seq，分页成员/status/presence 保持初始快照，detail 读取当前态。approval、reconciliation、Memory decision 均先取 server-owned context/token，Admin 只追加裁决，明确不执行工具/投影。浏览器/API/action 不再接受 `conflict_ids`；Memory store 在事务内使用完整当前 conflict set，并以原子 append outcome 区分 first write/exact retry，双连接只有 `[False, True]`。409 refresh 失败先清旧 authority，503 再切只读。
+
+**审计、验证与回滚**：独立审查先复现 Memory conflict spoof、并发 exact-retry、409→503 stale authority、Worldbook status cursor 四个 P2，修复后又发现 ContextVar outcome bridge P3；改为显式 outcome API 后最终当前快照无 P0-P3 finding。P5 focused **90 passed**；P0-P5 core **509 passed**；tools/client/application/Worldbook/Social/Schedule 兼容 **515 passed / 42 个上游 aiohttp warning**；frontend contracts **9 passed**、`vue-tsc` 与生产 build 通过；scoped Ruff、Pyright 0/0、`git diff --check` 与 production import/config/storage/profile isolation 全绿，`BUILTIN_WIRE_PROFILE.validated=false`。临时 5173/8081 预览已停止，浏览器 viewport 已恢复默认；Docker daemon 未运行且未操作。回滚删除 P5 Admin/query/action/readiness、Worldbook治理 store/query、页面和对应测试即可，无生产数据迁移。生产激活必须另立 tracker 并逐项 attestation。
+
+## 2026-07-22 Agent Runtime v2 P4 Living Story Governance 暗态验收
+
+**变更类型**：P4 显式 world identity、typed Social/Schedule source binding、纯 event proposal 与 legacy reducer commit proof。未 commit/push/deploy，未改生产 Worldbook/Schedule/Social callback、JSON、配置、gate 或既有 ID，未创建 DB/worker，未调用 QQ/QZone/NapCat。
+
+**实现与真实性边界**：新增 `WorldRefV1`、冻结的 Schedule/Social source binding、`WorldbookEventProposalV1` 与 verifier-only scalar receipt。Schedule 只携带 canonical 日期与摘要 digest，不带 evidence；Social 绑定 factual experience/group/user/message/source/time，evidence 使用由完整 binding 派生的 raw-free canonical ref 和固定 attest quote，`user_text`/`bot_reply`/真人线下行为不进入 proposal。逻辑 proposal/event ID 不受 producer clock 重试影响，Schedule payload 变化会改变身份。legacy StoryArc 只能证明 `omubot.default`，显式冲突 world fail-closed。
+
+**Reducer、审计与回滚**：verifier 对齐真实 `EventReducer` 的持久 history 投影，并同时核验 committed semantics、Arc/world/exact non-bool revision、durable event-ID set 与唯一 history row；receipt 不保留 Event/Arc 可变 payload，只保存 event/Arc/ID-set proof digest，公开构造、replace 与 digest factory 均关闭。两轮独立审计发现 reducer 形状、opaque binding、receipt 伪造、carrier 漏检、bool coercion、Social scope splice 与 snapshot world 问题，均有 RED/GREEN；最终 19/19 adversarial，无 P0-P3 finding。focused **64 passed**；P0-P4/Memory/Worldbook/Social/Schedule 兼容 **729 passed / 3 个上游 aiohttp warning**；Ruff clean、Pyright 0/0、diff/import/storage/config/profile isolation 全绿，`BUILTIN_WIRE_PROFILE.validated=false`。回滚仅删除两个 Worldbook governance 模块和对应测试；无生产数据需迁移。下一步 P5 只做显式来源、bounded/redacted Admin 查询与 report-only readiness，生产审批执行仍未授权。
+
+## 2026-07-22 Agent Runtime v2 P3 Memory Governance 暗态验收
+
+**变更类型**：P3 immutable memory truth、candidate-only producer、SQLite shadow ledger 与共享连接取消安全。未 commit/push/deploy，未接生产 `LLMClient`/ToolRegistry/bootstrap，未创建生产 governance DB，未调用 QQ/QZone/NapCat。
+
+**实现与不变式**：新增 `ObservationV1`、`CandidateEnvelopeV1`、`ConflictV1`、`PromotionEventV1` 及 immutable/deep-freeze/canonical hash 合同；Memo 保留原始消息 evidence，Compaction 按 item 对齐 evidence，只生成候选。显式路径 shadow store 使用 append-only truth 表、DDL checksum/schema allowlist/FK/index/trigger 复验和全局 `append_seq`。重放按记录顺序处理 late/backdated conflict，同时禁止在 detection 之前裁决；Conflict discovery 合并 canonical payload 与辅助索引，再核验 observation/candidate/projection link 完全一致，额外或缺失链接均 fail-closed。
+
+**并发、取消与审计**：same-object init single-flight，close 等待 active write，exact retry 不重复分配 append order；共享 `connect_sqlite` 在 PRAGMA 初始化期间被重复取消时先关闭已获得连接再传播 `CancelledError`。独立审计先后复现 future approval、backdated post-projection conflict、init/close race、extra schema object、init connection leak、global seq collision、extra/missing auxiliary link；十个 RED 均转绿。最终复验代理回包被外部 platform policy filter 阻断，按非瞬态 policy error 未重试/替换，也未伪造 no-findings。
+
+**验证、影响与回滚**：P3 + shared SQLite **120 passed**；shared storage **40 passed**；Memo/Client/Consolidator **172 passed / 40 个上游 aiohttp warning**；scoped Ruff clean、Pyright 0/0、`git diff --check` 与生产 import/storage isolation 通过。P3 仍为 dark/local，无默认 DB、无生产 prompt/write 改动。回滚删除三个 governance 模块/测试并恢复 shared SQLite cancellation hunk；无生产数据需迁移或删除。下一步 P4 复用现有 Worldbook ledger/reducer，补 `world_id` 与受治理 Social/Schedule event adapter，不建立第二个 StoryArc 真值源。
+
+## 2026-07-21 Agent Runtime v2 P2 崩溃后当前快照复审收口
+
+**变更类型**：P2 dark/offline 持久执行与 QZone 取消语义重新验收。未 commit/push/deploy，未创建生产 Agent Runtime DB、未接生产 principal/ToolRegistry/LLMClient，未调用 QQ/QZone/NapCat。
+
+**根因与修复真相**：崩溃后的 handoff 引用了早于当前工作树的只读审计结果，误把已经写入但尚未登记 tracker 的修复列为开放项。当前实现已覆盖 `ready`/`claimed` 终态写恢复、`claimed -> dispatching` commit-then-error 状态复查、provider error 后 QZone cleanup 期间取消传播、QZone claim inspection 重复取消，以及 executor 外层 lookup+cancel 整段 shield。额外强化 `test_executor_parallel_setup_cancellation_closes_open_call`，在 cleanup ledger lookup 阻塞期间连续取消两次，仍先持久化 `cancelled` 再传播 `CancelledError`。
+
+**D1/D2、验证与边界**：同模式扫描复读 `EffectExecutor` claim/dispatch/finalize/outer-cancel 与 `JournalDelivery` claim/inspection/mark-unknown 路径；focused 55 passed，Runtime/QZone 501 passed，scoped Ruff clean、Pyright 0/0、`git diff --check` pass，生产 Agent Runtime DB 不存在，`BUILTIN_WIRE_PROFILE.validated=false`。复用原 `qzone_runtime_review` 对当前快照独立复审，无 actionable finding，五项旧 finding 全部 closed；未发现非法 transition、错误 terminal/unknown 分类、取消吞没、provider replay 或异常文本持久化。Grok 仍为明确 `auth_unavailable`，按规则未重试。回滚仅恢复本次测试补强与对应 executor/delivery 暗线修复；不得重放任何 unknown 外部调用。
+
+## 2026-07-21 Agent Runtime v2 Provider Reconciliation 暗线合同
+
+**变更类型**：P2 dark/offline ambiguous external-effect 人工裁决与 domain adapter 合同。未 commit/push/deploy，未创建生产 Agent Runtime DB、未接生产 principal/ToolRegistry/LLMClient，未调用或重放 QQ/QZone/NapCat。
+
+**持久真相**：`unknown` ToolCall 不再被事后改写成 succeeded/failed；`record_tool_reconciliation` 在现有 schema-v2 append-only event 表中写唯一 `reconciliation_resolved`，只保存 closed decision、actor、adapter ID、canonical evidence ref、标准化 operator note 的 SHA-256 与可选 external ID。`BEGIN IMMEDIATE` 保证跨连接相反裁决只有一个获胜；exact retry 返回既有记录，冲突在 adapter 前拒绝。一个 Run 的所有 unknown 都有 resolution 后，才在同一事务从 `waiting_external` 恢复 `running`，且绝不自动重放原 ToolCall。
+
+**完整中介与领域顺序**：`ReconciliationCoordinator` 要求 `runtime:tool:reconcile` scope + exact target allowlist；actor/ref/note、adapter 幂等声明与 supports、receipt decision/target/evidence/external ID 全部校验。QZone adapter 先调用既有幂等 `confirm_published`/`confirm_not_published` 并验证 draft/status，再写 Runtime event；OneBot 因没有通用 receipt query，只允许 group_admin/qq_interaction/sticker 的 external `onebot:` target 使用人工 attestation，不查询 provider、不调用 bot、不重发工具。
+
+**验证、影响与回滚**：ledger API missing RED 1、service module missing RED 3、QZone adapter missing RED 1、OneBot adapter missing RED 1、existing-resolution 先调用 adapter RED 1 均转绿；跨连接 race、unauthorized、non-idempotent、forged receipt、双向 QZone resolution 全部通过。focused **10 passed**，Runtime/QZone **501 passed**，P2/QZone/client/plugin/application **859 passed / 40 个上游 aiohttp warning**；Ruff clean、Pyright 0/0、diff/生产 import/storage/profile 隔离全绿，schema 保持 v2。Grok 仍为明确 `auth_unavailable`，未重复派发。回滚删除 reconciliation service/adapters/event API；不删除历史 unknown，不重放外部调用。
+
+## 2026-07-21 Agent Runtime v2 Reaction 与 Sticker 动态目标治理
+
+**变更类型**：P2 dark/offline OneBot reaction provenance 与 sticker durable resolution。未 commit/push/deploy，未构造生产 principal、未注册/接管生产 ToolRegistry/LLMClient、未创建生产 Agent Runtime DB，未调用真实 QQ/QZone/NapCat。
+
+**Reaction**：`react_to_message` 从 legacy 升级为 `EXTERNAL_IRREVERSIBLE`、ALWAYS approval、reconcile-only/never retry/keyed serial；只接受 runtime extra 中 canonical `onebot:group|user:<id>:message:<message_id>` ref，目标同时绑定数字 emoji。由于 `set_msg_emoji_like` provider 参数没有 group_id，`OutboundGroupAccessGuard` 暴露同源实时断言，dispatch 前再次执行 whitelist/blacklist/presence/mute fail-closed；拒绝或 guard 缺失是 terminal pre-dispatch，provider 异常是 unknown。旧 ToolRegistry 直接调用、私聊和 token bucket 行为保持。
+
+**Sticker**：`send_sticker` 首次 binding 将 explicit ID 或 intent 单次检索结果与 trusted recipient 写入 `ToolCall.target_ref`。新增 runtime-owned `ToolContext.target_ref`；approval/retry resume binder 和 executor 都读取 ledger target，intent 排名即使从 A 变为 B 仍发送批准的 A，不再二次搜索。文件读取/MessageSegment 构造失败是 terminal pre-dispatch；provider error/cancel 是 unknown，且 send_count/recent state 不写成功。legacy direct path 仍按原 intent 搜索、错误文本和 base64/sub_type 发送方式运行。
+
+**验证、影响与回滚**：reaction RED 为 spec/binding 5、guard marker 1、live blocked incorrectly succeeded 1；sticker RED 为 target ABI 1、spec/binding 4、approval rerank TOCTOU 1、本地 segment 相位 1，均转绿。D1 same-pattern scan 确认非测试 `set_msg_emoji_like` 只有 interaction tool 一处，`search_by_intent(intent)` 只剩首次 governed binding 与 legacy execute 两处。reaction focused **131 passed**，Runtime/sticker/interaction/guard **275 passed**，P2/QZone/client/plugin/application **850 passed / 40 个上游 aiohttp warning**；范围 Ruff clean、Pyright 0/0、diff/生产 import/storage/profile 隔离通过。Grok 仍为明确 `auth_unavailable`，未重复派发或伪造交叉审计。回滚恢复 reaction/sticker legacy spec，删除 runtime target 透传和 message-only guard assertion；不得重放 unknown 外部调用。
+
+## 2026-07-21 Agent Runtime v2 QZone Journal Adapter 暗线验收
+
+**变更类型**：P2 dark/offline QZone 不可逆外部效果适配与取消恢复收口。未 commit/push/deploy，未注册生产工具、未创建生产 Agent Runtime DB、未接 `LLMClient`，未调用真实 QQ/QZone/NapCat。
+
+**实现与边界**：新增 `QZonePublishDraftTool`，只包装既有 `JournalDelivery`，不暴露 raw transport；严格接受 runtime trusted `qzd_[0-9a-f]{24}` allowlist，绑定 `qzone:draft:<draft_id>:publish`，声明 `EXTERNAL_IRREVERSIBLE`、ALWAYS approval、`RECONCILE_ONLY`、never retry、keyed serial。delivery 将 lookup/credential/gate 与 provider/claim/finalize 相位分开；dispatch 后异常、未验证响应、local finalize 失败、commit-then-error 均进入 QZone `unknown`，Runtime ToolCall/Run 对应为 `unknown`/`waiting_external`。异常持久化只保留类型，测试 canary 证明 cookie/content 不泄漏。
+
+**取消与审查**：独立审查提出的 spec substitution、claim ambiguity、contention retry、finalization、cancel projection 与泄漏窗口均已逐项复现修复。最后两个 RED 是 provider 已报错后 cleanup 取消被吞，以及 claim 复查二次取消留下 `dispatching`；现以通用 shield 等待完成 inspection/`mark_unknown`，记录期间取消并在状态安全后传播，不使用 `uncancel()`。Grok 仍为明确非瞬态 `auth_unavailable`，按规则未重复派发，也未以 Codex 子代理伪装 Grok 交叉验证。
+
+**验证、影响与回滚**：精确取消 RED `2 failed` 后 GREEN `2 passed`；Agent Runtime **157 passed**，完整 QZone **337 passed**，P2/QZone/client/plugin/application 组合 **835 passed / 40 个上游 aiohttp warning**；范围 Ruff clean、Pyright 0/0、`git diff --check`、生产 import/storage 隔离通过，`BUILTIN_WIRE_PROFILE.validated=false`。回滚删除 adapter 并恢复 delivery 相位/取消改动；不得重放任何既有 `dispatching/unknown` draft，需显式 reconcile。下一步是 reaction trusted message refs 与 sticker durable resolution。
+
+## 2026-07-21 Agent Runtime v2 P2-5 OneBot 群管理与 poke 暗线治理
+
+**变更类型**：P2 dark/offline OneBot outbound 安全子集迁移。未部署、未创建生产 Agent Runtime DB、未接 `LLMClient`，所有 bot 均为 mock，未发送 QQ、未调用真实 NapCat/QZone。
+
+**实现与边界**：`TrustedToolContext` 新增只在当前执行内存中存在的 bot 引用，并在 binding/execute ToolContext 重建时透传；该对象不写 ledger/event/model payload。`mute_user`/`set_title` 为 `EXTERNAL_REVERSIBLE`，`send_group_msg`/`poke_user` 为 `EXTERNAL_IRREVERSIBLE`；全部 ALWAYS approval、reconcile-only、never retry、keyed serial，并在 ToolCall 前绑定 trusted superuser/group/member 或 trusted humanization profile/target user。真实协调器测试证明 approval 前 bot 零调用，恢复后精确一次调用，provider 异常进入 `unknown`/`waiting_external`。全局 group outbound guard 额外覆盖带 group_id 的 `send_poke` 以及 `set_group_ban`/`set_group_special_title`，private poke 保持可用。
+
+**明确未迁移**：`react_to_message` 缺少可信 message-id provenance；`send_sticker(intent)` 在 binding/execute 间会二次检索且没有 durable resolved sticker id，二者继续 `legacy_unclassified`。OneBot 没有通用 provider idempotency，当前 unknown 只能等待 reconcile；本切片不把“返回失败字符串”当成功，governed poke provider 异常会传播且释放 token bucket。
+
+**验证、影响与回滚**：bot 透传 RED 1、群管理 spec/binding RED 8、poke/guard RED 7 均修复；OneBot focused **228 passed**，interaction-integrated **158 passed**，P2 超集 **321 passed**，broader **477 passed / 40 个上游 aiohttp warning**；Ruff/Pyright/diff/生产隔离全绿。Grok 仍为既有 `auth_unavailable`，无外部交叉审计。回滚恢复 executor/coordinator trusted bot、group/interaction specs 与 guard action set；无数据迁移或外部动作。
+
+## 2026-07-21 Agent Runtime v2 P2-4 GET-only HTTP API 条件式迁移
+
+**变更类型**：P2 dark/offline 通用 HTTP API 效果拆分。未修改插件生产默认配置，未 commit/push/deploy，未联网、未创建生产 Agent Runtime DB、未接 `LLMClient`、未触发 QQ/QZone/NapCat。
+
+**实现与边界**：`HttpApiTool` 只有在构造时原始 `allowed_methods` 非空且集合精确为 `{GET}` 才声明 `EXTERNAL_READ`、`network:http-api:read`、canonical API origin binding 与 safe-transient retry，并复用 P2-3 pinned public transport。GET-only schema 去掉 body，只允许 `Accept`/`Accept-Language` 两个最长 512 字符、无控制字符的内容协商 header；method/body/Authorization/Host/CRLF 在 ToolCall 前拒绝。默认 GET+POST、POST-only、空列表和含未知 method 的配置全部保持 `legacy_unclassified`；默认 mixed 实例的旧 `_is_safe_url` + httpx POST 路径有专门兼容测试，未被暗线 GET 分支改写。
+
+**验证与结论**：初始 spec/binding/header RED 5 项、transport/coordinator RED 2 项均复现后修复；HTTP API + safe HTTP + plugin/application focused **198 passed**，P2 runtime/tool 超集 **246 passed**，含 client/PluginToggle/PluginBus/command/application 的 broader **402 passed / 40 个上游 aiohttp warning**。范围 Ruff pass、Pyright 0 errors / 0 warnings、`git diff --check` 与生产 import/storage 隔离扫描通过。Grok 仍因既有明确 `auth_unavailable` 未派发，本切片没有外部交叉审计。
+
+**影响与回滚**：仓库默认 `plugins/http_api/config.default.json` 仍为 GET+POST，所以当前插件并未获得 governed 身份；这只是可由未来显式 GET-only 配置启用的暗线能力。POST 在 provider receipt/reconcile、凭据 broker 与 unknown 处置前继续 fail-closed。回滚恢复 `services/tools/http_api.py` 与对应 catalog/tools/coordinator tests，无数据迁移。
+
+## 2026-07-21 Agent Runtime v2 P2-3 外部读取与 public HTTP 暗线验收
+
+**变更类型**：P2 dark/offline 外部读取工具迁移与 SSRF/传输边界收口。未 commit/push/deploy，未创建生产 Agent Runtime DB，未接 `LLMClient`，未真实联网调用工具，未重启容器，未触发 QQ/QZone/NapCat。
+
+**实现与安全边界**：`web_search`/`web_fetch` 现在显式为 `EXTERNAL_READ`，分别要求 `network:search`/`network:fetch`，并在 ToolCall 前绑定固定搜索目标或 canonical web origin。新增 `safe_http.py`：仅允许 HTTP(S)，拒绝 credentials、控制字符、反斜杠、空/零/畸形端口、非法 IDNA/DNS label、超长 URL、本机/私网/保留/transition 地址；DNS 每次解析都校验全部 answer 并把同一组 IP 交给 aiohttp connector，禁用 env proxy/自动 redirect/DNS cache，redirect 只允许原授权 origin，正文按字节上限跨 chunk 读取。代理 fake-IP `198.18.0.0/15` 只允许来自域名解析，模型字面 IP 永远拒绝；安全 DNS 拒绝使用专用异常并最终落 `failed_terminal`，瞬态 timeout/provider failure 落 durable `failed_retryable`，旧 ToolRegistry 仍保留中文错误文本。`http_api` 仍显式 `legacy_unclassified`，没有因复用旧 `_is_safe_url` 被误判完成。
+
+**审查与验证**：RED 覆盖首 chunk 截断、非法 hostname、空/零端口、原始 LF/DEL、超长 URL、governed 假成功、unsafe DNS 包装误分类；最终 focused **100 passed**、P2 runtime/tool 超集 **231 passed**、含 client/PluginToggle/PluginBus/command transactions 的 broader **387 passed / 40 个上游 aiohttp warning**。范围 Ruff pass、Pyright 0 errors / 0 warnings、`git diff --check`、凭据模式、生产 consumer import 与 storage DB 扫描均通过；取消测试证明 response/session context 退出。既有 Grok canonical stream 已明确 `auth_unavailable`，本切片未重复派发或伪造 Grok 交叉验证，由 Codex 直接复读 diff。
+
+**影响、残余与回滚**：P2-3 仍是 dark slice；无真实网络/生产行为证据，`allowed_target_refs` 尚无生产构造，`allow_proxy_dns_net=true` 仍把本机 fake-IP proxy 作为显式可信解析边界。下一步必须先拆 `http_api` GET/POST 效果，再处理 OneBot outbound 与 QZone journal adapter；不得直接包装 raw transport。回滚删除 `services/tools/safe_http.py`，恢复 `web_fetch.py`/`web_search.py` 旧 spec/transport 与对应测试即可，无数据迁移。
+
+## 2026-07-21 Agent Runtime v2 P2-2 本地写 binding 终验
+
+**变更类型**：P2 dark/offline 本地写工具治理与安全审计收口。未 commit/push/deploy，未创建生产 Agent Runtime DB，未接 `LLMClient`，未重启容器，未触发 QQ/QZone/NapCat。
+
+**修复与不变式**：`save_sticker` 现在只绑定本轮可信 `image_tags` 中存在的标签；`manage_sticker` 的 update/delete 在 governed binding 与旧 `execute` 路径都只接受非空可信 superuser，模型参数 `requested_by` 不再能替代身份；`RunCoordinator` 在 approval/retry resume 的任何持久状态变化前重新运行 binding，并逐项比对 durable target/concurrency key，错误上下文不会写入 approval、切换 Run 或再次执行工具。`SendStickerTool` 从类定义到文件末尾与 HEAD 一致，未分类、未改生产发送路径。
+
+**审查与验证**：三组 RED 共 6 个精确失败（unknown image tag 1、管理权限 3、恢复重绑 2），修复后新增场景全绿；sticker/catalog/coordinator 64 passed，P2 focused 超集 **158 passed**，含 client/PluginToggle/PluginBus/命令事务的 broader 超集 **345 passed / 82 个上游 warning**。范围 Ruff pass、Pyright 0 errors / 0 warnings，`git diff --check`、凭据模式扫描、生产 import/storage scan、SendSticker 对比均通过。Grok post-GREEN child `019f827e-c1d3-73d1-91cc-a5f285e42544` 的发现已由 Codex 复现并修复；top `d0481be7-b7c7-478d-9557-b235b420844d` 交付后后台辅助 `grok-4.5` 持续返回明确 `auth_unavailable`，按规则终止残留进程且未重复派发。
+
+**影响与回滚**：P2-2 仍为 dark slice，P2 总体未完成。回滚只涉及 `ToolInvocationBinding`/四本地写工具 spec+binding、恢复重绑 helper 与对应测试；无生产数据迁移。下一步继续外部工具、HTTP/SSRF 与 QZone adapter；`allowed_target_refs` 生产构造、store-backed ID ACL、policy-denied proposed-call 语义与 provider reconcile 仍是明确残余门槛。
+
+## 2026-07-21 Agent Runtime v2 P1 暗运行主干完成
+
+**变更类型**：Agent Runtime v2 第二个源码里程碑；受治理执行、Run 协调、SQLite schema v2 并发与恢复合同。未 commit/push/deploy，未创建生产 Agent Runtime DB，未接管 `LLMClient`，未重启容器，未触 QQ/QZone/NapCat。
+
+**实现与安全边界**：新增 deterministic `CapabilityPlanner` 与执行时 `PolicyGate`，工具可见性不再等于授权；legacy effect、缺 scope/target/key、registry epoch 漂移与无效/过期 approval 均 fail closed。`EffectExecutor` 在工具代码前完成 durable snapshot 绑定、JSON Schema、二次 policy、claim/dispatch；可信 `ToolContext` 由 runtime 重建；异常文本/effect receipt 不进入 model payload；外部 timeout/异常/非法输出与取消均落 `unknown`。`RunCoordinator` 支持 message/tick/domain_event/recovery 暗 Run、同 call approval/retry resume 与 waiting states，未实现生产模型循环接线。
+
+**持久执行与恢复**：临时 Agent Runtime DB 升级到 schema v2，v1 rows 无损迁移为 `global_serial`；global/keyed/parallel occupancy 在 `BEGIN IMMEDIATE` claim 内检查。非取消 worker transition 与 worker cancel 均要求精确 `lease_owner`，supervisor cancel 必须显式 force；过期 claimed→ready、dispatching→unknown；全量 incomplete recovery 默认拒绝且只允许显式 exclusive startup。多 worker 仍禁止：真实 runtime-instance 独占锁与 claim 内联过期回收是启用多进程前门槛。
+
+**审查与验证**：全程 RED-GREEN-REFACTOR。Grok normal required-parallel 最终 top `66534738-ce9f-493b-9136-1e5625eecccd`、child `019f80ee-93a5-7190-8ba5-7d62a285254f` 只读审查、零文件改动；其 stale owner transition/cancel findings 已复现并修复。最终 P0/P1/plugin 明确超集 **284 passed / 40 个上游 aiohttp warning**；范围 Ruff clean、Pyright 0 errors / 0 warnings；`git diff --check` 通过；生产 Agent Runtime DB 不存在，生产仍运行 `40a8e32`。
+
+**影响与回滚**：P1 仅 dark/offline；回滚为停用本地测试 worker、删除显式临时 v2 DB，并恢复/删除新增 Agent Runtime 源码与测试。不得将 v2 DB 原地降级为 v1。P2 继续限定单进程暗态；任何生产启用、外部发送、部署或多 worker 均需新的硬门槛与单独授权。
+
+## 2026-07-21 Agent Runtime v2 P0 暗运行结构里程碑
+
+**变更类型**：Agent Runtime v2 立项后的首个源码里程碑；Tool ABI、显式路径 SQLite ledger、插件工具组合与故障恢复合同。未 commit/push/deploy，未创建生产 Agent Runtime DB，未重启容器，未触 QQ/QZone/NapCat。
+
+**实现与安全边界**：`kernel.types` 增加 fail-closed Tool ABI v2（effect/approval/idempotency/retry/concurrency、trusted runtime context、model-safe result），旧 Tool 的 OpenAI schema 与旧执行循环保持不变。新增 dark `services.agent_runtime` Run/ToolCall snapshot + append-only event ledger：DDL 内容 SHA-256、列属性/FK/索引结构复验、CAS 状态机、单一 claim、双重取消下 shielded rollback/close、Run 终态父子约束、原子取消/失败收口、原子重启恢复；派发前可取消/回到 ready，遗留或取消中的 `dispatching` 一律 `unknown` 且不自动重试。`required/provider_supported` 无 key digest 时拒绝入账。`PluginToggleService` 以切换前 registry 快照保留非插件基础工具，并在持久文件已写后抛错时复读、恢复旧状态。
+
+**审查与验证**：全程 RED-GREEN-REFACTOR。Grok normal required-parallel top `99b25e79-260b-4e68-80de-05322889dd44`、真实 children `019f807a-5851-77a2-b51b-2a0dc2f21248` / `019f807c-78b3-7ad3-b996-d42ed1351f91` 只读交叉审计，零文件改动；Codex `runtime_research` 两轮独立审查发现的终态父 Run、非法枚举、弱 schema verify、空 required key、残留错误、double-claim 与缺失 override 回滚均已补测试修复，终审无 P0 blocker。最终组合回归 **183 passed / 40 个上游 aiohttp warning**；P0 范围 Ruff clean，Pyright 0 errors / 0 warnings，临时 SQLite `user_version=1`、`quick_check=ok`。全仓 Ruff/Pyright 仍被本任务外既有与未跟踪 WIP 阻塞（178 / 394），未改动这些用户文件。
+
+**影响与回滚**：P0 没有接管 `LLMClient`、没有 bot startup wiring，也不创建或迁移生产数据库；生产仍是 `40a8e32`。回滚只需恢复 `kernel/types.py`、`services/plugin_toggle.py` 与对应测试，删除新增 `services/agent_runtime`/P0 tests/docs；无需生产数据回滚。P1 仅允许继续 dark CapabilityPlanner/PolicyGate/EffectExecutor，任何部署或真实外部动作仍需独立授权。
+
+---
+
 ## 2026-07-20 Style provenance 防再污染提交、部署与复验闭环
 
 **变更类型**：对 2026-07-19 Style 历史视觉/system 污染清理的后续授权收口；确认防再污染代码已提交并完成 bot-only 生产部署，补做代码、容器、生产 DB 与 Grok normal required-parallel 交叉验证。未 push、未发送 QQ/QZone，未重启或重建 NapCat，未触发 Style 手工抽取或自动审批。

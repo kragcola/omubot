@@ -1,10 +1,19 @@
 """Affection-related tools: set_nickname."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 from loguru import logger
 
+from kernel.types import (
+    ToolApproval,
+    ToolConcurrency,
+    ToolEffect,
+    ToolIdempotency,
+    ToolInvocationBinding,
+    ToolRetryPolicy,
+    ToolSpec,
+)
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 
@@ -87,6 +96,40 @@ class SetNicknameTool(Tool):
             },
             "required": ["user_id", "nickname"],
         }
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            input_schema=dict(self.parameters),
+            owner="affection",
+            effect=ToolEffect.WRITE_LOCAL,
+            required_scopes=("affection:write",),
+            approval=ToolApproval.POLICY,
+            idempotency=ToolIdempotency.RECONCILE_ONLY,
+            retry_policy=ToolRetryPolicy.NEVER,
+            concurrency=ToolConcurrency.KEYED_SERIAL,
+            binding_required=True,
+            data_classification=("user_preference",),
+        )
+
+    def bind_invocation(
+        self,
+        ctx: ToolContext,
+        arguments: Mapping[str, Any] | dict[str, Any],
+    ) -> ToolInvocationBinding:
+        claimed_user = str(arguments.get("user_id") or "").strip()
+        trusted_user = str(ctx.user_id or "").strip()
+        if not claimed_user or not trusted_user or claimed_user != trusted_user:
+            raise ValueError("set_nickname user_id must equal trusted context user_id")
+        group_id = str(ctx.group_id or "").strip()
+        target = (
+            f"affection:group:{group_id}:user:{trusted_user}"
+            if group_id
+            else f"affection:user:{trusted_user}"
+        )
+        return ToolInvocationBinding(target_ref=target, concurrency_key=target)
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         user_id: str = kwargs["user_id"]

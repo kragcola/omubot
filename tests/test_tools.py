@@ -5,12 +5,16 @@ from typing import Any
 
 import pytest
 
+import services.tools.http_api as http_api_module
+import services.tools.web_fetch as web_fetch_module
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 from services.tools.datetime_tool import DateTimeTool
 from services.tools.group_admin import MuteUserTool
+from services.tools.http_api import HttpApiTool
 from services.tools.registry import ToolRegistry
-from services.tools.web_fetch import _is_safe_url
+from services.tools.safe_http import PublicHttpTextResponse, UnsafePublicUrl
+from services.tools.web_fetch import WebFetchTool, _is_safe_url
 from services.tools.web_search import WebSearchTool
 
 
@@ -90,6 +94,180 @@ class _InternalTimeoutTool(_BlockingTool):
 )
 def test_is_safe_url(url: str, expected: bool) -> None:
     assert _is_safe_url(url) == expected
+
+
+async def test_web_fetch_execute_uses_pinned_public_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch(url: str, **kwargs: Any) -> PublicHttpTextResponse:
+        captured["url"] = url
+        captured.update(kwargs)
+        return PublicHttpTextResponse(
+            status_code=200,
+            text="<p>safe body</p>",
+            final_url=url,
+            truncated=False,
+        )
+
+    def forbid_legacy_transport(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise AssertionError("legacy httpx transport was used")
+
+    monkeypatch.setattr(
+        web_fetch_module,
+        "fetch_public_text",
+        fake_fetch,
+        raising=False,
+    )
+    monkeypatch.setattr("httpx.AsyncClient", forbid_legacy_transport)
+
+    result = await WebFetchTool(max_length=1000).execute(
+        ToolContext(user_id="10001"),
+        url="https://93.184.216.34/docs",
+    )
+
+    assert result == "safe body"
+    assert captured["url"] == "https://93.184.216.34/docs"
+    assert captured["follow_redirects"] is True
+    assert captured["allow_proxy_dns_net"] is True
+    assert captured["max_bytes"] >= 4000
+
+
+async def test_web_fetch_execute_maps_transport_target_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def reject_fetch(url: str, **kwargs: Any) -> PublicHttpTextResponse:
+        del url, kwargs
+        raise UnsafePublicUrl("redirect crossed origin")
+
+    def forbid_legacy_transport(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise AssertionError("legacy httpx transport was used")
+
+    monkeypatch.setattr(
+        web_fetch_module,
+        "fetch_public_text",
+        reject_fetch,
+        raising=False,
+    )
+    monkeypatch.setattr("httpx.AsyncClient", forbid_legacy_transport)
+
+    result = await WebFetchTool().execute(
+        ToolContext(user_id="10001"),
+        url="https://93.184.216.34/start",
+    )
+
+    assert result == "拒绝访问: 不允许访问非公网或跨源地址"
+
+
+async def test_web_fetch_legacy_execute_keeps_timeout_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def timeout_fetch(url: str, **kwargs: Any) -> PublicHttpTextResponse:
+        del url, kwargs
+        raise TimeoutError("transport timed out")
+
+    monkeypatch.setattr(web_fetch_module, "fetch_public_text", timeout_fetch)
+
+    result = await WebFetchTool(timeout_seconds=7).execute(
+        ToolContext(user_id="10001"),
+        url="https://example.com/docs",
+    )
+
+    assert result == "请求超时: 网页在 7 秒内未响应 (https://example.com/docs)"
+
+
+async def test_http_api_get_only_execute_uses_pinned_public_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch(url: str, **kwargs: Any) -> PublicHttpTextResponse:
+        captured["url"] = url
+        captured.update(kwargs)
+        return PublicHttpTextResponse(
+            status_code=200,
+            text='{"temperature": 22}',
+            final_url=url,
+            truncated=False,
+        )
+
+    def forbid_legacy_transport(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise AssertionError("legacy httpx transport was used")
+
+    monkeypatch.setattr(http_api_module, "fetch_public_text", fake_fetch, raising=False)
+    monkeypatch.setattr(http_api_module.httpx, "AsyncClient", forbid_legacy_transport)
+
+    result = await HttpApiTool(allowed_methods=["GET"]).execute(
+        ToolContext(user_id="10001"),
+        method="GET",
+        url="https://api.example.com/weather",
+        headers={"Accept": "application/json"},
+    )
+
+    assert '"temperature": 22' in result
+    assert captured["url"] == "https://api.example.com/weather"
+    assert captured["headers"] == {"Accept": "application/json"}
+    assert captured["follow_redirects"] is True
+    assert captured["max_bytes"] >= 16_000
+
+
+async def test_http_api_mixed_legacy_execute_keeps_httpx_post_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _LegacyResponse:
+        text = '{"accepted": true}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, bool]:
+            return {"accepted": True}
+
+    class _LegacyClient:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            del args
+
+        async def post(self, url: str, **kwargs: Any) -> _LegacyResponse:
+            calls.append({"method": "POST", "url": url, **kwargs})
+            return _LegacyResponse()
+
+        async def get(self, url: str, **kwargs: Any) -> _LegacyResponse:
+            calls.append({"method": "GET", "url": url, **kwargs})
+            return _LegacyResponse()
+
+    monkeypatch.setattr(http_api_module, "_is_safe_url", lambda url: bool(url))
+    monkeypatch.setattr(
+        http_api_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: _LegacyClient(),
+    )
+
+    result = await HttpApiTool().execute(
+        ToolContext(user_id="10001"),
+        method="POST",
+        url="https://api.example.com/actions",
+        headers={"X-Legacy": "kept"},
+        body={"action": "preview"},
+    )
+
+    assert '"accepted": true' in result.lower()
+    assert calls == [
+        {
+            "method": "POST",
+            "url": "https://api.example.com/actions",
+            "headers": {"X-Legacy": "kept"},
+            "json": {"action": "preview"},
+        }
+    ]
 
 
 # ── ToolRegistry ──
@@ -287,3 +465,23 @@ async def test_web_search_max_results_capped(monkeypatch: pytest.MonkeyPatch) ->
     ctx = ToolContext(user_id="123")
     await tool.execute(ctx, query="test", max_results=99)
     assert captured["n"] == 10
+
+
+async def test_web_search_max_results_has_a_positive_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, int] = {}
+
+    def capture_n(q: str, n: int) -> list:
+        del q
+        captured["n"] = n
+        return []
+
+    monkeypatch.setattr("services.tools.web_search._ddg_search_sync", capture_n)
+    await WebSearchTool().execute(
+        ToolContext(user_id="123"),
+        query="test",
+        max_results=-9,
+    )
+
+    assert captured["n"] == 1

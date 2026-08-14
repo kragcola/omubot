@@ -1,7 +1,17 @@
 """群管理工具：通过 OneBot API 执行群管理操作，需要 SUPERUSER 权限。"""
 
+from collections.abc import Mapping
 from typing import Any
 
+from kernel.types import (
+    ToolApproval,
+    ToolConcurrency,
+    ToolEffect,
+    ToolIdempotency,
+    ToolInvocationBinding,
+    ToolRetryPolicy,
+    ToolSpec,
+)
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 
@@ -13,6 +23,53 @@ def _check_auth(ctx: ToolContext, superusers: set[str]) -> str | None:
     if ctx.user_id not in superusers:
         return "权限不足: 仅管理员可执行此操作"
     return None
+
+
+def _positive_qq_id(value: Any, *, field_name: str) -> str:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive QQ id")
+    text = str(value or "").strip()
+    if (
+        not text
+        or len(text) > 32
+        or not text.isascii()
+        or not text.isdigit()
+        or int(text) <= 0
+    ):
+        raise ValueError(f"{field_name} must be a positive QQ id")
+    return str(int(text))
+
+
+def _trusted_admin(ctx: ToolContext, superusers: set[str]) -> str:
+    requester = str(ctx.user_id or "").strip()
+    if ctx.bot is None:
+        raise ValueError("group admin tool requires a trusted OneBot bot")
+    if not requester or requester not in superusers:
+        raise ValueError("group admin tool requires a trusted superuser")
+    return requester
+
+
+def _external_spec(
+    tool: Tool,
+    *,
+    effect: ToolEffect,
+    scope: str,
+    classification: str,
+) -> ToolSpec:
+    return ToolSpec(
+        name=tool.name,
+        description=tool.description,
+        input_schema=dict(tool.parameters),
+        owner="group_admin",
+        effect=effect,
+        required_scopes=(scope,),
+        approval=ToolApproval.ALWAYS,
+        idempotency=ToolIdempotency.RECONCILE_ONLY,
+        retry_policy=ToolRetryPolicy.NEVER,
+        concurrency=ToolConcurrency.KEYED_SERIAL,
+        binding_required=True,
+        data_classification=(classification,),
+    )
 
 
 class MuteUserTool(Tool):
@@ -52,6 +109,26 @@ class MuteUserTool(Tool):
             "required": ["user_id"],
         }
 
+    @property
+    def spec(self) -> ToolSpec:
+        return _external_spec(
+            self,
+            effect=ToolEffect.EXTERNAL_REVERSIBLE,
+            scope="onebot:group:moderate",
+            classification="qq_group_state",
+        )
+
+    def bind_invocation(
+        self,
+        ctx: ToolContext,
+        arguments: Mapping[str, Any] | dict[str, Any],
+    ) -> ToolInvocationBinding:
+        _trusted_admin(ctx, self._superusers)
+        group_id = _positive_qq_id(ctx.group_id, field_name="group_id")
+        user_id = _positive_qq_id(arguments.get("user_id"), field_name="user_id")
+        target = f"onebot:group:{group_id}:member:{user_id}:mute"
+        return ToolInvocationBinding(target_ref=target, concurrency_key=target)
+
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         if err := _check_auth(ctx, self._superusers):
             return err
@@ -89,6 +166,26 @@ class SetTitleTool(Tool):
             "required": ["user_id", "title"],
         }
 
+    @property
+    def spec(self) -> ToolSpec:
+        return _external_spec(
+            self,
+            effect=ToolEffect.EXTERNAL_REVERSIBLE,
+            scope="onebot:group:title",
+            classification="qq_group_state",
+        )
+
+    def bind_invocation(
+        self,
+        ctx: ToolContext,
+        arguments: Mapping[str, Any] | dict[str, Any],
+    ) -> ToolInvocationBinding:
+        _trusted_admin(ctx, self._superusers)
+        group_id = _positive_qq_id(ctx.group_id, field_name="group_id")
+        user_id = _positive_qq_id(arguments.get("user_id"), field_name="user_id")
+        target = f"onebot:group:{group_id}:member:{user_id}:title"
+        return ToolInvocationBinding(target_ref=target, concurrency_key=target)
+
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         if err := _check_auth(ctx, self._superusers):
             return err
@@ -123,6 +220,28 @@ class SendGroupMsgTool(Tool):
             },
             "required": ["group_id", "message"],
         }
+
+    @property
+    def spec(self) -> ToolSpec:
+        return _external_spec(
+            self,
+            effect=ToolEffect.EXTERNAL_IRREVERSIBLE,
+            scope="onebot:group:message",
+            classification="qq_message",
+        )
+
+    def bind_invocation(
+        self,
+        ctx: ToolContext,
+        arguments: Mapping[str, Any] | dict[str, Any],
+    ) -> ToolInvocationBinding:
+        _trusted_admin(ctx, self._superusers)
+        group_id = _positive_qq_id(arguments.get("group_id"), field_name="group_id")
+        message = arguments.get("message")
+        if not isinstance(message, str) or not message.strip() or len(message) > 4000:
+            raise ValueError("send_group_msg message must be 1..4000 characters")
+        target = f"onebot:group:{group_id}:message"
+        return ToolInvocationBinding(target_ref=target, concurrency_key=target)
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         if not ctx.bot:

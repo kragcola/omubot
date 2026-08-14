@@ -13,6 +13,7 @@ export const MENU_PLUGIN_REQUIREMENTS = {
   '/learning': null,
   '/knowledge': 'knowledge',
   '/block-trace': null,
+  '/agent-runtime': null,
   '/worldbook': 'worldbook',
   '/replay/weekly': null,
   '/config': null,

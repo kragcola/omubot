@@ -97,6 +97,38 @@ class _FailingPluginStateStore:
         raise RuntimeError("state persistence failed")
 
 
+class _WriteThenRaisePluginStateStore:
+    def __init__(self, initial: bool) -> None:
+        self.value: bool | None = initial
+        self.calls: list[tuple[str, bool]] = []
+        self._fail_next = True
+
+    def get(self, name: str) -> bool | None:
+        return self.value
+
+    def set_enabled(self, name: str, enabled: bool) -> None:
+        self.calls.append((name, enabled))
+        self.value = enabled
+        if self._fail_next:
+            self._fail_next = False
+            raise RuntimeError("state persisted before failure")
+
+    def clear_override(self, name: str) -> None:
+        self.value = None
+
+
+class _WriteThenRaiseRealPluginStateStore(PluginStateStore):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self._fail_next = True
+
+    def set_enabled(self, name: str, enabled: bool) -> None:
+        super().set_enabled(name, enabled)
+        if self._fail_next:
+            self._fail_next = False
+            raise RuntimeError("state persisted before failure")
+
+
 def test_restart_toggle_service_persists_without_hot_apply(tmp_path: Path) -> None:
     bus = PluginBus()
     plugin = _RestartPlugin()
@@ -221,6 +253,119 @@ def test_admin_runtime_toggle_preserves_base_sha_http_contract(tmp_path: Path) -
     assert payload["plugin"]["persistent_enabled"] is False
     assert registry.empty is True
     assert state_store.get("runtime_demo") is False
+
+
+def test_runtime_toggle_preserves_non_plugin_base_tools(tmp_path: Path) -> None:
+    base_tool = _NamedTool("base_interaction")
+    plugin_tool = _NamedTool("runtime_tool")
+    plugin = _ToolPlugin(
+        name="runtime_demo",
+        tools=[plugin_tool],
+        enabled=True,
+        priority=10,
+    )
+    bus = PluginBus()
+    bus.register(plugin)
+    state_store = PluginStateStore(tmp_path / "plugin-state.json")
+    registry = ToolRegistry()
+    registry.register(base_tool)
+    registry.register(plugin_tool)
+    service = PluginToggleService(
+        bus=bus,
+        tool_registry=registry,
+        plugin_state_store=state_store,
+        is_locked=PluginBus.is_plugin_locked,
+        serialize_plugin=lambda value: {
+            "name": value.name,
+            "enabled": value.enabled,
+        },
+    )
+
+    disabled = service.toggle(plugin.name, False)
+
+    assert disabled["ok"] is True
+    assert registry.snapshot_tools() == (base_tool,)
+    assert registry.get("base_interaction") is base_tool
+    assert registry.get("runtime_tool") is None
+
+    enabled = service.toggle(plugin.name, True)
+
+    assert enabled["ok"] is True
+    assert registry.snapshot_tools() == (base_tool, plugin_tool)
+    assert registry.get("base_interaction") is base_tool
+    assert registry.get("runtime_tool") is plugin_tool
+
+
+def test_persistence_post_write_failure_restores_base_tools_and_state() -> None:
+    base_tool = _NamedTool("base_interaction")
+    plugin_tool = _NamedTool("runtime_tool")
+    plugin = _ToolPlugin(
+        name="runtime_demo",
+        tools=[plugin_tool],
+        enabled=True,
+        priority=10,
+    )
+    bus = PluginBus()
+    bus.register(plugin)
+    state_store = _WriteThenRaisePluginStateStore(initial=True)
+    registry = ToolRegistry()
+    registry.register(base_tool)
+    registry.register(plugin_tool)
+    service = PluginToggleService(
+        bus=bus,
+        tool_registry=registry,
+        plugin_state_store=state_store,
+        is_locked=PluginBus.is_plugin_locked,
+        serialize_plugin=lambda value: {
+            "name": value.name,
+            "enabled": value.enabled,
+        },
+    )
+
+    payload = service.toggle(plugin.name, False)
+
+    assert payload["ok"] is False
+    assert plugin.enabled is True
+    assert state_store.value is True
+    assert state_store.calls == [(plugin.name, False), (plugin.name, True)]
+    assert registry.snapshot_tools() == (base_tool, plugin_tool)
+
+
+def test_persistence_post_write_failure_restores_missing_override(
+    tmp_path: Path,
+) -> None:
+    plugin_tool = _NamedTool("runtime_tool")
+    plugin = _ToolPlugin(
+        name="runtime_demo",
+        tools=[plugin_tool],
+        enabled=True,
+        priority=10,
+    )
+    bus = PluginBus()
+    bus.register(plugin)
+    state_store = _WriteThenRaiseRealPluginStateStore(
+        tmp_path / "plugin-state.json"
+    )
+    registry = ToolRegistry()
+    registry.register(plugin_tool)
+    service = PluginToggleService(
+        bus=bus,
+        tool_registry=registry,
+        plugin_state_store=state_store,
+        is_locked=PluginBus.is_plugin_locked,
+        serialize_plugin=lambda value: {
+            "name": value.name,
+            "enabled": value.enabled,
+        },
+    )
+    assert state_store.get(plugin.name) is None
+
+    payload = service.toggle(plugin.name, False)
+
+    assert payload["ok"] is False
+    assert plugin.enabled is True
+    assert state_store.get(plugin.name) is None
+    assert registry.snapshot_tools() == (plugin_tool,)
 
 
 def test_runtime_enable_duplicate_tool_rolls_back_all_state(tmp_path: Path) -> None:

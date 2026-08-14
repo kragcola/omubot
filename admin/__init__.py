@@ -58,6 +58,11 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
     humanizer = getattr(ctx, "humanizer", None)
     talk_schedule = getattr(ctx, "talk_schedule", None)
     llm_client = getattr(ctx, "llm_client", None)
+    operator_action_factory = getattr(ctx, "agent_runtime_operator_action_factory", None)
+    agent_runtime_query = getattr(ctx, "agent_runtime_query", None)
+    memory_governance_query = getattr(ctx, "memory_governance_query", None)
+    worldbook_governance_query = getattr(ctx, "worldbook_governance_query", None)
+    agent_runtime_readiness = getattr(ctx, "agent_runtime_readiness", None)
 
     if not config_path:
         config_path = os.environ.get("BOT_CONFIG_PATH", "config/config.json")
@@ -158,6 +163,11 @@ def create_admin_router(ctx: Any, *, config_path: str = "") -> APIRouter:
         humanizer=humanizer,
         talk_schedule=talk_schedule,
         llm_client=llm_client,
+        runtime_query=agent_runtime_query,
+        memory_query=memory_governance_query,
+        worldbook_query=worldbook_governance_query,
+        readiness=agent_runtime_readiness,
+        operator_action_factory=operator_action_factory,
         bot=getattr(ctx, "bot", None),
     ))
 

@@ -161,6 +161,183 @@ class _PluginToolMergeLifecycle:
             self._snapshot = None
 
 
+_AGENT_RUNTIME_CONTEXT_FIELDS = (
+    "agent_runtime_host_ingress",
+    "agent_runtime_assembly",
+    "agent_runtime_query",
+    "memory_governance_query",
+    "worldbook_governance_query",
+    "agent_runtime_readiness",
+    "agent_runtime_operator_action_factory",
+)
+
+
+async def _await_agent_runtime_cleanup(awaitable: Any) -> None:
+    """Finish shutdown cleanup before releasing the selected LLM boundary."""
+
+    task = asyncio.ensure_future(awaitable)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    task.result()
+    if cancellation is not None:
+        raise cancellation
+
+
+class _AgentRuntimeCompositionLifecycle:
+    """Attach the explicitly configured Runtime v2 only after tool merge.
+
+    The lifecycle deliberately does not acquire a worker lease. Its dispatcher
+    therefore remains selected but fail-closed until a later, separately
+    attested activation step is authorized.
+    """
+
+    def __init__(self, ctx: Any, *, repo_root: Path) -> None:
+        self._ctx = ctx
+        self._repo_root = Path(repo_root).resolve()
+        self._assembly: Any | None = None
+        self._bindings: dict[str, Any] = {}
+        self._llm_client: Any = None
+        self._started = False
+        self._stopped = False
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        if self._stopped:
+            raise RuntimeError("agent runtime bootstrap cannot restart after stop")
+
+        settings = getattr(getattr(self._ctx, "config", None), "agent_runtime", None)
+        if settings is None or not bool(getattr(settings, "enabled", False)):
+            self._started = True
+            return
+
+        self._require_detached_context()
+        registry = getattr(self._ctx, "tool_registry", None)
+        llm_client = getattr(self._ctx, "llm_client", None)
+        if llm_client is None:
+            raise RuntimeError("agent runtime bootstrap requires an LLM client")
+        if getattr(llm_client, "_runtime_tool_dispatcher", None) is not None:
+            raise RuntimeError("agent runtime dispatcher is already selected")
+
+        from services.agent_runtime.admin_query import RuntimeAdminQueryV1
+        from services.agent_runtime.production import (
+            compose_production_runtime_from_settings,
+        )
+        from services.memory.governance_query import MemoryGovernanceAdminQueryV1
+        from services.tools.registry import ToolRegistry
+        from services.worldbook.governance_query import WorldbookGovernanceAdminQueryV1
+
+        if not isinstance(registry, ToolRegistry):
+            raise RuntimeError("agent runtime bootstrap requires a tool registry")
+
+        assembly = await compose_production_runtime_from_settings(
+            settings,
+            repo_root=self._repo_root,
+            registry=registry,
+            llm_client=llm_client,
+        )
+        if assembly is None:
+            self._started = True
+            return
+
+        self._llm_client = llm_client
+        try:
+            self._bindings = {
+                "agent_runtime_host_ingress": assembly.create_host_trigger_ingress(),
+                "agent_runtime_assembly": assembly,
+                "agent_runtime_query": RuntimeAdminQueryV1(assembly.runtime),
+                "memory_governance_query": MemoryGovernanceAdminQueryV1(
+                    assembly.memory
+                ),
+                "worldbook_governance_query": WorldbookGovernanceAdminQueryV1(
+                    assembly.worldbook
+                ),
+                "agent_runtime_readiness": assembly.readiness,
+                "agent_runtime_operator_action_factory": (
+                    assembly.create_admin_operator_actions_factory()
+                ),
+            }
+            for field, value in self._bindings.items():
+                setattr(self._ctx, field, value)
+        except BaseException:
+            self._stopped = True
+            try:
+                await self._close_assembly(assembly)
+            finally:
+                self._clear_bindings()
+                self._detach_llm_dispatcher(assembly.dispatcher)
+            raise
+        self._assembly = assembly
+        self._started = True
+
+    async def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        assembly = self._assembly
+        if assembly is None:
+            self._started = False
+            return
+        try:
+            await self._close_assembly(assembly)
+        finally:
+            # Keep the dispatcher selected and deactivated until every source
+            # has closed; otherwise a shutdown race could fall back to legacy.
+            self._clear_bindings()
+            self._detach_llm_dispatcher(assembly.dispatcher)
+            self._assembly = None
+            self._started = False
+
+    def _require_detached_context(self) -> None:
+        occupied = [
+            field
+            for field in _AGENT_RUNTIME_CONTEXT_FIELDS
+            if getattr(self._ctx, field, None) is not None
+        ]
+        if occupied:
+            raise RuntimeError("agent runtime context is already configured")
+
+    async def _close_assembly(self, assembly: Any) -> None:
+        dispatcher = getattr(assembly, "dispatcher", None)
+        deactivate = getattr(dispatcher, "deactivate", None)
+        if callable(deactivate):
+            deactivate()
+        await _await_agent_runtime_cleanup(assembly.close())
+
+    def _clear_bindings(self) -> None:
+        for field, value in self._bindings.items():
+            if getattr(self._ctx, field, None) is value:
+                setattr(self._ctx, field, None)
+        self._bindings.clear()
+
+    def _detach_llm_dispatcher(self, dispatcher: Any) -> None:
+        llm_client = self._llm_client
+        self._llm_client = None
+        if llm_client is None:
+            return
+        current = getattr(llm_client, "_runtime_tool_dispatcher", dispatcher)
+        if current is not dispatcher:
+            return
+        setter = getattr(llm_client, "set_runtime_tool_dispatcher", None)
+        if callable(setter):
+            setter(None)
+
+
+def create_agent_runtime_composition_lifecycle(
+    ctx: Any,
+    *,
+    repo_root: Path,
+) -> LifecycleComponent:
+    """Create the default-off Runtime v2 bootstrap lifecycle without starting it."""
+
+    return _AgentRuntimeCompositionLifecycle(ctx, repo_root=repo_root)
+
+
 class _BackupLifecycle:
     def __init__(self, backup: BackupLifecycle) -> None:
         self._backup = backup
@@ -211,6 +388,7 @@ def compose_application_runtime(
     admin: AdminInstaller,
     task_supervisor: BackgroundTaskSupervisor | None = None,
     memory_consolidator_lifecycle: LifecycleComponent | None = None,
+    agent_runtime_lifecycle: LifecycleComponent | None = None,
     learning_extract_coordinator: LifecycleComponent | None = None,
 ) -> ApplicationRuntime:
     """Compose process lifecycle owners without installing host handlers."""
@@ -223,6 +401,12 @@ def compose_application_runtime(
     components.extend(
         [
             _PluginToolMergeLifecycle(bus, registry),
+        ]
+    )
+    if agent_runtime_lifecycle is not None:
+        components.append(agent_runtime_lifecycle)
+    components.extend(
+        [
             _BackupLifecycle(backup),
             _TickCleanupLifecycle(bus),
             _AdminCommitLifecycle(ctx, admin),
@@ -445,6 +629,10 @@ def build_application(
         task_supervisor=task_supervisor,
     )
     ctx.memory_consolidator_lifecycle = memory_consolidator_lifecycle
+    agent_runtime_lifecycle = create_agent_runtime_composition_lifecycle(
+        ctx,
+        repo_root=paths.repo_root,
+    )
 
     runtime = compose_application_runtime(
         ctx=ctx,
@@ -454,6 +642,7 @@ def build_application(
         admin=_AdminRouterInstaller(app, config_path=paths.config_path),
         task_supervisor=task_supervisor,
         memory_consolidator_lifecycle=memory_consolidator_lifecycle,
+        agent_runtime_lifecycle=agent_runtime_lifecycle,
         learning_extract_coordinator=learning_extract_coordinator,
     )
     connection_pipeline = RuntimeConnectionPipeline(ctx, bus)

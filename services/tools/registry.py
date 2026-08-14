@@ -21,12 +21,14 @@ class ToolRegistry:
         if default_timeout_seconds <= 0:
             raise ValueError("default_timeout_seconds must be positive")
         self._tools: dict[str, Tool] = {}
+        self._generation = 0
         self._default_timeout_seconds = float(default_timeout_seconds)
 
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
             raise ValueError(f"tool already registered: {tool.name}")
         self._tools[tool.name] = tool
+        self._generation += 1
 
     def replace_all(self, tools: Iterable[Tool]) -> None:
         """Validate a complete candidate registry before swapping it live."""
@@ -35,11 +37,18 @@ class ToolRegistry:
             if tool.name in candidate:
                 raise ValueError(f"tool already registered: {tool.name}")
             candidate[tool.name] = tool
+        if candidate == self._tools:
+            return
         self._tools = candidate
+        self._generation += 1
 
     def snapshot_tools(self) -> tuple[Tool, ...]:
         """Return the current tools in stable registry order."""
         return tuple(self._tools.values())
+
+    def snapshot_catalog(self) -> tuple[int, tuple[Tool, ...]]:
+        """Return one atomic catalog epoch and its stable tool snapshot."""
+        return self._generation, tuple(self._tools.values())
 
     def merge_all(self, tools: Iterable[Tool]) -> None:
         """Validate extensions against the live registry before swapping."""
@@ -48,7 +57,10 @@ class ToolRegistry:
             if tool.name in candidate:
                 raise ValueError(f"tool already registered: {tool.name}")
             candidate[tool.name] = tool
+        if candidate == self._tools:
+            return
         self._tools = candidate
+        self._generation += 1
 
     def register_interaction_tools(
         self,
@@ -67,7 +79,10 @@ class ToolRegistry:
             self.register(tool)
 
     def clear(self) -> None:
+        if not self._tools:
+            return
         self._tools.clear()
+        self._generation += 1
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)

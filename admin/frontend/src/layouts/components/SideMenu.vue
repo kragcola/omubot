@@ -17,6 +17,7 @@ import {
   ScanOutline,
   JournalOutline,
   BookOutline,
+  PulseOutline,
 } from '@vicons/ionicons5'
 import { api } from '../../api/client'
 import { useAppStore } from '../../stores/app'
@@ -58,6 +59,7 @@ const baseMenuOptions: MenuOption[] = [
       { label: '学习管道', key: '/learning', icon: renderIcon(AnalyticsOutline) },
       { label: '知识库', key: '/knowledge', icon: renderIcon(LibraryOutline) },
       { label: 'BlockTrace', key: '/block-trace', icon: renderIcon(AnalyticsOutline) },
+      { label: 'Agent Runtime', key: '/agent-runtime', icon: renderIcon(PulseOutline) },
       { label: '世界书', key: '/worldbook', icon: renderIcon(BookOutline) },
       { label: '反事实重放', key: '/replay/weekly', icon: renderIcon(AnalyticsOutline) },
     ],

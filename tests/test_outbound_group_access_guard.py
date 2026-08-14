@@ -119,6 +119,15 @@ async def test_send_group_forward_msg_to_non_whitelisted_group_is_rejected() -> 
     ("action", "params"),
     [
         ("send_group_notice", {"group_id": BLOCKED_GROUP_ID, "content": "notice"}),
+        ("send_poke", {"group_id": BLOCKED_GROUP_ID, "user_id": 300}),
+        (
+            "set_group_ban",
+            {"group_id": BLOCKED_GROUP_ID, "user_id": 300, "duration": 60},
+        ),
+        (
+            "set_group_special_title",
+            {"group_id": BLOCKED_GROUP_ID, "user_id": 300, "special_title": "x"},
+        ),
         (
             "send_forward_msg",
             {"message_type": "group", "group_id": BLOCKED_GROUP_ID, "messages": []},
@@ -144,6 +153,15 @@ async def test_other_group_send_shapes_are_also_rejected(
         ("send_group_msg", {"group_id": ALLOWED_GROUP_ID, "message": "hello"}),
         ("send_group_forward_msg", {"group_id": ALLOWED_GROUP_ID, "messages": []}),
         ("send_group_notice", {"group_id": ALLOWED_GROUP_ID, "content": "notice"}),
+        ("send_poke", {"group_id": ALLOWED_GROUP_ID, "user_id": 300}),
+        (
+            "set_group_ban",
+            {"group_id": ALLOWED_GROUP_ID, "user_id": 300, "duration": 60},
+        ),
+        (
+            "set_group_special_title",
+            {"group_id": ALLOWED_GROUP_ID, "user_id": 300, "special_title": "x"},
+        ),
         (
             "send_msg",
             {"message_type": "group", "group_id": ALLOWED_GROUP_ID, "message": "hello"},
@@ -171,6 +189,7 @@ async def test_whitelisted_group_sends_reach_original_call_api(
     ("action", "params"),
     [
         ("send_private_msg", {"user_id": 300, "message": "hello"}),
+        ("send_poke", {"user_id": 300}),
         ("send_msg", {"message_type": "private", "user_id": 300, "message": "hello"}),
         ("send_forward_msg", {"message_type": "private", "user_id": 300, "messages": []}),
         ("get_group_list", {}),
@@ -232,6 +251,18 @@ async def test_repeated_wrap_is_idempotent() -> None:
         group_id=ALLOWED_GROUP_ID,
         message="only one wrapper should run",
     )
+
+
+def test_guard_exposes_live_assertion_for_message_id_only_actions() -> None:
+    bot, original_call_api, _guard = _wrapped_bot()
+    assertion = vars(bot).get("_omubot_assert_group_outbound_allowed")
+
+    assert callable(assertion)
+    assertion(ALLOWED_GROUP_ID, action="set_msg_emoji_like")
+    with pytest.raises(PermissionError):
+        assertion(BLOCKED_GROUP_ID, action="set_msg_emoji_like")
+
+    original_call_api.assert_not_awaited()
 
 
 @pytest.mark.asyncio

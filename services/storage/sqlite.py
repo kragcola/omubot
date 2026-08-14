@@ -7,6 +7,7 @@ consistently without forcing a large storage rewrite.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import sqlite3
 from pathlib import Path
@@ -51,11 +52,24 @@ async def connect_sqlite(
             await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("PRAGMA foreign_keys=ON")
         await db.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-    except Exception:
-        with contextlib.suppress(Exception):
-            await db.close()
+    except BaseException:
+        await _close_failed_connection(db)
         raise
     return db
+
+
+async def _close_failed_connection(db: aiosqlite.Connection) -> None:
+    close_task = asyncio.create_task(
+        db.close(),
+        name="sqlite-connect-failure-close",
+    )
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            continue
+    with contextlib.suppress(BaseException):
+        close_task.result()
 
 
 async def read_user_version_read_only(db_path: str | Path) -> int:

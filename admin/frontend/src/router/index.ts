@@ -137,6 +137,12 @@ const router = createRouter({
       component: () => import('../views/block-trace/BlockTraceView.vue'),
     },
     {
+      path: '/agent-runtime',
+      name: 'agent-runtime',
+      meta: { title: 'Agent Runtime', keepAlive: true },
+      component: () => import('../views/agent-runtime/AgentRuntimeView.vue'),
+    },
+    {
       path: '/worldbook',
       name: 'worldbook',
       meta: { title: '世界书 / Living Story', keepAlive: true },

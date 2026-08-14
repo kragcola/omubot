@@ -8,9 +8,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-import httpx
-
-from plugins.qzone_journal.store import InvalidDraftTransitionError
 from plugins.qzone_journal.transport import WireProfile
 
 BUILTIN_WIRE_PROFILE = WireProfile(
@@ -31,8 +28,20 @@ BUILTIN_WIRE_PROFILE = WireProfile(
 )
 
 
-class DeliveryGateError(RuntimeError):
+class DeliveryPreDispatchError(RuntimeError):
+    """Delivery stopped before the QZone publish provider was invoked."""
+
+
+class DeliveryGateError(DeliveryPreDispatchError):
     """Local policy rejected delivery before any irreversible network call."""
+
+
+class DeliveryPostDispatchError(RuntimeError):
+    """Delivery failed after the provider invocation became ambiguous."""
+
+
+class _UnverifiedPublishResponseError(RuntimeError):
+    """The provider response did not prove that publication succeeded."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,9 +120,12 @@ class JournalDelivery:
         self._profile = profile
 
     async def deliver(self, draft_id: str) -> JournalDraft | dict[str, Any]:
-        current_raw = await self._store.get(draft_id)
+        current_raw = await self._await_pre_dispatch(
+            self._store.get(draft_id),
+            safe_message="QZone journal lookup failed before dispatch",
+        )
         if current_raw is None:
-            raise KeyError(draft_id)
+            raise DeliveryGateError("QZone journal draft was not found")
         current = _as_delivery_draft(current_raw)
         if current.status == "published":
             return current
@@ -124,9 +136,12 @@ class JournalDelivery:
         if not callable(tip_fn):
             raise DeliveryGateError("QZone journal store lacks is_lineage_tip")
         tip_call = cast(Callable[[str], Awaitable[bool]], tip_fn)
-        is_tip = await tip_call(draft_id)
+        is_tip = await self._await_pre_dispatch(
+            tip_call(draft_id),
+            safe_message="QZone journal lineage check failed before dispatch",
+        )
         if not bool(is_tip):
-            raise InvalidDraftTransitionError(
+            raise DeliveryGateError(
                 "cannot deliver QZone draft: not lineage tip"
             )
         if not self._config.enabled:
@@ -141,12 +156,22 @@ class JournalDelivery:
                     )
                 describe_fn = cast(Callable[..., dict[str, Any]], describe)
                 return describe_fn(profile=self._profile, text=current.text)
-            credentials = await self._credential_source.acquire()
-            return self._transport.dry_run(
-                profile=self._profile,
-                credentials=credentials,
-                text=current.text,
+            credentials = await self._await_pre_dispatch(
+                self._credential_source.acquire(),
+                safe_message="QZone credentials are unavailable before dispatch",
             )
+            try:
+                return self._transport.dry_run(
+                    profile=self._profile,
+                    credentials=credentials,
+                    text=current.text,
+                )
+            except DeliveryPreDispatchError:
+                raise
+            except Exception as exc:
+                raise DeliveryPreDispatchError(
+                    "QZone dry-run failed before dispatch"
+                ) from exc
 
         if not self._config.allow_live_publish:
             raise DeliveryGateError("live QZone publish is not allowed")
@@ -189,7 +214,10 @@ class JournalDelivery:
                 "QZone journal draft failed live authenticity validation"
             )
 
-        credentials = await self._credential_source.acquire()
+        credentials = await self._await_pre_dispatch(
+            self._credential_source.acquire(),
+            safe_message="QZone credentials are unavailable before dispatch",
+        )
         uin = _credential_uin(credentials)
         allowed = set(self._config.allowed_live_uins)
         if not allowed or uin not in allowed:
@@ -197,7 +225,7 @@ class JournalDelivery:
                 "live QZone publish UIN is not on the allowed_live_uins allowlist"
             )
 
-        claimed_raw = await self._claim(draft_id)
+        claimed_raw = await self._claim_with_phase(draft_id)
         if claimed_raw is None:
             raise DeliveryGateError("QZone journal draft could not be claimed")
         claimed = _as_delivery_draft(claimed_raw)
@@ -208,23 +236,39 @@ class JournalDelivery:
                 credentials=credentials,
                 text=claimed.text,
             )
+            if (
+                not isinstance(response, dict)
+                or str(response.get("status", "") or "") != "published"
+            ):
+                raise _UnverifiedPublishResponseError(
+                    "QZone publish response was not explicitly successful"
+                )
+            remote_id = str(
+                response.get("remote_id", response.get("tid", "")) or ""
+            )
+            published = await self._mark_published(
+                draft_id,
+                remote_id=remote_id,
+            )
         except BaseException as exc:
-            await self._mark_unknown_shielded(
-                draft_id,
-                reason=self._safe_error_reason(exc),
+            reason = (
+                "unverified_publish_response"
+                if isinstance(exc, _UnverifiedPublishResponseError)
+                else self._safe_error_reason(exc)
             )
-            raise
-
-        if not isinstance(response, dict) or str(response.get("status", "") or "") != "published":
-            await self._mark_unknown_shielded(
+            cancelled_during_cleanup = await self._mark_unknown_shielded(
                 draft_id,
-                reason="unverified_publish_response",
+                reason=reason,
             )
-            raise RuntimeError("QZone publish response was not explicitly successful")
-        remote_id = str(
-            response.get("remote_id", response.get("tid", "")) or ""
-        )
-        published = await self._mark_published(draft_id, remote_id=remote_id)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if cancelled_during_cleanup:
+                raise asyncio.CancelledError() from exc
+            if isinstance(exc, DeliveryPostDispatchError):
+                raise
+            raise DeliveryPostDispatchError(
+                "QZone publish outcome is unknown after dispatch"
+            ) from exc
         return _as_delivery_draft(published)
 
     async def reject(self, draft_id: str, *, reason: str) -> JournalDraft:
@@ -246,6 +290,75 @@ class JournalDelivery:
         claim_fn = cast(Callable[[str], Awaitable[Any]], claim_for_publish)
         return await claim_fn(draft_id)
 
+    async def _claim_with_phase(self, draft_id: str) -> Any:
+        try:
+            return await self._claim(draft_id)
+        except BaseException as exc:
+            try:
+                current_raw, cancelled_during_inspection = (
+                    await self._await_shielded(self._store.get(draft_id))
+                )
+                current = (
+                    _as_delivery_draft(current_raw)
+                    if current_raw is not None
+                    else None
+                )
+            except BaseException as inspect_exc:
+                if isinstance(exc, asyncio.CancelledError):
+                    raise exc from inspect_exc
+                if isinstance(inspect_exc, asyncio.CancelledError):
+                    raise asyncio.CancelledError() from exc
+                raise DeliveryPostDispatchError(
+                    "QZone journal claim outcome requires reconciliation"
+                ) from exc
+            if current is not None and current.status == "dispatching":
+                try:
+                    cancelled_during_cleanup = await self._mark_unknown_shielded(
+                        draft_id,
+                        reason="claim_outcome_unknown",
+                    )
+                except BaseException as cleanup_exc:
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise exc from cleanup_exc
+                    if isinstance(cleanup_exc, asyncio.CancelledError):
+                        raise asyncio.CancelledError() from exc
+                    raise DeliveryPostDispatchError(
+                        "QZone journal claim outcome requires reconciliation"
+                    ) from cleanup_exc
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                if cancelled_during_inspection or cancelled_during_cleanup:
+                    raise asyncio.CancelledError() from exc
+                raise DeliveryPostDispatchError(
+                    "QZone journal claim outcome requires reconciliation"
+                ) from exc
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if cancelled_during_inspection:
+                raise asyncio.CancelledError() from exc
+            if current is None or current.status != "approved":
+                raise DeliveryPostDispatchError(
+                    "QZone journal claim outcome requires reconciliation"
+                ) from exc
+            raise DeliveryPreDispatchError(
+                "QZone journal claim failed before dispatch"
+            ) from exc
+
+    @staticmethod
+    async def _await_pre_dispatch(
+        awaitable: Awaitable[Any],
+        *,
+        safe_message: str,
+    ) -> Any:
+        try:
+            return await awaitable
+        except asyncio.CancelledError:
+            raise
+        except DeliveryPreDispatchError:
+            raise
+        except Exception as exc:
+            raise DeliveryPreDispatchError(safe_message) from exc
+
     async def _mark_published(self, draft_id: str, *, remote_id: str) -> Any:
         method = self._store.mark_published
         parameters = inspect.signature(method).parameters
@@ -253,30 +366,48 @@ class JournalDelivery:
             return await method(draft_id, external_post_id=remote_id)
         return await method(draft_id, remote_id=remote_id or None)
 
-    async def _mark_unknown_shielded(self, draft_id: str, *, reason: str) -> None:
-        task = asyncio.create_task(
+    @staticmethod
+    async def _await_shielded(
+        awaitable: Awaitable[Any],
+    ) -> tuple[Any, bool]:
+        task = asyncio.ensure_future(awaitable)
+        cancelled_during_wait = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.done() and task.cancelled():
+                    raise
+                cancelled_during_wait = True
+        try:
+            return task.result(), cancelled_during_wait
+        except BaseException as exc:
+            if cancelled_during_wait:
+                raise asyncio.CancelledError() from exc
+            raise
+
+    async def _mark_unknown_shielded(
+        self,
+        draft_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        _, cancelled_during_cleanup = await self._await_shielded(
             self._store.mark_unknown(draft_id, reason=reason)
         )
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
+        return cancelled_during_cleanup
 
     @staticmethod
     def _safe_error_reason(exc: BaseException) -> str:
-        name = type(exc).__name__
-        if isinstance(exc, httpx.HTTPError):
-            return name
-        message = ""
-        if isinstance(exc, (OSError, TimeoutError)):
-            message = " ".join(str(exc).split())[:180]
-        return f"{name}: {message}" if message else name
+        return type(exc).__name__
 
 
 __all__ = [
     "BUILTIN_WIRE_PROFILE",
     "DeliveryConfig",
     "DeliveryGateError",
+    "DeliveryPostDispatchError",
+    "DeliveryPreDispatchError",
     "JournalDelivery",
     "JournalDraft",
 ]

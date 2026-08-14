@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from kernel.types import ToolExecutionError
 from services.humanization import STICKER_RECENT_USED_SLOT, create_humanization_state_bus
 from services.media.sticker_store import StickerStore
 from services.system_module import Scope
@@ -311,7 +312,7 @@ async def test_manage_sticker_update_description(
 ) -> None:
     stk_id, _ = store.add(_JPEG_DATA, "old desc", "old hint")
     tool = ManageStickerTool(store, superusers)
-    ctx = ToolContext(user_id="regular_user")
+    ctx = ToolContext(user_id="admin1")
 
     result = await tool.execute(ctx, sticker_id=stk_id, action="update", description="new desc")
 
@@ -325,7 +326,7 @@ async def test_manage_sticker_update_usage_hint(
 ) -> None:
     stk_id, _ = store.add(_JPEG_DATA, "desc", "old hint")
     tool = ManageStickerTool(store, superusers)
-    ctx = ToolContext(user_id="regular_user")
+    ctx = ToolContext(user_id="admin1")
 
     result = await tool.execute(ctx, sticker_id=stk_id, action="update", usage_hint="new hint")
 
@@ -338,7 +339,7 @@ async def test_manage_sticker_update_both(
 ) -> None:
     stk_id, _ = store.add(_JPEG_DATA, "old", "old")
     tool = ManageStickerTool(store, superusers)
-    ctx = ToolContext(user_id="regular_user")
+    ctx = ToolContext(user_id="admin1")
 
     result = await tool.execute(
         ctx, sticker_id=stk_id, action="update", description="new desc", usage_hint="new hint"
@@ -356,7 +357,7 @@ async def test_manage_sticker_update_no_fields(
 ) -> None:
     stk_id, _ = store.add(_JPEG_DATA, "desc", "hint")
     tool = ManageStickerTool(store, superusers)
-    ctx = ToolContext(user_id="regular_user")
+    ctx = ToolContext(user_id="admin1")
 
     result = await tool.execute(ctx, sticker_id=stk_id, action="update")
 
@@ -367,11 +368,29 @@ async def test_manage_sticker_update_not_found(
     store: StickerStore, superusers: set[str]
 ) -> None:
     tool = ManageStickerTool(store, superusers)
-    ctx = ToolContext(user_id="regular_user")
+    ctx = ToolContext(user_id="admin1")
 
     result = await tool.execute(ctx, sticker_id="stk_nonexist", action="update", description="x")
 
     assert "不存在" in result
+
+
+async def test_manage_sticker_update_non_admin_rejected(
+    store: StickerStore, superusers: set[str]
+) -> None:
+    stk_id, _ = store.add(_JPEG_DATA, "old desc", "old hint")
+    tool = ManageStickerTool(store, superusers)
+
+    result = await tool.execute(
+        ToolContext(user_id="regular_user"),
+        sticker_id=stk_id,
+        action="update",
+        description="spoofed",
+        requested_by="regular_user",
+    )
+
+    assert "管理员" in result
+    assert store.get(stk_id)["description"] == "old desc"  # type: ignore[index]
 
 
 # ---------------------------------------------------------------------------
@@ -405,18 +424,18 @@ async def test_manage_sticker_delete_non_admin_rejected(
     assert store.get(stk_id) is not None  # not deleted
 
 
-async def test_manage_sticker_delete_via_requested_by(
+async def test_manage_sticker_delete_does_not_trust_requested_by_fallback(
     store: StickerStore, superusers: set[str]
 ) -> None:
-    """Group chat: ctx.user_id is empty but requested_by carries the admin QQ."""
+    """A model-provided admin id cannot replace a trusted caller identity."""
     stk_id, _ = store.add(_JPEG_DATA, "desc", "hint")
     tool = ManageStickerTool(store, superusers)
     ctx = ToolContext(user_id="")  # scheduler sets empty user_id
 
     result = await tool.execute(ctx, sticker_id=stk_id, action="delete", requested_by="admin1")
 
-    assert "已删除" in result
-    assert store.get(stk_id) is None
+    assert "管理员" in result
+    assert store.get(stk_id) is not None
 
 
 async def test_manage_sticker_delete_requested_by_non_admin_rejected(
@@ -674,6 +693,37 @@ async def test_send_sticker_exception_handled(
     assert "发送失败" in result
     assert stk_id in result
     # record_send should NOT have been called
+    assert store.get(stk_id)["send_count"] == 0  # type: ignore[index]
+
+
+async def test_governed_send_sticker_segment_failure_is_pre_dispatch(
+    store: StickerStore,
+    mock_bot: MagicMock,
+) -> None:
+    stk_id, _ = store.add(_JPEG_DATA, "desc", "hint")
+    tool = SendStickerTool(store)
+    ctx = ToolContext(
+        bot=mock_bot,
+        user_id="123456",
+        group_id="987654",
+        run_id="run-sticker-segment",
+        target_ref=(
+            f"onebot:group:987654:sticker:{stk_id}:send"
+        ),
+    )
+
+    with (
+        patch(
+            "nonebot.adapters.onebot.v11.MessageSegment.image",
+            side_effect=RuntimeError("local segment failure"),
+        ),
+        pytest.raises(ToolExecutionError) as raised,
+    ):
+        await tool.execute(ctx, sticker_id=stk_id)
+
+    assert raised.value.external_effect_started is False
+    assert raised.value.code == "sticker_segment_failed"
+    mock_bot.send_group_msg.assert_not_awaited()
     assert store.get(stk_id)["send_count"] == 0  # type: ignore[index]
 
 

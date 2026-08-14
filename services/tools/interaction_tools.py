@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from typing import Any
 
+from kernel.types import (
+    ToolApproval,
+    ToolConcurrency,
+    ToolEffect,
+    ToolExecutionError,
+    ToolIdempotency,
+    ToolInvocationBinding,
+    ToolRetryPolicy,
+    ToolSpec,
+)
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 
 _ERROR_DISABLED = "当前拟人化档位未开启 QQ 出站交互"
 _POKE_PARAMS = {"type": "object", "properties": {"user_id": {"type": "string", "description": "目标用户 QQ 号"}, "group_id": {"type": "string", "description": "群号；群聊中可省略"}}, "required": ["user_id"]}  # noqa: E501
 _REACT_PARAMS = {"type": "object", "properties": {"message_id": {"type": "string", "description": "目标消息 ID"}, "emoji_code": {"type": "string", "description": "QQ 表情编码"}}, "required": ["message_id", "emoji_code"]}  # noqa: E501
+_ONEBOT_MESSAGE_REF_RE = re.compile(
+    r"^onebot:(?:group|user):[1-9][0-9]{0,31}:message:[1-9][0-9]{0,31}$"
+)
 _BUCKETS: dict[tuple[str, str], deque[tuple[float, object]]] = defaultdict(deque)
 
 
@@ -102,6 +117,8 @@ async def _call_reserved(
         raise
     except Exception:
         _release(token, keys)
+        if ctx.run_id:
+            raise
         return failed
     return None
 
@@ -124,6 +141,108 @@ class QQInteractionTool(Tool):
     def parameters(self) -> dict[str, Any]:
         return _POKE_PARAMS if self._action == "poke" else _REACT_PARAMS
 
+    @property
+    def spec(self) -> ToolSpec:
+        scope = (
+            "onebot:interaction:poke"
+            if self._action == "poke"
+            else "onebot:interaction:reaction"
+        )
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            input_schema=dict(self.parameters),
+            owner="qq_interaction",
+            effect=ToolEffect.EXTERNAL_IRREVERSIBLE,
+            required_scopes=(scope,),
+            approval=ToolApproval.ALWAYS,
+            idempotency=ToolIdempotency.RECONCILE_ONLY,
+            retry_policy=ToolRetryPolicy.NEVER,
+            concurrency=ToolConcurrency.KEYED_SERIAL,
+            binding_required=True,
+            data_classification=("qq_interaction",),
+        )
+
+    def bind_invocation(
+        self,
+        ctx: ToolContext,
+        arguments: Mapping[str, Any] | dict[str, Any],
+    ) -> ToolInvocationBinding:
+        if ctx.bot is None:
+            raise ValueError(f"{self.name} requires a trusted OneBot bot")
+        if error := _allowed(ctx, self._action):
+            raise ValueError(error)
+        if self._action == "reaction":
+            message_id = self._positive_id(
+                arguments.get("message_id"),
+                field="message_id",
+            )
+            emoji_code = self._positive_id(
+                arguments.get("emoji_code"),
+                field="emoji_code",
+            )
+            message_ref = self._trusted_message_ref(ctx, message_id)
+            target = f"{message_ref}:reaction:{emoji_code}"
+            return ToolInvocationBinding(
+                target_ref=target,
+                concurrency_key=target,
+            )
+        user_id = self._positive_id(arguments.get("user_id"), field="user_id")
+        trusted_group = str(ctx.group_id or "").strip()
+        claimed_group = str(arguments.get("group_id") or "").strip()
+        if trusted_group:
+            group_id = self._positive_id(trusted_group, field="group_id")
+            if claimed_group:
+                claimed = self._positive_id(claimed_group, field="group_id")
+                if claimed != group_id:
+                    raise ValueError("poke_user group_id must match trusted group")
+            target = f"onebot:group:{group_id}:user:{user_id}:poke"
+        else:
+            if claimed_group:
+                raise ValueError("private poke_user cannot claim a group_id")
+            target = f"onebot:user:{user_id}:poke"
+        return ToolInvocationBinding(target_ref=target, concurrency_key=target)
+
+    @classmethod
+    def _trusted_message_ref(
+        cls,
+        ctx: ToolContext,
+        message_id: str,
+    ) -> str:
+        if str(ctx.group_id or "").strip():
+            group_id = cls._positive_id(ctx.group_id, field="group_id")
+            expected = f"onebot:group:{group_id}:message:{message_id}"
+        else:
+            user_id = cls._positive_id(ctx.user_id, field="user_id")
+            expected = f"onebot:user:{user_id}:message:{message_id}"
+        raw_refs = ctx.extra.get("onebot_message_refs")
+        if not isinstance(raw_refs, (list, tuple, set, frozenset)):
+            raise ValueError("trusted OneBot message refs are missing")
+        trusted_refs: set[str] = set()
+        for item in raw_refs:
+            message_ref = str(item or "").strip()
+            if _ONEBOT_MESSAGE_REF_RE.fullmatch(message_ref) is None:
+                raise ValueError("trusted OneBot message refs are invalid")
+            trusted_refs.add(message_ref)
+        if expected not in trusted_refs:
+            raise ValueError("message_id is not trusted for this run")
+        return expected
+
+    @staticmethod
+    def _positive_id(value: Any, *, field: str) -> str:
+        if isinstance(value, bool):
+            raise ValueError(f"{field} must be a positive QQ id")
+        text = str(value or "").strip()
+        if (
+            not text
+            or len(text) > 32
+            or not text.isascii()
+            or not text.isdigit()
+            or int(text) <= 0
+        ):
+            raise ValueError(f"{field} must be a positive QQ id")
+        return str(int(text))
+
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         if err := _allowed(ctx, self._action):
             return err
@@ -140,13 +259,50 @@ class QQInteractionTool(Tool):
                 payload["group_id"] = int(group_id)
             err = await _call_reserved(ctx, rules, "send_poke", payload, limited="戳一戳过于频繁，已跳过", failed="戳一戳发送失败")  # noqa: E501
             return err or f"已戳 {user_id}"
-        scope = str(ctx.group_id or ctx.extra.get("group_id") or "global")
+        trusted_group_id = str(ctx.group_id or "").strip()
+        if trusted_group_id:
+            trusted_group_id = self._positive_id(
+                trusted_group_id,
+                field="group_id",
+            )
+            self._assert_group_outbound_allowed(ctx, trusted_group_id)
+        scope = str(trusted_group_id or ctx.extra.get("group_id") or "global")
         payload = {"message_id": int(str(kwargs["message_id"]).strip()), "emoji_id": str(kwargs["emoji_code"]).strip()}
         err = await _call_reserved(
             ctx, [("react_out_group", scope, 60.0, 3)], "set_msg_emoji_like", payload,
             limited="表情回应过于频繁，已跳过", failed="表情回应发送失败",
         )
         return err or "已添加表情回应"
+
+    @staticmethod
+    def _assert_group_outbound_allowed(
+        ctx: ToolContext,
+        group_id: str,
+    ) -> None:
+        try:
+            checker = vars(ctx.bot).get(
+                "_omubot_assert_group_outbound_allowed"
+            )
+        except TypeError:
+            checker = None
+        if not callable(checker):
+            if not ctx.run_id:
+                return
+            raise ToolExecutionError(
+                code="onebot_group_guard_unavailable",
+                safe_message="OneBot group policy guard is unavailable",
+                external_effect_started=False,
+            )
+        try:
+            checker(int(group_id), action="set_msg_emoji_like")
+        except Exception as exc:
+            if not ctx.run_id:
+                raise
+            raise ToolExecutionError(
+                code="onebot_group_policy_denied",
+                safe_message="OneBot group policy rejected the reaction",
+                external_effect_started=False,
+            ) from exc
 
 
 def build_interaction_tools(

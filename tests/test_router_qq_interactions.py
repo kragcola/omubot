@@ -60,13 +60,17 @@ class _Scheduler:
         trigger: object | None = None,
         user_id: str = "",
         message_text: str = "",
+        runtime_invocation_id: str | None = None,
     ) -> None:
         del message_text
-        self.calls.append({
+        call: dict[str, object] = {
             "group_id": group_id,
             "trigger": trigger,
             "user_id": user_id,
-        })
+        }
+        if runtime_invocation_id is not None:
+            call["runtime_invocation_id"] = runtime_invocation_id
+        self.calls.append(call)
 
 
 class _MoodEngine:
@@ -109,6 +113,7 @@ def _ctx(
     reaction_enabled: bool = True,
     mood_engine: object | None = None,
     climate_hub: object | None = None,
+    runtime_ingress: object | None = None,
 ) -> PluginContext:
     ctx = SimpleNamespace(
         config=SimpleNamespace(
@@ -124,6 +129,7 @@ def _ctx(
         scheduler=_Scheduler(),
         mood_engine=mood_engine,
         climate_sensor_hub=climate_hub,
+        agent_runtime_host_ingress=runtime_ingress,
     )
     return cast(PluginContext, ctx)
 
@@ -266,6 +272,33 @@ def test_dispatch_disabled_or_not_tome_does_not_mutate_runtime() -> None:
     assert dispatch_qq_interaction_signal(ctx, signal, now=100.0) is False
     assert ctx.timeline.triggers == []
     assert ctx.scheduler.calls == []
+
+
+def test_dispatch_with_configured_runtime_ingress_requires_canonical_invocation() -> None:
+    ctx = _ctx(runtime_ingress=object())
+    signal = QQInteractionSignal(
+        kind="poke",
+        group_id="123456",
+        actor_user_id="10001",
+        target_user_id="42",
+        is_tome=True,
+    )
+
+    assert dispatch_qq_interaction_signal(ctx, signal, now=100.0) is False
+    assert ctx.timeline.triggers == []
+    assert ctx.scheduler.calls == []
+
+    invocation_id = "inv_" + "a" * 32
+    assert dispatch_qq_interaction_signal(
+        ctx,
+        signal,
+        now=101.0,
+        runtime_invocation_id=invocation_id,
+    ) is True
+    assert ctx.scheduler.calls[-1]["runtime_invocation_id"] == invocation_id
+    trigger = ctx.scheduler.calls[-1]["trigger"]
+    assert isinstance(trigger, TriggerContext)
+    assert trigger.extra["runtime_invocation_id"] == invocation_id
 
     signal = QQInteractionSignal(
         kind="message_reaction",

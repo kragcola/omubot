@@ -124,3 +124,44 @@ async def test_cancelled_poke_releases_token_bucket() -> None:
     result = await tool.execute(ctx, user_id="300")
 
     assert result == "已戳 300"
+
+
+async def test_governed_poke_failure_propagates_and_releases_token_bucket() -> None:
+    ctx = _ctx()
+    ctx.run_id = "run-poke"
+    ctx.bot.call_api = AsyncMock(side_effect=RuntimeError("provider outcome unknown"))
+    tool = QQInteractionTool("poke")
+
+    with pytest.raises(RuntimeError, match="provider outcome unknown"):
+        await tool.execute(ctx, user_id="300")
+
+    ctx.bot.call_api = AsyncMock(return_value=None)
+    result = await tool.execute(ctx, user_id="300")
+
+    assert result == "已戳 300"
+    ctx.bot.call_api.assert_awaited_once()
+
+
+async def test_governed_reaction_failure_propagates_and_releases_token_bucket() -> None:
+    ctx = _ctx()
+    ctx.run_id = "run-reaction"
+    ctx.bot._omubot_assert_group_outbound_allowed = (
+        lambda group_id, *, action: None
+    )
+    ctx.bot.call_api = AsyncMock(
+        side_effect=RuntimeError("provider outcome unknown")
+    )
+    tool = QQInteractionTool("reaction")
+
+    with pytest.raises(RuntimeError, match="provider outcome unknown"):
+        await tool.execute(ctx, message_id="9001", emoji_code="66")
+
+    ctx.bot.call_api = AsyncMock(return_value=None)
+    result = await tool.execute(ctx, message_id="9001", emoji_code="66")
+
+    assert result == "已添加表情回应"
+    ctx.bot.call_api.assert_awaited_once_with(
+        "set_msg_emoji_like",
+        message_id=9001,
+        emoji_id="66",
+    )

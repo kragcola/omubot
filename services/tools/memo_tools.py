@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 from loguru import logger
 
+from kernel.types import (
+    ToolApproval,
+    ToolConcurrency,
+    ToolEffect,
+    ToolIdempotency,
+    ToolInvocationBinding,
+    ToolRetryPolicy,
+    ToolSpec,
+)
 from services.memory.card_store import Card, CardStore, NewCard
 from services.tools.base import Tool
 from services.tools.context import ToolContext
@@ -64,6 +74,22 @@ class CardLookupTool(Tool):
                 },
             },
         }
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            input_schema=dict(self.parameters),
+            owner="memo",
+            effect=ToolEffect.READ,
+            required_scopes=("memory:read",),
+            approval=ToolApproval.NEVER,
+            idempotency=ToolIdempotency.NOT_NEEDED,
+            retry_policy=ToolRetryPolicy.SAFE_TRANSIENT,
+            concurrency=ToolConcurrency.PARALLEL,
+            data_classification=("memory_pii",),
+        )
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         scope: str | None = kwargs.get("scope")
@@ -217,6 +243,64 @@ class CardUpdateTool(Tool):
             },
             "required": ["action"],
         }
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            input_schema=dict(self.parameters),
+            owner="memo",
+            effect=ToolEffect.WRITE_LOCAL,
+            required_scopes=("memory:write",),
+            approval=ToolApproval.POLICY,
+            idempotency=ToolIdempotency.RECONCILE_ONLY,
+            retry_policy=ToolRetryPolicy.NEVER,
+            concurrency=ToolConcurrency.KEYED_SERIAL,
+            binding_required=True,
+            data_classification=("memory_pii",),
+        )
+
+    def bind_invocation(
+        self,
+        ctx: ToolContext,
+        arguments: Mapping[str, Any] | dict[str, Any],
+    ) -> ToolInvocationBinding:
+        action = str(arguments.get("action") or "").strip()
+        if action == "add":
+            scope, scope_id = self._require_trusted_scope(ctx, arguments)
+            target = f"memory:{scope}:{scope_id}"
+            return ToolInvocationBinding(target_ref=target, concurrency_key=target)
+        if action in {"update", "expire"}:
+            card_id = str(arguments.get("card_id") or "").strip()
+            if not card_id:
+                raise ValueError(f"{action} requires card_id")
+            target = f"memory:card:{card_id}"
+            return ToolInvocationBinding(target_ref=target, concurrency_key=target)
+        if action == "supersede":
+            card_id = str(arguments.get("card_id") or "").strip()
+            if not card_id:
+                raise ValueError("supersede requires card_id")
+            scope, scope_id = self._require_trusted_scope(ctx, arguments)
+            return ToolInvocationBinding(
+                target_ref=f"memory:{scope}:{scope_id}",
+                concurrency_key=f"memory:card:{card_id}",
+            )
+        raise ValueError(f"unsupported update_cards action: {action or '<empty>'}")
+
+    @classmethod
+    def _require_trusted_scope(
+        cls,
+        ctx: ToolContext,
+        arguments: Mapping[str, Any],
+    ) -> tuple[str, str]:
+        scope = str(arguments.get("scope") or "").strip()
+        scope_id = str(arguments.get("scope_id") or "").strip()
+        if not scope or not scope_id:
+            raise ValueError("scope and scope_id are required")
+        if not cls._write_scope_allowed(ctx, scope, scope_id):
+            raise ValueError("write scope is not trusted for this invocation")
+        return scope, scope_id
 
     async def execute(self, ctx: ToolContext, **kwargs: Any) -> str:
         action: str = kwargs["action"]

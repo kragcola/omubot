@@ -111,3 +111,30 @@ def test_merge_all_appends_after_existing_tools_in_candidate_order() -> None:
         "extension_lookup",
         "extension_write",
     ]
+
+
+def test_registry_generation_changes_only_after_successful_catalog_mutation() -> None:
+    registry = ToolRegistry()
+    snapshot_catalog = getattr(registry, "snapshot_catalog", None)
+    assert callable(snapshot_catalog)
+    assert snapshot_catalog() == (0, ())
+
+    first = _NamedTool("first")
+    registry.register(first)
+    assert snapshot_catalog() == (1, (first,))
+
+    with pytest.raises(ValueError, match="already registered"):
+        registry.register(_NamedTool("first"))
+    assert snapshot_catalog() == (1, (first,))
+
+    registry.merge_all(())
+    assert snapshot_catalog() == (1, (first,))
+
+    replacement = _NamedTool("replacement")
+    registry.replace_all((replacement,))
+    assert snapshot_catalog() == (2, (replacement,))
+
+    registry.clear()
+    assert snapshot_catalog() == (3, ())
+    registry.clear()
+    assert snapshot_catalog() == (3, ())

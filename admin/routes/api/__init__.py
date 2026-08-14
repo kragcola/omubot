@@ -47,11 +47,18 @@ def create_api_router(
     llm_client: Any = None,
     bot: Any = None,
     repo_root: str | Path | None = None,
+    runtime_query: Any = None,
+    memory_query: Any = None,
+    worldbook_query: Any = None,
+    readiness: Any = None,
+    actions: Any = None,
+    operator_action_factory: Any = None,
 ) -> APIRouter:
     """Create the aggregated /api/admin router."""
     router = APIRouter(prefix="/api/admin")
 
     from admin.routes.api.affection import create_affection_router
+    from admin.routes.api.agent_runtime import create_agent_runtime_router
     from admin.routes.api.auth import create_auth_router
     from admin.routes.api.backup import create_backup_router
     from admin.routes.api.bandit import create_bandit_router
@@ -95,6 +102,14 @@ def create_api_router(
     from admin.routes.api.worldbook import create_worldbook_router
 
     router.include_router(create_auth_router())
+    router.include_router(create_agent_runtime_router(
+        runtime_query=runtime_query,
+        memory_query=memory_query,
+        worldbook_query=worldbook_query,
+        readiness=readiness,
+        actions=actions,
+        operator_action_factory=operator_action_factory,
+    ))
     router.include_router(create_bandit_router(scheduler=scheduler, ctx=ctx))
     router.include_router(create_birthday_router(ctx=ctx))
     router.include_router(create_dashboard_router(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import sqlite3
 from pathlib import Path
@@ -152,3 +153,81 @@ async def test_connect_sqlite_rejects_raw_string_profile_without_leaking_connect
         for db in opened:
             with contextlib.suppress(Exception):
                 await db.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_sqlite_cancellation_waits_for_acquired_connection_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.storage.sqlite as sqlite_module
+
+    pragma_entered = asyncio.Event()
+    release_pragma = asyncio.Event()
+    close_entered = asyncio.Event()
+    release_close = asyncio.Event()
+    opened: list[tuple[aiosqlite.Connection, Any]] = []
+    close_count = 0
+    real_connect = sqlite_module.aiosqlite.connect
+
+    async def tracked_connect(*args: Any, **kwargs: Any) -> aiosqlite.Connection:
+        nonlocal close_count
+        db = await real_connect(*args, **kwargs)
+        real_execute = db.execute
+        real_close = db.close
+        first_pragma = True
+
+        async def gated_execute(sql: str, *args: Any, **kwargs: Any) -> Any:
+            nonlocal first_pragma
+            if first_pragma and sql.lstrip().upper().startswith("PRAGMA"):
+                first_pragma = False
+                pragma_entered.set()
+                await release_pragma.wait()
+            return await real_execute(sql, *args, **kwargs)
+
+        async def gated_close() -> None:
+            nonlocal close_count
+            close_count += 1
+            close_entered.set()
+            await release_close.wait()
+            await real_close()
+
+        monkeypatch.setattr(db, "execute", gated_execute)
+        monkeypatch.setattr(db, "close", gated_close)
+        opened.append((db, real_close))
+        return db
+
+    monkeypatch.setattr(sqlite_module.aiosqlite, "connect", tracked_connect)
+    connect_task = asyncio.create_task(
+        sqlite_module.connect_sqlite(
+            tmp_path / "cancel-during-first-pragma.db",
+            profile=ConnectionProfile.SHORT_LIVED,
+        )
+    )
+    try:
+        await asyncio.wait_for(pragma_entered.wait(), timeout=1.0)
+        connect_task.cancel()
+        await asyncio.wait_for(close_entered.wait(), timeout=1.0)
+
+        connect_task.cancel()
+        await asyncio.sleep(0)
+        assert not connect_task.done(), (
+            "connect_sqlite must stay attached until the acquired connection closes"
+        )
+
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(connect_task, timeout=1.0)
+        assert close_count == 1
+        assert len(opened) == 1
+        with pytest.raises(ValueError):
+            await opened[0][0].execute("SELECT 1")
+    finally:
+        release_pragma.set()
+        release_close.set()
+        if not connect_task.done():
+            connect_task.cancel()
+        await asyncio.gather(connect_task, return_exceptions=True)
+        for _db, real_close in opened:
+            with contextlib.suppress(Exception):
+                await real_close()

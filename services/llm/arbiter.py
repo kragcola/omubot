@@ -66,6 +66,9 @@ class PendingMessage:
     block_id: str = ""
     evidence: str = ""
     obligation_level: str = ""
+    # Runtime v2 keeps the exact host-owned invocation through arbiter merges.
+    # It is internal-only and deliberately absent from the judge payload.
+    runtime_invocation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

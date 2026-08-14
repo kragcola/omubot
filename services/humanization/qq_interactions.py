@@ -9,6 +9,7 @@ from loguru import logger
 from nonebot.adapters.onebot.v11 import NoticeEvent, PokeNotifyEvent
 
 from kernel.types import PluginContext, TriggerContext
+from services.agent_runtime.invocation_store import is_authoritative_invocation_id
 from services.humanization.emoji_sentiment import classify_reaction_sentiment
 
 _POKE_INBOUND_WINDOW_S = 60.0
@@ -422,8 +423,22 @@ def dispatch_qq_interaction_signal(
     signal: QQInteractionSignal,
     *,
     now: float | None = None,
+    runtime_invocation_id: str | None = None,
 ) -> bool:
     if not signal.is_tome or not _qq_interaction_enabled(ctx, signal):
+        return False
+
+    runtime_ingress = getattr(ctx, "agent_runtime_host_ingress", None)
+    if runtime_invocation_id is not None and not is_authoritative_invocation_id(
+        runtime_invocation_id
+    ):
+        logger.warning("qq interaction dropped: runtime invocation ID is invalid")
+        return False
+    if runtime_ingress is not None and runtime_invocation_id is None:
+        # Notice payloads currently lack a durable host event reference accepted
+        # by AuthoritativeHostTriggerIngressV1. Do not invent a message identity
+        # or let this force-reply path bypass the selected Runtime dispatcher.
+        logger.warning("qq interaction dropped: authoritative runtime trigger is unavailable")
         return False
 
     group_config = getattr(getattr(ctx, "config", None), "group", None)
@@ -477,21 +492,29 @@ def dispatch_qq_interaction_signal(
             message_id=signal.raw_message_id,
             target_user_id=signal.actor_user_id,
         )
-    scheduler.notify(
-        signal.group_id,
-        trigger=TriggerContext(
+    trigger_extra: dict[str, Any] = {
+        "kind": signal.kind,
+        "actor_user_id": signal.actor_user_id,
+        "target_user_id": signal.target_user_id,
+        "emoji_code": signal.emoji_code,
+        "is_tome": signal.is_tome,
+    }
+    if runtime_invocation_id is not None:
+        trigger_extra["runtime_invocation_id"] = runtime_invocation_id
+    notify_kwargs: dict[str, Any] = {
+        "trigger": TriggerContext(
             reason=reason,
             mode="qq_interaction",
             target_message_id=signal.raw_message_id,
             target_user_id=signal.actor_user_id,
-            extra={
-                "kind": signal.kind,
-                "actor_user_id": signal.actor_user_id,
-                "target_user_id": signal.target_user_id,
-                "emoji_code": signal.emoji_code,
-                "is_tome": signal.is_tome,
-            },
+            extra=trigger_extra,
         ),
-        user_id=signal.actor_user_id,
+        "user_id": signal.actor_user_id,
+    }
+    if runtime_invocation_id is not None:
+        notify_kwargs["runtime_invocation_id"] = runtime_invocation_id
+    scheduler.notify(
+        signal.group_id,
+        **notify_kwargs,
     )
     return True

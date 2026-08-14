@@ -4,13 +4,13 @@
 
 ## Current
 
-- mode: none
-- tracker: none
-- objective: none
-- status: Style 历史视觉/system provenance 污染清理与防再污染代码提交、bot-only 部署、测试及生产只读复验均已闭环。
-- next_step: none
-- last_completed: 防再污染代码随 `40a8e32` / image `sha256:d89121d98ef0...` 在 `qq-bot` 运行；Style 定向测试 49 passed，生产 `quick_check=ok`、structured human evidence=0，当前 approved/pending/rejected=`10/1114/82`。Grok normal required-parallel 只读交叉验证完成；未发送 QQ/QZone，NapCat 未重启或重建。
-- rollback: 代码回退到部署前 bot image；历史数据恢复使用 trusted backup `pre-change-20260719-224533` 或 SHA-256 `53355a9f...2b88` 的 0600 行级计划。任何整库恢复必须另行授权并 stop/start bot；NapCat 禁止重建。
+- mode: task
+- tracker: `docs/tracking/agent-runtime-v2-production-activation-2026-08-14.md`
+- objective: 按 Agent Runtime v2 production activation runbook 依次完成显式 source、operator/ACL、trusted trigger、组合根、attestation 与验证；全程保持外部效果 fail-closed。
+- status: P0-P5 暗态/本地验收已完成；当前快照审计的七项 release 缺口已经关闭，production composition 19 passed、Runtime/Memory/Worldbook/router/guard 交叉 879 passed、Ruff/Pyright/diff clean。用户已授权在 `agent_runtime.enabled=false` 条件下从隔离输入发布 bot-only 暗态代码；没有真实 operator evidence 时，worker 仍无法取得 lease。
+- next_step: 提交、备份当前 bot/admin 静态产物，从隔离 release worktree 构建并 bot-only 替换，然后核验容器/API/无 lease/无新 DB/无外部效果。真实 activation 仍等待 production source、backup、restore/rollback rehearsal、operator ACL、Worldbook witness 和 profile-bound manifest。
+- last_completed: 生产 profile/source、operator ACL、credential-authenticated Admin principal/exact target ACL、trusted invocation、受限组合根、durable single-worker/exclusive-recovery lease、bootstrap 生命周期、worker startup dark/activation/rollback gate、Admin operator transport、offline reconciliation 与严格 GET query 接口均完成暗态验收；当前运行态仍没有 Runtime v2 source/worker。
+- rollback: 默认 feature gate 关闭，停 worker、保留未知 external call 供 reconcile；不建/删 production DB、不重建 NapCat；`BUILTIN_WIRE_PROFILE.validated=false`。
 
 ## Recovery Order
 
@@ -26,6 +26,7 @@
 - Worktree retains character-pack notes、deep-delivery drafts、coursework/tool outputs、NapCat data and temp artifacts; never use `git add -A`.
 - Pytest baseline: `source ./scripts/dev/env.sh` then `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-}`.
 - 本任务迁移/回滚：`docs/migrations/bot-memory-language-visual-remediation-2026-07-19.md`。
+- 当前 Agent Runtime v2 迁移/回滚（临时 DB schema v2）：`docs/migrations/agent-runtime-v2-2026-07-21.md`。
 - **禁止**将 `BUILTIN_WIRE_PROFILE.validated` 设为 `true`。
 
 ## Pending (authoritative; not the Current task)

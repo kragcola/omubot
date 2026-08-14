@@ -145,6 +145,17 @@ class _MemoryConsolidatorLifecycle:
         self._calls.append("memory.stop")
 
 
+class _AgentRuntimeLifecycle:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    async def start(self) -> None:
+        self._calls.append("agent-runtime.start")
+
+    async def stop(self) -> None:
+        self._calls.append("agent-runtime.stop")
+
+
 def _compose(
     *,
     ctx: _Context,
@@ -154,6 +165,7 @@ def _compose(
     admin: _Admin,
     task_supervisor: _Supervisor | None = None,
     memory_consolidator_lifecycle: _MemoryConsolidatorLifecycle | None = None,
+    agent_runtime_lifecycle: _AgentRuntimeLifecycle | None = None,
     learning_extract_coordinator: _LearningCoordinatorLifecycle | None = None,
 ) -> ApplicationRuntime:
     compose = getattr(application_module, "compose_application_runtime", None)
@@ -169,6 +181,8 @@ def _compose(
         dependencies["task_supervisor"] = task_supervisor
     if memory_consolidator_lifecycle is not None:
         dependencies["memory_consolidator_lifecycle"] = memory_consolidator_lifecycle
+    if agent_runtime_lifecycle is not None:
+        dependencies["agent_runtime_lifecycle"] = agent_runtime_lifecycle
     if learning_extract_coordinator is not None:
         dependencies["learning_extract_coordinator"] = learning_extract_coordinator
     runtime: Any = compose(
@@ -265,6 +279,27 @@ async def test_composed_startup_orders_services_and_installs_admin_last() -> Non
         "admin.install:chat-ready",
     ]
     assert registry.tools == [core_tool, plugin_tool]
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_composes_after_plugin_tool_merge_and_closes_before_restore() -> None:
+    calls: list[str] = []
+    chat_sentinel = object()
+    runtime = _compose(
+        ctx=_Context(llm_client=chat_sentinel),
+        bus=_Bus(calls, [object()]),
+        registry=_Registry(calls, [object()]),
+        backup=_Backup(calls),
+        admin=_Admin(calls, chat_sentinel),
+        agent_runtime_lifecycle=_AgentRuntimeLifecycle(calls),
+    )
+
+    await runtime.start()
+    await runtime.stop()
+
+    assert calls.index("registry.merge_all") < calls.index("agent-runtime.start")
+    assert calls.index("agent-runtime.start") < calls.index("backup.start")
+    assert calls.index("agent-runtime.stop") < calls.index("registry.restore")
 
 
 @pytest.mark.asyncio

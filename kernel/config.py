@@ -1071,6 +1071,42 @@ class BackupConfig(BaseModel):
         return self
 
 
+class AgentRuntimeSourceConfig(BaseModel):
+    """One explicitly supplied source for Agent Runtime v2 activation."""
+
+    db_path: str = ""
+    expected_schema_version: int = 0
+    backup_path: str = ""
+    backup_sha256: str = ""
+    restore_evidence_ref: str = ""
+    rollback_evidence_ref: str = ""
+
+
+class AgentRuntimeAttestationConfig(BaseModel):
+    """Digest-pinned rollout evidence manifest for Agent Runtime v2."""
+
+    manifest_path: str = ""
+    manifest_sha256: str = ""
+
+
+class AgentRuntimeActivationConfig(BaseModel):
+    """Fail-closed production activation inputs for Agent Runtime v2."""
+
+    enabled: bool = False
+    worker_id: str = ""
+    max_workers: int = 1
+    principal_scopes: tuple[str, ...] = ()
+    allowed_target_refs: tuple[str, ...] = ()
+    runtime: AgentRuntimeSourceConfig = Field(default_factory=AgentRuntimeSourceConfig)
+    memory: AgentRuntimeSourceConfig = Field(default_factory=AgentRuntimeSourceConfig)
+    worldbook: AgentRuntimeSourceConfig = Field(default_factory=AgentRuntimeSourceConfig)
+    operator: AgentRuntimeSourceConfig = Field(default_factory=AgentRuntimeSourceConfig)
+    invocation: AgentRuntimeSourceConfig = Field(default_factory=AgentRuntimeSourceConfig)
+    attestation: AgentRuntimeAttestationConfig = Field(
+        default_factory=AgentRuntimeAttestationConfig
+    )
+
+
 class PersonaV2Config(BaseModel):
     """Persona v2 runtime configuration.
 
@@ -2406,6 +2442,9 @@ class BotConfig(BaseModel):
     vision: VisionConfig = VisionConfig()
     thinker: ThinkerConfig = ThinkerConfig()
     backup: BackupConfig = Field(default_factory=BackupConfig)
+    agent_runtime: AgentRuntimeActivationConfig = Field(
+        default_factory=AgentRuntimeActivationConfig
+    )
     persona_v2: PersonaV2Config = Field(default_factory=PersonaV2Config)
     humanization: HumanizationConfig = Field(default_factory=HumanizationConfig)
     sentinel_guardrail: SentinelGuardrailConfig = Field(default_factory=SentinelGuardrailConfig)

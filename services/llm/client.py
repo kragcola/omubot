@@ -1493,6 +1493,7 @@ class LLMClient:
         authority_store: Any | None = None,
         admins: dict[str, str] | None = None,
         known_other_bots: dict[str, list[str]] | None = None,
+        runtime_tool_dispatcher: Any | None = None,
     ) -> None:
         self._base_url = base_url
         self._api_key = api_key
@@ -1501,6 +1502,7 @@ class LLMClient:
         self._prompt = prompt_builder
         self._short_term = short_term
         self._tools = tools
+        self._runtime_tool_dispatcher = runtime_tool_dispatcher
         self._max_context_tokens = max_context_tokens
         self._compact_ratio = compact_ratio
         self._compress_ratio = compress_ratio
@@ -2066,6 +2068,8 @@ class LLMClient:
         rng: Callable[[], float] | None = None,
         force_send: bool = False,
     ) -> bool:
+        if getattr(self, "_runtime_tool_dispatcher", None) is not None:
+            return False
         if already_sent or not self._sticker_placement_enabled(group_id):
             return False
         base_frequency = self._resolve_sticker_base_frequency(group_id)
@@ -4997,6 +5001,64 @@ class LLMClient:
         except Exception:
             return ""
 
+    def set_runtime_tool_dispatcher(self, dispatcher: Any | None) -> None:
+        """Select the governed tool boundary without changing legacy defaults."""
+
+        self._runtime_tool_dispatcher = dispatcher
+
+    async def _dispatch_tool_uses(
+        self,
+        *,
+        tool_uses: Sequence[Any],
+        tool_ctx: ToolContext,
+        runtime_invocation_id: str | None,
+    ) -> list[Any]:
+        """Use the governed dispatcher when one is explicitly installed.
+
+        A selected dispatcher is authoritative even when it rejects or fails.
+        Falling back to ``ToolRegistry.call`` here would let an invocation with
+        no persisted trusted context bypass the Runtime v2 policy boundary.
+        """
+
+        dispatcher = getattr(self, "_runtime_tool_dispatcher", None)
+        if dispatcher is None:
+            return await asyncio.gather(
+                *[
+                    self._tools.call(item.name, json.dumps(item.input), ctx=tool_ctx)
+                    for item in tool_uses
+                ],
+                return_exceptions=True,
+            )
+
+        normalized: list[dict[str, Any]] = []
+        try:
+            for item in tool_uses:
+                arguments = getattr(item, "input", {})
+                if not isinstance(arguments, dict):
+                    raise TypeError("tool call input must be an object")
+                normalized.append(
+                    {
+                        "id": str(getattr(item, "id", "") or ""),
+                        "name": str(getattr(item, "name", "") or ""),
+                        "arguments": dict(arguments),
+                    }
+                )
+            results = await dispatcher.dispatch_tool_uses(
+                invocation_id=runtime_invocation_id,
+                tool_uses=tuple(normalized),
+                bot=tool_ctx.bot,
+            )
+            if (
+                not isinstance(results, list)
+                or len(results) != len(tool_uses)
+                or any(not isinstance(result, str) for result in results)
+            ):
+                raise ValueError("governed tool dispatcher returned an invalid result")
+            return results
+        except Exception:
+            _log_thinking.exception("governed tool dispatch failed")
+            return ["Tool error: governed tool dispatch is unavailable"] * len(tool_uses)
+
     # ------------------------------------------------------------------
     # Main chat entry point
     # ------------------------------------------------------------------
@@ -5015,6 +5077,7 @@ class LLMClient:
         *,
         privacy_mask: bool = True,
         must_emit: bool = False,
+        runtime_invocation_id: str | None = None,
     ) -> str | None:
         force_reply = bool(force_reply or must_emit)
         source_message_id = (
@@ -6256,9 +6319,10 @@ class LLMClient:
             tool_ctx.extra["image_tags"] = image_tag_map
             if self._timeline is not None:
                 tool_ctx.extra["timeline"] = self._timeline
-            call_results = await asyncio.gather(
-                *[self._tools.call(tu.name, json.dumps(tu.input), ctx=tool_ctx) for tu in tool_uses],
-                return_exceptions=True,
+            call_results = await self._dispatch_tool_uses(
+                tool_uses=tool_uses,
+                tool_ctx=tool_ctx,
+                runtime_invocation_id=runtime_invocation_id,
             )
             # Convert any exceptions to error strings
             call_results = [

@@ -54,6 +54,15 @@ class PluginStateStore:
         payload["version"] = 1
         self._write_payload(payload)
 
+    def clear_override(self, name: str) -> None:
+        payload = self._read_payload()
+        plugins = payload.get("plugins", {})
+        if not isinstance(plugins, dict) or name not in plugins:
+            return
+        plugins.pop(name, None)
+        payload["version"] = 1
+        self._write_payload(payload)
+
     def as_payload(self) -> dict[str, Any]:
         payload = self._read_payload()
         payload.setdefault("version", 1)
