@@ -7,10 +7,10 @@
 - mode: task
 - tracker: `docs/tracking/agent-runtime-v2-production-activation-2026-08-14.md`
 - objective: 按 Agent Runtime v2 production activation runbook 依次完成显式 source、operator/ACL、trusted trigger、组合根、attestation 与验证；全程保持外部效果 fail-closed。
-- status: Agent Runtime v2 默认关闭 release `6880dd0` / image `4f02f5b17f66…` 正在生产运行，`agent_runtime_enabled=False`、无新 source/lease/worker、NapCat 未重启或重建。provider execution fence/worker lifecycle 后续已本地通过 25 focused、530 cross、范围 Ruff/Pyright/diff 与独立 P0-P2 复审，等待本轮 bot-only 暗态发布；真实 activation 仍被缺失的 operator-owned artifact 阻断。
-- next_step: 提交并从隔离 worktree 构建/替换 bot，然后核验新 image、`/api/admin/agent-runtime/summary` 的未认证 401、disabled preflight、无 source/lease/worker 与 NapCat 不变性。完成后仅收集和独立核验 production source/schema、backup SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness 与 profile-bound manifest；完整证据前禁止启动 worker 或修改 gate。
-- last_completed: Runtime v2 的 profile/source、operator ACL、trusted invocation、受限组合根、lease/recovery、bootstrap 生命周期、worker hard gate、Admin operator transport、offline reconciliation、strict GET query、provider 前 owner/token execution fence、同 token extension、guard terminalization 和 cancel-safe worker stop 均已完成本地验收。
-- rollback: 将 `omubot-bot:pre-agent-runtime-v2-dark-20260814` 重标为 `omubot-bot:latest`，恢复 `.workspace/rollback/agent-runtime-v2-dark-20260814.WhgUDO/admin-static`，然后仅执行 `docker compose up -d --no-deps --force-recreate --no-build bot`；不建/删 production DB、不重建 NapCat；`BUILTIN_WIRE_PROFILE.validated=false`。
+- status: Agent Runtime v2 默认关闭 fence release 已于 2026-08-15 上线：`ba32cdf` / image `6dc8ab9e8a30…`，fence focused 25 passed、Runtime/application/router/scheduler 交叉 530 passed、范围 Ruff/Pyright/diff clean、独立复审无 P0-P2。生产 `agent_runtime_enabled=False`、无新 Runtime source/lease/worker，容器 restart=0；NapCat 未重启或重建，ID/image/start/restart 均不变。真实 activation 仍被缺失的 operator-owned artifact 阻断。
+- next_step: 仅收集和独立核验 production source/schema、backup SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness、profile-bound manifest，以及 provider cooperative-cancellation/serial-throughput canary evidence；完整证据前禁止启动 worker 或修改 gate。
+- last_completed: Runtime v2 的 profile/source、operator ACL、trusted invocation、受限组合根、lease/recovery、bootstrap 生命周期、worker hard gate、Admin operator transport、offline reconciliation、strict GET query、provider 前 owner/token execution fence、同 token extension、guard terminalization 和 cancel-safe worker stop 已以默认关闭 image 上线；容器内 preflight=`agent_runtime_disabled`、未认证 `/api/admin/agent-runtime/summary`=401、无 Runtime storage 文件，NapCat 不变性均已核验。
+- rollback: 将 `omubot-bot:pre-agent-runtime-v2-fence-20260815` 重标为 `omubot-bot:latest`，然后仅执行 `docker compose up -d --no-deps --force-recreate --no-build bot`；不建/删 production DB、不重建 NapCat；`BUILTIN_WIRE_PROFILE.validated=false`。
 
 ## Recovery Order
 

@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-15 Agent Runtime v2 provider execution fence 默认关闭生产上线
+
+**变更类型**：生产部署 / bot-only 暗态发布。已提交 `ba32cdf`，从隔离 worktree 以 `GIT_COMMIT=ba32cdf` 构建 image `sha256:6dc8ab9e8a30780f4dcdb276dd252c0cf13d29fc10a89572ddd3d31e2ddbc58b`，先将旧 `sha256:4f02f5b17f66…` 固定为 `omubot-bot:pre-agent-runtime-v2-fence-20260815`，随后只执行 `docker compose up -d --no-deps --force-recreate --no-build bot`。新 `qq-bot` container=`a0f6d104…`、restart=0，启动日志确认 `GIT_COMMIT=ba32cdf`；未执行 `down`，未重启、重建或变更 NapCat。
+
+**发布后核验**：容器内只读 preflight 返回 `{"status":"not_ready","reason":"agent_runtime_disabled"}`；未认证正确 API `/api/admin/agent-runtime/summary` 返回 401；`/app/storage` 无 Agent Runtime 文件，未启动 Runtime worker 或创建 source。NapCat 仍为 container=`19f6cf13…`、image=`mlikiowa/napcat-docker:v4.15.0`、原启动时间、restart=0。回滚只需将 `omubot-bot:pre-agent-runtime-v2-fence-20260815` 重标 `latest` 后仅重建 bot。
+
+**非阻断观察**：本次 bot 重启因当天日程文件缺失触发既有 schedule generator，LLM 返回非 JSON 而记录一次 parse warning；函数安全返回，bot 随后正常就绪，`plugins/schedule/generator.py`、`services/scheduler.py`、LLM 与 `bot.py` 均不在 `ba32cdf` diff 中。此 warning 未混入本次 release 修复，后续按独立日程任务处理。
+
 ## 2026-08-15 Agent Runtime v2 provider execution fence 与默认关闭发布候选
 
 **变更类型**：运行时 lease/fence 安全修复、bootstrap 生命周期完善与发布准备。此项只改变默认关闭代码路径的可验证边界，尚未构建或替换生产 bot；`agent_runtime.enabled` 保持未配置/关闭，不创建 Runtime/Memory/Worldbook/operator/invocation 生产 source，不启动 worker，不发送 QQ/QZone/webhook，不改 `BUILTIN_WIRE_PROFILE.validated`，NapCat 不操作。

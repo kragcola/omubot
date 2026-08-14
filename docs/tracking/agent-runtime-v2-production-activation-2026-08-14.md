@@ -3,17 +3,17 @@
 > 状态：active
 > mode: task
 > 最后更新：2026-08-15 CST
-> 当前下一步：provider execution fence、同 token lease extension 和 bootstrap worker lifecycle 已完成本地验收与独立复审；先提交并从隔离 worktree 进行一次 bot-only 默认关闭发布，然后继续等待 operator 提供真实 production source、备份、restore/rollback rehearsal 与 Worldbook witness。全程绝不启动真实 worker。
+> 当前下一步：`ba32cdf` provider-fence 默认关闭 image 已完成 bot-only 发布和 runtime 核验；继续等待 operator 提供真实 production source、备份、restore/rollback rehearsal 与 Worldbook witness，才可进行新的 activation 决策。全程绝不启动真实 worker。
 > 阻塞：真实 production source/schema、冻结 backup SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness/profile-bound manifest 仍未齐备；这些只阻断真实 worker activation，不阻断本次默认关闭的代码发布。
-> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。独立复审无 P0-P2；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产当前仍为 `qq-bot` image/commit=`4f02f5b17f66…`/`6880dd0`、`agent_runtime_enabled=False`、新 Runtime source files=0、worker log events=0；NapCat 未变。
-> 回滚入口：保持 feature gate 默认关闭；不创建 production Runtime/Memory/Worldbook DB，不接管 LLM loop，不启动 worker；恢复 legacy loop。NapCat 永不重建。
+> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。独立复审无 P0-P2；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产 `qq-bot` image/commit=`6dc8ab9e8a30…`/`ba32cdf`、`agent_runtime_enabled=False`、新 Runtime source files=0、worker log events=0；NapCat ID/image/start/restart 均未变。
+> 回滚入口：保持 feature gate 默认关闭；将 `omubot-bot:pre-agent-runtime-v2-fence-20260815` 重标为 `omubot-bot:latest` 后仅替换 bot，不创建 production Runtime/Memory/Worldbook DB，不接管 LLM loop，不启动 worker。NapCat 永不重建。
 
 ## Resume Capsule
 
 - objective: 按 `docs/migrations/agent-runtime-v2-2026-07-21.md` 的 Future Production Activation Runbook，依次完成受限生产组合、认证/ACL、可信触发、attestation、recovery 和交付验证，同时保持所有外部效果 fail-closed。
-- next_step: 先提交并以默认关闭配置从隔离 worktree 构建/替换 bot，再复核 image、正确 Runtime API、preflight、无 source/lease/worker 与 NapCat 不变性；此后只收集并独立核验真实 production source path、schema、backup payload/digest、restore/rollback rehearsal、具名 operator ACL、deployment input 与 Worldbook authoritative-reread/reducer/no-dual-truth witness。完整 manifest 到位前不得启动 worker，禁止用测试 manifest 替代。
+- next_step: 只收集并独立核验真实 production source path、schema、backup payload/digest、restore/rollback rehearsal、具名 operator ACL、deployment input 与 Worldbook authoritative-reread/reducer/no-dual-truth witness。完整 manifest 到位前不得启动 worker，禁止用测试 manifest 替代。
 - current_files: `bootstrap/application.py`、`services/agent_runtime/{production,executor,coordinator,invocation_store}.py`、`tools/agent_runtime_preflight.py`、`docs/runbooks/agent-runtime-v2-production-activation.md`、对应测试与本 tracker。
-- last_verified: fence 在实际 provider 调用前持有进程锁和 SQLite owner/token CAS；同一 token 的不同 lease_until 可连续扩展，失权/超时/guard 异常全部终结为 `worker_not_ready`，取消 shutdown 会等待 fence 后释放 exact lease。production composition 25 passed、交叉 530 passed、preflight CLI 2 passed、范围 Ruff clean、范围 Pyright 0 errors、diff clean；实际 production config 通过新 CLI 返回 `agent_runtime_disabled`。旧生产 `qq-bot` 仍运行 image `sha256:4f02f5b17f66e54a2383af182fdd88b5806611918cce5576e8606e79848583de` / `GIT_COMMIT=6880dd0…`，未认证 `/api/admin/agent-runtime/summary` 为预期 401。实际配置没有 `agent_runtime`，所以没有 Runtime source/lease/worker。
+- last_verified: fence 在实际 provider 调用前持有进程锁和 SQLite owner/token CAS；同一 token 的不同 lease_until 可连续扩展，失权/超时/guard 异常全部终结为 `worker_not_ready`，取消 shutdown 会等待 fence 后释放 exact lease。production composition 25 passed、交叉 530 passed、preflight CLI 2 passed、范围 Ruff clean、范围 Pyright 0 errors、diff clean；新生产 `qq-bot` 为 image `sha256:6dc8ab9e8a30780f4dcdb276dd252c0cf13d29fc10a89572ddd3d31e2ddbc58b` / `GIT_COMMIT=ba32cdf`，容器 restart=0。容器内 preflight 返回 `agent_runtime_disabled`，未认证 `/api/admin/agent-runtime/summary` 为预期 401，`/app/storage` 无 Runtime 文件；NapCat 的 ID/image/start/restart 与发布前一致。实际配置没有 `agent_runtime`，所以没有 Runtime source/lease/worker。
 - do_not_redo: 不重写已验收 P0-P5 dark 合同；不把 HTTP POST、OneBot 自动 reconciliation 或 raw QZone transport 标记为已迁移；不把浏览器 token 当作 principal。
 - rollback: 禁用 `agent_runtime.enabled`，停止有界 worker，保留 `unknown`/`dispatching` ledger 供人工 reconcile；仅在 schema compatibility 检查后回滚 bot image，绝不重建 NapCat。
 
@@ -23,13 +23,13 @@
 - dirty baseline: 90 条 `git status --short` 记录，其中 4,724 个未跟踪文件；Agent Runtime v2 本身仍是未提交 WIP，与 NapCat、课程资料及其他用户 WIP 混存。
 - isolation: 不执行 `git add -A`、不清理/stash/reset 用户 WIP；不直接从当前工作树 build/deploy Docker image。若最终需要 release，必须从隔离的精确输入构造 bot-only artifact。
 - external boundary: 本次实现不发送 QQ/QZone/webhook，不启用 QZone live，不改 `BUILTIN_WIRE_PROFILE.validated`，不重启/重建 NapCat。
-- deployment boundary: 用户授权的 bot-only 暗态交付已完成，输入来自隔离 release worktree；生产配置保持 `agent_runtime.enabled=false`。source/backup/restore/rollback/Worldbook attestation 全绿前不得把它解释为或升级为 worker activation。
+- deployment boundary: 用户授权的 bot-only 暗态交付已完成，输入来自隔离 release worktree 的 `ba32cdf`；生产配置保持 `agent_runtime.enabled=false`。source/backup/restore/rollback/Worldbook attestation 全绿前不得把它解释为或升级为 worker activation。
 
 ## Parallel Ledger
 
 | Workstream | Owner | Conflict domain | Isolation | Status | Checkpoint |
 | --- | --- | --- | --- | --- | --- |
-| ARV2-A | Codex main | runtime composition, config, schemas, tests, docs, dark deployment | isolated release worktree; single writer | in_progress | Provider fence/lifecycle release candidate verified (25 focused, 530 cross); commit and bot-only dark deploy pending; real activation artifacts remain pending |
+| ARV2-A | Codex main | runtime composition, config, schemas, tests, docs, dark deployment | isolated release worktree; single writer | in_progress | `ba32cdf` provider fence/lifecycle dark release deployed and verified; real activation artifacts remain pending |
 | ARV2-B | bootstrap_tdd_tests | new bootstrap contract test only | shared workspace; sole writer for `tests/test_agent_runtime_bootstrap.py`; no production-file reads/writes | completed | Bootstrap contracts delivered; implementation integrated and cross-verified |
 | ARV2-C | arv2_attestation_audit | read-only current-snapshot attestation audit | shared workspace; no writes | completed | Confirmed absent production attestors and direct worker-start bypass; findings incorporated in A9 |
 | ARV2-D | arv2_a11_contracts | A11 test/repair design for profile, lease and manifest code | shared workspace; read-only, no test or production writes | completed | Confirmed four findings plus same-pattern renew lease; contracts and repair integrated by main writer |
@@ -43,10 +43,10 @@ The production implementation remains serial because composition, source paths a
 | Section | Status | Evidence / Note | Next Update |
 | --- | --- | --- | --- |
 | Context | done | P0-P5 dark/local complete; default-off production composition and bootstrap wiring complete | Keep source facts current |
-| Plan | in_progress | 默认关闭 bot-only fence release 已完成本地验收；真实 activation 仍按原 runbook 等待 artifact | 构建并替换 bot，再做暗态 runtime 核验 |
+| Plan | in_progress | 默认关闭 bot-only fence release `ba32cdf` 已完成生产发布；真实 activation 仍按原 runbook 等待 artifact | 只读核验真实 artifact |
 | Implementation | done | Provider 前 execution fence、exact owner/token extension、worker lifecycle、只读 preflight CLI 与 activation runbook 已完成 | 等待真实 source/restore/rollback/Worldbook evidence 才可 activation |
-| Verification | in_progress | fence focused 25 passed、交叉 530 passed、CLI 2 passed、范围 Ruff/Pyright/diff clean，独立复审无 P0-P2 | 做本轮 bot-only 暗态发布和 post-deploy 核验 |
-| Handoff | in_progress | P3: provider 必须协作取消，fence 故意串行 provider | 发布后更新 image/rollback 证据 |
+| Verification | done | fence focused 25 passed、交叉 530 passed、CLI 2 passed、范围 Ruff/Pyright/diff clean，独立复审无 P0-P2；new image/API/preflight/no-source/NapCat 均已核验 | 做未来真实 artifact preflight |
+| Handoff | pending | P3: provider 必须协作取消，fence 故意串行 provider | Update when real artifacts arrive |
 
 ## Todo
 
@@ -62,7 +62,7 @@ The production implementation remains serial because composition, source paths a
 - [x] Close current-snapshot release audit: recheck the exact worker lease before every tool use; project pre-dispatch cancellation to a cancelled run; classify group-policy denial as terminal; inject only offline OneBot reconciliation; require Admin operator headers without logging out the browser cookie session; reject unknown Runtime/Memory query keys; correct every rollback gate reference to `agent_runtime.enabled`.
 - [x] Commit, build and deploy the user-authorized dark release. `6880dd0` -> image `sha256:4f02f5b17f66…`; `agent_runtime.enabled=false`，未创建 Runtime/Memory/Worldbook production DB，未启动 worker；旧 image/static manifest 已保存，NapCat 未操作。
 - [x] Close execution-fence and lifecycle audit: provider entry now reserves the exact owner/token lease until tool completion; same-token extensions do not shorten TTL; lease extension/renew/stop cancellation cleans up observable ownership; guarded dispatches fail terminal as `worker_not_ready`; default-off bootstrap creates no source or worker, while fully attested startup owns one bounded worker.
-- [~] Commit, build and deploy the user-authorized fence follow-up as bot-only dark code; record new image, API/preflight/gate/no-worker evidence and rollback tag before resuming external activation artifacts.
+- [x] Commit, build and deploy the user-authorized fence follow-up as bot-only dark code. `ba32cdf` -> image `sha256:6dc8ab9e8a30…`; container image/API/preflight/no-source/no-worker/NapCat invariants are verified, and `omubot-bot:pre-agent-runtime-v2-fence-20260815` preserves `6880dd0` rollback.
 
 ## Decisions
 
@@ -136,6 +136,7 @@ The production implementation remains serial because composition, source paths a
 | Fence static analysis | scoped Ruff and Pyright over changed Runtime/bootstrap/preflight modules; `git diff --check` | clean / 0 errors / clean; whole-repository Pyright has 361 pre-existing optional sidecar/research errors reproduced in unchanged main |
 | Read-only preflight CLI | `tests/test_agent_runtime_preflight_cli.py`; CLI against production config | 2 passed; production reports `not_ready/agent_runtime_disabled`, without opening source stores |
 | Independent release review | ARV2-F read-only P0-P3 review | no P0-P2; provider cooperative-cancel and serialized throughput recorded as P3 activation constraints |
+| Provider fence dark release | isolated `GIT_COMMIT=ba32cdf docker compose build bot`; active `docker compose up -d --no-deps --force-recreate --no-build bot`; container/API/preflight/storage/log inspection | `qq-bot` image `6dc8ab9e…`, `GIT_COMMIT=ba32cdf`, restart=0; CLI disabled; Runtime API 401; no Runtime file; NapCat ID/image/start/restart unchanged |
 
 ## Test Ledger
 
@@ -179,10 +180,11 @@ The production implementation remains serial because composition, source paths a
 | A13-CROSS | Runtime/application/router/scheduler regression command above | 530 passed in 18.44s | Fence/lifecycle changes preserve selected dispatcher, trusted ingress, legacy routing and cancellation behavior | 2026-08-15 |
 | A13-STATIC | scoped Ruff/Pyright, `git diff --check`, CLI disabled production report | Ruff clean; Pyright 0 errors on changed modules; diff clean; CLI `not_ready/agent_runtime_disabled` | Full Pyright's 361 optional-dependency errors reproduce in unchanged main and are outside this release scope | 2026-08-15 |
 | A13-REVIEW | ARV2-F final read-only release review | No P0-P2; same-token concurrent extension regression added and passed | Provider must cooperate with cancellation; fence serializes provider execution, both recorded for canary evaluation | 2026-08-15 |
+| A13-PROD-DARK | Tag `4f02f5b17f66…` as `omubot-bot:pre-agent-runtime-v2-fence-20260815`; isolated `GIT_COMMIT=ba32cdf docker compose build bot`; tag `6dc8ab9e…` as `omubot-bot:latest`; active bot-only recreate; inspect/curl/container CLI/storage/logs | `qq-bot` image `6dc8ab9e…` / commit `ba32cdf`, restart=0; preflight `not_ready/agent_runtime_disabled`; unauth Runtime summary 401; no Runtime storage file; NapCat `19f6cf…` / v4.15.0 / same start / restart=0 | Default-off fence code is live and externally inert for Agent Runtime. Startup exposed one non-fatal pre-existing schedule LLM JSON parse warning; bot reached ready state and schedule module is outside this diff | 2026-08-15 |
 
 ## Next Session Starts Here
 
-- Direction: Default-off release `6880dd0` is live; the provider-fence follow-up is verified but not yet built/deployed. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
-- First action: Commit and bot-only deploy this fence follow-up from the isolated worktree, then verify the new image, correct Runtime API path, disabled preflight, no source/lease/worker and unchanged NapCat. Only then resume collection of operator-owned source/backup/restore/rollback/ACL/Worldbook artifacts for an activation decision.
+- Direction: Default-off fence release `ba32cdf` is live. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
+- First action: Obtain explicit operator-owned source locations/schema, backup payloads/digests, restore and rollback rehearsal records, named operator ACL and Worldbook authoritative-reread/reducer/no-dual-truth witness. Verify them read-only, including provider cooperative-cancellation and serial-throughput canary evidence, then produce a new independent review before any activation decision.
 - Open questions: Exact production source locations, backup artifact owner, restore rehearsal, rollback rehearsal and Worldbook witness remain unavailable; they must never be inferred from Admin state or replaced with test manifests.
 - Do not redo: P0-P5 dark/local implementation or the seven completed current-snapshot fixes. Do not turn dark deployment into real activation.
