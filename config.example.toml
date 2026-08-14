@@ -185,3 +185,64 @@ model = "qwen2.5-vl-7b-instruct"
 # 登录 Token
 # 环境变量: ADMIN_TOKEN
 admin_token = ""
+
+# ---------------------------------------------------------------------------
+# Agent Runtime v2 production activation（默认不配置，保持关闭）
+# ---------------------------------------------------------------------------
+# 不要把示例值或通配符直接复制到生产。只有五个独立 source、冻结备份与
+# restore/rollback 演练、具名 operator ACL、trusted trigger/Worldbook witness、
+# 以及 digest-pinned manifest 全部完成后，才由具名 operator 写入此段。
+#
+# [agent_runtime]
+# enabled = false
+# worker_id = "<unique-worker-id>"
+# max_workers = 1
+# principal_scopes = ["<exact-scope>"]
+# allowed_target_refs = ["<exact-target-ref>"]
+#
+# 每个 source 的 db_path 和 backup_path 必须是 storage/ 下彼此不同的真实文件。
+# `backup_sha256` 是冻结 payload 的 SHA-256；evidence ref 只标识外部演练记录，
+# 不写 credential、原始证据或敏感 target。
+# [agent_runtime.runtime]
+# db_path = "storage/<runtime-v2>.db"
+# expected_schema_version = 2
+# backup_path = "storage/<runtime-v2-backup>"
+# backup_sha256 = "sha256:<64-lowercase-hex>"
+# restore_evidence_ref = "restore:<opaque-reference>"
+# rollback_evidence_ref = "rollback:<opaque-reference>"
+#
+# [agent_runtime.memory]
+# db_path = "storage/<memory-v1>.db"
+# expected_schema_version = 1
+# backup_path = "storage/<memory-v1-backup>"
+# backup_sha256 = "sha256:<64-lowercase-hex>"
+# restore_evidence_ref = "restore:<opaque-reference>"
+# rollback_evidence_ref = "rollback:<opaque-reference>"
+#
+# [agent_runtime.worldbook]
+# db_path = "storage/<worldbook-v1>.db"
+# expected_schema_version = 1
+# backup_path = "storage/<worldbook-v1-backup>"
+# backup_sha256 = "sha256:<64-lowercase-hex>"
+# restore_evidence_ref = "restore:<opaque-reference>"
+# rollback_evidence_ref = "rollback:<opaque-reference>"
+#
+# [agent_runtime.operator]
+# db_path = "storage/<operator-v1>.db"
+# expected_schema_version = 1
+# backup_path = "storage/<operator-v1-backup>"
+# backup_sha256 = "sha256:<64-lowercase-hex>"
+# restore_evidence_ref = "restore:<opaque-reference>"
+# rollback_evidence_ref = "rollback:<opaque-reference>"
+#
+# [agent_runtime.invocation]
+# db_path = "storage/<invocation-v2>.db"
+# expected_schema_version = 2
+# backup_path = "storage/<invocation-v2-backup>"
+# backup_sha256 = "sha256:<64-lowercase-hex>"
+# restore_evidence_ref = "restore:<opaque-reference>"
+# rollback_evidence_ref = "rollback:<opaque-reference>"
+#
+# [agent_runtime.attestation]
+# manifest_path = "storage/<agent-runtime-rollout-attestation>.json"
+# manifest_sha256 = "sha256:<64-lowercase-hex>"

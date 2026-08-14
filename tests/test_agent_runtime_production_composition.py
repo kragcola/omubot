@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib
 import importlib.util
@@ -16,6 +17,7 @@ from typing import Any, cast
 
 import pytest
 
+import services.agent_runtime.executor as executor_module
 from kernel.types import Tool, ToolContext, ToolEffect, ToolSpec
 from services.agent_runtime.activation import ProductionActivationProfileV1
 from services.agent_runtime.invocation_store import AuthoritativeTriggerV1
@@ -117,6 +119,12 @@ class _LeaseReplacingReadTool(_ReadTool):
             assert callback is not None
             await callback()
         return result
+
+
+class _OverlongFenceReadTool(_ReadTool):
+    @property
+    def spec(self) -> ToolSpec:
+        return replace(super().spec, timeout_ms=300_000)
 
 
 class _RecordingLLM:
@@ -951,6 +959,435 @@ async def test_dispatcher_rechecks_exact_lease_before_each_tool_use(
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_fences_expired_lease_before_provider_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _api()
+    settings = await _prepared_settings(tmp_path)
+    registry = ToolRegistry()
+    provider = _ReadTool()
+    registry.register(provider)
+    assembly = await api.compose_production_runtime_from_settings(
+        settings,
+        repo_root=tmp_path,
+        registry=registry,
+    )
+    replacement = None
+    try:
+        acquired_at = datetime.now(UTC)
+        await assembly.start_worker(
+            lease_ttl_seconds=300,
+            now=acquired_at,
+        )
+        first_lease = assembly._worker_lease
+        assert first_lease is not None
+        assert assembly.dispatcher._worker_lease == first_lease
+        assert await assembly.invocations.has_worker_lease(
+            first_lease,
+            now=acquired_at,
+        )
+        expired_at = acquired_at + timedelta(seconds=301)
+        original_dispatch = assembly.executor._dispatch
+
+        async def expire_first_lease_before_provider(**kwargs: Any) -> Any:
+            nonlocal replacement
+            assert kwargs["worker_id"] == first_lease.owner_id
+            replacement = await assembly.invocations.acquire_worker_lease(
+                worker_id="agent-runtime-worker-replacement",
+                lease_ttl_seconds=300,
+                now=expired_at,
+            )
+            assert replacement is not None
+            assert replacement.owner_id != first_lease.owner_id
+            assert replacement.lease_token != first_lease.lease_token
+            assert await assembly.invocations.has_worker_lease(
+                replacement,
+                now=expired_at,
+            )
+            assert not await assembly.invocations.has_worker_lease(
+                first_lease,
+                now=expired_at,
+            )
+            return await original_dispatch(**kwargs)
+
+        monkeypatch.setattr(
+            assembly.executor,
+            "_dispatch",
+            expire_first_lease_before_provider,
+        )
+        trigger = AuthoritativeTriggerV1.from_onebot_message(
+            group_id="123",
+            user_id="456",
+            message_id="789",
+            session_id="group_123",
+            registry_generation=1,
+            granted_scopes=("runtime:read",),
+            allowed_target_refs=("onebot:group:123:message:789",),
+        )
+        record = await assembly.invocations.record(trigger)
+
+        results = await assembly.dispatcher.dispatch_tool_uses(
+            invocation_id=record.invocation_id,
+            tool_uses=(
+                {
+                    "id": "tool-use-lease-fence-1",
+                    "name": provider.name,
+                    "arguments": {"value": 1},
+                },
+            ),
+            bot=None,
+        )
+
+        assert replacement is not None
+        assert provider.calls == 0
+        assert results == ['{"code":"worker_not_ready","status":"rejected"}']
+    finally:
+        if replacement is not None:
+            await assembly.invocations.release_worker_lease(replacement)
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_reserves_worker_lease_until_provider_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _api()
+    settings = await _prepared_settings(tmp_path)
+    registry = ToolRegistry()
+    provider = _ReadTool()
+    registry.register(provider)
+    assembly = await api.compose_production_runtime_from_settings(
+        settings,
+        repo_root=tmp_path,
+        registry=registry,
+    )
+    replacement = None
+    dispatch_task: asyncio.Task[list[str]] | None = None
+    stop_task: asyncio.Task[None] | None = None
+    provider_entry = asyncio.Event()
+    allow_provider = asyncio.Event()
+    original_timeout = executor_module.asyncio.timeout
+
+    class _PauseBeforeProvider:
+        async def __aenter__(self) -> None:
+            provider_entry.set()
+            await allow_provider.wait()
+
+        async def __aexit__(self, *args: Any) -> bool:
+            return False
+
+    try:
+        acquired_at = datetime.now(UTC)
+        await assembly.start_worker(lease_ttl_seconds=5, now=acquired_at)
+        first_lease = assembly._worker_lease
+        assert first_lease is not None
+
+        def pause_after_fence(_delay: float) -> Any:
+            return _PauseBeforeProvider()
+
+        monkeypatch.setattr(executor_module.asyncio, "timeout", pause_after_fence)
+        trigger = AuthoritativeTriggerV1.from_onebot_message(
+            group_id="123",
+            user_id="456",
+            message_id="789",
+            session_id="group_123",
+            registry_generation=1,
+            granted_scopes=("runtime:read",),
+            allowed_target_refs=("onebot:group:123:message:789",),
+        )
+        record = await assembly.invocations.record(trigger)
+        dispatch_task = asyncio.create_task(
+            assembly.dispatcher.dispatch_tool_uses(
+                invocation_id=record.invocation_id,
+                tool_uses=(
+                    {
+                        "id": "tool-use-lease-reservation-1",
+                        "name": provider.name,
+                        "arguments": {"value": 1},
+                    },
+                ),
+                bot=None,
+            )
+        )
+        await asyncio.wait_for(provider_entry.wait(), timeout=1.0)
+        first_expiry = datetime.fromisoformat(
+            first_lease.lease_until.replace("Z", "+00:00")
+        )
+        replacement = await assembly.invocations.acquire_worker_lease(
+            worker_id="agent-runtime-worker-replacement",
+            lease_ttl_seconds=30,
+            now=first_expiry + timedelta(milliseconds=1),
+        )
+
+        assert replacement is None
+        stop_task = asyncio.create_task(assembly.stop_worker())
+        await asyncio.sleep(0)
+        assert not stop_task.done(), "shutdown must wait for the provider fence"
+        allow_provider.set()
+        results = await dispatch_task
+        assert json.loads(results[0]) == {
+            "output": {"value": 1},
+            "status": "succeeded",
+        }
+        assert provider.calls == 1
+        await stop_task
+        assert assembly._worker_lease is None
+    finally:
+        monkeypatch.setattr(executor_module.asyncio, "timeout", original_timeout)
+        allow_provider.set()
+        if dispatch_task is not None and not dispatch_task.done():
+            dispatch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await dispatch_task
+        if stop_task is not None and not stop_task.done():
+            stop_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stop_task
+        if replacement is not None:
+            await assembly.invocations.release_worker_lease(replacement)
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_dispatches_accept_same_token_lease_extensions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _api()
+    settings = await _prepared_settings(tmp_path)
+    registry = ToolRegistry()
+    provider = _ReadTool()
+    registry.register(provider)
+    assembly = await api.compose_production_runtime_from_settings(
+        settings,
+        repo_root=tmp_path,
+        registry=registry,
+    )
+    both_captured = asyncio.Event()
+    release_execution = asyncio.Event()
+    captured_count = 0
+    first_task: asyncio.Task[list[str]] | None = None
+    second_task: asyncio.Task[list[str]] | None = None
+
+    try:
+        await assembly.start_worker(now=datetime.now(UTC))
+        initial = assembly._worker_lease
+        assert initial is not None
+        original_execute = assembly.coordinator.execute_tool
+
+        async def pause_after_dispatcher_captures_lease(**kwargs: Any) -> Any:
+            nonlocal captured_count
+            captured_count += 1
+            if captured_count == 2:
+                both_captured.set()
+            await release_execution.wait()
+            return await original_execute(**kwargs)
+
+        monkeypatch.setattr(
+            assembly.coordinator,
+            "execute_tool",
+            pause_after_dispatcher_captures_lease,
+        )
+        first_trigger = AuthoritativeTriggerV1.from_onebot_message(
+            group_id="123",
+            user_id="456",
+            message_id="789",
+            session_id="group_123",
+            registry_generation=1,
+            granted_scopes=("runtime:read",),
+            allowed_target_refs=("onebot:group:123:message:789",),
+        )
+        second_trigger = AuthoritativeTriggerV1.from_onebot_message(
+            group_id="123",
+            user_id="456",
+            message_id="790",
+            session_id="group_123",
+            registry_generation=1,
+            granted_scopes=("runtime:read",),
+            allowed_target_refs=("onebot:group:123:message:789",),
+        )
+        first_record = await assembly.invocations.record(first_trigger)
+        second_record = await assembly.invocations.record(second_trigger)
+        first_task = asyncio.create_task(
+            assembly.dispatcher.dispatch_tool_uses(
+                invocation_id=first_record.invocation_id,
+                tool_uses=(
+                    {
+                        "id": "concurrent-fence-1",
+                        "name": provider.name,
+                        "arguments": {"value": 1},
+                    },
+                ),
+                bot=None,
+            )
+        )
+        second_task = asyncio.create_task(
+            assembly.dispatcher.dispatch_tool_uses(
+                invocation_id=second_record.invocation_id,
+                tool_uses=(
+                    {
+                        "id": "concurrent-fence-2",
+                        "name": provider.name,
+                        "arguments": {"value": 2},
+                    },
+                ),
+                bot=None,
+            )
+        )
+        await asyncio.wait_for(both_captured.wait(), timeout=1.0)
+        assert assembly._worker_lease == initial
+
+        release_execution.set()
+        first_results, second_results = await asyncio.gather(first_task, second_task)
+
+        assert json.loads(first_results[0]) == {
+            "output": {"value": 1},
+            "status": "succeeded",
+        }
+        assert json.loads(second_results[0]) == {
+            "output": {"value": 2},
+            "status": "succeeded",
+        }
+        assert provider.calls == 2
+    finally:
+        release_execution.set()
+        for task in (first_task, second_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_final_fence_error_finishes_call_without_provider_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _api()
+    settings = await _prepared_settings(tmp_path)
+    registry = ToolRegistry()
+    provider = _ReadTool()
+    registry.register(provider)
+    assembly = await api.compose_production_runtime_from_settings(
+        settings,
+        repo_root=tmp_path,
+        registry=registry,
+    )
+
+    class _ExplodingFence:
+        def __await__(self) -> Any:
+            async def fail() -> None:
+                raise RuntimeError("simulated final fence failure")
+
+            return fail().__await__()
+
+        async def __aenter__(self) -> bool:
+            raise RuntimeError("simulated final fence failure")
+
+        async def __aexit__(self, *args: Any) -> bool:
+            return False
+
+    try:
+        await assembly.start_worker(now=datetime.now(UTC))
+        original_dispatch = assembly.executor._dispatch
+
+        async def inject_failing_fence(**kwargs: Any) -> Any:
+            if "execution_fence" in kwargs:
+                kwargs["execution_fence"] = lambda *_args: _ExplodingFence()
+            else:
+                kwargs["execution_guard"] = lambda *_args: _ExplodingFence()
+            return await original_dispatch(**kwargs)
+
+        monkeypatch.setattr(assembly.executor, "_dispatch", inject_failing_fence)
+        trigger = AuthoritativeTriggerV1.from_onebot_message(
+            group_id="123",
+            user_id="456",
+            message_id="789",
+            session_id="group_123",
+            registry_generation=1,
+            granted_scopes=("runtime:read",),
+            allowed_target_refs=("onebot:group:123:message:789",),
+        )
+        record = await assembly.invocations.record(trigger)
+        tool_use_id = "tool-use-fence-error-1"
+        results = await assembly.dispatcher.dispatch_tool_uses(
+            invocation_id=record.invocation_id,
+            tool_uses=(
+                {
+                    "id": tool_use_id,
+                    "name": provider.name,
+                    "arguments": {"value": 1},
+                },
+            ),
+            bot=None,
+        )
+        call = await assembly.runtime.get_tool_call(
+            api._derived_id("call", record.invocation_id, tool_use_id, "0")
+        )
+
+        assert results == ['{"code":"worker_not_ready","status":"rejected"}']
+        assert provider.calls == 0
+        assert call is not None and call.status == "failed_terminal"
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_rejects_provider_when_execution_fence_exceeds_storage_cap(
+    tmp_path: Path,
+) -> None:
+    api = _api()
+    settings = await _prepared_settings(tmp_path)
+    registry = ToolRegistry()
+    provider = _OverlongFenceReadTool()
+    registry.register(provider)
+    assembly = await api.compose_production_runtime_from_settings(
+        settings,
+        repo_root=tmp_path,
+        registry=registry,
+    )
+    try:
+        await assembly.start_worker(now=datetime.now(UTC))
+        trigger = AuthoritativeTriggerV1.from_onebot_message(
+            group_id="123",
+            user_id="456",
+            message_id="789",
+            session_id="group_123",
+            registry_generation=1,
+            granted_scopes=("runtime:read",),
+            allowed_target_refs=("onebot:group:123:message:789",),
+        )
+        record = await assembly.invocations.record(trigger)
+        tool_use_id = "tool-use-overlong-fence-1"
+
+        results = await assembly.dispatcher.dispatch_tool_uses(
+            invocation_id=record.invocation_id,
+            tool_uses=(
+                {
+                    "id": tool_use_id,
+                    "name": provider.name,
+                    "arguments": {"value": 1},
+                },
+            ),
+            bot=None,
+        )
+        call = await assembly.runtime.get_tool_call(
+            api._derived_id("call", record.invocation_id, tool_use_id, "0")
+        )
+
+        assert results == ['{"code":"worker_not_ready","status":"rejected"}']
+        assert provider.calls == 0
+        assert call is not None
+        assert call.status == "failed_terminal"
+        assert call.error_code == "worker_not_ready"
+    finally:
+        await assembly.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_shutdown_releases_lease_before_cancellation_escapes(
     tmp_path: Path,
 ) -> None:
@@ -983,3 +1420,59 @@ async def test_worker_shutdown_releases_lease_before_cancellation_escapes(
         await stop_task
     assert not await assembly.invocations.has_worker_lease(lease)
     await assembly.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_shutdown_cancellation_waits_for_fence_and_releases_lease(
+    tmp_path: Path,
+) -> None:
+    api = _api()
+    settings = await _prepared_settings(tmp_path)
+    assembly = await api.compose_production_runtime_from_settings(
+        settings,
+        repo_root=tmp_path,
+        registry=ToolRegistry(),
+    )
+    fence_entered = asyncio.Event()
+    release_fence = asyncio.Event()
+    fence_task: asyncio.Task[None] | None = None
+    stop_task: asyncio.Task[None] | None = None
+
+    async def hold_provider_fence(lease: Any) -> None:
+        async with assembly.execution_fence(lease, timeout_ms=1_000):
+            fence_entered.set()
+            await release_fence.wait()
+
+    try:
+        await assembly.start_worker(now=datetime.now(UTC))
+        initial = assembly._worker_lease
+        assert initial is not None
+        fence_task = asyncio.create_task(hold_provider_fence(initial))
+        await asyncio.wait_for(fence_entered.wait(), timeout=1.0)
+        fenced_lease = assembly._worker_lease
+        assert fenced_lease is not None
+
+        stop_task = asyncio.create_task(assembly.stop_worker())
+        await asyncio.sleep(0)
+        assert not stop_task.done()
+        stop_task.cancel()
+        await asyncio.sleep(0)
+        assert not stop_task.done(), "shutdown cleanup must survive a waiting cancellation"
+
+        release_fence.set()
+        await fence_task
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+
+        assert assembly._worker_lease is None
+        assert assembly.dispatcher._worker_lease is None
+        assert not await assembly.invocations.has_worker_lease(fenced_lease)
+    finally:
+        release_fence.set()
+        if fence_task is not None and not fence_task.done():
+            await fence_task
+        if stop_task is not None and not stop_task.done():
+            stop_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await stop_task
+        await assembly.close()

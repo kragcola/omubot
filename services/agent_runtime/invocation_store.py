@@ -504,6 +504,82 @@ class TrustedInvocationStoreV1:
                 raise
         return renewed
 
+    async def extend_worker_lease(
+        self,
+        lease: WorkerLeaseV1,
+        *,
+        lease_ttl_seconds: float,
+        now: datetime | None = None,
+    ) -> WorkerLeaseV1 | None:
+        """Reserve an exact owner/token lease without rotating its token.
+
+        Provider execution needs a stable token while a process-local fence is
+        held.  Unlike normal renewal, this deliberately preserves that token
+        but still uses one SQLite transaction and a compare-and-swap over the
+        exact owner/token pair.  A stale token, expired lease, or concurrent
+        takeover therefore cannot be extended.
+        """
+
+        if not isinstance(lease, WorkerLeaseV1):
+            raise TypeError("lease must be a WorkerLeaseV1")
+        extended_at = _lease_now(now)
+        requested_until = extended_at + timedelta(
+            seconds=_clean_lease_ttl(lease_ttl_seconds)
+        )
+        extended: WorkerLeaseV1 | None = None
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                current = await _fetch_worker_lease(db)
+                if (
+                    current is None
+                    or not _lease_owner_token_matches(current, lease)
+                    or not _lease_is_active(current, extended_at)
+                ):
+                    await db.rollback()
+                    return None
+                current_until = _aware_utc(
+                    current.lease_until,
+                    field="persisted worker lease",
+                )
+                lease_until = max(current_until, requested_until)
+                if lease_until == current_until:
+                    await db.rollback()
+                    return current
+                extended = WorkerLeaseV1(
+                    owner_id=lease.owner_id,
+                    lease_token=lease.lease_token,
+                    lease_until=_iso_utc(lease_until),
+                )
+                updated = await db.execute(
+                    """
+                    UPDATE agent_runtime_worker_lease
+                    SET lease_until = ?, renewed_at = ?
+                    WHERE lease_name = ? AND owner_id = ? AND lease_token = ?
+                          AND lease_until = ?
+                    """,
+                    (
+                        extended.lease_until,
+                        _iso_utc(extended_at),
+                        _WORKER_LEASE_NAME,
+                        lease.owner_id,
+                        lease.lease_token,
+                        current.lease_until,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("worker lease execution fence lost compare-and-swap")
+                await db.commit()
+            except BaseException:
+                if extended is None:
+                    await _rollback_preserving_cancellation(db)
+                else:
+                    await _cleanup_abandoned_worker_lease_extension(db, extended)
+                raise
+        assert extended is not None
+        return extended
+
     async def has_worker_lease(
         self,
         lease: WorkerLeaseV1,
@@ -759,6 +835,18 @@ def _lease_matches(current: WorkerLeaseV1, expected: WorkerLeaseV1) -> bool:
     )
 
 
+def _lease_owner_token_matches(
+    current: WorkerLeaseV1,
+    expected: WorkerLeaseV1,
+) -> bool:
+    """Match a fence token without weakening full-lease checks elsewhere."""
+
+    return (
+        current.owner_id == expected.owner_id
+        and current.lease_token == expected.lease_token
+    )
+
+
 def _safe_text(value: object, *, field: str, maximum: int) -> str:
     text = str(value or "").strip()
     if (
@@ -830,6 +918,33 @@ async def _cleanup_abandoned_worker_lease_attempt(
             WHERE lease_name = ? AND owner_id = ? AND lease_token = ?
             """,
             (_WORKER_LEASE_NAME, lease.owner_id, lease.lease_token),
+        )
+        await db.commit()
+
+    await _await_required_cleanup(asyncio.create_task(cleanup()))
+
+
+async def _cleanup_abandoned_worker_lease_extension(
+    db: aiosqlite.Connection,
+    lease: WorkerLeaseV1,
+) -> None:
+    """Remove a committed extension without deleting its prior same-token lease."""
+
+    async def cleanup() -> None:
+        await db.rollback()
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            """
+            DELETE FROM agent_runtime_worker_lease
+            WHERE lease_name = ? AND owner_id = ? AND lease_token = ?
+                  AND lease_until = ?
+            """,
+            (
+                _WORKER_LEASE_NAME,
+                lease.owner_id,
+                lease.lease_token,
+                lease.lease_until,
+            ),
         )
         await db.commit()
 

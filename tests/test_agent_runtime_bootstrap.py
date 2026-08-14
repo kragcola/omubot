@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -473,5 +475,361 @@ async def test_bootstrap_dark_rehearsal_never_self_attests_activation_or_rollbac
             gate["status"] == "not_assessed"
             for gate in rollback["gates"].values()
         )
+    finally:
+        await lifecycle.stop()
+
+
+@pytest.mark.asyncio
+async def test_default_off_bootstrap_creates_no_sources_or_renewal_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm = _RecordingLLM()
+    ctx = _BootstrapContext(
+        agent_runtime_settings=SimpleNamespace(enabled=False),
+        registry=ToolRegistry(),
+        llm_client=llm,
+    )
+    created_tasks: list[Any] = []
+    original_create_task = asyncio.create_task
+
+    def record_task(coroutine: Any, *args: Any, **kwargs: Any) -> Any:
+        created_tasks.append(coroutine)
+        return original_create_task(coroutine, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_task", record_task)
+    lifecycle = _new_lifecycle(ctx, repo_root=tmp_path)
+
+    await lifecycle.start()
+    await lifecycle.stop()
+
+    assert ctx.storage_accesses == 0
+    assert not (tmp_path / "storage").exists()
+    assert created_tasks == []
+    assert llm.dispatcher_calls == []
+
+
+def _write_pinned_activation_ready_attestation(settings: Any, tmp_path: Path) -> None:
+    path = tmp_path / "storage/agent-runtime/rollout-attestation.json"
+    settings.attestation = SimpleNamespace(
+        manifest_path=str(path.relative_to(tmp_path)),
+        manifest_sha256="sha256:" + "0" * 64,
+    )
+    profile = ProductionActivationProfileV1.from_settings(settings, repo_root=tmp_path)
+    assert profile is not None
+    evidence_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+    def ready_gates(names: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+        return {
+            gate: {
+                "status": "ready",
+                "reason": "verified",
+                "evidence_at": evidence_at,
+                "evidence_ref": f"evidence:agent-runtime-bootstrap:{gate}:20260814",
+            }
+            for gate in names
+        }
+
+    manifest = {
+        "contract_version": "agent_runtime_rollout_attestation.v1",
+        "schema_version": 1,
+        "profile_fingerprint": profile.attestation_profile_fingerprint(),
+        "activation": ready_gates(ACTIVATION_GATE_NAMES),
+        "rollback": ready_gates(ROLLBACK_GATE_NAMES),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        manifest,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    path.write_bytes(payload)
+    settings.attestation = SimpleNamespace(
+        manifest_path=str(path.relative_to(tmp_path)),
+        manifest_sha256="sha256:" + hashlib.sha256(payload).hexdigest(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_attested_activation_bootstrap_starts_one_bounded_worker_and_executes_dispatch(
+    tmp_path: Path,
+) -> None:
+    settings = await _prepared_settings(tmp_path)
+    _write_pinned_activation_ready_attestation(settings, tmp_path)
+    registry = ToolRegistry()
+    tool = DateTimeTool()
+    registry.register(tool)
+    llm = _RecordingLLM()
+    ctx = _BootstrapContext(
+        agent_runtime_settings=settings,
+        registry=registry,
+        llm_client=llm,
+    )
+    lifecycle = _new_lifecycle(ctx, repo_root=tmp_path)
+
+    try:
+        await lifecycle.start()
+        assembly = ctx.agent_runtime_assembly
+        dispatcher = llm.dispatcher
+        assert assembly is not None
+        assert dispatcher is not None
+        lease = getattr(assembly, "_worker_lease", None)
+        assert lease is not None
+        assert getattr(dispatcher, "_worker_lease", None) == lease
+        assert (
+            await assembly.invocations.acquire_worker_lease(
+                worker_id="agent-runtime-bootstrap-second-worker",
+                lease_ttl_seconds=30,
+            )
+            is None
+        )
+
+        ingress = ctx.agent_runtime_host_ingress
+        assert ingress is not None
+        invocation = await ingress.record_onebot_message(
+            group_id="123",
+            user_id="456",
+            message_id="789",
+        )
+        results = await dispatcher.dispatch_tool_uses(
+            invocation_id=invocation.invocation_id,
+            tool_uses=(
+                {"id": "activation-ready-datetime", "name": tool.name, "arguments": {}},
+            ),
+            bot=None,
+        )
+
+        assert len(results) == 1
+        assert json.loads(results[0])["status"] == "succeeded"
+    finally:
+        await lifecycle.stop()
+
+    _assert_context_is_detached(ctx)
+    assert llm.dispatcher is None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_renewal_failure_clears_worker_lease_and_preserves_governed_dispatcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = await _prepared_settings(tmp_path)
+    _write_pinned_activation_ready_attestation(settings, tmp_path)
+    registry = ToolRegistry()
+    tool = DateTimeTool()
+    registry.register(tool)
+    llm = _RecordingLLM()
+    ctx = _BootstrapContext(
+        agent_runtime_settings=settings,
+        registry=registry,
+        llm_client=llm,
+    )
+    lifecycle = _new_lifecycle(ctx, repo_root=tmp_path)
+
+    try:
+        await lifecycle.start()
+        assembly = ctx.agent_runtime_assembly
+        assert assembly is not None
+        assert getattr(assembly, "_worker_lease", None) is not None
+
+        renewal_attempted = asyncio.Event()
+        original_sleep = asyncio.sleep
+
+        async def fail_renewal(_store: Any, _lease: Any, **_kwargs: Any) -> None:
+            renewal_attempted.set()
+            return None
+
+        async def immediate_sleep(_delay: float, result: Any = None) -> Any:
+            await original_sleep(0)
+            return result
+
+        monkeypatch.setattr(
+            TrustedInvocationStoreV1,
+            "renew_worker_lease",
+            fail_renewal,
+        )
+        monkeypatch.setattr(asyncio, "sleep", immediate_sleep)
+        for _ in range(64):
+            if renewal_attempted.is_set() and getattr(assembly, "_worker_lease", None) is None:
+                break
+            await original_sleep(0)
+
+        assert renewal_attempted.is_set(), "the active worker must schedule lease renewal"
+        assert llm.dispatcher is assembly.dispatcher
+        assert getattr(assembly, "_worker_lease", None) is None
+        assert getattr(assembly.dispatcher, "_worker_lease", None) is None
+
+        ingress = ctx.agent_runtime_host_ingress
+        assert ingress is not None
+        invocation = await ingress.record_onebot_message(
+            group_id="123",
+            user_id="456",
+            message_id="789",
+        )
+        results = await assembly.dispatcher.dispatch_tool_uses(
+            invocation_id=invocation.invocation_id,
+            tool_uses=(
+                {"id": "renewal-failure-datetime", "name": tool.name, "arguments": {}},
+            ),
+            bot=None,
+        )
+        assert results == ['{"code":"worker_not_ready","status":"rejected"}']
+
+        replacement_store = TrustedInvocationStoreV1(
+            tmp_path / settings.invocation.db_path
+        )
+        await replacement_store.init()
+        try:
+            replacement = await replacement_store.acquire_worker_lease(
+                worker_id="agent-runtime-bootstrap-replacement-worker",
+                lease_ttl_seconds=30,
+            )
+            assert replacement is not None
+            assert await replacement_store.release_worker_lease(replacement)
+        finally:
+            await replacement_store.close()
+    finally:
+        await lifecycle.stop()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_shutdown_cancellation_finishes_renewal_and_exact_lease_release_before_detach(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = await _prepared_settings(tmp_path)
+    _write_pinned_activation_ready_attestation(settings, tmp_path)
+    llm = _RecordingLLM()
+    ctx = _BootstrapContext(
+        agent_runtime_settings=settings,
+        registry=ToolRegistry(),
+        llm_client=llm,
+    )
+    lifecycle = _new_lifecycle(ctx, repo_root=tmp_path)
+    allow_renewal = asyncio.Event()
+    renewal_entered = asyncio.Event()
+    renewal_finished = asyncio.Event()
+    allow_release = asyncio.Event()
+    release_started = asyncio.Event()
+    shutdown: asyncio.Task[Any] | None = None
+
+    try:
+        await lifecycle.start()
+        assembly = ctx.agent_runtime_assembly
+        assert assembly is not None
+        lease = getattr(assembly, "_worker_lease", None)
+        assert lease is not None
+
+        original_sleep = asyncio.sleep
+
+        async def block_renewal(_store: Any, current: Any, **_kwargs: Any) -> Any:
+            renewal_entered.set()
+            try:
+                await allow_renewal.wait()
+            finally:
+                renewal_finished.set()
+            return current
+
+        async def immediate_sleep(_delay: float, result: Any = None) -> Any:
+            await original_sleep(0)
+            return result
+
+        monkeypatch.setattr(
+            TrustedInvocationStoreV1,
+            "renew_worker_lease",
+            block_renewal,
+        )
+        monkeypatch.setattr(asyncio, "sleep", immediate_sleep)
+        for _ in range(64):
+            if renewal_entered.is_set():
+                break
+            await original_sleep(0)
+        assert renewal_entered.is_set(), "the active worker must own a renewal task"
+
+        released: list[Any] = []
+        original_release = assembly.invocations.release_worker_lease
+
+        async def delayed_release(current: Any) -> bool:
+            released.append(current)
+            release_started.set()
+            await allow_release.wait()
+            return await original_release(current)
+
+        monkeypatch.setattr(
+            assembly.invocations,
+            "release_worker_lease",
+            delayed_release,
+        )
+        shutdown = asyncio.create_task(lifecycle.stop())
+        for _ in range(64):
+            if release_started.is_set():
+                break
+            await original_sleep(0)
+        assert release_started.is_set(), "shutdown must release the active worker lease"
+        assert renewal_finished.is_set()
+        assert released == [lease]
+        assert llm.dispatcher is assembly.dispatcher
+
+        shutdown.cancel()
+        await original_sleep(0)
+        assert not shutdown.done()
+        assert llm.dispatcher is assembly.dispatcher
+
+        allow_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown
+
+        assert renewal_finished.is_set()
+        assert released == [lease]
+        lease_probe = TrustedInvocationStoreV1(tmp_path / settings.invocation.db_path)
+        await lease_probe.init()
+        try:
+            assert not await lease_probe.has_worker_lease(lease)
+        finally:
+            await lease_probe.close()
+        _assert_context_is_detached(ctx)
+        assert llm.dispatcher is None
+    finally:
+        allow_renewal.set()
+        allow_release.set()
+        if shutdown is not None and not shutdown.done():
+            shutdown.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await shutdown
+        await lifecycle.stop()
+
+
+@pytest.mark.asyncio
+async def test_not_ready_attestation_bootstrap_never_acquires_worker_lease(
+    tmp_path: Path,
+) -> None:
+    settings = await _prepared_settings(tmp_path)
+    llm = _RecordingLLM()
+    ctx = _BootstrapContext(
+        agent_runtime_settings=settings,
+        registry=ToolRegistry(),
+        llm_client=llm,
+    )
+    lifecycle = _new_lifecycle(ctx, repo_root=tmp_path)
+
+    try:
+        await lifecycle.start()
+        assembly = ctx.agent_runtime_assembly
+        readiness = ctx.agent_runtime_readiness
+        assert assembly is not None
+        assert readiness is not None
+        assert _readiness_status(await readiness.activation_readiness()) == "not_ready"
+        assert getattr(assembly, "_worker_lease", None) is None
+        assert getattr(assembly.dispatcher, "_worker_lease", None) is None
+
+        probe = await assembly.invocations.acquire_worker_lease(
+            worker_id="agent-runtime-bootstrap-attestation-probe",
+            lease_ttl_seconds=30,
+        )
+        assert probe is not None
+        assert await assembly.invocations.release_worker_lease(probe)
     finally:
         await lifecycle.stop()

@@ -274,3 +274,210 @@ async def test_cancelled_worker_lease_renewal_cleans_committed_rotated_lease(
                 await renew_task
         await second.close()
         await first.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_fence_lease_extension_requires_current_exact_token_and_ttl_cap(
+    tmp_path: Path,
+) -> None:
+    _trigger_type, store_type = _api()
+    store = store_type(tmp_path / "invocations.db")
+    await store.init()
+    now = datetime(2026, 8, 14, 8, 0, tzinfo=UTC)
+    try:
+        initial = await store.acquire_worker_lease(
+            worker_id="agent-runtime-worker-1",
+            lease_ttl_seconds=30,
+            now=now,
+        )
+        assert initial is not None
+        preserved = await store.extend_worker_lease(
+            initial,
+            lease_ttl_seconds=20,
+            now=now + timedelta(seconds=1),
+        )
+        assert preserved == initial
+        assert await store.has_worker_lease(
+            initial,
+            now=now + timedelta(seconds=29),
+        )
+        extended = await store.extend_worker_lease(
+            initial,
+            lease_ttl_seconds=31,
+            now=now + timedelta(seconds=1),
+        )
+        assert extended is not None
+        assert extended.owner_id == initial.owner_id
+        assert extended.lease_token == initial.lease_token
+        assert extended.lease_until != initial.lease_until
+        assert await store.has_worker_lease(
+            extended,
+            now=now + timedelta(seconds=31),
+        )
+
+        renewed = await store.renew_worker_lease(
+            extended,
+            lease_ttl_seconds=30,
+            now=now + timedelta(seconds=2),
+        )
+        assert renewed is not None
+        assert renewed.lease_token != extended.lease_token
+        assert (
+            await store.extend_worker_lease(
+                extended,
+                lease_ttl_seconds=30,
+                now=now + timedelta(seconds=3),
+            )
+            is None
+        )
+        with pytest.raises(ValueError, match="worker lease ttl"):
+            await store.extend_worker_lease(
+                renewed,
+                lease_ttl_seconds=301,
+                now=now + timedelta(seconds=3),
+            )
+        assert await store.release_worker_lease(renewed)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_execution_fence_extension_cleans_committed_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _trigger_type, store_type = _api()
+    path = tmp_path / "invocations.db"
+    first = store_type(path)
+    second = store_type(path)
+    await first.init()
+    await second.init()
+    now = datetime(2026, 8, 14, 8, 0, tzinfo=UTC)
+    initial = await first.acquire_worker_lease(
+        worker_id="agent-runtime-worker-1",
+        lease_ttl_seconds=30,
+        now=now,
+    )
+    assert initial is not None
+    db = first._db
+    assert db is not None
+    original_commit = db.commit
+    commit_finished = asyncio.Event()
+    allow_commit_return = asyncio.Event()
+    commit_calls = 0
+
+    async def commit_after_persisting_extended_lease() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls != 1:
+            await original_commit()
+            return
+        await original_commit()
+        commit_finished.set()
+        await allow_commit_return.wait()
+
+    monkeypatch.setattr(db, "commit", commit_after_persisting_extended_lease)
+    extension_task = asyncio.create_task(
+        first.extend_worker_lease(
+            initial,
+            lease_ttl_seconds=30,
+            now=now + timedelta(seconds=1),
+        )
+    )
+    try:
+        await asyncio.wait_for(commit_finished.wait(), timeout=1.0)
+        extension_task.cancel()
+        allow_commit_return.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await extension_task
+
+        replacement = await second.acquire_worker_lease(
+            worker_id="agent-runtime-worker-2",
+            lease_ttl_seconds=30,
+            now=now + timedelta(seconds=1),
+        )
+        assert replacement is not None
+        assert await second.release_worker_lease(replacement)
+    finally:
+        allow_commit_return.set()
+        if not extension_task.done():
+            extension_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await extension_task
+        await second.close()
+        await first.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_execution_fence_extension_before_commit_preserves_previous_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _trigger_type, store_type = _api()
+    path = tmp_path / "invocations.db"
+    first = store_type(path)
+    second = store_type(path)
+    await first.init()
+    await second.init()
+    now = datetime(2026, 8, 14, 8, 0, tzinfo=UTC)
+    initial = await first.acquire_worker_lease(
+        worker_id="agent-runtime-worker-1",
+        lease_ttl_seconds=30,
+        now=now,
+    )
+    assert initial is not None
+    db = first._db
+    assert db is not None
+    original_commit = db.commit
+    commit_entered = asyncio.Event()
+    allow_commit = asyncio.Event()
+    commit_calls = 0
+
+    async def commit_before_persisting_extended_lease() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls != 1:
+            await original_commit()
+            return
+        commit_entered.set()
+        await allow_commit.wait()
+        await original_commit()
+
+    monkeypatch.setattr(db, "commit", commit_before_persisting_extended_lease)
+    extension_task = asyncio.create_task(
+        first.extend_worker_lease(
+            initial,
+            lease_ttl_seconds=31,
+            now=now + timedelta(seconds=1),
+        )
+    )
+    try:
+        await asyncio.wait_for(commit_entered.wait(), timeout=1.0)
+        extension_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await extension_task
+
+        assert await second.has_worker_lease(
+            initial,
+            now=now + timedelta(seconds=1),
+        )
+        assert (
+            await second.acquire_worker_lease(
+                worker_id="agent-runtime-worker-2",
+                lease_ttl_seconds=30,
+                now=now + timedelta(seconds=1),
+            )
+            is None
+        )
+        allow_commit.set()
+        assert await first.release_worker_lease(initial)
+    finally:
+        allow_commit.set()
+        if not extension_task.done():
+            extension_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await extension_task
+        await second.close()
+        await first.close()

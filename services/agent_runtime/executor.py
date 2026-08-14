@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -37,6 +39,108 @@ from services.agent_runtime.policy import (
     canonical_args_digest,
 )
 from services.group.outbound_access_guard import GroupOutboundPolicyDeniedError
+
+ExecutionGuardResult = AbstractAsyncContextManager[None] | Awaitable[bool]
+ExecutionGuard = Callable[[int], ExecutionGuardResult] | Callable[[], ExecutionGuardResult]
+
+
+class _ExecutionFenceError(RuntimeError):
+    """A provider entry fence could not reserve current worker ownership."""
+
+
+def _call_execution_guard(
+    execution_guard: ExecutionGuard,
+    *,
+    timeout_ms: int,
+) -> ExecutionGuardResult:
+    """Call timeout-aware guards while preserving legacy zero-argument guards."""
+
+    try:
+        guard_signature = inspect.signature(execution_guard)
+    except (TypeError, ValueError):
+        return cast(Callable[[int], ExecutionGuardResult], execution_guard)(timeout_ms)
+    try:
+        guard_signature.bind(timeout_ms)
+    except TypeError:
+        try:
+            guard_signature.bind()
+        except TypeError:
+            return cast(Callable[[int], ExecutionGuardResult], execution_guard)(
+                timeout_ms
+            )
+        return cast(Callable[[], ExecutionGuardResult], execution_guard)()
+    return cast(Callable[[int], ExecutionGuardResult], execution_guard)(timeout_ms)
+
+
+@asynccontextmanager
+async def _execution_guard_scope(
+    execution_guard: ExecutionGuard,
+    *,
+    timeout_ms: int,
+) -> AsyncIterator[None]:
+    """Enter the worker fence before provider code can observe a call.
+
+    Runtime v2 uses the context-manager form so the caller can keep a
+    process-local ownership lock for the complete provider call.  Awaitable
+    boolean guards remain accepted only for older direct executor callers;
+    they have no reservation semantics and are fail-closed.
+    """
+
+    try:
+        candidate = _call_execution_guard(execution_guard, timeout_ms=timeout_ms)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _ExecutionFenceError("worker execution fence is unavailable") from exc
+
+    if isinstance(candidate, AbstractAsyncContextManager):
+        context = candidate
+        try:
+            await context.__aenter__()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _ExecutionFenceError("worker execution fence was rejected") from exc
+        try:
+            yield
+        except BaseException as exc:
+            try:
+                suppress = await context.__aexit__(
+                    type(exc),
+                    exc,
+                    exc.__traceback__,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exit_exc:
+                raise _ExecutionFenceError(
+                    "worker execution fence could not close"
+                ) from exit_exc
+            if suppress:
+                raise _ExecutionFenceError(
+                    "worker execution fence must not suppress provider failure"
+                ) from exc
+            raise
+        else:
+            try:
+                await context.__aexit__(None, None, None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise _ExecutionFenceError(
+                    "worker execution fence could not close"
+                ) from exc
+        return
+
+    try:
+        allowed = await candidate
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _ExecutionFenceError("worker execution fence is unavailable") from exc
+    if allowed is not True:
+        raise _ExecutionFenceError("worker execution fence was rejected")
+    yield
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +222,7 @@ class EffectExecutor:
         trusted_context: TrustedToolContext,
         worker_id: str,
         current_registry_generation: int | Callable[[], int],
+        execution_guard: ExecutionGuard | None = None,
     ) -> EffectExecution:
         call = await self._ledger.get_tool_call(call_id)
         if call is None:
@@ -205,6 +310,7 @@ class EffectExecutor:
                     decision=decision,
                     policy_metadata=metadata,
                     current_registry_generation=current_registry_generation,
+                    execution_guard=execution_guard,
                 )
             async with lock:
                 return await self._dispatch(
@@ -217,6 +323,7 @@ class EffectExecutor:
                     decision=decision,
                     policy_metadata=metadata,
                     current_registry_generation=current_registry_generation,
+                    execution_guard=execution_guard,
                 )
         except asyncio.CancelledError:
             await _await_required_cleanup(
@@ -260,6 +367,7 @@ class EffectExecutor:
         decision: PolicyDecision,
         policy_metadata: dict[str, Any],
         current_registry_generation: int | Callable[[], int],
+        execution_guard: ExecutionGuard | None,
     ) -> EffectExecution:
         decision = self._policy_gate.evaluate(
             request,
@@ -398,11 +506,33 @@ class EffectExecutor:
             )
         started_at = datetime.now(UTC).isoformat()
         try:
-            async with asyncio.timeout(request.spec.timeout_ms / 1000):
-                output = await tool.execute(
-                    self._build_tool_context(call, request, trusted_context),
-                    **dict(arguments),
-                )
+            if execution_guard is None:
+                async with asyncio.timeout(request.spec.timeout_ms / 1000):
+                    output = await tool.execute(
+                        self._build_tool_context(call, request, trusted_context),
+                        **dict(arguments),
+                    )
+            else:
+                async with _execution_guard_scope(
+                    execution_guard,
+                    timeout_ms=request.spec.timeout_ms,
+                ):
+                    async with asyncio.timeout(request.spec.timeout_ms / 1000):
+                        output = await tool.execute(
+                            self._build_tool_context(call, request, trusted_context),
+                            **dict(arguments),
+                        )
+        except _ExecutionFenceError:
+            return await self._finish_failure(
+                call_id=call.call_id,
+                worker_id=worker_id,
+                decision=decision,
+                status=ToolResultStatus.FAILED_TERMINAL,
+                error_code="worker_not_ready",
+                retryable=False,
+                safe_message="Runtime worker ownership is no longer current",
+                started_at=started_at,
+            )
         except asyncio.CancelledError:
             await _await_required_cleanup(
                 self._ledger.cancel_tool_call(

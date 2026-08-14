@@ -11,6 +11,7 @@ from kernel.types import Tool, ToolConcurrency, ToolContext
 from services.agent_runtime.executor import (
     EffectExecution,
     EffectExecutor,
+    ExecutionGuard,
     TrustedToolContext,
 )
 from services.agent_runtime.ledger import (
@@ -94,6 +95,7 @@ class RunCoordinator:
         target_ref: str = "",
         idempotency_key_digest: str = "",
         approval: ApprovalGrant | None = None,
+        execution_guard: ExecutionGuard | None = None,
     ) -> EffectExecution:
         run = await self._ledger.get_run(run_id)
         if run is None:
@@ -163,6 +165,7 @@ class RunCoordinator:
                 trusted_context=trusted_context,
                 worker_id=worker_id,
                 current_registry_generation=self._registry_generation,
+                execution_guard=execution_guard,
             ),
         )
         if execution.decision.outcome == "require_approval":
@@ -197,6 +200,7 @@ class RunCoordinator:
         trusted_context: TrustedToolContext,
         worker_id: str,
         approval_actor: str,
+        execution_guard: ExecutionGuard | None = None,
     ) -> EffectExecution:
         run = await self._ledger.get_run(run_id)
         if run is None:
@@ -260,6 +264,7 @@ class RunCoordinator:
                 trusted_context=trusted_context,
                 worker_id=worker_id,
                 current_registry_generation=self._registry_generation,
+                execution_guard=execution_guard,
             ),
         )
         if execution.result is not None:
@@ -286,6 +291,7 @@ class RunCoordinator:
         arguments: Mapping[str, Any],
         trusted_context: TrustedToolContext,
         worker_id: str,
+        execution_guard: ExecutionGuard | None = None,
     ) -> EffectExecution:
         run = await self._ledger.get_run(run_id)
         if run is None:
@@ -345,6 +351,7 @@ class RunCoordinator:
                 trusted_context=trusted_context,
                 worker_id=worker_id,
                 current_registry_generation=self._registry_generation,
+                execution_guard=execution_guard,
             ),
         )
         if execution.result is not None:

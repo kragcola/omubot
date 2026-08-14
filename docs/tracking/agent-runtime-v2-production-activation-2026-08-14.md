@@ -2,18 +2,18 @@
 
 > 状态：active
 > mode: task
-> 最后更新：2026-08-14 CST
-> 当前下一步：`6880dd0` 已作为默认关闭的 dark release 由 bot-only image 上线；等待 operator 提供真实 production source、备份、restore/rollback rehearsal 与 Worldbook witness，才可进行新的 activation 决策。全程绝不启动 worker。
+> 最后更新：2026-08-15 CST
+> 当前下一步：provider execution fence、同 token lease extension 和 bootstrap worker lifecycle 已完成本地验收与独立复审；先提交并从隔离 worktree 进行一次 bot-only 默认关闭发布，然后继续等待 operator 提供真实 production source、备份、restore/rollback rehearsal 与 Worldbook witness。全程绝不启动真实 worker。
 > 阻塞：真实 production source/schema、冻结 backup SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness/profile-bound manifest 仍未齐备；这些只阻断真实 worker activation，不阻断本次默认关闭的代码发布。
-> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；当前快照审计的七项 release 缺口已关闭；production composition 19 passed，交叉回归 879 passed，frontend contracts 10 passed、`vue-tsc`/build passed，Ruff clean、Pyright 0 errors、`git diff --check` clean。生产 `qq-bot` image/commit=`4f02f5b17f66…`/`6880dd0`、`agent_runtime_enabled=False`、新 Runtime source files=0、worker log events=0；NapCat 未变。
+> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。独立复审无 P0-P2；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产当前仍为 `qq-bot` image/commit=`4f02f5b17f66…`/`6880dd0`、`agent_runtime_enabled=False`、新 Runtime source files=0、worker log events=0；NapCat 未变。
 > 回滚入口：保持 feature gate 默认关闭；不创建 production Runtime/Memory/Worldbook DB，不接管 LLM loop，不启动 worker；恢复 legacy loop。NapCat 永不重建。
 
 ## Resume Capsule
 
 - objective: 按 `docs/migrations/agent-runtime-v2-2026-07-21.md` 的 Future Production Activation Runbook，依次完成受限生产组合、认证/ACL、可信触发、attestation、recovery 和交付验证，同时保持所有外部效果 fail-closed。
-- next_step: 仅收集并独立核验真实 production source path、schema、backup payload/digest、restore/rollback rehearsal、具名 operator ACL、deployment input 与 Worldbook authoritative-reread/reducer/no-dual-truth witness；完整 manifest 到位前不得启动 worker，禁止用测试 manifest 替代。
-- current_files: `kernel/config.py`、`services/agent_runtime/`、`services/memory/governance_*.py`、`services/worldbook/governance_*.py`、`services/llm/client.py`、`bot.py`、`admin/__init__.py`、`admin/routes/api/`、对应测试与本 tracker。
-- last_verified: 当前快照审计关闭 worker 多 tool lease、取消 run 收束、group-policy terminal、offline reconciliation adapter、Admin operator header/401、GET query strictness 和 rollback key 七项缺口；production composition 19 passed、跨域交叉 879 passed、frontend contracts 10 passed、Ruff clean、Pyright 0 errors、diff clean。生产 `qq-bot` 已运行 image `sha256:4f02f5b17f66e54a2383af182fdd88b5806611918cce5576e8606e79848583de` / `GIT_COMMIT=6880dd0…`，SPA 和 asset 均为 200；unauthenticated Runtime summary 为预期 401。实际配置没有 `agent_runtime`，所以没有 Runtime source/lease/worker。
+- next_step: 先提交并以默认关闭配置从隔离 worktree 构建/替换 bot，再复核 image、正确 Runtime API、preflight、无 source/lease/worker 与 NapCat 不变性；此后只收集并独立核验真实 production source path、schema、backup payload/digest、restore/rollback rehearsal、具名 operator ACL、deployment input 与 Worldbook authoritative-reread/reducer/no-dual-truth witness。完整 manifest 到位前不得启动 worker，禁止用测试 manifest 替代。
+- current_files: `bootstrap/application.py`、`services/agent_runtime/{production,executor,coordinator,invocation_store}.py`、`tools/agent_runtime_preflight.py`、`docs/runbooks/agent-runtime-v2-production-activation.md`、对应测试与本 tracker。
+- last_verified: fence 在实际 provider 调用前持有进程锁和 SQLite owner/token CAS；同一 token 的不同 lease_until 可连续扩展，失权/超时/guard 异常全部终结为 `worker_not_ready`，取消 shutdown 会等待 fence 后释放 exact lease。production composition 25 passed、交叉 530 passed、preflight CLI 2 passed、范围 Ruff clean、范围 Pyright 0 errors、diff clean；实际 production config 通过新 CLI 返回 `agent_runtime_disabled`。旧生产 `qq-bot` 仍运行 image `sha256:4f02f5b17f66e54a2383af182fdd88b5806611918cce5576e8606e79848583de` / `GIT_COMMIT=6880dd0…`，未认证 `/api/admin/agent-runtime/summary` 为预期 401。实际配置没有 `agent_runtime`，所以没有 Runtime source/lease/worker。
 - do_not_redo: 不重写已验收 P0-P5 dark 合同；不把 HTTP POST、OneBot 自动 reconciliation 或 raw QZone transport 标记为已迁移；不把浏览器 token 当作 principal。
 - rollback: 禁用 `agent_runtime.enabled`，停止有界 worker，保留 `unknown`/`dispatching` ledger 供人工 reconcile；仅在 schema compatibility 检查后回滚 bot image，绝不重建 NapCat。
 
@@ -29,11 +29,12 @@
 
 | Workstream | Owner | Conflict domain | Isolation | Status | Checkpoint |
 | --- | --- | --- | --- | --- | --- |
-| ARV2-A | Codex main | runtime composition, config, schemas, tests, docs, dark deployment | isolated release worktree; single writer | in_progress | Current-snapshot seven-gap audit closed; local cross verification 879 passed; `6880dd0` dark bot deployed, real activation artifacts remain pending |
+| ARV2-A | Codex main | runtime composition, config, schemas, tests, docs, dark deployment | isolated release worktree; single writer | in_progress | Provider fence/lifecycle release candidate verified (25 focused, 530 cross); commit and bot-only dark deploy pending; real activation artifacts remain pending |
 | ARV2-B | bootstrap_tdd_tests | new bootstrap contract test only | shared workspace; sole writer for `tests/test_agent_runtime_bootstrap.py`; no production-file reads/writes | completed | Bootstrap contracts delivered; implementation integrated and cross-verified |
 | ARV2-C | arv2_attestation_audit | read-only current-snapshot attestation audit | shared workspace; no writes | completed | Confirmed absent production attestors and direct worker-start bypass; findings incorporated in A9 |
 | ARV2-D | arv2_a11_contracts | A11 test/repair design for profile, lease and manifest code | shared workspace; read-only, no test or production writes | completed | Confirmed four findings plus same-pattern renew lease; contracts and repair integrated by main writer |
 | ARV2-E | arv2_pending_reconcile | Bootstrap/host-ingress tracker reconciliation | shared workspace; read-only, no writes | completed | No fifth established local defect; bootstrap/host ingress contracts are implemented and notices intentionally fail closed |
+| ARV2-F | arv2_release_diff_review | release diff P0-P3 review | shared workspace; read-only, no writes | completed | Same-token concurrent extension finding repaired; final review has no P0-P2, with cooperative cancellation and serial provider throughput recorded as P3 constraints |
 
 The production implementation remains serial because composition, source paths and context ownership share one conflict domain. ARV2-B is isolated to a new test file so TDD can keep test intent separate from implementation; it must deliver a manifest before integration. Other parallelism is restricted to independent read-only checks.
 
@@ -42,10 +43,10 @@ The production implementation remains serial because composition, source paths a
 | Section | Status | Evidence / Note | Next Update |
 | --- | --- | --- | --- |
 | Context | done | P0-P5 dark/local complete; default-off production composition and bootstrap wiring complete | Keep source facts current |
-| Plan | in_progress | 默认关闭 bot-only 交付已完成；真实 activation 仍按原 runbook 等待 artifact | 只读核验真实 artifact |
-| Implementation | in_progress | Profile/config、operator ACL、trusted trigger、host ingress receipt、disabled-safe assembly/LLM bridge、durable lease/recovery、offline reconciliation、strict query 和 Admin operator transport 已在生产 image，但 gate=false | 等待真实 source/restore/rollback/Worldbook evidence 才可 activation |
-| Verification | in_progress | Current-snapshot audit seven gaps closed；production composition 19 passed，交叉 879 passed，frontend 10 passed；生产 image/commit、SPA/asset、gate=false、no source/worker 与 NapCat 不变均已核验 | 做未来真实 artifact preflight |
-| Handoff | pending |  | Update when paused or complete |
+| Plan | in_progress | 默认关闭 bot-only fence release 已完成本地验收；真实 activation 仍按原 runbook 等待 artifact | 构建并替换 bot，再做暗态 runtime 核验 |
+| Implementation | done | Provider 前 execution fence、exact owner/token extension、worker lifecycle、只读 preflight CLI 与 activation runbook 已完成 | 等待真实 source/restore/rollback/Worldbook evidence 才可 activation |
+| Verification | in_progress | fence focused 25 passed、交叉 530 passed、CLI 2 passed、范围 Ruff/Pyright/diff clean，独立复审无 P0-P2 | 做本轮 bot-only 暗态发布和 post-deploy 核验 |
+| Handoff | in_progress | P3: provider 必须协作取消，fence 故意串行 provider | 发布后更新 image/rollback 证据 |
 
 ## Todo
 
@@ -60,6 +61,8 @@ The production implementation remains serial because composition, source paths a
 - [x] Close A11 local fail-closed audit: `start_worker()` re-runs source/backup preflight before lease; acquire and renew cleanup exact committed tokens before cancellation propagates; every enabled profile requires a digest-pinned manifest and production rejects callback readiness; boolean manifest schema versions are rejected. RED 4+2 failed, focused 45 passed and cross 238 passed.
 - [x] Close current-snapshot release audit: recheck the exact worker lease before every tool use; project pre-dispatch cancellation to a cancelled run; classify group-policy denial as terminal; inject only offline OneBot reconciliation; require Admin operator headers without logging out the browser cookie session; reject unknown Runtime/Memory query keys; correct every rollback gate reference to `agent_runtime.enabled`.
 - [x] Commit, build and deploy the user-authorized dark release. `6880dd0` -> image `sha256:4f02f5b17f66…`; `agent_runtime.enabled=false`，未创建 Runtime/Memory/Worldbook production DB，未启动 worker；旧 image/static manifest 已保存，NapCat 未操作。
+- [x] Close execution-fence and lifecycle audit: provider entry now reserves the exact owner/token lease until tool completion; same-token extensions do not shorten TTL; lease extension/renew/stop cancellation cleans up observable ownership; guarded dispatches fail terminal as `worker_not_ready`; default-off bootstrap creates no source or worker, while fully attested startup owns one bounded worker.
+- [~] Commit, build and deploy the user-authorized fence follow-up as bot-only dark code; record new image, API/preflight/gate/no-worker evidence and rollback tag before resuming external activation artifacts.
 
 ## Decisions
 
@@ -71,6 +74,7 @@ The production implementation remains serial because composition, source paths a
 | Release input | Isolated artifact only | Current worktree contains unrelated user WIP and untracked runtime files | 2026-08-14 |
 | Attestation transport | SHA-256-pinned, profile-bound strict manifest | Keeps operator evidence explicit, repeatable and redacted without allowing test callbacks to replace configured deployment evidence | 2026-08-14 |
 | A11 evidence closure | Enabled profile pin plus internal-only attestor and exact-token cancellation cleanup | Removes test callback authority, post-assembly backup drift and acquire/renew orphan leases before any external artifact decision | 2026-08-14 |
+| Provider execution fence | Hold a process-local fence through provider execution and extend the exact SQLite owner/token before entry | Prevents stale workers from crossing into a provider call; provider execution is intentionally serial and requires cooperative cancellation during future activation | 2026-08-15 |
 
 ## Files Touched
 
@@ -84,6 +88,7 @@ The production implementation remains serial because composition, source paths a
 | `services/agent_runtime/admin_operator.py` | Request-scoped Admin principal/action factory over named credential and live ACL | done |
 | `services/agent_runtime/admin_actions.py` | Exact tool-target and Memory-candidate resource authorization hook | done |
 | `services/agent_runtime/invocation_store.py` | Immutable authoritative trigger persistence/reconstruction store | done |
+| `services/agent_runtime/{production,executor,coordinator}.py` | Provider execution fence and terminal `worker_not_ready` plumbing | done |
 | `services/agent_runtime/host_ingress.py` | OneBot identity to immutable trusted-record receipt adapter | done |
 | `services/agent_runtime/production.py` | Durable single-worker lease, exclusive startup recovery and dispatcher gate | done |
 | `services/agent_runtime/rollout_attestation.py` | SHA-256-pinned strict manifest reader bound to the full activation profile | done |
@@ -101,6 +106,10 @@ The production implementation remains serial because composition, source paths a
 | `tests/test_agent_runtime_operator_auth.py` | Operator auth/ACL and cancellation contracts | done |
 | `tests/test_agent_runtime_invocation_store.py` | Trigger persistence/reconstruction and cancellation contracts | done |
 | `tests/test_agent_runtime_production_composition.py` | Composition, worker ownership, recovery and cancellation contracts | done |
+| `tests/test_agent_runtime_bootstrap.py` | Default-off/attested worker lifecycle and renewal shutdown contracts | done |
+| `tests/test_agent_runtime_executor.py` / `tests/test_agent_runtime_invocation_store.py` | Guard ABI plus owner/token extension and cancellation contracts | done |
+| `tools/agent_runtime_preflight.py` / `tests/test_agent_runtime_preflight_cli.py` | Secret-safe, read-only source and manifest readiness command | done |
+| `docs/runbooks/agent-runtime-v2-production-activation.md` | Production input, canary, cancellation and rollback procedure | done |
 | `tests/test_agent_runtime_admin_operator_http.py` | Cookie/principal separation and exact HTTP resource ACL contracts | done |
 | `tests/test_agent_runtime_host_ingress.py` | Receipt identity, scheduler merge and cancellation contracts | done |
 | `tests/test_router_b_cluster_wiring.py` | Group/private host ingress, stale receipt and coalescer cancellation contracts | done |
@@ -122,6 +131,11 @@ The production implementation remains serial because composition, source paths a
 | Scoped static analysis | `uv run ruff check ...` and `uv run pyright ...` for the new profile/store modules | clean / 0 errors |
 | Admin governance frontend | `node --experimental-strip-types --test tests/agent-runtime-governance.test.ts`; `vue-tsc --noEmit`; `npm run build` | 10 passed; typecheck passed; Vite 4421 modules built (existing Rollup `#__PURE__` warnings only) |
 | Production dark release | isolated `docker compose build bot`; active `docker compose up -d --no-deps --force-recreate --no-build bot`; read-only inspect/curl/config/storage checks | image/commit match; SPA+asset 200; unauth summary 401; gate=false; source files/worker log events=0; bot healthy; NapCat image/start/restart unchanged |
+| Provider execution fence | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest -p no:cacheprovider tests/test_agent_runtime_production_composition.py -q` | 25 passed; stale lease, same-token concurrency, guard failure, overlong timeout and cancellation shutdown paths covered |
+| Fence cross regression | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest -p no:cacheprovider tests/test_agent_runtime_*.py tests/test_application_composition.py tests/test_router_b_cluster_wiring.py tests/test_router_qq_interactions.py tests/test_scheduler.py -q` | 530 passed |
+| Fence static analysis | scoped Ruff and Pyright over changed Runtime/bootstrap/preflight modules; `git diff --check` | clean / 0 errors / clean; whole-repository Pyright has 361 pre-existing optional sidecar/research errors reproduced in unchanged main |
+| Read-only preflight CLI | `tests/test_agent_runtime_preflight_cli.py`; CLI against production config | 2 passed; production reports `not_ready/agent_runtime_disabled`, without opening source stores |
+| Independent release review | ARV2-F read-only P0-P3 review | no P0-P2; provider cooperative-cancel and serialized throughput recorded as P3 activation constraints |
 
 ## Test Ledger
 
@@ -160,10 +174,15 @@ The production implementation remains serial because composition, source paths a
 | A12-CROSS | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -q` over all `test_agent_runtime_*`, governed Memory/Worldbook, router, scheduler, guard and affected tool modules | 879 passed in 18.26s | Runtime v2 changes preserve governed execution, dark bootstrap, legacy route and external-effect-negative contracts | 2026-08-14 |
 | A12-FRONTEND | `node --experimental-strip-types --test tests/agent-runtime-governance.test.ts && vue-tsc --noEmit && npm run build` | 10 passed; typecheck passed; Vite built 4,421 modules | Admin operator header transport, read-only governance views and the generated SPA entry are release-ready; only existing Rollup `#__PURE__` warnings remain | 2026-08-14 |
 | A12-PROD-DARK | Build from isolated commit `6880dd0`; backup old image/static manifest; sync verified SPA; active `docker compose up -d --no-deps --force-recreate --no-build bot`; inspect/curl/config/storage/log counts | `qq-bot` image `4f02f5b17f66…` / commit `6880dd0…`, restart=0; SPA+asset=200; unauth summary=401; gate=false; new source files=0; worker log events=0; post-deploy error events=0; NapCat unchanged/restart=0 | Default-off code is live and externally inert. Rollback is `omubot-bot:pre-agent-runtime-v2-dark-20260814` plus static snapshot `agent-runtime-v2-dark-20260814.WhgUDO`; no worker activation claim | 2026-08-14 |
+| A13-RED | Independent stale-lease provider-entry and bootstrap lifecycle tests before fence/lifecycle implementation | Provider was reachable after expired L1; all-ready bootstrap did not own a worker; renewal/shutdown contracts failed | Captured provider-entry, automatic lifecycle and cancellation gaps before repair | 2026-08-15 |
+| A13-GREEN | Production composition fence suite; invocation-store, executor, bootstrap and preflight CLI suites | 25 + 9 + 27 + 11 + 2 passed | Exact owner/token fence, extension cleanup, guard ABI, single worker lifecycle and disabled-safe preflight are covered | 2026-08-15 |
+| A13-CROSS | Runtime/application/router/scheduler regression command above | 530 passed in 18.44s | Fence/lifecycle changes preserve selected dispatcher, trusted ingress, legacy routing and cancellation behavior | 2026-08-15 |
+| A13-STATIC | scoped Ruff/Pyright, `git diff --check`, CLI disabled production report | Ruff clean; Pyright 0 errors on changed modules; diff clean; CLI `not_ready/agent_runtime_disabled` | Full Pyright's 361 optional-dependency errors reproduce in unchanged main and are outside this release scope | 2026-08-15 |
+| A13-REVIEW | ARV2-F final read-only release review | No P0-P2; same-token concurrent extension regression added and passed | Provider must cooperate with cancellation; fence serializes provider execution, both recorded for canary evaluation | 2026-08-15 |
 
 ## Next Session Starts Here
 
-- Direction: Default-off release `6880dd0` is live. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
-- First action: Obtain explicit operator-owned source locations/schema, backup payloads/digests, restore and rollback rehearsal records, named operator ACL and Worldbook authoritative-reread/reducer/no-dual-truth witness. Verify them read-only and produce a new independent review before any activation decision.
+- Direction: Default-off release `6880dd0` is live; the provider-fence follow-up is verified but not yet built/deployed. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
+- First action: Commit and bot-only deploy this fence follow-up from the isolated worktree, then verify the new image, correct Runtime API path, disabled preflight, no source/lease/worker and unchanged NapCat. Only then resume collection of operator-owned source/backup/restore/rollback/ACL/Worldbook artifacts for an activation decision.
 - Open questions: Exact production source locations, backup artifact owner, restore rehearsal, rollback rehearsal and Worldbook witness remain unavailable; they must never be inferred from Admin state or replaced with test manifests.
 - Do not redo: P0-P5 dark/local implementation or the seven completed current-snapshot fixes. Do not turn dark deployment into real activation.

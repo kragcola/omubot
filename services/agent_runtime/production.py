@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,19 @@ def _ready_report(
     )
 
 
+def _same_worker_lease_token(
+    current: WorkerLeaseV1 | None,
+    expected: WorkerLeaseV1,
+) -> bool:
+    """Treat a same-token lease extension as current worker ownership."""
+
+    return (
+        current is not None
+        and current.owner_id == expected.owner_id
+        and current.lease_token == expected.lease_token
+    )
+
+
 async def _await_required_cleanup(awaitable: Any) -> None:
     task = asyncio.ensure_future(awaitable)
     cancellation: asyncio.CancelledError | None = None
@@ -144,6 +158,9 @@ class LLMToolDispatcherV1:
         self._runtime = runtime
         self._invocations = invocations
         self._worker_lease: WorkerLeaseV1 | None = None
+        self._execution_fence_factory: (
+            Callable[[WorkerLeaseV1, int], AbstractAsyncContextManager[None]] | None
+        ) = None
 
     def activate(self, lease: WorkerLeaseV1) -> None:
         if not isinstance(lease, WorkerLeaseV1):
@@ -154,6 +171,18 @@ class LLMToolDispatcherV1:
 
     def deactivate(self) -> None:
         self._worker_lease = None
+
+    def bind_execution_fence(
+        self,
+        factory: Callable[[WorkerLeaseV1, int], AbstractAsyncContextManager[None]],
+    ) -> None:
+        """Bind the assembly-owned provider fence after composition exists."""
+
+        if not callable(factory):
+            raise TypeError("worker execution fence factory is required")
+        if self._execution_fence_factory is not None:
+            raise RuntimeError("worker execution fence is already bound")
+        self._execution_fence_factory = factory
 
     async def _current_worker_lease(self) -> WorkerLeaseV1 | None:
         """Return only the exact lease that still authorizes this dispatch."""
@@ -201,6 +230,10 @@ class LLMToolDispatcherV1:
             if lease is None:
                 results.append(_rejected("worker_not_ready"))
                 continue
+            execution_fence_factory = self._execution_fence_factory
+            if execution_fence_factory is None:
+                results.append(_rejected("worker_not_ready"))
+                continue
             try:
                 tool_use_id, tool_name, arguments = _normalized_tool_use(raw_tool_use)
                 call_id = _derived_id(
@@ -220,6 +253,10 @@ class LLMToolDispatcherV1:
                     arguments=arguments,
                     trusted_context=reconstructed.trusted_context,
                     worker_id=lease.owner_id,
+                    execution_guard=lambda timeout_ms, lease=lease, factory=execution_fence_factory: factory(
+                        lease,
+                        timeout_ms,
+                    ),
                 )
             except KeyError:
                 results.append(_rejected("tool_unavailable"))
@@ -232,6 +269,12 @@ class LLMToolDispatcherV1:
                 continue
 
             if execution.result is not None:
+                if (
+                    execution.result.error is not None
+                    and execution.result.error.code == "worker_not_ready"
+                ):
+                    results.append(_rejected("worker_not_ready"))
+                    continue
                 results.append(_model_payload(execution.result.to_model_payload()))
             elif execution.decision.outcome is PolicyOutcome.REQUIRE_APPROVAL:
                 results.append(
@@ -307,6 +350,52 @@ class ProductionRuntimeAssemblyV1:
     _worker_lease: WorkerLeaseV1 | None = field(default=None, init=False, repr=False)
     _worker_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+
+    @asynccontextmanager
+    async def execution_fence(
+        self,
+        expected: WorkerLeaseV1,
+        timeout_ms: int,
+    ) -> AsyncIterator[None]:
+        """Reserve exact worker ownership over one provider call.
+
+        The lock serializes renewal and shutdown in this process.  The SQLite
+        extension is the cross-process fence: it keeps the same owner/token
+        valid for longer than the provider timeout before any tool code starts.
+        """
+
+        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int):
+            raise ValueError("tool timeout is invalid for worker execution fence")
+        lease_ttl_seconds = (timeout_ms / 1000) + 1.0
+        async with self._worker_lock:
+            if self._closed or not _same_worker_lease_token(
+                self._worker_lease,
+                expected,
+            ):
+                raise WorkerOwnershipError("production worker lease is unavailable")
+            reserved = await self.invocations.extend_worker_lease(
+                expected,
+                lease_ttl_seconds=lease_ttl_seconds,
+            )
+            if reserved is None:
+                if _same_worker_lease_token(self._worker_lease, expected):
+                    self._worker_lease = None
+                    self.dispatcher.deactivate()
+                raise WorkerOwnershipError("production worker lease was lost")
+            if self._closed or not _same_worker_lease_token(
+                self._worker_lease,
+                expected,
+            ):
+                if _same_worker_lease_token(self._worker_lease, expected):
+                    self._worker_lease = None
+                    self.dispatcher.deactivate()
+                await _await_required_cleanup(
+                    self.invocations.release_worker_lease(reserved)
+                )
+                raise WorkerOwnershipError("production worker lease is unavailable")
+            self._worker_lease = reserved
+            self.dispatcher.activate(reserved)
+            yield
 
     async def _require_worker_start_readiness(self) -> None:
         """Reject startup unless all report-only rollout checks are explicit and ready."""
@@ -398,14 +487,25 @@ class ProductionRuntimeAssemblyV1:
             lease = self._worker_lease
             if lease is None:
                 raise WorkerOwnershipError("production worker lease is unavailable")
-            renewed = await self.invocations.renew_worker_lease(
-                lease,
-                lease_ttl_seconds=lease_ttl_seconds,
-                now=now,
-            )
+            try:
+                renewed = await self.invocations.renew_worker_lease(
+                    lease,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                    now=now,
+                )
+            except BaseException:
+                self._worker_lease = None
+                self.dispatcher.deactivate()
+                await _await_required_cleanup(
+                    self.invocations.release_worker_lease(lease)
+                )
+                raise
             if renewed is None:
                 self._worker_lease = None
                 self.dispatcher.deactivate()
+                await _await_required_cleanup(
+                    self.invocations.release_worker_lease(lease)
+                )
                 raise WorkerOwnershipError("production worker lease was lost")
             self._worker_lease = renewed
             self.dispatcher.activate(renewed)
@@ -413,6 +513,11 @@ class ProductionRuntimeAssemblyV1:
 
     async def stop_worker(self) -> None:
         """Close dispatch before releasing ownership so a stale worker cannot run."""
+
+        await _await_required_cleanup(self._stop_worker_cleanup())
+
+    async def _stop_worker_cleanup(self) -> None:
+        """Wait through an in-flight provider fence before releasing ownership."""
 
         async with self._worker_lock:
             lease = self._worker_lease
@@ -566,6 +671,7 @@ async def compose_production_runtime(
             dispatcher=dispatcher,
             readiness=readiness,
         )
+        dispatcher.bind_execution_fence(assembly.execution_fence)
         if llm_client is not None:
             setter = getattr(llm_client, "set_runtime_tool_dispatcher", None)
             if not callable(setter):

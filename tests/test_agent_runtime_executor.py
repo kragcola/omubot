@@ -169,6 +169,42 @@ class _ObservedConcurrencyGate(executor_module.ExecutionConcurrencyGate):
         return self.lock
 
 
+async def test_execution_guard_scope_supports_legacy_zero_argument_boolean_guard() -> None:
+    guard_calls = 0
+
+    async def legacy_guard() -> bool:
+        nonlocal guard_calls
+        guard_calls += 1
+        return True
+
+    async with executor_module._execution_guard_scope(
+        legacy_guard,
+        timeout_ms=1_000,
+    ):
+        assert guard_calls == 1
+
+    assert guard_calls == 1
+
+
+async def test_execution_guard_scope_rejects_guard_that_suppresses_provider_failure() -> None:
+    class _SuppressingGuard:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *args: Any) -> bool:
+            return True
+
+    def suppressing_guard(_timeout_ms: int) -> _SuppressingGuard:
+        return _SuppressingGuard()
+
+    with pytest.raises(executor_module._ExecutionFenceError):
+        async with executor_module._execution_guard_scope(
+            suppressing_guard,
+            timeout_ms=1_000,
+        ):
+            raise RuntimeError("provider failed")
+
+
 async def _create_call(
     ledger: AgentRuntimeLedger,
     *,

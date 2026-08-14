@@ -191,10 +191,13 @@ async def _await_agent_runtime_cleanup(awaitable: Any) -> None:
 class _AgentRuntimeCompositionLifecycle:
     """Attach the explicitly configured Runtime v2 only after tool merge.
 
-    The lifecycle deliberately does not acquire a worker lease. Its dispatcher
-    therefore remains selected but fail-closed until a later, separately
-    attested activation step is authorized.
+    A worker starts only after the pinned attestation reports every required
+    gate ready. Until then the selected dispatcher remains fail-closed instead
+    of falling back to the legacy tool path.
     """
+
+    _WORKER_LEASE_TTL_SECONDS = 30.0
+    _WORKER_RENEW_INTERVAL_SECONDS = 10.0
 
     def __init__(self, ctx: Any, *, repo_root: Path) -> None:
         self._ctx = ctx
@@ -202,6 +205,7 @@ class _AgentRuntimeCompositionLifecycle:
         self._assembly: Any | None = None
         self._bindings: dict[str, Any] = {}
         self._llm_client: Any = None
+        self._worker_renewal_task: asyncio.Task[None] | None = None
         self._started = False
         self._stopped = False
 
@@ -226,6 +230,8 @@ class _AgentRuntimeCompositionLifecycle:
 
         from services.agent_runtime.admin_query import RuntimeAdminQueryV1
         from services.agent_runtime.production import (
+            ProductionActivationNotReadyError,
+            WorkerOwnershipError,
             compose_production_runtime_from_settings,
         )
         from services.memory.governance_query import MemoryGovernanceAdminQueryV1
@@ -264,6 +270,19 @@ class _AgentRuntimeCompositionLifecycle:
             }
             for field, value in self._bindings.items():
                 setattr(self._ctx, field, value)
+            try:
+                await assembly.start_worker(
+                    lease_ttl_seconds=self._WORKER_LEASE_TTL_SECONDS,
+                )
+            except (ProductionActivationNotReadyError, WorkerOwnershipError):
+                # The governed dispatcher stays selected but rejects tool use.
+                # A later process restart with a ready manifest may activate it.
+                pass
+            else:
+                self._worker_renewal_task = asyncio.create_task(
+                    self._renew_worker_loop(assembly),
+                    name="agent-runtime-worker-lease-renewal",
+                )
         except BaseException:
             self._stopped = True
             try:
@@ -284,7 +303,7 @@ class _AgentRuntimeCompositionLifecycle:
             self._started = False
             return
         try:
-            await self._close_assembly(assembly)
+            await _await_agent_runtime_cleanup(self._close_assembly(assembly))
         finally:
             # Keep the dispatcher selected and deactivated until every source
             # has closed; otherwise a shutdown race could fall back to legacy.
@@ -303,11 +322,36 @@ class _AgentRuntimeCompositionLifecycle:
             raise RuntimeError("agent runtime context is already configured")
 
     async def _close_assembly(self, assembly: Any) -> None:
+        await self._stop_worker_renewal()
         dispatcher = getattr(assembly, "dispatcher", None)
         deactivate = getattr(dispatcher, "deactivate", None)
         if callable(deactivate):
             deactivate()
         await _await_agent_runtime_cleanup(assembly.close())
+
+    async def _renew_worker_loop(self, assembly: Any) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._WORKER_RENEW_INTERVAL_SECONDS)
+                await assembly.renew_worker(
+                    lease_ttl_seconds=self._WORKER_LEASE_TTL_SECONDS,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # renew_worker deactivates and releases the exact lease before it
+            # reports loss; leaving the dispatcher selected prevents fallback.
+            return
+
+    async def _stop_worker_renewal(self) -> None:
+        task = self._worker_renewal_task
+        self._worker_renewal_task = None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(task)
 
     def _clear_bindings(self) -> None:
         for field, value in self._bindings.items():

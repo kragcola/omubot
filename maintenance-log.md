@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-15 Agent Runtime v2 provider execution fence 与默认关闭发布候选
+
+**变更类型**：运行时 lease/fence 安全修复、bootstrap 生命周期完善与发布准备。此项只改变默认关闭代码路径的可验证边界，尚未构建或替换生产 bot；`agent_runtime.enabled` 保持未配置/关闭，不创建 Runtime/Memory/Worldbook/operator/invocation 生产 source，不启动 worker，不发送 QQ/QZone/webhook，不改 `BUILTIN_WIRE_PROFILE.validated`，NapCat 不操作。
+
+**内容与影响范围**：provider 调用前新增 assembly-owned execution fence：持有进程内 worker lock，并以 SQLite `owner_id + lease_token` CAS 延长 exact lease 到工具超时之后；同 token 的续期不再因 `lease_until` 改变被误拒绝，也不会缩短现有 TTL。fence 丢失、guard 异常或过长工具超出存储上限都终结为 `worker_not_ready`，不遗留 `dispatching` 或回退 legacy tool。bootstrap 只在完整 profile-bound attestation 就绪时启动一个 worker 并定期续租；dark/not-ready 时不建 source、不起 worker；shutdown 即使被取消也会等待在途 fence 后释放 exact lease。新增只读 preflight CLI、配置注释模板和 production activation runbook。
+
+**验证与风险**：composition fence **25 passed**，Runtime/application/router/scheduler 交叉 **530 passed**，preflight CLI **2 passed**，范围 Ruff clean、范围 Pyright **0 errors**、`git diff --check` clean；真实生产 config 的 CLI 输出为 `not_ready/agent_runtime_disabled`，正确未认证 API `/api/admin/agent-runtime/summary` 为 401。全仓 Pyright 的 **361** 个错误来自未安装的 sidecar/research 可选依赖和既有类型问题，已在未修改 main 复现，非本变更新增。独立复审无 P0-P2；P3 是 provider 必须协作取消，以及 fence 有意串行化 provider 调用，均写入 canary runbook 并作为未来 activation 条件。
+
+**交接/回滚**：提交后只能从隔离 release worktree 构建，先把当前 `omubot-bot` 固定为 `omubot-bot:pre-agent-runtime-v2-fence-20260815`，再仅 `--no-deps --force-recreate --no-build bot`。发布后必须复核 image/commit、disabled preflight、无 source/lease/worker、日志和 NapCat image/启动时间/restart 均不变。真实 activation 仍缺五个独立 source、冻结 backup SHA-256、真实 restore/rollback rehearsal、具名 operator/ACL、canary ingress/ToolRegistry/LLM witness、Worldbook authoritative witness 与完整 profile-bound manifest。
+
 ## 2026-08-14 Agent Runtime v2 默认关闭生产上线
 
 **变更类型**：生产部署 / 暗态发布。已提交 `6880dd0`（112 个 Runtime v2 文件），从隔离 worktree 构建 image `sha256:4f02f5b17f66e54a2383af182fdd88b5806611918cce5576e8606e79848583de`，仅执行 `docker compose up -d --no-deps --force-recreate --no-build bot`。`qq-bot` 运行 `GIT_COMMIT=6880dd0…`、restart=0；未重启、重建或 `down` NapCat，NapCat image、启动时间和 restart=0 均保持不变。
