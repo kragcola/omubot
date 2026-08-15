@@ -77,6 +77,11 @@ class StickerDecisionContext:
     kaomoji_candidates: Sequence[str] = field(default_factory=tuple)
     thinker_candidates: Sequence[str] = field(default_factory=tuple)
     tool_call_candidates: Sequence[str] = field(default_factory=tuple)
+    # The current human turn is kept separate from the bot reply so placement
+    # can respect quoted text and explicit feedback without consulting stale
+    # conversation history.
+    user_text: str = ""
+    user_feedback_veto: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +107,16 @@ class StickerDecisionProvider:
         threshold: float = _DEFAULT_SCORE_THRESHOLD,
         rng: Callable[[], float] | None = None,
     ) -> StickerDecision:
+        if context.user_feedback_veto:
+            return _decision(
+                False,
+                (),
+                "none",
+                context,
+                "none",
+                0.0,
+                "user_feedback_veto",
+            )
         extras = tuple(await extra_candidates()) if extra_candidates is not None else ()
         pool = fairmatch_rerank(_dedupe([
             *context.tool_call_candidates,

@@ -261,6 +261,49 @@ async def test_schedule_generator_loop_is_owned_by_supervisor(tmp_path, monkeypa
     await supervisor.stop()
 
 
+async def test_ensure_today_retries_strict_json_once(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(generator_module, "datetime", FixedDateTime)
+    schedule_dir = tmp_path / "schedule"
+    schedule_dir.mkdir()
+    store = ScheduleStore(storage_dir=str(schedule_dir))
+    generator = ScheduleGenerator(store=store, identity_name="凤晓梦")
+    calls: list[list[dict[str, Any]]] = []
+
+    async def api_call(system, messages, tools=None, max_tokens=None):
+        del system, tools, max_tokens
+        calls.append(messages)
+        if len(calls) == 1:
+            return {"text": "好的，我先确认一下日期。2026-06-08 是周一。"}
+        return {
+            "text": json.dumps({
+                "date": "2026-06-08",
+                "theme": "稳定日程",
+                "day_narrative": "按部就班",
+                "slots": [{"time": "08:00", "activity": "study", "mood_hint": "专注"}],
+            }),
+        }
+
+    assert await generator.ensure_today(api_call) is True
+    assert len(calls) == 2
+    assert "无法解析" in str(calls[1][-1]["content"])
+    assert store.load("2026-06-08") is not None
+
+
+async def test_ensure_today_reports_parse_failure_without_writing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(generator_module, "datetime", FixedDateTime)
+    schedule_dir = tmp_path / "schedule"
+    schedule_dir.mkdir()
+    store = ScheduleStore(storage_dir=str(schedule_dir))
+    generator = ScheduleGenerator(store=store, identity_name="凤晓梦")
+
+    async def api_call(system, messages, tools=None, max_tokens=None):
+        del system, messages, tools, max_tokens
+        return {"text": "{\"slots\":[{\"time\":\"08:00\"}"}
+
+    assert await generator.ensure_today(api_call) is False
+    assert store.load("2026-06-08") is None
+
+
 class TestPersonaDrivenScheduleFlag:
     def test_config_defaults_persona_driven_off(self):
         cfg = ScheduleConfig.model_validate({})
@@ -991,8 +1034,36 @@ class TestParseSchedule:
         assert schedule is not None
         assert schedule.theme == "测试"
 
+    def test_parses_json_embedded_in_provider_prose(self):
+        json_str = """好的，我先确认一下日期。\n{
+            "date": "2026-04-29",
+            "theme": "周末整理",
+            "day_narrative": "慢慢把房间收拾好",
+            "slots": [{"time": "09:00", "activity": "rest", "mood_hint": "放松"}]
+        }\n以上是今天的安排。"""
+        schedule = _parse_schedule(json_str, "2026-04-29")
+        assert schedule is not None
+        assert schedule.theme == "周末整理"
+        assert len(schedule.slots) == 1
+
+    def test_parses_json_fence_with_surrounding_prose(self):
+        json_str = """我整理好了：
+```json
+{"date":"2026-04-29","theme":"测试","day_narrative":"","slots":[{"time":"08:00","activity":"rest","mood_hint":"困倦"}]}
+```
+希望今天顺利。"""
+        schedule = _parse_schedule(json_str, "2026-04-29")
+        assert schedule is not None
+        assert schedule.theme == "测试"
+
     def test_invalid_json_returns_none(self):
         assert _parse_schedule("not json at all", "2026-04-29") is None
+
+    def test_truncated_embedded_json_returns_none(self):
+        assert _parse_schedule(
+            "模型输出到一半：{\"theme\":\"未完成\",\"slots\":[{\"time\":\"08:00\"}",
+            "2026-04-29",
+        ) is None
 
     def test_missing_slots_returns_none(self):
         json_str = '{"date": "2026-04-29", "theme": "test", "day_narrative": ""}'

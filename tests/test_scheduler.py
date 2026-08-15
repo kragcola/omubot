@@ -65,6 +65,49 @@ def test_must_obligation_overrides_legacy_addressee_flag() -> None:
     ) is True
 
 
+async def test_source_user_content_falls_back_to_latest_pending_after_stale_anchor() -> None:
+    """A delayed topic anchor must not erase the current user turn."""
+    timeline = GroupTimeline()
+    timeline.add("111", role="user", speaker="old(1)", content="旧话题", message_id=10)
+    timeline.add("111", role="user", speaker="new(1)", content="你怎么不叫", message_id=20)
+    timeline.add_pending_trigger("111", reason="旧话题 anchor", message_id=10)
+    scheduler = GroupChatScheduler(
+        llm=_FakeLLM(),
+        timeline=timeline,
+        persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+        group_config=_make_config(),
+    )
+
+    content = scheduler._source_user_content(
+        "111",
+        TriggerContext(reason="continuation", mode="companion", target_message_id=999),
+    )
+
+    assert content == "你怎么不叫"
+    await scheduler.close()
+
+
+async def test_source_user_content_keeps_exact_target_over_newer_pending() -> None:
+    """Explicit reply evidence remains authoritative when it is present."""
+    timeline = GroupTimeline()
+    timeline.add("111", role="user", speaker="old(1)", content="被引用的原话", message_id=10)
+    timeline.add("111", role="user", speaker="new(1)", content="后来的补充", message_id=20)
+    scheduler = GroupChatScheduler(
+        llm=_FakeLLM(),
+        timeline=timeline,
+        persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+        group_config=_make_config(),
+    )
+
+    content = scheduler._source_user_content(
+        "111",
+        TriggerContext(reason="reply", mode="at_mention", target_message_id="10"),  # type: ignore[arg-type]
+    )
+
+    assert content == "被引用的原话"
+    await scheduler.close()
+
+
 class _FakeRuntime:
     def __init__(self, identity: IdentitySnapshot) -> None:
         self._identity = identity
@@ -378,6 +421,28 @@ class TestDirectedFollowup:
 
 
 class TestPendingReset:
+    async def test_same_user_continuation_cancels_before_first_segment_and_refires(self) -> None:
+        """A follow-up arriving during generation must replace stale context."""
+        llm = _FakeLLM(reply=None, delay=0.5)
+        scheduler = GroupChatScheduler(
+            llm=llm,  # type: ignore[arg-type]
+            timeline=GroupTimeline(),
+            persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        scheduler.notify("111", user_id="42", message_text="？")
+        await asyncio.sleep(0.05)
+        slot = scheduler._slots["111"]
+        assert slot.running_task is not None and not slot.running_task.done()
+
+        scheduler.notify("111", user_id="42", message_text="你怎么不叫")
+        assert len(slot.pending_during_generation) == 1
+        await asyncio.sleep(0.15)
+
+        assert len(llm.calls) == 2
+        assert slot.pending_during_generation == []
+        await scheduler.close()
+
     async def test_clear_pending_resets_trigger_and_queue(self) -> None:
         llm = _FakeLLM(reply=None, delay=0.5)
         scheduler = GroupChatScheduler(

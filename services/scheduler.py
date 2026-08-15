@@ -863,7 +863,34 @@ class GroupChatScheduler:
             return
 
         if slot.running_task and not slot.running_task.done():
-            _L.info("scheduler | group={} busy, skip (msgs={})", group_id, slot.msg_count)
+            # A same-user continuation that arrives while a ratified reply is
+            # being generated belongs to the active exchange. Dropping it here
+            # made a follow-up such as "你怎么不叫" get flushed into history
+            # after the model had already answered an older "？". Reuse the
+            # existing cancel-and-remerge path before the first segment; after
+            # emission, queue it for one bounded follow-up fire.
+            same_user_continuation = bool(
+                user_id
+                and user_id == slot.firing_user_id
+                and slot.last_role in {"ratified", "addressed"}
+            )
+            if same_user_continuation:
+                slot.pending_during_generation.append(pending_message)
+                if not slot.first_segment_sent:
+                    _L.info(
+                        "scheduler | group={} same-user continuation -> cancel & remerge (n={})",
+                        group_id,
+                        len(slot.pending_during_generation),
+                    )
+                    slot.running_task.cancel()
+                else:
+                    _L.info(
+                        "scheduler | group={} same-user continuation queued after first segment (n={})",
+                        group_id,
+                        len(slot.pending_during_generation),
+                    )
+            else:
+                _L.info("scheduler | group={} busy, skip (msgs={})", group_id, slot.msg_count)
             return
 
         # ════════════════════════════════════════════════════════════════════
@@ -1512,16 +1539,50 @@ class GroupChatScheduler:
         group_id: str,
         trigger: TriggerContext | None,
     ) -> Content:
-        """Return only the pending user message identified by the reply evidence."""
+        """Return the current user evidence for a scheduled reply.
+
+        An explicit trigger ID is authoritative when it is still present in the
+        pending buffer. Probability/ratified continuation can carry an older
+        topic anchor, though; returning an empty string in that case made the
+        model answer only the stale topic marker. Fall back to the newest real
+        pending user message so the current turn is never silently discarded.
+        """
+        pending = self._timeline.get_pending(group_id)
         target_message_id = trigger.target_message_id if trigger is not None else None
-        if target_message_id is None:
-            return ""
-        for row in reversed(self._timeline.get_pending(group_id)):
+        if target_message_id is not None:
+            target_key = str(target_message_id)
+            for row in reversed(pending):
+                if row.get("role") != "user" or row.get("trigger_reason"):
+                    continue
+                row_message_id = row.get("message_id")
+                if row_message_id is None or str(row_message_id) != target_key:
+                    continue
+                return cast(Content, row.get("content", ""))
+
+        # The trigger marker is metadata and is intentionally skipped. Iterate
+        # newest-first so an interval-delayed continuation uses the message that
+        # actually caused this fire (including image-only Content blocks).
+        for row in reversed(pending):
             if row.get("role") != "user" or row.get("trigger_reason"):
                 continue
-            if row.get("message_id") != target_message_id:
+            content = row.get("content", "")
+            has_content = bool(content) if isinstance(content, list) else bool(str(content or "").strip())
+            if not has_content:
                 continue
-            return cast(Content, row.get("content", ""))
+            if target_message_id is not None:
+                _L.info(
+                    "scheduler | group={} source user fallback target={} -> msg={}",
+                    group_id,
+                    target_message_id,
+                    row.get("message_id"),
+                )
+            else:
+                _L.info(
+                    "scheduler | group={} source user fallback latest msg={}",
+                    group_id,
+                    row.get("message_id"),
+                )
+            return cast(Content, content)
         return ""
 
     def _arbiter_enabled(self, group_id: str) -> bool:
@@ -1899,7 +1960,11 @@ class GroupChatScheduler:
         # of THIS reply and trigger cancel-and-remerge (see the is_at branch in
         # notify). Reset the first-segment guard for the new fire.
         slot.firing_block_id = str(trigger.extra.get("block_id", "") or "") if trigger is not None else ""
-        slot.firing_user_id = str(trigger.target_user_id or "") if trigger is not None else ""
+        slot.firing_user_id = (
+            str(trigger.target_user_id or "")
+            if trigger is not None
+            else str(slot.last_user_id or "")
+        )
         slot.first_segment_sent = False
         slot.running_task = asyncio.create_task(
             self._do_chat(
@@ -2545,9 +2610,20 @@ class GroupChatScheduler:
                     self._fire(group_id, block_trigger=next_trigger)
                 elif slot.pending_during_generation:
                     pending = slot.pending_during_generation
-                    slot.burst_pending.extend(pending)
                     slot.pending_during_generation = []
-                    if self._arbiter_enabled(group_id):
+                    # Arbiter-A is for explicit @ bursts. Ordinary same-user
+                    # continuations queued during generation have no addressing
+                    # evidence and must re-fire directly, otherwise they would
+                    # be fabricated into an at_mention trigger by
+                    # ``_build_block_triggers``.
+                    has_addressed_pending = any(
+                        msg.target_message_id is not None
+                        or bool(msg.evidence)
+                        or bool(msg.obligation_level)
+                        for msg in pending
+                    )
+                    if self._arbiter_enabled(group_id) and has_addressed_pending:
+                        slot.burst_pending.extend(pending)
                         slot.arbiter_task = asyncio.create_task(self._arbiter_completeness_loop(group_id))
                         slot.arbiter_task.add_done_callback(lambda _: None)
                     else:

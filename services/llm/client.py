@@ -126,6 +126,24 @@ _QUOTE_ANCHOR_RE = re.compile(
     re.IGNORECASE,
 )
 _QUOTE_TAG_RE = re.compile(r"<quote\b[^>]*?/?>", re.IGNORECASE)
+_STICKER_FEEDBACK_VETO_RES = (
+    re.compile(
+        r"(?:不要|别|別|不用|无需|請勿|请勿|不需要|别再|不要再).{0,12}"
+        r"(?:发|发送|贴|带|用|来).{0,10}(?:表情|图片|贴纸|这个|图)",
+    ),
+    re.compile(
+        r"(?:根本|完全|都|还|又)?(?:不看|没看|没有看|看都没看).{0,18}"
+        r"(?:字|文字|内容|上边|上面|图上|图里)",
+    ),
+    re.compile(
+        r"(?:只会|只顾着|光顾着).{0,16}(?:发|选|挑|贴).{0,16}"
+        r"(?:表情|图片|贴纸|图)",
+    ),
+    re.compile(
+        r"(?:先|请先).{0,12}(?:看|读).{0,12}(?:字|文字|内容).{0,12}"
+        r"(?:再|然后).{0,8}(?:发|选|挑)",
+    ),
+)
 _STICKER_TOOL_NAMES = {"send_sticker", "save_sticker", "manage_sticker"}
 _STREAMING_ALLOWED_TOOL_NAMES = frozenset({
     "append_memo",
@@ -578,6 +596,33 @@ def _extract_quote_anchor(text: str) -> tuple[str | None, str]:
     match = _QUOTE_ANCHOR_RE.search(text)
     msg_id = match.group("msg_id") if match else None
     return msg_id, _QUOTE_TAG_RE.sub("", text).strip()
+
+
+def _sticker_user_context(content: Content | None) -> str:
+    """Extract only the current human turn for sticker intent selection.
+
+    Quoted-message wrappers are metadata, not intent; their body is retained so
+    a correction such as "上边写着..." can influence the placement decision.
+    No timeline or prior assistant turn is consulted here.
+    """
+    if not content:
+        return ""
+    text = content_text(content)
+    text = re.sub(r"\[/?QUOTED_MSG\b[^\]]*\]", " ", text, flags=re.IGNORECASE)
+    text = _CQ_CODE_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _sticker_user_feedback_veto(text: str) -> bool:
+    """Return true for explicit no-sticker/correction feedback.
+
+    This is deliberately narrow: ordinary negative sentiment (for example
+    "我不开心") must not disable an empathetic sticker, while a user saying
+    the bot did not read the quoted text must suppress decoration for the
+    corrective turn.
+    """
+    normalized = re.sub(r"\s+", "", text or "")
+    return bool(normalized and any(pattern.search(normalized) for pattern in _STICKER_FEEDBACK_VETO_RES))
 
 
 def _quote_reply_enabled(humanization: ResolvedHumanization) -> bool:
@@ -2058,6 +2103,7 @@ class LLMClient:
         self,
         *,
         reply: str,
+        user_content: Content | None = None,
         thinker_decision: object | None,
         session_id: str,
         group_id: str | None,
@@ -2093,6 +2139,8 @@ class LLMClient:
         tool = self._tools.get("send_sticker")
         if tool is None:
             return False
+        user_text = _sticker_user_context(user_content)
+        user_feedback_veto = _sticker_user_feedback_veto(user_text)
         mood_profile = self._current_humanization_mood(group_id=group_id, session_id=session_id)
         mood_energy = _coerce_mood_axis(mood_profile, "energy", 0.6, lo=0.0, hi=1.0)
         mood_valence = _coerce_mood_axis(mood_profile, "valence", 0.0, lo=-1.0, hi=1.0)
@@ -2119,6 +2167,8 @@ class LLMClient:
                 for sticker_id, entry in store.list_all().items()
                 if str((entry or {}).get("usage_hint", "") or "").strip()
             ),
+            user_text=user_text,
+            user_feedback_veto=user_feedback_veto,
         )
         decision = await StickerDecisionProvider().decide(
             context,
@@ -2132,6 +2182,15 @@ class LLMClient:
             rng=rng,
         )
         candidate_pool = decision.candidate_pool
+        # Explicit user feedback is a hard stop, including kaomoji/sticker-only
+        # force paths. Do this before the whole-library force fallback below.
+        if user_feedback_veto:
+            _log_msg_out.info(
+                "post_reply_sticker_skip | session={} reason=user_feedback_veto force={}",
+                session_id,
+                force_send,
+            )
+            return False
         # force_send (kaomoji-enforce #3): the reply carried a kaomoji that the LLM
         # forgot to attach a sticker to — converting it to a sticker is the design
         # intent, so bypass the Bernoulli send gate. Hard gates above (placement
@@ -2142,16 +2201,18 @@ class LLMClient:
         if (not force_send and not decision.should_send) or not candidate_pool:
             _log_msg_out.info(
                 "post_reply_sticker_skip | session={} reason={} prob={:.3f} source={} "
-                "thinker_ran={} thinker={} energy={:.2f} valence={:+.2f} affection={} freq={} pool={} force={}",
+                "thinker_ran={} thinker={} energy={:.2f} valence={:+.2f} affection={} freq={} pool={} force={} "
+                "user_veto={}",
                 session_id, decision.reason, decision.send_probability, decision.trigger_source,
                 thinker_ran, thinker_suggested, mood_energy, mood_valence, context.affection_stage,
-                base_frequency, len(candidate_pool), force_send,
+                base_frequency, len(candidate_pool), force_send, user_feedback_veto,
             )
             return False
         sticker_id = self._select_post_reply_sticker(
             store,
             candidate_pool=candidate_pool,
             reply=reply,
+            user_text=user_text,
             session_id=session_id,
             group_id=group_id,
             scope=scope,
@@ -2180,6 +2241,7 @@ class LLMClient:
         *,
         candidate_pool: tuple[str, ...],
         reply: str,
+        user_text: str = "",
         session_id: str,
         group_id: str | None,
         scope: Scope,
@@ -2195,19 +2257,15 @@ class LLMClient:
         current topic.  The actual *choice* should fit *what the bot just said*,
         so we run a BM25 intent search across the whole library.
 
-        Query signal layering (2026-06-11 — fixes mis-matched stickers on weak
-        replies). The library's ``usage_hint`` fields are emotion *labels*
-        ("适合在表达开心时发送"), so BM25 matches best against emotional intent:
-        1. **bot reply text** (kaomoji/markup stripped) is the primary signal —
-           it is what *this* turn expresses, and when the reply carries emotion
-           words it pins the right class. The previous implementation keyed off
-           ``_fallback_query`` (the scheduler trigger-reason boilerplate / raw
-           user input), whose filler tokens ("话题/回答/祝") cross-matched
-           unrelated descriptions (e.g. a 生日 sticker) and dominated the score.
-        2. **valence emotion words** are always appended (低→共情/陪伴/难过,
-           高→开心/兴奋/欢呼). They both reinforce an emotional reply and carry
-           weak replies whose stripped text is empty — verified on the live
-           library to select the correct class on their own.
+        Query signal layering (2026-06-11, extended 2026-08-15). The library's
+        ``usage_hint`` fields are emotion *labels* ("适合在表达开心时发送"), so
+        BM25 matches best against the current exchange:
+        1. **current user text** (including quoted text) is included first so a
+           correction or concrete topic can steer selection;
+        2. **bot reply text** (kaomoji/markup stripped) adds the emotion this
+           turn expresses;
+        3. **valence emotion words** are appended (低→共情/陪伴/难过,
+           高→开心/兴奋/欢呼).
         Falls back to the pool's top entry when there is no query (reply empty +
         neutral valence) or nothing matches — UNLESS ``intent_floor`` > 0 and no
         candidate clears it, in which case it returns None so the reply stays
@@ -2216,7 +2274,8 @@ class LLMClient:
         is explicit, so it still picks the pool's best rather than dropping图.
         """
         stripped = _strip_kaomoji_markup(reply or "").strip()
-        query = self._bias_query_by_valence(stripped, mood_valence).strip()
+        signals = [part.strip() for part in (user_text, stripped) if part and part.strip()]
+        query = self._bias_query_by_valence("\n".join(signals), mood_valence).strip()
         if query:
             recent = set(self._recent_sticker_ids(scope))
             scored = store.search_by_intent_scored(query, top_k=5)
@@ -3366,6 +3425,7 @@ class LLMClient:
         self,
         *,
         reply: str,
+        user_content: Content | None = None,
         thinker_decision: object | None,
         session_id: str,
         group_id: str | None,
@@ -3382,6 +3442,7 @@ class LLMClient:
             turn_id = f"{session_id}:light:{light_kind}:{int(time.monotonic() * 1000)}"
             await self._send_post_reply_sticker_if_needed(
                 reply=reply,
+                user_content=user_content,
                 thinker_decision=thinker_decision,
                 session_id=session_id,
                 group_id=group_id,
@@ -3399,6 +3460,7 @@ class LLMClient:
         light_kind: str,
         thinker_action: str,
         conversation_text: str,
+        user_content: Content | None = None,
         mood_text: str,
         user_id: str,
         group_id: str | None,
@@ -3472,6 +3534,7 @@ class LLMClient:
             if emitted:
                 await self._maybe_light_reply_sticker(
                     reply=token,
+                    user_content=user_content,
                     thinker_decision=thinker_decision,
                     session_id=session_id,
                     group_id=group_id,
@@ -3525,6 +3588,7 @@ class LLMClient:
             if emitted:
                 await self._maybe_light_reply_sticker(
                     reply=token,
+                    user_content=user_content,
                     thinker_decision=thinker_decision,
                     session_id=session_id,
                     group_id=group_id,
@@ -3546,6 +3610,7 @@ class LLMClient:
                 turn_id = f"{session_id}:light:sticker_only:{int(time.monotonic() * 1000)}"
                 sticker_sent = await self._send_post_reply_sticker_if_needed(
                     reply="",
+                    user_content=user_content,
                     thinker_decision=thinker_decision,
                     session_id=session_id,
                     group_id=group_id,
@@ -5489,6 +5554,7 @@ class LLMClient:
                 light_kind=light_kind,
                 thinker_action=thinker_action,
                 conversation_text=conversation_text,
+                user_content=user_content,
                 mood_text=climate_text or mood_text,
                 user_id=user_id,
                 group_id=group_id,
@@ -6106,6 +6172,7 @@ class LLMClient:
                         # Pure-kaomoji: no prose survives → the sticker is the reply.
                         sent = await self._send_post_reply_sticker_if_needed(
                             reply="",
+                            user_content=user_content,
                             thinker_decision=thinker_decision,
                             session_id=session_id,
                             group_id=group_id,
@@ -6278,6 +6345,7 @@ class LLMClient:
                 # left the whole F-cluster placement path effectively dead.
                 await self._send_post_reply_sticker_if_needed(
                     reply=full_reply,
+                    user_content=user_content,
                     thinker_decision=thinker_decision,
                     session_id=session_id,
                     group_id=group_id,
@@ -6655,6 +6723,7 @@ class LLMClient:
         )
         await self._send_post_reply_sticker_if_needed(
             reply=full_reply,
+            user_content=user_content,
             thinker_decision=thinker_decision,
             session_id=session_id,
             group_id=group_id,

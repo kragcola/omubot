@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -42,6 +43,10 @@ _RECENT_MEMORY_CARD_LIMIT = 5
 _REFLECTION_INSIGHT_CARD_LIMIT = 3
 _YESTERDAY_SLOT_LIMIT = 3
 _ARC_LAST_EVENTS_LIMIT = 6
+_SCHEDULE_REPAIR_PROMPT = (
+    "上一次日程输出无法解析。请立刻重新输出一个完整、有效的 JSON 对象，"
+    "只保留 date、theme、day_narrative、slots 字段；不要解释、不要 Markdown 代码块。"
+)
 
 _SCHEDULE_SYSTEM_PROMPT = """你是一个日程生成器。你需要以{name}的身份，生成一份详细的、沉浸式的每日日程。
 
@@ -189,8 +194,7 @@ class ScheduleGenerator:
             return False
         _L.info("today's schedule missing for {} — generating now", today_str)
         try:
-            await self._generate(api_call)
-            return True
+            return await self._generate(api_call)
         except Exception:
             _L.exception("on-demand schedule generation failed for {}", today_str)
             return False
@@ -225,7 +229,7 @@ class ScheduleGenerator:
             return getter(now)
         return None
 
-    async def _generate(self, api_call: ApiCaller) -> None:
+    async def _generate(self, api_call: ApiCaller) -> bool:
         now = datetime.now(CST)
         today_str = now.strftime("%Y-%m-%d")
 
@@ -233,7 +237,7 @@ class ScheduleGenerator:
         existing = self._store.load(today_str)
         if existing is not None:
             _L.info("schedule already exists for {} — skipping generation", today_str)
-            return
+            return False
 
         system = [{
             "type": "text",
@@ -302,12 +306,27 @@ class ScheduleGenerator:
         text = _extract_text(result)
         schedule = _parse_schedule(text, today_str)
         if schedule is None:
-            _L.error("failed to parse schedule JSON | raw={}", text[:500])
-            return
+            _L.warning("schedule JSON parse failed; retrying once | raw={}", text[:500])
+            retry_result = await api_call(
+                system,
+                [*messages, {"role": "user", "content": _SCHEDULE_REPAIR_PROMPT}],
+                tools=None,
+                max_tokens=4096,
+            )
+            retry_text = _extract_text(retry_result)
+            schedule = _parse_schedule(retry_text, today_str)
+            if schedule is None:
+                _L.error(
+                    "failed to parse schedule JSON after retry | raw={} retry_raw={}",
+                    text[:300],
+                    retry_text[:500],
+                )
+                return False
 
         self._store.save(schedule)
         self._update_story_arc_after_schedule(active_arc, schedule)
         _L.info("schedule generated | date={} theme={} slots={}", schedule.date, schedule.theme, len(schedule.slots))
+        return True
 
     def _build_worldbook_schedule_context(self, conversation_text: str) -> str:
         runtime = self._worldbook_runtime
@@ -913,19 +932,9 @@ def _extract_text(result: dict[str, Any]) -> str:
 
 
 def _parse_schedule(text: str, date_str: str) -> Schedule | None:
-    """Parse a JSON schedule from LLM output. Strips markdown fences if present."""
-    text = text.strip()
-    if text.startswith("```"):
-        # Remove markdown code fences
-        lines = text.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
+    """Parse a valid schedule object from direct, fenced, or embedded JSON."""
+    data = _extract_schedule_json_object(text)
+    if data is None:
         return None
     try:
         slots: list[TimeSlot] = []
@@ -951,6 +960,47 @@ def _parse_schedule(text: str, date_str: str) -> Schedule | None:
         )
     except (KeyError, TypeError):
         return None
+
+
+def _extract_schedule_json_object(text: str) -> dict[str, Any] | None:
+    """Find the first JSON object that actually carries schedule slots.
+
+    ``json.JSONDecoder.raw_decode`` preserves JSON syntax semantics while
+    allowing a provider to add a short prose preface/suffix. We deliberately do
+    not repair malformed JSON: a truncated or ambiguous payload must retry and
+    otherwise leave the current schedule untouched.
+    """
+    body = (text or "").strip()
+    if not body:
+        return None
+    candidates = [body]
+    candidates.extend(
+        match.group(1).strip()
+        for match in re.finditer(r"```(?:json|JSON)?\s*(.*?)```", body, flags=re.DOTALL)
+        if match.group(1).strip()
+    )
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        try:
+            loaded = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(loaded, dict) and isinstance(loaded.get("slots"), list):
+            return loaded
+
+    start = 0
+    while True:
+        start = body.find("{", start)
+        if start < 0:
+            return None
+        try:
+            loaded, _end = decoder.raw_decode(body[start:])
+        except json.JSONDecodeError:
+            start += 1
+            continue
+        if isinstance(loaded, dict) and isinstance(loaded.get("slots"), list):
+            return loaded
+        start += 1
 
 
 def _weekday_cn(wd: int) -> str:
