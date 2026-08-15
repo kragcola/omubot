@@ -4,7 +4,7 @@
 
 ---
 
-## 2026-08-15 对话连续性、表情包上下文与 QZone 所有权修复（发布候选）
+## 2026-08-16 对话连续性、表情包上下文与 QZone 所有权修复上线
 
 **变更类型**：日志驱动的 bot 行为修复 / bot-only 发布候选。来自运行中 `qq-bot` 的两段同日证据：15:57--16:08 “大狗叫”续话中，16:07:20 的“你怎么不叫”被旧 stale trigger 变为 `chat text=''`，并于 16:07:24 出现 `busy, skip`；20:52 用户反馈“但是你根本发之前不看上边的字”后，旧 selector 仍只按 bot 回复检索并发送 `stk_95fba825`。另有多次日程 LLM 返回解释文字而非 JSON 的 parse warning。
 
@@ -12,7 +12,7 @@
 
 **补充根因与修复**：独立 callback 审计还发现模型生成的 `image/mface/face` CQ 可从 light、plan-then-utter、pause-extend 回调绕过贴图反馈 veto；现统一在 callback/timeline 前清理视觉 CQ，保留 reply/at，并在纯元数据时给出文本下限。全仓 pytest 随后暴露一个发布基线架构阻断：`services/tools/qzone_journal.py` 反向 import `plugins.qzone_journal.delivery`。新增 kernel 中性的 `ExternalEffectPreDispatchError`，QZone 的 `DeliveryPreDispatchError` 兼容地继承它，服务工具只依赖 kernel 合同；确定的 pre-dispatch 仍为 terminal，post-dispatch ambiguous failure 仍不被捕获并保持 unknown。
 
-**验证与发布边界**：隔离 worktree 的贴图/排班/QZone/ownership 交叉回归为 **199 passed**，完整 pytest 为 **5729 passed / 17 skipped / 206 warnings**；Ruff clean、受影响源文件 Pyright `0 errors / 0 warnings`、`git diff --check` clean。待完成本轮提交、构建与 bot-only runtime 核验；不发送测试 QQ 消息，不创建/修改 Runtime v2 source，不启动 worker，`agent_runtime.enabled` 保持关闭，NapCat 不重启、不重建、不执行 `down`。回滚将使用本次构建前固定的 bot image，仅替换 bot 服务。
+**验证与发布**：隔离 worktree 的贴图/排班/QZone/ownership 交叉回归为 **199 passed**，完整 pytest 为 **5729 passed / 17 skipped / 206 warnings**；Ruff clean、受影响源文件 Pyright `0 errors / 0 warnings`、`git diff --check` clean。提交 `d311056` 后从隔离 Dockerfile 构建 `sha256:60f179753e94da0692545014d572d0cc840cfc76fbc52de394a7c9da346ff9a5`，先固定旧 image `sha256:6dc8ab9e…` 为 `omubot-bot:pre-log-behavior-fix-20260815`，再只执行主工作区 `docker compose up -d --no-deps --force-recreate --no-build bot`。新 bot container=`94fee24a…`、`GIT_COMMIT=d311056`、restart=0/OOM=false；Admin=200、未认证 Runtime summary=401、production JSON config 无 `agent_runtime`、storage 无 Runtime source，NapCat ID/image/created/started/restart 不变。启动时日程模型首轮返回解释文本，日志显示 retry 一次后成功生成 14 个 slots；未发送测试 QQ 消息，不创建/修改 Runtime v2 source，不启动 worker，NapCat 不重启、不重建、不执行 `down`。回滚只需将该 pre tag 重标 `latest` 后仅替换 bot。
 
 ## 2026-08-15 Agent Runtime v2 provider execution fence 默认关闭生产上线
 
