@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from kernel.types import (
+    ExternalEffectPreDispatchError,
     ToolApproval,
     ToolConcurrency,
     ToolContext,
@@ -63,6 +64,12 @@ class _LiveDeliveryStub:
 
     async def deliver(self, draft_id: str) -> Any:
         raise AssertionError(f"delivery must not run during binding: {draft_id}")
+
+
+class _PreDispatchDeliveryStub:
+    async def deliver(self, draft_id: str) -> Any:
+        assert draft_id == _DRAFT_ID
+        raise ExternalEffectPreDispatchError("local delivery gate rejected the draft")
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +412,27 @@ async def test_qzone_publish_tool_rejects_legacy_direct_execution() -> None:
     assert store.status == "approved"
     assert credentials.calls == 0
     assert transport.publish_calls == 0
+
+
+async def test_qzone_publish_tool_maps_neutral_pre_dispatch_error() -> None:
+    """The adapter must classify a known pre-dispatch failure without importing its plugin."""
+    tool = QZonePublishDraftTool(_PreDispatchDeliveryStub())
+
+    with pytest.raises(ToolExecutionError) as raised:
+        await tool.execute(
+            ToolContext(
+                user_id="operator",
+                run_id="run-qzone-neutral-pre-dispatch",
+                call_id="call-qzone-neutral-pre-dispatch",
+                principal_kind="service",
+                principal_id="qzone-runtime",
+                extra={"qzone_draft_ids": [_DRAFT_ID]},
+            ),
+            draft_id=_DRAFT_ID,
+        )
+
+    assert raised.value.code == "qzone_publish_precondition_failed"
+    assert raised.value.external_effect_started is False
 
 
 async def test_qzone_dual_approval_publishes_exactly_once(tmp_path: Any) -> None:

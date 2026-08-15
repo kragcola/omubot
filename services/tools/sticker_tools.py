@@ -432,6 +432,16 @@ class SendStickerTool(Tool):
         if not ctx.bot:
             return "Bot 不可用"
 
+        # The current human turn may explicitly correct a previous sticker
+        # choice. Keep this guard at the external-effect boundary as defense in
+        # depth for direct registry calls and future governed dispatchers.
+        if bool(ctx.extra.get("sticker_user_feedback_veto")):
+            logger.info("send_sticker blocked | reason=user_feedback_veto")
+            return "Tool error: send_sticker suppressed by explicit user feedback"
+        if bool(ctx.extra.get("sticker_send_attempted")):
+            logger.info("send_sticker blocked | reason=prior_delivery_attempt")
+            return "Tool error: send_sticker suppressed after a prior delivery attempt"
+
         if str(ctx.target_ref or "").strip():
             try:
                 sticker_id = self._sticker_id_from_durable_target(ctx, kwargs)

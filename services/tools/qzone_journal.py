@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from kernel.types import (
+    ExternalEffectPreDispatchError,
     ToolApproval,
     ToolConcurrency,
     ToolEffect,
@@ -17,7 +18,6 @@ from kernel.types import (
     ToolRetryPolicy,
     ToolSpec,
 )
-from plugins.qzone_journal.delivery import DeliveryPreDispatchError
 from services.agent_runtime.ledger import ToolCallRecord
 from services.agent_runtime.reconciliation import (
     ReconciliationCommand,
@@ -106,7 +106,7 @@ class QZonePublishDraftTool(Tool):
         draft_id = self._trusted_draft_id(ctx, kwargs.get("draft_id"))
         try:
             result = await self._delivery.deliver(draft_id)
-        except DeliveryPreDispatchError as exc:
+        except ExternalEffectPreDispatchError as exc:
             raise ToolExecutionError(
                 code="qzone_publish_precondition_failed",
                 safe_message="QZone publish was rejected before dispatch",

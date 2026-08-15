@@ -4,13 +4,15 @@
 
 ---
 
-## 2026-08-15 对话连续性与表情包上下文修复（发布候选）
+## 2026-08-15 对话连续性、表情包上下文与 QZone 所有权修复（发布候选）
 
 **变更类型**：日志驱动的 bot 行为修复 / bot-only 发布候选。来自运行中 `qq-bot` 的两段同日证据：15:57--16:08 “大狗叫”续话中，16:07:20 的“你怎么不叫”被旧 stale trigger 变为 `chat text=''`，并于 16:07:24 出现 `busy, skip`；20:52 用户反馈“但是你根本发之前不看上边的字”后，旧 selector 仍只按 bot 回复检索并发送 `stk_95fba825`。另有多次日程 LLM 返回解释文字而非 JSON 的 parse warning。
 
 **内容与影响范围**：`services/llm/client.py` 把当前用户文字及引用正文带入表情包意图检索；“不要发/不看文字/先看文字”等明确反馈成为普通、kaomoji 和 force-send 路径共同的硬 veto。`services/scheduler.py` 在 stale target 缺失时回退最新真实用户消息；同用户在 ratified/addressed 生成期间续话，首段前取消重合并、首段后只排队一次 follow-up，不再记录后直接丢弃。`plugins/schedule/generator.py` 支持正文或代码块中的完整 JSON，首次解析失败后仅重试一次，二次失败不写入日程且向调用方返回失败。
 
-**验证与发布边界**：隔离 worktree 定向回归 `tests/test_sticker_context_regression.py tests/test_scheduler.py tests/test_schedule_generator.py -q` 为 **129 passed**。待完成本轮提交、构建与 bot-only runtime 核验；不发送测试 QQ 消息，不创建/修改 Runtime v2 source，不启动 worker，`agent_runtime.enabled` 保持关闭，NapCat 不重启、不重建、不执行 `down`。回滚将使用本次构建前固定的 bot image，仅替换 bot 服务。
+**补充根因与修复**：独立 callback 审计还发现模型生成的 `image/mface/face` CQ 可从 light、plan-then-utter、pause-extend 回调绕过贴图反馈 veto；现统一在 callback/timeline 前清理视觉 CQ，保留 reply/at，并在纯元数据时给出文本下限。全仓 pytest 随后暴露一个发布基线架构阻断：`services/tools/qzone_journal.py` 反向 import `plugins.qzone_journal.delivery`。新增 kernel 中性的 `ExternalEffectPreDispatchError`，QZone 的 `DeliveryPreDispatchError` 兼容地继承它，服务工具只依赖 kernel 合同；确定的 pre-dispatch 仍为 terminal，post-dispatch ambiguous failure 仍不被捕获并保持 unknown。
+
+**验证与发布边界**：隔离 worktree 的贴图/排班/QZone/ownership 交叉回归为 **199 passed**，完整 pytest 为 **5729 passed / 17 skipped / 206 warnings**；Ruff clean、受影响源文件 Pyright `0 errors / 0 warnings`、`git diff --check` clean。待完成本轮提交、构建与 bot-only runtime 核验；不发送测试 QQ 消息，不创建/修改 Runtime v2 source，不启动 worker，`agent_runtime.enabled` 保持关闭，NapCat 不重启、不重建、不执行 `down`。回滚将使用本次构建前固定的 bot image，仅替换 bot 服务。
 
 ## 2026-08-15 Agent Runtime v2 provider execution fence 默认关闭生产上线
 

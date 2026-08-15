@@ -100,6 +100,10 @@ class ToolResultStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ExternalEffectPreDispatchError(RuntimeError):
+    """A dependency proved that an external effect was not started."""
+
+
 class ToolExecutionError(RuntimeError):
     """Structured tool failure with a fail-safe external-dispatch claim."""
 

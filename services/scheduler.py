@@ -135,6 +135,7 @@ class _GroupSlot:
         "consecutive_skip",
         "debounce_task",
         "firing_block_id",
+        "firing_role",
         "firing_user_id",
         "first_segment_sent",
         "last_fire_time",
@@ -199,6 +200,7 @@ class _GroupSlot:
         # first segment is out ("已发段不撤回"), we no longer cancel — the
         # post-emission case falls to Arbiter-B (abort unsent segments only).
         self.firing_block_id: str = ""
+        self.firing_role: str = "addressed"
         self.firing_user_id: str = ""
         self.first_segment_sent: bool = False
 
@@ -356,6 +358,7 @@ class GroupChatScheduler:
         )
         self._rws_reward_task: asyncio.Task[None] | None = None
         self._slots: dict[str, _GroupSlot] = {}
+        self._closing = False
         self._bot: Bot | None = None
         self._outbound_delivery: RuntimeOutboundDelivery | None = None
         self._muted_groups: set[str] = set()
@@ -599,6 +602,8 @@ class GroupChatScheduler:
         runtime_invocation_id: str | None = None,
     ) -> None:
         """Called on every group message. Manages probability-based dispatch."""
+        if self._closing:
+            return
         if group_id in self._muted_groups:
             return
         # B1: feed every observed group message into topic-block attribution
@@ -872,7 +877,7 @@ class GroupChatScheduler:
             same_user_continuation = bool(
                 user_id
                 and user_id == slot.firing_user_id
-                and slot.last_role in {"ratified", "addressed"}
+                and slot.firing_role in {"ratified", "addressed"}
             )
             if same_user_continuation:
                 slot.pending_during_generation.append(pending_message)
@@ -1347,6 +1352,8 @@ class GroupChatScheduler:
 
     def trigger(self, group_id: str) -> None:
         """Immediately fire a chat for this group (no debounce). Used at startup."""
+        if self._closing:
+            return
         if group_id in self._muted_groups:
             return
         identity = self._persona_runtime.identity_snapshot()
@@ -1360,8 +1367,15 @@ class GroupChatScheduler:
 
     async def close(self) -> None:
         """Cancel all running tasks on shutdown."""
+        self._closing = True
         tasks: list[asyncio.Task[None]] = []
         for slot in self._slots.values():
+            slot.msg_count = 0
+            slot.trigger = None
+            slot.runtime_invocation_id = None
+            slot.pending_during_generation = []
+            slot.burst_pending = []
+            slot.block_fire_queue = []
             if slot.running_task and not slot.running_task.done():
                 slot.running_task.cancel()
                 tasks.append(slot.running_task)
@@ -1930,6 +1944,8 @@ class GroupChatScheduler:
         return (rows + pending)[-limit:]
 
     def _fire(self, group_id: str, *, block_trigger: TriggerContext | None = None) -> None:
+        if self._closing:
+            return
         slot = self._slots.get(group_id)
         if not slot:
             return
@@ -1960,6 +1976,7 @@ class GroupChatScheduler:
         # of THIS reply and trigger cancel-and-remerge (see the is_at branch in
         # notify). Reset the first-segment guard for the new fire.
         slot.firing_block_id = str(trigger.extra.get("block_id", "") or "") if trigger is not None else ""
+        slot.firing_role = slot.last_role
         slot.firing_user_id = (
             str(trigger.target_user_id or "")
             if trigger is not None
@@ -2326,7 +2343,7 @@ class GroupChatScheduler:
                         # necessity gate uses the SAME "被寻址" definition as the
                         # scheduler (addressed/ratified never get suppressed).
                         if slot is not None:
-                            ctx.extra["receiver_role"] = slot.last_role
+                            ctx.extra["receiver_role"] = slot.firing_role
 
                         # Write trigger reason into the timeline so the LLM sees it
                         # in the pending buffer, not as transient user_content.

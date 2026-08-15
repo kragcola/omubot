@@ -72,7 +72,7 @@ async def test_source_user_content_falls_back_to_latest_pending_after_stale_anch
     timeline.add("111", role="user", speaker="new(1)", content="你怎么不叫", message_id=20)
     timeline.add_pending_trigger("111", reason="旧话题 anchor", message_id=10)
     scheduler = GroupChatScheduler(
-        llm=_FakeLLM(),
+        llm=_FakeLLM(),  # type: ignore[arg-type]
         timeline=timeline,
         persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
         group_config=_make_config(),
@@ -93,7 +93,7 @@ async def test_source_user_content_keeps_exact_target_over_newer_pending() -> No
     timeline.add("111", role="user", speaker="old(1)", content="被引用的原话", message_id=10)
     timeline.add("111", role="user", speaker="new(1)", content="后来的补充", message_id=20)
     scheduler = GroupChatScheduler(
-        llm=_FakeLLM(),
+        llm=_FakeLLM(),  # type: ignore[arg-type]
         timeline=timeline,
         persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
         group_config=_make_config(),
@@ -105,6 +105,30 @@ async def test_source_user_content_keeps_exact_target_over_newer_pending() -> No
     )
 
     assert content == "被引用的原话"
+    await scheduler.close()
+
+
+async def test_same_user_continuation_does_not_cancel_overhearer_fire() -> None:
+    """A proactive overhearer reply keeps its original role during generation."""
+    from kernel.config import TopicBlockConfig
+
+    llm = _FakeLLM(reply=None, delay=0.5)
+    scheduler = GroupChatScheduler(
+        llm=llm,  # type: ignore[arg-type]
+        timeline=GroupTimeline(),
+        persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+        group_config=_make_config(),
+        topic_block_config=TopicBlockConfig(enabled=True),
+    )
+    scheduler.notify("111", user_id="42", message_text="旁观话题")
+    await asyncio.sleep(0.05)
+    slot = scheduler._slots["111"]
+    assert slot.firing_role == "overhearer"
+    assert slot.running_task is not None and not slot.running_task.done()
+
+    scheduler.notify("111", user_id="42", message_text="新的旁观消息")
+    assert slot.pending_during_generation == []
+    assert not slot.running_task.cancelled()
     await scheduler.close()
 
 
@@ -506,6 +530,30 @@ class TestClose:
         # After close, running tasks should be cancelled or done
         for slot in scheduler._slots.values():
             assert slot.running_task is None or slot.running_task.done()
+
+    async def test_close_does_not_refire_pending_same_user_continuation(self) -> None:
+        """Shutdown cannot turn a cancelled continuation into a new chat call."""
+        llm = _FakeLLM(reply=None, delay=1.0)
+        scheduler = GroupChatScheduler(
+            llm=llm,  # type: ignore[arg-type]
+            timeline=GroupTimeline(),
+            persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        scheduler.notify("111", user_id="42", message_text="？")
+        await asyncio.sleep(0.05)
+        slot = scheduler._slots["111"]
+        assert len(llm.calls) == 1
+
+        scheduler.notify("111", user_id="42", message_text="你怎么不叫")
+        assert len(slot.pending_during_generation) == 1
+
+        await scheduler.close()
+
+        assert len(llm.calls) == 1
+        assert slot.running_task is None or slot.running_task.done()
+        assert slot.pending_during_generation == []
+        assert slot.block_fire_queue == []
 
 
 class TestAtOnly:

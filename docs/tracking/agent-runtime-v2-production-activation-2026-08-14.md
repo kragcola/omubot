@@ -5,7 +5,7 @@
 > 最后更新：2026-08-15 CST
 > 当前下一步：完成本轮日志驱动 bot 行为修复的隔离提交、bot-only 发布与运行核验；随后继续等待 operator 提供真实 production source、备份、restore/rollback rehearsal 与 Worldbook witness，才可进行新的 activation 决策。全程绝不启动真实 worker。
 > 阻塞：真实 production source/schema、冻结 backup SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness/profile-bound manifest 仍未齐备；这些只阻断真实 worker activation，不阻断本次默认关闭的代码发布。
-> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。独立复审无 P0-P2；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产 `qq-bot` image/commit=`6dc8ab9e8a30…`/`ba32cdf`、`agent_runtime_enabled=False`、新 Runtime source files=0、worker log events=0；NapCat ID/image/start/restart 均未变。
+> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。日志驱动 bot 修复补齐 raw visual CQ callback、贴图失败后续话、stale continuation 与排班 JSON 回归；交叉 199 passed、全仓 5729 passed / 17 skipped。独立复审无 P0-P1；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产 `qq-bot` image/commit=`6dc8ab9e8a30…`/`ba32cdf`、`agent_runtime_enabled=False`、新 Runtime source files=0、worker log events=0；NapCat ID/image/start/restart 均未变。
 > 回滚入口：保持 feature gate 默认关闭；将 `omubot-bot:pre-agent-runtime-v2-fence-20260815` 重标为 `omubot-bot:latest` 后仅替换 bot，不创建 production Runtime/Memory/Worldbook DB，不接管 LLM loop，不启动 worker。NapCat 永不重建。
 
 ## Related Bot Behavior Fix (2026-08-15)
@@ -15,8 +15,9 @@
 - **表情包不看文字**：2026-08-15 20:52 的真实反馈为“但是你根本发之前不看上边的字”，旧路径只用 bot 回复做意图检索，仍发送 `stk_95fba825`。`LLMClient` 现在把当前用户文字和引用正文带入 selector；明确“不要发/不看文字/先看文字”等反馈在普通、kaomoji 和 force-send 路径统一硬 veto。
 - **间隔续话断裂**：2026-08-15 16:07 的真实序列中，`？` 触发 companion rescue 后，`你怎么不叫` 被记录为 `chat text=''`，并在 16:07:24 以 `busy, skip` 丢弃。调度器现在在 stale target 找不到时回退最新真实用户消息；同用户在首段发送前续话会取消并重合并，首段后排队一次有界 follow-up。
 - **排班 JSON**：模型返回解释文字或代码块包裹 JSON 时先抽取有效对象；首次解析失败只重试一次，仍失败则返回 false 且不写入坏日程。
+- **回调绕过与架构基线**：明确反馈或一次贴图尝试后，normal、light、plan-then-utter、pause-extend 及 timeline/callback 写入前都会移除模型生成的 `image/mface/face` CQ，并保留 reply/at 与可见文本下限。全仓回归首次暴露 `services.tools.qzone_journal` 反向 import `plugins`；以 kernel 的 `ExternalEffectPreDispatchError` 作为中性 pre-dispatch 合同后，QZone 既有 `DeliveryPreDispatchError` 保持兼容子类，post-dispatch unknown 语义不变。
 
-本轮隔离 release 输入：`services/llm/client.py`、`services/sticker/decision_provider.py`、`services/scheduler.py`、`plugins/schedule/generator.py` 及三个对应回归文件。`tests/test_sticker_context_regression.py tests/test_scheduler.py tests/test_schedule_generator.py` 当前为 **129 passed**；Runtime activation 的真实 source/backup/Worldbook 前置仍未提供，不能以这组行为修复作为 activation 证据。
+本轮隔离 release 输入还包括 `kernel/types.py`、`plugins/qzone_journal/delivery.py`、`services/tools/qzone_journal.py` 与其契约测试。贴图/排班/QZone/插件所有权交叉为 **199 passed**，完整 pytest 为 **5729 passed / 17 skipped**；Runtime activation 的真实 source/backup/Worldbook 前置仍未提供，不能以这组行为修复作为 activation 证据。
 
 ## Resume Capsule
 
@@ -45,8 +46,8 @@
 | ARV2-D | arv2_a11_contracts | A11 test/repair design for profile, lease and manifest code | shared workspace; read-only, no test or production writes | completed | Confirmed four findings plus same-pattern renew lease; contracts and repair integrated by main writer |
 | ARV2-E | arv2_pending_reconcile | Bootstrap/host-ingress tracker reconciliation | shared workspace; read-only, no writes | completed | No fifth established local defect; bootstrap/host ingress contracts are implemented and notices intentionally fail closed |
 | ARV2-F | arv2_release_diff_review | release diff P0-P3 review | shared workspace; read-only, no writes | completed | Same-token concurrent extension finding repaired; final review has no P0-P2, with cooperative cancellation and serial provider throughput recorded as P3 constraints |
-| ARV2-R2 | arv2_release_diff_review | sticker/scheduler/schedule behavior review | isolated release worktree; read-only, no writes | in_progress | Rechecking the two production log samples against the new selector and continuation paths |
-| ARV2-R3 | arv2_worker_lifecycle_tests | Runtime activation artifact inventory | shared workspace; read-only, no writes | in_progress | Separating locally automatable checks from operator-owned source/backup/Worldbook evidence |
+| ARV2-R2 | arv2_release_diff_review | sticker/scheduler/schedule behavior review | isolated release worktree; read-only, no writes | completed | Raw-CQ callback probes and failed-sticker continuation probe passed; no P0/P1, no files edited |
+| ARV2-R3 | arv2_worker_lifecycle_tests | Runtime activation artifact inventory | shared workspace; read-only, no writes | waiting_external | Local contracts are complete; real source/backup/restore/operator/Worldbook artifacts have not been supplied and must not be synthesized |
 
 The production implementation remains serial because composition, source paths and context ownership share one conflict domain. ARV2-B is isolated to a new test file so TDD can keep test intent separate from implementation; it must deliver a manifest before integration. Other parallelism is restricted to independent read-only checks.
 
@@ -55,9 +56,9 @@ The production implementation remains serial because composition, source paths a
 | Section | Status | Evidence / Note | Next Update |
 | --- | --- | --- | --- |
 | Context | done | P0-P5 dark/local complete; default-off production composition and bootstrap wiring complete | Keep source facts current |
-| Plan | in_progress | 默认关闭 bot-only fence release `ba32cdf` 已完成生产发布；真实 activation 仍按原 runbook 等待 artifact | 只读核验真实 artifact |
+| Plan | in_progress | 默认关闭 bot-only fence release `ba32cdf` 已完成生产发布；本轮 bot 行为与 QZone ownership 候选已全仓通过，等待隔离提交/build/recreate；真实 activation 仍按原 runbook 等待 artifact | 提交、bot-only 发布和只读运行核验；随后只读核验真实 artifact |
 | Implementation | done | Provider 前 execution fence、exact owner/token extension、worker lifecycle、只读 preflight CLI 与 activation runbook 已完成 | 等待真实 source/restore/rollback/Worldbook evidence 才可 activation |
-| Verification | done | fence focused 25 passed、交叉 530 passed、CLI 2 passed、范围 Ruff/Pyright/diff clean，独立复审无 P0-P2；new image/API/preflight/no-source/NapCat 均已核验 | 做未来真实 artifact preflight |
+| Verification | in_progress | fence focused 25 passed、交叉 530 passed、CLI 2 passed、范围 Ruff/Pyright/diff clean；本轮交叉 199 passed、全仓 5729 passed / 17 skipped，独立复审无 P0/P1 | 完成本轮发布后 runtime negative verification；未来做真实 artifact preflight |
 | Handoff | pending | P3: provider 必须协作取消，fence 故意串行 provider | Update when real artifacts arrive |
 
 ## Todo
@@ -75,7 +76,7 @@ The production implementation remains serial because composition, source paths a
 - [x] Commit, build and deploy the user-authorized dark release. `6880dd0` -> image `sha256:4f02f5b17f66…`; `agent_runtime.enabled=false`，未创建 Runtime/Memory/Worldbook production DB，未启动 worker；旧 image/static manifest 已保存，NapCat 未操作。
 - [x] Close execution-fence and lifecycle audit: provider entry now reserves the exact owner/token lease until tool completion; same-token extensions do not shorten TTL; lease extension/renew/stop cancellation cleans up observable ownership; guarded dispatches fail terminal as `worker_not_ready`; default-off bootstrap creates no source or worker, while fully attested startup owns one bounded worker.
 - [x] Commit, build and deploy the user-authorized fence follow-up as bot-only dark code. `ba32cdf` -> image `sha256:6dc8ab9e8a30…`; container image/API/preflight/no-source/no-worker/NapCat invariants are verified, and `omubot-bot:pre-agent-runtime-v2-fence-20260815` preserves `6880dd0` rollback.
-- [~] Deliver the independent log-driven sticker/scheduler/schedule behavior fix. Tests and static checks are green; commit/build/deploy/runtime evidence is pending. This item does not authorize Runtime v2 worker activation.
+- [~] Deliver the independent log-driven sticker/scheduler/schedule behavior fix plus the discovered QZone ownership-boundary repair. Cross suite 199 passed、full pytest 5729 passed / 17 skipped、Ruff/Pyright/diff clean; commit/build/deploy/runtime evidence is pending. This item does not authorize Runtime v2 worker activation.
 
 ## Decisions
 
@@ -88,6 +89,7 @@ The production implementation remains serial because composition, source paths a
 | Attestation transport | SHA-256-pinned, profile-bound strict manifest | Keeps operator evidence explicit, repeatable and redacted without allowing test callbacks to replace configured deployment evidence | 2026-08-14 |
 | A11 evidence closure | Enabled profile pin plus internal-only attestor and exact-token cancellation cleanup | Removes test callback authority, post-assembly backup drift and acquire/renew orphan leases before any external artifact decision | 2026-08-14 |
 | Provider execution fence | Hold a process-local fence through provider execution and extend the exact SQLite owner/token before entry | Prevents stale workers from crossing into a provider call; provider execution is intentionally serial and requires cooperative cancellation during future activation | 2026-08-15 |
+| QZone pre-dispatch contract | Put the generic no-external-effect error in `kernel.types`; retain the QZone exception as a subclass | Removes services-to-plugin reverse import without converting post-dispatch ambiguity into a terminal failure | 2026-08-15 |
 
 ## Files Touched
 
@@ -132,6 +134,8 @@ The production implementation remains serial because composition, source paths a
 | `services/scheduler.py` | Recover latest user content from stale anchors and merge same-user continuations | release candidate |
 | `plugins/schedule/generator.py` | Extract embedded/fenced JSON and retry once without writing invalid schedules | release candidate |
 | `tests/test_sticker_context_regression.py` / `tests/test_scheduler.py` / `tests/test_schedule_generator.py` | Log-shaped regressions for sticker context, interval continuation and schedule parsing | release candidate |
+| `kernel/types.py` / `plugins/qzone_journal/delivery.py` / `services/tools/qzone_journal.py` | Neutral pre-dispatch contract removes reverse plugin import while preserving QZone failure phase | release candidate |
+| `tests/test_agent_runtime_qzone_tool.py` | Neutral pre-dispatch mapping contract | release candidate |
 
 ## Verification
 
@@ -202,6 +206,10 @@ The production implementation remains serial because composition, source paths a
 | A13-PROD-DARK | Tag `4f02f5b17f66…` as `omubot-bot:pre-agent-runtime-v2-fence-20260815`; isolated `GIT_COMMIT=ba32cdf docker compose build bot`; tag `6dc8ab9e…` as `omubot-bot:latest`; active bot-only recreate; inspect/curl/container CLI/storage/logs | `qq-bot` image `6dc8ab9e…` / commit `ba32cdf`, restart=0; preflight `not_ready/agent_runtime_disabled`; unauth Runtime summary 401; no Runtime storage file; NapCat `19f6cf…` / v4.15.0 / same start / restart=0 | Default-off fence code is live and externally inert for Agent Runtime. Startup exposed one non-fatal pre-existing schedule LLM JSON parse warning; bot reached ready state and schedule module is outside this diff | 2026-08-15 |
 | B1-LOG-RED | Read-only `docker logs` around group `993065015` 16:07 and 20:52 | Old path recorded `chat text=''`, then `busy, skip`; feedback turn still sent `stk_95fba825` after “根本发之前不看上边的字” | Reproduced both user-visible failures before the behavior candidate | 2026-08-15 |
 | B1-GREEN | Isolated sticker/scheduler/schedule regression suite plus scoped static checks | 129 passed; Ruff clean; Pyright 0 errors/0 warnings; `git diff --check` clean | Current-user/quote context, feedback veto, stale-anchor fallback, same-user cancel/remerge and strict schedule retry are covered; awaiting runtime rollout evidence | 2026-08-15 |
+| B1-RAW-CQ | Independent `arv2_bot_final_review` callback probes plus failed-sticker continuation probe | 4 callback paths and failed delivery continuation passed; no P0/P1 | Visual CQ cannot bypass explicit feedback or one-send budget through light/planner/pause callbacks or timeline writes | 2026-08-15 |
+| B1-ARCH-RED | Full pytest before the QZone repair | 1 failed / 5727 passed / 17 skipped: `services/tools/qzone_journal.py` imported `plugins.qzone_journal.delivery` | Isolated a pre-existing release-base ownership violation; not caused by the bot behavior diff, but a release blocker | 2026-08-15 |
+| B1-ARCH-GREEN | QZone tool, delivery and ownership focused tests; sticker/scheduler/schedule/QZone cross suite | 17 + 14 + 1 passed; cross suite 199 passed; Ruff clean; Pyright 0 errors/0 warnings; diff clean | A kernel-level phase contract removes the reverse import while preserving terminal pre-dispatch and ambiguous post-dispatch classification | 2026-08-15 |
+| B1-FULL | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -p no:cacheprovider -q` | 5729 passed / 17 skipped / 206 warnings in 75.90s | Full regression gate is green; warnings are existing aiohttp/NoneBot deprecations, not failures | 2026-08-15 |
 
 ## Next Session Starts Here
 

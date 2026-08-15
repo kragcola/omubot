@@ -101,6 +101,14 @@ _CQ_CODE_RE = re.compile(r"\[CQ:[^\]]+\]")
 _CQ_BROKEN_RE = re.compile(r"\[CQ:[^\]]*\]", re.DOTALL)
 _CQ_KV_FIX_RE = re.compile(r",(\w+):")
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply\b[^\]]*\]", re.IGNORECASE)
+_VISUAL_CQ_RE = re.compile(
+    r"\[CQ:(?:image|mface|face)\b(?:[^\[\]]|\[[^\]]*\])*\]",
+    re.IGNORECASE,
+)
+_TRAILING_VISUAL_CQ_RE = re.compile(
+    r"\[CQ:(?:image|mface|face)\b[^\]]*$",
+    re.IGNORECASE,
+)
 _BARE_VISUAL_DEICTIC_QUERY_RE = re.compile(
     r"^\s*(?:请问|问下|看看)?\s*"
     r"(?:这|这个|这位|这人|这张图|这个图|图里|图片里|照片里|画面里)"
@@ -127,6 +135,10 @@ _QUOTE_ANCHOR_RE = re.compile(
 )
 _QUOTE_TAG_RE = re.compile(r"<quote\b[^>]*?/?>", re.IGNORECASE)
 _STICKER_FEEDBACK_VETO_RES = (
+    re.compile(
+        r"^(?:不要|别|別|不用|无需|請勿|请勿|不需要|别再|不要再)"
+        r"(?:发|发送|贴|带|用|来)(?:了|啦|吧|呀|嘛)?[。！？!?…]*$",
+    ),
     re.compile(
         r"(?:不要|别|別|不用|无需|請勿|请勿|不需要|别再|不要再).{0,12}"
         r"(?:发|发送|贴|带|用|来).{0,10}(?:表情|图片|贴纸|这个|图)",
@@ -589,6 +601,14 @@ def fix_cq_codes(text: str) -> str:
 
 def _strip_cq_reply_codes(text: str) -> str:
     return _clean_text(_CQ_REPLY_RE.sub("", text))
+
+
+def _strip_visual_cq_codes(text: str) -> str:
+    """Remove model-authored visual CQ without touching reply or mention codes."""
+    without_complete_codes = _VISUAL_CQ_RE.sub("", text)
+    # Light-token generation has a fixed character cap. If it splits a visual
+    # CQ before its closing bracket, remove that trailing fragment as well.
+    return _TRAILING_VISUAL_CQ_RE.sub("", without_complete_codes)
 
 
 def _extract_quote_anchor(text: str) -> tuple[str | None, str]:
@@ -3357,6 +3377,7 @@ class LLMClient:
         user_id: str,
         group_id: str | None,
         identity_name: str,
+        max_chars: int | None = 32,
     ) -> str:
         """Generate a short, symmetric farewell token for a closing turn."""
         return await self._gen_light_token(
@@ -3366,6 +3387,7 @@ class LLMClient:
             user_id=user_id,
             group_id=group_id,
             identity_name=identity_name,
+            max_chars=max_chars,
         )
 
     async def _gen_light_token(
@@ -3377,6 +3399,7 @@ class LLMClient:
         user_id: str,
         group_id: str | None,
         identity_name: str,
+        max_chars: int | None = 32,
     ) -> str:
         """Generate a short, symmetric token for a closing/greeting turn.
 
@@ -3419,7 +3442,8 @@ class LLMClient:
             return ""
         text = str(result.get("text", "") or "") if isinstance(result, dict) else str(result or "")
         cleaned, _ = _strip_control_tokens(_clean_reply(text))
-        return cleaned.strip().strip('"').strip("'").strip()[:32]
+        token = cleaned.strip().strip('"').strip("'").strip()
+        return token if max_chars is None else token[:max_chars]
 
     async def _maybe_light_reply_sticker(
         self,
@@ -3473,6 +3497,7 @@ class LLMClient:
         t0: float,
         thinker_decision: object | None = None,
         ctx: ToolContext | None = None,
+        block_visual_cq: bool = False,
     ) -> dict[str, Any] | None:
         """Handle light_reply (closing/companion) as a unified short-circuit.
 
@@ -3500,8 +3525,15 @@ class LLMClient:
                 user_id=user_id,
                 group_id=group_id,
                 identity_name=identity_name,
+                max_chars=None if block_visual_cq else 32,
             )
             token = (token or "").strip() or _LIGHT_REPLY_CLOSING_FALLBACK
+            if block_visual_cq:
+                token = self._sanitize_vetoed_visual_cq(
+                    token,
+                    session_id=session_id,
+                    is_group=group_id is not None,
+                )
             emitted = False
             if on_segment is not None:
                 quote_id = getattr(trigger, "target_message_id", None) if trigger is not None else None
@@ -3554,8 +3586,15 @@ class LLMClient:
                 user_id=user_id,
                 group_id=group_id,
                 identity_name=identity_name,
+                max_chars=None if block_visual_cq else 32,
             )
             token = (token or "").strip() or _LIGHT_REPLY_GREETING_FALLBACK
+            if block_visual_cq:
+                token = self._sanitize_vetoed_visual_cq(
+                    token,
+                    session_id=session_id,
+                    is_group=group_id is not None,
+                )
             emitted = False
             if on_segment is not None:
                 quote_id = getattr(trigger, "target_message_id", None) if trigger is not None else None
@@ -3632,12 +3671,17 @@ class LLMClient:
                 )
                 return {"light_reply": True, "light_kind": "sticker_only", "text": ""}
             # F5: sticker unavailable → fall back to companion (short text ack,
-            # never silent). Reuse the companion hint pathway.
+            # never silent). The first send may have reached OneBot before a
+            # lost response, so retain the one-send budget for the main loop.
             _log_msg_out.info(
                 "light_reply | session={} kind=sticker_only -> F5 fallback to companion",
                 session_id,
             )
-            return {"inject_companion_hint": True, "light_kind": "companion"}
+            return {
+                "inject_companion_hint": True,
+                "light_kind": "companion",
+                "sticker_send_attempted": True,
+            }
 
         if light_kind == "companion":
             # Companion: return a hint to inject into plugin_dynamic, then let
@@ -3691,6 +3735,25 @@ class LLMClient:
             )
         )
 
+    def _sanitize_vetoed_visual_cq(
+        self,
+        candidate: str,
+        *,
+        session_id: str,
+        is_group: bool,
+    ) -> str:
+        """Keep reply/mention CQ while replacing a vetoed visual-only reply with text."""
+        cleaned = _strip_visual_cq_codes(candidate)
+        if cleaned == candidate:
+            return candidate
+        _log_msg_out.info("reply_visual_cq_stripped | session={}", session_id)
+        visible_text = _CQ_CODE_RE.sub("", cleaned).strip()
+        if _is_blank_or_punctuation_only_reply(visible_text):
+            # A reply/at CQ alone carries transport metadata, not user-visible text.
+            # Keep it so targeting semantics survive, then restore the visible floor.
+            cleaned = f"{cleaned}{self._fallback_ack(session_id=session_id, is_group=is_group, allow_sticker=False)}"
+        return cleaned.strip()
+
     def _finalize_visible_reply(
         self,
         *,
@@ -3699,6 +3762,7 @@ class LLMClient:
         force_reply: bool,
         has_visible_tool_output: bool,
         is_group: bool,
+        allow_sticker_fallback: bool = True,
     ) -> tuple[str, str]:
         raw_reply = reply or ""
         control_only_reply = _contains_control_token(raw_reply)
@@ -3708,6 +3772,12 @@ class LLMClient:
             _log_msg_out.info("reply_control_token_stripped | session={}", session_id)
             if control_only_reply:
                 cleaned = ""
+        if not allow_sticker_fallback:
+            cleaned = self._sanitize_vetoed_visual_cq(
+                cleaned,
+                session_id=session_id,
+                is_group=is_group,
+            )
 
         normalized = cleaned.strip()
         if _is_blank_or_punctuation_only_reply(normalized):
@@ -3716,20 +3786,29 @@ class LLMClient:
                 return "", "suppressed"
             if force_reply or not is_group:
                 _log_msg_out.info("reply_fallback_emitted | session={}", session_id)
-                return self._fallback_ack(session_id=session_id, is_group=is_group), "fallback"
+                return self._fallback_ack(
+                    session_id=session_id,
+                    is_group=is_group,
+                    allow_sticker=allow_sticker_fallback,
+                ), "fallback"
             _log_msg_out.info("reply_suppressed_empty | session={} reason=autonomous", session_id)
             return "", "suppressed"
         return normalized, "reply"
 
-    def _fallback_ack(self, *, session_id: str, is_group: bool) -> str:
+    def _fallback_ack(
+        self,
+        *,
+        session_id: str,
+        is_group: bool,
+        allow_sticker: bool = True,
+    ) -> str:
         """Ack when addressed but the LLM produced no visible text.
 
         Search the sticker library by the last user message(s) in this
-        conversation — if the user said something emotional / reactive the
-        library likely has a matching sticker. Fall back to a short text ack
-        when no stickers are available or nothing matches the context.
+        conversation only when that turn has not vetoed or already attempted a
+        sticker. Otherwise return the short text floor directly.
         """
-        store = self._sticker_store()
+        store = self._sticker_store() if allow_sticker else None
         if store is not None:
             query = self._fallback_query(session_id=session_id, is_group=is_group)
             if query:
@@ -4043,6 +4122,7 @@ class LLMClient:
         tool_call_records: list[dict[str, Any]],
         started_at: float,
         trigger_mode: str,
+        block_visual_cq: bool = False,
     ) -> str | None:
         if not self._plan_then_utter_enabled(
             humanization,
@@ -4179,6 +4259,12 @@ class LLMClient:
             )
             total_input_tokens += int(utter_result.get("input_tokens", 0) or 0)
             candidate = self._clean_plan_then_utter_candidate(str(utter_result.get("text") or ""))
+            if block_visual_cq:
+                candidate = self._sanitize_vetoed_visual_cq(
+                    candidate,
+                    session_id=session_id,
+                    is_group=is_group,
+                )
             if not candidate or candidate in candidates:
                 await self._record_plan_then_utter_trace(
                     session_id=session_id,
@@ -4269,6 +4355,7 @@ class LLMClient:
             humanization=humanization,
             on_segment=on_segment,
             last_segment_emitted_at=last_segment_emitted_at,
+            block_visual_cq=block_visual_cq,
         )
         return ""
 
@@ -4341,6 +4428,7 @@ class LLMClient:
         humanization: ResolvedHumanization,
         on_segment: Callable[[str], Awaitable[bool]] | None,
         last_segment_emitted_at: float | None = None,
+        block_visual_cq: bool = False,
     ) -> list[str]:
         is_group = group_id is not None and self._timeline is not None
         if not self._pause_extend_enabled(
@@ -4469,6 +4557,12 @@ class LLMClient:
             candidate, _stripped = _strip_control_tokens(_clean_reply(str(result.get("text") or "")))
             _quote_msg_id, candidate = _extract_quote_anchor(candidate)
             candidate = fix_cq_codes(candidate.strip())
+            if block_visual_cq:
+                candidate = self._sanitize_vetoed_visual_cq(
+                    candidate,
+                    session_id=session_id,
+                    is_group=True,
+                )
             if not candidate or candidate in {"...", "☆", "~"} or candidate == current_reply:
                 await self._record_pause_extend_trace(
                     session_id=session_id,
@@ -4853,6 +4947,17 @@ class LLMClient:
             guardrail_hits=guardrail_hits,
         )
 
+    @staticmethod
+    def _sticker_tool_succeeded(result_text: str) -> bool:
+        """Recognize a completed sticker send in legacy or governed output."""
+        if result_text.startswith("已发送 "):
+            return True
+        try:
+            payload = json.loads(result_text)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(payload, dict) and payload.get("status") == "succeeded"
+
     def _has_visible_tool_output(self, tool_calls: list[dict[str, Any]]) -> bool:
         for call in tool_calls:
             if call.get("is_error"):
@@ -5086,21 +5191,51 @@ class LLMClient:
         """
 
         dispatcher = getattr(self, "_runtime_tool_dispatcher", None)
+        sticker_feedback_veto = bool(tool_ctx.extra.get("sticker_user_feedback_veto"))
+        sticker_send_attempted = bool(tool_ctx.extra.get("sticker_send_attempted"))
+        # A feedback veto prevents an external effect. It must be surfaced as a
+        # tool error so an empty follow-up model turn still reaches the visible
+        # reply floor instead of being mistaken for a sent sticker.
+        if sticker_feedback_veto:
+            blocked_sticker_result = "Tool error: send_sticker suppressed by explicit user feedback"
+            blocked_sticker_reason = "user_feedback_veto"
+        elif sticker_send_attempted:
+            # A transport failure can follow remote acceptance. Do not let a
+            # later model round turn that ambiguity into a duplicate send.
+            blocked_sticker_result = "Tool error: send_sticker suppressed after a prior delivery attempt"
+            blocked_sticker_reason = "prior_delivery_attempt"
+        else:
+            blocked_sticker_result = ""
+            blocked_sticker_reason = ""
+
+        def _sticker_is_blocked(item: Any) -> bool:
+            return bool(blocked_sticker_reason) and getattr(item, "name", "") == "send_sticker"
+
+        async def _legacy_call(item: Any) -> Any:
+            if _sticker_is_blocked(item):
+                _log_thinking.info(
+                    "tool_call blocked | name=send_sticker reason={}",
+                    blocked_sticker_reason,
+                )
+                return blocked_sticker_result
+            return await self._tools.call(item.name, json.dumps(item.input), ctx=tool_ctx)
+
         if dispatcher is None:
             return await asyncio.gather(
-                *[
-                    self._tools.call(item.name, json.dumps(item.input), ctx=tool_ctx)
-                    for item in tool_uses
-                ],
+                *[_legacy_call(item) for item in tool_uses],
                 return_exceptions=True,
             )
 
         normalized: list[dict[str, Any]] = []
+        blocked_indexes: set[int] = set()
         try:
-            for item in tool_uses:
+            for index, item in enumerate(tool_uses):
                 arguments = getattr(item, "input", {})
                 if not isinstance(arguments, dict):
                     raise TypeError("tool call input must be an object")
+                if _sticker_is_blocked(item):
+                    blocked_indexes.add(index)
+                    continue
                 normalized.append(
                     {
                         "id": str(getattr(item, "id", "") or ""),
@@ -5108,21 +5243,39 @@ class LLMClient:
                         "arguments": dict(arguments),
                     }
                 )
-            results = await dispatcher.dispatch_tool_uses(
-                invocation_id=runtime_invocation_id,
-                tool_uses=tuple(normalized),
-                bot=tool_ctx.bot,
-            )
-            if (
-                not isinstance(results, list)
-                or len(results) != len(tool_uses)
-                or any(not isinstance(result, str) for result in results)
-            ):
-                raise ValueError("governed tool dispatcher returned an invalid result")
-            return results
+            results: list[Any] = [
+                blocked_sticker_result if i in blocked_indexes else None
+                for i in range(len(tool_uses))
+            ]
+            if normalized:
+                dispatched = await dispatcher.dispatch_tool_uses(
+                    invocation_id=runtime_invocation_id,
+                    tool_uses=tuple(normalized),
+                    bot=tool_ctx.bot,
+                )
+                if (
+                    not isinstance(dispatched, list)
+                    or len(dispatched) != len(normalized)
+                    or any(not isinstance(result, str) for result in dispatched)
+                ):
+                    raise ValueError("governed tool dispatcher returned an invalid result")
+                result_index = 0
+                for index in range(len(results)):
+                    if index in blocked_indexes:
+                        continue
+                    results[index] = dispatched[result_index]
+                    result_index += 1
+            return [str(result) for result in results]
         except Exception:
             _log_thinking.exception("governed tool dispatch failed")
-            return ["Tool error: governed tool dispatch is unavailable"] * len(tool_uses)
+            return [
+                (
+                    blocked_sticker_result
+                    if index in blocked_indexes
+                    else "Tool error: governed tool dispatch is unavailable"
+                )
+                for index in range(len(tool_uses))
+            ]
 
     # ------------------------------------------------------------------
     # Main chat entry point
@@ -5152,6 +5305,8 @@ class LLMClient:
         )
         trigger_mode = str(getattr(trigger, "mode", "") or "")
         content_preview = user_content[:80] if isinstance(user_content, str) else str(user_content)[:80]
+        sticker_user_context = _sticker_user_context(user_content)
+        sticker_feedback_veto = _sticker_user_feedback_veto(sticker_user_context)
         _log_msg_in.info(
             "chat | session={} user={} identity={} text={!r}",
             session_id, user_id, identity.id, content_preview,
@@ -5185,11 +5340,18 @@ class LLMClient:
             # message already identified in pending is evidence, not a second
             # transient turn, so do not duplicate it in the provider payload.
             source_is_pending = bool(
-                source_message_id is not None
+                user_content
                 and any(
                     row.get("role") == "user"
                     and not row.get("trigger_reason")
-                    and row.get("message_id") == source_message_id
+                    and (
+                        (
+                            source_message_id is not None
+                            and row.get("message_id") is not None
+                            and str(row.get("message_id")) == str(source_message_id)
+                        )
+                        or row.get("content") == user_content
+                    )
                     for row in pending_for_request
                 )
             )
@@ -5303,6 +5465,7 @@ class LLMClient:
         slang_ask_user_fallback: str | None = None
         speculative_slang_task: asyncio.Task[Any] | None = None
         companion_hint: str | None = None
+        light_sticker_send_attempted = False
         instruction_hint = ""
         # #2 weak-reply on force_reply turns: the pre-reply thinker is the SOLE
         # producer of light_kind (companion/closing) and reply_necessity. The old
@@ -5567,11 +5730,13 @@ class LLMClient:
                 t0=t0,
                 thinker_decision=thinker_decision,
                 ctx=ctx,
+                block_visual_cq=sticker_feedback_veto,
             )
             if light_result is not None:
                 if light_result.get("light_kind") in ("closing", "greeting", "sticker_only"):
                     # Closing/greeting handled by short-circuit token; skip main LLM.
                     return None
+                light_sticker_send_attempted = bool(light_result.get("sticker_send_attempted"))
                 if light_result.get("inject_companion_hint"):
                     # Companion: inject hint and continue to main LLM. The hint
                     # constrains length/register; sticker attachment is left to
@@ -5787,7 +5952,11 @@ class LLMClient:
             is_group=is_group,
             force_reply=force_reply,
         )
-        if self._sentinel_guardrail_enabled(group_id):
+        if (
+            self._sentinel_guardrail_enabled(group_id)
+            or sticker_feedback_veto
+            or light_sticker_send_attempted
+        ):
             streaming_segment = False
 
         # Token accumulators across tool rounds
@@ -5801,6 +5970,10 @@ class LLMClient:
         acc_llm_elapsed = 0.0
 
         _sticker_sent = False
+        # A failed or vetoed sticker attempt must not be retried by the
+        # post-reply placement hook: an external send can be ambiguous after a
+        # timeout.
+        _sticker_attempted = light_sticker_send_attempted
         tool_call_records: list[dict[str, Any]] = []
 
         for round_i in range(MAX_TOOL_ROUNDS):
@@ -5825,6 +5998,7 @@ class LLMClient:
                     tool_call_records=tool_call_records,
                     started_at=t0,
                     trigger_mode=trigger_mode,
+                    block_visual_cq=sticker_feedback_veto or _sticker_attempted,
                 )
                 if plan_reply is not None:
                     return plan_reply
@@ -5988,6 +6162,7 @@ class LLMClient:
                         humanization=humanization,
                         on_segment=on_segment,
                         last_segment_emitted_at=_optional_float(result.get("_last_segment_emitted_at")),
+                        block_visual_cq=sticker_feedback_veto or _sticker_attempted,
                     )
                     return ""
 
@@ -5996,13 +6171,13 @@ class LLMClient:
                     session_id=session_id,
                     # Weak-reply floor (§3.5.5): a companion turn is an explicit
                     # "you should be seen" decision (ratified续话/宝宝/点名). If the
-                    # main LLM yields no visible text, fall to a sticker-or-text
-                    # ack instead of SILENCE — a weak reply must not be stripped
-                    # to nothing. _fallback_ack already tries stickers by intent
-                    # first (§3.5.5 载体), then a non-empty text floor.
+                    # main LLM yields no visible text, fall to a contextual
+                    # sticker-or-text ack instead of SILENCE. A feedback veto or
+                    # previous sticker attempt makes this floor text-only.
                     force_reply=force_reply or companion_hint is not None,
                     has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
                     is_group=is_group,
+                    allow_sticker_fallback=not (sticker_feedback_veto or _sticker_attempted),
                 )
                 quote_reply_enabled = _quote_reply_enabled(humanization)
                 quote_msg_id, reply = _extract_quote_anchor(reply)
@@ -6107,6 +6282,7 @@ class LLMClient:
                     force_reply=force_reply or companion_hint is not None,
                     has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
                     is_group=is_group,
+                    allow_sticker_fallback=not (sticker_feedback_veto or _sticker_attempted),
                 )
                 if _visual_sidechannel_active and reply:
                     cleaned_diag = _strip_visual_diagnostic_phrases(reply)
@@ -6117,6 +6293,7 @@ class LLMClient:
                             force_reply=force_reply or companion_hint is not None,
                             has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
                             is_group=is_group,
+                            allow_sticker_fallback=not (sticker_feedback_veto or _sticker_attempted),
                         )
                 if not reply:
                     if is_group and group_id is not None and self._timeline is not None:
@@ -6150,15 +6327,16 @@ class LLMClient:
                 # kaomoji span, emit the residual prose normally, and attach a
                 # sticker via the post-reply hook (force_send bypasses only the
                 # Bernoulli gate, not the off/placement hard gates). A pure-kaomoji
-                # reply (no prose survives) becomes a wordless sticker — the sticker
-                # stands as the reply.
+                # reply (no prose survives) becomes a wordless sticker only when
+                # that sticker actually sends; an owed turn otherwise gets the
+                # text-only visible-reply floor.
                 kaomoji_force_sticker = self._should_force_kaomoji_sticker_round(
                     reply,
                     session_id=session_id,
                     group_id=group_id,
                     user_id=user_id,
                     turn_id=reply_turn_id,
-                    sticker_sent=_sticker_sent,
+                    sticker_sent=_sticker_sent or _sticker_attempted,
                     round_i=round_i,
                 )
                 if kaomoji_force_sticker:
@@ -6169,7 +6347,8 @@ class LLMClient:
                     )
                     reply = residual
                     if not reply:
-                        # Pure-kaomoji: no prose survives → the sticker is the reply.
+                        # Pure-kaomoji: no prose survives. The sticker is the reply
+                        # only after an actual successful send.
                         sent = await self._send_post_reply_sticker_if_needed(
                             reply="",
                             user_content=user_content,
@@ -6179,10 +6358,20 @@ class LLMClient:
                             user_id=user_id,
                             turn_id=reply_turn_id,
                             ctx=ctx,
-                            already_sent=_sticker_sent,
+                            already_sent=_sticker_sent or _sticker_attempted,
                             force_send=True,
                         )
+                        _sticker_attempted = True
                         _sticker_sent = _sticker_sent or sent
+                        if not sent:
+                            reply, _reply_state = self._finalize_visible_reply(
+                                reply="",
+                                session_id=session_id,
+                                force_reply=force_reply or companion_hint is not None,
+                                has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
+                                is_group=is_group,
+                                allow_sticker_fallback=False,
+                            )
                         if is_group and group_id is not None and self._timeline is not None:
                             self._timeline.set_input_tokens(group_id, result["input_tokens"])
                         else:
@@ -6199,7 +6388,7 @@ class LLMClient:
                             reasoning_replay_tokens=acc_reasoning_replay,
                             tool_rounds=round_i, elapsed_s=acc_llm_elapsed,
                         )
-                        return ""
+                        return reply
 
                 plan = self._visible_reply_segment_plan(
                     reply,
@@ -6337,6 +6526,7 @@ class LLMClient:
                     humanization=humanization,
                     on_segment=on_segment,
                     last_segment_emitted_at=last_segment_emitted_at,
+                    block_visual_cq=sticker_feedback_veto or _sticker_attempted,
                 )
                 # Post-reply sticker decision also runs on the normal no-tool
                 # terminal branch — not just tool_exhausted. The vast majority
@@ -6352,7 +6542,7 @@ class LLMClient:
                     user_id=user_id,
                     turn_id=reply_turn_id,
                     ctx=ctx,
-                    already_sent=_sticker_sent,
+                    already_sent=_sticker_sent or _sticker_attempted,
                     force_send=kaomoji_force_sticker,
                 )
                 if slang_ask_user_fallback and not full_reply.strip():
@@ -6360,6 +6550,7 @@ class LLMClient:
 
                 return last_seg
 
+            prior_sticker_send_attempted = _sticker_attempted
             for tu in tool_uses:
                 args_str = json.dumps(tu.input, ensure_ascii=False)[:200]
                 args_str = args_str.replace("{", "{{").replace("}", "}}")
@@ -6368,7 +6559,7 @@ class LLMClient:
                     round_i, tu.name, args_str,
                 )
                 if tu.name == "send_sticker":
-                    _sticker_sent = True
+                    _sticker_attempted = True
 
             # Assistant message content — preserve thinking blocks for DeepSeek
             assistant_content: list[dict[str, Any]] = []
@@ -6385,6 +6576,8 @@ class LLMClient:
             tool_ctx.extra["resolved_humanization"] = humanization
             tool_ctx.extra["humanization"] = humanization
             tool_ctx.extra["image_tags"] = image_tag_map
+            tool_ctx.extra["sticker_user_feedback_veto"] = sticker_feedback_veto
+            tool_ctx.extra["sticker_send_attempted"] = prior_sticker_send_attempted
             if self._timeline is not None:
                 tool_ctx.extra["timeline"] = self._timeline
             call_results = await self._dispatch_tool_uses(
@@ -6399,6 +6592,10 @@ class LLMClient:
             tool_results: list[dict[str, Any]] = []
             for tu, result_text in zip(tool_uses, call_results, strict=True):
                 is_error = result_text.startswith("Tool error:")
+                if tu.name == "send_sticker":
+                    sticker_succeeded = self._sticker_tool_succeeded(result_text)
+                    is_error = is_error or not sticker_succeeded
+                    _sticker_sent = _sticker_sent or sticker_succeeded
                 _log_thinking.debug(
                     "tool_result | name={} result={}",
                     tu.name, result_text[:200].replace("{", "{{").replace("}", "}}"),
@@ -6453,6 +6650,7 @@ class LLMClient:
             force_reply=force_reply or companion_hint is not None,
             has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
             is_group=is_group,
+            allow_sticker_fallback=not (sticker_feedback_veto or _sticker_attempted),
         )
         quote_reply_enabled = _quote_reply_enabled(humanization)
         quote_msg_id, reply = _extract_quote_anchor(reply)
@@ -6555,6 +6753,7 @@ class LLMClient:
             force_reply=force_reply or companion_hint is not None,
             has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
             is_group=is_group,
+            allow_sticker_fallback=not (sticker_feedback_veto or _sticker_attempted),
         )
         if _visual_sidechannel_active and reply:
             cleaned_diag = _strip_visual_diagnostic_phrases(reply)
@@ -6565,6 +6764,7 @@ class LLMClient:
                     force_reply=force_reply or companion_hint is not None,
                     has_visible_tool_output=self._has_visible_tool_output(tool_call_records),
                     is_group=is_group,
+                    allow_sticker_fallback=not (sticker_feedback_veto or _sticker_attempted),
                 )
         if not reply:
             if is_group and group_id is not None and self._timeline is not None:
@@ -6720,6 +6920,7 @@ class LLMClient:
             humanization=humanization,
             on_segment=on_segment,
             last_segment_emitted_at=last_segment_emitted_at,
+            block_visual_cq=sticker_feedback_veto or _sticker_attempted,
         )
         await self._send_post_reply_sticker_if_needed(
             reply=full_reply,
@@ -6730,7 +6931,7 @@ class LLMClient:
             user_id=user_id,
             turn_id=reply_turn_id,
             ctx=ctx,
-            already_sent=_sticker_sent,
+            already_sent=_sticker_sent or _sticker_attempted,
         )
         return last_seg
 

@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+from kernel.types import ExternalEffectPreDispatchError
 from plugins.qzone_journal.transport import WireProfile
 
 BUILTIN_WIRE_PROFILE = WireProfile(
@@ -28,7 +29,7 @@ BUILTIN_WIRE_PROFILE = WireProfile(
 )
 
 
-class DeliveryPreDispatchError(RuntimeError):
+class DeliveryPreDispatchError(ExternalEffectPreDispatchError):
     """Delivery stopped before the QZone publish provider was invoked."""
 
 
