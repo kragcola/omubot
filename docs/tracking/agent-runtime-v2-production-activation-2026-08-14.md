@@ -5,7 +5,7 @@
 > 最后更新：2026-08-16 CST
 > 当前下一步：本轮日志驱动 bot-only 修复已提交、发布并完成运行核验；现在只读寻找并独立核验 operator 提供的真实 production source、备份、restore/rollback rehearsal 与 Worldbook witness，才可进行新的 activation 决策。全程绝不启动真实 worker。
 > 阻塞：真实 production source/schema、冻结 backup SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness/profile-bound manifest 仍未齐备；这些只阻断真实 worker activation，不阻断本次默认关闭的代码发布。
-> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。日志驱动 bot 修复补齐 raw visual CQ callback、贴图失败后续话、stale continuation 与排班 JSON 回归；交叉 199 passed、全仓 5729 passed / 17 skipped。独立复审无 P0-P1；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产 `qq-bot` image/commit=`60f179753e94…`/`d311056`、restart=0，production JSON config 没有 `agent_runtime`，storage 无 Runtime source/worker；NapCat ID/image/start/restart 均未变。
+> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。日志驱动 bot 修复补齐 raw visual CQ callback、贴图失败后续话、stale continuation 与排班 JSON 回归；交叉 199 passed、全仓 5729 passed / 17 skipped。独立复审无 P0-P1；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产 `qq-bot` image/commit=`60f179753e94…`/`d311056`、restart=0，production JSON config 没有 `agent_runtime`，storage 无 Runtime source/worker；release 已提交并快进 `origin/main=0ee2c3e`，GitHub Typed boundaries CI 成功；NapCat ID/image/start/restart 均未变。
 > 回滚入口：保持 feature gate 默认关闭；将 `omubot-bot:pre-log-behavior-fix-20260815`（`6dc8ab9e8a30…`）重标为 `omubot-bot:latest` 后仅替换 bot，不创建 production Runtime/Memory/Worldbook DB，不接管 LLM loop，不启动 worker。NapCat 永不重建。
 
 ## Related Bot Behavior Fix (2026-08-15)
@@ -47,7 +47,7 @@
 | Frozen backups and rehearsal | 没有 contract-named Runtime backup；历史 `storage/backups` 及 `.workspace` snapshot 未绑定 source/profile | blocked | 每源冻结 backup SHA-256、五份 restore transcript，以及保留 `unknown`/`dispatching` 的 rollback rehearsal |
 | Operator authority | 没有 storage/config 内 operator ACL evidence；credential 按设计在 Git 外，本轮无法推断其存在 | waiting_external | 具名 principal、外置 credential 的持有证明、exact scopes/target refs 和 store-backed ACL entries |
 | Trusted ingress and provider canary | 代码/离线合同已验收，但 tracking/runbook 之外没有 canary target、maintenance window 或 cooperative-cancellation witness | waiting_external | 1 个 exact canary target、registry generation/LLM wiring witness、provider cancellation transcript 和 operator window |
-| Worldbook authority | production 只有 5 个 `config/worldbook/*.json` 内容文件；没有选定的 Worldbook v1 SQLite source 或 witness | blocked | authoritative reread、reducer verification、single-world/no-dual-truth witness，绑定同一 source |
+| Worldbook authority | 容器 `/app/config` 的 production bind mount 实测有 5 个 `config/worldbook/*.json` 内容文件；没有选定的 Worldbook v1 SQLite source 或 witness | blocked | authoritative reread、reducer verification、single-world/no-dual-truth witness，绑定同一 source |
 | Deployment/rollback image | live `d311056` image=`60f179…`，rollback tag `pre-log-behavior-fix-20260815`=`6dc8…` 已存在 | ready for future canary only | artifact set全绿后再由 operator 选择唯一 worker_id、`max_workers=1` 与 canary target |
 
 ## Parallel Ledger
@@ -72,7 +72,7 @@ The production implementation remains serial because composition, source paths a
 | Context | done | P0-P5 dark/local complete; default-off production composition and bootstrap wiring complete | Keep source facts current |
 | Plan | waiting_external | 默认关闭 bot-only fence release `ba32cdf` 与本轮 `d311056` 都已完成生产发布；真实 activation 仍按原 runbook 等待 artifact | 只读核验真实 artifact |
 | Implementation | done | Provider 前 execution fence、exact owner/token extension、worker lifecycle、只读 preflight CLI 与 activation runbook 已完成 | 等待真实 source/restore/rollback/Worldbook evidence 才可 activation |
-| Verification | done | fence focused 25 passed、交叉 530 passed、CLI 2 passed、范围 Ruff/Pyright/diff clean；本轮交叉 199 passed、全仓 5729 passed / 17 skipped，独立复审无 P0/P1；`d311056` container/API/config/storage/NapCat negative checks通过 | 未来做真实 artifact preflight |
+| Verification | done | fence focused 25 passed、交叉 530 passed、CLI 2 passed、范围 Ruff/Pyright/diff clean；本轮交叉 199 passed、全仓 5729 passed / 17 skipped，独立复审无 P0/P1；`d311056` container/API/config/storage/NapCat negative checks通过，`0ee2c3e` 已快进 `origin/main` 且 Typed boundaries CI 成功 | 未来做真实 artifact preflight |
 | Handoff | pending | P3: provider 必须协作取消，fence 故意串行 provider | Update when real artifacts arrive |
 
 ## Todo
@@ -227,10 +227,11 @@ The production implementation remains serial because composition, source paths a
 | B1-PROD | Isolated Docker build `d311056` then main-workspace `docker compose up -d --no-deps --force-recreate --no-build bot`; API/config/storage/log/NapCat inspection | bot `94fee24a…` / `60f179…` / `GIT_COMMIT=d311056`, running/restart=0/OOM=false; Admin=200; unauth Runtime=401; JSON config key absent; storage matches=[]; NapCat unchanged/restart=0 | Default-off Runtime remains inert. Startup schedule parse failed once on model prose, retried once and generated 14 slots; no test QQ message or NapCat action | 2026-08-16 |
 | B1-PROD-PREFLIGHT | Read-only preflight with production JSON config | `not_ready/config_unavailable`; CLI requires TOML activation proposal, while production JSON has no `agent_runtime` key | Do not synthesize a TOML profile to obtain a different status; direct config/storage checks establish the intended absent-source fail-closed state | 2026-08-16 |
 | A14-ARTIFACT-INVENTORY | Correct `config/config.toml` preflight, contract-named storage/config/backup scan, Worldbook file inventory and evidence-doc scan | TOML has no `[agent_runtime]`; preflight=`not_ready/agent_runtime_disabled`; source/manifest/backup paths=0; only 5 Worldbook JSON content files; no non-tracker operator/canary/rehearsal witness | All real activation inputs remain operator-owned external blockers. Existing generic DBs, historical backups and test manifests are explicitly not substituted | 2026-08-16 |
+| A15-SOURCE-PARITY | `git fetch origin`; fast-forward ancestry check; push `0ee2c3e` to `origin/main`; GitHub run `31897383286`; read-only Admin/API/container/log inspection | `origin/main` and release both=`0ee2c3e`; Typed boundaries CI=`success`; Admin=200, Runtime unauth=401, bot image=`60f179…`, restart=0, no ERROR/CRITICAL/Traceback; NapCat remains running/restart=0 | Remote source, verified release and dark production image are aligned; this does not satisfy any real activation artifact gate | 2026-08-16 |
 
 ## Next Session Starts Here
 
-- Direction: Default-off fence release `ba32cdf` is live. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
+- Direction: Default-off fence release `ba32cdf` and log-driven `d311056` behavior release are live; `origin/main=0ee2c3e` has passed Typed boundaries CI. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
 - First action: Obtain explicit operator-owned source locations/schema, backup payloads/digests, restore and rollback rehearsal records, named operator ACL and Worldbook authoritative-reread/reducer/no-dual-truth witness. Verify them read-only, including provider cooperative-cancellation and serial-throughput canary evidence, then produce a new independent review before any activation decision.
 - Open questions: Exact production source locations, backup artifact owner, restore rehearsal, rollback rehearsal and Worldbook witness remain unavailable; they must never be inferred from Admin state or replaced with test manifests.
 - Do not redo: P0-P5 dark/local implementation or the seven completed current-snapshot fixes. Do not turn dark deployment into real activation.

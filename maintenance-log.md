@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-16 Agent Runtime v2 证据盘点远端对齐
+
+**变更类型**：发布可追溯性 / 运行态复核。将 production artifact inventory 提交为 `0ee2c3e`，并将已验证的隔离 release 快进到 `origin/main`；GitHub `Typed boundaries` run `31897383286` 成功。该提交只固化 source、backup、operator、canary 与 Worldbook witness 的缺口，未以 generic DB、历史 backup 或测试 manifest 代替真实 activation evidence。
+
+**影响范围与交接**：生产仍运行 `d311056` 的 bot image `60f179…`，Admin=200、未认证 Runtime summary=401、restart=0、无新的 ERROR/CRITICAL/Traceback；NapCat 未重启或重建。`config/config.toml` 继续没有 `[agent_runtime]`，preflight 为 `not_ready/agent_runtime_disabled`。下一步只接受具名 operator 提供的五 source/schema、冻结 backup/digest、restore/rollback transcript、ACL、canary/provider 与 Worldbook witness，并先只读核验。
+
+---
+
 ## 2026-08-16 对话连续性、表情包上下文与 QZone 所有权修复上线
 
 **变更类型**：日志驱动的 bot 行为修复 / bot-only 发布候选。来自运行中 `qq-bot` 的两段同日证据：15:57--16:08 “大狗叫”续话中，16:07:20 的“你怎么不叫”被旧 stale trigger 变为 `chat text=''`，并于 16:07:24 出现 `busy, skip`；20:52 用户反馈“但是你根本发之前不看上边的字”后，旧 selector 仍只按 bot 回复检索并发送 `stk_95fba825`。另有多次日程 LLM 返回解释文字而非 JSON 的 parse warning。
