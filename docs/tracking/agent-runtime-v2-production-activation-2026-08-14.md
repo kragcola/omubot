@@ -36,6 +36,20 @@
 - external boundary: 本次实现不发送 QQ/QZone/webhook，不启用 QZone live，不改 `BUILTIN_WIRE_PROFILE.validated`，不重启/重建 NapCat。
 - deployment boundary: 用户授权的 bot-only 暗态交付已完成，先为 `ba32cdf`，后为隔离 release worktree 的 `d311056`；生产 JSON config 仍无 `agent_runtime`。source/backup/restore/rollback/Worldbook attestation 全绿前不得把它解释为或升级为 worker activation。
 
+## Production Artifact Inventory (2026-08-16)
+
+本次仅做真实 production 配置、storage 文件名与已有交接文档的只读盘点；没有把历史 backup、测试 manifest 或现有 generic DB 重新标记为 Runtime evidence。
+
+| Gate | Read-only evidence | Status | Required next artifact |
+| --- | --- | --- | --- |
+| Activation profile | `config/config.toml` 无 `[agent_runtime]`；容器内正确 TOML preflight 为 `not_ready/agent_runtime_disabled` | blocked | 具名 operator 写入审核后的 default-off-to-canary profile；不能从示例复制 placeholder |
+| Five explicit sources | `storage/` 中 0 个 contract-named runtime/memory/worldbook/operator/invocation source 或 rollout manifest；现有 17 个 generic SQLite 没有 profile 选定它们 | blocked | 五个彼此不同的真实 SQLite 路径、schema `2/1/1/1/2` 与只读 `quick_check` 结果 |
+| Frozen backups and rehearsal | 没有 contract-named Runtime backup；历史 `storage/backups` 及 `.workspace` snapshot 未绑定 source/profile | blocked | 每源冻结 backup SHA-256、五份 restore transcript，以及保留 `unknown`/`dispatching` 的 rollback rehearsal |
+| Operator authority | 没有 storage/config 内 operator ACL evidence；credential 按设计在 Git 外，本轮无法推断其存在 | waiting_external | 具名 principal、外置 credential 的持有证明、exact scopes/target refs 和 store-backed ACL entries |
+| Trusted ingress and provider canary | 代码/离线合同已验收，但 tracking/runbook 之外没有 canary target、maintenance window 或 cooperative-cancellation witness | waiting_external | 1 个 exact canary target、registry generation/LLM wiring witness、provider cancellation transcript 和 operator window |
+| Worldbook authority | production 只有 5 个 `config/worldbook/*.json` 内容文件；没有选定的 Worldbook v1 SQLite source 或 witness | blocked | authoritative reread、reducer verification、single-world/no-dual-truth witness，绑定同一 source |
+| Deployment/rollback image | live `d311056` image=`60f179…`，rollback tag `pre-log-behavior-fix-20260815`=`6dc8…` 已存在 | ready for future canary only | artifact set全绿后再由 operator 选择唯一 worker_id、`max_workers=1` 与 canary target |
+
 ## Parallel Ledger
 
 | Workstream | Owner | Conflict domain | Isolation | Status | Checkpoint |
@@ -47,7 +61,7 @@
 | ARV2-E | arv2_pending_reconcile | Bootstrap/host-ingress tracker reconciliation | shared workspace; read-only, no writes | completed | No fifth established local defect; bootstrap/host ingress contracts are implemented and notices intentionally fail closed |
 | ARV2-F | arv2_release_diff_review | release diff P0-P3 review | shared workspace; read-only, no writes | completed | Same-token concurrent extension finding repaired; final review has no P0-P2, with cooperative cancellation and serial provider throughput recorded as P3 constraints |
 | ARV2-R2 | arv2_release_diff_review | sticker/scheduler/schedule behavior review | isolated release worktree; read-only, no writes | completed | Raw-CQ callback probes and failed-sticker continuation probe passed; no P0/P1, no files edited |
-| ARV2-R3 | arv2_worker_lifecycle_tests | Runtime activation artifact inventory | shared workspace; read-only, no writes | waiting_external | Local contracts are complete; real source/backup/restore/operator/Worldbook artifacts have not been supplied and must not be synthesized |
+| ARV2-R3 | arv2_worker_lifecycle_tests | Runtime activation artifact inventory | shared workspace; read-only, no writes | waiting_external | 2026-08-16 TOML profile absent/preflight disabled; no contract-named source/manifest/backup, operator/canary/Worldbook evidence remains external and must not be synthesized |
 
 The production implementation remains serial because composition, source paths and context ownership share one conflict domain. ARV2-B is isolated to a new test file so TDD can keep test intent separate from implementation; it must deliver a manifest before integration. Other parallelism is restricted to independent read-only checks.
 
@@ -212,6 +226,7 @@ The production implementation remains serial because composition, source paths a
 | B1-FULL | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -p no:cacheprovider -q` | 5729 passed / 17 skipped / 206 warnings in 75.90s | Full regression gate is green; warnings are existing aiohttp/NoneBot deprecations, not failures | 2026-08-15 |
 | B1-PROD | Isolated Docker build `d311056` then main-workspace `docker compose up -d --no-deps --force-recreate --no-build bot`; API/config/storage/log/NapCat inspection | bot `94fee24a…` / `60f179…` / `GIT_COMMIT=d311056`, running/restart=0/OOM=false; Admin=200; unauth Runtime=401; JSON config key absent; storage matches=[]; NapCat unchanged/restart=0 | Default-off Runtime remains inert. Startup schedule parse failed once on model prose, retried once and generated 14 slots; no test QQ message or NapCat action | 2026-08-16 |
 | B1-PROD-PREFLIGHT | Read-only preflight with production JSON config | `not_ready/config_unavailable`; CLI requires TOML activation proposal, while production JSON has no `agent_runtime` key | Do not synthesize a TOML profile to obtain a different status; direct config/storage checks establish the intended absent-source fail-closed state | 2026-08-16 |
+| A14-ARTIFACT-INVENTORY | Correct `config/config.toml` preflight, contract-named storage/config/backup scan, Worldbook file inventory and evidence-doc scan | TOML has no `[agent_runtime]`; preflight=`not_ready/agent_runtime_disabled`; source/manifest/backup paths=0; only 5 Worldbook JSON content files; no non-tracker operator/canary/rehearsal witness | All real activation inputs remain operator-owned external blockers. Existing generic DBs, historical backups and test manifests are explicitly not substituted | 2026-08-16 |
 
 ## Next Session Starts Here
 
