@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-16 Agent Runtime v2 B2/A16 生产镜像上线与 ingress-only 证据核验
+
+**变更类型**：生产部署 / Runtime activation 前置证据更新。隔离 release worktree 的 `c0a7309` 已构建为 `sha256:aed72adb25a0…`，重标为 `omubot-bot:latest` 后仅执行 `docker compose up -d --no-deps --force-recreate --no-build bot`。新 `qq-bot` 的 commit 为 `c0a7309`、restart=0、OOM=false；Admin SPA=200，未认证 `/api/admin/agent-runtime/summary`=401。NapCat 的容器 ID、image、created、started 与 restart 均未改变，未执行 `down`、restart 或 recreate。
+
+**内容与影响范围**：实际 `omubot-storage` 现有五个 Agent Runtime source（schema `2/1/1/1/2`）、冻结 backup、restore 副本、profile-bound manifest、0600 operator credential 与 exact ACL。容器内即时 preflight 对五源均为 `ready/verified`，source inventory 与 manifest hash 在 bot 启动后不变；但 manifest 的 17 个 activation 和 4 个 rollback gate 仍全部 `not_assessed/operator_evidence_required`，worker lease、trusted invocation、run/tool call/event 均为 0，未出现 worker activation/error 日志。当前 enabled profile 仅进入 ingress-only、selected-dispatcher fail-closed 阶段，不得误称 worker 已上线。
+
+**验证、交接与回滚**：使用不回显 credential 的本地探针验证 Admin login=200、带 named operator credential 的不存在 context=404，证明身份/ACL 链路而未写业务状态；bootstrap renewal-failure regression 在当前 release worktree 独立重复 30/30 通过。下一步是 bot-only image/config rollback rehearsal、自然 OneBot canary、provider cooperative-cancellation/serial-throughput 与 source-bound Worldbook authority witness；完整 evidence、重新 pin 的 manifest 和独立复审前绝不启动 worker，也不发送 QQ/QZone 测试消息。代码回滚 tag 为 `omubot-bot:pre-b2-long-gap-20260816`=`sha256:60f179753e94…`，且永不重建 NapCat。
+
+---
+
 ## 2026-08-16 Agent Runtime v2 source provision 与 ingress-only 配置工具
 
 **变更类型**：生产前置配置 / 可恢复运维工具。新增 `agent_runtime_provision_sources.py`，使用五个既有 store 的正式 migration 在单一 staging 目录创建 Runtime v2、Memory v1、Worldbook v1、operator ACL v1 与 trusted invocation/lease v2；通过 SQLite backup API 冻结各 source，并对每份 backup 完成独立 restore + `quick_check`。工具只读取 legacy `storage/worldbook` JSON，验证 proposal--decision--commit 的精确链、event namespace 不重叠，绝不迁移旧 truth。输出 profile-bound、全 `not_assessed` manifest，不能启动 worker。
