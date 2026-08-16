@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-17 Agent Runtime v2 A20 可取消 web-search provider 候选（待 bot-only 上线）
+
+**变更类型**：生产前代码修复 / provider 边界加固。实际 production 没有 `SEARCH_API_KEY`，默认 `WebSearchTool(mode="auto")` 会将 `ddgs` 调用放入 `asyncio.to_thread`；外层任务取消不能可靠停止底层 provider。容器继承的 Docker 代理不可达，直连 DuckDuckGo HTML/API 也在 12 秒内超时。这个组合不能作为 worker activation 的 cooperative-cancellation 证据。
+
+**内容与影响范围**：提交 `af75232` 将默认无 key `auto` 路径改为固定 `cn.bing.com` RSS，经现有 `fetch_public_text()` 异步、`trust_env=False`、公网 DNS/SSRF、无跨源 redirect、64 KiB 和工具 timeout 边界执行；标准库解析 RSS。带 key 的 Bing API 同样显式忽略失效环境代理。显式 `mode="ddg"` 保持 legacy 兼容，当前 production 配置实际为 `auto`。插件升至 `web_search 1.1.2`，架构/运维/wiki 已同步当前 provider 事实。
+
+**验证与限制**：RED 为 **1 failed**；RSS 格式、取消穿透、受治理超时映射、Runtime fence 的串行/关停合同及相关 profile/tool suite 为 **156 passed**，插件 layout/manifest 为 **52 passed**，完整 pytest 为 **5781 passed / 17 skipped / 206 warnings**，Ruff/Pyright/diff clean。无 key 的受治理本地真实 probe 返回 5 个不回显内容的结果块；此前正在运行容器对 RSS transport 也得到 HTTP 200 / 0.22s。候选尚未构建或替换 production bot，未改 config/manifest/DB，未启动 worker，未发送 QQ/QZone，NapCat 未操作。
+
+**交接与回滚**：下一步从隔离 release worktree 构建 `af75232`，先保留 A18 image 为回滚，再仅替换 bot 并采集 image 内 provider transcript 与 no-worker/NapCat 不变量。RSS 为有界公共依赖，失效只能映射为 retryable provider failure，不能将 gate 置为 ready。Worldbook 只读复核同时确认当前 policy-allowed Social source=0，且当天 schedule 是 legacy reducer 直写；不得借此补写 v2 proposal/receipt 或临时放宽 allowlist。
+
 ## 2026-08-17 Agent Runtime v2 A18 web-search scope repair 上线
 
 **变更类型**：生产配置修复 / bot-only 发布。修复唯一 ingress-only `network:web-search` profile 漏配 `network:search` 的 capability mismatch；provisioner 现在强制校验该依赖，repair 只接受唯一 target 且所有 activation/rollback gate 仍为 `not_assessed` 的 profile。repair 使用目录 FD、`O_NOFOLLOW`、inode 复核、锁、generation manifest 不可变写入、文件/目录 `fsync` 和最后 config 指针原子替换，避免把 scope 修复误扩展成 worker activation。
