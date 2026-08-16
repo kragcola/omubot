@@ -38,8 +38,10 @@ _SOURCE_SCHEMAS = {
 _RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,95}$")
 _OPERATOR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,95}$")
 _WORKER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,95}$")
-_DEFAULT_SCOPES = ("memory:read", "time:read")
+_DEFAULT_SCOPES = ("memory:read", "network:search", "time:read")
 _DEFAULT_TARGETS = ("network:web-search",)
+_WEB_SEARCH_SCOPE = "network:search"
+_WEB_SEARCH_TARGET = "network:web-search"
 _OPERATOR_SCOPES = (
     "memory:candidate:decide",
     "runtime:read",
@@ -401,6 +403,8 @@ async def provision_sources(
     )
     if not scopes or not targets or any("*" in value for value in (*scopes, *targets)):
         raise ValueError("principal scopes and target refs must be explicit and non-wildcard")
+    if _WEB_SEARCH_TARGET in targets and _WEB_SEARCH_SCOPE not in scopes:
+        raise ValueError("network:web-search requires network:search")
 
     storage = root / "storage"
     storage.mkdir(parents=True, exist_ok=True)
