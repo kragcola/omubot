@@ -7,12 +7,29 @@ model turn; it never derives identity from prompt text or a browser session.
 
 from __future__ import annotations
 
+import hashlib
+import json
+
+from loguru import logger
+
 from services.agent_runtime.invocation_store import (
     AuthoritativeTriggerV1,
     TrustedInvocationRecordV1,
     TrustedInvocationStoreV1,
 )
 from services.tools.registry import ToolRegistry
+
+_L = logger.bind(channel="agent_runtime_ingress")
+
+
+def _opaque_digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class AuthoritativeHostTriggerIngressV1:
@@ -55,7 +72,17 @@ class AuthoritativeHostTriggerIngressV1:
             granted_scopes=self._granted_scopes,
             allowed_target_refs=self._allowed_target_refs,
         )
-        return await self._invocations.record(trigger)
+        record = await self._invocations.record(trigger)
+        _L.info(
+            "trusted invocation witness | invocation_id={} registry_generation={} "
+            "scope_digest={} target_digest={} trigger_digest={}",
+            record.invocation_id,
+            record.registry_generation,
+            _opaque_digest(record.granted_scopes),
+            _opaque_digest(record.allowed_target_refs),
+            _opaque_digest(record.trigger_ref),
+        )
+        return record
 
 
 __all__ = ["AuthoritativeHostTriggerIngressV1"]

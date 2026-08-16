@@ -19,6 +19,15 @@ from services.scheduler import GroupChatScheduler, _GroupSlot
 from services.tools.registry import ToolRegistry
 
 
+class _IngressLogProbe:
+    def __init__(self) -> None:
+        self.info_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def info(self, message: str, *args: Any, **kwargs: Any) -> None:
+        del kwargs
+        self.info_calls.append((message, args))
+
+
 def _api() -> Any:
     module_name = "services.agent_runtime.host_ingress"
     if importlib.util.find_spec(module_name) is None:
@@ -72,6 +81,50 @@ async def test_host_ingress_persists_exact_group_and_private_onebot_identity(
         assert private.trigger_ref == "onebot:user:10001:message:30004"
         assert private.group_id == ""
         assert private.session_id == "private_10001"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_host_ingress_emits_opaque_current_scope_witness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("services.agent_runtime.host_ingress")
+    ingress_type = _api()
+    probe = _IngressLogProbe()
+    monkeypatch.setattr(module, "_L", probe, raising=False)
+    store = TrustedInvocationStoreV1(tmp_path / "trusted-invocations.db")
+    registry = ToolRegistry()
+    await store.init()
+    try:
+        ingress = ingress_type(
+            invocations=store,
+            registry=registry,
+            granted_scopes=("memory:read", "network:search"),
+            allowed_target_refs=("network:web-search",),
+        )
+        receipt = await ingress.record_onebot_message(
+            group_id="20002",
+            user_id="10001",
+            message_id="30003",
+        )
+
+        assert len(probe.info_calls) == 1
+        message, args = probe.info_calls[0]
+        assert message == (
+            "trusted invocation witness | invocation_id={} registry_generation={} "
+            "scope_digest={} target_digest={} trigger_digest={}"
+        )
+        assert args[0] == receipt.invocation_id
+        assert args[1] == registry.snapshot_catalog()[0]
+        assert all(isinstance(value, str) and len(value) == 64 for value in args[2:])
+        rendered = message.format(*args)
+        assert "network:search" not in rendered
+        assert "network:web-search" not in rendered
+        assert "20002" not in rendered
+        assert "10001" not in rendered
+        assert "30003" not in rendered
     finally:
         await store.close()
 
