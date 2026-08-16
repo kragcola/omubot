@@ -3,8 +3,8 @@
 > 状态：active
 > mode: task
 > 最后更新：2026-08-16 CST
-> 当前下一步：本轮日志驱动 bot-only 修复已提交、发布并完成运行核验；现在只读寻找并独立核验 operator 提供的真实 production source、备份、restore/rollback rehearsal 与 Worldbook witness，才可进行新的 activation 决策。全程绝不启动真实 worker。
-> 阻塞：真实 production source/schema、冻结 backup SHA-256、restore/rollback rehearsal、具名 operator ACL、Worldbook witness/profile-bound manifest 仍未齐备；这些只阻断真实 worker activation，不阻断本次默认关闭的代码发布。
+> 当前下一步：提交并构建隔离 release 后，在 Docker named volume 内执行一次性 source provision；验证 JSON preflight、备份/restore、ACL 与 legacy Worldbook witness，再原子安装 all-`not_assessed` ingress-only profile。该阶段不得启动 worker 或发送消息。
+> 阻塞：真实 source/schema、冻结 backup SHA-256、restore 与具名 ACL 已有可执行工具但尚未在 named volume 落地；真实 rollback rehearsal、自然 OneBot ingress、provider cooperative-cancellation 与完整 Worldbook authority 仍阻断 worker activation，不能由历史 DB 倒灌或 test manifest 代替。
 > 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。日志驱动 bot 修复补齐 raw visual CQ callback、贴图失败后续话、stale continuation 与排班 JSON 回归；交叉 199 passed、全仓 5729 passed / 17 skipped。独立复审无 P0-P1；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产 `qq-bot` image/commit=`60f179753e94…`/`d311056`、restart=0，production JSON config 没有 `agent_runtime`，storage 无 Runtime source/worker；release 已提交并快进 `origin/main=0ee2c3e`，GitHub Typed boundaries CI 成功；NapCat ID/image/start/restart 均未变。
 > 回滚入口：保持 feature gate 默认关闭；将 `omubot-bot:pre-log-behavior-fix-20260815`（`6dc8ab9e8a30…`）重标为 `omubot-bot:latest` 后仅替换 bot，不创建 production Runtime/Memory/Worldbook DB，不接管 LLM loop，不启动 worker。NapCat 永不重建。
 
@@ -22,9 +22,9 @@
 ## Resume Capsule
 
 - objective: 按 `docs/migrations/agent-runtime-v2-2026-07-21.md` 的 Future Production Activation Runbook，依次完成受限生产组合、认证/ACL、可信触发、attestation、recovery 和交付验证，同时保持所有外部效果 fail-closed。
-- next_step: 只收集并独立核验真实 production source path、schema、backup payload/digest、restore/rollback rehearsal、具名 operator ACL、deployment input 与 Worldbook authoritative-reread/reducer/no-dual-truth witness。完整 manifest 到位前不得启动 worker，禁止用测试 manifest 替代；本轮 bot-only deploy 已完成，不再重跑 build/recreate。
-- current_files: `bootstrap/application.py`、`services/agent_runtime/{production,executor,coordinator,invocation_store}.py`、`tools/agent_runtime_preflight.py`、`docs/runbooks/agent-runtime-v2-production-activation.md`、对应测试与本 tracker。
-- last_verified: fence 在实际 provider 调用前持有进程锁和 SQLite owner/token CAS；同一 token 的不同 lease_until 可连续扩展，失权/超时/guard 异常全部终结为 `worker_not_ready`，取消 shutdown 会等待 fence 后释放 exact lease。production composition 25 passed、交叉 530 passed、preflight CLI 2 passed、范围 Ruff clean、范围 Pyright 0 errors、diff clean；本轮 `d311056` production image 为 `sha256:60f179753e94da0692545014d572d0cc840cfc76fbc52de394a7c9da346ff9a5`，容器 restart=0。Admin=200、未认证 `/api/admin/agent-runtime/summary`=401，production JSON config 无 `agent_runtime`，`/app/storage` 无 Runtime 文件；preflight CLI 仅接受 TOML activation proposal，传 JSON config 的安全结果为 `not_ready/config_unavailable`，不以此伪造 disabled input。NapCat 的 ID/image/start/restart 与发布前一致；实际没有 Runtime source/lease/worker。
+- next_step: 从隔离 release image 在 `omubot-storage:/app/storage` 内运行 `agent_runtime_provision_sources.py`，绝不在 host checkout 的 `storage/` 冒充 production artifact；然后用 JSON preflight 和 ingress-only installer 建立仅入站采证阶段。完整 manifest 到位前不得启动 worker，禁止用测试 manifest 替代。
+- current_files: `bootstrap/application.py`、`services/agent_runtime/{production,executor,coordinator,invocation_store}.py`、`tools/agent_runtime_{preflight,provision_sources,install_profile}.py`、`docs/runbooks/agent-runtime-v2-production-activation.md`、对应测试与本 tracker。
+- last_verified: fence 在实际 provider 调用前持有进程锁和 SQLite owner/token CAS；同一 token 的不同 lease_until 可连续扩展，失权/超时/guard 异常全部终结为 `worker_not_ready`，取消 shutdown 会等待 fence 后释放 exact lease。production composition 25 passed、交叉 539 passed、source/preflight/log focused 8 passed、范围 Ruff clean、范围 Pyright 0 errors、diff clean；JSON preflight 现在复用实际 `config/config.json` 格式。新 source provisioner 的 five-store migration、SQLite backup/restore、operator auth、not_assessed manifest 和 Worldbook chain 都仅在 temporary contract 中验证；`storage/agent-runtime-v2/` 已 Git-ignore，尚未写入 production volume。当前 `d311056` production image 为 `sha256:60f179753e94da0692545014d572d0cc840cfc76fbc52de394a7c9da346ff9a5`，容器 restart=0。Admin=200、未认证 `/api/admin/agent-runtime/summary`=401，production JSON config 无 `agent_runtime`，`/app/storage` 无 Runtime 文件；NapCat 的 ID/image/start/restart 与发布前一致。
 - do_not_redo: 不重写已验收 P0-P5 dark 合同；不把 HTTP POST、OneBot 自动 reconciliation 或 raw QZone transport 标记为已迁移；不把浏览器 token 当作 principal。
 - rollback: 禁用 `agent_runtime.enabled`，停止有界 worker，保留 `unknown`/`dispatching` ledger 供人工 reconcile；仅在 schema compatibility 检查后回滚 bot image，绝不重建 NapCat。
 
@@ -78,6 +78,7 @@ The production implementation remains serial because composition, source paths a
 ## Todo
 
 - [x] Create production activation tracker and preserve dirty baseline.
+- [~] 提供 named-volume source provision、JSON preflight 与 ingress-only config installer；本地 contract 已验证、独立审阅已修正 credential Git-ignore 与 Worldbook decision-chain 校验，production execution 尚未发生。
 - [~] Define explicit, fail-closed Runtime/Memory/Worldbook source paths, schema expectations, backup/restore and rollback attestations. Code contract plus digest-pinned/profile-bound manifest verifier done; real source/backup/restore/rollback artifacts pending.
 - [x] Implement named/scoped operator authentication and store-backed exact resource ACL; browser tokens remain assertions. Admin sensitive routes require credential-authenticated named principal; tool target and Memory candidate grants are exact and checked on every context/action request.
 - [x] Persist authoritative triggers and reconstruct trusted invocation context with exact target refs and registry generation. OneBot group/private ingress returns a bound receipt; router, scheduler and private LLM path forward only its exact canonical ID, while missing, malformed, cancelled or stale receipts fail closed.

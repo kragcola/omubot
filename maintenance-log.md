@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-16 Agent Runtime v2 source provision 与 ingress-only 配置工具
+
+**变更类型**：生产前置配置 / 可恢复运维工具。新增 `agent_runtime_provision_sources.py`，使用五个既有 store 的正式 migration 在单一 staging 目录创建 Runtime v2、Memory v1、Worldbook v1、operator ACL v1 与 trusted invocation/lease v2；通过 SQLite backup API 冻结各 source，并对每份 backup 完成独立 restore + `quick_check`。工具只读取 legacy `storage/worldbook` JSON，验证 proposal--decision--commit 的精确链、event namespace 不重叠，绝不迁移旧 truth。输出 profile-bound、全 `not_assessed` manifest，不能启动 worker。
+
+**配置与安全**：preflight 现同时支持实际的 JSON/TOML 配置格式；初始 profile 只授予 `time:read` 与 `memory:read`，不授予 `network:search` 或任何 OneBot write scope。`agent_runtime_install_profile.py` 只接受 source-preflight 通过且所有 gate 仍为 `not_assessed` 的 fragment，先备份 `config.json` 后原子安装 ingress-only profile，因此 worker 仍会 fail-closed。`storage/agent-runtime-v2/` 已整体 Git-ignore，operator credential 以 0600 文件只存在于 runtime volume，命令输出不会回显 secret。日志格式修复将动态 Loguru message 中的反斜杠、尖括号与花括号整体转义，避免 `<【信息记录】...>` 被当成颜色标签。
+
+**验证与交接**：provisioner/preflight/log focused **8 passed**；Runtime/application/router/scheduler 交叉 **539 passed**；范围 Ruff、Pyright 和 `git diff --check` 均通过，独立复审无 P0-P2。此条仅提交工具与验证，尚未向 `omubot-storage` 写入 source、未修改 production config、未重启 bot 或 NapCat、未发送消息。下一步必须从隔离 image 的一次性容器挂载 named volume 运行 provisioner，再验证并安装 all-`not_assessed` ingress-only profile；真实 rollback、自然 OneBot ingress 和完整 manifest 前不得声称 worker 已上线。
+
+---
+
 ## 2026-08-16 Agent Runtime v2 证据盘点远端对齐
 
 **变更类型**：发布可追溯性 / 运行态复核。将 production artifact inventory 提交为 `0ee2c3e`，并将已验证的隔离 release 快进到 `origin/main`；GitHub `Typed boundaries` run `31897383286` 成功。该提交只固化 source、backup、operator、canary 与 Worldbook witness 的缺口，未以 generic DB、历史 backup 或测试 manifest 代替真实 activation evidence。

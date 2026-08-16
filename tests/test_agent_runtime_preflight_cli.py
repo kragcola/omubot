@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import sqlite3
+import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -186,3 +187,19 @@ async def test_preflight_validates_sources_and_pinned_manifest_without_leaking_i
     assert "database_path" not in serialized
     assert "backup_path" not in serialized
     assert "evidence_ref" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_preflight_reads_the_production_json_config_format(tmp_path: Path) -> None:
+    module = _api()
+    toml_path = await _ready_config(tmp_path)
+    json_path = toml_path.with_suffix(".json")
+    json_path.write_text(
+        json.dumps(tomllib.loads(toml_path.read_text(encoding="utf-8"))),
+        encoding="utf-8",
+    )
+
+    report = await module.run_preflight(config_path=json_path, repo_root=tmp_path)
+
+    assert report["status"] == "ready"
+    assert report["sources"]["invocation"] == {"status": "ready", "reason": "verified"}

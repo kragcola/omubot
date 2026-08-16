@@ -26,6 +26,7 @@ if args.llm_model:
     os.environ["_CLI_LLM_MODEL"] = args.llm_model
 
 from kernel.config import load_config as _load_config  # noqa: E402
+from services.logging_format import escape_loguru_message  # noqa: E402
 
 _bot_config = _load_config(config_path=args.config)
 log_dir = Path(_bot_config.log.dir)
@@ -99,9 +100,8 @@ def _channel_format(record: loguru.Record) -> str:
     """Human-readable log format with Chinese channel labels for tagged records."""
     time_str = record["time"].strftime("%m-%d %H:%M:%S")
     channel = record["extra"].get("channel")
-    # Escape curly braces so that loguru's stderr colorizer doesn't parse
-    # JSON-like content (e.g. [json:data={...}]) in messages as format fields.
-    msg = record["message"].replace("{", "{{").replace("}", "}}")
+    # Escape message syntax before Loguru's colorizer parses the dynamic format.
+    msg = escape_loguru_message(record["message"])
 
     if channel and channel in _CHANNEL_LABELS:
         label = _CHANNEL_LABELS[channel]

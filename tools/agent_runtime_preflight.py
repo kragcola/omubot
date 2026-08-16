@@ -134,8 +134,10 @@ async def run_preflight(*, config_path: Path, repo_root: Path) -> dict[str, Any]
     """Return a secret-safe readiness report without mutating activation state."""
 
     try:
-        raw_config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        raw_config = _read_activation_config(config_path)
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError):
+        return {"status": "not_ready", "reason": "config_unavailable"}
+    if not isinstance(raw_config, Mapping):
         return {"status": "not_ready", "reason": "config_unavailable"}
     raw_settings = raw_config.get("agent_runtime")
     if not isinstance(raw_settings, Mapping) or not bool(raw_settings.get("enabled", False)):
@@ -182,6 +184,16 @@ async def run_preflight(*, config_path: Path, repo_root: Path) -> dict[str, Any]
         "activation": activation,
         "rollback": rollback,
     }
+
+
+def _read_activation_config(config_path: Path) -> Mapping[str, Any]:
+    """Load only the file format selected by the supplied config path."""
+
+    raw = config_path.read_text(encoding="utf-8")
+    value = json.loads(raw) if config_path.suffix.lower() == ".json" else tomllib.loads(raw)
+    if not isinstance(value, Mapping):
+        raise ValueError("activation config must be an object")
+    return value
 
 
 def _gate_summary_unavailable(names: tuple[str, ...]) -> dict[str, Any]:

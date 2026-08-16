@@ -36,6 +36,7 @@ storage/*.db
 storage/*.db-shm
 storage/*.db-wal
 storage/backups/
+storage/agent-runtime-v2/
 storage/image_cache/
 storage/stickers/
 storage/plugins/
