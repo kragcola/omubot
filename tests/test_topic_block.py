@@ -290,6 +290,31 @@ def test_mark_bot_involved_without_block_id_fallback() -> None:
     assert anchor.bot_involved is True
 
 
+def test_only_successful_bot_reply_records_continuation_timestamp() -> None:
+    """Inbound participation is not evidence that the bot actually replied."""
+    t = _tracker()
+    g = "g1"
+    block = t.observe(g, message_id=1, speaker="u1", text="姆姆在吗", at_self=True, now=1.0)
+
+    t.mark_bot_involved(g, now=2.0, block_id=block.block_id)
+    assert block.bot_involved is True
+    assert block.last_bot_reply_at == 0.0
+
+    t.mark_bot_replied(g, now=3.0, block_id=block.block_id)
+    assert block.last_bot_reply_at == 3.0
+
+
+def test_bot_reply_without_exact_block_id_does_not_record_continuation_timestamp() -> None:
+    """A reply with no attributable block must fail closed for long-gap revival."""
+    t = _tracker()
+    g = "g1"
+    block = t.observe(g, message_id=1, speaker="u1", text="姆姆在吗", at_self=True, now=1.0)
+
+    t.mark_bot_replied(g, now=3.0)
+
+    assert block.last_bot_reply_at == 0.0
+
+
 # ── Wave L1 tests ──────────────────────────────────────────────────────
 
 

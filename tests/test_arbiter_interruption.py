@@ -153,7 +153,9 @@ async def test_segment_aborted_on_arbiter_abort() -> None:
         if kwargs["send_count"] == 1:
             timeline.add("123", role="user", content="补充一句", speaker="小明(42)")
             scheduler._slots["123"].pending_during_generation.append(  # type: ignore[attr-defined]
-                PendingMessage(content="补充一句", user_id="42", timestamp=0.0)
+                PendingMessage(
+                    content="补充一句", user_id="42", timestamp=0.0, evidence="at_mention",
+                )
             )
 
     bot = _BotStub(on_send=_inject)
@@ -187,7 +189,9 @@ async def test_segment_continues_on_arbiter_continue() -> None:
         if kwargs["send_count"] == 1:
             timeline.add("123", role="user", content="补充一句", speaker="小明(42)")
             scheduler._slots["123"].pending_during_generation.append(  # type: ignore[attr-defined]
-                PendingMessage(content="补充一句", user_id="42", timestamp=0.0)
+                PendingMessage(
+                    content="补充一句", user_id="42", timestamp=0.0, evidence="at_mention",
+                )
             )
 
     bot = _BotStub(on_send=_inject)
@@ -273,6 +277,56 @@ async def test_no_new_messages_skips_arbiter_call() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evidence", "content"),
+    [
+        ("ratified_continuation", "接着问大狗"),
+        ("directed_followup", "继续上一句"),
+    ],
+)
+async def test_arbiter_b_ignores_direct_turn_during_addressed_reply(
+    evidence: str,
+    content: str,
+) -> None:
+    """Focused direct turns queue for drain, never for an interruption verdict."""
+    timeline = GroupTimeline()
+    llm = _SegmentLLM()
+    scheduler = GroupChatScheduler(
+        llm=llm,  # type: ignore[arg-type]
+        timeline=timeline,
+        persona_runtime=_FakeRuntime(),  # type: ignore[arg-type]
+        group_config=_group_config(),
+    )
+    scheduler._arbiter_config = _arbiter_cfg()  # type: ignore[attr-defined]
+    arbiter = _FakeArbiter(InterruptionResult(action="abort_unsent", reason="wrong input"))
+    scheduler.set_arbiter(arbiter)  # type: ignore[arg-type]
+
+    async def _inject(**kwargs) -> None:
+        if kwargs["send_count"] == 1:
+            timeline.add("123", role="user", content=content, speaker="小明(42)")
+            scheduler._slots["123"].pending_during_generation.append(  # type: ignore[attr-defined]
+                PendingMessage(
+                    content=content,
+                    user_id="42",
+                    timestamp=0.0,
+                    evidence=evidence,
+                )
+            )
+
+    bot = _BotStub(on_send=_inject)
+    scheduler._bot = bot  # type: ignore[attr-defined]
+    slot = scheduler._slots.setdefault("123", _GroupSlot())  # type: ignore[attr-defined]
+    slot.last_user_id = "42"
+    timeline.add("123", role="user", content="原消息", speaker="小明(42)")
+
+    await scheduler._do_chat("123", trigger=TriggerContext(reason="有人@了你", mode="at_mention"))  # type: ignore[attr-defined]
+
+    assert arbiter.calls == []
+    assert len(bot.sent) == 2
+    await scheduler.close()
+
+
+@pytest.mark.asyncio
 async def test_arbiter_b_timeout_continues() -> None:
     timeline = GroupTimeline()
     llm = _SegmentLLM()
@@ -289,7 +343,9 @@ async def test_arbiter_b_timeout_continues() -> None:
         if kwargs["send_count"] == 1:
             timeline.add("123", role="user", content="补充一句", speaker="小明(42)")
             scheduler._slots["123"].pending_during_generation.append(  # type: ignore[attr-defined]
-                PendingMessage(content="补充一句", user_id="42", timestamp=0.0)
+                PendingMessage(
+                    content="补充一句", user_id="42", timestamp=0.0, evidence="at_mention",
+                )
             )
 
     bot = _BotStub(on_send=_inject)

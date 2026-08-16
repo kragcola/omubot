@@ -2,9 +2,11 @@
 
 import asyncio
 import time
+from typing import Any, cast
 
 from kernel.config import GroupConfig, GroupOverride
 from kernel.types import AddressingContext, ReplyObligation, TriggerContext
+from services.llm.arbiter import PendingMessage
 from services.memory.timeline import GroupTimeline
 from services.persona import IdentitySnapshot
 from services.scheduler import GroupChatScheduler, _GroupSlot, _should_force_reply
@@ -154,6 +156,35 @@ class _FakeLLM:
         if self._delay:
             await asyncio.sleep(self._delay)
         return self.reply
+
+
+class _GateLLM:
+    """Test double whose calls advance only when the test releases them."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self._started: list[asyncio.Event] = []
+        self._release: list[asyncio.Event] = []
+
+    async def chat(self, **kwargs) -> None:  # type: ignore[override]
+        started = asyncio.Event()
+        release = asyncio.Event()
+        self.calls.append(kwargs)
+        self._started.append(started)
+        self._release.append(release)
+        started.set()
+        await release.wait()
+
+    async def wait_started(self, index: int) -> None:
+        async def wait_for_call() -> None:
+            while len(self._started) <= index:
+                await asyncio.sleep(0)
+            await self._started[index].wait()
+
+        await asyncio.wait_for(wait_for_call(), timeout=1.0)
+
+    def release(self, index: int) -> None:
+        self._release[index].set()
 
 
 class TestNotify:
@@ -431,6 +462,7 @@ class TestDirectedFollowup:
         )
 
         assert len(slot.pending_during_generation) == 1
+        assert len(slot.pending_direct_triggers) == 1
         assert slot.trigger is not None and slot.trigger.mode == "directed_followup"
         assert slot.consecutive_skip == 0
 
@@ -438,9 +470,46 @@ class TestDirectedFollowup:
         await asyncio.sleep(0.05)
 
         assert slot.pending_during_generation == []
+        assert slot.pending_direct_triggers == []
         assert slot.trigger is None
         assert slot.consecutive_skip == 0
         assert len(llm.calls) == 1
+        await scheduler.close()
+
+    async def test_queued_ratified_continuation_is_not_rewritten_as_at_mention(self) -> None:
+        """Arbiter-A owns only actual @ bursts, never a queued continuation."""
+        from types import SimpleNamespace
+
+        llm = _FakeLLM(reply=None, delay=0.08)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        scheduler._arbiter_config = SimpleNamespace(enabled=True, runtime_groups=[])  # type: ignore[assignment]
+        scheduler.set_arbiter(object())  # type: ignore[arg-type]
+        scheduler.notify(
+            "111",
+            trigger=TriggerContext(reason="继续刚才的话题", mode="directed_followup"),
+            user_id="u1",
+            message_text="先说这个",
+            message_id=1,
+        )
+        await asyncio.sleep(0.01)
+        scheduler.notify(
+            "111",
+            trigger=TriggerContext(
+                reason="同一话题继续", mode="ratified_continuation", target_message_id=2,
+                target_user_id="u1", extra={"block_id": "b1"},
+            ),
+            user_id="u1",
+            message_text="接着说",
+            message_id=2,
+        )
+        await asyncio.sleep(0.2)
+
+        assert len(llm.calls) == 2
+        followup = llm.calls[1]["trigger"]
+        assert followup is not None and followup.mode == "ratified_continuation"
         await scheduler.close()
 
 
@@ -510,6 +579,279 @@ class TestPendingReset:
 
         assert slot.running_task is None or slot.running_task.cancelled() or slot.running_task.done()
         await scheduler.close()
+
+    async def test_mute_unmute_old_chat_cannot_clear_replacement_task(self) -> None:
+        """A cancelled pre-mute chat must not detach an immediate replacement."""
+        llm = _GateLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(reason="旧触发", mode="directed_followup"),
+                user_id="u1",
+                message_text="旧问题",
+                message_id=1,
+            )
+            await llm.wait_started(0)
+            slot = scheduler._slots["111"]
+            previous = slot.running_task
+            assert previous is not None
+
+            scheduler.mute("111", source="test")
+            scheduler.unmute("111")
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(reason="新触发", mode="directed_followup"),
+                user_id="u2",
+                message_text="新问题",
+                message_id=2,
+            )
+            replacement = slot.running_task
+            assert replacement is not None and replacement is not previous
+
+            # Let the cancelled task run its finally block before checking the
+            # post-unmute task identity.
+            await asyncio.sleep(0)
+            assert slot.running_task is replacement
+            await llm.wait_started(1)
+            llm.release(1)
+        finally:
+            await scheduler.close()
+
+    async def test_mute_unmute_old_arbiter_cannot_clear_replacement_burst(self) -> None:
+        """A cancelled pre-mute Arbiter-A task must not consume a new @ burst."""
+        from types import SimpleNamespace
+
+        scheduler = GroupChatScheduler(
+            llm=_FakeLLM(reply=None), timeline=GroupTimeline(),  # type: ignore[arg-type]
+            persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        scheduler._arbiter_config = SimpleNamespace(  # type: ignore[assignment]
+            enabled=True,
+            runtime_groups=[],
+            completeness_poll_interval_s=60.0,
+            completeness_max_wait_s=60.0,
+            completeness_confidence_threshold=1.0,
+        )
+        scheduler.set_arbiter(object())  # type: ignore[arg-type]
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(reason="旧@", mode="at_mention"),
+                user_id="u1",
+                message_text="旧的@",
+                message_id=1,
+                at_self=True,
+            )
+            slot = scheduler._slots["111"]
+            previous = slot.arbiter_task
+            assert previous is not None
+            await asyncio.sleep(0)
+
+            scheduler.mute("111", source="test")
+            scheduler.unmute("111")
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(reason="新@", mode="at_mention"),
+                user_id="u2",
+                message_text="新的@",
+                message_id=2,
+                at_self=True,
+            )
+            replacement = slot.arbiter_task
+            assert replacement is not None and replacement is not previous
+
+            await asyncio.sleep(0)
+            assert slot.arbiter_task is replacement
+            assert [message.content for message in slot.burst_pending] == ["新的@"]
+        finally:
+            await scheduler.close()
+
+    async def test_mute_rejects_late_segment_from_cancel_suppressing_provider(self) -> None:
+        """A detached chat cannot send after a provider swallows cancellation."""
+        from unittest.mock import AsyncMock
+
+        class _CancellationSuppressingLLM:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+                self.late_segment_allowed: bool | None = None
+
+            async def chat(self, **kwargs) -> str:
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    on_segment = kwargs["on_segment"]
+                    assert on_segment is not None
+                    self.late_segment_allowed = await on_segment("晚到的分段")
+                    self.cancelled.set()
+                    return ""
+
+        async def _sent(*_args, sent_event=None, **_kwargs) -> float:
+            if sent_event is not None:
+                sent_event.set()
+            return 0.1
+
+        llm = _CancellationSuppressingLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        scheduler._bot = object()  # type: ignore[assignment]
+        send = AsyncMock(side_effect=_sent)
+        scheduler._send_to_group = send  # type: ignore[method-assign]
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(reason="旧触发", mode="directed_followup"),
+                user_id="u1",
+                message_text="旧问题",
+                message_id=1,
+            )
+            await asyncio.wait_for(llm.started.wait(), timeout=1.0)
+
+            scheduler.mute("111", source="test")
+            await asyncio.wait_for(llm.cancelled.wait(), timeout=1.0)
+
+            assert llm.late_segment_allowed is False
+            send.assert_not_awaited()
+        finally:
+            await scheduler.close()
+
+    async def test_live_slot_accepts_stream_segment_from_wait_for_child_task(self) -> None:
+        """A live _fire task must accept its LLM child's streamed segment."""
+        from unittest.mock import AsyncMock
+
+        class _StreamingLLM:
+            def __init__(self) -> None:
+                self.finished = asyncio.Event()
+                self.segment_allowed: bool | None = None
+
+            async def chat(self, **kwargs) -> str:
+                on_segment = kwargs["on_segment"]
+                assert on_segment is not None
+                segment_task = asyncio.create_task(on_segment("正常流式分段"))
+                self.segment_allowed = await segment_task
+                self.finished.set()
+                return ""
+
+        async def _sent(*_args, sent_event=None, **_kwargs) -> float:
+            if sent_event is not None:
+                sent_event.set()
+            return 0.1
+
+        llm = _StreamingLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        scheduler._bot = object()  # type: ignore[assignment]
+        send = AsyncMock(side_effect=_sent)
+        scheduler._send_to_group = send  # type: ignore[method-assign]
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(reason="正常流", mode="directed_followup"),
+                user_id="u1",
+                message_text="请正常回复",
+                message_id=1,
+            )
+            await asyncio.wait_for(llm.finished.wait(), timeout=1.0)
+
+            assert llm.segment_allowed is True
+            send.assert_awaited_once()
+        finally:
+            await scheduler.close()
+
+    async def test_replacement_slot_rejects_late_segment_from_cancel_suppressing_provider(self) -> None:
+        """An old provider cannot send into or detach an unmuted replacement."""
+        from unittest.mock import AsyncMock
+
+        class _CancellationSuppressingLLM:
+            def __init__(self) -> None:
+                self.old_started = asyncio.Event()
+                self.replacement_started = asyncio.Event()
+                self.allow_old_callback = asyncio.Event()
+                self.old_callback_done = asyncio.Event()
+                self.release_replacement = asyncio.Event()
+                self.late_segment_allowed: bool | None = None
+                self.calls = 0
+
+            async def chat(self, **kwargs) -> str:
+                call = self.calls
+                self.calls += 1
+                if call == 0:
+                    self.old_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        await self.allow_old_callback.wait()
+                        on_segment = kwargs["on_segment"]
+                        assert on_segment is not None
+                        self.late_segment_allowed = await on_segment("旧任务的晚到分段")
+                        self.old_callback_done.set()
+                        return ""
+                self.replacement_started.set()
+                await self.release_replacement.wait()
+                return ""
+
+        async def _sent(*_args, sent_event=None, **_kwargs) -> float:
+            if sent_event is not None:
+                sent_event.set()
+            return 0.1
+
+        llm = _CancellationSuppressingLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        scheduler._bot = object()  # type: ignore[assignment]
+        send = AsyncMock(side_effect=_sent)
+        scheduler._send_to_group = send  # type: ignore[method-assign]
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(reason="旧触发", mode="directed_followup"),
+                user_id="u1",
+                message_text="旧问题",
+                message_id=1,
+            )
+            await asyncio.wait_for(llm.old_started.wait(), timeout=1.0)
+            slot = scheduler._slots["111"]
+
+            scheduler.mute("111", source="test")
+            scheduler.unmute("111")
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(reason="新触发", mode="directed_followup"),
+                user_id="u2",
+                message_text="新问题",
+                message_id=2,
+            )
+            replacement = slot.running_task
+            assert replacement is not None
+
+            llm.allow_old_callback.set()
+            await asyncio.wait_for(llm.old_callback_done.wait(), timeout=1.0)
+
+            assert llm.late_segment_allowed is False
+            send.assert_not_awaited()
+            assert slot.running_task is replacement
+            await asyncio.wait_for(llm.replacement_started.wait(), timeout=1.0)
+        finally:
+            llm.allow_old_callback.set()
+            llm.release_replacement.set()
+            await scheduler.close()
 
 
 class TestClose:
@@ -707,6 +1049,73 @@ class TestMute:
         assert slot.msg_count == 0
         assert slot.pending_during_generation == []
         await scheduler.close()
+
+    async def test_mute_drops_direct_continuation_queued_by_cancelled_chat(self) -> None:
+        """Mute must not let a queued focused turn escape a cancelled reply."""
+        llm = _GateLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(
+                    reason="先回答", mode="directed_followup", target_message_id=1, target_user_id="u1",
+                ),
+                user_id="u1",
+                message_text="先说这个",
+                message_id=1,
+            )
+            await llm.wait_started(0)
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(
+                    reason="继续", mode="ratified_continuation", target_message_id=2, target_user_id="u1",
+                ),
+                user_id="u1",
+                message_text="还想听",
+                message_id=2,
+            )
+            slot = scheduler._slots["111"]
+            running = slot.running_task
+            assert running is not None
+            assert len(slot.pending_direct_triggers) == 1
+
+            scheduler.mute("111")
+            await asyncio.gather(running, return_exceptions=True)
+
+            assert len(llm.calls) == 1
+            assert slot.pending_direct_triggers == []
+        finally:
+            await scheduler.close()
+
+    async def test_mute_cancels_deferred_addressed_fire_before_unmute(self) -> None:
+        """Unmuting cannot revive an addressed wait that mute invalidated."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(),
+        )
+        try:
+            slot = scheduler._slots.setdefault("111", _GroupSlot())
+            slot.wait_defer_task = asyncio.create_task(
+                scheduler._deferred_addressed_fire(
+                    "111",
+                    TriggerContext(reason="有人@了你", mode="at_mention", target_message_id=1),
+                    0.05,
+                )
+            )
+            await asyncio.sleep(0)
+
+            scheduler.mute("111")
+            scheduler.unmute("111")
+            await asyncio.sleep(0.1)
+
+            assert len(llm.calls) == 0
+            assert slot.wait_defer_task is None
+        finally:
+            await scheduler.close()
 
     async def test_is_muted(self) -> None:
         """is_muted returns correct state."""
@@ -1281,8 +1690,8 @@ class TestOverhearerRole:
         assert len(llm.calls) == 1  # ratified continuation, not silenced
         await scheduler.close()
 
-    async def test_do_chat_marks_block_bot_involved_after_reply(self) -> None:
-        """_do_chat calls mark_bot_involved after a successful send."""
+    async def test_do_chat_records_exact_block_reply_time_after_successful_send(self) -> None:
+        """A successful send records its timestamp only on the firing block."""
         from unittest.mock import AsyncMock
 
         llm = _FakeLLM(reply="好呀")
@@ -1291,15 +1700,77 @@ class TestOverhearerRole:
             group_config=_make_config(talk_value=1.0),
             topic_block_config=self._config("silent"),
         )
-        scheduler._send_to_group = AsyncMock(return_value=0.1)  # type: ignore[method-assign]
-        scheduler._topic_tracker.observe("111", message_id=1, speaker="u1", text="姆姆在吗", at_self=True)
+        async def _sent(*_args, sent_event=None, **_kwargs) -> float:
+            if sent_event is not None:
+                sent_event.set()
+            return 0.1
+
+        scheduler._send_to_group = AsyncMock(side_effect=_sent)  # type: ignore[method-assign]
+        block = scheduler._topic_tracker.observe("111", message_id=1, speaker="u1", text="姆姆在吗")
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.firing_block_id = block.block_id
         await scheduler._do_chat("111", trigger=TriggerContext(
             reason="@", mode="at_mention", target_message_id=1, target_user_id="u1",
+            extra={"block_id": block.block_id},
         ))
-        # The block the bot replied in is now bot-involved.
-        blk = scheduler._topic_tracker.pick_anchor_block("111", require_bot_involved=True)
-        assert blk is not None and blk.bot_involved is True
+        assert block.bot_involved is True
+        assert block.last_bot_reply_at > 0.0
         await scheduler.close()
+
+    async def test_cancelled_streaming_reply_records_exact_block_after_visible_segment(self) -> None:
+        """A delivered stream segment remains a real block reply after cancellation."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        class _StreamingUntilCancelledLLM:
+            def __init__(self) -> None:
+                self.segment_sent = asyncio.Event()
+                self.block = asyncio.Event()
+
+            async def chat(self, **kwargs) -> None:  # type: ignore[override]
+                on_segment = kwargs["on_segment"]
+                assert on_segment is not None
+                assert await on_segment("already delivered first segment") is True
+                self.segment_sent.set()
+                await self.block.wait()
+
+        llm = _StreamingUntilCancelledLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("silent"),
+        )
+        scheduler.set_bot(cast(Any, SimpleNamespace(self_id="bot")))
+
+        async def _sent(*_args, sent_event=None, **_kwargs) -> float:
+            if sent_event is not None:
+                sent_event.set()
+            return 0.1
+
+        scheduler._send_to_group = AsyncMock(side_effect=_sent)  # type: ignore[method-assign]
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe("111", message_id=1, speaker="u1", text="mum are you there")
+        slot = scheduler._slots.setdefault("111", _GroupSlot())
+        slot.firing_block_id = block.block_id
+        task = asyncio.create_task(scheduler._do_chat("111", trigger=TriggerContext(
+            reason="@", mode="at_mention", target_message_id=1, target_user_id="u1",
+            extra={"block_id": block.block_id},
+        )))
+        try:
+            await asyncio.wait_for(llm.segment_sent.wait(), timeout=1.0)
+            delivered_at = block.last_bot_reply_at
+            assert delivered_at > 0.0
+
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+            assert block.bot_involved is True
+            assert block.last_bot_reply_at >= delivered_at
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await scheduler.close()
 
     async def test_ratified_floor_fires_when_rws_would_skip(self) -> None:
         """B2 continuation floor: a ratified follow-up fires even when the base
@@ -1361,6 +1832,645 @@ class TestOverhearerRole:
         await asyncio.sleep(0.1)
         assert len(llm.calls) == 0  # within cooldown → no rescue, stays silent
         await scheduler.close()
+
+    async def test_current_uninvolved_block_is_not_rescued_by_other_ratified_block(self) -> None:
+        """A bot-involved block A must not ratify an unrelated current block B."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block_a = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_involved("111", block_id=block_a.block_id)
+
+        # This message opens block B. Before the fix, _receiver_role() selected
+        # block A globally and incorrectly sent a companion rescue for B.
+        scheduler.notify("111", user_id="u2", message_text="今天的天气真好", message_id=2)
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 0
+        await scheduler.close()
+
+    async def test_probability_reply_records_the_current_uninvolved_block_only(self) -> None:
+        """A delivered ordinary reply starts continuity for its own topic, not A."""
+        from unittest.mock import AsyncMock
+
+        async def _sent(*_args, sent_event=None, **_kwargs) -> float:
+            if sent_event is not None:
+                sent_event.set()
+            return 0.1
+
+        llm = _FakeLLM(reply="收到")
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("shadow", ratified_floor=0.0),
+        )
+        scheduler._send_to_group = AsyncMock(side_effect=_sent)  # type: ignore[method-assign]
+        assert scheduler._topic_tracker is not None
+        block_a = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 100.0, block_id=block_a.block_id,
+        )
+        block_b = scheduler._topic_tracker.observe(
+            "111", message_id=2, speaker="u2", text="今天的天气真好",
+        )
+        previous_a_reply_at = block_a.last_bot_reply_at
+
+        scheduler.notify("111", user_id="u2", message_text="天气确实很好", message_id=3)
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 1
+        assert block_b.last_bot_reply_at > 0.0
+        assert block_a.last_bot_reply_at == previous_a_reply_at
+        await scheduler.close()
+
+    async def test_long_gap_same_ratified_block_uses_focused_current_anchor(self) -> None:
+        """A 10-minute same-block continuation must not become companion/sticker-only."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 586.0, block_id=block.block_id,
+        )
+
+        scheduler.notify("111", user_id="u1", message_text="大狗还在叫吗", message_id=2)
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 1
+        trigger = llm.calls[0]["trigger"]
+        assert trigger is not None
+        assert trigger.mode == "ratified_continuation"
+        assert trigger.target_message_id == 2
+        assert trigger.target_user_id == "u1"
+        assert trigger.extra["block_id"] == block.block_id
+        assert llm.calls[0]["force_reply"] is True
+        assert "不要把上文里别的" in scheduler._focused_trigger_reason(trigger)
+        assert "轻轻应一声" not in trigger.reason
+        await scheduler.close()
+
+    async def test_long_gap_same_block_keeps_continuation_mode_when_probability_fires(self) -> None:
+        """A probability hit must not strip the same-block continuation anchor."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 586.0, block_id=block.block_id,
+        )
+
+        scheduler.notify("111", user_id="u1", message_text="大狗还在叫吗", message_id=2)
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 1
+        trigger = llm.calls[0]["trigger"]
+        assert trigger is not None and trigger.mode == "ratified_continuation"
+        assert trigger.target_message_id == 2
+        await scheduler.close()
+
+    async def test_long_gap_same_block_bypasses_proactive_none_without_global_rescue(self) -> None:
+        """An active same-block continuation remains answerable with proactive off."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity(proactive=None)),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 586.0, block_id=block.block_id,
+        )
+
+        scheduler.notify("111", user_id="u1", message_text="大狗还在叫吗", message_id=2)
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 1
+        trigger = llm.calls[0]["trigger"]
+        assert trigger is not None and trigger.mode == "ratified_continuation"
+        await scheduler.close()
+
+    async def test_internal_long_gap_continuation_survives_cancel_and_remerge(self) -> None:
+        """A real queued candidate keeps its focused trigger after remerge."""
+        llm = _FakeLLM(reply=None, delay=0.15)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 586.0, block_id=block.block_id,
+        )
+        scheduler.notify(
+            "111",
+            trigger=TriggerContext(
+                reason="先回答", mode="directed_followup", target_message_id=2, target_user_id="u1",
+            ),
+            user_id="u1",
+            message_text="大狗怎么了",
+            message_id=2,
+        )
+        await asyncio.sleep(0.02)
+        scheduler.notify("111", user_id="u1", message_text="大狗还在叫吗", message_id=3)
+        await asyncio.sleep(0.25)
+
+        assert len(llm.calls) == 2
+        trigger = llm.calls[-1]["trigger"]
+        assert trigger is not None and trigger.mode == "ratified_continuation"
+        assert trigger.target_message_id == 3
+        assert trigger.extra["block_id"] == block.block_id
+        await scheduler.close()
+
+    async def test_cancelled_internal_long_gap_continuation_clears_pending_trigger(self) -> None:
+        """Shutdown/cancel cannot let an internal continuation leak into a later chat."""
+        llm = _FakeLLM(reply=None, delay=1.0)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 586.0, block_id=block.block_id,
+        )
+        scheduler.notify(
+            "111",
+            trigger=TriggerContext(
+                reason="先回答", mode="directed_followup", target_message_id=2, target_user_id="u1",
+            ),
+            user_id="u1",
+            message_text="大狗怎么了",
+            message_id=2,
+        )
+        await asyncio.sleep(0.02)
+        scheduler.notify("111", user_id="u1", message_text="大狗还在叫吗", message_id=3)
+        slot = scheduler._slots["111"]
+        assert len(slot.pending_direct_triggers) == 1
+        assert slot.pending_direct_triggers[0].mode == "ratified_continuation"
+
+        scheduler.clear_pending("111", cancel_running=True)
+        await asyncio.sleep(0.1)
+
+        assert len(llm.calls) == 1
+        assert slot.pending_during_generation == []
+        assert slot.pending_direct_triggers == []
+        assert slot.trigger is None
+        await scheduler.close()
+
+    async def test_long_gap_continuation_survives_block_queue_priority(self) -> None:
+        """A serial @ block must not erase a newer focused continuation."""
+        llm = _GateLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 586.0, block_id=block.block_id,
+        )
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(
+                    reason="先回答", mode="directed_followup", target_message_id=2, target_user_id="u1",
+                ),
+                user_id="u1",
+                message_text="大狗怎么了",
+                message_id=2,
+            )
+            await llm.wait_started(0)
+            slot = scheduler._slots["111"]
+            # The first real segment was already visible, so this is queued rather
+            # than cancelling the reply it follows.
+            slot.first_segment_sent = True
+            slot.block_fire_queue.append(
+                TriggerContext(
+                    reason="另一个@", mode="at_mention", target_message_id=30,
+                    target_user_id="u2", extra={"block_id": "other"},
+                )
+            )
+            scheduler.notify("111", user_id="u1", message_text="大狗还在叫吗", message_id=3)
+
+            llm.release(0)
+            await llm.wait_started(1)
+            assert llm.calls[1]["trigger"].mode == "at_mention"
+            llm.release(1)
+            await llm.wait_started(2)
+
+            trigger = llm.calls[2]["trigger"]
+            assert trigger is not None and trigger.mode == "ratified_continuation"
+            assert trigger.target_message_id == 3
+            assert trigger.extra["block_id"] == block.block_id
+            assert llm.calls[2]["force_reply"] is True
+        finally:
+            await scheduler.close()
+
+    async def test_mixed_at_and_long_gap_pending_keep_individual_trigger_modes(self) -> None:
+        """Arbiter-A receives only @ turns; a queued continuation stays focused."""
+        from types import SimpleNamespace
+
+        class _AlwaysComplete:
+            async def judge_completeness(self, *_args, **_kwargs):
+                return SimpleNamespace(complete=True, confidence=1.0, fallback=False)
+
+        llm = _GateLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        scheduler._arbiter_config = SimpleNamespace(  # type: ignore[assignment]
+            enabled=True,
+            runtime_groups=[],
+            completeness_poll_interval_s=0.01,
+            completeness_max_wait_s=1.0,
+            completeness_confidence_threshold=0.5,
+        )
+        scheduler.set_arbiter(_AlwaysComplete())  # type: ignore[arg-type]
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 586.0, block_id=block.block_id,
+        )
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(
+                    reason="先回答", mode="directed_followup", target_message_id=2, target_user_id="u1",
+                ),
+                user_id="u1",
+                message_text="大狗怎么了",
+                message_id=2,
+            )
+            await llm.wait_started(0)
+            slot = scheduler._slots["111"]
+            slot.first_segment_sent = True
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(
+                    reason="有人@了你", mode="at_mention", target_message_id=3, target_user_id="u2",
+                ),
+                user_id="u2",
+                message_text="姆姆看看这个",
+                message_id=3,
+                at_self=True,
+            )
+            scheduler.notify("111", user_id="u1", message_text="大狗还在叫吗", message_id=4)
+
+            llm.release(0)
+            await llm.wait_started(1)
+            at_trigger = llm.calls[1]["trigger"]
+            assert at_trigger is not None and at_trigger.mode == "at_mention"
+            assert at_trigger.target_message_id == 3
+            llm.release(1)
+            await llm.wait_started(2)
+
+            continuation = llm.calls[2]["trigger"]
+            assert continuation is not None and continuation.mode == "ratified_continuation"
+            assert continuation.target_message_id == 4
+            assert continuation.extra["block_id"] == block.block_id
+            assert llm.calls[2]["force_reply"] is True
+        finally:
+            await scheduler.close()
+
+    async def test_long_gap_continuation_waits_for_pending_arbiter_at(self) -> None:
+        """An already queued @ keeps priority over a later focused continuation."""
+        from types import SimpleNamespace
+
+        class _AlwaysComplete:
+            def __init__(self) -> None:
+                self.pending_batches: list[list[PendingMessage]] = []
+
+            async def judge_completeness(self, pending, *_args, **_kwargs):
+                self.pending_batches.append(list(pending))
+                return SimpleNamespace(complete=True, confidence=1.0, fallback=False)
+
+        llm = _GateLLM()
+        arbiter = _AlwaysComplete()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        scheduler._arbiter_config = SimpleNamespace(  # type: ignore[assignment]
+            enabled=True,
+            runtime_groups=[],
+            completeness_poll_interval_s=0.01,
+            completeness_max_wait_s=1.0,
+            completeness_confidence_threshold=0.5,
+        )
+        scheduler.set_arbiter(arbiter)  # type: ignore[arg-type]
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 300.0, block_id=block.block_id,
+        )
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(
+                    reason="有人@了你", mode="at_mention", target_message_id=2, target_user_id="u2",
+                ),
+                user_id="u2",
+                message_text="姆姆看看这个",
+                message_id=2,
+                at_self=True,
+            )
+            slot = scheduler._slots["111"]
+            assert slot.arbiter_task is not None and not slot.arbiter_task.done()
+
+            scheduler.notify(
+                "111",
+                user_id="u1",
+                message_text="大狗还在叫吗",
+                message_id=3,
+                reply_to_sender_id="u1",
+                reply_to_message_id=1,
+            )
+            assert len(llm.calls) == 0
+            assert slot.pending_during_generation == []
+            assert len(slot.pending_direct_triggers) == 1
+
+            await llm.wait_started(0)
+            at_trigger = llm.calls[0]["trigger"]
+            assert at_trigger is not None and at_trigger.mode == "at_mention"
+            assert at_trigger.target_message_id == 2
+            assert len(arbiter.pending_batches) == 1
+            assert [msg.evidence for msg in arbiter.pending_batches[0]] == ["at_mention"]
+            llm.release(0)
+
+            await llm.wait_started(1)
+            continuation = llm.calls[1]["trigger"]
+            assert continuation is not None and continuation.mode == "ratified_continuation"
+            assert continuation.target_message_id == 3
+            assert continuation.extra["block_id"] == block.block_id
+            assert llm.calls[1]["force_reply"] is True
+            assert llm.calls[1]["must_emit"] is False
+            llm.release(1)
+        finally:
+            await scheduler.close()
+
+    async def test_explicit_continuation_waits_for_pending_arbiter_at(self) -> None:
+        """An explicit focused continuation cannot overtake Arbiter-A's @."""
+        from types import SimpleNamespace
+
+        class _AlwaysComplete:
+            async def judge_completeness(self, *_args, **_kwargs):
+                return SimpleNamespace(complete=True, confidence=1.0, fallback=False)
+
+        llm = _GateLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        scheduler._arbiter_config = SimpleNamespace(  # type: ignore[assignment]
+            enabled=True,
+            runtime_groups=[],
+            completeness_poll_interval_s=0.01,
+            completeness_max_wait_s=1.0,
+            completeness_confidence_threshold=0.5,
+        )
+        scheduler.set_arbiter(_AlwaysComplete())  # type: ignore[arg-type]
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(
+                    reason="有人@了你", mode="at_mention", target_message_id=2, target_user_id="u2",
+                ),
+                user_id="u2",
+                message_text="姆姆看看这个",
+                message_id=2,
+                at_self=True,
+            )
+            slot = scheduler._slots["111"]
+            assert slot.arbiter_task is not None and not slot.arbiter_task.done()
+
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(
+                    reason="继续", mode="ratified_continuation", target_message_id=3, target_user_id="u1",
+                ),
+                user_id="u1",
+                message_text="大狗还在叫吗",
+                message_id=3,
+            )
+            await asyncio.sleep(0)
+            assert len(llm.calls) == 0
+            assert len(slot.pending_direct_triggers) == 1
+
+            await llm.wait_started(0)
+            at_trigger = llm.calls[0]["trigger"]
+            assert at_trigger is not None and at_trigger.mode == "at_mention"
+            assert at_trigger.target_message_id == 2
+            assert at_trigger.reason == "有人@了你"
+            llm.release(0)
+
+            await llm.wait_started(1)
+            continuation = llm.calls[1]["trigger"]
+            assert continuation is not None and continuation.mode == "ratified_continuation"
+            assert continuation.target_message_id == 3
+            assert llm.calls[1]["force_reply"] is True
+            llm.release(1)
+        finally:
+            await scheduler.close()
+
+    def test_long_gap_eligibility_has_strict_minimum_and_bounded_maximum(self) -> None:
+        """Only a delivered reply in this block can cross the 180s upgrade gate."""
+        from kernel.config import TopicBlockConfig
+        from services.group.topic_block import TopicBlock
+
+        scheduler = GroupChatScheduler(
+            llm=_FakeLLM(reply=None), timeline=GroupTimeline(),  # type: ignore[arg-type]
+            persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=TopicBlockConfig(
+                enabled=True,
+                ratified_continuation_min_gap_seconds=180.0,
+                ratified_continuation_window_seconds=600.0,
+            ),
+        )
+        replied = TopicBlock(block_id="reply", bot_involved=True, last_bot_reply_at=100.0)
+        inbound_only = TopicBlock(block_id="inbound", bot_involved=True)
+        wrong_topic = TopicBlock(block_id="other", bot_involved=False, last_bot_reply_at=100.0)
+
+        assert scheduler._ratified_continuation_age_seconds(replied, now=280.0) is None
+        assert scheduler._ratified_continuation_age_seconds(replied, now=280.001) is not None
+        assert scheduler._ratified_continuation_age_seconds(replied, now=700.0) == 600.0
+        assert scheduler._ratified_continuation_age_seconds(replied, now=700.001) is None
+        assert scheduler._ratified_continuation_age_seconds(inbound_only, now=400.0) is None
+        assert scheduler._ratified_continuation_age_seconds(wrong_topic, now=400.0) is None
+
+    async def test_long_gap_continuation_scores_as_original_untriggered_turn(self) -> None:
+        """RWS sees mode=none; only its resolved fire uses the synthetic mode."""
+        llm = _FakeLLM(reply=None)
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 300.0, block_id=block.block_id,
+        )
+        seen_triggers: list[TriggerContext | None] = []
+
+        def capture_rws(*_args, **kwargs):
+            seen_triggers.append(kwargs["trigger"])
+            return None
+
+        scheduler._maybe_compute_rws = capture_rws  # type: ignore[method-assign]
+        scheduler.notify("111", user_id="u1", message_text="大狗还在叫吗", message_id=2)
+        await asyncio.sleep(0.1)
+
+        assert seen_triggers == [None]
+        assert len(llm.calls) == 1
+        assert llm.calls[0]["trigger"].mode == "ratified_continuation"
+        assert llm.calls[0]["force_reply"] is True
+        assert llm.calls[0]["must_emit"] is False
+        await scheduler.close()
+
+    async def test_long_gap_continuation_queues_behind_other_users_addressed_reply(self) -> None:
+        """A force candidate must not be dropped merely because another user is active."""
+        llm = _GateLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+            topic_block_config=self._config("silent", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 300.0, block_id=block.block_id,
+        )
+
+        try:
+            scheduler.notify(
+                "111",
+                trigger=TriggerContext(
+                    reason="先回答", mode="directed_followup", target_message_id=2, target_user_id="u1",
+                ),
+                user_id="u1",
+                message_text="大狗怎么了",
+                message_id=2,
+            )
+            await llm.wait_started(0)
+            slot = scheduler._slots["111"]
+            assert slot.firing_role == "addressed"
+            running = slot.running_task
+            scheduler.notify(
+                "111",
+                user_id="u2",
+                message_text="大狗还在叫吗",
+                message_id=3,
+                reply_to_sender_id="u1",
+                reply_to_message_id=1,
+            )
+            assert running is not None and not running.cancelled()
+
+            llm.release(0)
+            await llm.wait_started(1)
+            trigger = llm.calls[1]["trigger"]
+            assert trigger is not None and trigger.mode == "ratified_continuation"
+            assert trigger.target_message_id == 3
+            assert trigger.target_user_id == "u2"
+            assert trigger.extra["block_id"] == block.block_id
+            assert llm.calls[1]["force_reply"] is True
+            llm.release(1)
+        finally:
+            await scheduler.close()
+
+    async def test_long_gap_continuation_queues_behind_overhearer_reply(self) -> None:
+        """A force candidate also survives an unrelated probability reply."""
+        llm = _GateLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=1.0),
+            topic_block_config=self._config("shadow", ratified_floor=0.0),
+        )
+        assert scheduler._topic_tracker is not None
+        block = scheduler._topic_tracker.observe(
+            "111", message_id=1, speaker="u1", text="大狗叫得很响", at_self=True,
+        )
+        scheduler._topic_tracker.mark_bot_replied(
+            "111", now=time.monotonic() - 300.0, block_id=block.block_id,
+        )
+        # Keep the old block eligible for its explicit reply edge, but make the
+        # next ordinary message open a separate, overheard block.
+        block.last_active = time.monotonic() - 121.0
+
+        try:
+            scheduler.notify("111", user_id="u9", message_text="今天下雨，路很滑", message_id=2)
+            await llm.wait_started(0)
+            slot = scheduler._slots["111"]
+            assert slot.firing_role == "overhearer"
+            running = slot.running_task
+            scheduler.notify(
+                "111",
+                user_id="u2",
+                message_text="大狗还在叫吗",
+                message_id=3,
+                reply_to_sender_id="u1",
+                reply_to_message_id=1,
+            )
+            assert running is not None and not running.cancelled()
+
+            llm.release(0)
+            await llm.wait_started(1)
+            trigger = llm.calls[1]["trigger"]
+            assert trigger is not None and trigger.mode == "ratified_continuation"
+            assert trigger.target_message_id == 3
+            assert trigger.target_user_id == "u2"
+            assert trigger.extra["block_id"] == block.block_id
+            assert llm.calls[1]["force_reply"] is True
+            llm.release(1)
+        finally:
+            await scheduler.close()
 
 
 

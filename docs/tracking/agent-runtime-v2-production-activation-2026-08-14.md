@@ -3,9 +3,9 @@
 > 状态：active
 > mode: task
 > 最后更新：2026-08-16 CST
-> 当前下一步：提交 CLI module-path 修复并构建隔离 release 后，在 Docker named volume 内重试一次性 source provision；验证 JSON preflight、备份/restore、ACL 与 legacy Worldbook witness，再原子安装 all-`not_assessed` ingress-only profile。该阶段不得启动 worker 或发送消息。
-> 阻塞：首次真实 one-shot 在第一处 `services` import 前停止，未写入 source 或 staging；修复并回归验证后待重试。成功 source provision 后，真实 rollback rehearsal、自然 OneBot ingress、provider cooperative-cancellation 与完整 Worldbook authority 仍阻断 worker activation，不能由历史 DB 倒灌或 test manifest 代替。
-> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。日志驱动 bot 修复补齐 raw visual CQ callback、贴图失败后续话、stale continuation 与排班 JSON 回归；交叉 199 passed、全仓 5729 passed / 17 skipped。独立复审无 P0-P1；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产 `qq-bot` image/commit=`60f179753e94…`/`d311056`、restart=0，production JSON config 没有 `agent_runtime`，storage 无 Runtime source/worker；release 已提交并快进 `origin/main=0ee2c3e`，GitHub Typed boundaries CI 成功；NapCat ID/image/start/restart 均未变。
+> 当前下一步：提交 B2 长间隔同话题续话与 A16 source-provision 修复的隔离 release，构建唯一 bot image 并仅替换 `bot`；完成 container、Admin、日志和 NapCat 不变量核验后，才以该 image 在 Docker named volume 内重试一次性 source provision。该阶段不得启动 worker 或发送消息。
+> 阻塞：B2 的本地与完整回归已完成，仍缺本次 container、Admin、日志和 NapCat 不变量的生产证据。首次真实 one-shot 在第一处 `services` import 前停止，未写入 source 或 staging；本次 bot image 上线并复核后才可重试。成功 source provision 后，真实 rollback rehearsal、自然 OneBot ingress、provider cooperative-cancellation 与完整 Worldbook authority 仍阻断 worker activation，不能由历史 DB 倒灌或 test manifest 代替。
+> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。日志驱动 bot 修复补齐 raw visual CQ callback、贴图失败后续话、stale continuation 与排班 JSON 回归；交叉 199 passed、全仓 5729 passed / 17 skipped。B2 并发修复 RED 为 3 failed、GREEN 为 8 passed；随后 streaming owner RED 为 1 failed，正常 callback、mute callback 与 unmute replacement cancel-path 为 4 passed，扩展交叉为 242 passed；JUnit 全仓为 5,765 passed / 17 skipped（5,782 tests，0 failures/errors）。两轮最终独立复审均无 P0-P2；范围 Ruff clean、生产源 Pyright 0 errors、diff clean。全仓 Pyright 的既有测试夹具/sidecar 可选依赖错误未作为本次新增。生产 `qq-bot` image/commit=`60f179753e94…`/`d311056`、restart=0，production JSON config 没有 `agent_runtime`，storage 无 Runtime source/worker；release 已提交并快进 `origin/main=0ee2c3e`，GitHub Typed boundaries CI 成功；NapCat ID/image/start/restart 均未变。
 > 回滚入口：保持 feature gate 默认关闭；将 `omubot-bot:pre-log-behavior-fix-20260815`（`6dc8ab9e8a30…`）重标为 `omubot-bot:latest` 后仅替换 bot，不创建 production Runtime/Memory/Worldbook DB，不接管 LLM loop，不启动 worker。NapCat 永不重建。
 
 ## Related Bot Behavior Fix (2026-08-15)
@@ -18,6 +18,18 @@
 - **回调绕过与架构基线**：明确反馈或一次贴图尝试后，normal、light、plan-then-utter、pause-extend 及 timeline/callback 写入前都会移除模型生成的 `image/mface/face` CQ，并保留 reply/at 与可见文本下限。全仓回归首次暴露 `services.tools.qzone_journal` 反向 import `plugins`；以 kernel 的 `ExternalEffectPreDispatchError` 作为中性 pre-dispatch 合同后，QZone 既有 `DeliveryPreDispatchError` 保持兼容子类，post-dispatch unknown 语义不变。
 
 本轮隔离 release 输入还包括 `kernel/types.py`、`plugins/qzone_journal/delivery.py`、`services/tools/qzone_journal.py` 与其契约测试。贴图/排班/QZone/插件所有权交叉为 **199 passed**，完整 pytest 为 **5729 passed / 17 skipped**；已提交 `d311056`，由隔离 Dockerfile 构建为 `sha256:60f179753e94…`，只替换 bot 后新 container=`94fee24a…`、restart=0。启动时日程模型首轮仍返回解释文本，严格 retry 后成功写入 14 slots；未发送测试 QQ 消息。Runtime activation 的真实 source/backup/Worldbook 前置仍未提供，不能以这组行为修复作为 activation 证据。
+
+## B2 Long-Gap Topic Continuation Follow-Up (2026-08-16, local green)
+
+本次直接覆盖生产日志中的“大狗叫”同话题长间隔续话缺口：仅当 bot 曾在同一 topic block 成功发送文本、间隔严格落在 `180 < gap <= 600` 秒时，普通入站消息会在原始 RWS 评分后升级为带精确 block/message/user 锚点的 `ratified_continuation`。纯入站 `@`、贴图尝试、失败发送和其他 block 均不能写入 `last_bot_reply_at`；因此不会把未发出的 bot 参与或无关话题误当作续话资格。
+
+排队边界保持三层优先级：既有 block `@` 队列、运行期间的新 `@` 批次、最后合并的 direct/focused turn。`ratified_continuation` 不会进入 Arbiter-A/B 的 `@` 输入，也不会在跨用户、overhearer、取消或已发首段的情况下丢失。direct turn 仍遵守旧的合并契约：同一 in-flight 窗口只发最后一个 direct trigger，同时以最终 host 消息的可信 invocation ID 覆盖（或显式清除）旧 ID，禁止前一条 ID 授权最后一条无 ID 的消息。
+
+同轮独立 lease 诊断确认 `test_bootstrap_renewal_failure...` 的失败是测试读取内存 lease 已清空、SQLite exact-token release 仍在进行中的时序窗口；production 保持先 deactivate dispatcher 再 release 的 fail-closed 顺序，测试改为等待可观察的 store release。此候选尚未部署；Runtime 仍默认关闭，任何 source provision/ingress-only 安装也必须在本次 bot image 的生产核验后单独执行。
+
+最终独立复审在 mute 路径发现两个发布前并发缺口：取消的旧 chat/Arbiter-A task 在 immediate unmute 后会无条件清除新 task/burst；生成期间的 `ratified_continuation` 会被 Arbiter-B 误作 `@` 中断，可能截断已有 addressed reply。修复将 production 启动的 chat 与 Arbiter-A 收尾绑定到当前 `asyncio.Task` 身份，失去槽位所有权后不再写共享队列或 task 指针；Arbiter-B 只读取 `evidence="at_mention"` 的 pending 项。三条 RED 精确复现 replacement chat 被置空、replacement Arbiter burst 被擦除与 continuation 被 abort；修复后均通过，且真实 `@` Arbiter-B interruption 回归仍通过。
+
+该复审继续发现 Python 3.12 的 `asyncio.wait_for()` 会将 LLM coroutine 包入子 task；若 callback 动态比较 `asyncio.current_task()`，正常 production streaming 会被误判为 detached、`LLMClient` 随即以 `SegmentAborted` 静默结束。`_do_chat()` 现于入口捕获 outer owner task，并用该稳定 task 与 slot 指针比较。新增生产形状 RED/GREEN 证明 live callback 能发送一次；D2 组合回归证明旧 provider 吞掉取消后，`mute -> unmute` replacement 已占 slot 时，旧 callback 仍返回 false、零发送且不会清空 replacement。复审复核该补强后无 P0-P2。
 
 ## Resume Capsule
 
@@ -74,7 +86,7 @@ The production implementation remains serial because composition, source paths a
 | Context | done | P0-P5 dark/local complete; default-off production composition and bootstrap wiring complete | Keep source facts current |
 | Plan | waiting_external | 默认关闭 bot-only fence release `ba32cdf` 与本轮 `d311056` 都已完成生产发布；真实 activation 仍按原 runbook 等待 artifact | 只读核验真实 artifact |
 | Implementation | done | Provider 前 execution fence、exact owner/token extension、worker lifecycle、只读 preflight CLI 与 activation runbook 已完成 | 等待真实 source/restore/rollback/Worldbook evidence 才可 activation |
-| Verification | done | fence focused 25 passed、交叉 530 passed、CLI 2 passed、范围 Ruff/Pyright/diff clean；本轮交叉 199 passed、全仓 5729 passed / 17 skipped，独立复审无 P0/P1；`d311056` container/API/config/storage/NapCat negative checks通过，`0ee2c3e` 已快进 `origin/main` 且 Typed boundaries CI 成功 | 未来做真实 artifact preflight |
+| Verification | done | fence focused 25 passed、交叉 530 passed、CLI 2 passed、范围 Ruff/Pyright/diff clean；B2 owner/queue cross 242 passed、JUnit 5,765 passed / 17 skipped，独立复审无 P0-P2；`d311056` container/API/config/storage/NapCat negative checks通过，`0ee2c3e` 已快进 `origin/main` 且 Typed boundaries CI 成功 | 部署 B2 image 后再做真实 artifact preflight |
 | Handoff | pending | P3: provider 必须协作取消，fence 故意串行 provider | Update when real artifacts arrive |
 
 ## Todo
@@ -94,6 +106,7 @@ The production implementation remains serial because composition, source paths a
 - [x] Close execution-fence and lifecycle audit: provider entry now reserves the exact owner/token lease until tool completion; same-token extensions do not shorten TTL; lease extension/renew/stop cancellation cleans up observable ownership; guarded dispatches fail terminal as `worker_not_ready`; default-off bootstrap creates no source or worker, while fully attested startup owns one bounded worker.
 - [x] Commit, build and deploy the user-authorized fence follow-up as bot-only dark code. `ba32cdf` -> image `sha256:6dc8ab9e8a30…`; container image/API/preflight/no-source/no-worker/NapCat invariants are verified, and `omubot-bot:pre-agent-runtime-v2-fence-20260815` preserves `6880dd0` rollback.
 - [x] Deliver the independent log-driven sticker/scheduler/schedule behavior fix plus the discovered QZone ownership-boundary repair. Cross suite 199 passed、full pytest 5729 passed / 17 skipped、Ruff/Pyright/diff clean; `d311056` -> `60f179…` bot-only deployment/runtime evidence complete. This item does not authorize Runtime v2 worker activation.
+- [~] Deliver B2 long-gap continuation plus A16 provisioner path repair as bot-only dark code. Local owner/queue/cancel-path contracts, 242-module cross regression, JUnit 5,765 passed / 17 skipped, scoped Ruff/Pyright/diff and two independent reviews are complete; commit/build/deploy/runtime evidence is next. This item does not authorize worker activation.
 
 ## Decisions
 
@@ -153,6 +166,10 @@ The production implementation remains serial because composition, source paths a
 | `tests/test_sticker_context_regression.py` / `tests/test_scheduler.py` / `tests/test_schedule_generator.py` | Log-shaped regressions for sticker context, interval continuation and schedule parsing | release candidate |
 | `kernel/types.py` / `plugins/qzone_journal/delivery.py` / `services/tools/qzone_journal.py` | Neutral pre-dispatch contract removes reverse plugin import while preserving QZone failure phase | release candidate |
 | `tests/test_agent_runtime_qzone_tool.py` | Neutral pre-dispatch mapping contract | release candidate |
+| `kernel/config.py` / `kernel/types.py` / `services/group/topic_block.py` | B2 ratified-continuation config, type and exact delivered-block timestamp contract | release candidate |
+| `services/scheduler.py` | Long-gap focused queue, Arbiter evidence split and stable outer-task ownership for streaming callbacks | release candidate |
+| `tests/test_scheduler.py` / `tests/test_topic_block.py` / `tests/test_arbiter_interruption.py` | Long-gap priority, mute/unmute ownership, streaming callback and Arbiter-B regressions | release candidate |
+| `tests/test_agent_runtime_host_ingress.py` / `tests/test_agent_runtime_bootstrap.py` | Latest host invocation authority and observable lease-release synchronization regressions | release candidate |
 
 ## Verification
 
@@ -178,6 +195,10 @@ The production implementation remains serial because composition, source paths a
 | Provider fence dark release | isolated `GIT_COMMIT=ba32cdf docker compose build bot`; active `docker compose up -d --no-deps --force-recreate --no-build bot`; container/API/preflight/storage/log inspection | `qq-bot` image `6dc8ab9e…`, `GIT_COMMIT=ba32cdf`, restart=0; CLI disabled; Runtime API 401; no Runtime file; NapCat ID/image/start/restart unchanged |
 | Log-driven behavior regression | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest -q tests/test_sticker_context_regression.py tests/test_scheduler.py tests/test_schedule_generator.py`; scoped Ruff/Pyright/diff | **129 passed**; Ruff clean; Pyright 0 errors/0 warnings; diff clean; includes exact feedback “根本发之前不看上边的字” and “你怎么不叫” continuation |
 | Source provision CLI regression | `tests/test_agent_runtime_provision_sources.py tests/test_agent_runtime_preflight_cli.py tests/test_bot_log_format.py`; scoped Ruff/Pyright | **9 passed**; actual script-by-path subprocess reaches provision completion in a temporary root; the failed production one-shot left the live source root absent |
+| B2 owner/queue static analysis | scoped Ruff over ten B2 files; Pyright over `kernel/config.py kernel/types.py services/group/topic_block.py services/scheduler.py`; `git diff --check` | all clean / 0 errors / clean |
+| B2 cross regression | scheduler/topic/Arbiter/host/bootstrap/composition/router/invocation suites | **242 passed** / 1 existing aiohttp deprecation warning |
+| B2 final regression | JUnit-backed `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -q -p no:cacheprovider` | **5,765 passed / 17 skipped / 206 warnings**, `tests=5,782`, `failures=0`, `errors=0`, 81.64s |
+| B2 independent review | two read-only final reviews, including Python 3.12 `wait_for` callback ownership and cancel-suppressing replacement race | no P0-P2; release blocker closed |
 
 ## Test Ledger
 
@@ -230,6 +251,22 @@ The production implementation remains serial because composition, source paths a
 | B1-FULL | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -p no:cacheprovider -q` | 5729 passed / 17 skipped / 206 warnings in 75.90s | Full regression gate is green; warnings are existing aiohttp/NoneBot deprecations, not failures | 2026-08-15 |
 | B1-PROD | Isolated Docker build `d311056` then main-workspace `docker compose up -d --no-deps --force-recreate --no-build bot`; API/config/storage/log/NapCat inspection | bot `94fee24a…` / `60f179…` / `GIT_COMMIT=d311056`, running/restart=0/OOM=false; Admin=200; unauth Runtime=401; JSON config key absent; storage matches=[]; NapCat unchanged/restart=0 | Default-off Runtime remains inert. Startup schedule parse failed once on model prose, retried once and generated 14 slots; no test QQ message or NapCat action | 2026-08-16 |
 | B1-PROD-PREFLIGHT | Read-only preflight with production JSON config | `not_ready/config_unavailable`; CLI requires TOML activation proposal, while production JSON has no `agent_runtime` key | Do not synthesize a TOML profile to obtain a different status; direct config/storage checks establish the intended absent-source fail-closed state | 2026-08-16 |
+| B2-RED | `tests/test_agent_runtime_host_ingress.py::test_scheduler_pending_latest_missing_invocation_never_reuses_prior_id` | 1 failed: follow-on chat received `inv_prior_123`, expected `None` | The new direct queue emitted the first queued trigger FIFO instead of preserving legacy latest-turn coalescing; an earlier trusted ID crossed the final host-message boundary | 2026-08-16 |
+| B2-GREEN | Target host-ingress regression; `tests/test_scheduler.py`; `tests/test_agent_runtime_host_ingress.py` | 1 + 102 + 6 passed | Direct queue consumes only the latest focused trigger and exact final invocation authority; long-gap/Arbiter priority contracts remain green | 2026-08-16 |
+| B2-LEASE-DIAG | 50 independent focused bootstrap runs plus forced race | 47 passed / 3 failed before test synchronization; DB lease remained active after in-memory lease/dispatcher deactivation, then released when renewal task completed | Production sequence is intentionally fail-closed, so add a test barrier on `has_worker_lease(lease)` rather than reorder production cleanup | 2026-08-16 |
+| B2-LEASE-GREEN | Same bootstrap renewal-failure test repeated 30 times; full bootstrap module | 30/30 passed; 11 passed | Test now waits for observable exact-token SQLite release before replacement-owner acquisition | 2026-08-16 |
+| B2-CROSS | Runtime host/lease/composition/router/invocation + scheduler/topic/sticker regression | 253 passed / 17 aiohttp warnings | Invocation trust, default-off lifecycle and bot behavior changes compose without a selected-dispatcher or queue regression | 2026-08-16 |
+| B2-STATIC | Changed-source Ruff, source Pyright, host/bootstrap test Pyright, `git diff --check` | clean / 0 errors | 14 Pyright errors in unrelated pre-existing scheduler/topic test fixtures reproduce from `HEAD`; the new `PendingMessage` annotation is clean | 2026-08-16 |
+| B2-FULL | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -p no:cacheprovider -q` | 5753 passed / 17 skipped / 206 warnings in 112.90s | Full regression gate is green; warnings are existing aiohttp/NoneBot deprecations | 2026-08-16 |
+| B2-CONCURRENCY-RED | Two immediate `mute -> unmute` replacement tests plus streaming Arbiter-B continuation test | 3 failed exactly: old chat detached new task, old Arbiter-A erased new burst, direct continuation reached abort verdict | Captured both independent review findings before implementation | 2026-08-16 |
+| B2-CONCURRENCY-GREEN | Same 3 contracts plus `tests/test_arbiter_interruption.py` | 8 passed / 1 existing aiohttp deprecation warning | Strict task ownership prevents stale cancellation cleanup; Arbiter-B receives only actual `@` evidence | 2026-08-16 |
+| B2-CONCURRENCY-CROSS | scheduler/chat-lock/Arbiter/topic/host/bootstrap/composition/router/invocation suites | 255 passed / 1 existing aiohttp deprecation warning | Queue priority, default-off Runtime lifecycle and host authority remain composed | 2026-08-16 |
+| B2-CONCURRENCY-FULL | JUnit-backed `pytest -p no:cacheprovider -q` | 5761 passed / 17 skipped / 0 failures / 0 errors in 79.743s | Full repository regression gate is green after the cancellation and Arbiter-B repairs | 2026-08-16 |
+| B2-STREAM-RED | `tests/test_scheduler.py -k live_slot_accepts_stream_segment_from_wait_for_child_task` before outer-owner capture | 1 failed: normal callback returned false | Python 3.12 `wait_for` child task made dynamic `current_task()` ownership reject attached streaming | 2026-08-16 |
+| B2-STREAM-GREEN | normal streaming callback plus mute/replacement cancel-suppressing provider contracts | 4 passed | Stable outer owner accepts live callback, while detached old callback cannot send or clear replacement | 2026-08-16 |
+| B2-STREAM-CROSS | scheduler/topic/Arbiter/host/bootstrap/composition/router/invocation suites | 242 passed / 1 existing aiohttp deprecation warning | Queue priority, default-off lifecycle, host authority and streaming ownership compose | 2026-08-16 |
+| B2-STREAM-FULL | JUnit-backed `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -q -p no:cacheprovider` | 5765 passed / 17 skipped / 206 warnings; XML tests=5782, failures=0, errors=0 | Final full repository regression gate is green after callback ownership and replacement cancel-path coverage | 2026-08-16 |
+| B2-STREAM-REVIEW | two independent read-only reviews of `services/scheduler.py` and `tests/test_scheduler.py` | no P0-P2 | Python 3.12 `wait_for` owner capture and old-provider replacement race are both covered | 2026-08-16 |
 | A14-ARTIFACT-INVENTORY | Correct `config/config.toml` preflight, contract-named storage/config/backup scan, Worldbook file inventory and evidence-doc scan | TOML has no `[agent_runtime]`; preflight=`not_ready/agent_runtime_disabled`; source/manifest/backup paths=0; only 5 Worldbook JSON content files; no non-tracker operator/canary/rehearsal witness | All real activation inputs remain operator-owned external blockers. Existing generic DBs, historical backups and test manifests are explicitly not substituted | 2026-08-16 |
 | A15-SOURCE-PARITY | `git fetch origin`; fast-forward ancestry check; push `0ee2c3e` to `origin/main`; GitHub run `31897383286`; read-only Admin/API/container/log inspection | `origin/main` and release both=`0ee2c3e`; Typed boundaries CI=`success`; Admin=200, Runtime unauth=401, bot image=`60f179…`, restart=0, no ERROR/CRITICAL/Traceback; NapCat remains running/restart=0 | Remote source, verified release and dark production image are aligned; this does not satisfy any real activation artifact gate | 2026-08-16 |
 | A16-CLI-RED | One-shot, `--network none` / `--read-only` container of image `820fd8c` mounting only `omubot-storage:/app/storage` | `ModuleNotFoundError: No module named 'services'` before source initialization; final source root and staging glob both absent | Script execution by path lacked the project-root module insertion. No production data was written, so repair before retry is safe | 2026-08-16 |
@@ -237,7 +274,7 @@ The production implementation remains serial because composition, source paths a
 
 ## Next Session Starts Here
 
-**Current execution checkpoint (newer than the historical bullets below)**: commit the A16 module-path repair, build a unique isolated image, then retry one-shot source provision. Do not infer source, backup, ACL or worker readiness from the failed attempt.
+**Current execution checkpoint (newer than the historical bullets below)**: B2 final review now has no P0-P2 after the strict task-ownership, Arbiter-B evidence and Python 3.12 streaming callback repair. Commit the complete B2/A16 release input, build a unique isolated bot image, deploy only `bot`, then inspect container/API/log/NapCat invariants before retrying one-shot source provision. Do not infer source, backup, ACL or worker readiness from the failed attempt.
 
 - Direction: Default-off fence release `ba32cdf` and log-driven `d311056` behavior release are live; `origin/main=0ee2c3e` has passed Typed boundaries CI. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
 - First action: Obtain explicit operator-owned source locations/schema, backup payloads/digests, restore and rollback rehearsal records, named operator ACL and Worldbook authoritative-reread/reducer/no-dual-truth witness. Verify them read-only, including provider cooperative-cancellation and serial-throughput canary evidence, then produce a new independent review before any activation decision.

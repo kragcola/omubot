@@ -69,6 +69,9 @@ class TopicBlock:
     last_access: float = 0.0  # L2: last time activity was evaluated
     last_text: str = ""
     bot_involved: bool = False
+    # Monotonic timestamp of a successfully delivered bot reply in this block.
+    # Inbound @ / reply-to-self evidence alone is not enough to revive a topic.
+    last_bot_reply_at: float = 0.0
     at_message_id: int | None = None  # last message that @-addressed someone
     anchor_speaker: str = ""  # L0: speaker of the message that started this block (edge source)
     centroid: str | None = None  # L3: aggregated block text (c-TF-IDF; NOT maintained yet — see §5)
@@ -469,7 +472,7 @@ class TopicBlockTracker:
     # ── public helpers ────────────────────────────────────────────────
 
     def mark_bot_involved(self, group_id: str, now: float | None = None, *, block_id: str = "") -> None:
-        """Flag the bot's reply block as bot-involved."""
+        """Flag a topic block as involving the bot."""
         now = time.monotonic() if now is None else now
         if block_id:
             block = self.pick_block_by_id(group_id, block_id)
@@ -477,6 +480,16 @@ class TopicBlockTracker:
             block = self.pick_anchor_block(group_id, now, require_bot_involved=False)
         if block is not None:
             block.bot_involved = True
+
+    def mark_bot_replied(self, group_id: str, now: float | None = None, *, block_id: str = "") -> None:
+        """Record a successfully delivered bot reply for one topic block."""
+        if not block_id:
+            return
+        now = time.monotonic() if now is None else now
+        block = self.pick_block_by_id(group_id, block_id)
+        if block is not None:
+            block.bot_involved = True
+            block.last_bot_reply_at = now
 
     def pick_block_by_id(self, group_id: str, block_id: str) -> TopicBlock | None:
         """Return the block with this id (checks active + reservoir)."""

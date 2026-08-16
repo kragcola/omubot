@@ -608,7 +608,7 @@ class TriggerContext:
 
     reason: str = ""  # 人类可读的触发原因，如 "有人@了你" / "视频分享:《xxx》"
     # "at_mention" | "video_always" | "video_dedicated" | "video_autonomous"
-    # | "directed_followup" | "correction" | "closing" | "probability" | "manual"
+    # | "directed_followup" | "ratified_continuation" | "correction" | "closing" | "probability" | "manual"
     mode: str = "probability"
     target_message_id: int | None = None  # 触发消息的 QQ message_id
     target_user_id: str = ""  # 触发消息的发送者

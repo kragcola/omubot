@@ -2045,6 +2045,16 @@ class TopicBlockConfig(BaseModel):
         description="Min fire probability for a ratified continuation (user follows up in a block the bot is in). "
         "0 disables. A positive floor stops low time-of-day multipliers from crushing a live back-and-forth.",
     )
+    ratified_continuation_min_gap_seconds: float = Field(
+        default=180.0,
+        description="Only upgrade a ratified continuation after this much quiet time in the same topic block. "
+        "Keeps short follow-ups on the existing companion path without changing router follow-up detection.",
+    )
+    ratified_continuation_window_seconds: float = Field(
+        default=600.0,
+        description="Maximum same-block quiet gap for focused ratified continuation. "
+        "0, or a value not greater than ratified_continuation_min_gap_seconds, disables the upgrade.",
+    )
     corpus_capture_enabled: bool = Field(
         default=False,
         description="OFF by default. When true, persist each observed message with its topic-block "

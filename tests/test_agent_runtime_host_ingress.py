@@ -260,3 +260,38 @@ async def test_scheduler_arbiter_merge_keeps_each_block_anchor_invocation_id() -
         ]
     finally:
         await scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_arbiter_merge_never_borrows_prior_id_for_untrusted_final_host() -> None:
+    """The last merged @ is the host boundary for Runtime authority."""
+    scheduler = _scheduler(_RecordingLLM())
+    try:
+        slot = scheduler._slots.setdefault("20002", _GroupSlot())
+        slot.trigger = TriggerContext(reason="有人@了你", mode="at_mention")
+        triggers = scheduler._build_block_triggers(
+            "20002",
+            [
+                PendingMessage(
+                    content="早一条可信 @",
+                    user_id="10001",
+                    timestamp=1.0,
+                    target_message_id=30001,
+                    block_id="block-a",
+                    runtime_invocation_id="inv_prior_123",
+                ),
+                PendingMessage(
+                    content="最后一条无可信 ID",
+                    user_id="10002",
+                    timestamp=2.0,
+                    target_message_id=30002,
+                    block_id="block-a",
+                    runtime_invocation_id=None,
+                ),
+            ],
+        )
+
+        assert len(triggers) == 1
+        assert "runtime_invocation_id" not in triggers[0].extra
+    finally:
+        await scheduler.close()

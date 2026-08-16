@@ -633,7 +633,8 @@ async def test_bootstrap_renewal_failure_clears_worker_lease_and_preserves_gover
         await lifecycle.start()
         assembly = ctx.agent_runtime_assembly
         assert assembly is not None
-        assert getattr(assembly, "_worker_lease", None) is not None
+        lease = getattr(assembly, "_worker_lease", None)
+        assert lease is not None
 
         renewal_attempted = asyncio.Event()
         original_sleep = asyncio.sleep
@@ -661,6 +662,12 @@ async def test_bootstrap_renewal_failure_clears_worker_lease_and_preserves_gover
         assert llm.dispatcher is assembly.dispatcher
         assert getattr(assembly, "_worker_lease", None) is None
         assert getattr(assembly.dispatcher, "_worker_lease", None) is None
+
+        async def wait_for_db_release() -> None:
+            while await assembly.invocations.has_worker_lease(lease):
+                await original_sleep(0)
+
+        await asyncio.wait_for(wait_for_db_release(), timeout=1.0)
 
         ingress = ctx.agent_runtime_host_ingress
         assert ingress is not None

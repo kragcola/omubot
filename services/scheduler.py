@@ -18,7 +18,7 @@ from kernel.config import GroupConfig
 from kernel.reply_run import ReplyOrigin, ReplyOutcome, ReplyRun, ReplyStage
 from kernel.types import Content, ResponseClass, TriggerContext
 from services.group.corpus_capture import CaptureRow, CorpusCapture
-from services.group.topic_block import TopicBlockTracker
+from services.group.topic_block import TopicBlock, TopicBlockTracker
 from services.humanization import CLIMATE_CURRENT_SLOT, CLOCK_CURRENT_SLOT, REGISTER_LABEL_SLOT
 from services.llm.arbiter import ArbiterClient, InterruptionResult, PendingMessage
 from services.llm.client import RATE_LIMIT_BASE_DELAY, RATE_LIMIT_MAX_RETRIES, RateLimitError
@@ -48,6 +48,18 @@ if TYPE_CHECKING:
 _L = logger.bind(channel="scheduler")
 _CHAT_LOCK_LLM_TIMEOUT_S = 120.0
 _REPLY_RUN_METRIC_TIMEOUT_S = 1.0
+
+
+def _owns_slot_task(task: asyncio.Task[None] | None) -> bool:
+    """Whether the current coroutine still owns a slot's task pointer.
+
+    ``clear_pending()`` deliberately detaches a cancelled task. Its old
+    coroutine must not touch any state after that point, even before a later
+    post-unmute trigger creates a replacement.
+    """
+    return task is asyncio.current_task()
+
+
 # Arbiter B (interruption) timeout layering. MUST stay above the inner arbiter
 # LLM timeout (arbiter.timeout_ms, config.json) which itself must cover the
 # deepseek-flash p90. Measured 2026-06-10: deepseek-v4-flash arbiter payload
@@ -85,7 +97,13 @@ def _should_force_reply(trigger: TriggerContext | None) -> bool:
     obligation = getattr(trigger, "obligation", None)
     if obligation is not None and getattr(obligation, "level", "") == "must":
         return True
-    if trigger.mode in {"video_always", "directed_followup", "qq_interaction", "correction"}:
+    if trigger.mode in {
+        "video_always",
+        "directed_followup",
+        "ratified_continuation",
+        "qq_interaction",
+        "correction",
+    }:
         return True
     # A deferred addressed-wait re-fire must reply (its quiet window elapsed).
     if bool(trigger.extra.get("force_after_wait", False)):
@@ -109,10 +127,16 @@ def _with_runtime_invocation_id(
     trigger: TriggerContext | None,
     runtime_invocation_id: str | None,
 ) -> TriggerContext | None:
-    if trigger is None or runtime_invocation_id is None:
+    if trigger is None:
         return trigger
     extra = dict(trigger.extra)
-    extra[_RUNTIME_INVOCATION_ID_KEY] = runtime_invocation_id
+    if runtime_invocation_id is None:
+        # Invocation authority belongs to the final host message merged into a
+        # follow-on turn.  A missing ID must actively erase a prior trigger's
+        # value rather than let that older authority cross the merge boundary.
+        extra.pop(_RUNTIME_INVOCATION_ID_KEY, None)
+    else:
+        extra[_RUNTIME_INVOCATION_ID_KEY] = runtime_invocation_id
     return replace(trigger, extra=extra)
 
 
@@ -123,6 +147,24 @@ def _latest_runtime_invocation_id(
     # Do not walk backward past a missing value: that would grant the latest
     # legacy/untrusted message authority owned by an earlier message.
     return pending[-1].runtime_invocation_id if pending else None
+
+
+def _consume_latest_direct_trigger(
+    pending: list[TriggerContext],
+    *,
+    runtime_invocation_id: str | None,
+) -> TriggerContext | None:
+    """Consume one coalesced direct turn with the final host authority.
+
+    Direct arrivals during one in-flight reply historically merged into one
+    follow-on chat.  Keep that behavior while retaining the latest trigger's
+    focused mode/target through an intervening @ burst.
+    """
+    if not pending:
+        return None
+    trigger = pending[-1]
+    pending.clear()
+    return _with_runtime_invocation_id(trigger, runtime_invocation_id)
 
 
 class _GroupSlot:
@@ -148,6 +190,7 @@ class _GroupSlot:
         "last_skip_time",
         "last_user_id",
         "msg_count",
+        "pending_direct_triggers",
         "pending_during_generation",
         "running_task",
         "runtime_invocation_id",
@@ -164,6 +207,10 @@ class _GroupSlot:
         self.running_task: asyncio.Task[None] | None = None
         self.msg_count: int = 0
         self.pending_during_generation: list[PendingMessage] = []
+        # Non-@ rule-layer triggers queued while a chat is running.  They keep
+        # their own target/mode instead of borrowing the scalar slot.trigger,
+        # which Arbiter-A legitimately clears while firing an @ burst.
+        self.pending_direct_triggers: list[TriggerContext] = []
         self.last_fire_time: float = 0.0
         self.last_reply_time: float = 0.0
         self.last_reply_content: str = ""
@@ -451,12 +498,11 @@ class GroupChatScheduler:
         )
         slot = self._slots.get(group_id)
         if slot:
-            if slot.running_task and not slot.running_task.done():
-                slot.running_task.cancel()
-            slot.running_task = None
-            slot.msg_count = 0
-            slot.pending_during_generation = []
-            slot.burst_pending = []
+            # A mute invalidates every queued turn, including direct continuations
+            # held outside Arbiter-A's @ input.  The cancelled chat's finally
+            # block runs after this method returns, so leaving any queue behind
+            # would let it start a reply after the mute took effect.
+            self.clear_pending(group_id, cancel_running=True)
         _L.info("scheduler | group={} muted source={} tasks cancelled", group_id, source)
 
     def unmute(self, group_id: str) -> None:
@@ -649,10 +695,26 @@ class GroupChatScheduler:
                     )
                 except Exception as exc:
                     _L.debug("corpus capture failed | group={} err={}", group_id, exc)
+        block_id = observed_block.block_id if observed_block is not None else ""
+        if trigger is not None and block_id and not str(trigger.extra.get("block_id", "") or ""):
+            trigger = replace(trigger, extra={**trigger.extra, "block_id": block_id})
+        now = time.monotonic()
+        continuation_age_s = self._ratified_continuation_age_seconds(observed_block, now=now)
+        eligible_ratified_continuation = bool(
+            trigger is None
+            and not is_addressed
+            and not reply_to_self
+            and not at_self
+            and not at_targets
+            and message_id is not None
+            and observed_block is not None
+            and continuation_age_s is not None
+        )
         identity = self._persona_runtime.identity_snapshot()
         is_at = trigger is not None and trigger.mode == "at_mention"
         is_video_always = trigger is not None and trigger.mode == "video_always"
         is_directed_followup = trigger is not None and trigger.mode == "directed_followup"
+        is_ratified_continuation = trigger is not None and trigger.mode == "ratified_continuation"
         is_correction = trigger is not None and trigger.mode == "correction"
         is_closing = trigger is not None and trigger.mode == "closing"
         is_greeting = trigger is not None and trigger.mode == "greeting"
@@ -661,9 +723,11 @@ class GroupChatScheduler:
             and not is_at
             and not is_video_always
             and not is_directed_followup
+            and not is_ratified_continuation
             and not is_correction
             and not is_closing
             and not is_greeting
+            and not eligible_ratified_continuation
         ):
             # Skip non-@ messages when there are no proactive interjection rules.
             # @ mentions, directed followups, correction turns, closing farewells,
@@ -674,6 +738,7 @@ class GroupChatScheduler:
         resolved = self._group_config.resolve(int(group_id))
 
         slot = self._slots.setdefault(group_id, _GroupSlot())
+        prior_scalar_trigger = slot.trigger
         # The newest message is the current host trigger for the ordinary path.
         # A missing value intentionally clears prior state so no old invocation
         # can authorize a later legacy turn after a configured ingress failure.
@@ -694,7 +759,19 @@ class GroupChatScheduler:
             # block_id/target_message_id) — see _build_block_triggers.
             slot.trigger = trigger
 
-        block_id = observed_block.block_id if observed_block is not None else ""
+        ratified_continuation_trigger: TriggerContext | None = None
+        if eligible_ratified_continuation and observed_block is not None:
+            continuation_extra: dict[str, Any] = {"block_id": observed_block.block_id}
+            if slot.runtime_invocation_id is not None:
+                continuation_extra[_RUNTIME_INVOCATION_ID_KEY] = slot.runtime_invocation_id
+            ratified_continuation_trigger = TriggerContext(
+                reason="对方在已确认的话题里间隔后续话，请承接当前这条消息继续回答",
+                mode="ratified_continuation",
+                target_message_id=message_id,
+                target_user_id=str(user_id or slot.last_user_id or ""),
+                extra=continuation_extra,
+            )
+
         pending_message = PendingMessage(
             content=message_text or (trigger.reason if trigger is not None else "") or "@我",
             user_id=user_id,
@@ -705,6 +782,50 @@ class GroupChatScheduler:
             obligation_level=(str(trigger.obligation) if trigger is not None else ""),
             runtime_invocation_id=runtime_invocation_id,
         )
+
+        def queue_direct_trigger(direct_trigger: TriggerContext | None) -> None:
+            """Preserve a direct rule-layer trigger outside Arbiter message input.
+
+            Arbiter-A consumes only actual @ messages and clears the scalar
+            ``slot.trigger`` when it starts an addressed reply.  A continuation
+            or other direct turn that arrived alongside that burst must therefore
+            retain its own focused trigger until the batch's final direct turn
+            can fire after addressed work.
+            """
+            if direct_trigger is not None:
+                queued_trigger = _with_runtime_invocation_id(direct_trigger, runtime_invocation_id)
+                if queued_trigger is not None:
+                    slot.pending_direct_triggers.append(queued_trigger)
+
+        def queue_direct_during_generation(
+            direct_trigger: TriggerContext | None,
+        ) -> None:
+            """Queue a direct turn that genuinely arrived during LLM generation."""
+            slot.pending_during_generation.append(pending_message)
+            queue_direct_trigger(direct_trigger)
+
+        def defer_ratified_continuation_until_arbiter(
+            direct_trigger: TriggerContext | None,
+        ) -> bool:
+            """Keep an already queued @ ahead of a later focused continuation."""
+            arbiter_task = slot.arbiter_task
+            if (
+                direct_trigger is None
+                or not slot.burst_pending
+                or arbiter_task is None
+                or arbiter_task.done()
+            ):
+                return False
+            # There is no active LLM generation yet. Do not put this historic
+            # message into pending_during_generation: Arbiter-B reads that queue
+            # as an interruption feed for the upcoming @ reply.
+            queue_direct_trigger(direct_trigger)
+            _L.info(
+                "scheduler | group={} ratified continuation queued behind arbiter @ (pending={})",
+                group_id,
+                len(slot.burst_pending),
+            )
+            return True
 
         # ════════════════════════════════════════════════════════════════════
         # P7 — RULE LAYER (deterministic, runs before any scoring).
@@ -763,22 +884,37 @@ class GroupChatScheduler:
             self._fire(group_id)
             return
 
-        if is_directed_followup:
+        if is_directed_followup or is_ratified_continuation:
             if slot.running_task and not slot.running_task.done():
-                slot.pending_during_generation.append(pending_message)
+                queue_direct_during_generation(trigger)
                 _L.debug(
-                    "scheduler | group={} directed_followup queued during generation (n={})",
+                    "scheduler | group={} {} queued during generation (n={})",
                     group_id,
+                    "ratified_continuation" if is_ratified_continuation else "directed_followup",
                     len(slot.pending_during_generation),
                 )
                 return
-            _L.info("scheduler | group={} directed_followup -> fire", group_id)
+            if is_ratified_continuation and defer_ratified_continuation_until_arbiter(trigger):
+                # The queued @ still owns the scalar carrier used by
+                # _build_block_triggers(). The direct continuation has its own
+                # durable queue entry and must not replace that context.
+                slot.trigger = (
+                    prior_scalar_trigger
+                    if prior_scalar_trigger is not None and prior_scalar_trigger.mode == "at_mention"
+                    else None
+                )
+                return
+            _L.info(
+                "scheduler | group={} {} -> fire",
+                group_id,
+                "ratified_continuation" if is_ratified_continuation else "directed_followup",
+            )
             self._fire(group_id)
             return
 
         if is_correction:
             if slot.running_task and not slot.running_task.done():
-                slot.pending_during_generation.append(pending_message)
+                queue_direct_during_generation(trigger)
                 _L.debug(
                     "scheduler | group={} correction queued during generation (n={})",
                     group_id,
@@ -808,7 +944,7 @@ class GroupChatScheduler:
                 slot.runtime_invocation_id = None
                 return
             if slot.running_task and not slot.running_task.done():
-                slot.pending_during_generation.append(pending_message)
+                queue_direct_during_generation(trigger)
                 _L.debug(
                     "scheduler | group={} closing queued during generation (n={})",
                     group_id,
@@ -834,7 +970,7 @@ class GroupChatScheduler:
                 slot.runtime_invocation_id = None
                 return
             if slot.running_task and not slot.running_task.done():
-                slot.pending_during_generation.append(pending_message)
+                queue_direct_during_generation(trigger)
                 _L.debug(
                     "scheduler | group={} greeting queued during generation (n={})",
                     group_id,
@@ -849,7 +985,7 @@ class GroupChatScheduler:
         # Video always-reply: force fire for B站 video shares
         if is_video_always:
             if slot.running_task and not slot.running_task.done():
-                slot.pending_during_generation.append(pending_message)
+                queue_direct_during_generation(trigger)
                 _L.debug(
                     "scheduler | group={} bilibili always queued during generation (n={})",
                     group_id,
@@ -879,6 +1015,22 @@ class GroupChatScheduler:
                 and user_id == slot.firing_user_id
                 and slot.firing_role in {"ratified", "addressed"}
             )
+            if ratified_continuation_trigger is not None:
+                queue_direct_during_generation(ratified_continuation_trigger)
+                if same_user_continuation and not slot.first_segment_sent:
+                    _L.info(
+                        "scheduler | group={} ratified continuation -> cancel & remerge (n={})",
+                        group_id,
+                        len(slot.pending_during_generation),
+                    )
+                    slot.running_task.cancel()
+                else:
+                    _L.info(
+                        "scheduler | group={} ratified continuation queued during generation (n={})",
+                        group_id,
+                        len(slot.pending_during_generation),
+                    )
+                return
             if same_user_continuation:
                 slot.pending_during_generation.append(pending_message)
                 if not slot.first_segment_sent:
@@ -906,7 +1058,6 @@ class GroupChatScheduler:
         # them can resurrect a rule-layer skip nor veto a rule-layer fire.
         # ════════════════════════════════════════════════════════════════════
         # Probability-based dispatch with minimum interval (replaces debounce).
-        now = time.monotonic()
         if now - slot.last_fire_time < resolved.planner_smooth:
             _L.info("scheduler | group={} interval too short, skip (msgs={})", group_id, slot.msg_count)
             slot.trigger = None  # clear trigger on skip — prevent leak
@@ -964,6 +1115,7 @@ class GroupChatScheduler:
         role = self._receiver_role(
             group_id,
             slot,
+            observed_block=observed_block,
             is_addressed=is_addressed,
             reply_to_self=reply_to_self,
             at_self=at_self,
@@ -1059,10 +1211,43 @@ class GroupChatScheduler:
             slot.consecutive_skip = 0
             slot.last_fire_time = now
             slot.last_response_class = ResponseClass.FULL_REPLY.value
-            self._maybe_anchor_topic_block(group_id, slot)
             self._enqueue_reward(group_id, decision=True, rws=rws, threshold=threshold)
-            self._fire(group_id)
+            if ratified_continuation_trigger is not None:
+                if defer_ratified_continuation_until_arbiter(ratified_continuation_trigger):
+                    return
+                self._fire(group_id, block_trigger=ratified_continuation_trigger)
+                return
+            anchor_block_id = (
+                block_id
+                if observed_block is not None and observed_block.bot_involved
+                else ""
+            )
+            self._maybe_anchor_topic_block(group_id, slot, block_id=anchor_block_id)
+            # Prompt anchoring stays fail-closed for overheard conversations,
+            # but a reply that was actually delivered belongs to the exact
+            # block that produced this probability decision.
+            self._fire(group_id, firing_block_id=block_id)
         else:
+            if (
+                role == "ratified"
+                and ratified_continuation_trigger is not None
+                and observed_block is not None
+            ):
+                _L.info(
+                    "scheduler | group={} prob skip -> ratified continuation "
+                    "(block={} age={:.1f}s)",
+                    group_id,
+                    observed_block.block_id,
+                    continuation_age_s,
+                )
+                slot.consecutive_skip = 0
+                slot.last_fire_time = now
+                slot.last_response_class = ResponseClass.FULL_REPLY.value
+                self._enqueue_reward(group_id, decision=True, rws=rws, threshold=threshold)
+                if defer_ratified_continuation_until_arbiter(ratified_continuation_trigger):
+                    return
+                self._fire(group_id, block_trigger=ratified_continuation_trigger)
+                return
             # Companion rescue (weak-reply §2.5-2d): a ratified continuation —
             # the user follows up in a block the bot is already part of (the
             # "宝宝" case) — is a message that should be SEEN. Rather than letting
@@ -1083,16 +1268,21 @@ class GroupChatScheduler:
                 slot.consecutive_skip = 0
                 slot.last_light_time = now_wall
                 slot.last_response_class = ResponseClass.LIGHT_ACK.value
+                companion_extra: dict[str, Any] = {}
+                if observed_block is not None:
+                    companion_extra["block_id"] = observed_block.block_id
+                if slot.runtime_invocation_id is not None:
+                    companion_extra[_RUNTIME_INVOCATION_ID_KEY] = slot.runtime_invocation_id
                 companion_trigger = TriggerContext(
                     reason="对方在和你的对话里续话，该被看见——轻轻应一声",
                     mode="companion",
-                    target_message_id=(trigger.target_message_id if trigger is not None else None),
-                    target_user_id=(slot.last_user_id or ""),
-                    extra=(
-                        {_RUNTIME_INVOCATION_ID_KEY: slot.runtime_invocation_id}
-                        if slot.runtime_invocation_id is not None
-                        else {}
+                    target_message_id=(
+                        message_id
+                        if message_id is not None
+                        else (trigger.target_message_id if trigger is not None else None)
                     ),
+                    target_user_id=(slot.last_user_id or ""),
+                    extra=companion_extra,
                 )
                 self._enqueue_reward(group_id, decision=True, rws=rws, threshold=threshold)
                 self._fire(group_id, block_trigger=companion_trigger)
@@ -1119,7 +1309,13 @@ class GroupChatScheduler:
 
     # B1-addressed: focus an addressed reply on the @-ed message + its topic
     # block, instead of replying to the whole stale multi-topic timeline.
-    _FOCUS_TRIGGER_MODES = frozenset({"at_mention", "directed_followup", "correction", "qq_interaction"})
+    _FOCUS_TRIGGER_MODES = frozenset({
+        "at_mention",
+        "directed_followup",
+        "ratified_continuation",
+        "correction",
+        "qq_interaction",
+    })
 
     def _build_block_triggers(
         self, group_id: str, pending: list[PendingMessage]
@@ -1176,20 +1372,10 @@ class GroupChatScheduler:
                     anchor_uid = msg.user_id
                     break
             extra: dict[str, Any] = dict(base_trigger.extra) if base_trigger is not None else {}
-            invocation_id: str | None = None
-            if anchor_mid is not None:
-                for msg in reversed(members):
-                    if (
-                        msg.target_message_id == anchor_mid
-                        and msg.runtime_invocation_id is not None
-                    ):
-                        invocation_id = msg.runtime_invocation_id
-                        break
-            if invocation_id is None:
-                for msg in reversed(members):
-                    if msg.runtime_invocation_id is not None:
-                        invocation_id = msg.runtime_invocation_id
-                        break
+            # Invocation authority belongs to the final host message merged
+            # into this block, not to its representative anchor or any earlier
+            # trusted @. A missing final ID must clear the inherited scalar.
+            invocation_id = members[-1].runtime_invocation_id
             if invocation_id is None:
                 extra.pop(_RUNTIME_INVOCATION_ID_KEY, None)
             else:
@@ -1265,6 +1451,7 @@ class GroupChatScheduler:
         group_id: str,
         slot: _GroupSlot,
         *,
+        observed_block: TopicBlock | None,
         is_addressed: bool,
         reply_to_self: bool,
         at_self: bool,
@@ -1283,12 +1470,36 @@ class GroupChatScheduler:
             return "addressed"
         if self._topic_tracker is None:
             return "addressed"  # tracker off → no role gating
-        block = self._topic_tracker.pick_anchor_block(group_id, require_bot_involved=True)
-        if block is not None:
+        if observed_block is not None and observed_block.bot_involved:
             return "ratified"
         return "overhearer"
 
-    def _maybe_anchor_topic_block(self, group_id: str, slot: _GroupSlot) -> None:
+    def _ratified_continuation_age_seconds(
+        self,
+        observed_block: TopicBlock | None,
+        *,
+        now: float,
+    ) -> float | None:
+        """Return a bounded same-block bot-reply gap eligible for full continuation."""
+        if observed_block is None or not observed_block.bot_involved:
+            return None
+        last_reply_at = float(getattr(observed_block, "last_bot_reply_at", 0.0) or 0.0)
+        if last_reply_at <= 0.0:
+            return None
+        min_gap = max(
+            0.0,
+            float(getattr(self._topic_block_config, "ratified_continuation_min_gap_seconds", 180.0) or 0.0),
+        )
+        max_gap = max(
+            0.0,
+            float(getattr(self._topic_block_config, "ratified_continuation_window_seconds", 600.0) or 0.0),
+        )
+        age = max(0.0, now - last_reply_at)
+        if max_gap <= min_gap or not (min_gap < age <= max_gap):
+            return None
+        return age
+
+    def _maybe_anchor_topic_block(self, group_id: str, slot: _GroupSlot, *, block_id: str = "") -> None:
         """B1: anchor a probability-fire reply to the bot's topic block.
 
         Only fires for non-explicit triggers (``slot.trigger is None``);
@@ -1299,7 +1510,11 @@ class GroupChatScheduler:
         if self._topic_tracker is None or slot.trigger is not None:
             return
         try:
-            block = self._topic_tracker.pick_anchor_block(group_id)
+            block = (
+                self._topic_tracker.pick_block_by_id(group_id, block_id)
+                if block_id
+                else self._topic_tracker.pick_anchor_block(group_id)
+            )
             if block is None:
                 return
             rep_id = block.representative_message_id()
@@ -1336,6 +1551,7 @@ class GroupChatScheduler:
         slot.trigger = None
         slot.runtime_invocation_id = None
         slot.pending_during_generation = []
+        slot.pending_direct_triggers = []
         slot.block_fire_queue = []
         if cancel_running and slot.running_task and not slot.running_task.done():
             slot.running_task.cancel()
@@ -1344,6 +1560,9 @@ class GroupChatScheduler:
         if slot.arbiter_task and not slot.arbiter_task.done():
             slot.arbiter_task.cancel()
         slot.arbiter_task = None
+        if slot.wait_defer_task and not slot.wait_defer_task.done():
+            slot.wait_defer_task.cancel()
+        slot.wait_defer_task = None
         _L.info(
             "scheduler | group={} pending cleared cancel_running={}",
             group_id,
@@ -1374,6 +1593,7 @@ class GroupChatScheduler:
             slot.trigger = None
             slot.runtime_invocation_id = None
             slot.pending_during_generation = []
+            slot.pending_direct_triggers = []
             slot.burst_pending = []
             slot.block_fire_queue = []
             if slot.running_task and not slot.running_task.done():
@@ -1638,6 +1858,8 @@ class GroupChatScheduler:
         arbiter = self._arbiter
         if slot is None or config is None or arbiter is None:
             return
+        if not _owns_slot_task(slot.arbiter_task):
+            return
         elapsed = 0.0
         poll_s = max(0.05, float(getattr(config, "completeness_poll_interval_s", 0.3) or 0.3))
         max_wait_s = max(0.05, float(getattr(config, "completeness_max_wait_s", 5.0) or 5.0))
@@ -1648,6 +1870,8 @@ class GroupChatScheduler:
         try:
             while elapsed < max_wait_s:
                 await asyncio.sleep(poll_s)
+                if not _owns_slot_task(slot.arbiter_task):
+                    return
                 elapsed += poll_s
                 if not slot.burst_pending:
                     return
@@ -1656,6 +1880,8 @@ class GroupChatScheduler:
                     user_id=slot.burst_pending[-1].user_id if slot.burst_pending else "",
                     group_id=group_id,
                 )
+                if not _owns_slot_task(slot.arbiter_task):
+                    return
                 if result.complete and result.confidence >= threshold:
                     _L.info(
                         "arbiter_a_fire | group={} pending={} confidence={:.2f} fallback={}",
@@ -1665,6 +1891,8 @@ class GroupChatScheduler:
                         result.fallback,
                     )
                     break
+            if not _owns_slot_task(slot.arbiter_task):
+                return
             if slot.running_task and not slot.running_task.done():
                 slot.pending_during_generation.extend(slot.burst_pending)
                 return
@@ -1686,8 +1914,9 @@ class GroupChatScheduler:
         except asyncio.CancelledError:
             raise
         finally:
-            slot.burst_pending = []
-            slot.arbiter_task = None
+            if _owns_slot_task(slot.arbiter_task):
+                slot.burst_pending = []
+                slot.arbiter_task = None
 
     async def _arbiter_b_monitor(
         self,
@@ -1721,6 +1950,7 @@ class GroupChatScheduler:
                 continue
             new_pending = [
                 msg for msg in list(slot.pending_during_generation)
+                if msg.evidence == "at_mention"
                 if (msg.content, msg.user_id) not in seen_keys
             ]
             if not new_pending:
@@ -1943,8 +2173,17 @@ class GroupChatScheduler:
         ]
         return (rows + pending)[-limit:]
 
-    def _fire(self, group_id: str, *, block_trigger: TriggerContext | None = None) -> None:
-        if self._closing:
+    def _fire(
+        self,
+        group_id: str,
+        *,
+        block_trigger: TriggerContext | None = None,
+        firing_block_id: str = "",
+    ) -> None:
+        # `notify()` and most deferred paths check this already, but delayed
+        # finally/arbiter callbacks can reach the common fire entrypoint after a
+        # mute. Keep that boundary fail-closed.
+        if self._closing or group_id in self._muted_groups:
             return
         slot = self._slots.get(group_id)
         if not slot:
@@ -1975,7 +2214,11 @@ class GroupChatScheduler:
         # same-user @ arriving mid-generation can be recognized as a continuation
         # of THIS reply and trigger cancel-and-remerge (see the is_at branch in
         # notify). Reset the first-segment guard for the new fire.
-        slot.firing_block_id = str(trigger.extra.get("block_id", "") or "") if trigger is not None else ""
+        slot.firing_block_id = (
+            str(trigger.extra.get("block_id", "") or "")
+            if trigger is not None
+            else str(firing_block_id or "")
+        )
         slot.firing_role = slot.last_role
         slot.firing_user_id = (
             str(trigger.target_user_id or "")
@@ -1988,6 +2231,7 @@ class GroupChatScheduler:
                 group_id,
                 trigger=trigger,
                 runtime_invocation_id=runtime_invocation_id,
+                _slot_owned=True,
             )
         )
         slot.running_task.add_done_callback(lambda _: None)
@@ -2051,7 +2295,9 @@ class GroupChatScheduler:
         )
         _L.info("scheduler | group={} deferred @ -> fire (force)", group_id)
         slot.last_response_class = ResponseClass.FULL_REPLY.value
-        slot.running_task = asyncio.create_task(self._do_chat(group_id, trigger=fire_trigger))
+        slot.running_task = asyncio.create_task(
+            self._do_chat(group_id, trigger=fire_trigger, _slot_owned=True)
+        )
         slot.running_task.add_done_callback(lambda _: None)
 
     async def _record_runtime_metric(
@@ -2295,11 +2541,19 @@ class GroupChatScheduler:
         *,
         trigger: TriggerContext | None = None,
         runtime_invocation_id: str | None = None,
+        _slot_owned: bool = False,
     ) -> None:
         slot = self._slots.get(group_id)
         reply_run: ReplyRun | None = None
+        owner_task = asyncio.current_task()
+
+        def owns_chat_slot() -> bool:
+            return not _slot_owned or (slot is not None and slot.running_task is owner_task)
+
         try:
             if slot is None:
+                return
+            if not owns_chat_slot():
                 return
             if runtime_invocation_id is None:
                 runtime_invocation_id = _trigger_runtime_invocation_id(trigger)
@@ -2326,6 +2580,8 @@ class GroupChatScheduler:
                 for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
                     monitor_task = None
                     try:
+                        if not owns_chat_slot():
+                            return
                         uid = (
                             trigger.target_user_id
                             if trigger is not None and trigger.target_user_id
@@ -2377,6 +2633,18 @@ class GroupChatScheduler:
                         sent_texts: list[str] = []
                         generation_pending_baseline = len(self._timeline.get_pending(group_id))
                         generation_turn_baseline = len(self._timeline.get_turns(group_id))
+
+                        def mark_delivered_topic_reply() -> None:
+                            """Attribute an externally delivered text segment to its exact block."""
+                            if self._topic_tracker is None:
+                                return
+                            try:
+                                self._topic_tracker.mark_bot_replied(
+                                    group_id, block_id=slot_ref.firing_block_id,
+                                )
+                            except Exception as exc:
+                                _L.debug("mark_bot_replied failed | group={} err={}", group_id, exc)
+
                         reply_prefix = ""
                         if (
                             trigger is not None
@@ -2423,6 +2691,12 @@ class GroupChatScheduler:
                         ) -> bool:
                             nonlocal first_segment, sent_segments, send_total_elapsed
 
+                            if not owns_chat_slot():
+                                _L.debug(
+                                    "scheduler | group={} detached chat rejected late segment",
+                                    group_id,
+                                )
+                                return False
                             if _gate is not None and not await _gate.check():
                                 if _gate.verdict and _gate.verdict.action == "revise":
                                     new_pending = self._pending_messages_since(group_id, _baseline)
@@ -2470,6 +2744,9 @@ class GroupChatScheduler:
                                 return False
                             send_total_elapsed += send_elapsed
                             sent_segments += 1
+                            # The segment is already visible outside this task.
+                            # Record it before the LLM can be cancelled or fail.
+                            mark_delivered_topic_reply()
                             reply_run.record(
                                 ReplyStage.DELIVERED,
                                 streaming=True,
@@ -2501,6 +2778,8 @@ class GroupChatScheduler:
                             ),
                             timeout=_CHAT_LOCK_LLM_TIMEOUT_S,
                         )
+                        if not owns_chat_slot():
+                            return
                         reply_run.record(ReplyStage.GENERATION_FINISHED, attempt=attempt)
                         latest_reply = self._latest_assistant_reply_after(group_id, generation_turn_baseline)
 
@@ -2546,18 +2825,11 @@ class GroupChatScheduler:
                         if latest_reply:
                             slot_ref.last_reply_time = time.time()
                             slot_ref.last_reply_content = latest_reply
-                        # B2 fix: mark the active topic block as bot-involved so a
-                        # user's follow-up in the same block is judged "ratified"
-                        # (a continuation of our exchange) rather than suppressed
-                        # as overhearer. Without this the bot replies once, then
-                        # goes silent on the user's very next line.
-                        if sent_segments > 0 and self._topic_tracker is not None:
-                            try:
-                                self._topic_tracker.mark_bot_involved(
-                                    group_id, block_id=slot_ref.firing_block_id,
-                                )
-                            except Exception as exc:
-                                _L.debug("mark_bot_involved failed | group={} err={}", group_id, exc)
+                        # B2 fix: record the actual delivered reply on its exact
+                        # topic block. Inbound @ evidence alone must not make a
+                        # long-gap continuation eligible for a full reply.
+                        if sent_segments > 0:
+                            mark_delivered_topic_reply()
                         if sent_segments > 0:
                             slot_ref.wait_deferrals = 0  # honored → reset deferral budget
                         # Addressed-wait deferral: an @ turn produced no reply
@@ -2611,41 +2883,81 @@ class GroupChatScheduler:
             # NOT spawn the next block — clear the queue so it cannot pollute a
             # later run. (The finally still runs; with an empty queue it falls
             # back to the pre-existing pending/msg_count re-fire behavior.)
-            if slot:
+            if slot and owns_chat_slot():
                 slot.block_fire_queue = []
         except Exception:
             if reply_run is not None:
                 reply_run.finish(ReplyOutcome.FAILED)
             _L.exception("scheduler | group={} chat error", group_id)
         finally:
-            if slot:
+            if slot and owns_chat_slot():
                 slot.running_task = None
                 # Path Y: drain the next topic block back-to-back (no gap) so a
                 # multi-addressee burst across topics gets one reply per block.
+                # Priority is intentional: already-classified topic-block @ work,
+                # then newly queued @ work, then direct focused continuations.
+                # A direct turn keeps its exact context in pending_direct_triggers
+                # and cannot be rewritten into an @ trigger while it waits.
                 if slot.block_fire_queue:
                     next_trigger = slot.block_fire_queue.pop(0)
                     self._fire(group_id, block_trigger=next_trigger)
                 elif slot.pending_during_generation:
                     pending = slot.pending_during_generation
                     slot.pending_during_generation = []
-                    # Arbiter-A is for explicit @ bursts. Ordinary same-user
-                    # continuations queued during generation have no addressing
-                    # evidence and must re-fire directly, otherwise they would
-                    # be fabricated into an at_mention trigger by
-                    # ``_build_block_triggers``.
-                    has_addressed_pending = any(
-                        msg.target_message_id is not None
-                        or bool(msg.evidence)
-                        or bool(msg.obligation_level)
-                        for msg in pending
-                    )
-                    if self._arbiter_enabled(group_id) and has_addressed_pending:
-                        slot.burst_pending.extend(pending)
+                    # Arbiter-A owns actual @ bursts only. Direct rule-layer
+                    # turns (especially a synthetic ratified continuation)
+                    # retain their trigger in pending_direct_triggers and wait
+                    # behind the addressed reply instead of being fabricated
+                    # into an at_mention by _build_block_triggers().
+                    at_pending = [msg for msg in pending if msg.evidence == "at_mention"]
+                    direct_pending = [msg for msg in pending if msg.evidence != "at_mention"]
+                    if at_pending and self._arbiter_enabled(group_id):
+                        slot.burst_pending.extend(at_pending)
+                        slot.pending_during_generation = direct_pending
                         slot.arbiter_task = asyncio.create_task(self._arbiter_completeness_loop(group_id))
                         slot.arbiter_task.add_done_callback(lambda _: None)
+                    elif at_pending:
+                        # Without Arbiter-A, preserve the same per-block @
+                        # routing rather than letting a queued direct trigger
+                        # clobber the addressed message's scalar context.
+                        slot.pending_during_generation = direct_pending
+                        at_triggers = self._build_block_triggers(group_id, at_pending)
+                        if at_triggers:
+                            slot.block_fire_queue = at_triggers[1:]
+                            self._fire(group_id, block_trigger=at_triggers[0])
+                        elif slot.pending_direct_triggers:
+                            direct_trigger = _consume_latest_direct_trigger(
+                                slot.pending_direct_triggers,
+                                runtime_invocation_id=_latest_runtime_invocation_id(
+                                    direct_pending
+                                ),
+                            )
+                            if direct_trigger is not None:
+                                self._fire(group_id, block_trigger=direct_trigger)
+                        else:
+                            slot.runtime_invocation_id = _latest_runtime_invocation_id(direct_pending)
+                            self._fire(group_id)
+                    elif slot.pending_direct_triggers:
+                        direct_trigger = _consume_latest_direct_trigger(
+                            slot.pending_direct_triggers,
+                            runtime_invocation_id=_latest_runtime_invocation_id(
+                                direct_pending
+                            ),
+                        )
+                        if direct_trigger is not None:
+                            self._fire(group_id, block_trigger=direct_trigger)
                     else:
-                        slot.runtime_invocation_id = _latest_runtime_invocation_id(pending)
+                        slot.runtime_invocation_id = _latest_runtime_invocation_id(direct_pending)
                         self._fire(group_id)
+                elif slot.pending_direct_triggers:
+                    direct_trigger = _consume_latest_direct_trigger(
+                        slot.pending_direct_triggers,
+                        runtime_invocation_id=_trigger_runtime_invocation_id(
+                            slot.pending_direct_triggers[-1]
+                        ),
+                    )
+                    if direct_trigger is not None:
+                        self._fire(group_id, block_trigger=direct_trigger)
                 elif slot.msg_count > 0:
                     self._fire(group_id)
             if reply_run is not None and reply_run.outcome is not None:
