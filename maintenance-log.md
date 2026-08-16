@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-17 Agent Runtime v2 A18 web-search scope repair 上线
+
+**变更类型**：生产配置修复 / bot-only 发布。修复唯一 ingress-only `network:web-search` profile 漏配 `network:search` 的 capability mismatch；provisioner 现在强制校验该依赖，repair 只接受唯一 target 且所有 activation/rollback gate 仍为 `not_assessed` 的 profile。repair 使用目录 FD、`O_NOFOLLOW`、inode 复核、锁、generation manifest 不可变写入、文件/目录 `fsync` 和最后 config 指针原子替换，避免把 scope 修复误扩展成 worker activation。
+
+**发布与验证**：提交 `dc67f19` 构建 image `sha256:7ca937f05eed…`，先在 `--network none --read-only` 的真实 config/storage mount 做 dry-run，再应用 config backup 与新 generation manifest，仅执行 bot `--no-deps --force-recreate`。生产 profile 现为 `memory:read`、`network:search`、`time:read`，唯一 target 仍为 `network:web-search`；五源 preflight=ready，17 个 activation 与 4 个 rollback gate 仍 `not_assessed`，worker lease/run/tool/event=0。Admin=200、未认证 Runtime API=401、qq-bot restart=0/OOM=false；NapCat ID、image、启动时间和 restart 全程不变。
+
+**交接与回滚**：保留旧 config `sha256:a9f0…` 的 backup `config/backups/config.before-agent-runtime-web-search-scope-20260817t003700z.json`、旧 manifest/source inventory 与 rollback image tag `omubot-bot:pre-agent-runtime-web-search-scope-20260817`=`aed72…`。若需回退 scope，原子恢复 config backup 并保留 generation manifest orphan；若需回退代码，只替换 bot。真实自然 canary、provider cooperative-cancellation/serial-throughput 和 source-bound Worldbook authority 仍未具备，不得启动 worker、发送 QQ/QZone 测试消息或将本次修复称为全量 activation。
+
 ## 2026-08-16 Agent Runtime v2 bot-only image/config rollback rehearsal
 
 **变更类型**：生产回滚演练 / activation gate 实证。先为当前 `config/config.json` 生成独立 backup 并记录 SHA-256；仅把 `agent_runtime.enabled` 置为 false，将 `omubot-bot:pre-b2-long-gap-20260816`（`d311056` / `60f179…`）重标为 latest，随后仅 `--no-deps --force-recreate --no-build bot`。fallback bot restart=0、OOM=false、Admin=200、Runtime unauth=401，lease/trusted invocation 均为 0；旧 preflight CLI 对 JSON 返回 `config_unavailable`，这是旧工具不支持 JSON 的已知格式差异，不作为运行失败。

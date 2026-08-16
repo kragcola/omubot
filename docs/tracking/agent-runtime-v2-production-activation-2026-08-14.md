@@ -2,11 +2,11 @@
 
 > 状态：active
 > mode: task
-> 最后更新：2026-08-16 CST
+> 最后更新：2026-08-17 CST
 > 当前下一步：等待并记录自然 OneBot canary、provider cooperative-cancellation/serial-throughput 和 source-bound Worldbook authority；每项由独立证据支撑后再生成新的 profile-bound manifest。完整 gate 前不得启动 worker 或发送测试消息。
-> 阻塞：2026-08-16 的 B2/A16 image、五个 source/backup/restore/operator artifact 和真实 bot-only image/config rollback rehearsal 均已完成；worker 仍被 17 个 activation 与 4 个 rollback `not_assessed` gate 正确阻断。当前没有 trusted invocation、worker lease、Runtime run/tool call/event，也没有自然 OneBot canary、provider cancellation 或 source-bound Worldbook authority；不能由历史 DB、测试 manifest 或本地模拟替代。
-> 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；B2 JUnit 全仓为 5,765 passed / 17 skipped（5,782 tests，0 failures/errors）、交叉 242 passed、Ruff/Pyright/diff clean、两轮独立复审无 P0-P2。候选 image `aed72adb25a0…` 内置 `c0a7309`，2026-08-16 22:48 CST 仅 `--no-deps --force-recreate --no-build bot` 后 `qq-bot` restart=0/OOM=false、Admin=200、未认证 `/api/admin/agent-runtime/summary`=401、worker/trusted-invocation rows=0、worker activation/error logs=0；source inventory 与 manifest hash 未变，bot 内即时 preflight 为五源 `ready`、activation/rollback `not_ready`。随后实际以 `d311056` + disabled config 启动并核验，再回到 `c0a7309` + 原始 enabled config；配置 SHA-256、source/manifest hash、lease/invocation=0 和 NapCat 全部不变。operator 探针 login=200、带 named credential 的不存在 context=404，未写入业务状态；当前 bootstrap renewal regression 重复 30/30 通过。
-> 回滚入口：代码回滚将 `omubot-bot:pre-b2-long-gap-20260816`（`60f179753e94…`）重标为 `omubot-bot:latest` 后仅替换 bot；未来 worker rollback 先将 `agent_runtime.enabled=false` 并保留 `unknown`/`dispatching`。NapCat 永不重建。
+> 阻塞：五个 source/backup/restore/operator artifact、真实 bot-only rollback rehearsal 和 A18 scope repair 均已完成；worker 仍被 17 个 activation 与 4 个 rollback `not_assessed` gate 正确阻断。9 条历史 invocation 已由消息库和 OneBot 入站日志逐条交叉见证，但均早于 A18、未授予 `network:search`，所以不能替代当前 profile 的自然 scoped canary、provider cancellation 或 source-bound Worldbook authority；不能由测试 manifest 或本地模拟替代。
+> 验证证据：A18 修复后 62 个 provision/profile/manifest/composition 契约测试通过，Ruff/Pyright/diff clean，两轮独立 review 最终无 P0-P3。`dc67f19` / `7ca937f05eed…` 先在 `--network none --read-only` 的真实 config/storage mount dry-run，再 apply config backup + generation manifest；bot-only recreate 后 restart=0/OOM=false、Admin=200、Runtime unauth=401、五源 preflight=ready、旧 manifest/source inventory hash 不变、worker lease/run/tool/event=0、启动窗口 error/worker pattern=0，NapCat ID/image/start/restart 不变。scope 现为 `memory:read,network:search,time:read`，target 仍唯一 `network:web-search`，全部 activation/rollback gate 仍 `not_assessed`。
+> 回滚入口：代码回滚将 `omubot-bot:pre-agent-runtime-web-search-scope-20260817`（`aed72adb25a0…`）重标为 `omubot-bot:latest` 后仅替换 bot；若要恢复旧 profile 指针，原子恢复 `config.before-agent-runtime-web-search-scope-20260817t003700z.json` 的精确内容并保留 generation manifest。未来 worker rollback 先将 `agent_runtime.enabled=false` 并保留 `unknown`/`dispatching`。NapCat 永不重建。
 
 ## Related Bot Behavior Fix (2026-08-15)
 
@@ -33,12 +33,12 @@
 
 ## Resume Capsule
 
-**A16 production checkpoint (2026-08-16)**: the repaired one-shot provisioner has completed in `omubot-storage` exactly once. It created five distinct contract DBs, frozen backups, restore copies, a profile-bound all-`not_assessed` manifest, a 0600 operator credential and a legacy Worldbook witness. The ingress-only installer then added the reviewed JSON profile. Do not rerun provisioner: it intentionally rejects an existing final root.
+**A18 production checkpoint (2026-08-17)**: the repaired one-shot provisioner has completed in `omubot-storage` exactly once. A18 corrected the sole canary's missing `network:search` capability without changing source data: it preserved the old manifest and source inventory, wrote a generation manifest bound to the repaired profile, and atomically switched only the config pointer. Do not rerun provisioner or rewrite either manifest; all gates remain `not_assessed`.
 
 - objective: 按 `docs/migrations/agent-runtime-v2-2026-07-21.md` 的 Future Production Activation Runbook，依次完成受限生产组合、认证/ACL、可信触发、attestation、recovery 和交付验证，同时保持所有外部效果 fail-closed。
 - next_step: 被动等待或在获准的精确 canary 上采集真实 OneBot ingress、registry/LLM、provider cancellation 与 Worldbook authoritative witness。完整 evidence 到位、manifest 对 profile 重新 pin 并由独立审查确认后，才可启动一个 worker。
 - current_files: `bootstrap/application.py`、`services/agent_runtime/{production,executor,coordinator,invocation_store}.py`、`tools/agent_runtime_{preflight,provision_sources,install_profile}.py`、`docs/runbooks/agent-runtime-v2-production-activation.md`、对应测试与本 tracker。
-- last_verified: fence 在实际 provider 调用前持有进程锁和 SQLite owner/token CAS；同一 token 的不同 lease_until 可连续扩展，失权/超时/guard 异常全部终结为 `worker_not_ready`，取消 shutdown 会等待 fence 后释放 exact lease。候选 image `c0a7309` 已作为 `qq-bot` 运行，restart=0/OOM=false；Admin=200、Runtime unauth=401、source inventory/manifest hash 不变、source preflight 5/5 ready、worker/trusted-invocation rows=0。五源 schema `2/1/1/1/2` 与 quick_check、backup digest、restore copies、operator exact ACL 通过独立只读审计；实际 Admin/operator probe 为 200/404。NapCat 的 ID/image/start/restart 与发布前一致。
+- last_verified: fence 在实际 provider 调用前持有进程锁和 SQLite owner/token CAS；同一 token 的不同 lease_until 可连续扩展，失权/超时/guard 异常全部终结为 `worker_not_ready`，取消 shutdown 会等待 fence 后释放 exact lease。`dc67f19` / `7ca937…` 已作为 `qq-bot` 运行，restart=0/OOM=false；Admin=200、Runtime unauth=401、scope/target 精确为 `memory:read,network:search,time:read` / `network:web-search`、source preflight 5/5 ready、旧 manifest/source inventory 不变、worker lease/run/tool/event=0。五源 schema `2/1/1/1/2` 与 quick_check、backup digest、restore copies、operator exact ACL 通过独立只读审计；NapCat 的 ID/image/start/restart 与发布前一致。
 - do_not_redo: 不重写已验收 P0-P5 dark 合同；不把 HTTP POST、OneBot 自动 reconciliation 或 raw QZone transport 标记为已迁移；不把浏览器 token 当作 principal。
 - rollback: 禁用 `agent_runtime.enabled`，停止有界 worker，保留 `unknown`/`dispatching` ledger 供人工 reconcile；仅在 schema compatibility 检查后回滚 bot image，绝不重建 NapCat。
 
@@ -48,27 +48,27 @@
 - dirty baseline: 90 条 `git status --short` 记录，其中 4,724 个未跟踪文件；Agent Runtime v2 本身仍是未提交 WIP，与 NapCat、课程资料及其他用户 WIP 混存。
 - isolation: 不执行 `git add -A`、不清理/stash/reset 用户 WIP；不直接从当前工作树 build/deploy Docker image。若最终需要 release，必须从隔离的精确输入构造 bot-only artifact。
 - external boundary: 本次实现不发送 QQ/QZone/webhook，不启用 QZone live，不改 `BUILTIN_WIRE_PROFILE.validated`，不重启/重建 NapCat。
-- deployment boundary: 用户授权的 bot image 已到 `c0a7309`；production JSON 的 ingress-only profile 为 enabled，但 worker attestation 仍不可用，因此 selected dispatcher 必须保持 fail-closed。source/backup/restore/rollback/Worldbook attestation 全绿前不得把它解释为或升级为 worker activation。
+- deployment boundary: 用户授权的 bot image 已到 `dc67f19`；production JSON 的 ingress-only profile 为 enabled，且唯一 `network:web-search` target 已有其所需的 `network:search` scope，但 worker attestation 仍不可用，因此 selected dispatcher 必须保持 fail-closed。source/backup/restore/rollback/Worldbook attestation 全绿前不得把它解释为或升级为 worker activation。
 
-## Production Artifact Inventory (2026-08-16)
+## Production Artifact Inventory (2026-08-17)
 
-本次盘点已经被 `ARV2-ACT-READ` 的容器内 read-only audit 取代；所有结果来自实际 named volume、实际 bind-mounted JSON config 和已运行的 `c0a7309` image，未读取 credential 值、未发送消息、未写数据库。
+本次盘点已经被 `ARV2-ACT-READ` 与 A18 容器内 read-only audit 取代；所有结果来自实际 named volume、实际 bind-mounted JSON config 和已运行的 `dc67f19` image，未读取 credential 值、未发送消息、未写数据库。
 
 | Gate | Read-only evidence | Status | Required next artifact |
 | --- | --- | --- | --- |
-| Activation profile | actual `config/config.json` has enabled one-worker ingress-only profile and digest-pinned manifest; preflight parses it | ready for ingress only | retain until an evidence-backed manifest is ready |
+| Activation profile | actual `config/config.json` has enabled one-worker ingress-only profile, exact `network:search` capability for its one web-search target, and a generation manifest pinned to the repaired profile; preflight parses it | ready for ingress only | retain until an evidence-backed manifest is ready |
 | Five explicit sources | five distinct DBs; schema `2/1/1/1/2`, quick_check and inventory digests match | ready | no rerun or replacement |
 | Frozen backups and restore | five frozen backup digests verify; five restore copies pass schema/quick_check; actual image/config rollback returned source hashes unchanged | ready for source recovery | retain evidence; no source replacement |
 | Operator authority | one enabled durable named operator, four exact grants, 0600 credential; local Admin/operator probe=200/404 | ready for read-only operator actions | retain a redacted evidence record; do not expose credential |
-| Trusted ingress and provider canary | invocation/lease/run/tool-call/event rows are all 0; no natural OneBot canary or provider cancellation transcript | blocked | exact canary target, actual persisted trigger, registry/LLM witness and cooperative-cancellation result |
+| Trusted ingress and provider canary | 9 immutable group invocation rows have exact message-store and OneBot inbound-log correlation, but all predate A18 and have only `memory:read,time:read`; lease/run/tool-call/event remain 0 and no current scoped provider transcript exists | blocked | post-A18 natural trigger with `network:search`, registry/LLM witness and cooperative-cancellation result |
 | Worldbook authority | source schema is valid and legacy read-only witness is structurally ready (`7/7/7/8`); governed source contains no proposal/decision/receipt | blocked | same-source authoritative reread, reducer, single-world/no-dual-truth witness |
-| Deployment/rollback image | live `c0a7309` image=`aed72…`; pre-B2 tag `omubot-bot:pre-b2-long-gap-20260816`=`60f179…`; actual `d311056` disabled-config rollback and restore succeeded | ready | retain tags and current config backup |
+| Deployment/rollback image | live `dc67f19` image=`7ca937…`; pre-A18 tag `omubot-bot:pre-agent-runtime-web-search-scope-20260817`=`aed72…`; actual `d311056` disabled-config rollback and restore succeeded | ready | retain tags, A18 config backup and generation manifest |
 
 ## Parallel Ledger
 
 | Workstream | Owner | Conflict domain | Isolation | Status | Checkpoint |
 | --- | --- | --- | --- | --- | --- |
-| ARV2-A | Codex main | runtime composition, config, schemas, tests, docs, ingress-only deployment | isolated release worktree; single writer | in_progress | `c0a7309` deployed; source/operator audit and image/config rollback rehearsal complete; canary/Worldbook evidence remain |
+| ARV2-A | Codex main | runtime composition, config, schemas, tests, docs, ingress-only deployment | isolated release worktree; single writer | in_progress | `dc67f19` deployed; A18 scope repair, source/operator audit and image/config rollback rehearsal complete; canary/Worldbook evidence remain |
 | ARV2-B | bootstrap_tdd_tests | new bootstrap contract test only | shared workspace; sole writer for `tests/test_agent_runtime_bootstrap.py`; no production-file reads/writes | completed | Bootstrap contracts delivered; implementation integrated and cross-verified |
 | ARV2-C | arv2_attestation_audit | read-only current-snapshot attestation audit | shared workspace; no writes | completed | Confirmed absent production attestors and direct worker-start bypass; findings incorporated in A9 |
 | ARV2-D | arv2_a11_contracts | A11 test/repair design for profile, lease and manifest code | shared workspace; read-only, no test or production writes | completed | Confirmed four findings plus same-pattern renew lease; contracts and repair integrated by main writer |
@@ -76,6 +76,10 @@
 | ARV2-F | arv2_release_diff_review | release diff P0-P3 review | shared workspace; read-only, no writes | completed | Same-token concurrent extension finding repaired; final review has no P0-P2, with cooperative cancellation and serial provider throughput recorded as P3 constraints |
 | ARV2-R2 | arv2_release_diff_review | sticker/scheduler/schedule behavior review | isolated release worktree; read-only, no writes | completed | Raw-CQ callback probes and failed-sticker continuation probe passed; no P0/P1, no files edited |
 | ARV2-R3 | ARV2-ACT-READ | Runtime activation artifact audit | production container/volume; read-only, no writes | completed | five sources/backups/restores/profile/operator ACL are real and ready; all manifest gates remain `not_assessed`, zero lease/invocation/run evidence |
+| ARV2-R4 | scope_repair_review | narrow scope-repair P0-P3 review | shared workspace; read-only, no writes | completed | found and closed TOCTOU, CLI/lock, file/child/config-directory durability P2s; final review has no P0-P3 |
+| ARV2-R5 | activation_evidence_audit | Worldbook/provider gate admissibility | shared workspace; read-only, no writes | completed | existing DB/legacy witness cannot make a gate ready; source-bound authority and provider transcript remain required |
+| ARV2-R6 | natural_canary_audit | trusted-ingress evidence audit | production container/volume; read-only, no writes | completed | nine structurally valid receipts are insufficient without a designated natural canary witness |
+| ARV2-R7 | production_canary_recheck | post-A18 trusted-ingress admissibility | production container/volume/messages/logs; read-only, no writes | completed | 9/9 historical receipts correlate with messages and 8/9 exact OneBot logs, but all are pre-A18 and lack `network:search`; no current canary |
 
 The production implementation remains serial because composition, source paths and context ownership share one conflict domain. ARV2-B is isolated to a new test file so TDD can keep test intent separate from implementation; it must deliver a manifest before integration. Other parallelism is restricted to independent read-only checks.
 
@@ -84,22 +88,22 @@ The production implementation remains serial because composition, source paths a
 | Section | Status | Evidence / Note | Next Update |
 | --- | --- | --- | --- |
 | Context | done | P0-P5 dark/local complete; default-off production composition and bootstrap wiring complete | Keep source facts current |
-| Plan | in_progress | `c0a7309` ingress-only release、source/operator artifact audit、bot-only image/config rollback rehearsal and runtime invariants complete | real canary evidence |
+| Plan | in_progress | `dc67f19` A18 ingress-only repair、source/operator artifact audit、bot-only image/config rollback rehearsal and runtime invariants complete | real canary evidence |
 | Implementation | done | Provider 前 execution fence、exact owner/token extension、worker lifecycle、只读 preflight CLI 与 activation runbook 已完成 | 等待真实 source/restore/rollback/Worldbook evidence 才可 activation |
-| Verification | in_progress | B2 owner/queue cross 242 passed、JUnit 5,765 passed / 17 skipped、独立复审无 P0-P2；`c0a7309` container/API/source/NapCat negative checks通过，bootstrap renewal test repeated 30/30；rollback rehearsal passed | real canary evidence |
+| Verification | in_progress | A18 relevant suite 62 passed、Ruff/Pyright/diff clean、两轮独立复审最终无 P0-P3；`dc67f19` container/API/source/NapCat negative checks通过，bootstrap renewal test repeated 30/30；rollback rehearsal passed | real canary evidence |
 | Handoff | pending | P3: provider 必须协作取消，fence 故意串行 provider | Update when real artifacts arrive |
 
 ## Todo
 
 - [x] Create production activation tracker and preserve dirty baseline.
 - [x] 提供并执行 named-volume source provision、JSON preflight 与 ingress-only config installer；五个 source、backup、restore、profile、credential 与 operator ACL 已由独立只读审计确认，manifest 刻意保持 all-`not_assessed`。
-- [~] Define explicit, fail-closed Runtime/Memory/Worldbook source paths, schema expectations, backup/restore and rollback attestations. Source/backup/restore are real and verified; real bot-only rollback rehearsal and Worldbook authority remain pending.
+- [~] Define explicit, fail-closed Runtime/Memory/Worldbook source paths, schema expectations, backup/restore and rollback attestations. Source/backup/restore and the real bot-only rollback rehearsal are verified; source-bound Worldbook authority remains pending.
 - [x] Implement named/scoped operator authentication and store-backed exact resource ACL; browser tokens remain assertions. Admin sensitive routes require credential-authenticated named principal; tool target and Memory candidate grants are exact and checked on every context/action request.
 - [x] Persist authoritative triggers and reconstruct trusted invocation context with exact target refs and registry generation. OneBot group/private ingress returns a bound receipt; router, scheduler and private LLM path forward only its exact canonical ID, while missing, malformed, cancelled or stale receipts fail closed.
 - [x] Compose production principal, ToolRegistry, LLMClient and bootstrap without changing legacy behavior while disabled. Assembly occurs after plugin-tool merge; disabled config has no source/LLM/context side effects and never starts a worker.
-- [~] Attest source integrity, single worker, exclusive recovery, Worldbook authoritative reread/no-dual-truth and rollback. `start_worker()` now requires dark, activation and rollback reports before it can acquire a lease; the digest-pinned evidence reader is complete, but real evidence and Worldbook authoritative integration remain.
-- [~] Rehearse dark readiness and rollback; real bot-only `d311056` + disabled-config rollback and `c0a7309` restore passed without source/lease/NapCat drift. Enable a bounded worker only after every gate is independently ready.
-- [~] Run focused/compat/static/storage-isolation/external-effect-negative verification and independent current-snapshot review. A11 focused/static/negative/runtime checks pass; real-artifact verification is pending.
+- [~] Attest source integrity, single worker, exclusive recovery, Worldbook authoritative reread/no-dual-truth and rollback. `start_worker()` now requires dark, activation and rollback reports before it can acquire a lease; A18 repinned the generation manifest to the repaired profile, but all 17 activation and 4 rollback gates remain `not_assessed` until real evidence is reviewed.
+- [x] Rehearse dark readiness and rollback; real bot-only `d311056` + disabled-config rollback and `c0a7309` restore passed without source/lease/NapCat drift. A18 config backup and pre-repair image tag are retained; a bounded worker remains prohibited until every gate is independently ready.
+- [~] Run focused/compat/static/storage-isolation/external-effect-negative verification and independent current-snapshot review. A18 focused 62 passed, scoped Ruff/Pyright/diff are clean, and two independent reviews have no P0-P3; real canary/provider/Worldbook evidence remains pending.
 - [x] Close A11 local fail-closed audit: `start_worker()` re-runs source/backup preflight before lease; acquire and renew cleanup exact committed tokens before cancellation propagates; every enabled profile requires a digest-pinned manifest and production rejects callback readiness; boolean manifest schema versions are rejected. RED 4+2 failed, focused 45 passed and cross 238 passed.
 - [x] Close current-snapshot release audit: recheck the exact worker lease before every tool use; project pre-dispatch cancellation to a cancelled run; classify group-policy denial as terminal; inject only offline OneBot reconciliation; require Admin operator headers without logging out the browser cookie session; reject unknown Runtime/Memory query keys; correct every rollback gate reference to `agent_runtime.enabled`.
 - [x] Commit, build and deploy the user-authorized dark release. `6880dd0` -> image `sha256:4f02f5b17f66…`; `agent_runtime.enabled=false`，未创建 Runtime/Memory/Worldbook production DB，未启动 worker；旧 image/static manifest 已保存，NapCat 未操作。
@@ -107,6 +111,7 @@ The production implementation remains serial because composition, source paths a
 - [x] Commit, build and deploy the user-authorized fence follow-up as bot-only dark code. `ba32cdf` -> image `sha256:6dc8ab9e8a30…`; container image/API/preflight/no-source/no-worker/NapCat invariants are verified, and `omubot-bot:pre-agent-runtime-v2-fence-20260815` preserves `6880dd0` rollback.
 - [x] Deliver the independent log-driven sticker/scheduler/schedule behavior fix plus the discovered QZone ownership-boundary repair. Cross suite 199 passed、full pytest 5729 passed / 17 skipped、Ruff/Pyright/diff clean; `d311056` -> `60f179…` bot-only deployment/runtime evidence complete. This item does not authorize Runtime v2 worker activation.
 - [x] Deliver B2 long-gap continuation plus A16 provisioner path repair. `c0a7309` -> `aed72…` is live; container/API/source/NapCat invariants and no-worker negative evidence are verified. This does not authorize worker activation.
+- [x] Deliver A18 narrow web-search scope repair. `dc67f19` -> `7ca937…` is live; the unique `network:web-search` target now has `network:search`, the new generation manifest is profile-bound, and bot-only restart/API/source/NapCat/no-worker invariants are verified. This does not authorize worker activation.
 
 ## Decisions
 
@@ -199,6 +204,9 @@ The production implementation remains serial because composition, source paths a
 | B2 cross regression | scheduler/topic/Arbiter/host/bootstrap/composition/router/invocation suites | **242 passed** / 1 existing aiohttp deprecation warning |
 | B2 final regression | JUnit-backed `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -q -p no:cacheprovider` | **5,765 passed / 17 skipped / 206 warnings**, `tests=5,782`, `failures=0`, `errors=0`, 81.64s |
 | B2 independent review | two read-only final reviews, including Python 3.12 `wait_for` callback ownership and cancel-suppressing replacement race | no P0-P2; release blocker closed |
+| A18 focused contracts | `source ./scripts/dev/env.sh && PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -q tests/test_agent_runtime_provision_sources.py tests/test_agent_runtime_preflight_cli.py tests/test_agent_runtime_activation_profile.py tests/test_agent_runtime_rollout_manifest.py tests/test_agent_runtime_production_composition.py` | **62 passed** in 2.62s; scope dependency, profile binding, generation repair, preflight and worker fail-closed contracts hold |
+| A18 static/review | scoped Ruff/Pyright/`git diff --check`; two independent read-only release reviews | clean; Pyright 0 errors; no P0-P3 findings after durability repairs |
+| A18 production ingress-only rollout | `--network none --read-only` dry-run, real config apply with backup/generation manifest, bot-only recreate, API/config/storage/log/NapCat inspection | `dc67f19` / image `7ca937…`; restart=0/OOM=false, Admin=200, Runtime unauth=401, five-source preflight ready, worker/lease/run/tool/event=0, NapCat unchanged |
 
 ## Test Ledger
 
@@ -274,12 +282,15 @@ The production implementation remains serial because composition, source paths a
 | A15-SOURCE-PARITY | `git fetch origin`; fast-forward ancestry check; push `0ee2c3e` to `origin/main`; GitHub run `31897383286`; read-only Admin/API/container/log inspection | `origin/main` and release both=`0ee2c3e`; Typed boundaries CI=`success`; Admin=200, Runtime unauth=401, bot image=`60f179…`, restart=0, no ERROR/CRITICAL/Traceback; NapCat remains running/restart=0 | Remote source, verified release and dark production image are aligned; this does not satisfy any real activation artifact gate | 2026-08-16 |
 | A16-CLI-RED | One-shot, `--network none` / `--read-only` container of image `820fd8c` mounting only `omubot-storage:/app/storage` | `ModuleNotFoundError: No module named 'services'` before source initialization; final source root and staging glob both absent | Script execution by path lacked the project-root module insertion. No production data was written, so repair before retry is safe | 2026-08-16 |
 | A16-CLI-GREEN | Add root insertion plus a subprocess regression that invokes the real script path; focused provision/preflight/log suite and scoped Ruff/Pyright | 9 passed; Ruff clean; Pyright 0 errors | The new image can execute the one-shot command with the same Python entrypoint used in the volume deployment | 2026-08-16 |
+| A18-RED/GREEN | Legacy unique `network:web-search` ingress profile without `network:search`, then narrow repair and generation rebind | RED rejected the capability mismatch; GREEN focused suite **62 passed** and repair remained limited to the single all-`not_assessed` profile | A18 closes the scope/config blocker without widening target authority; it does not attest a worker | 2026-08-17 |
+| A18-PROD | Read-only dry-run, config backup/apply, generation manifest persistence and bot-only recreate from `dc67f19` | image `7ca937…`, restart=0/OOM=false, Admin=200, Runtime unauth=401, source/old-manifest hashes unchanged, worker ledger empty, NapCat unchanged | Ingress-only profile is live; all activation/rollback gates remain fail-closed | 2026-08-17 |
+| A19-INGRESS-READ | Read-only URI SQLite checks of invocation/runtime/messages DBs plus exact-ID OneBot log correlation | 9 immutable group receipts; 9/9 message-store correlation, 8/9 exact inbound-log correlation, all registry generation 1; current worker lease/run/tool/event=0 | Historical natural ingress is real but all records predate A18 and have no `network:search`; it cannot satisfy the current scoped-canary gate | 2026-08-17 |
 
 ## Next Session Starts Here
 
-**Current execution checkpoint (newer than the historical bullets below)**: B2/A16 image `c0a7309` is live; source provision, ingress-only installation, source/operator audit and actual image/config rollback rehearsal have completed. Do not rerun source provision, alter the all-`not_assessed` manifest, or start a worker until real canary/provider and Worldbook authority evidence is recorded.
+**Current execution checkpoint (newer than the historical bullets below)**: A18 image `dc67f19` is live; source provision, ingress-only installation, source/operator audit, actual image/config rollback rehearsal and the narrow web-search scope repair have completed. Do not rerun source provision, rewrite the old manifest/source inventory, or start a worker until real canary/provider and Worldbook authority evidence is recorded.
 
-- Direction: Default-off fence release `ba32cdf` and log-driven `d311056` behavior release are live; `origin/main=0ee2c3e` has passed Typed boundaries CI. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
-- First action: Obtain a real canary trigger and provider cancellation witness plus a fresh source-bound Worldbook authority witness. Re-verify all evidence read-only and require an independent review before an activation decision.
+- Direction: Default-off fence release `ba32cdf`, log-driven `d311056` behavior release, B2/A16 `c0a7309`, and A18 `dc67f19` are live; A18's ingress-only scope is corrected and `origin/main` remains behind this release branch. Real activation remains blocked by missing operator-owned evidence; preserve the current fail-closed state.
+- First action: Capture the first natural post-A18 OneBot invocation with `network:search`, bind it to current registry/LLM state, then obtain the provider cancellation/serial transcript and a fresh source-bound Worldbook authority witness. Require an independent review before changing any manifest gate.
 - Open questions: Exact canary target/window, natural OneBot trigger, provider cancellation transcript and source-bound Worldbook authority are still unavailable; they must never be inferred from Admin state or replaced with test manifests.
 - Do not redo: P0-P5 dark/local implementation or the seven completed current-snapshot fixes. Do not turn dark deployment into real activation.
