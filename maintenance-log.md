@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-16 Agent Runtime v2 bot-only image/config rollback rehearsal
+
+**变更类型**：生产回滚演练 / activation gate 实证。先为当前 `config/config.json` 生成独立 backup 并记录 SHA-256；仅把 `agent_runtime.enabled` 置为 false，将 `omubot-bot:pre-b2-long-gap-20260816`（`d311056` / `60f179…`）重标为 latest，随后仅 `--no-deps --force-recreate --no-build bot`。fallback bot restart=0、OOM=false、Admin=200、Runtime unauth=401，lease/trusted invocation 均为 0；旧 preflight CLI 对 JSON 返回 `config_unavailable`，这是旧工具不支持 JSON 的已知格式差异，不作为运行失败。
+
+**恢复与不变量**：将配置精确恢复到原始 SHA-256，重标 `c0a7309` / `aed72…` 并再次仅替换 bot。恢复后 `qq-bot` restart=0、OOM=false、Admin=200、Runtime unauth=401；五个 source hash 和 rollout manifest hash 与 source inventory 一致，worker/trusted-invocation rows=0，c0 preflight 保持五源 `ready`、activation/rollback `not_ready`。NapCat 的 ID、image、created、started、restart 全程不变，未执行 `down`、restart 或 recreate。
+
+**交接/限制**：该演练证明 bot image/config rollback 可回到 dark state 并恢复 ingress-only state，且不会污染 source；它没有生成自然 OneBot trigger、provider cancellation 或 Worldbook authority 证据，未修改 manifest gate、未启动 worker、未发送 QQ/QZone 测试消息。保留 `omubot-bot:pre-b2-long-gap-20260816` 与 config backup，下一步仍是实际 canary/provider/Worldbook evidence 与独立审查。
+
+---
+
 ## 2026-08-16 Agent Runtime v2 B2/A16 生产镜像上线与 ingress-only 证据核验
 
 **变更类型**：生产部署 / Runtime activation 前置证据更新。隔离 release worktree 的 `c0a7309` 已构建为 `sha256:aed72adb25a0…`，重标为 `omubot-bot:latest` 后仅执行 `docker compose up -d --no-deps --force-recreate --no-build bot`。新 `qq-bot` 的 commit 为 `c0a7309`、restart=0、OOM=false；Admin SPA=200，未认证 `/api/admin/agent-runtime/summary`=401。NapCat 的容器 ID、image、created、started 与 restart 均未改变，未执行 `down`、restart 或 recreate。
