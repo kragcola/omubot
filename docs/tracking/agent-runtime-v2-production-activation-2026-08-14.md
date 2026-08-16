@@ -3,8 +3,8 @@
 > 状态：active
 > mode: task
 > 最后更新：2026-08-16 CST
-> 当前下一步：提交并构建隔离 release 后，在 Docker named volume 内执行一次性 source provision；验证 JSON preflight、备份/restore、ACL 与 legacy Worldbook witness，再原子安装 all-`not_assessed` ingress-only profile。该阶段不得启动 worker 或发送消息。
-> 阻塞：真实 source/schema、冻结 backup SHA-256、restore 与具名 ACL 已有可执行工具但尚未在 named volume 落地；真实 rollback rehearsal、自然 OneBot ingress、provider cooperative-cancellation 与完整 Worldbook authority 仍阻断 worker activation，不能由历史 DB 倒灌或 test manifest 代替。
+> 当前下一步：提交 CLI module-path 修复并构建隔离 release 后，在 Docker named volume 内重试一次性 source provision；验证 JSON preflight、备份/restore、ACL 与 legacy Worldbook witness，再原子安装 all-`not_assessed` ingress-only profile。该阶段不得启动 worker 或发送消息。
+> 阻塞：首次真实 one-shot 在第一处 `services` import 前停止，未写入 source 或 staging；修复并回归验证后待重试。成功 source provision 后，真实 rollback rehearsal、自然 OneBot ingress、provider cooperative-cancellation 与完整 Worldbook authority 仍阻断 worker activation，不能由历史 DB 倒灌或 test manifest 代替。
 > 验证证据：P0-P5 dark/local 基线已在 2026-07-22 验收；本轮 provider fence focused 25 passed、Runtime/应用/router/scheduler 交叉 530 passed、范围 Ruff clean、范围 Pyright 0 errors、`git diff --check` clean。日志驱动 bot 修复补齐 raw visual CQ callback、贴图失败后续话、stale continuation 与排班 JSON 回归；交叉 199 passed、全仓 5729 passed / 17 skipped。独立复审无 P0-P1；全仓 Pyright 的 361 个 sidecar/research 既有可选依赖/类型错误可在未修改主工作树复现，未作为本次回归。生产 `qq-bot` image/commit=`60f179753e94…`/`d311056`、restart=0，production JSON config 没有 `agent_runtime`，storage 无 Runtime source/worker；release 已提交并快进 `origin/main=0ee2c3e`，GitHub Typed boundaries CI 成功；NapCat ID/image/start/restart 均未变。
 > 回滚入口：保持 feature gate 默认关闭；将 `omubot-bot:pre-log-behavior-fix-20260815`（`6dc8ab9e8a30…`）重标为 `omubot-bot:latest` 后仅替换 bot，不创建 production Runtime/Memory/Worldbook DB，不接管 LLM loop，不启动 worker。NapCat 永不重建。
 
@@ -20,6 +20,8 @@
 本轮隔离 release 输入还包括 `kernel/types.py`、`plugins/qzone_journal/delivery.py`、`services/tools/qzone_journal.py` 与其契约测试。贴图/排班/QZone/插件所有权交叉为 **199 passed**，完整 pytest 为 **5729 passed / 17 skipped**；已提交 `d311056`，由隔离 Dockerfile 构建为 `sha256:60f179753e94…`，只替换 bot 后新 container=`94fee24a…`、restart=0。启动时日程模型首轮仍返回解释文本，严格 retry 后成功写入 14 slots；未发送测试 QQ 消息。Runtime activation 的真实 source/backup/Worldbook 前置仍未提供，不能以这组行为修复作为 activation 证据。
 
 ## Resume Capsule
+
+**A16 CLI checkpoint (2026-08-16)**: the first true `--network none` / `--read-only` production one-shot stopped at `ModuleNotFoundError: services` before source initialization. It left neither `storage/agent-runtime-v2` nor a staging directory. The provisioner now inserts `/app` into `sys.path`, and a subprocess test invokes the script exactly as the container does; commit and rebuild this repair before retrying the source provision.
 
 - objective: 按 `docs/migrations/agent-runtime-v2-2026-07-21.md` 的 Future Production Activation Runbook，依次完成受限生产组合、认证/ACL、可信触发、attestation、recovery 和交付验证，同时保持所有外部效果 fail-closed。
 - next_step: 从隔离 release image 在 `omubot-storage:/app/storage` 内运行 `agent_runtime_provision_sources.py`，绝不在 host checkout 的 `storage/` 冒充 production artifact；然后用 JSON preflight 和 ingress-only installer 建立仅入站采证阶段。完整 manifest 到位前不得启动 worker，禁止用测试 manifest 替代。
@@ -175,6 +177,7 @@ The production implementation remains serial because composition, source paths a
 | Independent release review | ARV2-F read-only P0-P3 review | no P0-P2; provider cooperative-cancel and serialized throughput recorded as P3 activation constraints |
 | Provider fence dark release | isolated `GIT_COMMIT=ba32cdf docker compose build bot`; active `docker compose up -d --no-deps --force-recreate --no-build bot`; container/API/preflight/storage/log inspection | `qq-bot` image `6dc8ab9e…`, `GIT_COMMIT=ba32cdf`, restart=0; CLI disabled; Runtime API 401; no Runtime file; NapCat ID/image/start/restart unchanged |
 | Log-driven behavior regression | `PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run pytest -q tests/test_sticker_context_regression.py tests/test_scheduler.py tests/test_schedule_generator.py`; scoped Ruff/Pyright/diff | **129 passed**; Ruff clean; Pyright 0 errors/0 warnings; diff clean; includes exact feedback “根本发之前不看上边的字” and “你怎么不叫” continuation |
+| Source provision CLI regression | `tests/test_agent_runtime_provision_sources.py tests/test_agent_runtime_preflight_cli.py tests/test_bot_log_format.py`; scoped Ruff/Pyright | **9 passed**; actual script-by-path subprocess reaches provision completion in a temporary root; the failed production one-shot left the live source root absent |
 
 ## Test Ledger
 
@@ -229,8 +232,12 @@ The production implementation remains serial because composition, source paths a
 | B1-PROD-PREFLIGHT | Read-only preflight with production JSON config | `not_ready/config_unavailable`; CLI requires TOML activation proposal, while production JSON has no `agent_runtime` key | Do not synthesize a TOML profile to obtain a different status; direct config/storage checks establish the intended absent-source fail-closed state | 2026-08-16 |
 | A14-ARTIFACT-INVENTORY | Correct `config/config.toml` preflight, contract-named storage/config/backup scan, Worldbook file inventory and evidence-doc scan | TOML has no `[agent_runtime]`; preflight=`not_ready/agent_runtime_disabled`; source/manifest/backup paths=0; only 5 Worldbook JSON content files; no non-tracker operator/canary/rehearsal witness | All real activation inputs remain operator-owned external blockers. Existing generic DBs, historical backups and test manifests are explicitly not substituted | 2026-08-16 |
 | A15-SOURCE-PARITY | `git fetch origin`; fast-forward ancestry check; push `0ee2c3e` to `origin/main`; GitHub run `31897383286`; read-only Admin/API/container/log inspection | `origin/main` and release both=`0ee2c3e`; Typed boundaries CI=`success`; Admin=200, Runtime unauth=401, bot image=`60f179…`, restart=0, no ERROR/CRITICAL/Traceback; NapCat remains running/restart=0 | Remote source, verified release and dark production image are aligned; this does not satisfy any real activation artifact gate | 2026-08-16 |
+| A16-CLI-RED | One-shot, `--network none` / `--read-only` container of image `820fd8c` mounting only `omubot-storage:/app/storage` | `ModuleNotFoundError: No module named 'services'` before source initialization; final source root and staging glob both absent | Script execution by path lacked the project-root module insertion. No production data was written, so repair before retry is safe | 2026-08-16 |
+| A16-CLI-GREEN | Add root insertion plus a subprocess regression that invokes the real script path; focused provision/preflight/log suite and scoped Ruff/Pyright | 9 passed; Ruff clean; Pyright 0 errors | The new image can execute the one-shot command with the same Python entrypoint used in the volume deployment | 2026-08-16 |
 
 ## Next Session Starts Here
+
+**Current execution checkpoint (newer than the historical bullets below)**: commit the A16 module-path repair, build a unique isolated image, then retry one-shot source provision. Do not infer source, backup, ACL or worker readiness from the failed attempt.
 
 - Direction: Default-off fence release `ba32cdf` and log-driven `d311056` behavior release are live; `origin/main=0ee2c3e` has passed Typed boundaries CI. Real activation remains blocked by missing operator-owned artifacts; preserve the current dark state.
 - First action: Obtain explicit operator-owned source locations/schema, backup payloads/digests, restore and rollback rehearsal records, named operator ACL and Worldbook authoritative-reread/reducer/no-dual-truth witness. Verify them read-only, including provider cooperative-cancellation and serial-throughput canary evidence, then produce a new independent review before any activation decision.

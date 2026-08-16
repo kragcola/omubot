@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,8 @@ from types import SimpleNamespace
 from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 _SOURCE_NAMES = ("runtime", "memory", "worldbook", "operator", "invocation")
 _SOURCE_SCHEMAS = {
     "runtime": 2,

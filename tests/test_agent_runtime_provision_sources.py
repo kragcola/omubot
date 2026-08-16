@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -186,6 +188,36 @@ async def test_provision_refuses_to_overwrite_existing_sources(tmp_path: Path) -
 
     with pytest.raises(FileExistsError):
         await module.provision_sources(**kwargs)
+
+
+def test_provision_cli_resolves_project_services_from_tools_directory(tmp_path: Path) -> None:
+    """The production one-shot container executes the script by path."""
+
+    _write_legacy_worldbook(tmp_path)
+    script = Path(__file__).resolve().parents[1] / "tools" / "agent_runtime_provision_sources.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--repo-root",
+            str(tmp_path),
+            "--run-id",
+            "20260816t000002z",
+            "--worker-id",
+            "agent-runtime-prod-003",
+            "--operator-id",
+            "prod-operator",
+            "--credential",
+            "operator-credential-0123456789-abcdefghij",
+        ],
+        cwd=script.parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "provisioned_not_assessed"
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,8 @@
 
 **验证与交接**：provisioner/preflight/log focused **8 passed**；Runtime/application/router/scheduler 交叉 **539 passed**；范围 Ruff、Pyright 和 `git diff --check` 均通过，独立复审无 P0-P2。此条仅提交工具与验证，尚未向 `omubot-storage` 写入 source、未修改 production config、未重启 bot 或 NapCat、未发送消息。下一步必须从隔离 image 的一次性容器挂载 named volume 运行 provisioner，再验证并安装 all-`not_assessed` ingress-only profile；真实 rollback、自然 OneBot ingress 和完整 manifest 前不得声称 worker 已上线。
 
+**运行时补正**：首次真实 one-shot 在 `services` module-path import 处停止，发生在 source 初始化之前；只读检查确认 `storage/agent-runtime-v2` 和 staging 均未出现。补齐 project-root `sys.path` 注入后，新增 script-by-path 子进程回归；focused 增至 **9 passed**，交叉为 **541 passed**，范围 Ruff/Pyright 继续 clean。必须从包含该修复的 image 重试，不能将这次失败误记为 provision 完成。
+
 ---
 
 ## 2026-08-16 Agent Runtime v2 证据盘点远端对齐
