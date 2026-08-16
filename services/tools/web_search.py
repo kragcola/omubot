@@ -1,16 +1,23 @@
-"""Web search tool: Bing Web Search API (primary) + DuckDuckGo (fallback).
+"""Web search tool: Bing API (credentialed) plus bounded public RSS fallback.
 
 Set SEARCH_API_KEY env var to a Bing Web Search API key from Azure.
-Without it, falls back to DuckDuckGo (may return empty results from datacenter IPs).
+Without it, ``auto`` uses Bing's public RSS endpoint through the shared async
+public-HTTP boundary.  The explicit DuckDuckGo compatibility mode remains
+available for legacy plugin configuration.
 """
 
 from __future__ import annotations
 
+import html
 import os
+import re
 import warnings
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlencode
+from xml.etree import ElementTree
 
+import aiohttp
 import httpx
 
 from kernel.types import (
@@ -24,9 +31,15 @@ from kernel.types import (
 )
 from services.tools.base import Tool
 from services.tools.context import ToolContext
+from services.tools.safe_http import UnsafePublicUrl, fetch_public_text
 
 MAX_RESULTS = 5
 BING_API = "https://api.bing.microsoft.com/v7.0/search"
+BING_RSS_SEARCH = "https://cn.bing.com/search"
+_BING_RSS_MAX_BYTES = 64 * 1024
+_SEARCH_USER_AGENT = "Mozilla/5.0 QQBot/1.0"
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_SPACE_RE = re.compile(r"\s+")
 
 
 class WebSearchTool(Tool):
@@ -139,9 +152,11 @@ class WebSearchTool(Tool):
                 timeout_seconds=self._timeout_seconds,
                 propagate_errors=governed,
             )
-        return await _ddg_search(
+        return await _bing_rss_search(
             query,
             max_results,
+            market=self._bing_market,
+            timeout_seconds=self._timeout_seconds,
             propagate_errors=governed,
         )
 
@@ -156,7 +171,10 @@ async def _bing_search(
     propagate_errors: bool = False,
 ) -> str:
     """Search via Bing Web Search API."""
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout_seconds),
+        trust_env=False,
+    ) as client:
         try:
             resp = await client.get(
                 BING_API,
@@ -177,13 +195,100 @@ async def _bing_search(
             return f"Bing 搜索失败: {e}"
 
     pages = (data.get("webPages") or {}).get("value") or []
-    if not pages:
-        return "未找到相关结果。"
+    return _format_results(
+        [
+            {
+                "title": str(page.get("name") or ""),
+                "href": str(page.get("url") or ""),
+                "body": str(page.get("snippet") or ""),
+            }
+            for page in pages
+        ]
+    )
 
-    lines: list[str] = []
-    for i, p in enumerate(pages, 1):
-        lines.append(f"{i}. {p['name']}\n   {p['url']}\n   {p.get('snippet', '')}")
-    return "\n\n".join(lines)
+
+async def _bing_rss_search(
+    query: str,
+    max_results: int,
+    *,
+    market: str = "zh-CN",
+    timeout_seconds: float = 15,
+    propagate_errors: bool = False,
+) -> str:
+    """Search a fixed public Bing RSS endpoint with cancellable async I/O."""
+    url = f"{BING_RSS_SEARCH}?{urlencode({'format': 'rss', 'q': query, 'mkt': market})}"
+    try:
+        response = await fetch_public_text(
+            url,
+            timeout_seconds=timeout_seconds,
+            follow_redirects=False,
+            headers={"User-Agent": _SEARCH_USER_AGENT},
+            max_bytes=_BING_RSS_MAX_BYTES,
+        )
+    except (TimeoutError, aiohttp.ClientError, UnsafePublicUrl) as exc:
+        if propagate_errors:
+            raise TimeoutError("web_search provider failed") from exc
+        return f"Bing 搜索失败: {type(exc).__name__}"
+
+    if response.status_code < 200 or response.status_code >= 300:
+        if propagate_errors:
+            if response.status_code in {408, 425, 429} or response.status_code >= 500:
+                raise TimeoutError(
+                    f"web_search retryable HTTP {response.status_code}"
+                )
+            raise RuntimeError(f"web_search terminal HTTP {response.status_code}")
+        return f"Bing 搜索失败: HTTP {response.status_code}"
+
+    try:
+        results = _parse_bing_rss_results(response.text, max_results=max_results)
+    except ElementTree.ParseError as exc:
+        if propagate_errors:
+            raise TimeoutError("web_search provider returned invalid RSS") from exc
+        return "Bing 搜索失败: 无法解析搜索结果。"
+    return _format_results(results)
+
+
+def _parse_bing_rss_results(text: str, *, max_results: int) -> list[dict[str, str]]:
+    root = ElementTree.fromstring(text)
+    results: list[dict[str, str]] = []
+    for item in root.iter():
+        if _local_name(item.tag) != "item":
+            continue
+        fields = {
+            _local_name(child.tag): _clean_result_text("".join(child.itertext()))
+            for child in item
+        }
+        title = fields.get("title", "")
+        href = fields.get("link", "")
+        if not title or not href:
+            continue
+        results.append(
+            {
+                "title": title,
+                "href": href,
+                "body": fields.get("description", ""),
+            }
+        )
+        if len(results) >= max_results:
+            break
+    return results
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _clean_result_text(value: str) -> str:
+    return _SPACE_RE.sub(" ", _HTML_TAG_RE.sub(" ", html.unescape(value))).strip()
+
+
+def _format_results(results: list[dict[str, str]]) -> str:
+    if not results:
+        return "未找到相关结果。"
+    return "\n\n".join(
+        f"{index}. {result['title']}\n   {result['href']}\n   {result['body']}"
+        for index, result in enumerate(results, 1)
+    )
 
 
 async def _ddg_search(
@@ -202,13 +307,7 @@ async def _ddg_search(
             raise TimeoutError("web_search provider failed") from e
         return f"搜索失败: {e}"
 
-    if not results:
-        return "未找到相关结果。"
-
-    lines: list[str] = []
-    for i, r in enumerate(results, 1):
-        lines.append(f"{i}. {r['title']}\n   {r['href']}\n   {r['body']}")
-    return "\n\n".join(lines)
+    return _format_results(results)
 
 
 def _ddg_search_sync(query: str, max_results: int) -> list[dict[str, str]]:

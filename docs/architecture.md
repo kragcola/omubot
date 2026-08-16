@@ -350,7 +350,7 @@ class PluginContext:
 | `update_memo` | `UpdateMemoTool` | Overwrite user/group memo (async fire-and-forget) |
 | `get_datetime` | `DateTimeTool` | Current date/time (Asia/Shanghai) |
 | `web_fetch` | `WebFetchTool` | Fetch web page content (SSRF-protected) |
-| `web_search` | `WebSearchTool` | DuckDuckGo web search (max 10 results) |
+| `web_search` | `WebSearchTool` | Bing API / bounded public RSS search in `auto`; DuckDuckGo compatibility mode (max 10 results) |
 | `http_api` | `HttpApiTool` | Call NapCat HTTP API |
 | `mute_user` | `MuteUserTool` | Mute group member (admin only; duration=0 unmutes) |
 | `set_title` | `SetTitleTool` | Set member special title (admin only) |

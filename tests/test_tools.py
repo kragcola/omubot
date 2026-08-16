@@ -7,6 +7,7 @@ import pytest
 
 import services.tools.http_api as http_api_module
 import services.tools.web_fetch as web_fetch_module
+import services.tools.web_search as web_search_module
 from services.tools.base import Tool
 from services.tools.context import ToolContext
 from services.tools.datetime_tool import DateTimeTool
@@ -413,6 +414,87 @@ async def test_registry_bad_arguments() -> None:
 # ── WebSearchTool ──
 
 
+async def test_web_search_auto_without_credential_uses_bounded_async_rss_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SEARCH_API_KEY", raising=False)
+    captured: dict[str, object] = {}
+
+    async def fake_fetch(
+        url: str,
+        *,
+        timeout_seconds: float,
+        follow_redirects: bool,
+        headers: dict[str, str],
+        max_bytes: int,
+        allow_proxy_dns_net: bool = True,
+    ) -> PublicHttpTextResponse:
+        captured.update(
+            url=url,
+            timeout_seconds=timeout_seconds,
+            follow_redirects=follow_redirects,
+            headers=headers,
+            max_bytes=max_bytes,
+            allow_proxy_dns_net=allow_proxy_dns_net,
+        )
+        return PublicHttpTextResponse(
+            status_code=200,
+            final_url=url,
+            truncated=False,
+            text=(
+                "<?xml version='1.0'?><rss><channel><item>"
+                "<title>Async result</title><link>https://example.com/result</link>"
+                "<description>Bounded provider</description>"
+                "</item></channel></rss>"
+            ),
+    )
+
+    monkeypatch.setattr(web_search_module, "fetch_public_text", fake_fetch, raising=False)
+
+    result = await WebSearchTool(timeout_seconds=7).execute(
+        ToolContext(run_id="governed-search"),
+        query="async provider contract",
+    )
+
+    assert result == "1. Async result\n   https://example.com/result\n   Bounded provider"
+    assert str(captured["url"]).startswith("https://cn.bing.com/search?")
+    assert captured["timeout_seconds"] == 7
+    assert captured["follow_redirects"] is False
+    assert isinstance(captured["max_bytes"], int)
+    assert captured["max_bytes"] >= 4096
+
+
+async def test_web_search_auto_cancellation_reaches_async_rss_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SEARCH_API_KEY", raising=False)
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocking_fetch(*_args: object, **_kwargs: object) -> PublicHttpTextResponse:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        raise AssertionError("blocked RSS request unexpectedly completed")
+
+    monkeypatch.setattr(web_search_module, "fetch_public_text", blocking_fetch)
+    task = asyncio.create_task(
+        WebSearchTool().execute(
+            ToolContext(run_id="governed-search-cancellation"),
+            query="async cancellation contract",
+        )
+    )
+
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+
+
 async def test_web_search_formats_results(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_results = [
         {"title": "Result 1", "href": "https://example.com/1", "body": "Snippet 1"},
@@ -422,7 +504,7 @@ async def test_web_search_formats_results(monkeypatch: pytest.MonkeyPatch) -> No
         "services.tools.web_search._ddg_search_sync",
         lambda q, n: fake_results,
     )
-    tool = WebSearchTool()
+    tool = WebSearchTool(mode="ddg")
     ctx = ToolContext(user_id="123")
     result = await tool.execute(ctx, query="test")
     assert "Result 1" in result
@@ -436,7 +518,7 @@ async def test_web_search_empty_results(monkeypatch: pytest.MonkeyPatch) -> None
         "services.tools.web_search._ddg_search_sync",
         lambda q, n: [],
     )
-    tool = WebSearchTool()
+    tool = WebSearchTool(mode="ddg")
     ctx = ToolContext(user_id="123")
     result = await tool.execute(ctx, query="nonexistent gibberish xyz")
     assert "未找到" in result
@@ -447,7 +529,7 @@ async def test_web_search_error_handling(monkeypatch: pytest.MonkeyPatch) -> Non
         raise RuntimeError("network error")
 
     monkeypatch.setattr("services.tools.web_search._ddg_search_sync", raise_error)
-    tool = WebSearchTool()
+    tool = WebSearchTool(mode="ddg")
     ctx = ToolContext(user_id="123")
     result = await tool.execute(ctx, query="test")
     assert "搜索失败" in result
@@ -461,7 +543,7 @@ async def test_web_search_max_results_capped(monkeypatch: pytest.MonkeyPatch) ->
         return []
 
     monkeypatch.setattr("services.tools.web_search._ddg_search_sync", capture_n)
-    tool = WebSearchTool()
+    tool = WebSearchTool(mode="ddg")
     ctx = ToolContext(user_id="123")
     await tool.execute(ctx, query="test", max_results=99)
     assert captured["n"] == 10
@@ -478,7 +560,7 @@ async def test_web_search_max_results_has_a_positive_floor(
         return []
 
     monkeypatch.setattr("services.tools.web_search._ddg_search_sync", capture_n)
-    await WebSearchTool().execute(
+    await WebSearchTool(mode="ddg").execute(
         ToolContext(user_id="123"),
         query="test",
         max_results=-9,

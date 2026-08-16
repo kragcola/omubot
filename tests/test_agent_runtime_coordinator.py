@@ -1932,15 +1932,15 @@ async def test_coordinator_records_web_search_provider_failure_as_retryable(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_search(query: str, max_results: int) -> list[dict[str, str]]:
-        del query, max_results
-        raise RuntimeError("provider unavailable")
+    async def fail_search(*_args: Any, **_kwargs: Any) -> Any:
+        raise TimeoutError("provider unavailable")
 
-    monkeypatch.setattr(web_search_module, "_ddg_search_sync", fail_search)
+    monkeypatch.delenv("SEARCH_API_KEY", raising=False)
+    monkeypatch.setattr(web_search_module, "fetch_public_text", fail_search)
     ledger = AgentRuntimeLedger(tmp_path / "agent-runtime.db")
     await ledger.init()
     registry = ToolRegistry()
-    tool = WebSearchTool(mode="ddg")
+    tool = WebSearchTool()
     registry.register(tool)
     coordinator = coordinator_module.RunCoordinator(
         ledger=ledger,

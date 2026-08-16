@@ -78,7 +78,7 @@ storage/
 | `aiosqlite` | Usage tracking SQLite async |
 | `rich` | Usage TUI dashboard |
 | `pyvips` | Image downscaling (requires libvips system lib) |
-| `duckduckgo-search` | Web search tool backend |
+| `ddgs` | Explicit DuckDuckGo compatibility backend; `auto` without a key uses bounded Bing RSS |
 | `aiofiles` | Async file I/O |
 | `tenacity` | Retry logic |
 | `loguru` | Structured logging |

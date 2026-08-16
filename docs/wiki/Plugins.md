@@ -95,7 +95,7 @@ storage/plugins/config/<name>.json
 | `style` | 1.0.0 | user | restart_required | expression | 表达学习：表达样本、动态风格档案、Prompt 注入 |
 | `sticker` | 1.2.0 | user | restart_required | expression | 表情包：保存、发送、管理与 OCR / 轻量语义检索 |
 | `echo` | 1.1.2 | user | runtime | expression | 复读检测：5 分钟内同消息 3 次触发 |
-| `web_search` | 1.1.1 | user | runtime | tool | 网页搜索，用于实时信息和 AI 复核 |
+| `web_search` | 1.1.2 | user | runtime | tool | 网页搜索；`auto` 无 key 时使用有界 Bing RSS，保留 DuckDuckGo 兼容模式 |
 | `web_fetch` | 1.1.1 | user | runtime | tool | 网页内容抓取 |
 | `datetime` | 1.1.1 | user | runtime | tool | 时间日期查询工具 |
 | `http_api` | 1.1.1 | user | runtime | tool | 通用 HTTP API 调用 |
