@@ -455,6 +455,10 @@ async def test_operator_header_bypass_fails_closed_without_named_operator_factor
     app = FastAPI()
     app.add_middleware(AdminAuthMiddleware, admin_token="browser-session")
     app.include_router(create_api_router(actions=actions))
+    browser_session = _sign_value(
+        "browser-session",
+        _derive_signing_key("browser-session"),
+    )
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -468,7 +472,21 @@ async def test_operator_header_bypass_fails_closed_without_named_operator_factor
                     "Authorization": "Bearer forged-credential",
                 },
             )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://admin.test",
+            cookies={"admin_session": browser_session},
+        ) as client:
+            cookie_response = await client.get(
+                "/api/admin/worldbook-governance/proposals/"
+                f"{proposal.proposal_id}/decision/context",
+                headers={
+                    "X-Agent-Runtime-Operator-Id": "forged",
+                    "Authorization": "Bearer forged-credential",
+                },
+            )
         assert response.status_code == 503
+        assert cookie_response.status_code == 503
         assert await worldbook.get_operator_decision(proposal.proposal_id) is None
     finally:
         await worldbook.close()

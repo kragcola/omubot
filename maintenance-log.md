@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-18 Agent Runtime v2 A21 operator factory 硬门（待 bot-only 发布）
+
+**变更类型**：Admin 认证纵深防御 / 已部署候选的安全加固。
+
+**内容与影响范围**：Worldbook decision 路径现在无论浏览器 cookie 是否有效，都设置 named-operator requirement；只有 `operator_action_factory` 能继续执行，静态 `actions` fallback 一律 503。cookie 仍可作为 SPA 会话，但不能成为 decision actor；正确 Bearer/operator ID 仍由 route 每次复核 durable credential 与 ACL。
+
+**验证与交接**：新增合法 cookie + 静态 actions 不写 decision 的负向回归；全仓 **5,811 passed / 17 skipped / 206 warnings**，Ruff/Pyright/diff clean。上一提交 `0a094ad` 已在生产并完成本轮 proposal decision/receipt；本加固尚未构建或替换，旧生产 digest `sha256:8a0a9f…` 可回滚。
+
+**回滚**：保留 `omubot-bot:0a094ad` 及其前一 fallback tag；仅替换 bot，不重启/重建 NapCat，不重复写 Worldbook decision。
+
 ## 2026-08-18 Agent Runtime v2 A21 operator decision middleware 修复（待 bot-only 发布）
 
 **变更类型**：Admin 认证边界修复 / 发布前阻断解除。

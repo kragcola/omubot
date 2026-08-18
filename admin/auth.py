@@ -50,15 +50,9 @@ def _get_admin_token() -> str:
 _API_SKIP_PATHS = {"/api/admin/login", "/api/admin/logout"}
 
 
-def _is_operator_decision_request(request: Request) -> bool:
-    """Allow the named-operator routes to perform their own authentication.
+def _is_operator_decision_path(request: Request) -> bool:
+    """Recognize only the two named-operator decision endpoints."""
 
-    These two endpoints are intentionally outside the browser-session trust
-    boundary: the route handler validates the Bearer credential, operator ID,
-    and the exact durable ACL for every request.  Keep the escape hatch
-    structural and narrow so operator headers cannot bypass the cookie gate on
-    any other Admin API.
-    """
     parts = request.url.path.split("/")
     if len(parts) < 7 or parts[:5] != [
         "",
@@ -76,12 +70,19 @@ def _is_operator_decision_request(request: Request) -> bool:
         matches_route = len(parts) == 7
     else:
         matches_route = False
-    if not matches_route:
-        return False
+    return matches_route
+
+
+def _has_operator_headers(request: Request) -> bool:
     return all(
         len(request.headers.getlist(header)) == 1
         for header in ("x-agent-runtime-operator-id", "authorization")
     )
+
+
+def _is_operator_decision_request(request: Request) -> bool:
+    """Allow named-operator routes to perform their own authentication."""
+    return _is_operator_decision_path(request) and _has_operator_headers(request)
 
 
 class AdminAuthMiddleware(BaseHTTPMiddleware):
@@ -113,10 +114,15 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
             value = _verify_signed(session, self._signing_key)
             ok = value == self._admin_token
 
-        if not ok and _is_operator_decision_request(request):
+        operator_decision_path = _is_operator_decision_path(request)
+        if operator_decision_path:
+            # Even a valid browser session must not become the operator
+            # principal for these decision routes.
+            request.state.admin_operator_auth_required = True
+
+        if not ok and operator_decision_path and _has_operator_headers(request):
             # The endpoint's request-scoped factory performs the real
             # credential and exact-resource ACL checks.
-            request.state.admin_operator_auth_required = True
             return await call_next(request)
 
         if not ok:
