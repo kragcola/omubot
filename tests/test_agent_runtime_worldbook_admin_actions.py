@@ -346,6 +346,19 @@ async def test_worldbook_decision_http_fails_closed_for_cookie_acl_token_and_sou
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://admin.test",
+        ) as operator_client:
+            no_cookie_context = await operator_client.get(
+                f"{base}/{proposal.proposal_id}/decision/context",
+                headers=alice_headers,
+            )
+            operator_headers_on_other_route = await operator_client.get(
+                "/api/admin/agent-runtime/summary",
+                headers=alice_headers,
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://admin.test",
             cookies={"admin_session": session},
         ) as client:
             cookie_only = await client.get(
@@ -398,6 +411,8 @@ async def test_worldbook_decision_http_fails_closed_for_cookie_acl_token_and_sou
                 headers=alice_headers,
             )
 
+        assert no_cookie_context.status_code == 200
+        assert operator_headers_on_other_route.status_code == 401
         assert cookie_only.status_code == 401
         assert wrong_scope.status_code == 403
         assert wrong_resource.status_code == 403
@@ -410,6 +425,52 @@ async def test_worldbook_decision_http_fails_closed_for_cookie_acl_token_and_sou
         assert await worldbook.get_operator_decision(social.proposal_id) is None
     finally:
         await operators.close()
+        await worldbook.close()
+        await memory.close()
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_operator_header_bypass_fails_closed_without_named_operator_factory(
+    tmp_path,
+) -> None:
+    runtime = AgentRuntimeLedger(tmp_path / "runtime.db")
+    memory = MemoryGovernanceStore(tmp_path / "memory.db")
+    worldbook = WorldbookGovernanceStore(tmp_path / "worldbook.db")
+    await runtime.init()
+    await memory.init()
+    await worldbook.init()
+    proposal = await _proposal(worldbook)
+    actions = OfflineAdminActionsV1(
+        runtime_source=runtime,
+        memory_source=memory,
+        worldbook_source=worldbook,
+        worldbook_committer=_Committer(),
+        operator=OperatorIdentityV1(
+            operator_id="ops-static",
+            granted_scopes=(SCOPE,),
+        ),
+        resource_authorizer=lambda scope, resource: _allow(scope, resource),
+    )
+    app = FastAPI()
+    app.add_middleware(AdminAuthMiddleware, admin_token="browser-session")
+    app.include_router(create_api_router(actions=actions))
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://admin.test",
+        ) as client:
+            response = await client.get(
+                "/api/admin/worldbook-governance/proposals/"
+                f"{proposal.proposal_id}/decision/context",
+                headers={
+                    "X-Agent-Runtime-Operator-Id": "forged",
+                    "Authorization": "Bearer forged-credential",
+                },
+            )
+        assert response.status_code == 503
+        assert await worldbook.get_operator_decision(proposal.proposal_id) is None
+    finally:
         await worldbook.close()
         await memory.close()
         await runtime.close()

@@ -137,6 +137,11 @@ async def _actions_for_request(
     operator_action_factory: Any,
 ) -> Any:
     if operator_action_factory is None:
+        if getattr(request.state, "admin_operator_auth_required", False):
+            # The cookie middleware only admits this path when the request is
+            # expected to use the durable named-operator factory.  A static
+            # actions fallback must never become an authentication bypass.
+            raise HTTPException(status_code=503, detail="operator actions unavailable")
         if actions is None:
             raise HTTPException(status_code=503, detail="operator actions unavailable")
         return actions

@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-18 Agent Runtime v2 A21 operator decision middleware 修复（待 bot-only 发布）
+
+**变更类型**：Admin 认证边界修复 / 发布前阻断解除。
+
+**内容与影响范围**：`AdminAuthMiddleware` 仅对 Worldbook proposal 的 decision context（GET）和 decision（POST）在同时出现单一 operator ID 与 Authorization header 时放行，让路由自身执行 Bearer、named operator 与精确 resource ACL 校验；其他 `/api/admin/*` 仍要求 signed cookie。middleware 设置 request-scoped 标记，若敏感路径误装配为静态 `actions` 而无 `operator_action_factory`，路由 fail-closed 返回 503，防止 header 旁路变成未认证决策。
+
+**验证与交接**：新增无 cookie 正确 operator 到达 context、普通 Runtime 路由仍 401、cookie-only 仍 401，以及无 factory 不写 decision 的负向回归；A21/Admin 相关 **9 passed**，Admin/Worldbook 全组 **124 passed**，Ruff、Pyright、`git diff --check` clean。当前仅在隔离 release worktree，尚未构建或替换生产 bot；生产仍保留 `c26ad9f` fallback 镜像与回滚 tag。
+
+**回滚**：代码回滚到 `c26ad9f` 并仅替换 bot；不重启/重建 NapCat，不启动 worker，不直接写 SQLite。
+
 ## 2026-08-18 Agent Runtime v2 A21 Worldbook Schedule Governance 发布候选
 
 **变更类型**：生产前运行时治理修复 / Admin 精确决策路径。新增 `ScheduleWorldbookGovernanceBridge`，将新的 Worldbook schedule source 固定为 `immutable intent -> proposal -> named decision -> reducer -> persisted receipt`；不扫描、不迁移、不回填旧 `schedule.<date>`、`schedule:<date>` 或 `schedule_generator:<date>` 事实。

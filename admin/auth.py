@@ -50,6 +50,40 @@ def _get_admin_token() -> str:
 _API_SKIP_PATHS = {"/api/admin/login", "/api/admin/logout"}
 
 
+def _is_operator_decision_request(request: Request) -> bool:
+    """Allow the named-operator routes to perform their own authentication.
+
+    These two endpoints are intentionally outside the browser-session trust
+    boundary: the route handler validates the Bearer credential, operator ID,
+    and the exact durable ACL for every request.  Keep the escape hatch
+    structural and narrow so operator headers cannot bypass the cookie gate on
+    any other Admin API.
+    """
+    parts = request.url.path.split("/")
+    if len(parts) < 7 or parts[:5] != [
+        "",
+        "api",
+        "admin",
+        "worldbook-governance",
+        "proposals",
+    ]:
+        return False
+    if not parts[5] or parts[6] != "decision":
+        return False
+    if request.method == "GET":
+        matches_route = len(parts) == 8 and parts[7] == "context"
+    elif request.method == "POST":
+        matches_route = len(parts) == 7
+    else:
+        matches_route = False
+    if not matches_route:
+        return False
+    return all(
+        len(request.headers.getlist(header)) == 1
+        for header in ("x-agent-runtime-operator-id", "authorization")
+    )
+
+
 class AdminAuthMiddleware(BaseHTTPMiddleware):
     """Middleware that protects /api/admin/* endpoints with HMAC-signed cookies.
 
@@ -78,6 +112,12 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
         if session:
             value = _verify_signed(session, self._signing_key)
             ok = value == self._admin_token
+
+        if not ok and _is_operator_decision_request(request):
+            # The endpoint's request-scoped factory performs the real
+            # credential and exact-resource ACL checks.
+            request.state.admin_operator_auth_required = True
+            return await call_next(request)
 
         if not ok:
             from fastapi.responses import JSONResponse
