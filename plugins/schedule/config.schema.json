@@ -29,6 +29,10 @@
       "type": "boolean",
       "title": "启用 L3 事件重规划闭环"
     },
+    "local_billing_fallback_enabled": {
+      "type": "boolean",
+      "title": "LLM 余额不足时使用本地日程降级"
+    },
     "dialogue_climate": {
       "type": "object",
       "title": "对话气候",

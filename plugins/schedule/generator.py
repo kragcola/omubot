@@ -48,6 +48,31 @@ _SCHEDULE_REPAIR_PROMPT = (
     "只保留 date、theme、day_narrative、slots 字段；不要解释、不要 Markdown 代码块。"
 )
 
+_LOCAL_BILLING_FALLBACK_WEEKDAY = (
+    ("06:30", "rest", "把闹钟按掉后再缓一会儿", "困倦", "家中"),
+    ("07:30", "meal", "简单吃点东西，把今天要做的事排成顺序", "清醒", "家中"),
+    ("08:30", "study", "先处理最需要专注的一小段学习任务", "专注", "书桌"),
+    ("12:00", "meal", "午饭时把上午的进度放下，慢慢补充体力", "放松", "餐桌"),
+    ("13:00", "rest", "留一段不安排输入的午后空档", "平静", "房间"),
+    ("15:00", "practice", "把一个需要反复练习的动作拆成几轮完成", "投入", "练习室"),
+    ("18:30", "meal", "晚饭时回看今天已经完成的部分", "踏实", "餐桌"),
+    ("20:00", "leisure", "做一件不追求效率的小事，让注意力慢下来", "轻松", "客厅"),
+    ("22:30", "hobby", "整理兴趣素材，给明天留一个容易接手的起点", "满足", "书桌"),
+    ("00:30", "sleep", "关掉灯，把未完成的事情留给明天", "安定", "卧室"),
+)
+_LOCAL_BILLING_FALLBACK_WEEKEND = (
+    ("07:30", "rest", "不急着起床，先把睡意慢慢放下", "松弛", "家中"),
+    ("09:00", "meal", "吃一顿不赶时间的早午餐", "满足", "餐桌"),
+    ("10:30", "errand", "处理一件积着的小事，让空间重新顺手", "轻快", "附近"),
+    ("12:30", "meal", "午饭后暂时不安排复杂任务", "放松", "餐桌"),
+    ("14:00", "hobby", "把喜欢的素材摊开，挑一小部分慢慢整理", "投入", "书桌"),
+    ("16:30", "social", "和熟悉的人聊几句，交换近况和小发现", "温暖", "线上"),
+    ("18:30", "meal", "晚饭时把今天最喜欢的片段记下来", "愉快", "餐桌"),
+    ("20:00", "leisure", "看一段轻松的内容，给一天收尾", "舒展", "客厅"),
+    ("22:30", "rest", "整理下周的第一步，不把计划写得过满", "安心", "书桌"),
+    ("00:30", "sleep", "在安静里结束这一天", "安定", "卧室"),
+)
+
 _SCHEDULE_SYSTEM_PROMPT = """你是一个日程生成器。你需要以{name}的身份，生成一份详细的、沉浸式的每日日程。
 
 日程需结合真实日期生成，日期类型影响全天安排：
@@ -138,6 +163,7 @@ class ScheduleGenerator:
         partner_state_store: FictionPartnerStateStoreLike | None = None,
         fiction_partner_profiles: tuple[FictionPartnerProfile, ...] = (),
         event_replan_enabled: bool = False,
+        local_billing_fallback_enabled: bool = False,
         task_supervisor: BackgroundTaskSupervisor | None = None,
         calendar_service: Any | None = None,
         worldbook_runtime: Any | None = None,
@@ -153,6 +179,7 @@ class ScheduleGenerator:
         self._partner_state_store = partner_state_store
         self._fiction_partner_profiles = fiction_partner_profiles
         self._event_replan_enabled = bool(event_replan_enabled)
+        self._local_billing_fallback_enabled = bool(local_billing_fallback_enabled)
         self._task: asyncio.Task[None] | None = None
         self._task_supervisor = task_supervisor
         self._calendar_service = calendar_service
@@ -325,27 +352,43 @@ class ScheduleGenerator:
         messages = [{"role": "user", "content": "\n".join(user_parts)}]
 
         _L.info("generating schedule for {} ...", today_str)
-        result = await api_call(system, messages, tools=None, max_tokens=4096)
-
-        text = _extract_text(result)
-        schedule = _parse_schedule(text, today_str)
-        if schedule is None:
-            _L.warning("schedule JSON parse failed; retrying once | raw={}", text[:500])
-            retry_result = await api_call(
-                system,
-                [*messages, {"role": "user", "content": _SCHEDULE_REPAIR_PROMPT}],
-                tools=None,
-                max_tokens=4096,
+        try:
+            result = await api_call(system, messages, tools=None, max_tokens=4096)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not self._local_billing_fallback_enabled or not _is_billing_provider_error(exc):
+                raise
+            _L.warning(
+                "schedule provider billing error; using local fallback | date={} error_type={}",
+                today_str,
+                type(exc).__name__,
             )
-            retry_text = _extract_text(retry_result)
-            schedule = _parse_schedule(retry_text, today_str)
+            schedule = _build_local_billing_fallback(
+                now=now,
+                identity_name=self._identity_name,
+                day_context=day_ctx,
+            )
+        else:
+            text = _extract_text(result)
+            schedule = _parse_schedule(text, today_str)
             if schedule is None:
-                _L.error(
-                    "failed to parse schedule JSON after retry | raw={} retry_raw={}",
-                    text[:300],
-                    retry_text[:500],
+                _L.warning("schedule JSON parse failed; retrying once | raw={}", text[:500])
+                retry_result = await api_call(
+                    system,
+                    [*messages, {"role": "user", "content": _SCHEDULE_REPAIR_PROMPT}],
+                    tools=None,
+                    max_tokens=4096,
                 )
-                return False
+                retry_text = _extract_text(retry_result)
+                schedule = _parse_schedule(retry_text, today_str)
+                if schedule is None:
+                    _L.error(
+                        "failed to parse schedule JSON after retry | raw={} retry_raw={}",
+                        text[:300],
+                        retry_text[:500],
+                    )
+                    return False
 
         if self._worldbook_schedule_enabled():
             if not await self._persist_governed_worldbook_schedule(schedule):
@@ -982,6 +1025,59 @@ def _extract_text(result: dict[str, Any]) -> str:
             if t:
                 return t
     return ""
+
+
+def _is_billing_provider_error(exc: BaseException) -> bool:
+    """Recognize only explicit provider-billing failures for local fallback."""
+    if getattr(exc, "status", None) == 402:
+        return True
+    message = str(exc).lower()
+    return "insufficient balance" in message or ("http 402" in message and "balance" in message)
+
+
+def _build_local_billing_fallback(
+    *,
+    now: datetime,
+    identity_name: str,
+    day_context: Any | None,
+) -> Schedule:
+    """Build a deterministic, non-factual schedule when billing blocks the LLM.
+
+    This is deliberately limited to provider balance failures.  It contains no
+    external claims and still flows through the normal Worldbook governance bridge.
+    """
+    raw_day_type = str(
+        getattr(day_context, "day_type", "school_day" if now.weekday() < 5 else "weekend")
+        or ""
+    )
+    weekend = raw_day_type in {"weekend", "holiday"} or now.weekday() >= 5
+    templates = _LOCAL_BILLING_FALLBACK_WEEKEND if weekend else _LOCAL_BILLING_FALLBACK_WEEKDAY
+    variant = now.toordinal() % 3
+    weekday_themes = ("把事情拆小的一天", "先稳住节奏的一天", "完成一段再休息的一天")
+    weekend_themes = ("慢慢收拢的一天", "留出呼吸的一天", "把喜欢的事放回手边的一天")
+    themes = weekend_themes if weekend else weekday_themes
+    day_label = "周末" if weekend else "工作日"
+    narrative = (
+        f"{identity_name}在{day_label}里把安排压到可执行的大小，"
+        "先完成眼前一件，再给下一件留出余地。"
+    )
+    slots = [
+        TimeSlot(
+            time=time,
+            activity=activity,
+            description=description,
+            mood_hint=mood_hint,
+            location=location,
+        )
+        for time, activity, description, mood_hint, location in templates
+    ]
+    return Schedule(
+        date=now.strftime("%Y-%m-%d"),
+        day_narrative=narrative,
+        theme=themes[variant],
+        generated_at=now.isoformat(),
+        slots=slots,
+    )
 
 
 def _parse_schedule(text: str, date_str: str) -> Schedule | None:

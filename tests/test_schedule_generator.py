@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import pytest
+
 from kernel.background_tasks import BackgroundTaskSupervisor
 from plugins.schedule import generator as generator_module
 from plugins.schedule.generator import (
@@ -52,6 +54,14 @@ class RollingDateTime(datetime):
             cls.current.minute,
             tzinfo=tz,
         )
+
+
+class BillingProviderError(RuntimeError):
+    status = 402
+
+
+class ServerProviderError(RuntimeError):
+    status = 500
 
 
 @dataclass(frozen=True)
@@ -301,6 +311,61 @@ async def test_ensure_today_reports_parse_failure_without_writing(tmp_path, monk
         return {"text": "{\"slots\":[{\"time\":\"08:00\"}"}
 
     assert await generator.ensure_today(api_call) is False
+    assert store.load("2026-06-08") is None
+
+
+async def test_ensure_today_uses_local_fallback_only_for_billing_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(generator_module, "datetime", FixedDateTime)
+    schedule_dir = tmp_path / "schedule"
+    schedule_dir.mkdir()
+    store = ScheduleStore(storage_dir=str(schedule_dir))
+    generator = ScheduleGenerator(
+        store=store,
+        identity_name="凤晓梦",
+        local_billing_fallback_enabled=True,
+    )
+    calls = 0
+
+    async def api_call(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise BillingProviderError("HTTP 402: Insufficient Balance")
+
+    assert await generator.ensure_today(api_call) is True
+    assert calls == 1
+    schedule = store.load("2026-06-08")
+    assert schedule is not None
+    assert 8 <= len(schedule.slots) <= 12
+    assert {slot.activity for slot in schedule.slots} <= set(generator_module.ALLOWED_ACTIVITY_LABELS)
+    assert schedule.theme
+
+
+async def test_local_fallback_does_not_swallow_server_errors_or_cancellation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(generator_module, "datetime", FixedDateTime)
+    schedule_dir = tmp_path / "schedule"
+    schedule_dir.mkdir()
+    store = ScheduleStore(storage_dir=str(schedule_dir))
+    generator = ScheduleGenerator(
+        store=store,
+        identity_name="凤晓梦",
+        local_billing_fallback_enabled=True,
+    )
+
+    async def server_error(*_args, **_kwargs):
+        raise ServerProviderError("HTTP 500: upstream unavailable")
+
+    with pytest.raises(ServerProviderError):
+        await generator._generate(server_error)
+    assert store.load("2026-06-08") is None
+
+    async def cancelled(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await generator._generate(cancelled)
     assert store.load("2026-06-08") is None
 
 

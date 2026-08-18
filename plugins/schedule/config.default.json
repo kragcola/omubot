@@ -8,6 +8,7 @@
     "persona_driven_enabled": false,
     "story_arc_enabled": false,
     "event_replan_enabled": false,
+    "local_billing_fallback_enabled": false,
     "dialogue_climate": {
       "m2_enabled": false,
       "m3_sensors_enabled": false,

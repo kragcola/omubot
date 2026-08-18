@@ -43,6 +43,7 @@ class ScheduleConfig(BaseModel):
     persona_driven_enabled: bool = False
     story_arc_enabled: bool = False
     event_replan_enabled: bool = False
+    local_billing_fallback_enabled: bool = False
     dialogue_climate: DialogueClimateConfig = Field(default_factory=DialogueClimateConfig)
     mood_anomaly_chance: float = 0.05
     mood_refresh_minutes: int = 30

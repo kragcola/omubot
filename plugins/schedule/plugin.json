@@ -37,6 +37,7 @@
       "persona_driven_enabled",
       "story_arc_enabled",
       "event_replan_enabled",
+      "local_billing_fallback_enabled",
       "dialogue_climate.m2_enabled",
       "dialogue_climate.m3_sensors_enabled",
       "dialogue_climate.m4_policy_enabled",

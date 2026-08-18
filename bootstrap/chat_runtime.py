@@ -726,6 +726,7 @@ async def build_chat_runtime(
             partner_state_store=partner_state_store,
             fiction_partner_profiles=fiction_partner_profiles,
             event_replan_enabled=schedule_cfg.event_replan_enabled,
+            local_billing_fallback_enabled=schedule_cfg.local_billing_fallback_enabled,
             task_supervisor=getattr(ctx, "background_task_supervisor", None),
             calendar_service=getattr(ctx, "calendar_service", None),
         )
