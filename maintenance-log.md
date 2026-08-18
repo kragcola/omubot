@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-19 Agent Runtime v2 A21 Worldbook governance 全链路上线
+
+**变更类型**：生产 bot-only 发布 / Worldbook authoritative witness 完成。
+
+**发布与证据**：`e82b659` 构建为 `sha256:7863321164f5…`，仅替换 `qq-bot`；运行态 `GIT_COMMIT=e82b659`、restart=0、OOM=false。真实 operator credential 的无 cookie context GET 返回 `200/committed/receipt_present=true`；生产只读 Worldbook 表为 proposal/decision/receipt=`1/1/1`，proposal=`wprop_628409d7e36af58b66ede5a2`，decision=`approve`，reason=`provider_billing_local_schedule`。主 Arc `living_story_v1.main` revision=16，receipt canonical arc hash/revision 匹配，目标 event history 恰好 1、committed IDs 无重复；runtime run/tool/event 与 worker lease 均为 0。
+
+**不变量与剩余阻断**：NapCat ID、image、started、restart 全程不变；未启动 worker、未发送 QQ/QZone 测试消息、未重复写 decision。日志显示 OneBot 正常连接且未出现本轮修复关注的 `busy, skip`/`chat text=''`；DeepSeek 通用调用仍有 402 余额错误，当前 fallback 只覆盖排班，不能宣称全局聊天已恢复。A18 后自然 search-trigger canary 尚未出现，17 个 activation 与 4 个 rollback gate 继续 `not_assessed`，因此 Runtime worker 仍保持 fail-closed。
+
+**回滚**：`omubot-bot:pre-agent-runtime-v2-admin-factory-hardening-20260818` 指向上一版 `0a094ad`；必要时仅替换 bot，保留已提交 governance receipt，不重建 NapCat。
+
 ## 2026-08-18 Agent Runtime v2 A21 operator factory 硬门（待 bot-only 发布）
 
 **变更类型**：Admin 认证纵深防御 / 已部署候选的安全加固。
