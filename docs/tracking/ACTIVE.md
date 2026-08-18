@@ -7,10 +7,10 @@
 - mode: task
 - tracker: `docs/tracking/agent-runtime-v2-production-activation-2026-08-14.md`
 - objective: 按 Agent Runtime v2 production activation runbook 依次完成显式 source、operator/ACL、trusted trigger、组合根、attestation 与验证；全程保持外部效果 fail-closed。
-- status: A20 已在生产：`2574103` / image `d52a330c946c…`，默认无 `SEARCH_API_KEY` 的 `auto` 搜索已改为有界、`trust_env=False` 的 Bing RSS async transport。image 内无写入 probe 两次各返回 5 个结果块，取消到达 transport；当前 worker gate 不变，17 个 activation 与 4 个 rollback gate 仍为 `not_assessed`，worker lease/run/tool/event 均为 0，dispatcher 保持 fail-closed。A21 Worldbook schedule governance 已在隔离 release worktree 通过 `5,808 passed / 17 skipped` 全仓回归，待提交后 bot-only 部署。
-- next_step: 提交 A21；保留 A20 image 作为回滚，仅 bot-only 构建/替换，然后用新的 marker-bearing source 做 `proposal -> named decision -> reducer receipt` 只读 witness。不得伪造 gate、回填 legacy source、写生产 DB 或发送 QQ/QZone 测试消息。
-- last_completed: A21 已覆盖 bridge 生命周期、不可变 intent、启动 resume、legacy 同日零 mutation、late-mounted Worldbook guard、取消后 exact retry、并发 approve/retry、精确 named ACL、缺 committer 不落 approval、receipt 持久复读以及损坏 governed source 不覆盖；本地 focused/cross/full 证据已记录在 tracker，生产仍无 v2 proposal/decision/receipt。
-- rollback: 代码回滚可将 `omubot-bot:pre-agent-runtime-web-search-rss-20260817`（`d4231440e7d3…`）重标为 `omubot-bot:latest` 后仅替换 bot；该 scope 增量本身不打开 worker。若需恢复旧 profile 指针，使用 `config/backups/config.before-agent-runtime-web-search-scope-20260817t003700z.json` 的精确内容原子恢复 config，保留 generation manifest 作为审计 orphan。未来 worker 回滚先将 `agent_runtime.enabled=false`，保留 `unknown`/`dispatching`。不建/删 production DB、不重建 NapCat；`BUILTIN_WIRE_PROFILE.validated=false`。
+- status: A21 已在生产：`e82b659` / image `sha256:7863321164f5…`，仅 bot-only 替换；Worldbook proposal/decision/receipt=`1/1/1`，主 Arc revision=16/hash reread 匹配，worker lease/run/tool/event 均为 0。A18 后最新 invocation 仍早于本次部署，部署后尚无新的 search-trigger canary；17 个 activation 与 4 个 rollback gate 继续 `not_assessed`，dispatcher 保持 fail-closed。DeepSeek 通用调用仍返回 402，排班 fallback 不覆盖全局聊天。
+- next_step: 被动等待并只读采集 e82b659 之后的自然 OneBot scoped canary、provider cancellation/throughput 与剩余 attestation；不得伪造 gate、回填 legacy source、写生产 DB、启动 worker 或发送 QQ/QZone 测试消息。
+- last_completed: A21 已覆盖 bridge 生命周期、不可变 intent、启动 resume、legacy 同日零 mutation、late-mounted Worldbook guard、取消后 exact retry、并发 approve/retry、精确 named ACL、缺 committer 不落 approval、receipt 持久复读以及损坏 governed source 不覆盖；生产 authoritative witness 已完成并记录在 tracker/maintenance-log。
+- rollback: 代码回滚可将 `omubot-bot:pre-agent-runtime-v2-admin-factory-hardening-20260818`（`0a094ad`）重标为 `omubot-bot:latest` 后仅替换 bot；保留 governance receipt。未来 worker 回滚先将 `agent_runtime.enabled=false`，保留 `unknown`/`dispatching`。不建/删 production DB、不重建 NapCat；`BUILTIN_WIRE_PROFILE.validated=false`。
 
 ## Recovery Order
 

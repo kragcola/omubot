@@ -2,7 +2,7 @@
 
 > 状态：active
 > mode: task
-> 最后更新：2026-08-18 CST
+> 最后更新：2026-08-19 CST
 > 当前下一步：保持 A21 governance chain 不变，只读采集 A18 后自然 OneBot scoped canary、provider cancellation/throughput 与剩余 attestation；每项 gate 仍需独立证据后才可生成新的 profile-bound manifest。完整 gate 前不得启动 worker 或发送测试消息。
 > 阻塞：五个 source/backup/restore/operator artifact、真实 bot-only rollback rehearsal、A18 scope repair、A20 provider rollout 与 A21 proposal/decision/receipt 均已完成。worker 仍被 17 个 activation 与 4 个 rollback `not_assessed` gate 正确阻断；部署后尚无新的 search-trigger invocation，历史 invocation 不能替代自然 scoped canary。DeepSeek 通用调用仍返回 402 余额错误，排班受限 fallback 已覆盖但没有可用备用 provider，不能伪造全局聊天证据。
 > 验证证据：`e82b659` / `sha256:7863321164f5…` bot-only recreate 后 restart=0/OOM=false、Admin Runtime unauth=401、authenticated Worldbook context=200 committed、proposal/decision/receipt=1/1/1、Arc revision=16/hash reread=match、worker lease/run/tool/event=0；NapCat ID/image/start/restart 不变。全仓 5,811 passed / 17 skipped / 206 warnings，Ruff/Pyright/diff clean。
@@ -130,7 +130,7 @@ The production implementation remains serial because composition, source paths a
 - [x] Deliver the independent log-driven sticker/scheduler/schedule behavior fix plus the discovered QZone ownership-boundary repair. Cross suite 199 passed、full pytest 5729 passed / 17 skipped、Ruff/Pyright/diff clean; `d311056` -> `60f179…` bot-only deployment/runtime evidence complete. This item does not authorize Runtime v2 worker activation.
 - [x] Deliver B2 long-gap continuation plus A16 provisioner path repair. `c0a7309` -> `aed72…` is live; container/API/source/NapCat invariants and no-worker negative evidence are verified. This does not authorize worker activation.
 - [x] Deliver A18 narrow web-search scope repair. `dc67f19` -> `7ca937…` is live; the unique `network:web-search` target now has `network:search`, the new generation manifest is profile-bound, and bot-only restart/API/source/NapCat/no-worker invariants are verified. This does not authorize worker activation.
-- [~] Deliver A21 governed Worldbook Schedule source path. Local bridge/Admin/lifecycle/source-immutability implementation and regression evidence are complete; commit, bot-only deployment, exact offline ACL grant, fresh source witness and authoritative receipt reread remain.
+- [x] Deliver A21 governed Worldbook Schedule source path. `e82b659` is live; exact named ACL, marker-bearing source, proposal/decision/receipt=`1/1/1`, authoritative Arc/receipt reread and bot/NapCat invariants are verified. Social Worldbook lane remains blocked because its 39 factual rows have no persisted allowlist authority.
 
 ## Decisions
 
@@ -317,6 +317,7 @@ The production implementation remains serial because composition, source paths a
 | A21-CROSS-FINAL | `tests/test_agent_runtime_*.py tests/test_schedule_plugin_replan_atomic.py tests/test_schedule_store.py tests/test_schedule_worldbook_governance.py tests/test_worldbook_runtime.py tests/test_application_composition.py` | **572 passed** in 10.55s | Runtime/Admin/Worldbook/Schedule/application contracts compose after the guard and explicit decision surface update | 2026-08-18 |
 | A21-ADMIN-MIDDLEWARE-RED/GREEN | `tests/test_agent_runtime_worldbook_admin_actions.py tests/test_agent_runtime_admin_operator_http.py tests/test_agent_runtime_admin*.py tests/test_agent_runtime_worldbook_admin*.py tests/test_admin_api.py tests/test_research_event_admin_api.py` | **9 focused + 124 Admin/Worldbook passed**; Ruff/Pyright/diff clean | Named operator decision routes can reach route-level Bearer/ACL without browser cookie; ordinary Admin routes remain cookie-protected; static actions fallback cannot use header bypass even with a valid browser cookie | 2026-08-18 |
 | A21-PROD | bot-only `e82b659`, authenticated context GET, read-only governance/Arc/worker checks | image `sha256:786332…`, context `200/committed`, proposal/decision/receipt=`1/1/1`, Arc revision=16/hash match, worker lease/run/tool/event=0, NapCat unchanged | A21 schedule governance chain is authoritative; no duplicate decision or external message | 2026-08-19 |
+| A21-PROD-RECHECK | read-only `docker inspect/logs`, invocation/runtime/operator/worldbook DB queries after e82b659 | e82b659 running restart=0/OOM=false; 40 trusted invocations, latest created before deployment; post-deploy search canary=0; 402 errors continue; all five DB quick_check=ok; attestation activation/rollback gates=17/4 not_assessed | No new canary or provider credential appeared; worker remains correctly fail-closed; no DB/config/message mutation performed | 2026-08-19 |
 | A21-FULL | `source ./scripts/dev/env.sh && PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -q -p no:cacheprovider` | **5,811 passed / 17 skipped / 206 warnings** in 84.68s | Full repository regression is green; warnings are existing aiohttp/NoneBot deprecations | 2026-08-18 |
 
 ## Next Session Starts Here
