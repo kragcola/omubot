@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-19 Agent Runtime v2 A21 部署后只读复核
+
+**变更类型**：生产运行态观测 / activation 阻断确认。
+
+**观测证据**：`e82b659` / `sha256:7863321164f5…` 自 `2026-08-19 00:38:19 CST` 启动后，日志出现 764 条自然 OneBot 群入站和 35 条 DeepSeek `402 Insufficient Balance`；同一时间窗口没有 `busy, skip` 或 `chat text=''`。`invocation.db` 只读复核为 35 条 trusted invocation，其中 26 条带 `network:search`，最新 `2026-08-18T15:17:52Z`，部署后新增为 0；`runtime.db` 的 run/tool/event 与 worker lease 仍全为 0，五个 Agent Runtime/Worldbook DB `quick_check=ok`。
+
+**配置与 Worldbook 边界**：生产 `llm.profiles` 只有 `main`（DeepSeek）；Qwen 视觉端点不作为通用聊天备用 provider。`social_narrative` 与 Worldbook 持久 allowlist 仍只有 `984198159`，39 条 active factual `SocialExperience` 全在 `993065015`，政策交集为 0；未扩大 allowlist、未回填 source、未写库。
+
+**交接与回滚**：worker 继续 fail-closed，17 个 activation 与 4 个 rollback gate 维持 `not_assessed`；不发送 QQ/QZone 测试消息、不重启/重建 NapCat。下一步仅接受经授权的备用 credential/余额修复和自然 post-deploy scoped canary；回滚仍为只替换 bot 到既有 `0a094ad` tag。
+
 ## 2026-08-19 Agent Runtime v2 A21 Worldbook governance 全链路上线
 
 **变更类型**：生产 bot-only 发布 / Worldbook authoritative witness 完成。
