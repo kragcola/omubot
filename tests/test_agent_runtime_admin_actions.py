@@ -516,6 +516,8 @@ async def test_constructor_sources_identity_and_command_surface_are_explicit(
         "reconciliation_token",
         "tool_approval_context",
         "tool_approval_token",
+        "worldbook_proposal_context",
+        "decide_worldbook_proposal",
     }
     expected_parameters = {
         "approve_tool_call": {
@@ -542,12 +544,27 @@ async def test_constructor_sources_identity_and_command_surface_are_explicit(
             "operator_note",
             "occurred_at",
         },
+        "worldbook_proposal_context": {
+            "self",
+            "proposal_id",
+        },
+        "decide_worldbook_proposal": {
+            "self",
+            "proposal_id",
+            "expected_token",
+            "decision",
+            "reason_code",
+        },
     }
     for method_name, expected in expected_parameters.items():
         parameters = inspect.signature(getattr(type(actions), method_name)).parameters
         assert set(parameters) == expected
         assert not any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-        identifier_name = "candidate_id" if method_name.startswith("decide") else "call_id"
+        identifier_name = {
+            "decide_memory_candidate": "candidate_id",
+            "decide_worldbook_proposal": "proposal_id",
+            "worldbook_proposal_context": "proposal_id",
+        }.get(method_name, "call_id")
         for name, parameter in parameters.items():
             if name not in {"self", identifier_name}:
                 assert parameter.kind is inspect.Parameter.KEYWORD_ONLY

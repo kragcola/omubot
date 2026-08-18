@@ -955,7 +955,7 @@ async def test_schedule_memory_lookup_is_explicitly_global_scoped(tmp_path: Path
     assert memory_store.calls == [("", "global", 5)]
 
 
-def test_worldbook_schedule_commit_uses_event_reducer_without_fixed_daily_increment(
+def test_worldbook_schedule_without_governance_bridge_fails_closed(
     tmp_path: Path,
 ) -> None:
     story_store = StoryArcStore(tmp_path / "arcs")
@@ -1006,12 +1006,8 @@ def test_worldbook_schedule_commit_uses_event_reducer_without_fixed_daily_increm
         "rehearsal_progress": 0.2,
         "exam_pressure": 0.4,
     }
-    assert [event["event_id"] for event in updated.event_history] == [
-        "schedule.2026-07-18"
-    ]
-    assert [event["event_id"] for event in updated.last_events] == [
-        "schedule.2026-07-18"
-    ]
+    assert updated.event_history == []
+    assert updated.last_events == []
 
 
 def test_worldbook_schedule_selects_explicit_main_arc_not_newest_mtime(

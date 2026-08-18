@@ -205,6 +205,8 @@ class _AgentRuntimeCompositionLifecycle:
         self._assembly: Any | None = None
         self._bindings: dict[str, Any] = {}
         self._llm_client: Any = None
+        self._schedule_generator: Any | None = None
+        self._schedule_worldbook_bridge: Any | None = None
         self._worker_renewal_task: asyncio.Task[None] | None = None
         self._started = False
         self._stopped = False
@@ -253,6 +255,7 @@ class _AgentRuntimeCompositionLifecycle:
 
         self._llm_client = llm_client
         try:
+            worldbook_committer = self._bind_schedule_worldbook_bridge(assembly)
             self._bindings = {
                 "agent_runtime_host_ingress": assembly.create_host_trigger_ingress(),
                 "agent_runtime_assembly": assembly,
@@ -265,7 +268,9 @@ class _AgentRuntimeCompositionLifecycle:
                 ),
                 "agent_runtime_readiness": assembly.readiness,
                 "agent_runtime_operator_action_factory": (
-                    assembly.create_admin_operator_actions_factory()
+                    assembly.create_admin_operator_actions_factory(
+                        worldbook_committer=worldbook_committer
+                    )
                 ),
             }
             for field, value in self._bindings.items():
@@ -327,7 +332,48 @@ class _AgentRuntimeCompositionLifecycle:
         deactivate = getattr(dispatcher, "deactivate", None)
         if callable(deactivate):
             deactivate()
+        await self._detach_schedule_worldbook_bridge()
         await _await_agent_runtime_cleanup(assembly.close())
+
+    def _bind_schedule_worldbook_bridge(self, assembly: Any) -> Any | None:
+        runtime = getattr(self._ctx, "worldbook_runtime", None)
+        config = getattr(runtime, "config", None)
+        if not bool(getattr(config, "enabled", False)) or not bool(
+            getattr(config, "schedule_projection_enabled", False)
+        ):
+            return None
+
+        schedule_generator = getattr(self._ctx, "schedule_gen", None)
+        schedule_store = getattr(self._ctx, "schedule_store", None)
+        setter = getattr(schedule_generator, "set_worldbook_governance_bridge", None)
+        if schedule_generator is None or schedule_store is None or not callable(setter):
+            raise RuntimeError(
+                "Worldbook schedule governance requires an explicit schedule source"
+            )
+
+        from plugins.schedule.worldbook_governance import ScheduleWorldbookGovernanceBridge
+
+        bridge = ScheduleWorldbookGovernanceBridge(
+            schedule_store=schedule_store,
+            worldbook_runtime=runtime,
+            governance_store=assembly.worldbook,
+        )
+        setter(bridge)
+        self._schedule_generator = schedule_generator
+        self._schedule_worldbook_bridge = bridge
+        return bridge
+
+    async def _detach_schedule_worldbook_bridge(self) -> None:
+        bridge = self._schedule_worldbook_bridge
+        schedule_generator = self._schedule_generator
+        self._schedule_worldbook_bridge = None
+        self._schedule_generator = None
+        if bridge is None:
+            return
+        setter = getattr(schedule_generator, "set_worldbook_governance_bridge", None)
+        if callable(setter):
+            setter(None)
+        await bridge.close()
 
     async def _renew_worker_loop(self, assembly: Any) -> None:
         try:

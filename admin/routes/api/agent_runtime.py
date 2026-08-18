@@ -40,6 +40,12 @@ class _MemoryDecisionBody(_StrictBody):
     occurred_at: datetime
 
 
+class _WorldbookDecisionBody(_StrictBody):
+    expected_token: str = Field(min_length=1, max_length=512)
+    decision: Literal["approve", "reject"]
+    reason_code: str = Field(min_length=1, max_length=120)
+
+
 _OPERATOR_ID_HEADER = "x-agent-runtime-operator-id"
 _AUTHORIZATION_HEADER = "authorization"
 
@@ -380,6 +386,20 @@ def create_agent_runtime_router(
             )
         )
 
+    @router.get("/worldbook-governance/proposals/{proposal_id}/decision/context")
+    async def worldbook_proposal_context(proposal_id: str, request: Request) -> Any:
+        _forbid_context_query(request)
+        request_actions = await _actions_for_request(
+            request,
+            actions=actions,
+            operator_action_factory=operator_action_factory,
+        )
+        return await _action_result(
+            request_actions.worldbook_proposal_context(
+                _clean_id(proposal_id, "proposal_id")
+            )
+        )
+
     @router.post("/agent-runtime/tool-calls/{call_id}/approval")
     async def approve_tool_call(
         call_id: str,
@@ -440,6 +460,26 @@ def create_agent_runtime_router(
                 reason_code=body.reason_code,
                 operator_note=body.operator_note,
                 occurred_at=body.occurred_at,
+            )
+        )
+
+    @router.post("/worldbook-governance/proposals/{proposal_id}/decision")
+    async def decide_worldbook_proposal(
+        proposal_id: str,
+        body: _WorldbookDecisionBody,
+        request: Request,
+    ) -> Any:
+        request_actions = await _actions_for_request(
+            request,
+            actions=actions,
+            operator_action_factory=operator_action_factory,
+        )
+        return await _action_result(
+            request_actions.decide_worldbook_proposal(
+                _clean_id(proposal_id, "proposal_id"),
+                expected_token=body.expected_token,
+                decision=body.decision,
+                reason_code=body.reason_code,
             )
         )
 

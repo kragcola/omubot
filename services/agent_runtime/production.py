@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from services.agent_runtime.activation import ProductionActivationProfileV1
+from services.agent_runtime.admin_actions import WorldbookProposalCommitterV1
 from services.agent_runtime.admin_operator import AdminOperatorActionsFactoryV1
 from services.agent_runtime.coordinator import RunCoordinator
 from services.agent_runtime.executor import EffectExecutor
@@ -528,7 +529,11 @@ class ProductionRuntimeAssemblyV1:
                     self.invocations.release_worker_lease(lease)
                 )
 
-    def create_admin_operator_actions_factory(self) -> AdminOperatorActionsFactoryV1:
+    def create_admin_operator_actions_factory(
+        self,
+        *,
+        worldbook_committer: WorldbookProposalCommitterV1 | None = None,
+    ) -> AdminOperatorActionsFactoryV1:
         """Expose Admin actions only from this already-attested composition."""
 
         if self._closed:
@@ -536,6 +541,8 @@ class ProductionRuntimeAssemblyV1:
         return AdminOperatorActionsFactoryV1(
             runtime_source=self.runtime,
             memory_source=self.memory,
+            worldbook_source=self.worldbook,
+            worldbook_committer=worldbook_committer,
             operator_source=self.operators,
             reconciliation_adapters=(OneBotManualAttestationAdapter(),),
         )

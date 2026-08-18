@@ -8,7 +8,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
@@ -112,6 +112,16 @@ class FictionPartnerStateStoreLike(Protocol):
         ...
 
 
+class WorldbookScheduleGovernanceBridgeLike(Protocol):
+    """Narrow bridge surface used by the schedule generator."""
+
+    async def prepare_fresh(self, schedule: Schedule) -> Any:
+        ...
+
+    async def resume_pending_source(self, schedule_date: str) -> Any:
+        ...
+
+
 class ScheduleGenerator:
     """Daily background task that generates schedules via LLM."""
 
@@ -147,9 +157,22 @@ class ScheduleGenerator:
         self._task_supervisor = task_supervisor
         self._calendar_service = calendar_service
         self._worldbook_runtime = worldbook_runtime
+        self._worldbook_governance_bridge: WorldbookScheduleGovernanceBridgeLike | None = None
 
     def set_worldbook_runtime(self, runtime: Any | None) -> None:
         self._worldbook_runtime = runtime
+
+    def set_worldbook_governance_bridge(
+        self,
+        bridge: WorldbookScheduleGovernanceBridgeLike | None,
+    ) -> None:
+        """Attach the only permitted Worldbook schedule write path.
+
+        The bridge is installed after Runtime v2 has opened its explicit
+        governance source. Until then, Worldbook projection refuses to create
+        an unmarked schedule source.
+        """
+        self._worldbook_governance_bridge = bridge
 
     def set_worldbook_story_arc_store(self, store: Any | None) -> None:
         """Attach the ledger provisioned by the Worldbook lifecycle.
@@ -191,6 +214,7 @@ class ScheduleGenerator:
         existing = self._store.load(today_str)
         if existing is not None:
             _L.info("today's schedule already exists for {} — no generation needed", today_str)
+            await self.resume_worldbook_governance(today_str)
             return False
         _L.info("today's schedule missing for {} — generating now", today_str)
         try:
@@ -323,10 +347,80 @@ class ScheduleGenerator:
                 )
                 return False
 
-        self._store.save(schedule)
-        self._update_story_arc_after_schedule(active_arc, schedule)
+        if self._worldbook_schedule_enabled():
+            if not await self._persist_governed_worldbook_schedule(schedule):
+                return False
+        else:
+            self._store.save(schedule)
+            self._update_story_arc_after_schedule(active_arc, schedule)
         _L.info("schedule generated | date={} theme={} slots={}", schedule.date, schedule.theme, len(schedule.slots))
         return True
+
+    async def resume_worldbook_governance(self, schedule_date: str) -> bool:
+        """Resume only a marker-bearing v2 schedule source after restart."""
+        if not self._worldbook_schedule_enabled():
+            return False
+        bridge = self._worldbook_governance_bridge
+        if bridge is None:
+            return False
+        try:
+            outcome = await bridge.resume_pending_source(schedule_date)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _L.warning(
+                "worldbook schedule governance resume failed | date={} error={}",
+                schedule_date,
+                type(exc).__name__,
+            )
+            return False
+        status = str(getattr(outcome, "status", "") or "")
+        if status not in {"proposed", "committed", "rejected"}:
+            _L.warning(
+                "worldbook schedule governance resume blocked | date={} status={}",
+                schedule_date,
+                status or "unknown",
+            )
+            return False
+        return True
+
+    async def _persist_governed_worldbook_schedule(self, schedule: Schedule) -> bool:
+        """Persist only through the bound governed bridge.
+
+        In Worldbook projection mode an unmarked schedule cannot later become a
+        governed proposal without crossing the legacy cutover boundary.  A
+        missing or failed bridge therefore leaves no schedule source behind.
+        """
+        bridge = self._worldbook_governance_bridge
+        if bridge is None:
+            _L.warning(
+                "worldbook schedule projection has no governance bridge; "
+                "refusing unmarked source | date={}",
+                schedule.date,
+            )
+            return False
+        try:
+            outcome = await bridge.prepare_fresh(schedule)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _L.warning(
+                "worldbook schedule governance prepare failed; "
+                "no reducer fallback | date={} error={}",
+                schedule.date,
+                type(exc).__name__,
+            )
+            return False
+        status = str(getattr(outcome, "status", "") or "")
+        if status in {"proposed", "committed", "rejected"}:
+            return True
+        _L.warning(
+            "worldbook schedule governance did not create a proposal; "
+            "no reducer fallback | date={} status={}",
+            schedule.date,
+            status or "unknown",
+        )
+        return False
 
     def _build_worldbook_schedule_context(self, conversation_text: str) -> str:
         runtime = self._worldbook_runtime
@@ -491,7 +585,11 @@ class ScheduleGenerator:
         if arc is None or not self._story_arc_enabled or self._story_arc_store is None:
             return
         if self._worldbook_schedule_enabled():
-            self._commit_worldbook_schedule_event(arc, schedule)
+            _L.warning(
+                "worldbook schedule projection has no governance bridge; "
+                "refusing direct reducer write | date={}",
+                schedule.date,
+            )
             return
         changed = False
 
@@ -526,51 +624,6 @@ class ScheduleGenerator:
             and getattr(config, "enabled", False)
             and getattr(config, "schedule_projection_enabled", False)
         )
-
-    def _commit_worldbook_schedule_event(
-        self,
-        arc: StoryArc,
-        schedule: Schedule,
-    ) -> None:
-        runtime = self._worldbook_runtime
-        if runtime is None or self._story_arc_store is None:
-            return
-        summary = _summarize_generated_schedule(schedule)
-        if not summary:
-            return
-        from services.worldbook.domain import EventRecord
-
-        event = EventRecord(
-            event_id=f"schedule.{schedule.date}",
-            event_type="schedule",
-            summary=summary,
-            status="committed",
-            arc_id=arc.arc_id,
-            variable_deltas={},
-            severity="daily",
-            evidence_refs=(f"schedule:{schedule.date}",),
-        )
-        try:
-            step = date.fromisoformat(schedule.date).toordinal()
-        except ValueError:
-            step = 0
-
-        def apply(latest: StoryArc) -> None:
-            runtime.commit_event(latest, event, now_step=step)
-
-        update: Any = getattr(self._story_arc_store, "update", None)
-        try:
-            if callable(update):
-                cast(Any, update)(arc.arc_id, apply)
-                return
-            apply(arc)
-            self._story_arc_store.save(arc)
-        except Exception as exc:
-            _L.warning(
-                "worldbook schedule event commit failed | arc_id={} error={}",
-                arc.arc_id,
-                exc,
-            )
 
     def _save_partner_states_from_arc(self, arc: StoryArc) -> None:
         if self._partner_state_store is None:

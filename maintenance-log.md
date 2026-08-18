@@ -4,15 +4,25 @@
 
 ---
 
-## 2026-08-17 Agent Runtime v2 A20 可取消 web-search provider 候选（待 bot-only 上线）
+## 2026-08-18 Agent Runtime v2 A21 Worldbook Schedule Governance 发布候选
+
+**变更类型**：生产前运行时治理修复 / Admin 精确决策路径。新增 `ScheduleWorldbookGovernanceBridge`，将新的 Worldbook schedule source 固定为 `immutable intent -> proposal -> named decision -> reducer -> persisted receipt`；不扫描、不迁移、不回填旧 `schedule.<date>`、`schedule:<date>` 或 `schedule_generator:<date>` 事实。
+
+**内容与影响范围**：Worldbook projection mode 下，generator 缺 bridge、bridge 失败、坏 marker、主 Arc 变化、legacy 同日事实、reducer 缺失或 receipt suffix 异常都会 fail-closed，绝不退回普通 schedule save 或 reducer 直写。启动会仅恢复 marker-bearing source；event replan 遇治理 source 不改 schedule/Arc。Admin 新增 proposal context/decision，使用 `worldbook:proposal:decide` 和精确 `worldbook_proposal:<proposal_id>` 动态 ACL；approve 在落 decision 前确认 committer，只有重读持久 receipt 后才报告 `committed`。bootstrap 在 Admin 安装前绑定 bridge，关停先 detach、再 bridge quiesce、最后关闭 Worldbook source。
+
+**验证与同模式扫描**：覆盖 source/intent/Arc 变更零 mutation、legacy 同日零 mutation、receipt 前取消后的 exact retry、并发 approve/retry、cookie/错误 scope/resource/额外 body/stale token/ACL 撤销 fail-closed、bridge close cancellation。额外 RED/GREEN 修复了三条通用 `ScheduleStore` 覆盖路径：带 marker 的非法 activity 不再被 legacy repair 删除；可识别的损坏 marker JSON 不再被 save 覆盖；marker key 为 null 也不会被普通 save 覆盖。补充检查发现 SchedulePlugin 晚于 Worldbook runtime 挂载时，旧 source 可能绕过 marker 判断；现从持久 `PluginContext` 动态读取 Worldbook schedule gate，在 projection enabled 时连无 marker/legacy source 也禁止 event replan 写入，并新增回归。扫描确认 Schedule generator 的 legacy Arc 写入只在 Worldbook projection disabled 时执行；projection enabled 时唯一新增写入入口是 bridge，旧 identifier 仅作为拒绝条件保留。当前 scoped Ruff/Pyright/diff clean，A21 相关跨层为 572 passed，全仓回归为 5,808 passed / 17 skipped / 206 warnings；production 尚未部署或写入任何 A21 source/decision/receipt。
+
+**交接与回滚**：先完成 commit 和 bot-only 构建，保留 A20 image `d52a330c…` 为回滚；只替换 bot，绝不重建 NapCat。上线后只通过一条新的 marker-bearing schedule 创建 proposal，在 bot 停机窗口离线授予精确 resource ACL，再走认证 Admin decision 并只读核验 Arc/receipt。不得用 legacy history、测试 fixture、直接 DB 写入或 QQ/QZone 消息伪造 witness；worker gates 继续全部 `not_assessed`。
+
+## 2026-08-17 Agent Runtime v2 A20 可取消 web-search provider 已 bot-only 上线
 
 **变更类型**：生产前代码修复 / provider 边界加固。实际 production 没有 `SEARCH_API_KEY`，默认 `WebSearchTool(mode="auto")` 会将 `ddgs` 调用放入 `asyncio.to_thread`；外层任务取消不能可靠停止底层 provider。容器继承的 Docker 代理不可达，直连 DuckDuckGo HTML/API 也在 12 秒内超时。这个组合不能作为 worker activation 的 cooperative-cancellation 证据。
 
 **内容与影响范围**：提交 `af75232` 将默认无 key `auto` 路径改为固定 `cn.bing.com` RSS，经现有 `fetch_public_text()` 异步、`trust_env=False`、公网 DNS/SSRF、无跨源 redirect、64 KiB 和工具 timeout 边界执行；标准库解析 RSS。带 key 的 Bing API 同样显式忽略失效环境代理。显式 `mode="ddg"` 保持 legacy 兼容，当前 production 配置实际为 `auto`。插件升至 `web_search 1.1.2`，架构/运维/wiki 已同步当前 provider 事实。
 
-**验证与限制**：RED 为 **1 failed**；RSS 格式、取消穿透、受治理超时映射、Runtime fence 的串行/关停合同及相关 profile/tool suite 为 **156 passed**，插件 layout/manifest 为 **52 passed**，完整 pytest 为 **5781 passed / 17 skipped / 206 warnings**，Ruff/Pyright/diff clean。无 key 的受治理本地真实 probe 返回 5 个不回显内容的结果块；此前正在运行容器对 RSS transport 也得到 HTTP 200 / 0.22s。候选尚未构建或替换 production bot，未改 config/manifest/DB，未启动 worker，未发送 QQ/QZone，NapCat 未操作。
+**发布与验证**：RED 为 **1 failed**；RSS 格式、取消穿透、受治理超时映射、Runtime fence 的串行/关停合同及相关 profile/tool suite 为 **156 passed**，插件 layout/manifest 为 **52 passed**，完整 pytest 为 **5781 passed / 17 skipped / 206 warnings**，Ruff/Pyright/diff clean。隔离 build 的最终 image 为 `sha256:d52a330c946c…`，其环境 `GIT_COMMIT=2574103`、`web_search=1.1.2` 与 plugin/tool 三份 SHA-256 都匹配 release worktree；仅以 `docker compose up -d --no-deps --force-recreate --no-build bot` 替换 `qq-bot`。image 内无 key 的受治理 RSS probe 连续两次各返回 5 个不回显内容的结果块；可观测阻塞 transport 收到 `CancelledError`，两次顺序调用总耗时 435ms。发布后 Admin=200、未认证 Runtime API=401、worker lease/run/tool/event=0、运行态 DB `quick_check=ok`，NapCat ID/image/start/restart 不变。未改 config/manifest/DB，未启动 worker，未发送 QQ/QZone。
 
-**交接与回滚**：下一步从隔离 release worktree 构建 `af75232`，先保留 A18 image 为回滚，再仅替换 bot 并采集 image 内 provider transcript 与 no-worker/NapCat 不变量。RSS 为有界公共依赖，失效只能映射为 retryable provider failure，不能将 gate 置为 ready。Worldbook 只读复核同时确认当前 policy-allowed Social source=0，且当天 schedule 是 legacy reducer 直写；不得借此补写 v2 proposal/receipt 或临时放宽 allowlist。
+**交接与回滚**：最初终端构建回传不完整时，同名旧 image 被替换且立即从 image 内 `dc67f19`/`web_search 1.1.1` 识别出来；该次不作为发布成功，随后已用核验后的 `d52…` 重替换。回滚为将 `omubot-bot:pre-agent-runtime-web-search-rss-20260817`=`d4231440…` 重标 `latest` 后仅替换 bot。RSS 为有界公共依赖，失效只能映射为 retryable provider failure，不能将 gate 置为 ready。下一步修复并部署真实 Worldbook governed write path；当前 policy-allowed Social source=0，且当天 schedule 是 legacy reducer 直写，不得回填 v2 proposal/receipt 或临时放宽 allowlist。
 
 ## 2026-08-17 Agent Runtime v2 A18 web-search scope repair 上线
 

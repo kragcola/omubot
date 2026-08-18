@@ -10,7 +10,7 @@ import secrets
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from services.agent_runtime.ledger import (
     AgentRuntimeLedger,
@@ -29,6 +29,13 @@ from services.memory.governance_contracts import (
     PromotionKind,
 )
 from services.memory.governance_store import MemoryGovernanceStore
+from services.worldbook.governance_contracts import (
+    LEGACY_SINGLETON_WORLD_ID,
+    WorldbookEventProposalV1,
+    WorldbookEventSource,
+    WorldbookOperatorDecisionV1,
+)
+from services.worldbook.governance_store import WorldbookGovernanceStore
 
 _CONTRACT_VERSION = "offline_admin_actions.v1"
 _SCHEMA_VERSION = 1
@@ -36,11 +43,19 @@ _MODE = "offline_dark"
 _APPROVE_SCOPE = "runtime:tool:approve"
 _RECONCILE_SCOPE = "runtime:tool:reconcile"
 _MEMORY_SCOPE = "memory:candidate:decide"
+_WORLDBOOK_SCOPE = "worldbook:proposal:decide"
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PROCESS_TOKEN_KEY = secrets.token_bytes(32)
 _MAX_PREVIEW_BYTES = 2_048
 _MAX_PREVIEW_TEXT = 240
 ResourceAuthorizerV1 = Callable[[str, str], Awaitable[bool]]
+
+
+class WorldbookProposalCommitterV1(Protocol):
+    """Narrow reducer port exposed only to named Worldbook decisions."""
+
+    async def commit_approved(self, proposal_id: str) -> Any:
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +106,7 @@ def _receipt(
     status: str,
     exact_retry: bool,
     started_field: str,
+    started: bool = False,
 ) -> dict[str, Any]:
     return {
         "contract_version": _CONTRACT_VERSION,
@@ -100,7 +116,7 @@ def _receipt(
         "decision_type": decision_type,
         "status": status,
         "exact_retry": exact_retry,
-        started_field: False,
+        started_field: started,
     }
 
 
@@ -144,6 +160,8 @@ class OfflineAdminActionsV1:
         runtime_source: AgentRuntimeLedger,
         memory_source: MemoryGovernanceStore,
         operator: OperatorIdentityV1,
+        worldbook_source: WorldbookGovernanceStore | None = None,
+        worldbook_committer: WorldbookProposalCommitterV1 | None = None,
         reconciliation_adapters: Sequence[ReconciliationAdapter] = (),
         resource_authorizer: ResourceAuthorizerV1 | None = None,
     ) -> None:
@@ -155,6 +173,8 @@ class OfflineAdminActionsV1:
             raise TypeError("operator identity is required")
         self._runtime_source = runtime_source
         self._memory_source = memory_source
+        self._worldbook_source = worldbook_source
+        self._worldbook_committer = worldbook_committer
         self._operator = operator
         self._reconciliation_adapters = tuple(reconciliation_adapters)
         self._resource_authorizer = resource_authorizer
@@ -475,6 +495,145 @@ class OfflineAdminActionsV1:
             exact_retry=not inserted,
         )
 
+    async def worldbook_proposal_context(self, proposal_id: str) -> dict[str, Any]:
+        """Return one redacted, exact-proposal decision context."""
+        self._require_worldbook()
+        self._require_scope(_WORLDBOOK_SCOPE)
+        proposal = await self._worldbook_schedule_proposal(proposal_id)
+        await self._require_resource(
+            _WORLDBOOK_SCOPE,
+            self._worldbook_resource(proposal.proposal_id),
+        )
+        decision, receipt = await self._worldbook_state(proposal.proposal_id)
+        preview = self._worldbook_preview(proposal, decision, receipt)
+        return self._decision_context(
+            resource_kind="worldbook_proposal",
+            resource_id=proposal.proposal_id,
+            state=self._worldbook_status(decision, receipt),
+            updated_at=(
+                decision.decided_at if decision is not None else proposal.proposed_at
+            ),
+            preview=preview,
+            token=self._worldbook_token(
+                proposal,
+                decision,
+                receipt,
+                preview_digest=_preview_digest(preview),
+            ),
+        )
+
+    async def decide_worldbook_proposal(
+        self,
+        proposal_id: str,
+        *,
+        expected_token: str,
+        decision: str,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        """Persist one named Schedule decision and resume an approved commit."""
+        self._require_worldbook()
+        self._require_scope(_WORLDBOOK_SCOPE)
+        proposal = await self._worldbook_schedule_proposal(proposal_id)
+        await self._require_resource(
+            _WORLDBOOK_SCOPE,
+            self._worldbook_resource(proposal.proposal_id),
+        )
+        normalized_decision = self._worldbook_decision(decision)
+        clean_reason = _safe_ascii(
+            reason_code,
+            field="reason_code",
+            maximum=120,
+        )
+        existing, receipt = await self._worldbook_state(proposal.proposal_id)
+        exact_retry = False
+        if existing is not None:
+            preview = self._worldbook_preview(proposal, existing, receipt)
+            self._verify_token(
+                expected_token,
+                self._worldbook_token(
+                    proposal,
+                    existing,
+                    receipt,
+                    preview_digest=_preview_digest(preview),
+                ),
+            )
+            if not self._same_worldbook_decision(
+                existing,
+                decision=normalized_decision,
+                reason_code=clean_reason,
+            ):
+                raise ValueError("Worldbook proposal already has another decision")
+            persisted = existing
+            exact_retry = True
+        else:
+            preview = self._worldbook_preview(proposal, None, None)
+            self._verify_token(
+                expected_token,
+                self._worldbook_token(
+                    proposal,
+                    None,
+                    None,
+                    preview_digest=_preview_digest(preview),
+                ),
+            )
+            if normalized_decision == "approve" and self._worldbook_committer is None:
+                raise RuntimeError("Worldbook schedule committer is unavailable")
+            candidate = WorldbookOperatorDecisionV1.create(
+                proposal_id=proposal.proposal_id,
+                decision=normalized_decision,
+                reason_code=clean_reason,
+                operator_ref=self._operator.actor_ref,
+                decided_at=datetime.now(UTC),
+            )
+            try:
+                persisted = await self._require_worldbook().append_operator_decision(candidate)
+            except ValueError:
+                raced, receipt = await self._worldbook_state(proposal.proposal_id)
+                if raced is None or not self._same_worldbook_decision(
+                    raced,
+                    decision=normalized_decision,
+                    reason_code=clean_reason,
+                ):
+                    raise
+                persisted = raced
+                exact_retry = True
+
+        if persisted.decision == "reject":
+            return self._worldbook_receipt(
+                persisted,
+                status="rejected",
+                exact_retry=exact_retry,
+                commit_status="not_requested",
+                receipt_present=receipt is not None,
+                reducer_commit_requested=False,
+            )
+
+        if receipt is not None:
+            return self._worldbook_receipt(
+                persisted,
+                status="committed",
+                exact_retry=True,
+                commit_status="committed",
+                receipt_present=True,
+                reducer_commit_requested=False,
+            )
+
+        committer = self._worldbook_committer
+        if committer is None:
+            raise RuntimeError("Worldbook schedule committer is unavailable")
+        outcome = await committer.commit_approved(proposal.proposal_id)
+        commit_status = str(getattr(outcome, "status", "") or "blocked")
+        receipt = await self._require_worldbook().get_commit_receipt(proposal.proposal_id)
+        receipt_present = receipt is not None
+        return self._worldbook_receipt(
+            persisted,
+            status="committed" if receipt_present else "approved_pending",
+            exact_retry=exact_retry,
+            commit_status=commit_status,
+            receipt_present=receipt_present,
+            reducer_commit_requested=True,
+        )
+
     def _require_runtime(self) -> None:
         if getattr(self._runtime_source, "_db", None) is None:
             raise RuntimeError("runtime source is not available or initialized")
@@ -482,6 +641,12 @@ class OfflineAdminActionsV1:
     def _require_memory(self) -> None:
         if getattr(self._memory_source, "_db", None) is None:
             raise RuntimeError("memory source is not available or initialized")
+
+    def _require_worldbook(self) -> WorldbookGovernanceStore:
+        source = self._worldbook_source
+        if source is None or getattr(source, "_db", None) is None:
+            raise RuntimeError("Worldbook source is not available or initialized")
+        return source
 
     def _require_scope(self, scope: str) -> None:
         if scope not in self._operator.granted_scopes:
@@ -511,6 +676,34 @@ class OfflineAdminActionsV1:
         if candidate is None:
             raise KeyError(clean_candidate_id)
         return candidate
+
+    async def _worldbook_schedule_proposal(
+        self,
+        proposal_id: str,
+    ) -> WorldbookEventProposalV1:
+        clean_proposal_id = _safe_ascii(
+            proposal_id,
+            field="proposal_id",
+            maximum=128,
+        )
+        proposal = await self._require_worldbook().get_proposal(clean_proposal_id)
+        if proposal is None:
+            raise KeyError(clean_proposal_id)
+        if (
+            proposal.source is not WorldbookEventSource.SCHEDULE
+            or proposal.world_ref.world_id != LEGACY_SINGLETON_WORLD_ID
+        ):
+            raise ValueError("Worldbook proposal is not a singleton Schedule proposal")
+        return proposal
+
+    async def _worldbook_state(
+        self,
+        proposal_id: str,
+    ) -> tuple[Any | None, Any | None]:
+        source = self._require_worldbook()
+        decision = await source.get_operator_decision(proposal_id)
+        receipt = await source.get_commit_receipt(proposal_id)
+        return decision, receipt
 
     async def _memory_state(
         self,
@@ -621,6 +814,38 @@ class OfflineAdminActionsV1:
             },
         )
 
+    def _worldbook_token(
+        self,
+        proposal: WorldbookEventProposalV1,
+        decision: Any | None,
+        receipt: Any | None,
+        *,
+        preview_digest: str,
+    ) -> str:
+        return self._token(
+            "worldbook_proposal",
+            {
+                "operator": self._operator.operator_id,
+                "proposal_id": proposal.proposal_id,
+                "proposal_sha256": proposal.proposal_sha256,
+                "world_id": proposal.world_ref.world_id,
+                "arc_id": proposal.world_ref.arc_id,
+                "event_id": proposal.event.event_id,
+                "schedule_date": str(
+                    getattr(proposal.source_binding, "schedule_date", "") or ""
+                ),
+                "decision_id": str(getattr(decision, "decision_id", "") or ""),
+                "decision": str(getattr(decision, "decision", "") or ""),
+                "decision_sha256": str(
+                    getattr(decision, "record_sha256", "") or ""
+                ),
+                "receipt_sha256": str(
+                    getattr(receipt, "receipt_sha256", "") or ""
+                ),
+                "preview_digest": preview_digest,
+            },
+        )
+
     @staticmethod
     def _runtime_preview(call: ToolCallRecord) -> dict[str, Any]:
         target_class = str(call.target_ref or "").partition(":")[0].strip() or "none"
@@ -656,6 +881,59 @@ class OfflineAdminActionsV1:
             "decision_event_count": len(event_ids),
             "produced_at": _iso_utc(candidate.produced_at),
         }
+
+    @staticmethod
+    def _worldbook_preview(
+        proposal: WorldbookEventProposalV1,
+        decision: Any | None,
+        receipt: Any | None,
+    ) -> dict[str, Any]:
+        return {
+            "source_kind": proposal.source.value,
+            "world_id": proposal.world_ref.world_id,
+            "arc_id": proposal.world_ref.arc_id,
+            "event_id": proposal.event.event_id,
+            "schedule_date": str(
+                getattr(proposal.source_binding, "schedule_date", "") or ""
+            ),
+            "summary_sha256": str(
+                getattr(proposal.source_binding, "summary_sha256", "") or ""
+            ),
+            "decision": str(getattr(decision, "decision", "") or "pending"),
+            "receipt_present": receipt is not None,
+        }
+
+    @staticmethod
+    def _worldbook_resource(proposal_id: str) -> str:
+        return f"worldbook_proposal:{proposal_id}"
+
+    @staticmethod
+    def _worldbook_status(decision: Any | None, receipt: Any | None) -> str:
+        if receipt is not None:
+            return "committed"
+        if decision is None:
+            return "pending"
+        return "approved" if decision.decision == "approve" else "rejected"
+
+    @staticmethod
+    def _worldbook_decision(value: str) -> str:
+        if value not in {"approve", "reject"}:
+            raise ValueError("unknown Worldbook decision")
+        return value
+
+    def _same_worldbook_decision(
+        self,
+        existing: Any,
+        *,
+        decision: str,
+        reason_code: str,
+    ) -> bool:
+        return (
+            str(getattr(existing, "decision", "") or "") == decision
+            and str(getattr(existing, "reason_code", "") or "") == reason_code
+            and str(getattr(existing, "operator_ref", "") or "")
+            == self._operator.actor_ref
+        )
 
     def _decision_context(
         self,
@@ -795,6 +1073,30 @@ class OfflineAdminActionsV1:
             exact_retry=exact_retry,
             started_field="projection_started",
         )
+
+    @staticmethod
+    def _worldbook_receipt(
+        decision: WorldbookOperatorDecisionV1,
+        *,
+        status: str,
+        exact_retry: bool,
+        commit_status: str,
+        receipt_present: bool,
+        reducer_commit_requested: bool,
+    ) -> dict[str, Any]:
+        return {
+            **_receipt(
+                decision_id=decision.decision_id,
+                decision_type="worldbook_schedule_decision",
+                status=status,
+                exact_retry=exact_retry,
+                started_field="reducer_commit_requested",
+                started=reducer_commit_requested,
+            ),
+            "reducer_commit_completed": receipt_present,
+            "commit_status": commit_status,
+            "receipt_present": receipt_present,
+        }
 
     @staticmethod
     def _decision_id(kind: str, *values: str) -> str:

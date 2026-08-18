@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -62,6 +63,7 @@ class SchedulePlugin(AmadeusPlugin):
         self._schedule_store = None
         self._schedule_gen = None
         self._timeline = None
+        self._root_ctx: PluginContext | None = None
         self._schedule_started = False
         self._event_replan_enabled = False
         self._climate_sensor_hub = None
@@ -76,6 +78,7 @@ class SchedulePlugin(AmadeusPlugin):
         self._runtime_state: Any = None
 
     async def on_startup(self, ctx: PluginContext) -> None:
+        self._root_ctx = ctx
         self._mood_engine = ctx.mood_engine
         self._schedule_store = ctx.schedule_store
         self._schedule_gen = ctx.schedule_gen
@@ -108,13 +111,25 @@ class SchedulePlugin(AmadeusPlugin):
                 if loaded is None:
                     _L_sys.info("today's schedule missing, generating now...")
                     await self._schedule_gen.ensure_today(ctx.llm_client._call)
+                else:
+                    resume = getattr(
+                        self._schedule_gen,
+                        "resume_worldbook_governance",
+                        None,
+                    )
+                    if callable(resume):
+                        await cast(Callable[[str], Awaitable[Any]], resume)(today)
 
     async def on_shutdown(self, ctx: PluginContext) -> None:
         del ctx
         if not self._schedule_started or self._schedule_gen is None:
+            self._root_ctx = None
             return
         self._schedule_started = False
-        await self._schedule_gen.stop()
+        try:
+            await self._schedule_gen.stop()
+        finally:
+            self._root_ctx = None
 
     async def on_pre_prompt(self, ctx: PromptContext) -> None:
         if self._mood_engine is None or self._schedule_store is None:
@@ -312,6 +327,8 @@ class SchedulePlugin(AmadeusPlugin):
             return ""
         if arc is None:
             return ""
+        if self._schedule_has_governance_intent(schedule):
+            return _render_active_event_replan_guidance(arc)
 
         tension = 0.0
         engine = self._climate_engine
@@ -383,6 +400,39 @@ class SchedulePlugin(AmadeusPlugin):
                 return _render_active_event_replan_guidance(arc)
             return _render_event_replan_guidance(candidate_arc, applied)
         return _render_active_event_replan_guidance(arc)
+
+    def _schedule_has_governance_intent(self, schedule: Schedule) -> bool:
+        """Keep event replanning away from immutable governed sources."""
+        if self._worldbook_schedule_projection_enabled():
+            # Worldbook schedule projection has one write path: the attached
+            # governance bridge.  A missing marker is not permission to treat
+            # an old or malformed source as a mutable legacy schedule.
+            return True
+        if self._schedule_store is None:
+            return False
+        load_snapshot = getattr(self._schedule_store, "load_governance_snapshot", None)
+        if not callable(load_snapshot):
+            return False
+        try:
+            snapshot = load_snapshot(schedule.date)
+        except Exception as exc:
+            _L.warning(
+                "event replan governance snapshot lookup failed; skipping replan | "
+                "date={} err={}",
+                schedule.date,
+                type(exc).__name__,
+            )
+            return True
+        return snapshot is not None and getattr(snapshot, "governance_intent", None) is not None
+
+    def _worldbook_schedule_projection_enabled(self) -> bool:
+        """Read the late-mounted Worldbook schedule gate from PluginContext."""
+        runtime = getattr(self._root_ctx, "worldbook_runtime", None)
+        config = getattr(runtime, "config", None)
+        return bool(
+            getattr(config, "enabled", False)
+            and getattr(config, "schedule_projection_enabled", False)
+        )
 
     def _save_event_replan(
         self,

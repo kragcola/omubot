@@ -436,7 +436,7 @@ async def test_real_open_store_dtos_remain_deeply_redacted_over_http(
     assert all(value not in serialized for value in forbidden_values)
 
 
-async def test_worldbook_routes_are_read_only_and_expose_no_activation_surface() -> None:
+async def test_worldbook_routes_expose_only_decision_context_and_named_decision() -> None:
     app = _direct_app(
         runtime_query=None,
         memory_query=None,
@@ -445,17 +445,18 @@ async def test_worldbook_routes_are_read_only_and_expose_no_activation_surface()
         actions=None,
     )
     expected = {
-        f"{API}/worldbook-governance/summary",
-        f"{API}/worldbook-governance/proposals",
-        f"{API}/worldbook-governance/proposals/{{proposal_id}}",
+        f"{API}/worldbook-governance/summary": {"GET"},
+        f"{API}/worldbook-governance/proposals": {"GET"},
+        f"{API}/worldbook-governance/proposals/{{proposal_id}}": {"GET"},
+        f"{API}/worldbook-governance/proposals/{{proposal_id}}/decision/context": {"GET"},
+        f"{API}/worldbook-governance/proposals/{{proposal_id}}/decision": {"POST"},
     }
     discovered = {
         str(getattr(route, "path", "")): set(getattr(route, "methods", set()) or set())
         for route in app.routes
         if "/worldbook-governance" in str(getattr(route, "path", ""))
     }
-    assert set(discovered) == expected
-    assert all(methods == {"GET"} for methods in discovered.values())
+    assert discovered == expected
 
     async with _client(app) as client:
         post_list = await client.post(f"{API}/worldbook-governance/proposals")
@@ -464,9 +465,13 @@ async def test_worldbook_routes_are_read_only_and_expose_no_activation_surface()
             json={"decision": "approve"},
         )
         activate = await client.post(f"{API}/worldbook-governance/activate")
+        raw_commit = await client.post(
+            f"{API}/worldbook-governance/proposals/wprop_7/commit"
+        )
     assert post_list.status_code == 405
     assert post_detail.status_code == 405
     assert activate.status_code == 404
+    assert raw_commit.status_code == 404
 
 
 async def test_dark_readiness_response_keeps_all_three_report_only_sources() -> None:

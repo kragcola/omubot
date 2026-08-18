@@ -17,6 +17,7 @@ from fastapi import APIRouter
 
 import admin as admin_module
 from bootstrap import application as application_module
+from plugins.schedule.worldbook_governance import ScheduleWorldbookGovernanceBridge
 from services.agent_runtime.activation import ProductionActivationProfileV1
 from services.agent_runtime.invocation_store import TrustedInvocationStoreV1
 from services.agent_runtime.ledger import AgentRuntimeLedger
@@ -56,6 +57,16 @@ class _RecordingLLM:
     def set_runtime_tool_dispatcher(self, dispatcher: Any | None) -> None:
         self.dispatcher = dispatcher
         self.dispatcher_calls.append(dispatcher)
+
+
+class _ScheduleBridgeRecorder:
+    """Captures only the lifecycle-owned schedule governance binding."""
+
+    def __init__(self) -> None:
+        self.calls: list[Any | None] = []
+
+    def set_worldbook_governance_bridge(self, bridge: Any | None) -> None:
+        self.calls.append(bridge)
 
 
 class _BootstrapContext:
@@ -337,6 +348,120 @@ async def test_preflight_ready_bootstrap_publishes_fail_closed_composition_and_t
     assert llm.dispatcher is None
     assert llm.dispatcher_calls[-1] is None
     assert _readiness_status(await readiness.dark_readiness()) == "not_ready"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_binds_schedule_bridge_then_detaches_before_worldbook_source_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = await _prepared_settings(tmp_path)
+    llm = _RecordingLLM()
+    ctx = _BootstrapContext(
+        agent_runtime_settings=settings,
+        registry=ToolRegistry(),
+        llm_client=llm,
+    )
+    schedule_generator = _ScheduleBridgeRecorder()
+    ctx.schedule_gen = schedule_generator
+    ctx.schedule_store = object()
+    ctx.worldbook_runtime = SimpleNamespace(
+        config=SimpleNamespace(enabled=True, schedule_projection_enabled=True)
+    )
+    lifecycle = _new_lifecycle(ctx, repo_root=tmp_path)
+
+    await lifecycle.start()
+    assembly = ctx.agent_runtime_assembly
+    assert assembly is not None
+    assert len(schedule_generator.calls) == 1
+    bridge = schedule_generator.calls[0]
+    assert isinstance(bridge, ScheduleWorldbookGovernanceBridge)
+    assert bridge._governance_store is assembly.worldbook
+    factory = ctx.agent_runtime_operator_action_factory
+    assert factory._worldbook_source is assembly.worldbook
+    assert factory._worldbook_committer is bridge
+
+    close_order: list[str] = []
+    original_bridge_close = bridge.close
+    original_worldbook_close = assembly.worldbook.close
+
+    async def record_bridge_close() -> None:
+        close_order.append("bridge")
+        await original_bridge_close()
+
+    async def record_worldbook_close() -> None:
+        assert close_order == ["bridge"]
+        close_order.append("worldbook")
+        await original_worldbook_close()
+
+    monkeypatch.setattr(bridge, "close", record_bridge_close)
+    monkeypatch.setattr(assembly.worldbook, "close", record_worldbook_close)
+
+    await lifecycle.stop()
+
+    assert schedule_generator.calls == [bridge, None]
+    assert close_order == ["bridge", "worldbook"]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_shutdown_waits_for_bridge_quiescence_when_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = await _prepared_settings(tmp_path)
+    ctx = _BootstrapContext(
+        agent_runtime_settings=settings,
+        registry=ToolRegistry(),
+        llm_client=_RecordingLLM(),
+    )
+    schedule_generator = _ScheduleBridgeRecorder()
+    ctx.schedule_gen = schedule_generator
+    ctx.schedule_store = object()
+    ctx.worldbook_runtime = SimpleNamespace(
+        config=SimpleNamespace(enabled=True, schedule_projection_enabled=True)
+    )
+    lifecycle = _new_lifecycle(ctx, repo_root=tmp_path)
+    await lifecycle.start()
+    assembly = ctx.agent_runtime_assembly
+    bridge = schedule_generator.calls[0]
+    assert assembly is not None
+    assert isinstance(bridge, ScheduleWorldbookGovernanceBridge)
+
+    close_entered = asyncio.Event()
+    allow_close = asyncio.Event()
+    bridge_closed = asyncio.Event()
+    original_bridge_close = bridge.close
+    original_worldbook_close = assembly.worldbook.close
+
+    async def blocked_bridge_close() -> None:
+        close_entered.set()
+        await allow_close.wait()
+        await original_bridge_close()
+        bridge_closed.set()
+
+    async def assert_bridge_closed_before_worldbook_close() -> None:
+        assert bridge_closed.is_set()
+        await original_worldbook_close()
+
+    monkeypatch.setattr(bridge, "close", blocked_bridge_close)
+    monkeypatch.setattr(
+        assembly.worldbook,
+        "close",
+        assert_bridge_closed_before_worldbook_close,
+    )
+    shutdown = asyncio.create_task(lifecycle.stop())
+    await close_entered.wait()
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    assert schedule_generator.calls == [bridge, None]
+
+    allow_close.set()
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+
+    assert bridge_closed.is_set()
+    assert assembly.worldbook._db is None
 
 
 @pytest.mark.asyncio

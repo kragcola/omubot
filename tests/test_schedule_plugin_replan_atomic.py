@@ -42,6 +42,29 @@ class _SavingScheduleStore:
         self.current = schedule
 
 
+class _GovernedSavingScheduleStore(_SavingScheduleStore):
+    def load_governance_snapshot(self, _date: str) -> Any:
+        return SimpleNamespace(governance_intent={"contract_version": "v1"})
+
+
+class _ExistingScheduleGenerator:
+    def __init__(self) -> None:
+        self.start_calls: list[Any] = []
+        self.resume_calls: list[str] = []
+        self.ensure_calls: list[Any] = []
+
+    def start(self, api_call: Any) -> None:
+        self.start_calls.append(api_call)
+
+    async def resume_worldbook_governance(self, schedule_date: str) -> bool:
+        self.resume_calls.append(schedule_date)
+        return True
+
+    async def ensure_today(self, api_call: Any) -> bool:
+        self.ensure_calls.append(api_call)
+        return False
+
+
 def _make_schedule() -> Schedule:
     return Schedule(
         date="2026-06-08",
@@ -158,6 +181,84 @@ async def test_event_replan_schedule_save_failure_leaves_story_arc_uncommitted(
         "event_budget": copy.deepcopy(before.event_budget),
         "guidance": "",
     }
+
+
+@pytest.mark.asyncio
+async def test_event_replan_never_mutates_a_governed_schedule_source(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("plugins.schedule.plugin.datetime", _FixedPromptDateTime)
+    story_store = StoryArcStore(tmp_path / "governed_story_arcs")
+    await story_store.startup()
+    story_store.save(_make_arc(exam_pressure=0.9))
+    before = story_store.load("stage_play_competition_week")
+    assert before is not None
+    schedule_store = _GovernedSavingScheduleStore(_make_schedule())
+    plugin = await _started_plugin(
+        schedule_store=schedule_store,
+        story_arc_store=story_store,
+    )
+
+    guidance = plugin._build_event_replan_guidance(_prompt_context())
+
+    after = story_store.load("stage_play_competition_week")
+    assert after is not None
+    assert schedule_store.saved == []
+    assert after.to_dict() == before.to_dict()
+    assert guidance == ""
+
+
+@pytest.mark.asyncio
+async def test_event_replan_never_mutates_a_legacy_source_in_worldbook_mode(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("plugins.schedule.plugin.datetime", _FixedPromptDateTime)
+    story_store = StoryArcStore(tmp_path / "worldbook_legacy_story_arcs")
+    await story_store.startup()
+    story_store.save(_make_arc(exam_pressure=0.9))
+    before = story_store.load("stage_play_competition_week")
+    assert before is not None
+    schedule_store = _SavingScheduleStore(_make_schedule())
+    plugin = await _started_plugin(
+        schedule_store=schedule_store,
+        story_arc_store=story_store,
+    )
+    assert plugin._root_ctx is not None
+    plugin._root_ctx.worldbook_runtime = SimpleNamespace(
+        config=SimpleNamespace(enabled=True, schedule_projection_enabled=True)
+    )
+
+    guidance = plugin._build_event_replan_guidance(_prompt_context())
+
+    after = story_store.load("stage_play_competition_week")
+    assert after is not None
+    assert schedule_store.saved == []
+    assert after.to_dict() == before.to_dict()
+    assert guidance == ""
+
+
+@pytest.mark.asyncio
+async def test_bot_connect_resumes_an_existing_governed_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("plugins.schedule.plugin.datetime", _FixedPromptDateTime)
+    generator = _ExistingScheduleGenerator()
+    plugin = SchedulePlugin()
+    plugin._schedule_store = SimpleNamespace(load=lambda _date: _make_schedule())
+    plugin._schedule_gen = generator
+    api_call = object()
+    ctx = SimpleNamespace(
+        schedule_enabled=True,
+        llm_client=SimpleNamespace(_call=api_call),
+    )
+
+    await plugin.on_bot_connect(cast(Any, ctx), SimpleNamespace())
+
+    assert generator.start_calls == [api_call]
+    assert generator.resume_calls == ["2026-06-08"]
+    assert generator.ensure_calls == []
 
 
 class _FailingArcPersistStore(StoryArcStore):
