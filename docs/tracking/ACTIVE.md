@@ -7,10 +7,10 @@
 - mode: task
 - tracker: `docs/tracking/agent-runtime-v2-production-activation-2026-08-14.md`
 - objective: 按 Agent Runtime v2 production activation runbook 依次完成显式 source、operator/ACL、trusted trigger、组合根、attestation 与验证；全程保持外部效果 fail-closed。
-- status: A21 已在生产：`e82b659` / image `sha256:7863321164f5…`，仅 bot-only 替换；Worldbook proposal/decision/receipt=`1/1/1`，主 Arc revision=16/hash reread 匹配，worker lease/run/tool/event 均为 0。A18 后最新 invocation 仍早于本次部署，部署后尚无新的 search-trigger canary；17 个 activation 与 4 个 rollback gate 继续 `not_assessed`，dispatcher 保持 fail-closed。DeepSeek 通用调用仍返回 402，排班 fallback 不覆盖全局聊天。
-- next_step: 被动等待并只读采集 e82b659 之后的自然 OneBot scoped canary、provider cancellation/throughput 与剩余 attestation；不得伪造 gate、回填 legacy source、写生产 DB、启动 worker 或发送 QQ/QZone 测试消息。
-- last_completed: A21 已覆盖 bridge 生命周期、不可变 intent、启动 resume、legacy 同日零 mutation、late-mounted Worldbook guard、取消后 exact retry、并发 approve/retry、精确 named ACL、缺 committer 不落 approval、receipt 持久复读以及损坏 governed source 不覆盖；生产 authoritative witness 已完成并记录在 tracker/maintenance-log。
-- rollback: 代码回滚可将 `omubot-bot:pre-agent-runtime-v2-admin-factory-hardening-20260818`（`0a094ad`）重标为 `omubot-bot:latest` 后仅替换 bot；保留 governance receipt。未来 worker 回滚先将 `agent_runtime.enabled=false`，保留 `unknown`/`dispatching`。不建/删 production DB、不重建 NapCat；`BUILTIN_WIRE_PROFILE.validated=false`。
+- status: 群友呼唤失败兜底已随 `6099912` / image `sha256:0c7a4233943c…` 上线；当前生产仍是 ingress-only Runtime v2，`agent_runtime.enabled=true` 但 worker lease/run/tool/event 均为 0。只读复核得到 invocation=`59`（其中 1 条在 `6099912` 发布后、带 `network:search` scope），Worldbook proposal/decision/receipt=`2/1/1`（第二条 schedule proposal 未裁决），五源 quick_check/schema/备份恢复证据可复核；17 个 activation 与 4 个 rollback gate 仍为 `not_assessed`，dispatcher 保持 fail-closed。DeepSeek 通用调用仍返回 402。
+- next_step: 继续只读采集发布后 scoped canary 的实际 tool/provider transcript、provider cancellation/throughput 与剩余 attestation；取得合法聊天 provider 余额恢复或独立授权的第二 provider，并取得第二条 Worldbook proposal 的明确授权后，才可生成新的 profile-bound manifest。不得伪造 gate、回填 legacy source、写生产 DB、启动 worker 或发送 QQ/QZone 测试消息。
+- last_completed: A21 schedule governance chain 已在生产保留；本轮已确认 `6099912` 运行态、OneBot 入站、Runtime/Worldbook DB 健康和新的发布后 invocation，并将 402 失败路径变为一次可见兜底。未重复裁决既有 receipt，未改变 allowlist，NapCat 未重启或重建。
+- rollback: 代码回滚可将 `omubot-bot:pre-agent-fallback-20260820`（`e82b659` 镜像）恢复为 latest 后仅替换 bot；保留 governance receipt 与 invocation。未来 worker 回滚先将 `agent_runtime.enabled=false`，保留 `unknown`/`dispatching`。不建/删 production DB、不重建 NapCat；`BUILTIN_WIRE_PROFILE.validated=false`。
 
 ## Recovery Order
 

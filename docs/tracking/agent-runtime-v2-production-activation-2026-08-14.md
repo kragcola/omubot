@@ -3,17 +3,18 @@
 > 状态：active
 > mode: task
 > 最后更新：2026-08-20 CST
-> 当前下一步：先完成 2026-08-20 日志驱动的强触发群呼唤兜底 bot-only 发布；随后保持 A21 governance chain 不变，只读采集自然 OneBot scoped canary、provider cancellation/throughput 与剩余 attestation。完整 gate 前不得启动 worker 或发送测试消息。
-> 阻塞：五个 source/backup/restore/operator artifact、真实 bot-only rollback rehearsal、A18 scope repair、A20 provider rollout 与 A21 proposal/decision/receipt 均已完成。worker 仍被 17 个 activation 与 4 个 rollback `not_assessed` gate 正确阻断；`e82b659` 部署后日志虽有自然入站，但 search-trigger invocation 新增仍为 0，历史 invocation 不能替代自然 scoped canary。DeepSeek 通用调用仍返回 402 余额错误；本轮只在隔离 release worktree 增加强触发失败可见兜底，尚未部署，不能伪造全局聊天证据。
-> 验证证据：`e82b659` / `sha256:7863321164f5…` bot-only recreate 后 restart=0/OOM=false、Admin Runtime unauth=401、authenticated Worldbook context=200 committed、proposal/decision/receipt=1/1/1、Arc revision=16/hash reread=match、worker lease/run/tool/event=0；NapCat ID/image/start/restart 不变。全仓 5,811 passed / 17 skipped / 206 warnings，Ruff/Pyright/diff clean。
-> 回滚入口：`omubot-bot:pre-agent-runtime-v2-admin-factory-hardening-20260818` 指向 `0a094ad`，仅替换 bot；保留 governance receipt，未来 worker rollback 先将 `agent_runtime.enabled=false` 并保留 `unknown`/`dispatching`。NapCat 永不重建。
+> 当前下一步：强触发群呼唤失败兜底已完成 bot-only 发布；保持 A21 governance chain 不变，只读采集自然 OneBot scoped canary、provider cancellation/throughput 与剩余 attestation。完整 gate 前不得启动 worker 或发送测试消息。
+> 阻塞：五个 source/backup/restore/operator artifact、真实 bot-only rollback rehearsal、A18 scope repair、A20 provider rollout 与 A21 proposal/decision/receipt 均已完成。worker 仍被 17 个 activation 与 4 个 rollback `not_assessed` gate 正确阻断；`6099912` 部署后新增 1 条带 `network:search` 的自然 ingress invocation，但没有对应 Runtime tool/provider transcript，不能替代完整 scoped canary。DeepSeek 通用调用仍返回 402 余额错误；本次只增加失败可见兜底，不能替代余额修复、备用 provider 或 Runtime activation 证据。
+> 验证证据：当前 `qq-bot` 为 `6099912` / image `sha256:0c7a4233943c…`，restart=0/OOM=false、Admin=200、OneBot connected；Runtime/Memory/Operator/Worldbook/Invocation DB 均 `quick_check=ok`，invocation=`59`（发布后新增 1 条、带 `network:search` scope），worker lease/run/tool/event=0；Worldbook proposal/decision/receipt=`2/1/1`，第二条 schedule proposal 未裁决。17 个 activation 与 4 个 rollback gate 全部 `not_assessed`，DeepSeek 仍 HTTP 402；NapCat ID/image/start/restart 不变。
+> 回滚入口：`omubot-bot:pre-agent-fallback-20260820`（`e82b659` 镜像），仅替换 bot；保留 governance receipt 与 invocation，未来 worker rollback 先将 `agent_runtime.enabled=false` 并保留 `unknown`/`dispatching`。NapCat 永不重建。
 
 ## Log-Driven Scheduler Fix (2026-08-20)
 
 - **根因**：生产只读日志中的 `姆。`、空 `@`、`姆` 均完成 `obligation=must`、`force_reply`、`arbiter_a_fire` 和 scheduler `chat`；DeepSeek 主聊天 HTTP 402 后 `_do_chat` 原先只记录异常并静默结束。
 - **修复**：隔离 release worktree 仅对仍持有槽位且尚未发送片段的强触发异常/超时/重试耗尽路径发送一次 `[CQ:reply]` + 静态确认，并写回 timeline/话题块；普通主动异常、取消、已发片段不发送。
-- **验证**：强触发 provider 异常/超时和普通主动异常负向回归；scheduler/arbiter **121 passed**，chat-lock **11 passed**，LLM/sticker **74 passed**，Ruff、scheduler Pyright、diff check clean。尚未构建或替换生产 bot。
-- **发布边界**：仅 bot-only 镜像替换；不重启/重建 NapCat、不发送 QQ/QZone 测试消息、不修改生产 SQLite。若发布后需回滚，恢复上一版 bot tag 后仅 `--no-deps --force-recreate --no-build bot`。
+- **验证**：强触发 provider 异常/超时和普通主动异常负向回归；scheduler/arbiter **121 passed**，chat-lock **11 passed**，LLM/sticker **74 passed**，Ruff、scheduler Pyright、diff check clean。隔离镜像 `sha256:0c7a4233943c…`（`GIT_COMMIT=6099912`）已仅替换生产 bot，Admin=200、OneBot connected、Runtime DB quick_check=ok 且 worker lease/run/tool/event=0。
+- **发布证据**：隔离提交 `6099912` 已构建为 `sha256:0c7a4233943c…` 并仅替换 `qq-bot`；运行态 `GIT_COMMIT=6099912`、Admin=200、OneBot connected，Runtime DB `quick_check=ok`、worker lease/run/tool/event=0。NapCat ID/image/start/restart=0 不变；8 分钟只读窗口无新强触发事件，未发送测试消息。
+- **发布边界/回滚**：不重启/重建 NapCat、不发送 QQ/QZone 测试消息、不修改生产 SQLite。回滚 tag 为 `omubot-bot:pre-agent-fallback-20260820`（`e82b659` 镜像），恢复后仅 `--no-deps --force-recreate --no-build bot`。
 
 ## A21 Worldbook Schedule Governance (local release candidate, 2026-08-18)
 
@@ -327,12 +328,13 @@ The production implementation remains serial because composition, source paths a
 | A21-PROD-RECHECK | read-only `docker inspect/logs`, invocation/runtime/operator/worldbook DB queries after e82b659 | e82b659 running restart=0/OOM=false; 35 trusted invocations (26 `network:search`), all created before deployment; post-deploy search canary=0; 402 errors continue; all five DB quick_check=ok; attestation activation/rollback gates=17/4 not_assessed | No new canary or provider credential appeared; worker remains correctly fail-closed; no DB/config/message mutation performed | 2026-08-19 |
 | A21-POSTDEPLOY-READ | read-only post-deploy log window, profile inventory, invocation/runtime/worldbook DB queries (`e82b659` start `2026-08-19 00:38:19 CST`) | 764 natural OneBot group ingress; 35 HTTP 402 lines; `busy, skip=0`, `chat text=''=0`; 35 trusted invocations / 26 `network:search`, all pre-deploy; five DB quick_check=ok; Social active factual `39` all group `993065015` vs persisted allowlist `984198159`, post-deploy SocialExperience=0; no provider failover marker | Published sticker/text and continuation guards show no new matching log pollution, but provider and scoped-canary evidence remain absent; no config/DB/container/NapCat mutation | 2026-08-19 |
 | A21-FULL | `source ./scripts/dev/env.sh && PYTHONPATH=/tmp/omubot_pytest_stubs:${PYTHONPATH:-} uv run --no-sync pytest -q -p no:cacheprovider` | **5,811 passed / 17 skipped / 206 warnings** in 84.68s | Full repository regression is green; warnings are existing aiohttp/NoneBot deprecations | 2026-08-18 |
+| A22-CURRENT-RECHECK | 只读 `docker inspect/logs`、当前 config/manifest、Runtime/Invocation/Operator/Worldbook SQLite URI 查询与 OneBot 时间窗对账 | `6099912` live；invocation=59（发布后新增=1，scope=`memory:read,network:search,time:read` / target=`network:web-search`）；runtime lease/run/tool/event=0；Worldbook proposal/decision/receipt=`2/1/1`，第二 proposal 未裁决；17/4 gates=`not_assessed`；DeepSeek 402 仍在；五源 quick_check/schema/恢复副本通过，NapCat 不变 | 只有 ingress receipt 增长，尚无 worker/tool execution 或可授权的 provider transcript；不得把自然入站或 402 日志当作 Runtime activation 证据 | 2026-08-20 |
 
 ## Next Session Starts Here
 
-**Current execution checkpoint (newer than the historical bullets below)**: `e82b659` is live with the unique A21 proposal/decision/receipt chain. Do not rerun source provision, rewrite the old manifest/source inventory, repeat the decision, start a worker, backfill a legacy schedule or alter an existing Worldbook fact.
+**Current execution checkpoint (newer than the historical bullets below)**: `6099912` is live with the A21 governance data preserved and a second pending schedule proposal. Do not rerun source provision, rewrite the manifest/source inventory, repeat the existing decision, start a worker, backfill a legacy schedule or alter an existing Worldbook fact.
 
-- Direction: passively collect a fresh natural scoped canary and provider transcript; keep all activation/rollback gates fail-closed until independent evidence and manifest repin. Preserve the A21 receipt.
-- First action: read-only inspect new post-deploy invocation rows/log correlation when they naturally occur; do not send a test message, create another schedule source, call raw commit, write DB, or start a worker.
-- Open questions: the production A21 proposal `wprop_628409d7e36af58b66ede5a2` is committed with an authoritative receipt; only a fresh post-A18 natural OneBot canary and the remaining activation gates are pending. No test/local artifact may substitute for that witness.
+- Direction: passively collect a fresh natural scoped canary and provider transcript; keep all activation/rollback gates fail-closed until independent evidence and manifest repin. Preserve the existing receipt and pending proposal.
+- First action: read-only inspect the next post-deploy invocation/provider correlation and validate the public no-key search transport in the running image; do not send a test message, create another schedule source, call raw commit, write DB, or start a worker.
+- Open questions: one post-`6099912` invocation has the repaired scope but no governed tool execution because the worker is correctly closed; DeepSeek balance/authorized chat fallback and independent Social authority remain unavailable. No test/local artifact may substitute for those witnesses.
 - Do not redo: P0-P5 dark/local implementation or the seven completed current-snapshot fixes. Do not turn dark deployment into real activation.

@@ -4,15 +4,25 @@
 
 ---
 
-## 2026-08-20 强触发群呼唤 provider 失败可见兜底（发布候选）
+## 2026-08-20 Agent Runtime v2 当前生产态复核（继续保持 fail-closed）
+
+**变更类型**：生产只读复核 / activation 阻断更新；未写生产 DB、未启动 worker、未发送 QQ/QZone/webhook、未重启或重建 NapCat。
+
+**当前证据**：`qq-bot` 运行 `6099912` / image `sha256:0c7a4233943c…`，Admin=200、OneBot connected。Runtime、Memory、Operator、Worldbook、Invocation 五库均 `quick_check=ok`，schema=`2/1/1/1/2`；invocation 共 59 条，其中 1 条在本次发布后产生并带 `memory:read,network:search,time:read` scope 与 `network:web-search` target。worker lease/run/tool/event 仍为 0。Worldbook 当前 proposal/decision/receipt=`2/1/1`：已有 receipt 不变，第二条 schedule proposal 尚未获得明确裁决。
+
+**阻断与交接**：17 个 activation 与 4 个 rollback gate 仍为 `not_assessed`；自然入站只证明 trusted receipt 写入，尚无 Runtime tool execution 或可授权的 provider transcript。DeepSeek 主聊天继续 HTTP 402；不能把视觉 Qwen、历史 usage 或测试/legacy source 当作聊天 fallback 或 Social authority。下一步只做运行中镜像的 provider cancellation/throughput 只读验证、自然 scoped canary 对账和独立证据整理；取得余额恢复/第二聊天 provider 与第二 proposal 授权前，不生成 ready manifest、不启动 worker。
+
+**回滚**：呼唤兜底回滚 tag 为 `omubot-bot:pre-agent-fallback-20260820`；Agent Runtime 仍按 `agent_runtime.enabled=false` 回滚，保留 invocation/unknown/dispatching，不重建 NapCat。
+
+## 2026-08-20 强触发群呼唤 provider 失败可见兜底（已上线）
 
 **变更类型**：日志驱动的 bot 行为修复 / scheduler / 测试。
 
 **根因与修复**：生产日志中 `group=993065015` 的 `姆。`、空 `@` 和 `姆` 均已完成 `obligation=must`、`reply_workflow=force_reply`、`arbiter_a_fire` 与 scheduler `chat` 链路；真正失败点是 DeepSeek 主聊天调用 HTTP 402，异常在 `_do_chat` 外层只记录 `chat error` 后静默结束。`services/scheduler.py` 现在仅对强触发、尚未发送片段且仍持有群槽位的异常/超时/重试耗尽路径发送一次带原消息引用的静态兜底，并将兜底写回 timeline 与话题块；普通旁观/主动异常、取消和已发片段路径不发送，避免重复或污染上下文。
 
-**验证**：新增强触发 provider 异常、超时及普通主动异常负向回归；scheduler/arbiter 相关 **121 passed**、chat-lock **11 passed**、LLM/sticker **74 passed**；Ruff、`pyright services/scheduler.py`、`git diff --check` clean。未发送 QQ/QZone 测试消息；当前条目尚未构建或替换生产 bot。
+**验证**：新增强触发 provider 异常、超时及普通主动异常负向回归；scheduler/arbiter 相关 **121 passed**、chat-lock **11 passed**、LLM/sticker **74 passed**；扩大交叉回归 **206 passed**；Ruff、`pyright services/scheduler.py`、`git diff --check` clean。隔离镜像 `sha256:0c7a4233943c…`（`GIT_COMMIT=6099912`）已仅替换 `qq-bot`；Admin=200、OneBot 已连接，Runtime DB quick_check=ok、worker lease/run/tool/event=0。NapCat ID、image、started、restart=0 全程不变。未发送 QQ/QZone 测试消息。
 
-**影响与回滚**：仅影响 scheduler 强触发失败后的用户可见确认，不恢复 DeepSeek 余额，也不新增 provider fallback。发布后若需回滚，只将本次 bot 镜像恢复到已冻结的上一版 tag，再执行 `docker compose up -d --no-deps --force-recreate --no-build bot`；不重启/重建 NapCat，不改生产 SQLite。
+**影响与回滚**：仅影响 scheduler 强触发失败后的用户可见确认，不恢复 DeepSeek 余额，也不新增 provider fallback。已保留回滚 tag `omubot-bot:pre-agent-fallback-20260820`（上一版 `e82b659` 镜像）；必要时将其恢复为 `latest` 后执行 `docker compose up -d --no-deps --force-recreate --no-build bot`；不重启/重建 NapCat，不改生产 SQLite。当前仍需运营方恢复 DeepSeek 余额或提供经授权的第二聊天 provider，才能消除 402 根因。
 
 ## 2026-08-19 Agent Runtime v2 A21 部署后只读复核
 
