@@ -82,6 +82,7 @@ _CB_HALF_OPEN_S: float = 30.0
 _LIGHT_COOLDOWN_S: float = 30.0  # min gap between two light replies in one group
 _CLOSING_RESET_S: float = 1800.0  # after this quiet gap, a new closing is allowed again
 _RATIFIED_FLOOR_COOLDOWN_S: float = 15.0  # min gap between bot's last fire and next ratified-floor fire
+_OBLIGATED_CHAT_FAILURE_FALLBACK = "我在，刚才没接上，再喊我一下？"
 
 
 @dataclass(slots=True)
@@ -2546,6 +2547,10 @@ class GroupChatScheduler:
         slot = self._slots.get(group_id)
         reply_run: ReplyRun | None = None
         owner_task = asyncio.current_task()
+        slot_ref = slot
+        sent_segments = 0
+        reply_prefix = ""
+        uid = ""
 
         def owns_chat_slot() -> bool:
             return not _slot_owned or (slot is not None and slot.running_task is owner_task)
@@ -2849,11 +2854,13 @@ class GroupChatScheduler:
 
                     except RateLimitError:
                         if attempt >= RATE_LIMIT_MAX_RETRIES:
-                            reply_run.finish(ReplyOutcome.FAILED)
                             _L.error(
                                 "scheduler | group={} rate limit exhausted after {} retries",
                                 group_id, RATE_LIMIT_MAX_RETRIES,
                             )
+                            if trigger is not None and _should_force_reply(trigger):
+                                raise
+                            reply_run.finish(ReplyOutcome.FAILED)
                             return
                         delay = RATE_LIMIT_BASE_DELAY * (2 ** attempt)
                         _L.warning(
@@ -2862,12 +2869,14 @@ class GroupChatScheduler:
                         )
                         await asyncio.sleep(delay)
                     except TimeoutError:
-                        reply_run.finish(ReplyOutcome.FAILED)
                         _L.warning(
                             "scheduler | group={} llm chat timed out after {:.1f}s",
                             group_id,
                             _CHAT_LOCK_LLM_TIMEOUT_S,
                         )
+                        if trigger is not None and _should_force_reply(trigger):
+                            raise
+                        reply_run.finish(ReplyOutcome.FAILED)
                         return
                     finally:
                         if monitor_task is not None and not monitor_task.done():
@@ -2885,10 +2894,79 @@ class GroupChatScheduler:
             # back to the pre-existing pending/msg_count re-fire behavior.)
             if slot and owns_chat_slot():
                 slot.block_fire_queue = []
-        except Exception:
+        except Exception as exc:
+            fallback_delivered = False
+            if (
+                trigger is not None
+                and _should_force_reply(trigger)
+                and sent_segments == 0
+                and slot_ref is not None
+                and owns_chat_slot()
+            ):
+                fallback_prefix = reply_prefix
+                if not fallback_prefix and trigger.mode == "at_mention" and trigger.target_message_id is not None:
+                    fallback_prefix = f"[CQ:reply,id={trigger.target_message_id}]"
+                elif not fallback_prefix and trigger.mode == "qq_interaction" and trigger.target_user_id:
+                    fallback_prefix = f"[CQ:at,qq={trigger.target_user_id}] "
+                fallback_body = _OBLIGATED_CHAT_FAILURE_FALLBACK
+                fallback_text = fallback_prefix + fallback_body
+                fallback_sent = asyncio.Event()
+                try:
+                    await self._send_to_group(
+                        group_id,
+                        fallback_text,
+                        humanize="normal",
+                        target_user_id=uid or trigger.target_user_id,
+                        sent_event=fallback_sent,
+                    )
+                    if fallback_sent.is_set():
+                        fallback_delivered = True
+                        sent_segments = 1
+                        slot_ref.first_segment_sent = True
+                        slot_ref.last_reply_time = time.time()
+                        slot_ref.last_reply_content = fallback_body
+                        if self._timeline is not None:
+                            self._timeline.add(group_id, role="assistant", content=fallback_body)
+                        if self._topic_tracker is not None:
+                            with contextlib.suppress(Exception):
+                                self._topic_tracker.mark_bot_replied(
+                                    group_id,
+                                    block_id=slot_ref.firing_block_id,
+                                )
+                        if reply_run is not None:
+                            reply_run.record(
+                                ReplyStage.POSTPROCESSED,
+                                streaming=False,
+                                segment_index=0,
+                            )
+                            reply_run.record(
+                                ReplyStage.DELIVERED,
+                                streaming=False,
+                                segment_index=0,
+                            )
+                        _L.warning(
+                            "scheduler | group={} obligated chat failure fallback sent | error_type={}",
+                            group_id,
+                            type(exc).__name__,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    _L.exception(
+                        "scheduler | group={} obligated chat failure fallback send error",
+                        group_id,
+                    )
             if reply_run is not None:
-                reply_run.finish(ReplyOutcome.FAILED)
-            _L.exception("scheduler | group={} chat error", group_id)
+                reply_run.finish(
+                    ReplyOutcome.COMPLETED if fallback_delivered else ReplyOutcome.FAILED,
+                )
+            if fallback_delivered:
+                _L.warning(
+                    "scheduler | group={} chat error recovered with obligated fallback",
+                    group_id,
+                )
+            else:
+                _L.exception("scheduler | group={} chat error", group_id)
         finally:
             if slot and owns_chat_slot():
                 slot.running_task = None

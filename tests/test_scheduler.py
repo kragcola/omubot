@@ -1717,6 +1717,111 @@ class TestOverhearerRole:
         assert block.last_bot_reply_at > 0.0
         await scheduler.close()
 
+    async def test_must_trigger_sends_fallback_when_llm_fails(self) -> None:
+        """An obligated call must remain visible when the provider is unavailable."""
+        from unittest.mock import AsyncMock
+
+        class _FailingLLM(_FakeLLM):
+            async def chat(self, **_kwargs: Any) -> str | None:  # type: ignore[override]
+                raise RuntimeError("provider unavailable")
+
+        llm = _FailingLLM()
+        scheduler = GroupChatScheduler(
+            llm=llm, timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        sent: list[str] = []
+
+        async def _sent(_group_id: str, text: str, *, sent_event=None, **_kwargs: Any) -> float:
+            sent.append(text)
+            if sent_event is not None:
+                sent_event.set()
+            return 0.0
+
+        scheduler._send_to_group = AsyncMock(side_effect=_sent)  # type: ignore[method-assign]
+        scheduler._slots.setdefault("111", _GroupSlot())
+        obligation = ReplyObligation(level="must", reason="self_addressed", source="nickname_original")
+
+        await scheduler._do_chat(
+            "111",
+            trigger=TriggerContext(
+                reason="有人叫你「姆」",
+                mode="at_mention",
+                obligation=obligation,
+                target_message_id=42,
+                target_user_id="u1",
+                extra={"addressee_self": True},
+            ),
+        )
+
+        assert sent == ["[CQ:reply,id=42]我在，刚才没接上，再喊我一下？"]
+        await scheduler.close()
+
+    async def test_proactive_trigger_does_not_emit_failure_fallback(self) -> None:
+        """Provider errors must not turn ordinary overhearing into a reply."""
+        from unittest.mock import AsyncMock
+
+        class _FailingLLM(_FakeLLM):
+            async def chat(self, **_kwargs: Any) -> str | None:  # type: ignore[override]
+                raise RuntimeError("provider unavailable")
+
+        scheduler = GroupChatScheduler(
+            llm=_FailingLLM(), timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        sent: list[str] = []
+
+        async def _sent(_group_id: str, text: str, **_kwargs: Any) -> float:
+            sent.append(text)
+            return 0.0
+
+        scheduler._send_to_group = AsyncMock(side_effect=_sent)  # type: ignore[method-assign]
+        scheduler._slots.setdefault("111", _GroupSlot())
+
+        await scheduler._do_chat("111")
+
+        assert sent == []
+        await scheduler.close()
+
+    async def test_must_trigger_sends_fallback_when_llm_times_out(self) -> None:
+        """A timed-out obligated call must still leave a visible acknowledgement."""
+        from unittest.mock import AsyncMock
+
+        class _TimedOutLLM(_FakeLLM):
+            async def chat(self, **_kwargs: Any) -> str | None:  # type: ignore[override]
+                raise TimeoutError("provider timeout")
+
+        scheduler = GroupChatScheduler(
+            llm=_TimedOutLLM(), timeline=GroupTimeline(), persona_runtime=_FakeRuntime(_make_identity()),  # type: ignore[arg-type]
+            group_config=_make_config(talk_value=0.0),
+        )
+        sent: list[str] = []
+
+        async def _sent(_group_id: str, text: str, *, sent_event=None, **_kwargs: Any) -> float:
+            sent.append(text)
+            if sent_event is not None:
+                sent_event.set()
+            return 0.0
+
+        scheduler._send_to_group = AsyncMock(side_effect=_sent)  # type: ignore[method-assign]
+        scheduler._slots.setdefault("111", _GroupSlot())
+        obligation = ReplyObligation(level="must", reason="self_addressed", source="nickname_original")
+
+        await scheduler._do_chat(
+            "111",
+            trigger=TriggerContext(
+                reason="有人叫你「姆」",
+                mode="at_mention",
+                obligation=obligation,
+                target_message_id=43,
+                target_user_id="u1",
+                extra={"addressee_self": True},
+            ),
+        )
+
+        assert sent == ["[CQ:reply,id=43]我在，刚才没接上，再喊我一下？"]
+        await scheduler.close()
+
     async def test_cancelled_streaming_reply_records_exact_block_after_visible_segment(self) -> None:
         """A delivered stream segment remains a real block reply after cancellation."""
         from types import SimpleNamespace

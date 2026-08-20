@@ -2,11 +2,18 @@
 
 > 状态：active
 > mode: task
-> 最后更新：2026-08-19 CST
-> 当前下一步：保持 A21 governance chain 不变，只读采集 A18 后自然 OneBot scoped canary、provider cancellation/throughput 与剩余 attestation；每项 gate 仍需独立证据后才可生成新的 profile-bound manifest。完整 gate 前不得启动 worker 或发送测试消息。
-> 阻塞：五个 source/backup/restore/operator artifact、真实 bot-only rollback rehearsal、A18 scope repair、A20 provider rollout 与 A21 proposal/decision/receipt 均已完成。worker 仍被 17 个 activation 与 4 个 rollback `not_assessed` gate 正确阻断；`e82b659` 部署后日志虽有 764 条自然入站，但 search-trigger invocation 新增仍为 0，历史 35 条 invocation（26 条含 `network:search`）不能替代自然 scoped canary。DeepSeek 通用调用仍返回 402 余额错误，排班受限 fallback 已覆盖但没有可用备用 provider，不能伪造全局聊天证据。
+> 最后更新：2026-08-20 CST
+> 当前下一步：先完成 2026-08-20 日志驱动的强触发群呼唤兜底 bot-only 发布；随后保持 A21 governance chain 不变，只读采集自然 OneBot scoped canary、provider cancellation/throughput 与剩余 attestation。完整 gate 前不得启动 worker 或发送测试消息。
+> 阻塞：五个 source/backup/restore/operator artifact、真实 bot-only rollback rehearsal、A18 scope repair、A20 provider rollout 与 A21 proposal/decision/receipt 均已完成。worker 仍被 17 个 activation 与 4 个 rollback `not_assessed` gate 正确阻断；`e82b659` 部署后日志虽有自然入站，但 search-trigger invocation 新增仍为 0，历史 invocation 不能替代自然 scoped canary。DeepSeek 通用调用仍返回 402 余额错误；本轮只在隔离 release worktree 增加强触发失败可见兜底，尚未部署，不能伪造全局聊天证据。
 > 验证证据：`e82b659` / `sha256:7863321164f5…` bot-only recreate 后 restart=0/OOM=false、Admin Runtime unauth=401、authenticated Worldbook context=200 committed、proposal/decision/receipt=1/1/1、Arc revision=16/hash reread=match、worker lease/run/tool/event=0；NapCat ID/image/start/restart 不变。全仓 5,811 passed / 17 skipped / 206 warnings，Ruff/Pyright/diff clean。
 > 回滚入口：`omubot-bot:pre-agent-runtime-v2-admin-factory-hardening-20260818` 指向 `0a094ad`，仅替换 bot；保留 governance receipt，未来 worker rollback 先将 `agent_runtime.enabled=false` 并保留 `unknown`/`dispatching`。NapCat 永不重建。
+
+## Log-Driven Scheduler Fix (2026-08-20)
+
+- **根因**：生产只读日志中的 `姆。`、空 `@`、`姆` 均完成 `obligation=must`、`force_reply`、`arbiter_a_fire` 和 scheduler `chat`；DeepSeek 主聊天 HTTP 402 后 `_do_chat` 原先只记录异常并静默结束。
+- **修复**：隔离 release worktree 仅对仍持有槽位且尚未发送片段的强触发异常/超时/重试耗尽路径发送一次 `[CQ:reply]` + 静态确认，并写回 timeline/话题块；普通主动异常、取消、已发片段不发送。
+- **验证**：强触发 provider 异常/超时和普通主动异常负向回归；scheduler/arbiter **121 passed**，chat-lock **11 passed**，LLM/sticker **74 passed**，Ruff、scheduler Pyright、diff check clean。尚未构建或替换生产 bot。
+- **发布边界**：仅 bot-only 镜像替换；不重启/重建 NapCat、不发送 QQ/QZone 测试消息、不修改生产 SQLite。若发布后需回滚，恢复上一版 bot tag 后仅 `--no-deps --force-recreate --no-build bot`。
 
 ## A21 Worldbook Schedule Governance (local release candidate, 2026-08-18)
 

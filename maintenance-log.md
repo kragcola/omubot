@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-20 强触发群呼唤 provider 失败可见兜底（发布候选）
+
+**变更类型**：日志驱动的 bot 行为修复 / scheduler / 测试。
+
+**根因与修复**：生产日志中 `group=993065015` 的 `姆。`、空 `@` 和 `姆` 均已完成 `obligation=must`、`reply_workflow=force_reply`、`arbiter_a_fire` 与 scheduler `chat` 链路；真正失败点是 DeepSeek 主聊天调用 HTTP 402，异常在 `_do_chat` 外层只记录 `chat error` 后静默结束。`services/scheduler.py` 现在仅对强触发、尚未发送片段且仍持有群槽位的异常/超时/重试耗尽路径发送一次带原消息引用的静态兜底，并将兜底写回 timeline 与话题块；普通旁观/主动异常、取消和已发片段路径不发送，避免重复或污染上下文。
+
+**验证**：新增强触发 provider 异常、超时及普通主动异常负向回归；scheduler/arbiter 相关 **121 passed**、chat-lock **11 passed**、LLM/sticker **74 passed**；Ruff、`pyright services/scheduler.py`、`git diff --check` clean。未发送 QQ/QZone 测试消息；当前条目尚未构建或替换生产 bot。
+
+**影响与回滚**：仅影响 scheduler 强触发失败后的用户可见确认，不恢复 DeepSeek 余额，也不新增 provider fallback。发布后若需回滚，只将本次 bot 镜像恢复到已冻结的上一版 tag，再执行 `docker compose up -d --no-deps --force-recreate --no-build bot`；不重启/重建 NapCat，不改生产 SQLite。
+
 ## 2026-08-19 Agent Runtime v2 A21 部署后只读复核
 
 **变更类型**：生产运行态观测 / activation 阻断确认。
