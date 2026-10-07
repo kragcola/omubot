@@ -1,115 +1,33 @@
-# 部署
+# 部署与恢复
 
-## Docker Compose（推荐）
+当前新版运行与构建源码已公开，未发布生产就绪的安装包；第三阶段未通过。先按离线流程验证，不能把源码公开当作批准生产切换。
 
-```bash
-# 首次空环境启动；已有 NapCat 登录态时不得重复执行 NapCat 行
-cp .env.example config/.env
-cp config.example.toml config/config.toml
-# 人设走 v2：admin SPA「人设管理」上传 source.md -> import -> freeze -> hot-reload
-docker compose up -d napcat
-docker compose build bot
-docker compose up -d --no-deps bot
-docker compose build ccip-sidecar
-docker compose up -d --no-deps ccip-sidecar
-```
+## 拓扑
 
-日常运维常用命令：
+核心原生运行优先，Docker 只作可选包装。管理端静态资源由 Python 服务提供，运行发行包无需常驻 Node。NapCat、视觉等外部组件独立部署，通过窄协议连接。
 
-```bash
-docker compose restart bot                          # 仅配置变更
-docker compose build bot                            # bot 代码/依赖变更
-docker compose up -d --no-deps --force-recreate bot
-docker compose up -d --build --no-deps --force-recreate ccip-sidecar # 角色识别 sidecar 变更
-docker compose restart napcat                      # 断线重连，唯一安全方式
-docker compose logs bot --tail=50
-docker compose logs ccip-sidecar --tail=50
-```
+目标是 macOS / Linux / Windows 分别验收。当前有 macOS 本机与受控 QQ 证据；Linux 和 Windows 的原生安装、生命周期、权限与资源验证未齐。Python 跨平台或离线回归通过不能替代真实目标平台运行。
 
-前端仅改 `admin/frontend` 时，不需要 rebuild bot；执行 `npm run build` 让 `admin/static` 更新即可。因为 `admin/static` 是宿主 bind mount，部署前必须同时快照该目录；后端回滚时恢复对应 SPA 快照，不能只切换旧 image。
+## 实例隔离
 
-## 关键规则
+开发、offline 演示和真实运行分别使用目录、端口、凭据、数据库与选定代码版本。运行环境不应以 editable 方式指向不断修改的开发源码。每个实例的执行者锁与实际 QQ 账号 owner 必须一致。
 
-- **永远不要 `docker compose down` + `up` 重启 napcat**：device fingerprint 变化会触发腾讯反欺诈，始终使用 `docker compose restart napcat`。
-- **Bot / Sidecar 改动分开重建**：`bot` 与 `ccip-sidecar` 各自按需 `--no-deps --build`，不要顺手重建 `napcat`。
-- **`admin/static` 是 bind mount**：前端 build 产物会直接生效；后端 API 改动仍需要 rebuild `bot`。
-- **回滚是 image + host static 成对操作**：旧 bot image 与它对应的 `admin/static` 快照必须一起恢复，再 bot-only recreate。
-- **NapCat WebUI**：`http://localhost:6099/webui`。
+代码工作区隔离不自动隔离端口、缓存、数据库或 NapCat。不得复制旧虚拟环境、数据库、密钥、登录态与副作用启动脚本来缩短迁移。
 
-## 端口
+## 更新既有环境
 
-| 端口 | 服务 | 用途 |
-|------|------|------|
-| 6099 | NapCat WebUI | 扫码登录、QQ 管理 |
-| 8081 | bot / FastAPI | Admin Dashboard + Bot API |
-| 8620 | `ccip-sidecar` | 角色识别与角色包构建 |
-| 8610 | `pmubot` | 可选控制平面 |
-| 29300 | NapCat HTTP | OneBot HTTP API |
-| 29301 | NapCat WS | OneBot WebSocket（本地开发用） |
+先核对当前运行候选、实际 argv、保存/运行配置、活动任务和外部动作终态。选择明确的核心进程进行单写者切换，而不是重建整个宿主或全部容器。
 
-## 本地开发
+**当前测试中的所有已有 NapCat 必须持续运行，不得停止、重启、重建或注销，也不能经 Docker Desktop 或主机操作间接中断。** 新版核心更新不要求触及 QQ 登录生命周期。不要套用旧版泛化 Compose down/up 命令。
 
-当前机器的活跃工作区是：
+本 Wiki 不提供未经平台验收的一键自动升级流程。已有发行准备工具提供核验和手工计划，不是完整容器控制平面。
 
-```bash
-cd /Volumes/OmubotDisk/omubot
-source ./scripts/dev/env.sh
-bash ./scripts/dev/doctor.sh
-uv sync
-# 仅首次空环境且不存在既有登录态时执行；已有环境必须跳过
-docker compose up -d napcat
-# 已有环境断线时只能使用：docker compose restart napcat
-uv run python bot.py
-```
+## 一致备份与恢复
 
-旧路径 `$HOME/OmubotWorkspace/omubot` 与 `/Volumes/我的电脑/omubot` 不再作为正常开发工作区使用。
+1. 使用所属 Store 的一致备份出口，保留配置、动作、成本、权限、unknown 与审计。
+2. 在独立离线路径核完整性、外键、schema 和全部业务表。
+3. 用匹配版本重新打开恢复副本，确认数据与身份没有额外变化。
+4. 单写者切换后核实际安装代码与运行配置。
+5. 记录回滚代码能否读取当前 schema；不能用旧代码直接读取不支持的新库。
 
-## 容器结构
-
-```text
-docker compose
-├── napcat
-│   └── QQ NT 协议 -> WebSocket 29301 / HTTP 29300
-├── bot
-│   ├── NoneBot2 -> OneBot V11 Adapter（NapCat 反连）
-│   ├── FastAPI -> :8080（映射到宿主机 :8081）
-│   └── omubot-storage + ./config + ./admin/static
-├── ccip-sidecar
-│   ├── /identify /identify-multi
-│   └── /build-pack /build-series-pack /health
-└── pmubot（可选）
-    └── 多 bot / 运维控制平面
-```
-
-## 存储路径
-
-```text
-storage/
-├── usage.db                   # LLM 用量
-├── messages.db                # 群消息持久化
-├── memory_cards.db            # 记忆卡片
-├── knowledge_index.db         # 文档知识库持久索引
-├── knowledge_graph.db         # 知识图谱事实与证据
-├── character_recognition.db   # 角色注册表 + 识别缓存
-├── slang.db                   # 群内黑话、候选、AI 复核、语义漂移、修订历史
-├── style.db                   # 表达样本、反馈、动态风格档案
-├── plugins/config/            # 插件 runtime override JSON
-├── config/                    # 配置审计与快照
-├── logs/                      # 日志（10 MB 切割，30 天保留）
-├── stickers/
-│   ├── stickers.db            # 表情包 SQLite 索引
-│   └── stk_*.jpg|png|webp|gif # 表情包文件
-├── affection/                 # 好感度
-└── schedule/                  # 日程
-```
-
-角色样本包位于 `config/character_packs/*.charpack/`，属于 gitignored 运行时数据。
-
-## 故障排查
-
-1. `docker compose ps`：确认 `napcat`、`bot`、`ccip-sidecar` 处于运行状态。
-2. `docker compose logs bot --tail=50`：查看 bot 错误日志。
-3. `docker compose logs ccip-sidecar --tail=50`：查看角色识别 sidecar 是否健康。
-4. NapCat WebUI（`:6099/webui`）：确认 QQ 是否在线。
-5. `/admin/system` 与 `/admin/characters`：确认 Provider、sidecar、角色包与缓存状态。
-6. `config/config.json` / `config/config.toml`：确认 LLM key、角色识别配置与群访问策略正确；JSON 优先，TOML 兼容读取。
+代码回退需保留切换后真实新写入、撤权和成本，不能以旧备份覆盖来“恢复成功”。数据迁移与生产切换仍须独立验收。

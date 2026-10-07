@@ -1,64 +1,43 @@
-# Omubot — QQ 机器人框架
+# Omubot Wiki
 
-基于 NoneBot2 + OneBot V11 + NapCat 的三层 QQ 机器人框架。当前主线已经从早期单体迁移，进入“本地插件治理、统一上下文、学习管线、角色识别与管理端控制台”并行演进阶段。
+Omubot 独立原生重构版的使用、架构与运行文档。面向持续角色聊天，让人格、记忆、关系、角色生活与表达共同支持当前对话，同时保留明确的权限、来源与生命周期。
 
-## 快速开始
+> 更新：2026-10-07。公开仓库 `main` 已替换为当前运行候选对应的新版源码，保留旧实现的 Git 历史。当前处于第三阶段受控实机验证，尚未通过上线验收；运行资料、完整开发测试和内部记录不公开。
 
-```bash
-git clone https://github.com/kragcola/omubot.git
-cd omubot
-cp .env.example config/.env
-cp config.example.toml config/config.toml
-# 人设走 v2：admin SPA「人设管理」上传 source.md -> import -> freeze -> hot-reload
-# 仅首次空环境显式启动 NapCat；已有登录态不要执行该行
-docker compose up -d napcat
-docker compose build bot
-docker compose up -d --no-deps bot
-```
+## 快速导航
 
-> 当前配置加载器优先读取 `config/config.json`，并兼容已有 `config/config.toml`。Admin 配置页保存时会写出 JSON 主配置。已有环境的 Bot 上线必须使用 `docker compose build bot` 后接 `docker compose up -d --no-deps --force-recreate bot`，不得用泛化 Compose 命令触及 NapCat。此机器的活跃开发工作区是 `/Volumes/OmubotDisk/omubot`；旧路径 `$HOME/OmubotWorkspace/omubot` 与 `/Volumes/我的电脑/omubot` 已废弃。
+| 文档 | 内容 | 适合 |
+| --- | --- | --- |
+| [架构](Architecture.md) | 三层职责、数据流、状态与副作用归属 | 开发者、维护者 |
+| [开始使用](Getting-Started.md) | 源码发布边界、离线准备、实例初始化 | 首次了解和使用 |
+| [配置](Configuration.md) | 模型、保存/运行版本、实例隔离 | 管理员 |
+| [管理端](Web-Console.md) | 配置、授权、人格、诊断与能力管理 | 管理员 |
+| [对话](Conversation.md) | Thinker、上下文、打断、分段与质量 | 使用者、开发者 |
+| [人格与记忆](Persona-and-Memory.md) | 固定设定、学习、纠正、事项和来源 | 使用者、维护者 |
+| [情感与角色连续性](Emotion-and-Continuity.md) | 事件评价、短窗余波、关系和故事衔接 | 产品与算法开发者 |
+| [主动联系](Autonomous-Contact.md) | 双授权、真实对象、择时与频率 | 管理员、开发者 |
+| [工具与扩展](Tools-and-Extensions.md) | 模型适配、工具、可选能力与生命周期 | 开发者 |
+| [权限与安全边界](Permissions-and-Safety.md) | 撤权、停发、未知结果、隐私与证据 | 所有人 |
+| [部署与恢复](Deployment.md) | 原生运行、外部组件、一致备份与回滚 | 运维 |
+| [新旧迁移](Migration.md) | 为什么重构、继承什么、哪些不能照搬 | 旧版使用者 |
+| [当前状态](Status.md) | 四阶段、已验证内容、失败及未验范围 | 所有人 |
+| [开发与检查](Development.md) | 代码纪律、检查、发行与文档维护 | 贡献者 |
+| [常见问题](FAQ.md) | 在线但不回复、功能开关、分段与上线 | 所有人 |
 
-## 当前状态
+## 技术与定位
 
-| 项目 | 当前事实 |
+| 项目 | 新版做法 |
 | --- | --- |
-| 版本 | `v1.5.0`，来源为 `pyproject.toml` |
-| 插件形态 | manifest v3 + 目录插件 + JSON 配置契约 |
-| 本地插件包 | 23 个本地包/能力包，其中 19 个用户运行时插件，4 个系统锁定能力包 |
-| 配置主路径 | `config/config.json`，`config/config.toml` 仅作为 legacy 兼容源 |
-| 管理端 | Vue 3 + Naive UI，Calm Ops / 雾青控制台风格 |
-| 运行拓扑 | `napcat` + `bot` + `ccip-sidecar`；`pmubot` 作为可选控制平面 |
-| 知识目录 | 生产聊天默认扫描 `docs/knowledge`；`docs/wiki` 继续作为研发/运维 wiki |
-| 课程交付 | [数据库课程交付 2026](Database-Coursework-2026)：报告、HTML 幻灯片、精简数据库 Web 和源码包已准备 |
+| 核心运行 | Python 3.12 单体原生应用，asyncio 有界任务 |
+| HTTP / 协议 | FastAPI、HTTPX、直接 OneBot 窄适配器 |
+| 状态 | SQLite 事务、明确业务 owner、审计与版本 |
+| 管理端 | Vue 3 / TypeScript / Vite，静态产物随 Python 交付 |
+| 模型 | OpenAI Chat / Responses、Anthropic Messages、DeepSeek Chat 的必要协议子集 |
+| QQ 桥接 | NapCat 等外部组件独立部署，不把其登录态并入源码 |
+| 发行版本 | 本地包版本 0.1.0；不是生产就绪声明 |
 
-## 核心特性
+新版不是 NoneBot2 / PluginBus 的目录迁移，也不为旧清单每一项建立一个模块。三层是职责和依赖规则，单体是部署方式，会话并发是运行机制。
 
-- **三层架构**：Kernel (`PluginBus`) -> Services -> Plugins，内核保持调度与类型契约。
-- **本地插件治理**：插件目录化、manifest v3、JSON 配置、系统锁定能力、本地包索引、签名/来源校验预留。
-- **多 Provider LLM**：`llm.profiles`、`llm.task_profiles`、Anthropic/OpenAI/DeepSeek 兼容 profile，可按任务热切换。
-- **统一上下文**：`ContextPlugin` 系统锁定，统一打包记忆卡片、文档知识库和知识图谱事实，避免重复注入。
-- **学习管线**：黑话、表达、记忆、episode 等学习数据已经折入统一后台与审计链路。
-- **角色识别**：`ccip-sidecar` + bot 本地 registry/cache，支持单角色录入、系列 pack、多角色识别、`self/friend/known` 关系维护。
-- **知识库**：生产扫描 `docs/knowledge`，SQLite 持久索引，本地 BM25/ngram 检索，提供上下文调试和评测指标。
-- **群内黑话**：候选学习、人工审核、每日 AI 复核、存量候选池 backlog reviewer、语义漂移治理、修订历史与 `slang_lookup` 工具。
-- **表达学习**：独立于人设的 `style` 插件与 `/admin/style` 控制台，学习“怎么说”，不自动改 persona source。
-- **对话归档底座**：`ConversationArchive` 提供消息事件流、scanner cursor、运行审计、证据引用和留存 dry-run 原语。
-- **群画像与访问控制**：按群 profile 覆盖参与模式、工具 allow/block、回复风格、表情模式、黑话学习与 `silent_learn`。
-- **系统运维**：Admin Dashboard、配置 diff/审计/快照回滚、日志、协议连接/trace、健康阈值告警、运行态错误存储。
-- **数据库课程交付**：从 Omubot 抽取消息、记忆、知识、图谱、黑话、表达和统计等数据库业务域，提供报告、HTML 幻灯片、精简数据库运营前端和脱敏源码包。
+## 阅读约定
 
-## 技术栈
-
-| 层 | 技术 |
-|----|------|
-| 框架 | NoneBot2 + OneBot V11 |
-| QQ 协议 | NapCat Docker |
-| LLM | 多 Provider profiles；默认兼容 Anthropic/OpenAI/DeepSeek 接入 |
-| 视觉 | Qwen VL 描述 + `ccip-sidecar` 角色识别 |
-| 数据库 | SQLite（用量、消息、记忆、知识索引、知识图谱、黑话、表达、角色识别等） |
-| 管理端 | FastAPI + Vue 3 + Naive UI |
-| 部署 | Docker Compose |
-
-## 版本
-
-当前版本：**v1.5.0**
+“已实现”“离线通过”“实机有限通过”“上线通过”是不同结论。本 Wiki 按当前重构源码与本地验收资料整理；`main` 提供运行与构建源码，完整开发测试和内部验收记录未随本次公开。当前快照与限制集中在 [Status](Status.md)，历史文档只用于追溯。

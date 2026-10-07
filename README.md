@@ -2,7 +2,7 @@
 
 **Omubot 的独立原生重构版：面向持续角色聊天，把记忆、关系、角色生活和表达组织接入同一条可追踪、可撤权的对话链。**
 
-> **公开进度 · 2026-10-07**：本次只更新 README 与 GitHub Wiki。此仓库现有代码仍是旧版 Omubot；重构源码、安装包和运行数据尚未上传。请勿将旧代码按新版 Wiki 部署。新版正在进行第三阶段受控实机测试，**尚未通过上线验收**。
+> **源码公开进度 · 2026-10-07**：`main` 已切换为当前运行候选对应的新版源码，包含 Python 核心、前端源码与静态资源、依赖锁、通用配置和必要构建检查。个人运行资料、完整开发测试与内部审计记录不在此快照内。新版正在进行第三阶段受控实机测试，**尚未通过上线验收**。
 
 [阅读 Wiki](https://github.com/kragcola/omubot/wiki) · [当前能力与限制](https://github.com/kragcola/omubot/wiki/Status) · [新旧项目关系](https://github.com/kragcola/omubot/wiki/Migration)
 
@@ -61,4 +61,15 @@
 | 如何安装与保护既有环境 | [开始使用](https://github.com/kragcola/omubot/wiki/Getting-Started) · [部署](https://github.com/kragcola/omubot/wiki/Deployment) |
 | 权限、失败与未知结果 | [权限与安全边界](https://github.com/kragcola/omubot/wiki/Permissions-and-Safety) |
 
-**源码发布前，GitHub 仅提供新版说明；旧代码、旧部署命令和旧 Wiki 历史不构成新版安装方法。**
+## 获取源码与离线验证
+
+```sh
+git clone https://github.com/kragcola/omubot.git
+cd omubot
+uv sync --locked --python 3.12
+uv run python scripts/dev/demo-loop.py
+```
+
+源码包含与当前候选一致的预构建 Web 静态资源，首次离线运行无需启动 NapCat。修改前端时再运行 `npm --prefix web ci` 与 `npm --prefix web run build`。正式账号接入和上线仍须单独授权与验收，见 [开始使用](https://github.com/kragcola/omubot/wiki/Getting-Started)。
+
+旧实现保留在 Git 历史中，旧部署命令不能用于新版。沿用本仓库的 [MIT License](https://github.com/kragcola/omubot/blob/main/LICENSE)。
