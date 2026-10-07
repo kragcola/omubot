@@ -1,197 +1,64 @@
-# Omubot
+# omubot-new
 
-> **状态：Demo 阶段** — 本项目仍在早期开发中，架构和 API 可能发生较大变更。欢迎试用和反馈，但不建议用于正式生产环境。
+**Omubot 的独立原生重构版：面向持续角色聊天，把记忆、关系、角色生活和表达组织接入同一条可追踪、可撤权的对话链。**
 
-基于 NoneBot2 的三层可扩展 QQ 机器人框架。
+> **公开进度 · 2026-10-07**：本次只更新 README 与 GitHub Wiki。此仓库现有代码仍是旧版 Omubot；重构源码、安装包和运行数据尚未上传。请勿将旧代码按新版 Wiki 部署。新版正在进行第三阶段受控实机测试，**尚未通过上线验收**。
 
-[![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-1.2.5-blue.svg)](CHANGELOG.md)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Ruff](https://img.shields.io/badge/lint-ruff-orange.svg)](https://github.com/astral-sh/ruff)
+[阅读 Wiki](https://github.com/kragcola/omubot/wiki) · [当前能力与限制](https://github.com/kragcola/omubot/wiki/Status) · [新旧项目关系](https://github.com/kragcola/omubot/wiki/Migration)
 
-## 架构
+## 为什么重构
 
-```
-QQ ←→ NapCat (WS) ←→ NoneBot2
-                        └── Omubot 三层框架
-                             ├── Kernel     PluginBus · 类型契约 · 插件发现 · 指令调度
-                             ├── Services   LLM · 记忆 · 时间线 · 版本 · 调度
-                             └── Plugins    23 个本地包/能力包（21 个 PluginBus 运行时插件）
-```
+旧 Omubot 已积累聊天、人格、记忆学习、角色识别、故事与管理功能，也提供了实际使用的体验基准。随着功能增长，代码和状态归属逐渐复杂，配置、任务生命周期、授权与外部发送之间更难保持一致。继续叠加规则，既增加维护成本，也难以可靠解释“为什么没回复、用了哪条记忆、消息究竟有没有发出”。
 
-- **内核层** — 零 I/O，零外部依赖。定义调度规则和类型契约，不改 API
-- **系统服务层** — LLM 客户端、记忆卡片、群聊时间线、图片缓存、指令分发、版本管理
-- **插件层** — 好感度、日程、记忆、表情包、梦境、视觉、复读等，通过钩子接入
+新项目继承经过确认的行为目标与经验，在独立仓库重新实现。目标是同时保留角色聊天的自然感、建立可靠的运行边界，并让后续改进有真实效果证据；代码更整齐并不等于体验已经超过旧版。
 
-## 快速开始
+## 有哪些不同
 
-### 前置
-
-- Python 3.12+ / [uv](https://github.com/astral-sh/uv)
-- Docker + Docker Compose
-- 一个 QQ 号（建议用小号）
-
-### 1. 安装
-
-```bash
-git clone https://github.com/kragcola/omubot.git
-cd omubot
-uv sync
-```
-
-### 2. 配置
-
-```bash
-cp config.example.toml config/config.toml    # 兼容 legacy TOML，首次在 /admin/config 保存后会迁移为 config/config.json
-# 创建 config/.env，填写 SUPERUSERS 和 LLM_API_KEY
-# 人设走 v2：在 admin SPA「人设管理」面板上传 source.md → import → freeze → hot-reload
-```
-
-配置模板见 [config.example.toml](config.example.toml)，完整文档见 [wiki/](wiki/)。
-
-### 3. 启动
-
-```bash
-# Docker（推荐；以下 NapCat 命令只用于没有既有登录态的首次空环境）
-docker compose up -d napcat
-docker compose build bot
-docker compose up -d --no-deps bot
-
-# 或本地运行
-docker compose up -d napcat
-uv run python bot.py
-```
-
-已有开发/生产环境不得使用泛化的 `docker compose up` 或 `down`。Bot 代码上线只执行 `docker compose build bot` 和 `docker compose up -d --no-deps --force-recreate bot`；NapCat 只能在明确需要断线重连时单独 `docker compose restart napcat`。
-
-### 4. 验证
-
-- 浏览器打开 `http://localhost:6099` → 扫码登录 QQ
-- 在群里 @bot 发消息
-- 访问 Admin 面板：`http://localhost:8081/admin/`
-- 私聊发送 `/version` 检查版本
-
-## 插件
-
-| 插件 | 优先级 | 功能 |
-|------|--------|------|
-| ChatPlugin | 0 | 核心聊天：消息路由、LLM 调用、tool loop、/debug 及其子命令 save/send |
-| DateTimePlugin | 1 | 时间日期查询 |
-| WebSearchPlugin | 1 | DuckDuckGo 网页搜索 |
-| WebFetchPlugin | 1 | 网页内容抓取 |
-| HttpApiPlugin | 1 | NapCat HTTP API 调用 |
-| GroupAdminPlugin | 1 | 群管理（禁言、头衔、发消息） |
-| StickerPlugin | 10 | 表情包库：收藏、检索、发送（依赖系统层 vision） |
-| MemoPlugin | 20 | 记忆卡片：7 类 3 作用域，检索门控 |
-| AffectionPlugin | 30 | 好感度系统：分数、昵称、态度调节 |
-| SchedulePlugin | 35 | 模拟日程：每日 LLM 生成，结合真实日期 |
-| HistoryBackfill | - | 核心连接阶段：PluginBus hooks 前加载群历史消息 |
-| DreamPlugin | 150 | 梦境整合：仅运行 DreamAgent 周期并发布 typed runtime handle |
-| EchoPlugin | 200 | 复读检测：5 分钟内同消息 3 次触发 |
-| ElementDetectorPlugin | 210 | 特殊消息元素检测（含 LLM 模式） |
-| BilibiliPlugin | 190 | B站视频链接识别：摘要注入、兴趣评估、回复模式 |
-| FoodPlugin | 1 | /吃什么 食物推荐：1094 条本地食物库、品牌/口味过滤、偏好管理 |
-| KnowledgePlugin | 1 | /knowledge 文档检索：倒排索引全文搜索 docs/ 目录 |
-| DebugCommandPlugin | 300 | /plugins 查看插件列表、/version 版本检查 |
-
-## 斜杠指令
-
-| 指令 | 权限 | 说明 |
+| 方向 | 新版做法 | 带来的价值 |
 | --- | --- | --- |
-| `/debug [问题]` | 管理员 | 进入调试模式，注入系统状态后单轮 LLM 回答 |
-| `/debug save [描述]` | 管理员 | 保存最近图片到表情包库（别名: 保存/收录/添加表情） |
-| `/debug send [stk_id\|gif]` | 管理员 | 发送表情包：指定ID或随机（别名: 发/发送） |
-| `/debug split <文本>` | 管理员 | 测试文本分段效果（别名: 分段/分割） |
-| `/吃什么 [口味\|菜系]` | 公开 | 根据时段和偏好推荐食物（"辣的""不要麦当劳"） |
-| `/food like\|dislike\|location <值>` | 公开 | 管理个人食物偏好与地区 |
-| `/food info` | 仅私聊 | 查看个人食物偏好与地区 |
-| `/food search on\|off` | 管理员 | 持久切换 Web 补充信息；本地结构化候选仍是唯一合法候选集 |
-| `/plugins` | 管理员 | 列出所有已加载插件（名称、版本、开发者、简介） |
-| `/version` | 公开 | 查看本地版本并检查 GitHub 是否有更新 |
+| 架构 | 原生 Python 单体，核心—服务—应用三层职责，显式装配；直接接入必要的 OneBot 协议面 | 按实际状态和生命周期拆分，不再围绕完整插件平台预建骨架 |
+| 权限与发送 | 统一 Policy / Actions 出口，保留来源、期限、撤权、真实回执和未知结果 | 模型的建议、关系变化或功能开关不能自行获得发送权限 |
+| 聊天调度 | 有界会话并发、轮次版本、取消与部分可见记录 | 旧轮次迟到结果不得继续生效；已发送的内容按真实事实保留 |
+| 配置与管理 | Vue 管理端，已保存与正在运行的版本分开，版本冲突明确拒绝 | 能看清“保存了什么、实际用了什么”，避免多个配置来源互相覆盖 |
+| 记忆与角色 | 固定人格、真人事实、表达偏好、临时状态、事项与虚构生活分域 | 可以学习和纠正，避免把一句临时情绪或模型编造写成永久事实 |
+| 表达与主动行为 | 从回应目的组织正文与节拍；主动联系同时核用户与群的独立授权 | 自然感属于有边界的产品行为，不靠提高频率或绕过保护获得 |
+| 交付 | 核心原生运行优先，Web 静态资源随 Python 包交付，外部组件独立部署 | 运行核心不要求容器编排；跨平台仍按实际环境分别验收 |
 
-插件可通过 `register_commands()` 注册更多指令。
+这些是已采用的结构与设计取向，不是更快、更省内存或更好聊天的无条件性能承诺。
 
-## 写一个插件
+## 能力方向
 
-**目录插件**：
+- **角色对话**：人格与固定设定、群聊上下文、Thinker 判断、工具使用、分段表达、打断与失效保护。
+- **记忆与学习**：事实、黑话、表达、纠正与审核、知识检索、当前事项；学习范围与来源资格受控。
+- **角色连续性**：关系与好感度、当前关切、日程与故事、明确标记的虚构梦境；真人事实与角色生活分开。
+- **情感表达**：依据本轮事件、角色和关系组织回应，持久情绪状态只影响获准的表达消费；效果需要实际验证。
+- **有理由的主动联系**：每次都有真实对象和来源，用户与群双授权，窗口与频率上限不因好感度或情绪自动扩大。
+- **工具与管理**：多种模型协议适配、网页与知识工具、富媒体相关能力，以及配置、权限、用量、诊断和恢复管理。
 
-```python
-# plugins/my_tool/plugin.py
-from kernel.types import AmadeusPlugin
-from services.tools.base import Tool
+完整清单不代表全部已启用或验收；请以 [Wiki 能力状态](https://github.com/kragcola/omubot/wiki/Status) 为准。新版不是通用插件市场，也不承诺任意第三方插件热安装。
 
-class MyTool(Tool):
-    name = "my_tool"
-    description = "我的工具"
-    parameters = {
-        "type": "object",
-        "properties": {"text": {"type": "string"}},
-        "required": ["text"],
-    }
+## 当前推进到哪里
 
-    async def execute(self, ctx, text: str) -> str:
-        return f"处理结果: {text}"
+| 阶段 | 当前状态 |
+| --- | --- |
+| 一 · 核心能力代码 | 当前已批准范围完成本地实现与必要检查 |
+| 二 · 附加能力代码 | 当前已批准范围完成隔离验证与候选发行；不等于全部旧功能迁移 |
+| 三 · 测试与上线检测 | **进行中，未通过**。已有有限 QQ 文字实收与人工阅读检查；固定候选长窗仍在进行 |
+| 四 · 真实使用反馈 | 尚未开始，待第三阶段与用户验收后按获准范围推进 |
 
-class MyToolPlugin(AmadeusPlugin):
-    name = "my_tool"
-    description = "我的工具插件"
-    version = "1.0.0"
-    priority = 10
+当前仍需处理主动联系候选缺证、图片实际发送失败、部分回复质量问题，以及富输入、外部服务、多日行为、资源和 Linux / Windows 原生验收。字词碎片式分段的本地实现通过，不代表模型已在真实聊天中自然选择。经历抽取质量保持未通过，不放宽证据与隐私要求。
 
-    def register_tools(self):
-        return [MyTool()]
-```
+## 文档导航
 
-放到 `plugins/` 目录下，重启后自动发现。
+| 想了解什么 | 入口 |
+| --- | --- |
+| 整体目标与阅读路线 | [Wiki 首页](https://github.com/kragcola/omubot/wiki/Home) |
+| 核心、服务、应用如何协作 | [架构](https://github.com/kragcola/omubot/wiki/Architecture) |
+| 配置、人格与日常管理 | [配置](https://github.com/kragcola/omubot/wiki/Configuration) · [管理端](https://github.com/kragcola/omubot/wiki/Web-Console) |
+| 聊天、分段、记忆与学习 | [对话](https://github.com/kragcola/omubot/wiki/Conversation) · [人格与记忆](https://github.com/kragcola/omubot/wiki/Persona-and-Memory) |
+| 情感如何衔接其他组件 | [情感与角色连续性](https://github.com/kragcola/omubot/wiki/Emotion-and-Continuity) |
+| 主动联系的边界 | [主动联系](https://github.com/kragcola/omubot/wiki/Autonomous-Contact) |
+| 如何安装与保护既有环境 | [开始使用](https://github.com/kragcola/omubot/wiki/Getting-Started) · [部署](https://github.com/kragcola/omubot/wiki/Deployment) |
+| 权限、失败与未知结果 | [权限与安全边界](https://github.com/kragcola/omubot/wiki/Permissions-and-Safety) |
 
-**可用钩子**：`on_startup` `on_shutdown` `on_bot_connect` `on_message` `on_pre_prompt` `on_post_reply` `on_tick` `register_tools` `register_commands` `register_admin_routes`
-
-详见 [wiki/](wiki/) 和 [docs/architecture.md](docs/architecture.md)。
-
-## 配置
-
-三层优先级：`config/config.json`（兼容 legacy TOML）< 环境变量 < CLI 参数
-
-| 环境变量 | 覆盖字段 |
-|----------|---------|
-| `LLM_BASE_URL` | `llm.base_url` |
-| `LLM_API_KEY` | `llm.api_key` |
-| `LLM_MODEL` | `llm.model` |
-| `NAPCAT_API_URL` | `napcat.api_url` |
-| `ADMIN_TOKEN` | `admin_token` |
-
-完整配置项见 [config.example.toml](config.example.toml) 和 [wiki/06-config.md](wiki/06-config.md)。
-
-## 开发
-
-```bash
-uv run ruff check    # Lint
-uv run pytest        # 测试
-uv run pyright       # 类型检查
-```
-
-## 项目结构
-
-```
-kernel/         # 内核层（PluginBus、类型、配置、路由）
-services/       # 系统服务层（LLM、记忆、媒体、工具、指令、版本）
-plugins/        # 插件层（23 个本地包/能力包，21 个运行时插件）
-admin/          # 管理面板（用量、配置、人设管理、日志）
-docs/           # 项目文档
-wiki/           # 框架开发文档
-config/         # 运行时配置（gitignored，Docker volume 挂载）
-storage/        # 运行时数据（volume 挂载，不进入版本控制）
-tests/          # 测试
-```
-
-## 变更日志
-
-详见 [CHANGELOG.md](CHANGELOG.md)。
-
-## 许可
-
-MIT License — 详见 [LICENSE](LICENSE)。
-
-## 致谢
-
-从 [amadeus-in-shell](https://github.com/RoggeOhta/amadeus-in-shell) 重构而来。构建在 [NoneBot2](https://github.com/nonebot/nonebot2) 和 [NapCat](https://github.com/NapNeko/NapCatQQ) 之上。
+**源码发布前，GitHub 仅提供新版说明；旧代码、旧部署命令和旧 Wiki 历史不构成新版安装方法。**
